@@ -45,12 +45,13 @@ use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 use serde::{Deserialize, Serialize};
 use wasmtime::component::Linker;
+use wasmtime::StoreLimits;
 
 /// The host-state type every store carries.
 ///
-/// Deliberately minimal here. `qqq-host`'s fuller store data (resource tables,
-/// quota counters, tenant identity) is layered on this in later work; keeping
-/// the security-critical path free of unnecessary state makes it auditable.
+/// Deliberately minimal. `qqq-host`'s fuller store data (resource tables, quota
+/// counters, tenant identity) is layered on this in later work; keeping the
+/// security-critical path free of unnecessary state makes it auditable.
 #[derive(Debug)]
 pub struct StoreData {
     /// The grants this instance was created with.
@@ -60,23 +61,62 @@ pub struct StoreData {
     /// the second check vacuous, since a mis-built linker would produce the
     /// same wrong answer twice.
     pub grants: GrantSet,
+
+    /// The Wasmtime resource limiter, applied to every store.
+    ///
+    /// # Why the resource limiter lives inside the store data
+    ///
+    /// `Store::limiter` takes a closure returning `&mut StoreLimits`, and the
+    /// returned reference must outlive the store. Storing it in the store's own
+    /// data is the only arrangement that satisfies that without self-reference
+    /// — and it keeps the limits travelling with the instance they constrain,
+    /// so they cannot be swapped by mistake.
+    resource_limits: StoreLimits,
+
+    /// The QQQ-level limits, for diagnostics and fuel accounting.
+    limits: Option<crate::config::StoreLimits>,
 }
 
 impl Default for StoreData {
-    /// An instance with **no** capability. The safe default: a store that was
-    /// not explicitly given grants cannot do anything.
+    /// An instance with **no** capability and no explicit limits. The safe
+    /// default twice over: a store that was not explicitly given grants cannot
+    /// do anything, and one without limits has Wasmtime's own defaults.
     fn default() -> Self {
         Self {
             grants: GrantSet::empty(),
+            resource_limits: StoreLimits::default(),
+            limits: None,
         }
     }
 }
 
 impl StoreData {
-    /// Build store data from a grant set.
+    /// Build store data from a grant set, with no explicit resource limits.
     #[must_use]
     pub fn new(grants: GrantSet) -> Self {
-        Self { grants }
+        Self {
+            grants,
+            resource_limits: StoreLimits::default(),
+            limits: None,
+        }
+    }
+
+    /// Mutable access to the resource limiter, for `Store::limiter`.
+    #[must_use]
+    pub fn limiter_mut(&mut self) -> &mut StoreLimits {
+        &mut self.resource_limits
+    }
+
+    /// Install the Wasmtime limiter and record the QQQ limits.
+    pub fn set_limits(&mut self, limiter: StoreLimits, limits: crate::config::StoreLimits) {
+        self.resource_limits = limiter;
+        self.limits = Some(limits);
+    }
+
+    /// The QQQ-level limits, when set.
+    #[must_use]
+    pub const fn limits(&self) -> Option<crate::config::StoreLimits> {
+        self.limits
     }
 }
 
@@ -575,20 +615,18 @@ mod tests {
 
     #[test]
     fn recheck_passes_for_a_granted_capability() {
-        let data = StoreData {
-            grants: grants_from(
-                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                 [capabilities.crypto]\nhash = [\"sha256\"]\n",
-            ),
-        };
+        let data = StoreData::new(grants_from(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+        ));
         assert!(recheck(&data, Capability::CryptoHash).is_none());
     }
 
     #[test]
     fn recheck_denies_an_ungranted_capability_with_full_context() {
-        let data = StoreData {
-            grants: grants_from("[package]\nname = \"a\"\nversion = \"0.1.0\"\n"),
-        };
+        let data = StoreData::new(grants_from(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ));
         let err = recheck(&data, Capability::SqlQuery)
             .expect("an ungranted capability must be denied");
         assert_eq!(err.code, qqq_core::ErrorCode::CapabilityDenied);
@@ -608,9 +646,7 @@ mod tests {
     fn recheck_is_independent_of_the_linker() {
         // A store whose grants are empty, even though some other linker might
         // have been built with more.
-        let data = StoreData {
-            grants: GrantSet::empty(),
-        };
+        let data = StoreData::new(GrantSet::empty());
         for &c in Capability::all() {
             assert!(
                 recheck(&data, c).is_some(),

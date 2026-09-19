@@ -31,11 +31,16 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod config;
+pub mod instance;
 pub mod linker;
 pub mod trap;
 
 pub use config::{
-    aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits,
+    aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
+};
+pub use instance::{
+    digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionOutcome,
+    Instance, PreparedComponent,
 };
 pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces,

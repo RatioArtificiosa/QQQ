@@ -705,6 +705,106 @@ cannot erode.
 
 ---
 
+### §O-015 — `qqq-host` part 3: the instance lifecycle, limits proven by execution
+
+**What was built.** `instance.rs`: `PreparedComponent`, `Instance`, `run`,
+`run_measured`, `ExecutionOutcome`, `digest_of`, `epoch_tick_interval`,
+`DeterministicClock`. Implements `HOST-005` … `HOST-012`, `HOST-014`,
+`HOST-015`, `HOST-018`, `HOST-019`.
+
+**Verification:** `cargo test -p qqq-host` → **59 pass**; workspace → **189
+pass**; clippy across the workspace → clean.
+
+---
+
+#### §O-015a — The limits are proven by *running* a real guest, not by inspection
+
+The central claims of `HOST-005`/`006`/`010` are now executable tests against
+the real engine:
+
+| Test | What it actually does |
+|---|---|
+| `fuel_exhaustion_traps_the_guest_and_the_host_survives` | Compiles a component containing a **genuine infinite loop**, gives it 10,000 fuel, runs it, asserts the trap classifies as `QQQ-3002`, asserts fuel-consumed reaches the error context, **then runs a different component on the same engine to prove the host survived** |
+| `execution_reports_fuel_consumed` | Runs a real call and asserts fuel is observable and bounded |
+| `a_poisoned_instance_refuses_to_run` | Poisons an instance and proves it refuses rather than executing with unknown state |
+| `instance_creation_fails_when_an_import_is_ungranted` | The capability rule end to end through `Instance::create`, not only at the linker level |
+
+The host-survival assertion is the one that matters. *"A guest trap does not
+kill the host"* is the claim in Proposal §6.1's failure table, and it is now
+checked by actually trapping a guest and then using the engine again.
+
+---
+
+#### §O-015b — `HOST-010` is enforced by the ownership model, not a flag
+
+`Instance::run` **consumes `self`**. A trapped instance therefore cannot be
+returned to a pool, because after `run` returns there is nothing left to return.
+The alternative — a `must_discard` boolean every caller must remember to check —
+is exactly the kind of convention that gets skipped under deadline pressure, in
+the one place where skipping it means a cross-request state leak.
+
+`poison()` exists as a *second* mechanism, for a host function that detects a
+condition only it can see. Belt and braces, with the compiler holding the belt.
+
+---
+
+#### §O-015c — `StoreData` gained the resource limiter, and why it lives there
+
+`Store::limiter` takes a closure returning `&mut StoreLimits`, and the returned
+reference must outlive the store. Storing the limiter **inside the store's own
+data** is the only arrangement satisfying that without self-reference — and it
+keeps the limits travelling with the instance they constrain, so they cannot be
+swapped by mistake.
+
+Two layers of memory bound, deliberately:
+* the **pooling config** reserves for the worst case at startup, so
+  over-provisioning fails at boot rather than under load;
+* **`StoreLimits`** is what actually traps a runaway guest at runtime.
+
+An unset `StoreData` uses `StoreLimits::default()` — the safe direction twice
+over: no grants, and Wasmtime's own defaults.
+
+---
+
+#### §O-015d — `PreparedComponent` deliberately does not hold the engine
+
+**What happened.** My first draft had `imported_interfaces()` reach for an
+engine through an `unreachable!()` placeholder — a genuine design smell caught
+on review before it ever compiled.
+
+**Why it was wrong.** Holding a second engine reference inside the component
+risks it disagreeing with the engine the component was *compiled against* —
+exactly the kind of aliasing bug that produces unreproducible behaviour.
+
+**Fix.** The engine is an explicit parameter, so the caller must prove it is
+using the right one. NN-5's "discoverable without running it" still holds,
+because the import table is derived from the compiled artifact rather than from
+execution.
+
+---
+
+#### §O-015e — A 32-bit correctness bug found by clippy, not by a test
+
+**Observed.** `tick.as_millis() as u64` in a bound assertion. `as_millis`
+returns `u128`, and the cast truncates on overflow.
+
+**Why it mattered.** The value is at most 100 ms by construction, so the cast
+was *safe in practice* — but "safe in practice because of an invariant asserted
+three lines away" is precisely the reasoning that rots when someone later
+changes the clamp. Replaced with `u64::try_from(...).expect(...)`, making the
+invariant explicit and failing loudly if it ever stops holding.
+
+**Broader note.** This is the **second 32-bit truncation clippy caught in this
+crate** (the first was the `u64 → usize` pool-memory cast in `§O-013`). Both
+were latent, both invisible on this 64-bit development machine, and both are now
+explicit conversions with a stated direction of failure. Worth watching for
+systematically in the remaining crates.
+
+**Cross-refs:** Checklist `HOST-005` … `HOST-012`, `HOST-014`, `HOST-015`,
+`HOST-018`, `HOST-019`; Proposal §6.1, §9.4, §10.5.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

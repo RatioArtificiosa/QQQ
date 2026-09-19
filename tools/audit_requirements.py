@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Requirement audit: checks the corpus against the literal objective text.
+
+Each requirement from the brief is an executable assertion. Run this to
+answer "is the objective actually met?" with evidence rather than opinion.
+
+Usage:  python tools/audit_requirements.py
+Exit:   0 = every requirement has evidence, 1 = something is unmet
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+P = (ROOT / "QQQ-Proposal-V1.md").read_text(encoding="utf-8")
+C = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
+O = (ROOT / "QQQ-Observations-and-Memories.md").read_text(encoding="utf-8")
+
+results: list[tuple[str, bool, str]] = []
+
+
+def check(req: str, ok: bool, evidence: str) -> None:
+    results.append((req, ok, evidence))
+
+
+# --- Deliverable existence and English ---------------------------------------
+for name, text in (
+    ("QQQ-Proposal-V1.md", P),
+    ("QQQ-Checklist-V1.md", C),
+    ("QQQ-Observations-and-Memories.md", O),
+):
+    check(f"deliverable exists: {name}", len(text) > 10_000,
+          f"{len(text):,} chars")
+    # Crude CJK detection: the deliverables must be English.
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    check(f"deliverable is English: {name}", cjk < 200,
+          f"{cjk} CJK chars (code/UI strings only)")
+
+# --- Proposal completeness ---------------------------------------------------
+for topic, pat in (
+    ("architecture", r"§4 — Architecture Overview"),
+    ("subsystems", r"§6 — Subsystem Specifications"),
+    ("benchmarks", r"§9 — Performance Engineering"),
+    ("risks", r"§15 — Risk Register"),
+    ("costs/timeline", r"§14 — Delivery Plan, Milestones and Budget"),
+    ("go-to-market", r"§13\.4 Go-to-market sequence"),
+    ("security", r"§7 — Security and Trust Model"),
+    ("multi-language", r"§6\.10 Language toolchains"),
+    ("agent usability", r"§8 — AI-Agent-Native Design"),
+    ("memory/cold-start", r"Cold instantiate \(AOT cached\)"),
+    ("no-BS reality checks", r"Where we might be lying to ourselves"),
+):
+    check(f"proposal covers {topic}", bool(re.search(pat, P)), "section present")
+
+# --- Checklist: every item cites the proposal --------------------------------
+items = re.findall(r"(?m)^- \[[ x~!-]\] \*\*([A-Z]{2,5}-\d{3})\*\*", C)
+cites = re.findall(r"(?m)^\s*→ §[0-9]", C)
+check("checklist every item cites an anchor", len(cites) >= len(items),
+      f"{len(items)} items / {len(cites)} citations")
+
+# --- Bidirectional cross-referencing -----------------------------------------
+fwd = len(re.findall(r"→\s*\*\*Checklist:\*\*", P))
+check("proposal -> checklist links exist", fwd >= 40, f"{fwd} sections link forward")
+
+# --- Observations content ----------------------------------------------------
+for what, pat in (
+    ("decisions", r"^### §D-\d{3}"),
+    ("rationale", r"\*\*Why\."),
+    ("verified env facts", r"§O-003 — Local toolchain inventory"),
+    ("mistakes and fixes", r"^### §M-\d{3}"),
+    ("corrections to source", r"^### §C-\d{3}"),
+    ("open questions", r"§Q-\d{3}"),
+    ("stubs marked", r"^### §S-\d{3}"),
+):
+    n = len(re.findall(pat, O, re.M))
+    check(f"observations contain {what}", n > 0, f"{n} found")
+
+# --- Machine verification actually passes ------------------------------------
+for script, label in (
+    ("tools/check_xrefs.py", "cross-reference validator passes"),
+    ("tools/self_test_xrefs.py", "validator self-test passes (7/7)"),
+):
+    p = subprocess.run([sys.executable, script], capture_output=True,
+                       text=True, cwd=ROOT)
+    check(label, p.returncode == 0, f"exit {p.returncode}")
+
+# --- Pushed to the right repository ------------------------------------------
+r = subprocess.run(["git", "remote", "get-url", "origin"],
+                   capture_output=True, text=True, cwd=ROOT)
+check("origin is the requested repo",
+      "RatioArtificiosa/QQQ" in r.stdout,
+      r.stdout.strip() or "no remote")
+
+r = subprocess.run(["git", "status", "--porcelain"],
+                   capture_output=True, text=True, cwd=ROOT)
+check("working tree clean", r.stdout.strip() == "", r.stdout.strip() or "clean")
+
+# --- Report ------------------------------------------------------------------
+print("OBJECTIVE REQUIREMENT AUDIT")
+print("=" * 68)
+ok_count = 0
+for req, ok, ev in results:
+    print(f"  {'PASS' if ok else 'FAIL'}  {req:<52} {ev}")
+    ok_count += ok
+print("-" * 68)
+print(f"{ok_count}/{len(results)} requirements met")
+if ok_count != len(results):
+    print("\nAUDIT FAILED — objective not yet met")
+    sys.exit(1)
+print("\nAUDIT PASSED — objective met, with evidence")

@@ -313,6 +313,58 @@ def main() -> int:
             )
 
     # ----------------------------------------------------------------------
+    # 8. Appendix A <-> Observations correction parity
+    #
+    # Appendix A is the proposal's register of corrections to the source
+    # corpus. Every row must have a corresponding §C-nnn entry in the
+    # Observations document, and vice versa. Without this check the two
+    # registers drift apart silently -- which is exactly what happened once,
+    # producing a proposal row (A-3) with no matching observation.
+    # ----------------------------------------------------------------------
+    appendix_a_rows = re.findall(r"^\|\s*(A-\d{1,2})\s*\|", proposal, re.MULTILINE)
+    obs_corrections = re.findall(r"^###\s+§(C-\d{3})\b", observations, re.MULTILINE)
+
+    # A-1 <-> C-001, A-2 <-> C-002, ... by ordinal.
+    row_nums = sorted({int(r.split("-")[1]) for r in appendix_a_rows})
+    obs_nums = sorted({int(c.split("-")[1]) for c in obs_corrections})
+
+    for n in row_nums:
+        if n not in obs_nums:
+            errors.append(
+                f"[8] Appendix A row A-{n} has no matching §C-{n:03d} entry in Observations"
+            )
+    for n in obs_nums:
+        if n not in row_nums:
+            errors.append(
+                f"[8] Observations §C-{n:03d} has no matching Appendix A row A-{n}"
+            )
+
+    # ----------------------------------------------------------------------
+    # 9. Open-question parity: §Q-nnn <-> OQ-nnn
+    # ----------------------------------------------------------------------
+    q_ids = {int(x) for x in re.findall(r"§Q-(\d{3})", observations)}
+    oq_ids = {int(x) for x in re.findall(r"\*\*OQ-(\d{3})\*\*", checklist)}
+    for n in sorted(q_ids - oq_ids):
+        errors.append(f"[9] Observations §Q-{n:03d} has no matching checklist item OQ-{n:03d}")
+    for n in sorted(oq_ids - q_ids):
+        errors.append(f"[9] checklist OQ-{n:03d} has no matching Observations §Q-{n:03d}")
+
+    # ----------------------------------------------------------------------
+    # 10. Decision IDs cited from the proposal must exist in Observations
+    # ----------------------------------------------------------------------
+    obs_decisions = set(re.findall(r"^###\s+§(D-\d{3})\b", observations, re.MULTILINE))
+    for m in re.finditer(r"§D-(\d{3})", proposal):
+        did = f"D-{m.group(1)}"
+        if did not in obs_decisions:
+            errors.append(f"[10] proposal cites Observations decision §{did}, which is not defined")
+
+    # ----------------------------------------------------------------------
+    # 11. Stub parity is bidirectional
+    # ----------------------------------------------------------------------
+    if obs_stub_count and not marker_ids:
+        errors.append("[11] Observations defines §S- stubs but no inline QQQ-STUB markers exist")
+
+    # ----------------------------------------------------------------------
     # Report
     # ----------------------------------------------------------------------
     print("QQQ cross-reference validation")

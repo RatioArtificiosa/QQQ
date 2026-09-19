@@ -6,12 +6,13 @@
 | Field | Value |
 |---|---|
 | **Document** | QQQ-Proposal-V1.md |
+| **Execution engine** | Wasmtime 48.x — see decision **`§D-003`** |
 | **Version** | 1.0.0 |
 | **Status** | Draft for founder review |
 | **Date** | 2026-09-19 |
 | **Product name** | **QQQ** |
 | **CLI binary** | `qqqai` |
-| **crate / npm package** | `qqqai` |
+| **crate / npm package** | `qqqai` — see decision **`§D-001`** |
 | **Domain** | `qqq.codes` |
 | **Repository** | https://github.com/RatioArtificiosa/QQQ |
 | **Companion documents** | [`QQQ-Checklist-V1.md`](./QQQ-Checklist-V1.md) · [`QQQ-Observations-and-Memories.md`](./QQQ-Observations-and-Memories.md) |
@@ -477,7 +478,7 @@ QQQ is nine layers. Data flows down on the request path; authority flows down on
 
 **Decision: thread-per-core with work stealing *within* a shard group, implemented on Tokio's multi-threaded runtime, with an optional io_uring backend on Linux.**
 
-This deserves justification, because the source conversation proposed both Tokio and monoio/glommio and asked which is better. The answer is nuanced:
+This deserves justification, because the source conversation proposed both Tokio and monoio/glommio and asked which is better. The answer is nuanced, and it is recorded as decision **`§D-005`** in the Observations document:
 
 | Option | Strength | Fatal weakness for QQQ |
 |---|---|---|
@@ -588,7 +589,7 @@ The Component Model Canonical ABI defines how rich types (strings, lists, record
 
 ## §4.7 Concurrency model for guests
 
-Three guest concurrency models exist and QQQ must state a policy for each.
+Three guest concurrency models exist and QQQ must state a policy for each. The default is recorded as decision **`§D-006`** in the Observations document.
 
 | Model | Wasm feature | QQQ V1 policy |
 |---|---|---|
@@ -1454,6 +1455,8 @@ Structured JSON by default; human-readable in a TTY. Every line carries `trace_i
 Automatic spans for: inbound request, routing, instance acquire, guest entry, each host capability call, outbound HTTP, DB queries, and instance release. Trace context propagates through `wasi:http` headers and through the `qqq:trace` interface. Sampling is host-controlled (head-based with tail sampling option) and *never* guest-controlled.
 
 ## §10.5 Determinism — the feature nobody else has
+
+> Shipped as a headline product feature rather than a testing convenience — see decision **`§D-007`** in the Observations document.
 
 **The claim.** With `[determinism] enabled = true`, executing the same component with the same inputs produces a bit-identical result, and the execution is recorded in a replay log sufficient to reproduce it exactly — including any failure.
 

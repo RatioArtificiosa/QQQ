@@ -31,6 +31,12 @@ jobs:
       - name: Validate proposal <-> checklist graph
         run: python tools/check_xrefs.py
 
+      # A validator that cannot fail manufactures false confidence. This harness
+      # deliberately breaks the corpus seven ways and asserts each is caught.
+      # See Observations §M-006.
+      - name: Prove the validator actually detects breakage
+        run: python tools/self_test_xrefs.py
+
   # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.
   # ---------------------------------------------------------------------------

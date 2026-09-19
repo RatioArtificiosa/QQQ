@@ -352,6 +352,34 @@ error: manifest path `E:\QQQ\.scratch\witprobe\Cargo.toml` does not exist
 
 ---
 
+### §M-006 — The cross-reference validator had never been proven to detect anything
+
+**What happened.** On review, `tools/check_xrefs.py` reported `validation PASSED` — but nothing had ever demonstrated that it *fails* when the corpus is actually broken. A validator that cannot fail is worse than no validator, because it manufactures false confidence. This is the same failure mode as a security test with no positive control (`§O-006`).
+
+**Fix.** Built `tools/self_test_xrefs.py`, a fault-injection harness that deliberately breaks the corpus in seven distinct ways, asserts the validator rejects each one, and restores the files afterwards. Result: **7/7 detected**, baseline restored clean.
+
+| # | Injected fault | Check that caught it |
+|---|---|---|
+| 1 | Proposal cites `HOST-999` | `[2]` dangling checklist ID |
+| 2 | Checklist cites `§99.9` | `[1]` dangling Proposal section |
+| 3 | `CAP-001` loses its citation line | `[4]` uncited item |
+| 4 | Observations `§C-006` removed | `[8]` Appendix A parity |
+| 5 | Checklist `OQ-012` renamed | `[2]` proposal cites undefined item |
+| 6 | Proposal cites `§D-099` | `[10]` undefined decision |
+| 7 | `CAP-001` duplicated | `[6]` duplicate ID |
+
+**Two real defects the self-test exposed, which a passing validator had been hiding:**
+
+1. **`check [8]` found genuine drift.** The Proposal's Appendix A had **6** correction rows but the Observations document defined only **5** — row **A-3** (Wasmtime version never pinned) had no counterpart. The missing entry was written as **`§C-006`**, and the pre-existing near-native-Wasm correction was renumbered from `§C-005` to `§C-006` so the two registers align one-to-one. Appendix A and Observations now match exactly.
+2. **`check [10]` had nothing to catch, because the Proposal cited only one of nine decisions.** Decision IDs were effectively *write-only* — `§D-002`, `§D-005`, `§D-006`, `§D-007`, `§D-008`, `§D-009` existed in Observations but were never referenced from the Proposal, so a reader of the Proposal alone would never learn they existed. The document-control table and the relevant sections now cite them.
+
+**Lessons:**
+- **A validator must be tested by breaking things, not by observing that it passes.** The self-test is wired into CI (`DOC-007`).
+- **"Write-only" identifiers are a silent form of drift.** If an ID is defined but never cited, the cross-reference graph is decorative. Checks `[9]` and `[10]` exist specifically to catch this class.
+- **Your own fault injections can be wrong.** Two manual injections initially did not fire; investigation showed the *injections* were faulty (a mismatched literal, and a replace that left one instance of the target string intact), not the checks. Always inspect a non-firing injection before concluding a check is dead.
+
+---
+
 ## 5. CORRECTIONS TO THE SOURCE CORPUS
 
 The brief said: *"If you are fixing something or just working and see something wrong or missing, fix it, even if it is out of scope."* These are the corrections. Each is mirrored in Proposal Appendix A.
@@ -404,15 +432,27 @@ The brief said: *"If you are fixing something or just working and see something 
 
 ---
 
-### §C-005 — The "Wasm is near-native" claim is true for compute and false for boundary crossings
+### §C-005 — "Wasmtime" was recommended without a version, which is not a decision
+
+**Source.** `docs/Notes.txt` and both conversation logs name Wasmtime as the recommended engine but never pin a version, and never acknowledge that it changes.
+
+**Problem.** "Use Wasmtime" is not an engineering decision; it is the absence of one. A systems project that does not pin its execution engine cannot reason about security advisories, cannot schedule compatibility work, and cannot answer "what exactly are we shipping?". It also invites silent behavioural drift when a dependency resolves to a new minor.
+
+**Correction.** Pinned to the **48.x line** — verified latest stable `48.0.2`, published 2026-09-10 (`49.0.0-rc.1` exists and is deliberately **not** adopted, being a release candidate). Engine upgrades are a scheduled, budgeted activity (`PLAN-012`, `HOST-020`) with a 72-hour patch target on advisories (`SEC-014`), and all churn is isolated behind `qqq-abi`.
+
+**Proposal ref:** Appendix A, item A-3; Appendix B, items B-1, B-2, B-3, B-4; §6.1, §15 (`R-03`, `R-14`).
+
+---
+
+### §C-006 — The "Wasm is near-native" claim is true for compute and false for boundary crossings
 
 **Source.** The corpus repeatedly asserts near-native Wasm performance without qualification.
 
-**Problem.** It is true for compute-bound code compiled with a good toolchain and false for code that crosses the host boundary constantly. The Component Model's canonical ABI has real per-crossing cost, and a chatty interface can erase the advantage entirely. Shipping the unqualified claim would set the project up for a very public correction.
+**Problem.** It is true for compute-bound code compiled with a good toolchain, and **false** for code that crosses the host boundary constantly. The Component Model's canonical ABI has real per-crossing cost, and a chatty interface can erase the advantage entirely. Shipping the unqualified claim would set the project up for a very public correction — and would be exactly the kind of overclaim that `§D-009` forbids.
 
-**Correction.** §9.3 quantifies the crossing costs, §4.5 states the batch-first design rule as a consequence, and the docs state the limitation. This is also why "we may lose the `hello world` benchmark" is written into the proposal rather than discovered later.
+**Correction.** Proposal §9.3 quantifies the crossing costs, §4.5 derives the **batch-first design rule** as a consequence and makes it a WIT style-guide requirement (`CON-011`, `CON-012`), and §3.3 states the limitation publicly. This is also why "we may lose the `hello world` benchmark" is written into the proposal rather than discovered later.
 
-**Proposal ref:** Appendix A, item A-6 (A-3 in the proposal's table); §4.5, §9.3.
+**Proposal ref:** Appendix A, item A-6; §4.5, §9.3.
 
 ---
 
@@ -517,6 +557,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 
 | Date | Change | Author |
 |---|---|---|
-| 2026-09-19 | Document opened. Initial decisions `§D-001` … `§D-009`, observations `§O-001` … `§O-005`, mistakes `§M-001` … `§M-003`, corrections `§C-001` … `§C-005`, stubs `§S-001` … `§S-005`, questions `§Q-001` … `§Q-012`. | Architect |
+| 2026-09-19 | Document opened. Initial decisions `§D-001` … `§D-009`, observations `§O-001` … `§O-008`, mistakes `§M-001` … `§M-006`, corrections `§C-001` … `§C-006`, stubs `§S-001` … `§S-005`, questions `§Q-001` … `§Q-012`. | Architect |
+| 2026-09-19 | Verification round. All four load-bearing architecture claims verified against Wasmtime 48.0.2 (`§O-006`); four WAT/ABI findings recorded (`§O-007`); two Wasmtime API differences recorded (`§O-008`); validator self-test built and **7/7 fault injections detected** (`§M-006`), which exposed and fixed two real defects: Appendix A/Observations correction drift, and Proposal decision citations that were write-only. `check [8]`, `[9]`, `[10]`, `[11]` added to the validator; self-test wired into CI. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

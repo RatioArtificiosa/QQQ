@@ -59,7 +59,28 @@ Items that require the founder specifically. Reviewed and pruned at every milest
 
 **Binding detail.** The *binary* inside the `qqqai` crate is named `qqqai`, not `qqq`. Do not "fix" this later — `qqq` on PATH is not ours to take.
 
-**Cross-refs:** Proposal §0.1, §5.1, Appendix B; Checklist `DIST-004`, `DIST-005`.
+**Founder clarification (2026-09-19, recorded verbatim in substance).** The founder confirmed: the crate/package name published to crates.io **is `qqqai`**, precisely because `qqq` is taken there. This is a *deliberate, permanent* decision, not a workaround awaiting a better option.
+
+Two distinct identifiers must never be conflated:
+
+| Identifier | Value | Where it appears | Changeable? |
+|---|---|---|---|
+| **Brand / product name** | **QQQ** | README, website, docs, marketing, conversation | No |
+| **Crate / package name** | **`qqqai`** | `Cargo.toml` `[package] name`, crates.io, npm | **No — this is settled** |
+| **Binary / command name** | **`qqqai`** | `[[bin]] name`, every command in every doc (`qqqai new`, `qqqai dev`, …) | **No — this is settled** |
+| **Rust crate identifiers** | `qqq_core`, `qqq_cap`, `qqq_host`, … | `use` statements, workspace members | No |
+| **Domain** | `qqq.codes` | Install URLs, docs site, registry | No |
+
+**Implementation rule for every future contributor and agent.** When writing code, manifests, tests, scripts, CI, install commands or documentation:
+
+- Use **`qqqai`** for anything that is *executed* or *installed*.
+- Use **`QQQ`** only for prose and branding.
+- Use **`qqqai/`** for the package namespace in WIT interfaces and registry paths (e.g. `qqqai/json`), never `qqq/`.
+- Never write `cargo install qqq`, `npm i -g qqq`, `brew install qqq`, or a binary named `qqq`. **A build that produces a `qqq` binary is a defect**, not a convenience.
+
+**Why this is recorded so emphatically.** The single most likely future regression in this project is an agent or contributor "helpfully" shortening `qqqai` to `qqq` for aesthetics — which would collide with an existing crates.io package and an existing npm package, making the release unpublishable. There is now a checklist item (`DIST-004`) and this note so the mistake is caught before it ships.
+
+**Cross-refs:** Proposal §0.1, §5.1, §5.2, Appendix B; Checklist `DIST-004`, `DIST-005`, `CON-013`.
 
 ---
 
@@ -290,6 +311,51 @@ Items that require the founder specifically. Reviewed and pruned at every milest
 2. **`Context`/`context()` comes from `wasmtime::error::Context`, not `anyhow`.** Wasmtime ships its own error types (`wasmtime::Error`, `wasmtime::Result`), and the idiomatic `.context(...)` extension trait is re-exported from there.
 
 **Consequence for `qqq-host`.** Standardise on `wasmtime::Result`/`wasmtime::Error` at the host boundary rather than introducing a second error type. The probe now depends on `wasmtime` alone.
+
+---
+
+### §O-009 — Implementation began: `qqq-core` is real, tested, and lint-clean
+
+**What was built.** The first functional crate. `crates/qqq-core` is no longer a
+stub: it implements the error model (37 stable codes across the seven classes,
+with docs URLs, cause chains, remediation and retryability), the identifier
+newtypes (`TenantId`, `ComponentId`, `PackageName`) and the version type.
+
+**Verification — actual commands, actual output:**
+
+| Command | Result |
+|---|---|
+| `cargo test -p qqq-core` | **35 tests pass**, 1 doc-test passes |
+| `cargo clippy -p qqq-core --all-targets -- -D warnings` | **clean**, with `clippy::pedantic` enabled workspace-wide |
+
+**Design decisions taken during implementation, recorded so they are not
+re-litigated:**
+
+1. **Errors are data structures, not messages.** `Error` carries `code`,
+   `message`, `cause[]`, `remediation` and ordered `context[]`. The doc comment
+   on `message` states explicitly that it is **unstable** and must not be
+   parsed — because wording will improve and an agent that parses prose is
+   making a mistake we should not encourage. Match on `code`.
+2. **`is_retryable()` is derived from the error class, not per-code.** Only
+   `Package` and `Host` retry. A guest trap is deliberately *not* retryable:
+   the same input traps identically, and a caller retrying with different input
+   is making a product decision, not a retry.
+3. **Identifiers are newtypes with validation.** This is a security control: a
+   package name reaches filesystem paths, so `../etc/passwd`, `a/b` and `a\0b`
+   are rejected at construction. Tested directly.
+4. **The naming decision is now executable.** `BINARY_NAME = "qqqai"` and
+   `BRAND_NAME = "QQQ"` are constants, and `naming_constants_match_the_recorded_decision`
+   asserts them — including an explicit `assert_ne!(BINARY_NAME, "qqq")` with the
+   reason in the message. A future contributor who shortens the name must
+   delete a documented constant and break a named test.
+
+**Codes are enforced, not merely documented.** Seven tests police the table:
+codes are unique, sorted, class-consistent, round-trip from both number and id,
+and the seven examples printed in Proposal §8.3 actually resolve. Adding a code
+incorrectly now fails the build rather than shipping a broken contract.
+
+**Cross-refs:** Checklist `ARCH-007`, `ARCH-008`, `CON-009`, `CON-016`,
+`AGENT-021`, `AGENT-022`; Proposal §4.3, §8.3, §12.2.
 
 ---
 

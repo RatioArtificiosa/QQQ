@@ -482,6 +482,65 @@ Proposal §6.2.
 
 ---
 
+### §O-012 — `qqq-cap` part 3: normalization, and three real bugs the tests caught
+
+**What was built.** Pipeline step 2, NORMALIZE (Checklist `CAP-003`):
+`HostPattern`, `SecretRef`, `Normalized`, `FsGrant`, and the `HostEnv` trait.
+
+**Verification:** `cargo test -p qqq-cap` → **93 pass**; clippy → clean.
+
+**The design decision worth recording: `HostEnv` is a trait, not direct
+syscalls.** Normalization touches the filesystem and the process environment,
+which makes it untestable and also wrong for cross-compilation — `qqqai build`
+on CI must be able to validate a manifest for a *different* target host. So
+normalization runs against a `HostEnv` implementation, with `RealEnv` for
+production and a `FakeEnv` for tests. This is what let me write 20 tests for
+path canonicalization and secret checking without creating a single real file.
+
+**Secrets are checked but never read.** `HostEnv` exposes only
+`has_env(&str) -> bool` — there is deliberately **no value getter anywhere in
+the trait**. A bug in `normalize_secrets` therefore *cannot* leak a secret into
+configuration, a log line or a serialized struct. The value is fetched by the
+host at the moment of use inside `qqq:secrets` (Proposal §6.3).
+
+---
+
+#### §O-012a — Three real bugs found by the tests, all fixed at the root
+
+**Bug 1 — IPv6 literals were rejected as invalid hosts.** My character
+validator only accepted `[a-z0-9._-]`, so `[::1]:8080` failed with *"host `::1`
+contains invalid characters"*. An IPv6 literal is a legitimate allowlist entry
+for an internal service. **Fix:** detect a literal by the presence of a colon
+and validate it against its own alphabet (hex digits and colons), comparing by
+exact equality since wildcards are meaningless for an address.
+
+**Bug 2 — the fix for bug 1 was itself over-strict.** My first correction
+rejected any literal beginning or ending with a colon — but `::1` and `::`
+**legitimately** begin with one; that is IPv6 shorthand for a run of zero
+groups. **Lesson:** a validation rule written from a plausible-sounding
+principle, rather than from the actual grammar, produces a rule that rejects
+valid input. Only three-or-more consecutive colons (and a lone `:`) are
+genuinely invalid.
+
+**Bug 3 — `fs_allows` compared the wrong thing.** The original expression was
+`g.mode.can_write() == mode.can_write() && (mode.can_read() <= g.mode.can_read())`.
+The first clause is an **equality** where a *coverage* relation was needed, so a
+`read-write` grant failed to satisfy a `read-only` request. **Fix:** replaced
+with an explicit `FsMode::covers()` expressed as a **rights check** — does the
+grant permit reading if the request needs it, and writing if the request needs
+it — plus a test asserting the **full 3×3 matrix** rather than sampling two
+cases. Expressing it as rights rather than a match over pairs also means a
+future mode must be taught to the function explicitly instead of silently
+inheriting permissive behaviour from its position in the enum ordering.
+
+**Pattern across all three:** the bug was in my *mental model* of a rule, not
+in the code that implemented the model. That is precisely why the matrix test
+exists — sample-based tests would have passed all three.
+
+**Cross-refs:** Checklist `CAP-003`, `SEC-010`; Proposal §5.3, §6.2, §6.3.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

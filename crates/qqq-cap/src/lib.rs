@@ -45,6 +45,7 @@
 
 pub mod capability;
 pub mod manifest;
+pub mod normalize;
 pub mod resolve;
 
 pub use capability::{
@@ -54,6 +55,10 @@ pub use manifest::{
     group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability,
     DnsCapability, EnvCapability, FsCapability, FsMode, HttpCapability, Manifest,
     ManifestError, Package,
+};
+pub use normalize::{
+    path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv,
+    SecretRef,
 };
 pub use resolve::{
     denial, CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode,

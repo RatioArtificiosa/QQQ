@@ -156,6 +156,36 @@ impl FsMode {
     pub const fn can_write(self) -> bool {
         matches!(self, Self::AppendOnly | Self::ReadWrite)
     }
+
+    /// Whether a grant with **this** mode satisfies a request for `requested`.
+    ///
+    /// Compared on the underlying *rights* (read, write), not on the enum's
+    /// derived ordering. That matters because a mode added later must be taught
+    /// to this function explicitly rather than silently inheriting permissive
+    /// behaviour from its position in the ordering — which is exactly how a
+    /// future "write-only, no-append" mode would accidentally become able to
+    /// read.
+    ///
+    /// | Grant | request `read-only` | request `append-only` | request `read-write` |
+    /// |---|---|---|---|
+    /// | `read-only` | ✅ | ❌ | ❌ |
+    /// | `append-only` | ❌ | ✅ | ❌ |
+    /// | `read-write` | ✅ | ✅ | ✅ |
+    ///
+    /// Expressing this as a rights check rather than a match over pairs keeps
+    /// the rule auditable: the question "does this grant cover this request?"
+    /// reduces to "does the grant permit reading (if the request needs it) and
+    /// writing (if the request needs it)?".
+    #[must_use]
+    pub const fn covers(self, requested: Self) -> bool {
+        let grant_reads = self.can_read();
+        let grant_writes = self.can_write();
+        // A read-only request must be satisfiable by reading alone; an
+        // append-only request by writing alone; a read-write request by both.
+        let need_read = requested.can_read();
+        let need_write = requested.can_write();
+        (!need_read || grant_reads) && (!need_write || grant_writes)
+    }
 }
 
 impl fmt::Display for FsMode {
@@ -1052,6 +1082,26 @@ max_open_handles = 256
         assert!(FsMode::ReadWrite.can_write());
         // Ordering supports narrowing: ReadOnly < AppendOnly < ReadWrite.
         assert!(FsMode::ReadOnly < FsMode::ReadWrite);
+    }
+
+    /// `covers` decides whether a grant satisfies a request. Getting this
+    /// wrong is a silent privilege escalation or a confusing denial, so the
+    /// full 3x3 matrix is asserted explicitly rather than sampled.
+    #[test]
+    fn fs_mode_covers_full_matrix() {
+        use FsMode::{AppendOnly, ReadOnly, ReadWrite};
+        // Grant read-only.
+        assert!(ReadOnly.covers(ReadOnly));
+        assert!(!ReadOnly.covers(AppendOnly));
+        assert!(!ReadOnly.covers(ReadWrite));
+        // Grant append-only.
+        assert!(!AppendOnly.covers(ReadOnly));
+        assert!(AppendOnly.covers(AppendOnly));
+        assert!(!AppendOnly.covers(ReadWrite), "append cannot satisfy read");
+        // Grant read-write.
+        assert!(ReadWrite.covers(ReadOnly));
+        assert!(ReadWrite.covers(AppendOnly));
+        assert!(ReadWrite.covers(ReadWrite));
     }
 
     #[test]

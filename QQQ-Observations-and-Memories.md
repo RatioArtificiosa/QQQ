@@ -541,6 +541,83 @@ exists — sample-based tests would have passed all three.
 
 ---
 
+### §O-013 — `qqq-host` part 1: the trap taxonomy and engine configuration
+
+**What was built.** `trap` (classification, structured traps, the `QQQ-3xxx`
+taxonomy) and `config` (engine configuration, pooling sizing, store limits,
+AOT cache keying). Checklist `HOST-001`, `HOST-007`, `HOST-008`, `HOST-009`,
+`HOST-010`, `HOST-013`.
+
+**Verification:** `cargo test -p qqq-host` → **29 pass**; clippy → clean.
+Full workspace: **158 tests pass**.
+
+---
+
+#### §O-013a — A wrong abstraction the tests caught: two different memory failures
+
+**What happened.** `wasmtime_memory_message_classifies_as_memory` failed on the
+input `"wasm trap: out of bounds memory access"`. My classifier bucketed it as
+`MemoryLimitExceeded`.
+
+**Why that was wrong, and worth a new error code.** These are **two different
+failures with opposite fixes**:
+
+| Detail | Meaning | The fix |
+|---|---|---|
+| `memory limit exceeded` | the guest asked for more than it was allowed | **raise `limits.memory`** |
+| `out of bounds memory access` | the guest has a **buffer overrun bug** | **change the code** |
+
+Conflating them sends a developer hunting for a limit to raise when the actual
+defect is in their indexing. So `QQQ-3007 GuestOutOfBounds` was added with a
+remediation that explicitly says *"this is a guest bug, not a limit to raise"* —
+and a test asserts that wording, so the distinction cannot silently collapse
+back.
+
+**This is the second time the same pattern has appeared** (see `§O-012a`): the
+bug was in the *mental model* of the domain, not in the code implementing it.
+Sample-based tests would have passed. The value of asserting specific real
+Wasmtime strings — rather than plausible ones — is that it forced the model to
+be corrected.
+
+---
+
+#### §O-013b — Wasmtime emits `"wasm trap: interrupt"` for epoch preemption
+
+**Observed.** The epoch-preemption path does not contain the word "epoch". The
+actual message Wasmtime emits when an epoch deadline fires is
+`wasm trap: interrupt`.
+
+**Consequence.** A classifier keyed on "epoch" would have silently misclassified
+*every* preemption as a generic trap — meaning `QQQ-3003` would never fire in
+production and timeouts would look like crashes. There is now a dedicated arm for
+the bare `interrupt` signature, with a comment naming it as the real message.
+
+---
+
+#### §O-013c — Three Wasmtime 48 API differences from the documented surface
+
+**Observed while compiling.**
+
+1. **`wasmtime::VERSION` does not exist.** The engine does not re-export its
+   version, which matters because the **AOT cache key must include the engine
+   version** — Cranelift codegen changes between releases, and a `.cwasm`
+   compiled by one release is not guaranteed valid for another. A stale key
+   would let native code compiled for a different engine be loaded, producing
+   code that is *subtly* wrong rather than obviously broken. Resolution: a
+   pinned `ENGINE_VERSION` constant plus a test that reads the **workspace
+   `Cargo.toml` at compile time** and fails if the constant and the dependency
+   drift apart. The constant cannot silently rot.
+2. **`PoolingAllocationConfig::total_stacks` takes `u32`**, not `usize`.
+3. **`Config::wasm_relaxed_simd` and `cranelift_nan_canonicalization` behave as
+   expected** — confirmed by building a real engine from both the default and
+   deterministic configurations in a test, which is what proves our flag
+   combination is *valid* rather than merely plausible.
+
+**Cross-refs:** Checklist `HOST-001`, `HOST-007`, `HOST-008`, `HOST-009`,
+`HOST-010`, `HOST-013`; Proposal §6.1, §9.4, §10.5.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

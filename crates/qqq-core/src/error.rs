@@ -200,6 +200,16 @@ pub enum ErrorCode {
     /// **Remediation:** the backtrace names the panic site when DWARF debug
     /// info is present; build with debug info to get source lines.
     GuestPanic = 3006,
+    /// The guest accessed memory outside its own linear memory — a genuine
+    /// buffer overrun or null dereference in guest code.
+    ///
+    /// **Distinct from [`Self::MemoryLimitExceeded`] on purpose.** That code
+    /// means "the guest asked for more memory than it was allowed"; this one
+    /// means "the guest has a bug". Conflating them would send a developer
+    /// hunting for a limit to raise when the real fix is a code change.
+    /// **Remediation:** this is a guest bug — fix the indexing or pointer
+    /// arithmetic. The backtrace names the faulting function.
+    GuestOutOfBounds = 3007,
 
     // -- 4xxx: capability denials --------------------------------------------
     /// The requested capability is not granted by any configuration layer.
@@ -354,6 +364,7 @@ impl ErrorCode {
             Self::GuestTrap,
             Self::InvalidResourceHandle,
             Self::GuestPanic,
+            Self::GuestOutOfBounds,
             Self::CapabilityOutOfScope,
             Self::CapabilityWideningRefused,
             Self::CapabilityDenied,

@@ -1,11 +1,50 @@
-//! `qqq-cap` -- see `QQQ-Proposal-V1.md` §4.3 for the crate topology.
+//! # qqq-cap
 //!
-//! Status: not yet implemented. Tracked by the checklist item(s) named in the
-//! workspace manifest.
+//! The QQQ capability engine — **the single authority gate**, and the subsystem
+//! that justifies the project (`QQQ-Proposal-V1.md` §6.2).
 //!
-//! QQQ-STUB(ARCH-007): crate declared so the architecture is enforced by the
-//! build system from the first commit. Implementation lands with its checklist
-//! item; see `QQQ-Observations-and-Memories.md` §6.
+//! ## The one rule that matters
+//!
+//! > A capability is denied unless something explicitly granted it, and **no
+//! > configuration layer may ever widen a grant. Overlays may only narrow.**
+//!
+//! This is what makes "the manifest is the truth" a *property* rather than a
+//! promise. Every other crate trusts this one to enforce it.
+//!
+//! ## The resolution pipeline
+//!
+//! ```text
+//! qqq.toml [capabilities]
+//!         │
+//!         ▼
+//!  1. PARSE       validate, rejecting unknown names with a suggestion
+//!  2. NORMALIZE   expand patterns, resolve secret refs, canonicalize paths
+//!  3. DEVELOPER   developer overlay  ─┐
+//!  4. ORGANIZATION Fabric policy      ├─ may only NARROW
+//!  5. PLATFORM    deployment config  ─┘
+//!  6. RESOLVE     → Grants
+//!  7. BIND        → per-instance linker (in qqq-host)
+//!  8. RECORD      → digest into the audit stream
+//! ```
+//!
+//! ## Why the narrowing rule is enforced structurally
+//!
+//! Overlays are applied through a narrowing operation that computes a **set
+//! intersection** and cannot express a widening — there is no code path that
+//! adds a capability. A test proves that applying every overlay in *every*
+//! order yields the same, smallest result.
+//!
+//! ## Checklist coverage
+//!
+//! `CAP-001` … `CAP-016`, `SEC-001`, `SEC-003`. See Proposal §6.2.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
 
+pub mod capability;
+
+pub use capability::{
+    Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,
+};

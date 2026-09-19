@@ -406,6 +406,82 @@ half of 2 (NORMALIZE) from Proposal §6.2.
 
 ---
 
+### §O-011 — `qqq-cap` part 2: the narrowing-only invariant is provable
+
+**What was built.** The resolution pipeline (Proposal §6.2 steps 3–6): `Layer`,
+`Overlay`, `GrantSet`, `Resolution` and the `why` chain.
+
+**Verification:** `cargo test -p qqq-cap` → **68 pass**; clippy → clean.
+
+**The invariant is structural, not checked.** A rule enforced by a check can be
+bypassed by a bug in the check; a rule enforced by the type system cannot. So
+`GrantSet` has **no public method that adds a capability**. Its only
+constructors are `empty()` and `from_manifest()`, and the only combinator is
+`narrow()`, which intersects or subtracts. `Layer::may_grant()` returns `true`
+for `Manifest` alone, and `narrow()` refuses an overlay from any other layer
+that claims granting authority — with a `debug_assert` for the programming
+error plus a test that proves it.
+
+`no_overlay_can_ever_widen` starts from an *empty* set and applies every
+non-granting layer × every mode, each carrying **every capability that exists**,
+and asserts the result is still empty.
+
+---
+
+#### §O-011a — A real design flaw the commutativity test caught
+
+**What happened.** `narrowing_is_commutative_across_layers` failed. The
+capability sets were correctly identical, but the `applied_layers` vectors
+differed by insertion order — and `GrantSet` derived `PartialEq`, so it was
+comparing **provenance** rather than **authority**.
+
+**Why this mattered more than a failed test.** Narrowing is commutative: A then
+B grants the same authority as B then A. If equality compared history, then
+(a) the commutativity guarantee would be *untestable*, and (b) any caller
+comparing two resolutions would see a phantom difference where the authority is
+identical. That is precisely the kind of subtle wrongness that ships and then
+confuses someone two years later.
+
+**Fix.** `GrantSet` now implements `PartialEq`, `Eq` and `Hash` **by hand**,
+over `capabilities` only, with the semantics documented on the type: *"two
+grant sets are equal if and only if they grant the same authority; provenance
+is not authority."* Ordering history remains available through
+`applied_layers()` and the full `Resolution::trace`, which is where a human or
+agent looks to understand *how* a result was reached.
+
+Two tests now pin this:
+- `equality_ignores_provenance_and_compares_authority` — asserts the histories
+  genuinely differ *and* the sets still compare equal (so the test cannot pass
+  vacuously), plus the audit digests match.
+- `overlay_from_a_non_granting_layer_that_claims_to_grant_is_ignored` — asserts
+  authority and digest are unchanged while provenance *is* recorded.
+
+---
+
+#### §O-011b — The trace records transitions, not membership
+
+**What happened.** A second failure: `resolution_records_which_layer_removed_what`
+expected one trace node and got two. Investigation showed the **code** was
+right and my **expectation** was wrong.
+
+**Resolution.** A capability declared by the manifest and later removed by
+policy legitimately has *two* transitions: `false → true` (manifest grants) and
+`true → false` (policy removes). Recording both is strictly better — it lets
+`qqqai why` tell the complete story rather than showing an orphaned removal with
+no explanation of where the capability came from. The trace now filters to
+**genuine transitions only** (`granted_before != granted_after`), which keeps it
+readable, and the test asserts both transitions plus that the *last* one names
+the deciding layer.
+
+**Lesson recorded:** when a test fails, establish whether the *code* or the
+*expectation* is wrong before changing either. Here, changing the code to match
+my expectation would have silently degraded the `why` output.
+
+**Cross-refs:** Checklist `CAP-003` … `CAP-012`, `SEC-001`, `SEC-003`;
+Proposal §6.2.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

@@ -26,8 +26,15 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod commands;
+pub mod manifest_loader;
 pub mod output;
 
+pub use commands::{
+    caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,
+    InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput, WhyStep,
+};
+pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{
     command_schemas, CommandName, CommandOutput, CommandSchema, Envelope, ErrorContextEntry,
     ErrorPayload, Format, Output,

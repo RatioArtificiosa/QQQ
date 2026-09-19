@@ -1130,6 +1130,120 @@ Proposal §6.1, §6.3, §7.4, §10.5.
 
 ---
 
+### §O-019 — The capability engine is now reachable: `why`, `caps` and `inspect`
+
+**What was built.** `qqq-run::commands` and `qqq-run::manifest_loader`, and the
+CLI wiring for three commands. Implements `CLI-015`, `CLI-018`, `CLI-019`,
+`CLI-002`.
+
+**Verification — by running the commands against a real project:**
+
+```console
+$ qqqai caps
+orders-api: 3 capabilities across 2 namespaces
+
+$ qqqai why http.client
+http.client GRANTED
+
+$ qqqai why sql.query --json
+ok: true   granted: false
+fix:
+    add to qqq.toml:
+
+        [[capabilities.sql]]
+        name = "orders"
+        driver = "postgres"
+        host = "db.internal:5432"
+        secret = "env:ORDERS_DB_URL"
+
+$ qqqai inspect --json
+project: orders-api   posture: exposed
+caps: ['http.server', 'http.client', 'crypto.hash']
+interfaces: qqq:crypto@1.0.0 (implemented=False), qqq:http@1.0.0 (implemented=False)
+limits: {epoch_deadline_ms: 5000, fuel: 10000000, memory: '64MiB'}
+```
+
+**Why this mattered more than it looks.** Before this round the capability
+engine was proven correct and **completely unreachable** — five CLI commands
+returned `QQQ-6004 not implemented`. Proposal §6.2 calls `qqqai why` "the killer
+DX affordance" and §5.2 lists `inspect` among "the surfaces that make QQQ
+different". Neither claim was worth anything until the commands existed. A
+correct engine behind an unreachable surface delivers no value.
+
+---
+
+#### §O-019a — The fix stanza is generated, not documented
+
+`why sql.query` prints the **exact** `qqq.toml` stanza that would grant it,
+rendered from the capability's namespace. A developer who hits a denial needs
+that text, not a link to a capabilities reference — and generating it means the
+suggestion cannot drift from what the parser accepts.
+
+A test (`every_capability_has_a_useful_fix_stanza`) walks all 24 capabilities
+and asserts each produces a stanza naming both `qqq.toml` and its own namespace.
+A new capability cannot ship without a fix suggestion.
+
+---
+
+#### §O-019b — `inspect` reports interfaces, not just capabilities
+
+The value of `inspect` over reading `qqq.toml` is that it answers a **different
+question**: not "what did I declare?" but "what will this component be able to
+import?". It resolves capabilities through the `qqq-abi` registry — the same
+table `qqq-host` builds its linker from — so the static report and the runtime
+enforcement cannot disagree.
+
+It also reports `implemented` per interface, honestly. A reviewer sees that
+`qqq:http@1.0.0` is granted but not yet servable, which is exactly the
+information a pre-deployment check needs.
+
+---
+
+#### §O-019c — `Posture` is an enum, not a sentence
+
+`classify_posture` returns `Minimal` / `Contained` / `Exposed`. `qqqai audit
+--fail-on` needs to compare against a severity, and an agent needs to branch on
+it — both impossible against free text. The classification rule is stated in one
+function rather than inferred, and tested across every capability: anything that
+writes or reaches the network is `Exposed`.
+
+---
+
+#### §O-019d — Manifest discovery does not walk upward, deliberately
+
+`qqqai` looks for `qqq.toml` in the current directory only. Upward search is
+convenient and ambiguous: in a directory nested under two projects, which
+manifest applies? NN-5 says nothing important is inferred, so the rule is one
+directory plus an explicit `--manifest` flag.
+
+A test (`discovery_does_not_walk_upward`) creates a nested directory under a
+project and asserts the parent manifest is **not** found. If upward search is
+ever wanted, that test has to be deliberately changed.
+
+---
+
+#### §O-019e — Three test failures, all my expectations being wrong
+
+Every one of the three initial failures was a **test** defect, not a code
+defect. Recorded because the pattern keeps recurring:
+
+| Failure | What was wrong |
+|---|---|
+| `caps` summary did not contain `"crypto"` | The summary reports counts; namespace *names* live in the structured field an agent reads. My assertion tested the human string for data that belongs to the machine contract. |
+| The developer-overlay warning did not fire | The warning fires only when an overlay **changes something** — correct behaviour, since warning about a no-op trains users to ignore warnings. My test applied it to a deny-all manifest where it is a no-op. |
+| The unknown-capability error did not mention `qqqai caps` | The *message* offers a name suggestion when one is close; the *remediation* explains the naming convention. I asserted on the wrong field. |
+
+**Each fix improved the test.** The overlay case in particular gained a second
+assertion worth having: `a_developer_overlay_cannot_widen_a_deny_all_manifest`
+proves through the command surface that `--cap` cannot grant authority the
+manifest did not declare — a security property now tested end to end, not only
+in `qqq-cap`.
+
+**Cross-refs:** Checklist `CLI-015`, `CLI-018`, `CLI-019`, `CAP-012`, `SEC-002`;
+Proposal §5.2, §6.2.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

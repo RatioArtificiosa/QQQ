@@ -914,6 +914,7 @@ version = "0.0.0"
 name = "qqq-run"
 version = "0.0.0"
 dependencies = [
+ "qqq-abi",
  "qqq-cap",
  "qqq-core",
  "qqq-host",

@@ -107,9 +107,15 @@ enum Action {
 mod exit {
     /// The command succeeded.
     pub const OK: u8 = 0;
+    /// The command ran but failed — an application error, not a usage mistake.
+    ///
+    /// Distinct from `USAGE` because an agent's recovery differs: a `FAILURE`
+    /// means retrying or fixing the input may help, while `USAGE` means the
+    /// invocation itself was wrong.
+    pub const FAILURE: u8 = 1;
     /// The arguments were not understood.
     pub const USAGE: u8 = 2;
-    /// A required resource was unavailable.
+    /// A required resource was unavailable — a command that does not exist yet.
     pub const UNAVAILABLE: u8 = 69;
     /// An internal error, always a QQQ bug.
     pub const INTERNAL: u8 = 70;
@@ -384,8 +390,31 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             let checks = run_doctor();
             report(&mut out, name, &DoctorOutput { checks })
         }
+        CommandName::Why => {
+            // The capability argument is extracted before `out` is borrowed by
+            // `with_manifest`, so the missing-argument error does not conflict
+            // with the later mutable borrow.
+            if let Some(cap) = args.first().cloned() {
+                with_manifest(name, &mut out, args, |loaded| {
+                    qqq_run::commands::why(loaded, &cap)
+                })
+            } else {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`why` needs a capability to explain",
+                )
+                .with_remediation("for example: qqqai why crypto.hash");
+                let _ = out.emit_error(name, &err);
+                ExitCode::from(exit::USAGE)
+            }
+        }
+        CommandName::Caps => with_manifest(name, &mut out, args, |loaded| {
+            Ok(qqq_run::commands::caps(loaded))
+        }),
+        CommandName::Inspect => with_manifest(name, &mut out, args, |loaded| {
+            qqq_run::commands::inspect(loaded)
+        }),
         _ => {
-            let _ = args;
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
                 format!("`{name}` is not implemented yet"),
@@ -398,6 +427,51 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             ExitCode::from(exit::UNAVAILABLE)
         }
     }
+}
+
+/// Load the project manifest, run `f`, and emit the result.
+///
+/// # Why every capability command shares this
+///
+/// So that manifest discovery, the `--manifest` flag and error reporting are
+/// identical across `why`, `caps` and `inspect`. A command that found a
+/// different manifest than another would produce a capability report that
+/// disagrees with what the runtime enforces — and the disagreement would be
+/// invisible until it mattered.
+fn with_manifest<T, F>(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+    f: F,
+) -> ExitCode
+where
+    T: qqq_run::output::CommandOutput,
+    F: FnOnce(&qqq_run::LoadedManifest) -> qqq_core::Result<T>,
+{
+    let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    match f(&loaded) {
+        Ok(value) => report(out, name, &value),
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
+/// Read the value following a flag, e.g. `--manifest path/to/qqq.toml`.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let idx = args.iter().position(|a| a == flag)?;
+    args.get(idx + 1).cloned()
 }
 
 /// Emit a successful result and convert it into an exit code.

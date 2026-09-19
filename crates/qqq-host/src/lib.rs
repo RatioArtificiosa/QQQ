@@ -30,11 +30,15 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod ambient;
 pub mod config;
 pub mod instance;
 pub mod linker;
 pub mod trap;
 
+pub use ambient::{
+    hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure,
+};
 pub use config::{
     aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
 };

@@ -114,12 +114,18 @@ fn ambient_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:clock@1.0.0",
             &[ClockWall, ClockMonotonic],
-            false,
+            true,
             "Wall-clock and monotonic time, virtualised in deterministic mode",
         ),
         iface(
             "qqq:crypto@1.0.0",
             &[CryptoRandom, CryptoHash, CryptoHmac, CryptoAead, CryptoSign],
+            // Partially implemented: `random` and `hash` are real (see
+            // `qqq-host::ambient`); `hmac`, `aead` and `sign` are not yet.
+            // The flag is `false` until the whole interface is servable —
+            // claiming `true` for a partially-served interface would let a
+            // guest that needs AEAD pass admission and fail at first call,
+            // which is exactly the opaque failure this flag exists to prevent.
             false,
             "Randomness, hashing, HMAC, AEAD and signatures, all explicitly named",
         ),
@@ -382,8 +388,14 @@ mod tests {
         );
     }
 
-    /// The `implemented` flags are claims about reality. This test documents the
-    /// current state so that flipping a flag without landing the code fails.
+    /// The `implemented` flags are claims about reality. This test pins the
+    /// current state so that flipping a flag **without landing the code** fails
+    /// the build.
+    ///
+    /// Update this list in the same commit that lands an implementation, and
+    /// note in the commit message which interface became servable. The point is
+    /// that the two cannot drift: a flag is a promise to a guest that a granted
+    /// capability will work.
     #[test]
     fn implemented_flags_match_reality() {
         let table = interfaces();
@@ -392,9 +404,29 @@ mod tests {
             .filter(|i| i.implemented)
             .map(|i| i.name.as_str())
             .collect();
+        assert_eq!(
+            implemented,
+            vec!["qqq:clock@1.0.0"],
+            "the set of implemented interfaces changed; update this test in the \
+             same commit that lands (or removes) an implementation"
+        );
+    }
+
+    /// A **partially** implemented interface must still report `false`.
+    ///
+    /// `qqq:crypto` serves `random` and `hash` today but not `hmac`, `aead` or
+    /// `sign`. Reporting it as implemented would let a component needing AEAD
+    /// pass admission and then fail at first call — the opaque failure the flag
+    /// exists to prevent.
+    #[test]
+    fn partial_implementations_do_not_claim_completeness() {
+        let crypto = interfaces()
+            .into_iter()
+            .find(|i| i.name.starts_with("qqq:crypto"))
+            .expect("crypto interface must exist");
         assert!(
-            implemented.is_empty(),
-            "no host interface is implemented yet; the following claim to be: {implemented:?}"
+            !crypto.implemented,
+            "qqq:crypto serves only random+hash; it must not claim to be implemented"
         );
     }
 

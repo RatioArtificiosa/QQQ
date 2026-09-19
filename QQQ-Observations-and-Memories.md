@@ -1040,6 +1040,96 @@ Proposal §6.3.
 
 ---
 
+### §O-018 — The first host implementations: `qqq:clock` and `qqq:crypto`
+
+**What was built.** `qqq-host::ambient`: `AmbientState` (the deterministic clock
+and seeded RNG), `HashAlgorithm`, `hash_data`, `require`, and `HostCallError`.
+Closes the `HOST-016` stub recorded in `§S-006` — partially, and honestly.
+
+**Verification:** `cargo test --workspace` → **244 pass**; clippy → clean;
+`wasm-tools` → 13/13.
+
+**Scope, stated precisely.** `random` and `hash` are implemented and tested.
+`hmac`, `aead` and `sign` are **not**. So `qqq:crypto` reports
+`implemented: false` in the registry, and a test
+(`partial_implementations_do_not_claim_completeness`) pins that. Claiming
+`true` for a partially-served interface would let a component needing AEAD pass
+admission and then fail at first call — the opaque failure the flag exists to
+prevent.
+
+---
+
+#### §O-018a — Known-answer tests, not round-trip tests
+
+The hash tests assert **published test vectors**:
+
+```text
+SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+BLAKE3("abc")  = 6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
+```
+
+A round-trip test (`hash(x) == hash(x)`) passes for any deterministic function,
+including a wrong one. A known-answer test fails unless the implementation is
+*correct*, which matters because these digests are compared against values
+produced by other systems.
+
+---
+
+#### §O-018b — An allowlist that is enforced, not advisory
+
+`hash_data` checks three things in order: the `crypto.hash` **grant**, that the
+algorithm is **known**, and that it is in the **manifest's list**. The third
+check is the one that is easy to omit: the host can compute SHA-512 whether or
+not the manifest mentioned it, so without the check the manifest's allowlist
+would be advisory and a guest could use any primitive the host happens to link.
+
+**Unknown and known-but-ungranted algorithms return the same error code**, so a
+guest cannot enumerate the host's supported set by probing. That is the same
+reasoning as `qqq:env`'s single `not-allowed` error.
+
+---
+
+#### §O-018c — Determinism is a property of the *instance*, not the host
+
+`AmbientState` is created per store, not shared. Two instances running
+concurrently must each see a reproducible sequence; a host-global counter would
+make one instance's output depend on how much the other had run — exactly the
+nondeterminism the feature removes.
+
+A test proves two independently constructed states produce **identical**
+sequences, which is what makes bit-identical replay achievable.
+
+**The generator's output is pinned.** `deterministic_randomness_is_pinned_to_known_bytes`
+asserts the first eight bytes are `9639138b2c6e4176`. I originally guessed a
+different value and the test failed — which is the point: the output is a
+*compatibility surface* for replay, so an accidental change to the mixing
+function would silently invalidate every recorded run. Pinning it makes such a
+change a build failure requiring a deliberate decision.
+
+It is a splitmix64 counter rather than a `HashMap`-seeded or address-derived
+source, because those vary between runs and machines — precisely the property
+that must not exist here. It is **not** a CSPRNG and is never used outside
+deterministic mode.
+
+---
+
+#### §O-018d — A bug in my own test setup, found by the tests
+
+`hashing_produces_known_digests` failed with `AlgorithmNotAllowed("sha256")`.
+The cause was in the *test helper*: `store_with` used `StoreData::new(grants)`,
+which leaves `allowed_hashes` empty, instead of `StoreData::from_manifest`,
+which populates it.
+
+**Why this is a useful failure.** It shows the allowlist check is genuinely
+load-bearing — a store built from grants alone cannot hash anything, which is
+the correct behaviour and was briefly mistaken for a bug in the hash
+implementation. The helper now uses `from_manifest` and says why in a comment.
+
+**Cross-refs:** Checklist `HOST-016`, `CAP-016`, `DET-002`, `DET-003`;
+Proposal §6.1, §6.3, §7.4, §10.5.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

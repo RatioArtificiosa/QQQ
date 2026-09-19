@@ -75,6 +75,17 @@ pub struct StoreData {
 
     /// The QQQ-level limits, for diagnostics and fuel accounting.
     limits: Option<crate::config::StoreLimits>,
+
+    /// Hash algorithms the manifest's `[capabilities.crypto] hash` list named.
+    ///
+    /// Retained so the host can refuse an algorithm it is perfectly capable of
+    /// computing but was not granted. Without this the manifest's allowlist
+    /// would be advisory, and a guest could use any primitive the host happened
+    /// to link — which is ambient authority by another route.
+    pub allowed_hashes: Vec<crate::ambient::HashAlgorithm>,
+
+    /// The ambient state: clock and RNG, deterministic or not.
+    pub ambient: crate::ambient::AmbientState,
 }
 
 impl Default for StoreData {
@@ -86,6 +97,8 @@ impl Default for StoreData {
             grants: GrantSet::empty(),
             resource_limits: StoreLimits::default(),
             limits: None,
+            allowed_hashes: Vec::new(),
+            ambient: crate::ambient::AmbientState::default(),
         }
     }
 }
@@ -98,7 +111,50 @@ impl StoreData {
             grants,
             resource_limits: StoreLimits::default(),
             limits: None,
+            allowed_hashes: Vec::new(),
+            ambient: crate::ambient::AmbientState::default(),
         }
+    }
+
+    /// Build store data from a manifest, deriving the ambient state and the
+    /// algorithm allowlists from its capability declaration.
+    ///
+    /// # Why this takes the manifest rather than the grant set
+    ///
+    /// The grant set says *that* `crypto.hash` is permitted; only the manifest
+    /// says *which algorithms*. A host that enforced only the grant would let a
+    /// guest use any algorithm the host links, which is not what the developer
+    /// declared.
+    #[must_use]
+    pub fn from_manifest(manifest: &qqq_cap::manifest::Manifest) -> Self {
+        let grants = GrantSet::from_manifest(manifest);
+
+        let allowed_hashes = manifest
+            .capabilities
+            .crypto
+            .as_ref()
+            .map(|c| {
+                c.hash
+                    .iter()
+                    .filter_map(|h| crate::ambient::HashAlgorithm::parse(h))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self {
+            grants,
+            resource_limits: StoreLimits::default(),
+            limits: None,
+            allowed_hashes,
+            ambient: crate::ambient::AmbientState::default(),
+        }
+    }
+
+    /// Install the deterministic ambient state.
+    #[must_use]
+    pub fn with_deterministic_ambient(mut self, deterministic: bool) -> Self {
+        self.ambient = crate::ambient::AmbientState::new(deterministic);
+        self
     }
 
     /// Mutable access to the resource limiter, for `Store::limiter`.

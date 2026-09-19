@@ -1,0 +1,56 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# WebAssembly artifacts
+*.wasm
+*.cwasm
+!tests/**/*.wasm
+!fixtures/**/*.wasm
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build outputs
+/dist/
+/build/
+/out/
+
+# Environment — never commit secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+!tests/**/fixtures/**/*.pem
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch / temporary verification crates
+.scratch/
+
+# Local tooling
+.tools/
+*.log

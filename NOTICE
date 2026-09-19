@@ -1,0 +1,13 @@
+QQQ
+Copyright 2026 The QQQ Contributors
+
+This product includes software developed by the QQQ project
+(https://qqq.codes).
+
+This product is built on Wasmtime (https://wasmtime.dev), developed by the
+Bytecode Alliance and contributors, licensed under the Apache License,
+Version 2.0 with LLVM Exceptions.
+
+Licensing of this project is described in LICENSING.md. The runtime is
+licensed under the Apache License, Version 2.0 (see LICENSE). QQQ Fabric is a
+separate, commercially licensed product and is not part of this repository.

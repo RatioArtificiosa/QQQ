@@ -1,0 +1,126 @@
+# QQQ Workspace
+#
+# Status: pre-alpha. This manifest defines the crate topology specified in
+# QQQ-Proposal-V1.md §4.3. Most members are not yet implemented; they are
+# declared here so that the architecture is enforced by the build system from
+# the first commit rather than by convention.
+
+[workspace]
+resolver = "2"
+members = [
+    # Tier: stable — shared types, no I/O.
+    # Implements: ARCH-007
+    # Proposal: §4.3 Crate topology
+    "crates/qqq-core",
+
+    # Tier: stable — the capability engine. The reason this project exists.
+    # Implements: CAP-001 .. CAP-016
+    # Proposal: §6.2 qqq-cap — the capability engine
+    "crates/qqq-cap",
+
+    # Tier: stable — Wasmtime integration.
+    # Implements: HOST-001 .. HOST-024
+    # Proposal: §6.1 qqq-host — the execution engine
+    "crates/qqq-host",
+
+    # Tier: stable — WIT packages and generated bindings.
+    # Implements: ABI-001 .. ABI-016
+    # Proposal: §6.3 qqq-abi — WIT interfaces as the single source of truth
+    "crates/qqq-abi",
+
+    # Tier: stable — reactor abstraction over Tokio / io_uring.
+    # Implements: ARCH-005, PERF-014
+    # Proposal: §4.2 Process and thread model
+    "crates/qqq-io",
+
+    # Tier: stable — HTTP and application server.
+    # Implements: SRV-001 .. SRV-020
+    # Proposal: §6.4 qqq-serve — the HTTP and application server
+    "crates/qqq-serve",
+
+    # Tier: stable — CLI orchestration: new, build, run, dev, test, deploy.
+    # Implements: CLI-001 .. CLI-024, DX-001 .. DX-020
+    # Proposal: §5.2 The command surface, §6.6 qqq-run
+    "crates/qqq-run",
+
+    # Tier: beta — registry client, solver, lockfile, content-addressed store.
+    # Implements: PKG-001 .. PKG-024
+    # Proposal: §6.5 qqq-pkg — package manager and registry
+    "crates/qqq-pkg",
+
+    # Tier: beta — debugger, DWARF source mapping, replay.
+    # Implements: DET-007, DET-008, DX-017
+    # Proposal: §10.5 Determinism, §6.6 qqq-run
+    "crates/qqq-debug",
+
+    # Tier: exception — requires `unsafe`. See crates/qqq-sys/SAFETY.md.
+    # Implements: ARCH-009, SEC-020
+    # Proposal: §4.3 Crate topology
+    "crates/qqq-sys",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/RatioArtificiosa/QQQ"
+homepage = "https://qqq.codes"
+documentation = "https://docs.qqq.codes"
+authors = ["QQQ Contributors"]
+keywords = ["webassembly", "runtime", "wasm", "component-model", "wasmtime"]
+categories = ["wasm", "development-tools", "network-programming"]
+
+[workspace.dependencies]
+# The execution engine. Pinned deliberately — see Proposal §D-003 and RISK-003.
+# Implements: HOST-020, PLAN-012
+wasmtime = "48"
+
+anyhow = "1"
+thiserror = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "time", "io-util", "signal", "macros"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+sha2 = "0.10"
+ed25519-dalek = "2"
+rustls = "0.23"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# The dev profile is tuned for iteration speed, not runtime speed.
+[profile.dev]
+opt-level = 1
+debug = 1
+
+# Benchmarks must be built with release semantics.
+[profile.bench]
+inherits = "release"
+lto = "fat"
+
+[workspace.lints.rust]
+# NN-2 (Proposal §2.2) and ARCH-008: the host must contain no unsafe code.
+# The three exception crates opt out explicitly and individually, each with a
+# written safety argument (ARCH-009).
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# These are deliberately allowed project-wide; each is justified.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

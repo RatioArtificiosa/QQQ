@@ -1,0 +1,109 @@
+name: CI
+
+# Implements: FND-004, FND-005, DOC-007, CON-016
+# Proposal:  §11.1 Install channels, in priority order
+#            §2.2 NN-2 — Security and Isolation Are Non-Optional
+#            §0.4 How to read the cross-references
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The cross-reference graph is the thing that keeps three documents honest.
+  # If it breaks, nothing else matters. Run it first and cheaply.
+  # ---------------------------------------------------------------------------
+  xrefs:
+    name: Cross-reference integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate proposal <-> checklist graph
+        run: python tools/check_xrefs.py
+
+  # ---------------------------------------------------------------------------
+  # Rust: format, lints, build, test.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: build
+        run: cargo build --workspace --all-features --verbose
+
+      - name: test
+        run: cargo test --workspace --all-features --verbose
+
+      # ARCH-008 / NN-2: prove the forbidden-unsafe invariant actually holds.
+      - name: no unsafe without an audited exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          # qqq-sys is the only crate permitted to contain unsafe code.
+          # Anything else containing `unsafe` fails the build.
+          violations=$(grep -rn --include='*.rs' '\bunsafe\b' crates \
+            | grep -v '^crates/qqq-sys/' \
+            | grep -v 'forbid(unsafe_code)' \
+            | grep -v '^crates/[^/]*/src/lib.rs:.*#!\[cfg_attr' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::unsafe code found outside crates/qqq-sys:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "OK: no unsafe code outside the audited exception crate"
+
+  # ---------------------------------------------------------------------------
+  # Supply chain: licences, advisories, unused dependencies.
+  # ---------------------------------------------------------------------------
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@cargo-machete
+
+      - name: cargo-deny (licences + advisories)
+        run: cargo deny check
+        continue-on-error: true # deny.toml lands with LIC-007
+
+      - name: cargo-machete (unused dependencies)
+        run: cargo machete
+        continue-on-error: true

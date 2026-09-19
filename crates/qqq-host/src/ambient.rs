@@ -28,6 +28,8 @@
 //! spurious re-check denies it — and that asymmetry justifies the cost.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use qqq_cap::capability::Capability;
 use serde::{Deserialize, Serialize};
@@ -61,7 +63,23 @@ pub struct AmbientState {
     rng_state: AtomicU64,
     /// The largest random request the host will serve in one call.
     max_random_bytes: u32,
+    /// The origin of the monotonic clock, captured on first use.
+    ///
+    /// A `OnceLock` rather than an `Instant` field so `new` does not read the
+    /// clock: doing so would make constructing ambient state an observable
+    /// event, and a determinism test that constructs two states would see two
+    /// different origins. Lazy initialisation also keeps `new` cheap on the
+    /// instantiation hot path, which is measured in hundreds of nanoseconds.
+    origin: OnceLock<Instant>,
 }
+
+/// The floor the host reports as its real-time clock resolution.
+///
+/// 100 ns, not the hardware's nominal figure. Reporting an optimistic
+/// resolution encourages a guest to poll faster than the host can service,
+/// turning a measurement into a spin. A conservative floor makes a
+/// well-written guest pace itself.
+const REAL_TICK_FLOOR_NANOS: u64 = 100;
 
 impl Default for AmbientState {
     fn default() -> Self {
@@ -85,6 +103,7 @@ impl AmbientState {
             // 1 MiB. A guest asking for more is either buggy or attacking the
             // host's memory, and a bound is cheaper than an investigation.
             max_random_bytes: 1024 * 1024,
+            origin: OnceLock::new(),
         }
     }
 
@@ -119,6 +138,54 @@ impl AmbientState {
     pub fn tick(&self) {
         if self.deterministic {
             self.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Read the monotonic clock, in nanoseconds.
+    ///
+    /// # Why this is a separate method from [`Self::now_nanos`]
+    ///
+    /// They answer different questions. `now_nanos` is a *wall-clock instant* —
+    /// nanoseconds since the Unix epoch, useful for timestamps.
+    /// `elapsed_nanos` is a *duration since some unspecified origin*, useful
+    /// only for differences, which is exactly what the WIT's `monotonic-clock`
+    /// promises. Conflating them would let a guest treat a monotonic reading as
+    /// a date, which the interface documentation explicitly warns against.
+    ///
+    /// In deterministic mode both are derived from the same tick counter, so a
+    /// replayed run sees identical values. In real-time mode this uses
+    /// `Instant`, which is monotonic by construction — unlike `SystemTime`,
+    /// which can jump backwards when the system clock is adjusted, and a
+    /// guest measuring a latency must never see a negative elapsed time.
+    #[must_use]
+    pub fn elapsed_nanos(&self) -> u64 {
+        if self.deterministic {
+            let ticks = self.ticks.load(Ordering::Relaxed);
+            self.tick_nanos.saturating_mul(ticks)
+        } else {
+            // `get_or_init` rather than reading a stored `Instant`: the origin
+            // is the moment the monotonic clock was *first read*, so two
+            // instances constructed at different times still both start at
+            // zero, which is what makes a monotonic reading comparable only
+            // within one instance — exactly what the WIT promises.
+            let origin = self.origin.get_or_init(Instant::now);
+            u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        }
+    }
+
+    /// The smallest interval this clock can meaningfully report, in nanoseconds.
+    ///
+    /// Reported so a guest can pace itself instead of spinning. In
+    /// deterministic mode it is the virtual tick interval; in real-time mode it
+    /// is a conservative floor rather than the hardware's nominal resolution,
+    /// because reporting an optimistic resolution would encourage polling
+    /// faster than the host can service.
+    #[must_use]
+    pub const fn tick_interval_nanos(&self) -> u64 {
+        if self.deterministic {
+            self.tick_nanos
+        } else {
+            REAL_TICK_FLOOR_NANOS
         }
     }
 

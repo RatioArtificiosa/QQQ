@@ -331,27 +331,50 @@ pub fn build_linker<'a>(
     engine: &'a wasmtime::Engine,
     grants: &GrantSet,
 ) -> wasmtime::Result<BuiltLinker<'a>> {
-    let linker: Linker<StoreData> = Linker::new(engine);
+    let mut linker: Linker<StoreData> = Linker::new(engine);
 
     // Interfaces with a Rust host implementation land here as they are built.
     //
-    // QQQ-STUB(HOST-016): the `qqq:crypto` and `qqq:clock` host implementations
-    // land next. Until then a component importing them fails to instantiate
-    // with a clear "unimplemented capability" diagnostic produced by
-    // `describe_gap`, rather than a raw Wasmtime linker error. This stub is
-    // recorded in Observations §6 as §S-006.
-    let _ = &linker;
-
+    // Each interface is registered **only when its capability is granted**. The
+    // linker is never populated speculatively and then filtered: building it
+    // from the grants alone is what makes an ungranted import absent rather than
+    // denied, and that property is the whole security argument.
     let required = required_interfaces(grants);
     let mut interfaces: Vec<String> = Vec::with_capacity(required.len());
     let mut unimplemented = Vec::new();
+
     for iface in required {
-        // Until a host implementation exists for this interface, record the
-        // gap rather than binding nothing and failing opaquely later.
         interfaces.push(iface.to_owned());
-        for &c in &grants.capabilities() {
-            if interface_for(c) == Some(iface) {
-                unimplemented.push(c);
+        match iface {
+            "qqq:clock@1.0.0" => {
+                crate::host_clock::register(&mut linker, grants)?;
+            }
+            // QQQ-STUB(CON-009): `qqq:crypto`, `qqq:fs`, `qqq:http` and the
+            // rest have host logic in `ambient.rs` but no registered interface
+            // yet. `qqq:clock` is the first and only interface wired up so far.
+            // Recording the gap keeps a partially-implemented milestone honest:
+            // a component that imports the others gets a clear diagnostic
+            // naming the capability, not Wasmtime's "unknown import".
+            //
+            // Two notes on the reference, because getting it wrong twice is
+            // itself worth recording (Observations §O-020d):
+            //
+            // * An earlier version cited `HOST-016`, which is
+            //   `epoch_deadline_async_yield_and_update` — a scheduling concern,
+            //   not interface implementation.
+            // * There is no checklist item that says "implement the host
+            //   functions of interface X". `CON-009` is the closest governing
+            //   item: it fixes the contract each host call must honour
+            //   (`result<T, E>` on every fallible call), which is what
+            //   `host_clock.rs` is written against. Per-interface work is
+            //   tracked by the WIT files themselves and by the `implemented`
+            //   flag in the `qqq-abi` registry.
+            _ => {
+                for &c in &grants.capabilities() {
+                    if interface_for(c) == Some(iface) {
+                        unimplemented.push(c);
+                    }
+                }
             }
         }
     }

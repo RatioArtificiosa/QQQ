@@ -26,10 +26,20 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod build;
 pub mod commands;
 pub mod manifest_loader;
 pub mod output;
+pub mod run;
 
+pub use build::{
+    plan, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact, ArtifactKind,
+    BuildOptions, BuildOutput, BuildPlan, ToolRequirement, COMPONENT_EXTENSION, OUTPUT_DIR,
+};
+pub use run::{
+    capability_for_interface, check_imports, locate_artifact, new_engine, parse_cap_flag, prepare,
+    resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput,
+};
 pub use commands::{
     caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,
     InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput, WhyStep,

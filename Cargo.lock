@@ -920,6 +920,7 @@ dependencies = [
  "qqq-host",
  "serde",
  "serde_json",
+ "wasmtime",
 ]
 
 [[package]]

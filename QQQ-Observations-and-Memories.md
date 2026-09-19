@@ -1044,7 +1044,7 @@ Proposal §6.3.
 
 **What was built.** `qqq-host::ambient`: `AmbientState` (the deterministic clock
 and seeded RNG), `HashAlgorithm`, `hash_data`, `require`, and `HostCallError`.
-Closes the `HOST-016` stub recorded in `§S-006` — partially, and honestly.
+Partially closes the stub recorded in `§S-006`, and honestly.
 
 **Verification:** `cargo test --workspace` → **244 pass**; clippy → clean;
 `wasm-tools` → 13/13.
@@ -1241,6 +1241,236 @@ in `qqq-cap`.
 
 **Cross-refs:** Checklist `CLI-015`, `CLI-018`, `CLI-019`, `CAP-012`, `SEC-002`;
 Proposal §5.2, §6.2.
+
+---
+
+### §O-020 — `build` and `run`: the loop closes, and two real bugs fall out
+
+**What was built.** `qqq-run::build` (toolchain probing, plan, execution, artifact
+classification, staging, reproducibility) and `qqq-run::run` (artifact location,
+pre-flight import checking, grant resolution, instantiation, trap reporting), the
+`[build]` section in the manifest, and the CLI wiring for `build` and `run`.
+Implements `CLI-008`, `CLI-009`.
+
+**Verification — by running the loop against a real project:**
+
+```console
+$ qqqai build
+e2eapp: target/qqq/e2eapp.component.wasm (14372 bytes) for wasm32-wasip2
+
+$ qqqai run
+e2eapp: ran in 86 µs
+```
+
+`cargo test --workspace` → **363 pass**; `clippy --workspace --all-targets -D
+warnings` → clean; `check_xrefs.py` → PASSED; `check_wit.py` → 13/13 PASSED.
+
+---
+
+#### §O-020a — The artifact classifier was wrong, twice, and tests passed both times
+
+**First bug.** The classifier walked the Wasm section framing and reported "core
+module" on seeing a type or code section. Running it against a real
+`wasm32-wasip2` artifact produced:
+
+```console
+$ qqqai build
+error[QQQ-1002]: the build produced a core module, not a WebAssembly component
+```
+
+The artifact was a component. `wasm-tools print` showed `(component (core module
+$main …))` — and that is the whole explanation: **a component *contains* core
+modules.** Its payload begins with `\0asm` and holds type and code sections, so
+any rule that looks for core sections *inside the file* misclassifies every
+genuine component. The check had to move to the header.
+
+**Second bug.** Having moved to the header, the discriminator was written as
+`bytes[4] == 1` for a component. But `bytes[4]` is the *version*'s low byte, and
+a **core module's version is `01 00 00 00`** — so every core module was reported
+as a component. The real layout is:
+
+```text
+core module: \0asm  01 00  00 00
+                   version layer
+component:   \0asm  0d 00  01 00
+                   version layer
+```
+
+The **layer** (bytes 6..8, little-endian) is the discriminator; the version
+(bytes 4..6) differs for historical reasons and must not be consulted.
+
+**Why this is the most instructive failure in the round.** The first version had
+five passing unit tests, written by me, asserting the behaviour I had just
+implemented — including one that constructed a fake artifact with a type section
+and asserted it was a core module. **The tests encoded the same wrong model as
+the code**, so they confirmed the mistake rather than catching it. One command
+against one real artifact found it immediately.
+
+The regression test now uses the **literal first eight bytes captured from a real
+`wasm32-wasip2` build on this machine** (`\0asm\x0d\0\x01\0`), and a companion
+test asserts classification ignores the body entirely — the exact property the
+first implementation violated.
+
+**Lesson, restated because it keeps recurring (§O-016b, §O-017a):** a test
+written from the same mental model as the code cannot refute that model. For
+anything defined by an external format, capture real bytes and assert on those.
+
+---
+
+#### §O-020b — An interface is not a package, and the false alarm was on the most load-bearing diagnostic
+
+**What happened.** `run` compares a component's imports against the grants. The
+component imports **interfaces** — `qqq:clock/wall-clock@1.0.0`. QQQ's registry
+grants **packages** — `qqq:clock@1.0.0`. Normalising both by stripping `@version`
+left `qqq:clock/wall-clock` versus `qqq:clock`, which never match.
+
+The effect: a component whose capability *was* granted was told its import was
+missing. The positive control caught it — granting `clock.wall` did not satisfy
+the import, which is not a state that should exist.
+
+**Fix.** `package_of` reduces both forms to `namespace:name`, dropping the
+version *and* the interface path:
+
+```text
+qqq:clock@1.0.0      -> qqq:clock
+qqq:clock/now@1.0.0  -> qqq:clock
+wasi:cli/stdout@0.2  -> wasi:cli
+```
+
+A name without a colon is returned unchanged rather than mangled, so an unknown
+foreign import cannot be reduced into a spurious match against another unknown.
+
+**Why it matters more than a matching bug.** The import check is the diagnostic a
+user meets when their capability model is wrong — the single moment the whole
+design has to be *clear*. A false "missing import" for a granted capability
+teaches users to distrust the tool and to grant capabilities they do not need,
+which is the failure the capability system exists to prevent.
+
+**And the second half.** The tests passed while this was broken, because they
+used the same string form the code did. The fix was found by building a real WAT
+component that imports the real interface, against a real manifest.
+
+---
+
+#### §O-020c — `GrantSet::empty().narrow(...)` grants nothing, and a test helper built that way proves nothing
+
+`narrow` **intersects**. Intersecting with the empty set is empty. So the
+`qqq-host` test helper
+
+```rust
+GrantSet::empty().narrow(&Overlay::allow_only(Layer::Manifest, caps, "test"))
+```
+
+grants **nothing regardless of `caps`**. Two consequences, both observed:
+
+* The deny-by-default assertion passed trivially — it would have passed against
+  any implementation.
+* The positive assertion failed, for a reason unrelated to the code under test.
+
+**Fix.** The helper now builds a real `qqq.toml` and calls `GrantSet::from_manifest`
+— documented as *the only layer that may grant authority* — and then **asserts
+its own precondition**, failing loudly if it did not grant what it was asked for.
+
+**The generalisable part.** A test fixture that cannot construct the state it
+means to test is worse than no test, because it produces green with no coverage.
+Helpers deserve the same scrutiny as production code, and the strongest form is
+for the helper to assert what it produced before the test asserts on it.
+
+---
+
+#### §O-020d — The stub gap was real: host logic existed but was never bound
+
+`ambient.rs` had a complete, tested `AmbientState` — deterministic clock, seeded
+RNG, hashing. `StoreData` carried it. But `build_linker` never registered **any**
+host function: the function body was a `let _ = &linker;` and a comment saying
+the implementations "land next". So every granted capability was reported
+unimplemented at instantiation, and no component could import anything.
+
+**And the comment cited the wrong checklist item, twice.** It said
+`QQQ-STUB(HOST-016)`. `HOST-016` is `epoch_deadline_async_yield_and_update` — a
+scheduling concern with no relation to interface implementation. The correction
+first landed on `CON-011`, which is the WIT style guide: also wrong. Only on
+checking every `CON-*` item did the real situation become clear: **there is no
+checklist item that says "implement the host functions of interface X".** The
+closest governing item is `CON-009` (every fallible host call returns
+`result<T, E>`).
+
+**Why a wrong cross-reference is worse than none.** A stub marker is a promise
+that a reader can follow it to the work that closes it. Pointing at an unrelated
+item means the next person reads a scheduling task, concludes the host
+implementations are already tracked, and moves on. The project's whole
+cross-referencing discipline exists to prevent exactly this, and it was violated
+in a comment that *looked* rigorous because it carried an identifier.
+
+**Lesson:** an identifier is not a citation. Before writing `§x` or `ITEM-nnn`,
+open the target and confirm it says what you are claiming it says. Two of the
+three stubs in this repository cited the right item; the one that did not was
+the one whose reference was never opened.
+
+This session wired `qqq:clock`: `host_clock.rs` registers `wall-clock` and
+`monotonic-clock` under their own grants, with `now`, `resolution` and `timezone`
+on the wall clock. `AmbientState` gained `elapsed_nanos` and
+`tick_interval_nanos`, backed by a lazily-captured `Instant` origin — `Instant`
+rather than `SystemTime` because a monotonic reading must never go backwards when
+the system clock is adjusted.
+
+**Registration is per-function, not per-interface.** `clock.wall` and
+`clock.monotonic` are separate capabilities, so a manifest granting only
+`monotonic` must not expose `now`. A test (`registration_follows_the_grants`)
+pins this in both directions.
+
+**The probe, and its positive control.** `Linker` exposes no lookup API in
+Wasmtime 48 — the public surface is `new`, `engine`, `allow_shadowing`, `root`,
+`instance`, `instantiate*`, `func_wrap*`, `func_new*`, `module`, `resource*`,
+`define_unknown_imports_as_traps`. There is no `get` and no `iter`. The
+observable signal is **shadowing**: with shadowing disallowed, redefining a name
+fails while defining a free one succeeds. So a probe was written that redefines
+the name and reports presence on failure.
+
+An earlier draft of that probe **returned a hardcoded `false`**, which would have
+made the deny-by-default test pass vacuously. `the_registration_probe_can_detect_a_bound_function`
+exists specifically to catch that: it asserts the probe reports a function that
+is certainly registered. A probe needs a positive control or it is decoration.
+
+**The empirical check, not the reasoned one.** The shadowing behaviour was
+confirmed with a throwaway example that printed actual results —
+redefining with a different signature errors (`true`), redefining with the same
+signature errors (`true`), defining a new name succeeds (`false`). Three lines of
+output replaced a paragraph of reasoning about `NameMap` internals.
+
+---
+
+#### §O-020e — Hand-written bindings are pinned to the WIT by tests
+
+`qqq:clock`'s host functions are written by hand against `wit/qqq-clock.wit`,
+because `wasmtime::component::bindgen!` needs the `wit/` directory wired into the
+crate build — the right change for the *whole* interface set at once, not for one
+interface. Until then three tests keep the hand-written binding honest:
+
+| Test | Property |
+|---|---|
+| `every_wit_function_is_registered` | Every function declared in the WIT appears in the host file. `now` and `resolution` appear in **both** interfaces, so the test **counts** occurrences rather than checking presence — a presence check would pass with only one registered. |
+| `the_package_name_matches_the_wit` | The interface constant equals the WIT `package` declaration. A typo binds a name no component imports, and every call fails while the file looks correct. |
+| `the_error_variant_order_matches_the_wit` | `ClockError`'s indices follow the WIT `variant` declaration order. A swapped case makes a guest read a denial as an out-of-range error — silent, and security-relevant. |
+
+---
+
+#### §O-020f — The security property, verified end to end for the first time
+
+A WAT component importing `qqq:clock/wall-clock@1.0.0` was built with
+`wasm-tools parse` and run against two manifests:
+
+| Manifest | Result | Exit |
+|---|---|---|
+| deny-all | `error[QQQ-6003]: the component imports 'qqq:clock/wall-clock@1.0.0' that no grant provides` + the generated `qqq.toml` stanza | **1** |
+| `[capabilities.clock] wall = true` | `deniedapp: ran in 28 µs` | **0** |
+
+This is the first time a QQQ component has actually called into a host
+capability. The refusal happens **before any instruction runs**, and names the
+exact interface and the exact stanza that would resolve it.
+
+**Cross-refs:** Checklist `CLI-008`, `CLI-009`, `HOST-016`, `PKG-001`, `SEC-002`,
+`DET-002`; Proposal §4.6, §5.2, §5.3, §6.1, §10.5.
 
 ---
 

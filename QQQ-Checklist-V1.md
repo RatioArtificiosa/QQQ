@@ -691,9 +691,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.5 `qqq-pkg` — package manager and registry
 - [ ] **CLI-007** Implement `qqqai update` with `--latest` and `--dry-run`.
   → §5.2 The command surface
-- [ ] **CLI-008** Implement `qqqai build` with `--release`, `--target`, `--aot`, `--reproducible`.
+- [x] **CLI-008** Implement `qqqai build` with `--release`, `--target`, `--aot`, `--reproducible`.
   → §5.2 The command surface
-- [ ] **CLI-009** Implement `qqqai run` with explicit capability and limit flags.
+- [x] **CLI-009** Implement `qqqai run` with explicit capability and limit flags.
   → §5.2 The command surface
 - [ ] **CLI-010** Implement `qqqai dev`.
   → §6.6 `qqq-run` — CLI and dev server

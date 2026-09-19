@@ -65,6 +65,12 @@ impl GlobalFlags {
         self.has(Self::JSON_LINES)
     }
 
+    /// Whether this is a rehearsal.
+    #[must_use]
+    const fn dry_run(self) -> bool {
+        self.has(Self::DRY_RUN)
+    }
+
     /// The output format these flags select.
     #[must_use]
     const fn format(self) -> Format {
@@ -414,6 +420,8 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Inspect => with_manifest(name, &mut out, args, |loaded| {
             qqq_run::commands::inspect(loaded)
         }),
+        CommandName::Build => dispatch_build(name, args, flags, &mut out),
+        CommandName::Run => dispatch_run(name, args, flags, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -427,6 +435,110 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             ExitCode::from(exit::UNAVAILABLE)
         }
     }
+}
+
+/// Dispatch `qqqai build`.
+///
+/// Split out of [`run_command`] because `build` is the first command with its
+/// own flag vocabulary. Keeping it inline would make the dispatcher grow with
+/// every command that gains options, and the dispatcher is the one function
+/// that must stay readable — it is the map of the whole CLI.
+fn dispatch_build(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match build_options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        if flags.dry_run() {
+            // A rehearsal plans but does not execute, so it reports the command
+            // without touching the toolchain. It still plans *fully* —
+            // including probing for missing tools — because discovering a
+            // missing compiler is the main reason to rehearse.
+            return qqq_run::build::plan(loaded, &opts).map(|p| qqq_run::BuildOutput {
+                project: loaded.name().to_owned(),
+                language: loaded.manifest.build.language.clone(),
+                target: loaded.manifest.build.target.clone(),
+                profile: loaded.manifest.build.profile.clone(),
+                command: p.render(),
+                artifact: None,
+                digest: None,
+                size_bytes: None,
+                kind: None,
+                aot_requested: opts.aot(),
+                aot_performed: false,
+                dry_run: true,
+            });
+        }
+        qqq_run::build::execute(loaded, &opts)
+    })
+}
+
+/// Dispatch `qqqai run`.
+///
+/// # Why `run` reports traps with a special exit code
+///
+/// A guest that traps is not a `qqqai` failure — it is the sandbox working. The
+/// exit code an agent should branch on is the guest's outcome, so a trap exits
+/// `FAILURE` (1) rather than `INTERNAL` (70). `70` means "QQQ is broken"; a trap
+/// means "your program or your limits are wrong", and conflating them would send
+/// every trapped guest to a bug tracker that cannot help.
+fn dispatch_run(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match run_options(args, flags) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        if opts.dry_run {
+            // A rehearsal performs the whole pre-flight — locating the
+            // artifact, compiling it, resolving grants and checking imports —
+            // and stops before instantiating. Discovering a missing grant is
+            // the entire reason to rehearse, so skipping the check would make
+            // the flag worthless.
+            let p = qqq_run::run::prepare(loaded, &opts)?;
+            let project_dir = loaded
+                .path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let artifact = p
+                .path
+                .strip_prefix(project_dir)
+                .unwrap_or(&p.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Ok(qqq_run::RunOutput {
+                project: loaded.name().to_owned(),
+                artifact,
+                digest: p.component.digest().to_owned(),
+                imports: p.check.required.clone(),
+                granted_imports: p.check.satisfied.clone(),
+                ok: p.check.is_satisfied(),
+                exit_code: None,
+                duration_us: 0,
+                fuel_consumed: None,
+                deterministic: opts.deterministic,
+                dry_run: true,
+            });
+        }
+        qqq_run::run::execute(loaded, &opts)
+    })
 }
 
 /// Load the project manifest, run `f`, and emit the result.
@@ -472,6 +584,148 @@ where
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     let idx = args.iter().position(|a| a == flag)?;
     args.get(idx + 1).cloned()
+}
+
+/// Decode `qqqai build`'s own flags.
+///
+/// # Why an unknown flag is an error here
+///
+/// The global parser forwards anything after the command name untouched, which
+/// is right for commands that define their own options — and wrong for a typo.
+/// `qqqai build --relase` would otherwise build a debug artifact and report
+/// success, and the user would discover the mistake only by noticing the binary
+/// is slow. Rejecting it names the mistake at the point it was made.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error naming the unrecognised flag.
+fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Error> {
+    // Flags that take a value and must not be mistaken for boolean switches.
+    const TAKES_VALUE: [&str; 2] = ["--manifest", "--target"];
+
+    let mut bits = 0u8;
+    let mut target: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--release" => bits |= qqq_run::BuildOptions::RELEASE,
+            "--debug" => bits |= qqq_run::BuildOptions::DEBUG,
+            "--aot" | "--emit-cwasm" => bits |= qqq_run::BuildOptions::AOT,
+            "--reproducible" => bits |= qqq_run::BuildOptions::REPRODUCIBLE,
+            "--target" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value("--target"))?;
+                target = Some(v.clone());
+                i += 1;
+            }
+            other => {
+                // A value-taking flag this function does not own (e.g.
+                // `--manifest`) is consumed with its value so the value is not
+                // then rejected as an unknown positional.
+                if TAKES_VALUE.contains(&other) {
+                    i += 1;
+                } else if let Some(stripped) = other.strip_prefix("--target=") {
+                    target = Some(stripped.to_owned());
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `build`"),
+                    )
+                    .with_remediation(
+                        "`build` accepts --release, --debug, --target, --aot and --reproducible",
+                    ));
+                }
+                // A bare positional is ignored rather than rejected: `qqqai
+                // build .` is a habit from other tools and harms nothing.
+            }
+        }
+        i += 1;
+    }
+    Ok(qqq_run::BuildOptions::from_flags(bits, target))
+}
+
+/// The error for a flag that needs a value and did not get one.
+fn missing_value(flag: &str) -> qqq_core::Error {
+    qqq_core::Error::new(
+        qqq_core::ErrorCode::McpArgumentInvalid,
+        format!("`{flag}` needs a value"),
+    )
+    .with_remediation(format!("for example: {flag} wasm32-wasip2"))
+}
+
+/// Decode `qqqai run`'s own flags.
+///
+/// # Why `--` matters here specifically
+///
+/// `run` forwards arguments to the component, and a component's own arguments
+/// may look exactly like ours — `qqqai run -- --json` must pass `--json` to the
+/// guest, not consume it. Without `--` as an explicit separator there is no way
+/// to tell the two apart, so anything after `--` is collected verbatim.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag or a flag missing its value.
+fn run_options(args: &[String], flags: GlobalFlags) -> Result<qqq_run::RunOptions, qqq_core::Error> {
+    // Flags owned by the global parser or `with_manifest`, which take a value.
+    const TAKES_VALUE: [&str; 2] = ["--manifest", "--artifact"];
+
+    let mut opts = qqq_run::RunOptions {
+        dry_run: flags.dry_run(),
+        ..Default::default()
+    };
+    let mut after_separator = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let a = args[i].as_str();
+        if after_separator {
+            opts.args.push(a.to_owned());
+            i += 1;
+            continue;
+        }
+        match a {
+            "--" => after_separator = true,
+            "--deterministic" => opts.deterministic = true,
+            "--artifact" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| missing_value("--artifact"))?;
+                opts.artifact = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            "--cap" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value("--cap"))?;
+                opts.caps.push(v.clone());
+                i += 1;
+            }
+            other => {
+                if let Some(v) = other.strip_prefix("--artifact=") {
+                    opts.artifact = Some(std::path::PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--cap=") {
+                    opts.caps.push(v.to_owned());
+                } else if TAKES_VALUE.contains(&other) {
+                    // `--manifest` is consumed by `with_manifest`; skip its
+                    // value here so it is not mistaken for a positional.
+                    i += 1;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `run`"),
+                    )
+                    .with_remediation(
+                        "`run` accepts --cap, --artifact, --deterministic and -- <args>; \
+                         use `--` before arguments meant for the component",
+                    ));
+                }
+                // A bare positional is passed to the component.
+                else {
+                    opts.args.push(a.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(opts)
 }
 
 /// Emit a successful result and convert it into an exit code.

@@ -43,6 +43,9 @@ use crate::capability::Capability;
 pub struct Manifest {
     /// `[package]` — identity.
     pub package: Package,
+    /// `[build]` — how the project is compiled to a component.
+    #[serde(default)]
+    pub build: Build,
     /// `[capabilities]` — the authority declaration. Absent means deny-all.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -65,6 +68,96 @@ pub struct Package {
     /// SPDX licence identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+}
+
+/// `[build]` — how the project is compiled into a component.
+///
+/// # Why this is in the manifest and not in a CLI flag
+///
+/// `qqqai build` must be reproducible from the manifest alone. If the language
+/// or the target lived only in a command line, a CI job and a developer's
+/// laptop could produce different artifacts from the same commit, and the
+/// resulting digest mismatch would look like a supply-chain problem when it is
+/// really a configuration one. Putting the build inputs in the manifest makes
+/// the artifact a function of committed files.
+///
+/// Every field defaults, so a manifest written before `[build]` existed keeps
+/// parsing unchanged — the alternative would break every existing project on
+/// upgrade, which is exactly the kind of change a capability system must never
+/// make silently.
+///
+/// See Proposal §5.3 (`[build]`) and Checklist `CLI-008`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    /// Source language: `rust`, `ts`, `go`, `python` or `cpp`.
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// Compilation target. `wasm32-wasip2` is the V1 default.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// `debug` or `release`.
+    #[serde(default = "default_profile")]
+    pub profile: String,
+    /// Fail the build if a second compilation of the same inputs produces a
+    /// different digest (Proposal §11, `QQQ-1005`).
+    #[serde(default)]
+    pub reproducible: bool,
+}
+
+fn default_language() -> String {
+    "rust".to_owned()
+}
+
+fn default_target() -> String {
+    "wasm32-wasip2".to_owned()
+}
+
+fn default_profile() -> String {
+    "release".to_owned()
+}
+
+impl Default for Build {
+    fn default() -> Self {
+        Self {
+            language: default_language(),
+            target: default_target(),
+            profile: default_profile(),
+            reproducible: false,
+        }
+    }
+}
+
+impl Build {
+    /// The languages `qqqai` can drive, in the order the docs list them.
+    ///
+    /// A closed set rather than an open string: an unknown language must be a
+    /// parse error naming the valid options, not a build that fails later with
+    /// "command not found" from a shell.
+    pub const LANGUAGES: [&'static str; 5] = ["rust", "ts", "go", "python", "cpp"];
+
+    /// The targets this build of `qqqai` can emit.
+    ///
+    /// `wasm32-wasip3` is listed because the Proposal (§5.3) anticipates it, but
+    /// it is **not** accepted yet: no toolchain emits it, and accepting a target
+    /// we cannot produce would be a silent stub. It is named in the error's
+    /// permitted-values list so a user who tries it learns why.
+    pub const TARGETS: [&'static str; 1] = ["wasm32-wasip2"];
+
+    /// Targets that exist but are not yet producible by any toolchain.
+    pub const ANTICIPATED_TARGETS: [&'static str; 1] = ["wasm32-wasip3"];
+
+    /// Whether `language` is one this build supports.
+    #[must_use]
+    pub fn supports_language(language: &str) -> bool {
+        Self::LANGUAGES.contains(&language)
+    }
+
+    /// Whether `target` is one this build can emit.
+    #[must_use]
+    pub fn supports_target(target: &str) -> bool {
+        Self::TARGETS.contains(&target)
+    }
 }
 
 /// The capability declaration.
@@ -441,6 +534,22 @@ fn check_range<T: PartialOrd + fmt::Display>(
     Ok(())
 }
 
+/// Render a slice of alternatives as `` `a`, `b` or `c` ``.
+///
+/// Used so every "expected one of" message in this module has the same shape.
+/// A user who sees two differently-formatted lists of valid values reasonably
+/// wonders whether they mean different things.
+fn quoted(values: &[&str]) -> String {
+    match values {
+        [] => "nothing".to_owned(),
+        [one] => format!("`{one}`"),
+        [rest @ .., last] => {
+            let head: Vec<String> = rest.iter().map(|v| format!("`{v}`")).collect();
+            format!("{} or `{last}`", head.join(", "))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Size parsing
 // ---------------------------------------------------------------------------
@@ -582,25 +691,70 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Semantic validation beyond what serde can express.
-    fn validate(&self) -> Result<(), ManifestError> {
-        // -- package.name must satisfy the shared identifier rules -------
-        qqq_core::PackageName::new(self.package.name.clone()).map_err(|e| {
-            ManifestError::InvalidField {
-                field: "package.name".to_owned(),
-                reason: e.to_string(),
-            }
-        })?;
-        // -- package.version must be a parsable version ------------------
-        self.package
-            .version
-            .parse::<qqq_core::Version>()
-            .map_err(|e| ManifestError::InvalidField {
-                field: "package.version".to_owned(),
-                reason: e.to_string(),
-            })?;
+    /// Validate `[build]` against the set of things this build can actually do.
+    ///
+    /// Kept separate from [`Self::validate`] because it is a different kind of
+    /// check: [`Self::validate`] asks "is this a coherent manifest?", while this
+    /// asks "can *this* `qqqai` carry it out?". The two have different lifetimes
+    /// — the second answer changes when a language driver lands — so mixing them
+    /// would make the general validator churn every time a toolchain is added.
+    ///
+    /// Validated at parse time rather than at build time so `qqqai inspect` and
+    /// `qqqai caps` reject a bad `[build]` too. A manifest that can only be
+    /// proven wrong by running the compiler is a manifest whose errors surface
+    /// late, in CI, far from the edit that caused them.
+    fn validate_build(&self) -> Result<(), ManifestError> {
+        if !Build::supports_language(&self.build.language) {
+            return Err(ManifestError::InvalidField {
+                field: "build.language".to_owned(),
+                reason: format!(
+                    "`{}` is not a supported language; expected {}",
+                    self.build.language,
+                    quoted(&Build::LANGUAGES)
+                ),
+            });
+        }
+        if !Build::supports_target(&self.build.target) {
+            // Distinguishing "anticipated" from "wrong" matters: a user who
+            // read the docs and typed `wasm32-wasip3` needs to learn that the
+            // target is planned but no toolchain emits it, not that they
+            // invented a name.
+            let extra = if Build::ANTICIPATED_TARGETS.contains(&self.build.target.as_str()) {
+                format!(
+                    " — `{}` is anticipated, but no toolchain emits it yet",
+                    self.build.target
+                )
+            } else {
+                String::new()
+            };
+            return Err(ManifestError::InvalidField {
+                field: "build.target".to_owned(),
+                reason: format!(
+                    "`{}` is not a target this build can emit; expected {}{extra}",
+                    self.build.target,
+                    quoted(&Build::TARGETS)
+                ),
+            });
+        }
+        if !matches!(self.build.profile.as_str(), "debug" | "release") {
+            return Err(ManifestError::InvalidField {
+                field: "build.profile".to_owned(),
+                reason: format!(
+                    "`{}` is not a profile; expected `debug` or `release`",
+                    self.build.profile
+                ),
+            });
+        }
+        Ok(())
+    }
 
-        // -- limits ------------------------------------------------------
+    /// Validate every `[limits]` field against the range the host can enforce.
+    ///
+    /// A limit outside the enforceable range is rejected rather than clamped:
+    /// silently clamping a memory cap from 900 GiB to the maximum would mean the
+    /// manifest says one thing and the runtime does another, which is exactly
+    /// the divergence an auditor cannot detect.
+    fn validate_limits(&self) -> Result<(), ManifestError> {
         let mem = ByteSize::parse(&self.limits.memory).map_err(|reason| {
             ManifestError::InvalidField {
                 field: "limits.memory".to_owned(),
@@ -637,6 +791,32 @@ impl Manifest {
             &0,
             &limit_bounds::HANDLES_MAX,
         )?;
+        Ok(())
+    }
+
+    /// Semantic validation beyond what serde can express.
+    fn validate(&self) -> Result<(), ManifestError> {
+        // -- package.name must satisfy the shared identifier rules -------
+        qqq_core::PackageName::new(self.package.name.clone()).map_err(|e| {
+            ManifestError::InvalidField {
+                field: "package.name".to_owned(),
+                reason: e.to_string(),
+            }
+        })?;
+        // -- package.version must be a parsable version ------------------
+        self.package
+            .version
+            .parse::<qqq_core::Version>()
+            .map_err(|e| ManifestError::InvalidField {
+                field: "package.version".to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        // -- build -------------------------------------------------------
+        self.validate_build()?;
+
+        // -- limits ------------------------------------------------------
+        self.validate_limits()?;
 
         // -- filesystem capabilities -------------------------------------
         for (i, fs) in self.capabilities.fs.iter().enumerate() {
@@ -1181,5 +1361,134 @@ max_open_handles = 256
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(caps, sorted, "must be sorted and deduplicated");
+    }
+
+    // -- [build] ---------------------------------------------------------
+
+    /// The compatibility guarantee: a manifest written before `[build]`
+    /// existed must parse **identically**, not merely parse. If adding a
+    /// section changed the defaults of an existing project, every deployed
+    /// manifest would change behaviour on upgrade.
+    #[test]
+    fn a_manifest_without_a_build_section_still_parses() {
+        let m = Manifest::parse(MINIMAL).unwrap();
+        assert_eq!(m.build, Build::default());
+        assert_eq!(m.build.language, "rust");
+        assert_eq!(m.build.target, "wasm32-wasip2");
+        assert_eq!(m.build.profile, "release");
+        assert!(!m.build.reproducible, "reproducible opt-in must default off");
+    }
+
+    #[test]
+    fn a_build_section_overrides_the_defaults() {
+        let src = r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[build]
+language = "ts"
+target = "wasm32-wasip2"
+profile = "debug"
+reproducible = true
+"#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(m.build.language, "ts");
+        assert_eq!(m.build.target, "wasm32-wasip2");
+        assert_eq!(m.build.profile, "debug");
+        assert!(m.build.reproducible);
+    }
+
+    #[test]
+    fn an_unknown_language_lists_the_valid_ones() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [build]\nlanguage = \"cobol\"\n";
+        let e = Manifest::parse(src).unwrap_err();
+        match &e {
+            ManifestError::InvalidField { field, reason } => {
+                assert_eq!(field, "build.language");
+                assert!(reason.contains("cobol"), "must quote the bad value: {reason}");
+                // The message must name every option, or a user is left guessing.
+                for lang in Build::LANGUAGES {
+                    assert!(reason.contains(lang), "reason omits `{lang}`: {reason}");
+                }
+            }
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    /// `wasm32-wasip3` is named in the Proposal as the future target. Accepting
+    /// it now would be a silent stub — the build would fail deep inside a
+    /// toolchain invocation. It must be refused up front, *and* the message must
+    /// explain that it is anticipated rather than simply unknown, because
+    /// "unknown target" for a target the docs mention reads as a bug.
+    #[test]
+    fn an_anticipated_but_unproducible_target_explains_itself() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [build]\ntarget = \"wasm32-wasip3\"\n";
+        let e = Manifest::parse(src).unwrap_err();
+        match &e {
+            ManifestError::InvalidField { field, reason } => {
+                assert_eq!(field, "build.target");
+                assert!(
+                    reason.contains("anticipated"),
+                    "must explain that it is anticipated, not unknown: {reason}"
+                );
+                assert!(reason.contains("wasm32-wasip2"), "must name the usable target");
+            }
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_nonsense_target_is_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [build]\ntarget = \"x86_64-unknown-linux-gnu\"\n";
+        let e = Manifest::parse(src).unwrap_err();
+        match &e {
+            ManifestError::InvalidField { field, reason } => {
+                assert_eq!(field, "build.target");
+                assert!(
+                    !reason.contains("anticipated"),
+                    "a native target is not anticipated, it is wrong: {reason}"
+                );
+            }
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_profile_is_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [build]\nprofile = \"turbo\"\n";
+        let e = Manifest::parse(src).unwrap_err();
+        match &e {
+            ManifestError::InvalidField { field, reason } => {
+                assert_eq!(field, "build.profile");
+                assert!(reason.contains("debug") && reason.contains("release"));
+            }
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    /// Unknown fields under `[build]` must be rejected like everywhere else: a
+    /// typo'd `targt = ...` that is silently ignored builds for the wrong
+    /// target, which is precisely the failure the strictness exists to prevent.
+    #[test]
+    fn an_unknown_build_field_is_rejected_not_ignored() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [build]\ntargt = \"wasm32-wasip2\"\n";
+        assert!(
+            Manifest::parse(src).is_err(),
+            "a typo'd [build] field must be an error, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn the_two_alternative_lists_are_quoted_readably() {
+        assert_eq!(quoted(&[]), "nothing");
+        assert_eq!(quoted(&["a"]), "`a`");
+        assert_eq!(quoted(&["a", "b"]), "`a` or `b`");
+        assert_eq!(quoted(&["a", "b", "c"]), "`a`, `b` or `c`");
     }
 }

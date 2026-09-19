@@ -1,11 +1,34 @@
-//! `qqq-run` -- see `QQQ-Proposal-V1.md` §4.3 for the crate topology.
+//! # qqq-run
 //!
-//! Status: not yet implemented. Tracked by the checklist item(s) named in the
-//! workspace manifest.
+//! The `qqqai` command-line interface.
 //!
-//! QQQ-STUB(ARCH-007): crate declared so the architecture is enforced by the
-//! build system from the first commit. Implementation lands with its checklist
-//! item; see `QQQ-Observations-and-Memories.md` §6.
+//! ## The one rule
+//!
+//! **Every command supports `--json`, and a new command cannot ship without a
+//! JSON shape.** Non-Negotiable #1 (`PRINCIPLES.md`) says an AI agent is a
+//! first-class user; a command that prints prose and forgets `--json` is
+//! invisible to every automated consumer. See [`output`] for the three
+//! mechanisms that make the omission impossible rather than merely discouraged.
+//!
+//! ## Naming
+//!
+//! The binary, the crate and the npm package are all **`qqqai`**, because
+//! `qqq` is taken on crates.io and npm (Observations `§D-001`). The brand is
+//! **QQQ**. A build that produces a `qqq` binary is a defect.
+//!
+//! ## Checklist coverage
+//!
+//! `CLI-001` … `CLI-024`, `DX-001` … `DX-020`. See `QQQ-Proposal-V1.md` §5.2
+//! and §6.6.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
 
+pub mod output;
+
+pub use output::{
+    command_schemas, CommandName, CommandOutput, CommandSchema, Envelope, ErrorContextEntry,
+    ErrorPayload, Format, Output,
+};

@@ -805,6 +805,107 @@ systematically in the remaining crates.
 
 ---
 
+### §O-016 — `qqqai` exists and runs: the machine contract is live
+
+**What was built.** The `qqq-run` crate and the `qqqai` binary: the shared
+output layer (`CLI-001`, `CLI-002`), argument parsing, help generation, the
+`schema` and `doctor` commands, and honest `UNAVAILABLE` reporting for the rest.
+
+**Verification — by *running the binary*, not by reading the tests:**
+
+```console
+$ qqqai --version
+qqqai 0.0.0
+
+$ qqqai --version --json
+{"producer":"qqqai","schema_version":"1.0.0","version":"0.0.0",
+ "wasi_target":"0.3","wasmtime_line":"48"}
+
+$ qqqai schema --json
+  commands: 26   errors: 38   capabilities: 24
+
+$ qqqai frobnicate
+error[QQQ-7001]: unknown command `frobnicate`
+
+  → run `qqqai --help` to see the available commands
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+exit=2
+```
+
+**Every claim in Proposal §12.2 is now observable.** The error block has the
+mandated shape — what happened, then the fix, then the docs URL — and exits `2`
+(usage) rather than `1` (failure), because an agent needs to distinguish "you
+called it wrong" from "it broke".
+
+**The naming invariant is enforced three ways**, because this is the decision
+most likely to be "helpfully" undone: a constant (`BINARY_NAME = "qqqai"`), a
+test asserting `assert_ne!(BINARY_NAME, "qqq")` with the reason in the message,
+and a third test that reads `crates/qqq-run/Cargo.toml` at compile time and
+fails if the `[[bin]]` name is ever changed to `qqq`.
+
+---
+
+#### §O-016a — `CLI-002` is enforced by the compiler, not by review
+
+Non-Negotiable #1 requires every command to support `--json`. The mechanism is
+not a checklist item a reviewer might skip:
+
+* `CommandOutput` requires a `to_json` method, so a command's return type cannot
+  be printed without having a machine form.
+* `Output::emit` is the **only** way to produce user-visible output.
+* `command_schemas()` matches over `CommandName` with no wildcard arm for the
+  commands that have a real schema, so adding a command **fails to compile**
+  until a schema is provided.
+
+The `--help` text is likewise generated from `CommandName::all()`, so a new
+command cannot be missing from it either. A test asserts every command and its
+summary appear.
+
+---
+
+#### §O-016b — A real bug found by *running* the binary, not by testing it
+
+**What happened.** `qqqai --version --json` printed the plain text version. The
+parser set `Action::Version` and then `break`-ed out of the loop, so `--json` —
+which appeared **after** the short-circuiting flag — was never recorded. All 30
+unit tests passed, because none of them exercised a flag *after* a
+short-circuiting flag.
+
+**Fix.** `--help` and `--version` now `continue` rather than `break`: they fix
+the *action* but let the parser finish recording flags.
+
+**The test that would have caught it** was added, and it asserts the general
+property rather than the single case:
+`short_circuit_flags_do_not_swallow_later_flags` checks `--version --json`,
+`--help --jsonl`, and that `--version --help` yields `Version` (the first
+short-circuit wins).
+
+**Lesson, and it is the third instance of the same pattern in this project:**
+unit tests written from the same mental model as the code cannot catch a flaw in
+that mental model. Running the actual binary — the way a user or an agent would
+— found in one command what 30 passing tests missed.
+
+---
+
+#### §O-016c — "More than 3 bools in a struct" was a design signal, not noise
+
+**Observed.** Clippy flagged `GlobalFlags`'s five boolean fields. The obvious
+response is an `#[allow]`. The better one is to notice that a struct of five
+bools is a struct where every combination is representable — including
+meaningless ones like `json && json_lines` — and that the shape does not survive
+a sixth flag.
+
+**Fix.** `GlobalFlags` is now a newtype over `u8` with named bit constants and
+`set`/`has`/`json`/`json_lines` accessors. Call sites read the same, the
+representation is explicit, adding a sixth flag costs nothing, and two tests
+pin that the bits are independent — a bug a bool struct cannot even express.
+
+**Cross-refs:** Checklist `CLI-001`, `CLI-002`, `CLI-021`, `CLI-023`,
+`DOC-014`; Proposal §5.2, §8.3, §12.2.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

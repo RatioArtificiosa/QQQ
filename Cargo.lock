@@ -870,6 +870,13 @@ version = "0.0.0"
 [[package]]
 name = "qqq-run"
 version = "0.0.0"
+dependencies = [
+ "qqq-cap",
+ "qqq-core",
+ "qqq-host",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "qqq-serve"

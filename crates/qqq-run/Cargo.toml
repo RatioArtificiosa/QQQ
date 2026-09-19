@@ -1,15 +1,30 @@
 [package]
 name = "qqq-run"
+description = "The qqqai CLI: new, build, run, dev, serve, test, inspect, audit, why, doctor, schema and mcp. Every command emits stable machine-readable JSON."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "QQQ crate: qqq-run (see QQQ-Proposal-V1.md 4.3)"
+documentation.workspace = true
+readme = "README.md"
+keywords = ["qqq", "cli", "runtime", "wasm"]
+categories = ["wasm", "command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
 
-[dependencies]
+[[bin]]
+name = "qqqai"
+path = "src/main.rs"
 
+[dependencies]
+qqq-core = { path = "../qqq-core", version = "0.0.0" }
+qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
+qqq-host = { path = "../qqq-host", version = "0.0.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

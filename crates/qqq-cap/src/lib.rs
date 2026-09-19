@@ -44,7 +44,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod capability;
+pub mod manifest;
 
 pub use capability::{
     Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,
+};
+pub use manifest::{
+    group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability,
+    DnsCapability, EnvCapability, FsCapability, FsMode, HttpCapability, Manifest,
+    ManifestError, Package,
 };

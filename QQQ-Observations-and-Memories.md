@@ -359,6 +359,53 @@ incorrectly now fails the build rather than shipping a broken contract.
 
 ---
 
+### §O-010 — `qqq-cap` part 1: manifest parsing is strict by design
+
+**What was built.** The capability vocabulary (24 capabilities, three kinds) and
+`qqq.toml` parsing/validation, which is pipeline steps 1 (PARSE) and the static
+half of 2 (NORMALIZE) from Proposal §6.2.
+
+**Verification:** `cargo test -p qqq-cap` → **43 pass**; `cargo clippy -p qqq-cap
+--all-targets -- -D warnings` → clean.
+
+**Decisions taken, recorded so they are not re-litigated:**
+
+1. **Unknown manifest fields are an error, not a warning.** A user who writes
+   `[capabilities.crypto] hassh = [...]` has made a mistake that, if silently
+   ignored, produces a service failing at runtime with a capability denial far
+   from the typo. Rejecting at parse time with the field named is the entire
+   point. `deny_unknown_fields` on every capability struct.
+2. **`crypto.random` and `clock.wall` default to `false`.** Both are classic
+   covert channels and neither is ever granted implicitly. Tested explicitly:
+   a crypto stanza asking only for `hash` must not grant `random`.
+3. **Wildcards are impossible in a manifest.** `CapabilitySelector` supports
+   `sql.*` for *policy*, but manifests name each capability. A wildcard in a
+   manifest is a blank cheque, and "the manifest is the truth" is a property
+   this design depends on.
+4. **`env.allow = ["*"]` is rejected** with an explanatory message, because a
+   blanket inherit is ambient authority wearing a different hat.
+5. **Byte sizes are binary throughout** — `128M` and `128MiB` mean the same
+   thing. Offering decimal multipliers only for the unsuffixed spelling would
+   make those differ, which is a trap in a *limit* field.
+6. **Limit bounds live in one `limit_bounds` module** so the check and the
+   error message cannot disagree about what the permitted range is.
+
+**Tests that encode the contract rather than the implementation:**
+
+| Test | What it guarantees |
+|---|---|
+| `proposal_full_manifest_example_parses` | The manifest printed in Proposal §5.3 actually parses — if it breaks, the docs are lying |
+| `minimal_manifest_parses_and_grants_nothing` | Deny-by-default holds for the simplest possible project |
+| `crypto_random_and_wall_clock_default_to_denied` | The covert-channel defaults cannot regress |
+| `read_only_fs_does_not_grant_write` | A mode mix-up cannot silently escalate authority |
+| `nul_byte_in_path_is_rejected` | Path handling is a security surface, not a string field |
+| `url_in_http_client_allowlist_is_rejected_with_guidance` | Errors teach; `https://x` is a common mistake with a specific fix |
+
+**Cross-refs:** Checklist `CAP-001`, `CAP-002`, `CON-001`, `CON-002`,
+`SEC-003`; Proposal §5.3, §6.2, §12.2.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

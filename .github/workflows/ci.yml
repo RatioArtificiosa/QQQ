@@ -38,6 +38,27 @@ jobs:
         run: python tools/self_test_xrefs.py
 
   # ---------------------------------------------------------------------------
+  # WIT: the interface definitions must actually parse.
+  #
+  # The Rust tests in qqq-abi check that the registry and the .wit files agree
+  # structurally -- every capability maps to exactly one interface, names are
+  # versioned, source is present. They CANNOT tell whether a file is valid WIT.
+  # The first draft of all thirteen files passed every Rust test while being
+  # rejected outright by wasm-tools. This job closes that gap.
+  # ---------------------------------------------------------------------------
+  wit:
+    name: WIT interface validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: taiki-e/install-action@wasm-tools
+      - name: Validate every interface with wasm-tools
+        run: python tools/check_wit.py
+
+  # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.
   # ---------------------------------------------------------------------------
   rust:

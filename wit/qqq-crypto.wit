@@ -1,0 +1,193 @@
+// QQQ cryptography interface.
+//
+// Randomness is a **capability**, not a right. A guest that can draw entropy
+// can build a covert channel to any observer that shares its clock — so
+// `crypto.random` is denied unless explicitly granted, and in deterministic
+// mode it is a **seeded** generator so a run is reproducible (Proposal §10.5).
+//
+// Every algorithm must be named explicitly. There are no default choices that
+// could change under the user, because a silent algorithm change would break
+// stored ciphertext and invalidate signatures.
+package qqq:crypto@1.0.0;
+
+/// Randomness.
+interface random {
+  /// Why a randomness request failed.
+  variant random-error {
+    /// `crypto.random` was not granted.
+    not-granted,
+    /// The requested length exceeds the host's per-call maximum.
+    ///
+    /// A bound rather than an unbounded allocation: a guest that asks for a
+    /// gigabyte of entropy is either buggy or attacking the host's memory.
+    too-long,
+    /// The host entropy source failed. This is a serious condition — the guest
+    /// must not fall back to a weaker source.
+    source-failed,
+  }
+
+  /// Fill `length` bytes with cryptographically secure random data.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted`, `too-long`, or `source-failed`. A guest that receives
+  /// `source-failed` must fail closed: generating predictable "randomness" is
+  /// worse than failing.
+  get: func(length: u32) -> result<list<u8>, random-error>;
+}
+
+/// Cryptographic hashing.
+interface hashing {
+  /// A hash algorithm, named explicitly.
+  ///
+  /// Only algorithms the host was configured to allow. `md5` and `sha1` are
+  /// deliberately absent: they are broken for collision resistance, and a
+  /// platform that offers them invites their use.
+  enum algorithm {
+    sha256,
+    sha512,
+    /// BLAKE3 — fast, parallelizable, and the default choice for new code that
+    /// controls both ends of the exchange.
+    blake3,
+  }
+
+  /// Why a hashing operation failed.
+  variant hash-error {
+    /// The algorithm is not in the manifest's allowlist.
+    algorithm-not-allowed,
+    /// The input exceeds the host's per-call maximum.
+    input-too-long,
+  }
+
+  /// Hash a byte string.
+  digest: func(algorithm: algorithm, data: list<u8>) -> result<list<u8>, hash-error>;
+
+  /// Hash many byte strings in one call.
+  ///
+  /// # Why batch-first
+  ///
+  /// The Component Model ABI charges per crossing. A guest hashing a list of
+  /// values in a loop pays that cost once per value; this shape pays it once.
+  /// The batch-first rule is a WIT style requirement (Proposal §4.5, `CON-012`)
+  /// precisely because chatty interfaces erase the near-native advantage.
+  digest-many: func(algorithm: algorithm, inputs: list<list<u8>>) -> result<list<list<u8>>, hash-error>;
+}
+
+/// Keyed message authentication.
+interface hmac {
+  use hashing.{algorithm};
+
+  /// Why an HMAC operation failed.
+  variant hmac-error {
+    /// The algorithm is not in the manifest's allowlist.
+    algorithm-not-allowed,
+    /// No key was supplied, or the key is empty.
+    invalid-key,
+  }
+
+  /// Compute a keyed MAC over `data`.
+  ///
+  /// The key is supplied by the guest as bytes here. For a key the guest must
+  /// never *see*, use `qqq:secrets` instead — that interface signs without
+  /// disclosing the key, which is the correct tool for a long-lived secret.
+  compute: func(algorithm: algorithm, key: list<u8>, data: list<u8>) -> result<list<u8>, hmac-error>;
+
+  /// Verify a MAC in constant time.
+  ///
+  /// # Why a separate operation rather than comparing in the guest
+  ///
+  /// A byte-by-byte comparison in guest code leaks the position of the first
+  /// mismatch, enabling a timing attack that recovers a valid MAC one byte at a
+  /// time. Providing `verify` means the guest does not have to know to write a
+  /// constant-time comparison — the platform does it correctly by default.
+  verify: func(algorithm: algorithm, key: list<u8>, data: list<u8>, tag: list<u8>) -> result<bool, hmac-error>;
+}
+
+/// Authenticated encryption with associated data.
+interface aead {
+  /// An AEAD construction, named explicitly.
+  enum construction {
+    /// AES-256-GCM. Hardware-accelerated on most modern CPUs.
+    aes-256-gcm,
+    /// ChaCha20-Poly1305. Preferred where AES hardware acceleration is absent
+    /// or its timing characteristics are a concern.
+    chacha20-poly1305,
+  }
+
+  /// Why an encryption or decryption operation failed.
+  variant aead-error {
+    /// The construction is not in the manifest's allowlist.
+    construction-not-allowed,
+    /// Authentication failed on decryption. **Never** partially return data —
+    /// the ciphertext was tampered with or the key is wrong, and the two are
+    /// indistinguishable by design.
+    authentication-failed,
+    /// The nonce was the wrong length for the construction.
+    invalid-nonce,
+    /// The key was the wrong length for the construction.
+    invalid-key,
+  }
+
+  /// The nonce length the construction requires, so a guest does not hardcode it.
+  nonce-length: func(construction: construction) -> u32;
+
+  /// The key length the construction requires.
+  key-length: func(construction: construction) -> u32;
+
+  /// Encrypt, optionally binding `associated-data` into the tag.
+  ///
+  /// `associated-data` is authenticated but not encrypted — the right place for
+  /// a message header that must be readable but must not be forgeable.
+  encrypt: func(
+    construction: construction,
+    key: list<u8>,
+    nonce: list<u8>,
+    associated-data: list<u8>,
+    plaintext: list<u8>,
+  ) -> result<list<u8>, aead-error>;
+
+  /// Decrypt and verify.
+  ///
+  /// # Errors
+  ///
+  /// `authentication-failed` when the tag does not verify. No plaintext is
+  /// returned in that case.
+  decrypt: func(
+    construction: construction,
+    key: list<u8>,
+    nonce: list<u8>,
+    associated-data: list<u8>,
+    ciphertext: list<u8>,
+  ) -> result<list<u8>, aead-error>;
+}
+
+/// Digital signatures.
+interface signing {
+  /// A signature algorithm, named explicitly.
+  enum algorithm {
+    /// Ed25519. Small keys, fast verification, and no parameter choices to get
+    /// wrong — which is why it is the only algorithm offered in V1.
+    ed25519,
+  }
+
+  /// Why a signing operation failed.
+  variant signature-error {
+    /// The algorithm is not in the manifest's allowlist.
+    algorithm-not-allowed,
+    /// The key was the wrong length for the algorithm.
+    invalid-key,
+    /// The signature was the wrong length, so it cannot be valid.
+    invalid-signature,
+  }
+
+  /// Sign a message with a guest-supplied key.
+  ///
+  /// For a key the guest must never see, use `qqq:secrets` instead.
+  sign: func(algorithm: algorithm, key: list<u8>, message: list<u8>) -> result<list<u8>, signature-error>;
+
+  /// Verify a signature.
+  verify: func(algorithm: algorithm, public-key: list<u8>, message: list<u8>, signature: list<u8>) -> result<bool, signature-error>;
+
+  /// Derive the public key corresponding to a private key.
+  public-key: func(algorithm: algorithm, key: list<u8>) -> result<list<u8>, signature-error>;
+}

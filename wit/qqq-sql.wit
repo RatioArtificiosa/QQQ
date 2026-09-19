@@ -1,0 +1,137 @@
+// QQQ SQL interface.
+//
+// # The guest never sees a credential
+//
+// A connection is named (`orders`), not configured. The manifest maps that name
+// to a driver, host, database and a **secret reference the host resolves**. The
+// guest receives a pooled connection handle and nothing else — so a compromised
+// guest cannot read a password, and rotating one does not require redeploying
+// anything that embedded it.
+//
+// This is the same inversion as `qqq:secrets`: authority is a *name* the host
+// understands, never a value the guest holds.
+//
+// See Proposal §6.3 and Checklist `ABI-003`.
+package qqq:sql@1.0.0;
+
+/// Typed SQL access against host-configured, pooled connections.
+interface database {
+  /// A value exchanged with the database.
+  ///
+  /// # Why a closed set of types rather than JSON
+  ///
+  /// Because a typed boundary is checkable. A guest sending a JSON string and
+  /// hoping the column is an integer is a class of bug the type system can
+  /// remove, and the ABI already pays for the encoding either way.
+  variant value {
+    null,
+    boolean(bool),
+    integer(s64),
+    float(f64),
+    text(string),
+    blob(list<u8>),
+  }
+
+  /// One row of results.
+  type row = list<value>;
+
+  /// Why a database operation failed.
+  variant sql-error {
+    /// `sql.query` or `sql.execute` was not granted.
+    not-granted,
+    /// The named database is not in the manifest.
+    database-not-configured,
+    /// A read was attempted through a read-only connection.
+    ///
+    /// Named specifically: the manifest grants `readonly = true` on some
+    /// connections, and a guest hitting this needs to know the connection is
+    /// fine and the *operation* is the problem.
+    read-only-connection,
+    /// The statement failed to prepare.
+    ///
+    /// The message names the position; it is the database's own diagnostic.
+    prepare-failed(string),
+    /// Execution failed after a successful prepare.
+    execution-failed(string),
+    /// The connection pool is exhausted.
+    pool-exhausted,
+    /// The result exceeded the host's row cap.
+    ///
+    /// A bound rather than an unbounded buffer: a guest issuing `SELECT *` on a
+    /// large table should be told to paginate, not allowed to exhaust host
+    /// memory.
+    result-too-large,
+    /// The argument count or type did not match the statement's placeholders.
+    argument-mismatch(string),
+  }
+
+  /// A handle to a prepared statement.
+  ///
+  /// Preparing once and executing many is the difference between a usable
+  /// database client and a denial-of-service tool; separating the two makes the
+  /// efficient path the obvious one.
+  resource statement {
+    /// Execute and return all rows.
+    query: func(args: list<value>) -> result<list<row>, sql-error>;
+
+    /// Execute for its effect, returning rows affected.
+    execute: func(args: list<value>) -> result<u64, sql-error>;
+
+    /// Release the statement.
+    close: func();
+  }
+
+  /// Prepare a statement against a named database.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted`, `database-not-configured`, or `prepare-failed`.
+  prepare: func(database: string, sql: string) -> result<statement, sql-error>;
+
+  /// Run a one-shot query, preparing implicitly.
+  ///
+  /// For the common case where a statement is used once; a guest that will reuse
+  /// one should call `prepare` instead.
+  query-once: func(database: string, sql: string, args: list<value>) -> result<list<row>, sql-error>;
+
+  /// The names of databases the manifest configures.
+  ///
+  /// Discoverable without attempting a query, per Proposal §2.5.
+  databases: func() -> list<string>;
+}
+
+/// Transactions.
+interface transaction {
+  use database.{row, sql-error, value};
+
+  /// A transaction handle.
+  ///
+  /// Dropping without calling `commit` **rolls back**, which is the safe
+  /// default: a guest that panics mid-transaction must not leave a partial
+  /// write committed.
+  resource txn {
+    /// Prepare a statement inside this transaction.
+    prepare: func(sql: string) -> result<txn-statement, sql-error>;
+
+    /// Commit.
+    commit: func() -> result<_, sql-error>;
+
+    /// Roll back explicitly.
+    rollback: func() -> result<_, sql-error>;
+  }
+
+  /// A statement bound to a transaction.
+  resource txn-statement {
+    /// Execute and return rows.
+    query: func(args: list<value>) -> result<list<row>, sql-error>;
+    /// Execute for its effect.
+    execute: func(args: list<value>) -> result<u64, sql-error>;
+  }
+
+  /// Begin a transaction on a named database.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted`, `database-not-configured`, or `pool-exhausted`.
+  begin: func(database: string) -> result<txn, sql-error>;
+}

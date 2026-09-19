@@ -1,0 +1,71 @@
+// QQQ environment interface.
+//
+// # Why this exists at all
+//
+// Reading the environment is how most services receive configuration today, and
+// refusing to support it would make QQQ unusable for the workloads that need it
+// most. But an **unrestricted** environment is ambient authority by another
+// name: it is how a guest discovers a `DATABASE_URL`, an API key, or a cloud
+// metadata token it was never granted.
+//
+// So the manifest names variables **individually**. There is no wildcard, and
+// `qqq-cap` rejects one at parse time with an explanation — because a blanket
+// inherit is exactly the ambient authority the capability model exists to
+// remove.
+//
+// # Prefer `qqq:secrets` for anything confidential
+//
+// A value read here lives in the guest's linear memory, where it can leak into
+// a crash dump or be exfiltrated by a compromised dependency. `qqq:secrets`
+// lets a guest *use* a value without ever holding it. Environment access is for
+// non-sensitive configuration — a log level, a region name.
+//
+// See Proposal §5.3, §6.3 and Checklist `ABI-011`.
+package qqq:env@1.0.0;
+
+/// Individually named environment variables.
+interface environment {
+  /// Why an environment lookup failed.
+  variant env-error {
+    /// `env.read` was not granted, or the name is not in the allowlist.
+    ///
+    /// A single error for both, deliberately: distinguishing them would let a
+    /// guest **enumerate** which variables exist by probing names and reading
+    /// the error, which is precisely the information a least-privilege model
+    /// should withhold.
+    not-allowed,
+    /// The variable is allowed but unset.
+    unset,
+    /// The value is not valid UTF-8.
+    ///
+    /// Reported rather than lossily converted: silently replacing invalid bytes
+    /// would hand a guest a value that is not what the operator set.
+    invalid-utf8,
+  }
+
+  /// Read a named variable as a UTF-8 string.
+  ///
+  /// # Errors
+  ///
+  /// See [`env-error`]. A guest should treat `not-allowed` as a configuration
+  /// error and `unset` as a deliberate state to handle.
+  get: func(name: string) -> result<string, env-error>;
+
+  /// Read a named variable with a caller-supplied fallback.
+  ///
+  /// The common case — "an optional tuning knob" — without forcing every caller
+  /// to pattern-match on `unset`. Returns the fallback for `unset` only;
+  /// `not-allowed` remains an error, because silently substituting a default for
+  /// a denied capability would hide a misconfiguration.
+  get-or: func(name: string, default: string) -> result<string, env-error>;
+
+  /// The names the manifest permits reading.
+  ///
+  /// # Why disclosing this is safe
+  ///
+  /// The names are already in `qqq.toml`, which is a build artifact the
+  /// developer publishes. What must stay secret is the *values* — and this
+  /// function returns only names, so a guest can discover what it may read
+  /// without learning anything it was not already entitled to know.
+  allowed-names: func() -> list<string>;
+}

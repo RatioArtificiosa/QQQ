@@ -1,0 +1,93 @@
+// QQQ message queue interface.
+//
+// Publishing and subscribing are **separate capabilities**, because they are
+// separate risks: a component that may announce an event is not thereby
+// entitled to consume every event on the same topic.
+//
+// See Proposal §6.3 and Checklist `ABI-005`.
+package qqq:queue@1.0.0;
+
+/// Publish and subscribe with acknowledgement.
+interface messaging {
+  /// Why a queue operation failed.
+  variant queue-error {
+    /// The direction was not granted (`queue.publish` or `queue.subscribe`).
+    not-granted,
+    /// The named queue is not in the manifest.
+    queue-not-configured,
+    /// The message exceeded the host's per-message limit.
+    message-too-large,
+    /// The queue's configured quota is exhausted.
+    quota-exceeded,
+    /// The backend failed.
+    backend-failed(string),
+    /// A delivery could not be acknowledged because its lease expired.
+    ///
+    /// The message has been redelivered to another consumer, so the original
+    /// consumer must not assume its work stands. Naming this explicitly stops a
+    /// guest from silently double-processing.
+    lease-expired,
+  }
+
+  /// A message received from a subscription.
+  record delivery {
+    /// The host-assigned identifier, used to acknowledge.
+    ///
+    /// Assigned by the **host**, not supplied by the publisher: a
+    /// publisher-chosen id would let one tenant collide with another's
+    /// in-flight messages.
+    id: string,
+    /// The payload.
+    body: list<u8>,
+    /// How many times this message has been delivered.
+    ///
+    /// A consumer that sees a count above one knows a previous attempt did not
+    /// acknowledge. Surfaced rather than hidden because it is the signal a
+    /// guest needs to decide whether its processing is idempotent.
+    delivery-count: u32,
+  }
+
+  /// Publish a message.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted`, `queue-not-configured`, `message-too-large`, or
+  /// `quota-exceeded`.
+  publish: func(queue: string, body: list<u8>) -> result<_, queue-error>;
+
+  /// Publish many messages in one call.
+  ///
+  /// Batch-first: a guest flushing a buffer of events should pay one ABI
+  /// crossing, and the host can then make one backend round trip.
+  publish-many: func(queue: string, bodies: list<list<u8>>) -> result<_, queue-error>;
+
+  /// Receive the next delivery, waiting up to `timeout-ms`.
+  ///
+  /// Returns `none` when the timeout elapses with nothing available. A timeout
+  /// is not an error — it is the normal steady state of a polling consumer, and
+  /// modelling it as a failure would make every idle consumer log errors.
+  ///
+  /// # Why this is `async` at the Component Model level
+  ///
+  /// Waiting for a message must not block the host's reactor. In WASI 0.3 the
+  /// `future`/`stream` types express this natively; a synchronous signature
+  /// would force every consumer onto its own thread.
+  receive: func(queue: string, timeout-ms: u64) -> result<option<delivery>, queue-error>;
+
+  /// Acknowledge a delivery, removing it from the queue.
+  ///
+  /// # Errors
+  ///
+  /// `lease-expired` when the message was already redelivered.
+  acknowledge: func(queue: string, id: string) -> result<_, queue-error>;
+
+  /// Return a delivery to the queue without acknowledging it.
+  ///
+  /// The correct response to "I cannot process this right now" — it makes the
+  /// message available to another consumer immediately rather than after a lease
+  /// timeout.
+  reject: func(queue: string, id: string) -> result<_, queue-error>;
+
+  /// The queues and directions the manifest configures.
+  queues: func() -> list<tuple<string, string>>;
+}

@@ -1,0 +1,73 @@
+// QQQ clock interface.
+//
+// Time is a **capability**, not a right. A guest that reads the wall clock can
+// encode information in *when* something happened, which is a covert channel
+// the audit stream cannot see. So both clocks are denied unless the manifest
+// grants them, and both are virtualised in deterministic mode (Proposal §10.5).
+package qqq:clock@1.0.0;
+
+/// Wall-clock time, and the monotonic clock used for measurement.
+///
+/// # Determinism
+///
+/// When the host runs in deterministic mode, `now` returns a **fixed** instant
+/// that advances only on explicit host ticks, and `resolution` reports the
+/// virtual tick interval rather than the hardware's. A guest therefore cannot
+/// observe wall-clock nondeterminism the host did not grant it.
+interface wall-clock {
+  /// A point in time, as nanoseconds since the Unix epoch (1970-01-01T00:00:00Z).
+  ///
+  /// Nanoseconds rather than seconds because sub-second precision is required
+  /// for latency measurement, and because a `u64` of nanoseconds covers
+  /// 584 years — comfortably beyond the lifetime of any deployment.
+  type instant-ns = u64;
+
+  /// A duration, as nanoseconds.
+  type duration-ns = u64;
+
+  /// Why a clock operation failed.
+  variant clock-error {
+    /// The clock capability was not granted by any configuration layer.
+    not-granted,
+    /// The requested instant is not representable, or lies before the epoch.
+    out-of-range,
+    /// The host is shutting down and will not service further calls.
+    shutting-down,
+  }
+
+  /// Read the current wall-clock time.
+  ///
+  /// # Errors
+  ///
+  /// Returns `not-granted` when `clock.wall` is absent from the effective
+  /// grants. A guest should treat that as a configuration error, not retry.
+  now: func() -> result<instant-ns, clock-error>;
+
+  /// The smallest difference the clock can report.
+  ///
+  /// A guest that polls faster than this is spinning, not measuring. Provided
+  /// so a well-written guest can pace itself without guessing.
+  resolution: func() -> duration-ns;
+
+  /// The host's configured timezone name, e.g. `UTC`.
+  ///
+  /// For **formatting only**. A guest computing what a timestamp *means* for a
+  /// user must do so explicitly; a host that silently applied a timezone would
+  /// make output depend on deployment configuration.
+  timezone: func() -> string;
+}
+
+/// A monotonic clock, for measuring elapsed time.
+interface monotonic-clock {
+  use wall-clock.{duration-ns};
+
+  /// Read the monotonic clock.
+  ///
+  /// Guaranteed non-decreasing across the lifetime of one instance. It has no
+  /// defined epoch: only *differences* between two readings are meaningful, and
+  /// a guest that treats it as a wall clock is making a mistake.
+  now: func() -> duration-ns;
+
+  /// The smallest difference the clock can report.
+  resolution: func() -> duration-ns;
+}

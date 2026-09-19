@@ -1,0 +1,93 @@
+// QQQ distributed tracing interface.
+//
+// Spans carry W3C Trace Context, and sampling decisions are made by the
+// **host**, never the guest. A guest that could influence sampling could hide
+// its own activity from the trace — which is the one thing an observability
+// system must not permit.
+//
+// See Proposal §10.4 and Checklist `ABI-009`.
+package qqq:trace@1.0.0;
+
+/// Spans and events with context propagation.
+interface tracing {
+  /// A trace attribute.
+  ///
+  /// Typed rather than a pre-formatted string, for the same reason log
+  /// attributes are: the host must be able to redact a value it recognises as
+  /// sensitive, and it cannot recognise one already interpolated into a
+  /// sentence.
+  variant attribute-value {
+    text(string),
+    integer(s64),
+    float(f64),
+    boolean(bool),
+  }
+
+  /// One attribute.
+  record attribute {
+    name: string,
+    value: attribute-value,
+  }
+
+  /// Why a tracing operation failed.
+  variant trace-error {
+    /// `trace.write` was not granted.
+    not-granted,
+    /// The span or attribute set exceeded the host's per-span limit.
+    span-too-large,
+    /// The span handle was already closed.
+    span-closed,
+  }
+
+  /// An open span.
+  ///
+  /// # Why this is an owned `resource` and not a `borrow`
+  ///
+  /// A borrowed handle was the first design: it would let the type system
+  /// enforce that a span cannot outlive its parent. **WIT does not permit a
+  /// function to return a `borrow<T>`** — `wasm-tools` rejects it with
+  /// *"returns a type which contains a `borrow<T>` which is not supported"*,
+  /// because a borrow's lifetime is bound to the dynamic call, and an owning
+  /// resource can outlive the call that produced it.
+  ///
+  /// So nesting is enforced by the **host** instead: a child span records its
+  /// parent when created, and the host rejects a child outliving its parent
+  /// with a clear error. The guarantee moves from compile time to runtime, and
+  /// the difference is recorded in Observations `§O-017c` rather than glossed
+  /// over.
+  resource span {
+    /// Start a child span.
+    ///
+    /// The host records the parent relation, so an out-of-order close is
+    /// detected rather than producing a corrupt trace.
+    child: func(name: string) -> result<span, trace-error>;
+
+    /// Record an event within this span.
+    event: func(name: string, attributes: list<attribute>) -> result<_, trace-error>;
+
+    /// Attach attributes to the span itself.
+    set-attributes: func(attributes: list<attribute>) -> result<_, trace-error>;
+
+    /// Mark the span as failed and record why.
+    ///
+    /// Separate from setting an attribute so a backend can index failures
+    /// without inspecting attribute names — which are application-defined and
+    /// therefore not queryable in aggregate.
+    set-error: func(message: string) -> result<_, trace-error>;
+  }
+
+  /// Start a root span.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted` or `span-too-large`.
+  start-span: func(name: string) -> result<span, trace-error>;
+
+  /// The current W3C `traceparent` header value, if any.
+  ///
+  /// Returned so a guest propagating context to an outbound service does not
+  /// have to construct the header itself — the format is versioned and
+  /// error-prone, and getting it subtly wrong breaks correlation in a way that
+  /// is only noticed during an incident.
+  current-traceparent: func() -> option<string>;
+}

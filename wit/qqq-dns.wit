@@ -1,0 +1,58 @@
+// QQQ DNS interface.
+//
+// Resolution is a **capability**, and a covert one: a guest that can resolve an
+// arbitrary name can exfiltrate data in the queries themselves, with no HTTP
+// request and no payload to inspect. So resolution is allowlisted by name, not
+// merely restricted by protocol.
+//
+// See Proposal §6.3 and Checklist `ABI-013`.
+package qqq:dns@1.0.0;
+
+/// Name resolution from an explicit allowlist.
+interface resolver {
+  /// Why a resolution failed.
+  variant dns-error {
+    /// `dns.resolve` was not granted.
+    not-granted,
+    /// The name is not in the manifest's allowlist.
+    ///
+    /// **Distinct from `not-found` on purpose.** A guest that cannot tell "I am
+    /// not allowed to resolve that" from "that name does not exist" will retry
+    /// against a policy denial, and an operator reading logs will see an
+    /// application bug where there is a configuration decision.
+    name-not-allowed,
+    /// The name is allowed but does not resolve.
+    not-found,
+    /// The resolver timed out.
+    timeout,
+    /// The resolver failed.
+    resolver-failed(string),
+  }
+
+  /// One resolved address.
+  variant address {
+    ipv4(string),
+    ipv6(string),
+  }
+
+  /// Resolve a name to its addresses.
+  ///
+  /// # Errors
+  ///
+  /// `not-granted`, `name-not-allowed`, `not-found`, `timeout`, or
+  /// `resolver-failed`.
+  resolve: func(name: string) -> result<list<address>, dns-error>;
+
+  /// Resolve several names in one call, returning them in the **same order** as
+  /// the input.
+  ///
+  /// Order preservation is part of the contract, not an implementation detail:
+  /// a caller mapping results back to requests by position is relying on it, and
+  /// a host that reordered would silently corrupt that mapping.
+  resolve-many: func(names: list<string>) -> result<list<result<list<address>, dns-error>>, dns-error>;
+
+  /// The names the manifest permits resolving.
+  ///
+  /// Discoverable without attempting a lookup, per Proposal §2.5.
+  allowed-names: func() -> list<string>;
+}

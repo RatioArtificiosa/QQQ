@@ -828,7 +828,7 @@ mod tests {
             "must name the capability: {}",
             err.message
         );
-        assert!(err.render().contains("qqq:crypto@1.0"));
+        assert!(err.render().contains("qqq:crypto@1.0.0"));
     }
 
     // -- Epoch configuration ----------------------------------------------

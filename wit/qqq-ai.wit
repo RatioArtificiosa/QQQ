@@ -1,0 +1,97 @@
+// QQQ model inference interface.
+//
+// # Status: interface authored, implementation deferred
+//
+// Proposal §6.9 specifies this interface so the capability model is coherent
+// from the start, but the implementation is deliberately deferred to `FUT-007`.
+// The reasoning is recorded in the proposal and repeated here because it is the
+// question every reader of this file will have:
+//
+// * it is a **differentiator, not a foundation** — the runtime must be solid
+//   before an inference layer is worth building;
+// * a model call is a **10–2000 ms** operation, so it cannot be on the request
+//   hot path and must not be presented as if it were;
+// * the support surface (model formats, quantization, hardware acceleration)
+//   is large and would compete for the same engineering time as the language
+//   matrix.
+//
+// Authoring the interface now costs little and means the capability model does
+// not need revising later. `qqq-abi`'s registry reports it as **declared but
+// unimplemented**, so a manifest that grants `ai.infer` fails at instantiation
+// with a clear diagnostic rather than at first call with an opaque one.
+package qqq:ai@1.0.0;
+
+/// Model inference with host-side token accounting.
+interface inference {
+  /// Why an inference request failed.
+  variant inference-error {
+    /// `ai.infer` was not granted.
+    not-granted,
+    /// The named model is not in the manifest's allowlist.
+    model-not-allowed,
+    /// The request exceeded the manifest's per-request token budget.
+    ///
+    /// Enforced by the **host**, not requested of the guest. A guest that can
+    /// exceed its token budget is a guest that can run up an unbounded bill.
+    token-budget-exceeded,
+    /// No model matching the request is loaded.
+    model-unavailable,
+    /// The inference backend failed.
+    backend-failed(string),
+  }
+
+  /// One message in a conversation.
+  record message {
+    role: role,
+    content: string,
+  }
+
+  /// Who produced a message.
+  enum role {
+    system,
+    user,
+    assistant,
+  }
+
+  /// Token accounting for one request.
+  ///
+  /// Returned on **every** call, including failures where any tokens were
+  /// consumed. A guest cannot be charged for work it cannot see.
+  record usage {
+    prompt-tokens: u32,
+    completion-tokens: u32,
+  }
+
+  /// The result of an inference request.
+  record completion {
+    content: string,
+    usage: usage,
+    /// Which model actually served the request.
+    ///
+    /// Reported because a host may route among models of similar capability;
+    /// a guest recording its own outputs needs to know which one produced them.
+    model: string,
+  }
+
+  /// Run inference and return the complete result.
+  ///
+  /// # Why this is not streaming in V1
+  ///
+  /// A streaming form is the better interface for interactive use, but it
+  /// requires the Component Model's `stream` type to be exercised through the
+  /// whole host stack first. Shipping the simple form now and the streaming form
+  /// once the plumbing is proven is the smaller risk.
+  complete: func(messages: list<message>) -> result<completion, inference-error>;
+
+  /// The models the manifest permits, in a stable order.
+  ///
+  /// Discoverable without attempting a call: what a module may do must be
+  /// knowable from its contracts (Proposal §2.5).
+  allowed-models: func() -> list<string>;
+
+  /// The remaining token budget for this instance.
+  ///
+  /// A guest that knows its budget can choose a shorter response rather than
+  /// failing when it runs out mid-request.
+  remaining-tokens: func() -> u64;
+}

@@ -165,47 +165,57 @@ impl fmt::Display for BoundInterfaces {
 
 /// The canonical mapping from a capability to the WIT interface it unlocks.
 ///
-/// # Why this is a function and not a table in the linker
+/// # One mapping, two consumers
 ///
-/// Because `qqqai inspect` must be able to answer *"what interfaces will this
-/// component be able to import?"* **without instantiating it** (NN-5: what a
-/// module can do must be discoverable without running it). A single mapping
-/// function used by both the static report and the runtime binding guarantees
-/// the two can never disagree — which is the difference between a security
-/// report you can trust and one that merely looks plausible.
+/// This delegates to `qqq_abi`, which owns the **single** source of truth shared
+/// with the static capability report (`qqqai inspect`). Keeping a second table
+/// here — even one that started identical — is how a report ends up saying a
+/// component cannot reach the network while the runtime quietly lets it.
 ///
-/// # The `None` case is deliberate
+/// # The fallback is deliberate
 ///
 /// `Capability` is `#[non_exhaustive]`, so a variant added in a later version
-/// reaches this function. Returning `None` for an unknown capability is the
-/// **safe** direction: it unlocks no interface, rather than guessing one. The
-/// caller surfaces it through [`describe_gap`] so the gap is loud rather than
-/// silent.
+/// reaches this function. Unlocking no interface is the **safe** direction, and
+/// `describe_gap` makes the gap loud rather than silent.
 #[must_use]
-pub const fn interface_for(c: Capability) -> Option<&'static str> {
-    match c {
-        Capability::HttpServer | Capability::HttpClient => Some("qqq:http@1.0"),
-        Capability::FsRead | Capability::FsWrite | Capability::FsWatch => Some("qqq:fs@1.0"),
-        Capability::SqlQuery | Capability::SqlExecute => Some("qqq:sql@1.0"),
-        Capability::KvRead | Capability::KvWrite => Some("qqq:kv@1.0"),
-        Capability::QueuePublish | Capability::QueueSubscribe => Some("qqq:queue@1.0"),
-        Capability::CryptoRandom
-        | Capability::CryptoHash
-        | Capability::CryptoHmac
-        | Capability::CryptoAead
-        | Capability::CryptoSign => Some("qqq:crypto@1.0"),
-        Capability::ClockWall | Capability::ClockMonotonic => Some("qqq:clock@1.0"),
-        Capability::LogWrite => Some("qqq:log@1.0"),
-        Capability::TraceWrite => Some("qqq:trace@1.0"),
-        Capability::SecretUse => Some("qqq:secrets@1.0"),
-        Capability::DnsResolve => Some("qqq:dns@1.0"),
-        Capability::EnvRead => Some("qqq:env@1.0"),
-        Capability::AiInfer => Some("qqq:ai@1.0"),
-        // A capability added in a newer version of `qqq-cap` than this build
-        // knows about. Unlocking nothing is the safe direction; the gap is
-        // reported by `describe_gap` rather than silently ignored.
-        #[allow(unreachable_patterns)]
-        _ => None,
+pub fn interface_for(c: Capability) -> Option<&'static str> {
+    qqq_abi::interfaces()
+        .into_iter()
+        .find(|i| i.is_unlocked_by(c))
+        .map(|i| interface_name_static(&i.name))
+}
+
+/// Map a registry interface name to its `&'static str` form.
+///
+/// # Why this projection exists
+///
+/// The registry owns `String`s because it must be serializable — it is part of
+/// `qqqai inspect --json`. Callers on the hot path want a `'static` handle
+/// without allocating, so this maps to string literals.
+///
+/// # Why the fallback is `"<unmapped>"`
+///
+/// Adding an interface to `qqq_abi` without adding it here would otherwise
+/// silently produce an empty name. Returning a visibly wrong value means the
+/// test `static_names_cover_the_registry` fails the build instead, and a
+/// surprise at runtime is impossible.
+#[must_use]
+fn interface_name_static(name: &str) -> &'static str {
+    match name {
+        "qqq:ai@1.0.0" => "qqq:ai@1.0.0",
+        "qqq:clock@1.0.0" => "qqq:clock@1.0.0",
+        "qqq:crypto@1.0.0" => "qqq:crypto@1.0.0",
+        "qqq:dns@1.0.0" => "qqq:dns@1.0.0",
+        "qqq:env@1.0.0" => "qqq:env@1.0.0",
+        "qqq:fs@1.0.0" => "qqq:fs@1.0.0",
+        "qqq:http@1.0.0" => "qqq:http@1.0.0",
+        "qqq:kv@1.0.0" => "qqq:kv@1.0.0",
+        "qqq:log@1.0.0" => "qqq:log@1.0.0",
+        "qqq:queue@1.0.0" => "qqq:queue@1.0.0",
+        "qqq:secrets@1.0.0" => "qqq:secrets@1.0.0",
+        "qqq:sql@1.0.0" => "qqq:sql@1.0.0",
+        "qqq:trace@1.0.0" => "qqq:trace@1.0.0",
+        _ => "<unmapped>",
     }
 }
 
@@ -305,7 +315,7 @@ pub fn build_linker<'a>(
 /// Describe what a granted-but-unbound capability means for this instance.
 ///
 /// Returns a `QQQ-6004` error naming the capability and the missing interface,
-/// so a developer sees *"`qqq:crypto@1.0` is granted but this build has no
+/// so a developer sees *"`qqq:crypto@1.0.0` is granted but this build has no
 /// implementation"* rather than Wasmtime's generic "unknown import".
 #[must_use]
 pub fn describe_gap(capability: Capability) -> qqq_core::Error {
@@ -387,19 +397,61 @@ mod tests {
         }
     }
 
+    /// **The delegation must stay honest.** This crate projects the registry's
+    /// owned names into `&'static str` literals for the hot path. If an
+    /// interface is added to `qqq_abi` without being added to
+    /// `interface_name_static`, the projection yields `"<unmapped>"` — a name
+    /// that matches no linker definition, so the capability would silently bind
+    /// nothing.
+    ///
+    /// This test is what makes that omission impossible to ship.
+    #[test]
+    fn static_names_cover_the_registry() {
+        for i in qqq_abi::interfaces() {
+            assert_ne!(
+                interface_name_static(&i.name),
+                "<unmapped>",
+                "interface `{}` is in the qqq-abi registry but has no static \
+                 projection in qqq-host::linker; add it to `interface_name_static`",
+                i.name
+            );
+            assert_eq!(interface_name_static(&i.name), i.name);
+        }
+    }
+
+    /// The two crates must agree about which capability unlocks which interface.
+    /// A disagreement is exactly the drift that makes `qqqai inspect` lie.
+    #[test]
+    fn host_and_abi_agree_on_every_mapping() {
+        for &c in Capability::all() {
+            let via_abi = qqq_abi::interface_for(c).map(|i| i.name);
+            let via_host = interface_for(c).map(str::to_owned);
+            assert_eq!(
+                via_abi, via_host,
+                "qqq-abi and qqq-host disagree about capability `{c}`"
+            );
+        }
+    }
+
     /// Interface names must be well-formed and versioned, because they are part
     /// of the machine contract an agent reads.
     ///
-    /// # Version shape: `major.minor`, deliberately not `major.minor.patch`
+    /// # Version shape: `major.minor.patch`
     ///
-    /// WIT interface versions follow the WIT convention, which is
-    /// `major.minor` — the patch level of an *interface* carries no meaning,
-    /// because an interface is a type signature and a signature either changed
-    /// compatibly or it did not. Using full semver here would invite a
-    /// `@1.0.3` that implies a distinction no consumer can act on.
+    /// **Corrected.** This test previously asserted `major.minor` and asserted
+    /// that full semver would be wrong — on the reasoning that "the patch level
+    /// of an interface carries no meaning". That reasoning was plausible and
+    /// **incorrect**: WIT requires full semver, verified by parsing with the
+    /// real toolchain:
     ///
-    /// This is distinct from [`qqq_core::Version`], which models *package*
-    /// versions where the patch level is meaningful.
+    /// ```text
+    /// package qqq:x@1.0;    -> error: expected '.', found ';'
+    /// package qqq:x@1.0.0;  -> parses
+    /// ```
+    ///
+    /// The mistake is recorded in Observations `§O-017`. The lesson is that a
+    /// plausible-sounding principle about a format is not evidence about that
+    /// format — the parser is.
     #[test]
     fn interface_names_are_wellformed_and_versioned() {
         for &c in Capability::all() {
@@ -416,8 +468,9 @@ mod tests {
             let parts: Vec<&str> = version.split('.').collect();
             assert_eq!(
                 parts.len(),
-                2,
-                "interface version `{version}` must be major.minor (WIT convention)"
+                3,
+                "interface version `{version}` must be major.minor.patch — \
+                 WIT requires full semver"
             );
             for p in &parts {
                 assert!(
@@ -439,13 +492,13 @@ mod tests {
              [capabilities.clock]\nwall = true\n",
         );
         let ifaces = required_interfaces(&g);
-        assert!(ifaces.contains(&"qqq:http@1.0"));
-        assert!(ifaces.contains(&"qqq:crypto@1.0"));
-        assert!(ifaces.contains(&"qqq:clock@1.0"));
+        assert!(ifaces.contains(&"qqq:http@1.0.0"));
+        assert!(ifaces.contains(&"qqq:crypto@1.0.0"));
+        assert!(ifaces.contains(&"qqq:clock@1.0.0"));
         // Never granted, never unlocked.
-        assert!(!ifaces.contains(&"qqq:fs@1.0"));
-        assert!(!ifaces.contains(&"qqq:sql@1.0"));
-        assert!(!ifaces.contains(&"qqq:secrets@1.0"));
+        assert!(!ifaces.contains(&"qqq:fs@1.0.0"));
+        assert!(!ifaces.contains(&"qqq:sql@1.0.0"));
+        assert!(!ifaces.contains(&"qqq:secrets@1.0.0"));
     }
     /// The headline security property, stated as a test: an empty grant set
     /// unlocks **nothing**.
@@ -467,7 +520,7 @@ mod tests {
              hmac = [\"sha256\"]\naead = [\"aes\"]\nsign = [\"ed25519\"]\n",
         );
         let ifaces = required_interfaces(&g);
-        let crypto_count = ifaces.iter().filter(|i| **i == "qqq:crypto@1.0").count();
+        let crypto_count = ifaces.iter().filter(|i| **i == "qqq:crypto@1.0.0").count();
         assert_eq!(crypto_count, 1, "must be deduplicated: {ifaces:?}");
         let mut sorted = ifaces.clone();
         sorted.sort_unstable();
@@ -482,7 +535,7 @@ mod tests {
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
              [[capabilities.fs]]\npath = \".\"\nmode = \"read-only\"\n",
         );
-        assert!(required_interfaces(&g).contains(&"qqq:fs@1.0"));
+        assert!(required_interfaces(&g).contains(&"qqq:fs@1.0.0"));
     }
 
     #[test]
@@ -514,15 +567,15 @@ mod tests {
              [capabilities.crypto]\nhash = [\"sha256\"]\n",
         );
         let built = build_linker(&engine, &g).unwrap();
-        assert!(built.bound.has("qqq:crypto@1.0"));
+        assert!(built.bound.has("qqq:crypto@1.0.0"));
         assert!(
             built.bound.unimplemented.contains(&Capability::CryptoHash),
             "the unimplemented capability must be reported: {:?}",
             built.bound
         );
         // And crucially: nothing outside the grants is bound.
-        assert!(!built.bound.has("qqq:fs@1.0"));
-        assert!(!built.bound.has("qqq:sql@1.0"));
+        assert!(!built.bound.has("qqq:fs@1.0.0"));
+        assert!(!built.bound.has("qqq:sql@1.0.0"));
     }
 
     /// **The core security test.** A component importing a capability we did
@@ -660,7 +713,7 @@ mod tests {
         let e = describe_gap(Capability::CryptoHash);
         let msg = e.message.clone();
         assert!(msg.contains("crypto.hash"), "must name the capability: {msg}");
-        assert!(msg.contains("qqq:crypto@1.0"), "must name the interface: {msg}");
+        assert!(msg.contains("qqq:crypto@1.0.0"), "must name the interface: {msg}");
         assert!(e.remediation.is_some());
         assert!(e.render().contains("QQQ-6004"));
     }
@@ -668,18 +721,18 @@ mod tests {
     #[test]
     fn bound_interfaces_has_lookup_works() {
         let b = BoundInterfaces {
-            interfaces: vec!["qqq:http@1.0".to_owned(), "qqq:clock@1.0".to_owned()],
+            interfaces: vec!["qqq:http@1.0.0".to_owned(), "qqq:clock@1.0.0".to_owned()],
             unimplemented: vec![],
         };
-        assert!(b.has("qqq:http@1.0"));
-        assert!(!b.has("qqq:sql@1.0"));
-        assert!(b.to_string().contains("qqq:http@1.0"));
+        assert!(b.has("qqq:http@1.0.0"));
+        assert!(!b.has("qqq:sql@1.0.0"));
+        assert!(b.to_string().contains("qqq:http@1.0.0"));
 
         let empty = BoundInterfaces {
             interfaces: Vec::new(),
             unimplemented: Vec::new(),
         };
         assert_eq!(empty.to_string(), "(none)");
-        assert!(!empty.has("qqq:http@1.0"));
+        assert!(!empty.has("qqq:http@1.0.0"));
     }
 }

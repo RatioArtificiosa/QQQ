@@ -823,6 +823,12 @@ dependencies = [
 [[package]]
 name = "qqq-abi"
 version = "0.0.0"
+dependencies = [
+ "qqq-cap",
+ "qqq-core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "qqq-cap"
@@ -851,6 +857,7 @@ version = "0.0.0"
 name = "qqq-host"
 version = "0.0.0"
 dependencies = [
+ "qqq-abi",
  "qqq-cap",
  "qqq-core",
  "serde",

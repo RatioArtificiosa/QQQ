@@ -906,6 +906,140 @@ pin that the bits are independent — a bug a bool struct cannot even express.
 
 ---
 
+### §O-017 — `qqq-abi`: thirteen interfaces, and a wrong conclusion corrected
+
+**What was built.** `qqq-abi`: thirteen WIT interface definitions under `wit/`,
+embedded via `include_str!` so the runtime and the published files cannot
+diverge; and `registry.rs`, the **single** capability-to-interface mapping shared
+by the runtime and the static capability report.
+
+**Verification:** `cargo test --workspace` → **238 pass**; clippy → clean;
+`wasm-tools component wit` → **13/13 interfaces parse**.
+
+---
+
+#### §O-017a — ⚠️ **I was wrong about the WIT version format, and the whole corpus encoded the error**
+
+**What I claimed in round 2** (`§O-014d`): *"WIT interface versions are
+`major.minor`, not `major.minor.patch`. The patch level of an interface carries
+no meaning, because an interface is a type signature."*
+
+**That reasoning is plausible and completely wrong.** WIT requires full semver.
+Verified by parsing with the real toolchain:
+
+```text
+package qqq:x@1.0;    ->  error: expected '.', found ';'
+package qqq:x@1.0.0;  ->  parses
+```
+
+**How far the error had spread.** The wrong conclusion was recorded in
+Observations, written into all **thirteen** `.wit` files, encoded in the
+registry's interface names, in `qqq-host`'s static-name projection, and asserted
+by **three tests** — in `qqq-abi` (twice) and `qqq-host` (once). Ninety-eight
+occurrences were corrected.
+
+**Why the tests did not catch it.** They asserted the convention I had invented,
+so they *confirmed* my mistake rather than challenging it. A test can only check
+a property you state correctly; it cannot tell you the property is wrong.
+
+**What caught it.** Parsing the files with `wasm-tools`. Not reasoning — running.
+
+**Lesson, and it generalises past this instance:** *a plausible-sounding
+principle about a format is not evidence about that format.* I had a tidy
+rationale ("patch level carries no meaning for an interface") and it felt like
+understanding. It was rationalisation. **When a claim is about an external
+grammar, parse it; do not reason about it.**
+
+---
+
+#### §O-017b — The structural tests passed while every file was invalid WIT
+
+**What happened.** `qqq-abi` had fifteen passing tests — every capability maps to
+exactly one interface, every interface has source, names are versioned and
+unique, names are sorted. **All thirteen `.wit` files were simultaneously
+rejected by `wasm-tools`.**
+
+The tests checked the *shape of my model*. The parser checks *the language*.
+Those are different properties, and only one of them was verified.
+
+**Fix.** `tools/check_wit.py` runs `wasm-tools` over every interface, and CI
+gained a dedicated `wit` job. The script **fails rather than warns** when
+`wasm-tools` is absent, because skipping validation would mean shipping unparsed
+interface definitions.
+
+---
+
+#### §O-017c — Six real WIT grammar errors, each a genuine mistake
+
+Once the files were actually parsed, six further errors surfaced. Each is
+recorded because each is a trap a future interface would hit again:
+
+| Error | Cause | Fix |
+|---|---|---|
+| `expected '.', found ';'` | `@1.0` — needs full semver | `@1.0.0` |
+| `expected constructor or identifier, found keyword 'list'` | `list` is a WIT keyword and cannot name a function | renamed to `entries` |
+| `name 'request' is defined more than once` | a function and a record cannot share a name in one interface | function became `send` |
+| `expected an identifier or string, found keyword 'string'` | variant case named `string` with a `string` payload | case renamed to `text` |
+| `expected ')', found ':'` | variant case payloads are **types**, not `name: type` fields | `sign(list<u8>)` |
+| `expected ')', found ','` | a variant case carries **exactly one** payload | `verify(list<u8>, list<u8>)` → a named `verify-request` record |
+| `expected identifier or string, found ':'` | `use` is a WIT keyword | renamed to `apply` |
+
+**The most interesting one is `verify`.** A variant case takes exactly one
+payload type, so two adjacent `list<u8>` parameters are impossible. The fix — a
+named record — is *better* than what I originally wrote: two adjacent `list<u8>`
+arguments are trivially swappable at a call site, and swapping them would
+produce a confusing failure rather than a compile error. The grammar pushed the
+design toward something clearer.
+
+---
+
+#### §O-017d — A real WIT limitation invalidated a design assumption
+
+**What I designed.** `qqq:trace`'s `span.child` returned `borrow<span>`, so the
+type system would enforce that a child span cannot outlive its parent.
+
+**What the parser said.**
+
+```text
+error: function `[method]span.child` returns a type which contains a
+       `borrow<T>` which is not supported
+```
+
+A borrow's lifetime is bound to the dynamic call, and an owning resource can
+outlive the call that produced it — so the Component Model forbids returning one.
+
+**Resolution.** `child` now returns an owned `span`, and **the host enforces
+nesting at runtime**: a child records its parent when created, and the host
+rejects an out-of-order close with a clear error. The guarantee moves from
+compile time to runtime.
+
+That is a real downgrade in strength and it is documented in the interface's own
+doc comment rather than glossed over. It is also a candidate for revisiting if
+the Component Model gains a mechanism for it — tracked by the existing
+`FUT-*` process.
+
+---
+
+#### §O-017e — One mapping, two consumers: the drift test
+
+`qqq-host::linker::interface_for` now **delegates** to `qqq_abi`. It previously
+held a second table, which is exactly how a security report ends up claiming a
+component cannot reach the network while the runtime quietly lets it.
+
+Delegation alone is not enough, because `qqq-host` projects the registry's owned
+`String` names into `&'static str` literals for the hot path. Two tests make the
+drift impossible:
+
+* `static_names_cover_the_registry` — fails if an interface is added to
+  `qqq-abi` without being added to the static projection.
+* `host_and_abi_agree_on_every_mapping` — compares both crates' answers for
+  every capability.
+
+**Cross-refs:** Checklist `ABI-001` … `ABI-016`, `CON-011`, `CON-014`;
+Proposal §6.3.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

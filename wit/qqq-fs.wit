@@ -1,0 +1,113 @@
+// QQQ filesystem interface.
+//
+// Built over `wasi:filesystem`, adding the mode and quota enforcement the
+// capability model promises.
+//
+// # The central restriction
+//
+// There is **no `open` that takes an arbitrary path**. A guest can only reach
+// a directory the manifest preopened, and it holds a **handle** to that
+// directory rather than a path string. This is what makes traversal escape
+// structurally impossible rather than merely checked: there is no API through
+// which to express `../../etc/passwd`, because a handle cannot be walked
+// upward.
+//
+// See Proposal §6.2, §7.5 and Checklist `SEC-010`.
+package qqq:fs@1.0.0;
+
+/// Filesystem access through preopened directories.
+interface filesystem {
+  /// Why a filesystem operation failed.
+  variant fs-error {
+    /// `fs.read` or `fs.write` was not granted.
+    not-granted,
+    /// Access was attempted outside a preopened directory.
+    ///
+    /// Reported separately from `not-found` so a guest can tell "my path logic
+    /// is wrong" from "the file is genuinely absent". Conflating them is how a
+    /// security denial gets silently retried as a missing file.
+    outside-preopen,
+    /// The path does not exist.
+    not-found,
+    /// The path exists but is not what the operation required.
+    wrong-type,
+    /// The manifest grants this path `read-only` and a write was attempted.
+    ///
+    /// Named specifically so the fix is obvious: the manifest needs
+    /// `read-write`, or the code should not be writing.
+    read-only,
+    /// The directory's quota from the manifest is exhausted.
+    quota-exceeded,
+    /// A host or OS-level I/O failure.
+    io-error(string),
+  }
+
+  /// A handle to an open directory.
+  ///
+  /// An opaque `resource`, so the guest holds an index into the host's handle
+  /// table rather than a filesystem path it could manipulate.
+  resource directory {
+    /// Open a subdirectory by a **relative** name.
+    ///
+    /// # Errors
+    ///
+    /// `outside-preopen` if `name` contains a `..` component or is absolute.
+    /// The host rejects both rather than resolving them, because a guest that
+    /// sends either is either buggy or probing.
+    open-subdirectory: func(name: string) -> result<directory, fs-error>;
+
+    /// Read a file's whole contents.
+    ///
+    /// # Errors
+    ///
+    /// `read-only` is not possible here; `not-found`, `wrong-type`,
+    /// `quota-exceeded`, or `io-error`.
+    read-file: func(name: string) -> result<list<u8>, fs-error>;
+
+    /// Write a file's whole contents, creating or truncating it.
+    ///
+    /// # Errors
+    ///
+    /// `read-only` when the manifest grants this path read-only, or
+    /// `quota-exceeded`.
+    write-file: func(name: string, contents: list<u8>) -> result<_, fs-error>;
+
+    /// Append to a file, creating it if absent.
+    ///
+    /// The operation an `append-only` grant permits: a guest can add records
+    /// but cannot rewrite or delete existing ones, which is the right shape for
+    /// an audit log a guest is trusted to write but not to revise.
+    append-file: func(name: string, contents: list<u8>) -> result<_, fs-error>;
+
+    /// List entries, sorted by name.
+    ///
+    /// # Why sorted, explicitly
+    ///
+    /// Unordered directory iteration is a source of nondeterminism: two runs
+    /// over the same directory can produce different orders, breaking the
+    /// bit-identical replay guarantee (Proposal §10.5). The host sorts, so the
+    /// guest cannot accidentally depend on filesystem order.
+    /// `list` is a WIT keyword, so the operation is named after what
+    /// it returns.
+    entries: func() -> result<list<string>, fs-error>;
+
+    /// Metadata for one entry.
+    metadata: func(name: string) -> result<metadata, fs-error>;
+
+    /// Delete a file.
+    delete-file: func(name: string) -> result<_, fs-error>;
+  }
+
+  /// What is known about a filesystem entry.
+  record metadata {
+    /// Whether the entry is a directory.
+    is-directory: bool,
+    /// Size in bytes. Zero for a directory.
+    size: u64,
+    /// Last modification time, as nanoseconds since the Unix epoch.
+    ///
+    /// Zero when the host cannot determine it — an honest "unknown" rather than
+    /// a fabricated timestamp, which a guest might otherwise act on.
+    modified-ns: u64,
+  }
+}

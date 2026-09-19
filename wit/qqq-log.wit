@@ -1,0 +1,66 @@
+// QQQ structured logging interface.
+//
+// Logs carry tenant and trace attribution applied by the **host**, not the
+// guest — so a guest cannot forge another tenant's identity in a log line, and
+// redaction of manifest-declared secret names is enforced outside the guest's
+// reach (Proposal §10.3).
+package qqq:log@1.0.0;
+
+/// Structured logging.
+interface logging {
+  /// Severity, ordered from most to least verbose.
+  ///
+  /// The set matches what operators already expect, deliberately: inventing a
+  /// new level scheme would make QQQ logs awkward to route in existing tooling.
+  enum level {
+    trace,
+    debug,
+    info,
+    warn,
+    error,
+  }
+
+  /// A structured log attribute.
+  ///
+  /// # Why a typed value rather than a pre-formatted string
+  ///
+  /// Because the host must be able to **redact** a value it recognises as
+  /// secret, and it cannot recognise a value that has already been interpolated
+  /// into a sentence. Structured attributes are what make host-side redaction
+  /// possible rather than aspirational.
+  variant attribute-value {
+    text(string),
+    integer(s64),
+    float(f64),
+    boolean(bool),
+  }
+
+  /// One attribute, as a name/value pair.
+  record attribute {
+    name: string,
+    value: attribute-value,
+  }
+
+  /// Why a logging call failed.
+  variant log-error {
+    /// `log.write` was not granted.
+    not-granted,
+    /// The message or an attribute exceeded the host's per-record maximum.
+    record-too-large,
+  }
+
+  /// Emit one log record.
+  emit: func(level: level, message: string, attributes: list<attribute>) -> result<_, log-error>;
+
+  /// Emit many log records in one call.
+  ///
+  /// Batch-first, per the WIT style guide: a guest logging a batch of parsed
+  /// records should not pay one ABI crossing per record.
+  emit-many: func(records: list<tuple<level, string, list<attribute>>>) -> result<_, log-error>;
+
+  /// Whether records at this level will actually be recorded.
+  ///
+  /// Lets a guest skip building an expensive message it knows will be dropped.
+  /// Without this, "debug logging is off" still costs the guest the formatting.
+  enabled: func(level: level) -> bool;
+}

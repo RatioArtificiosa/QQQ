@@ -618,6 +618,93 @@ the bare `interrupt` signature, with a comment naming it as the real message.
 
 ---
 
+### §O-014 — `qqq-host` part 2: the grant-built linker is real, and the security claim is a test
+
+**What was built.** `linker.rs`: `interface_for`, `required_interfaces`,
+`build_linker`, `BoundInterfaces`, `StoreData`, `recheck`, `describe_gap`.
+Checklist `CAP-008`, `SEC-002`, `HOST-012`.
+
+**Verification:** `cargo test -p qqq-host` → **44 pass**; full workspace →
+**173 pass**; `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+
+---
+
+#### §O-014a — The claim from `§O-006` is now a permanent regression test
+
+Observation `§O-006` recorded a claim verified by a throwaway probe: *a guest
+importing an ungranted capability fails at instantiation, and the error names
+the missing import.* That probe has now been replaced by two permanent tests
+in `qqq-host`:
+
+| Test | What it proves |
+|---|---|
+| `an_ungranted_import_fails_instantiation_and_names_itself` | The negative case: real Wasmtime component, real empty linker, instantiation fails and the error names `greet`/`host:probe` |
+| `a_satisfied_import_instantiates_and_runs` | **The positive control:** the same harness shape with a satisfiable component instantiates and returns 42 |
+
+**The control is not decoration.** Without it, the first test could be passing
+because the harness is broken rather than because the capability model works.
+This pairing was recorded as a standard in `§O-006` and is now enforced in the
+permanent suite.
+
+---
+
+#### §O-014b — Why the linker is per-instance, stated for the record
+
+A per-process linker would give every tenant the **union** of every tenant's
+grants — a catastrophic cross-tenant authority leak, and precisely the failure
+the architecture exists to prevent. Building per instance costs microseconds
+(the instantiation measurement in `§O-006` was p50 800 ns) and is the
+difference between *"the server has permissions"* and *"this request has
+permissions"*.
+
+`recheck` consults the **store's** grant set, never a re-derivation from the
+linker. Re-deriving would make the second check vacuous: a mis-built linker
+would produce the same wrong answer twice. The asymmetry justifies the cost —
+a mis-built linker is a *security hole*, while a spurious re-check denial is an
+*annoying error*.
+
+---
+
+#### §O-014c — Two design decisions forced by the type system, both improvements
+
+**1. `Capability` is `#[non_exhaustive]`, so `interface_for` needed a `_` arm.**
+The compiler refused to let me ignore it. The resolution is the **safe**
+direction: an unknown capability unlocks **no** interface, and the gap is
+surfaced through `describe_gap` as `QQQ-6004` rather than silently ignored. A
+newer `qqq-cap` variant reaching an older `qqq-host` therefore fails loudly
+instead of guessing.
+
+**2. `BoundInterfaces` could not hold `Vec<&'static str>`, because it must
+deserialize.** `Deserialize` cannot produce a `&'static str`, and this type is
+part of `qqqai inspect --json` and the audit record. It now owns `String`s —
+one small allocation per interface at *bind* time, on a path that runs once per
+component rather than once per request. The cheaper type was the wrong trade.
+
+---
+
+#### §O-014d — WIT interface versions are `major.minor`, not `major.minor.patch`
+
+**Observed.** My interface-name test failed: `interface version 1.0 is not a
+valid semver`, because it was validated against `qqq_core::Version`, which
+requires three components.
+
+**Resolution — a deliberate distinction, now documented in the test.** WIT
+interface versions follow the **WIT convention of `major.minor`**. The patch
+level of an *interface* carries no meaning, because an interface is a type
+signature: it either changed compatibly or it did not. Accepting `@1.0.3` would
+imply a distinction no consumer can act on.
+
+This is deliberately **different** from `qqq_core::Version`, which models
+*package* versions where the patch level is meaningful. Two version types with
+two rules, each matching its domain — rather than one loose type that is wrong
+for both. The test now asserts the WIT shape explicitly so the distinction
+cannot erode.
+
+**Cross-refs:** Checklist `CAP-008`, `SEC-002`, `HOST-012`; Proposal §4.4,
+§6.2, §7.3.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

@@ -31,10 +31,15 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod config;
+pub mod linker;
 pub mod trap;
 
 pub use config::{
     aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits,
+};
+pub use linker::{
+    build_linker, describe_gap, interface_for, recheck, required_interfaces,
+    BoundInterfaces, BuiltLinker, StoreData,
 };
 pub use trap::{
     classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame,

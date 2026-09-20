@@ -71,6 +71,8 @@ pub mod host_clock;
 pub mod host_crypto;
 pub mod instance;
 pub mod linker;
+pub mod metrics;
+pub mod pool;
 pub mod trap;
 
 pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
@@ -85,4 +87,6 @@ pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,
     BuiltLinker, StoreData,
 };
+pub use metrics::{Histogram, Metrics, TrapLabel};
+pub use pool::{exhausted_error, Acquired, Exhausted, Pool, ReleaseOutcome};
 pub use trap::{classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame};

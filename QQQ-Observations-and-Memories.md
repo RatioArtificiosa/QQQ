@@ -4797,6 +4797,108 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-057 — Metrics and the pool: the cardinality rule made structural, and a double-count in my own test
+
+**What was built.** `crates/qqq-host/src/metrics.rs` and
+`crates/qqq-host/src/pool.rs` — `HOST-019` and `HOST-012`. 36 new tests; the
+crate goes from 122 to 153.
+
+#### §O-057a — §10.2 asks for a lint; the type system is a better answer
+
+The proposal states the cardinality discipline plainly and names its enforcement
+mechanism:
+
+> **Cardinality discipline:** no metric label may take an unbounded value (no raw
+> paths, no user IDs, no full URLs). **Enforced by a lint on metric definitions.**
+
+A lint over metric definitions is hard to write and easy to bypass, because a
+label is a `&str` at the call site — the lint would have to reason about what
+values flow into it, which is a data-flow analysis dressed up as a lint. The rule
+is enforced here *before* that point instead:
+
+* `TrapLabel` is a closed enum whose variants map to fixed `ErrorCode`s. There is
+  no constructor from a string, so a formatted guest message cannot become a
+  label even by accident.
+* `Metrics` has **no** `label(name, value: &str)` method at all. A caller who
+  wants a new dimension must add a typed label, which is a visible change in a
+  reviewable file rather than a quiet one at a call site.
+* A test asserts every label string is lowercase, non-empty and distinct — and
+  another asserts every variant has its own counter, because two variants sharing
+  an index would silently merge their counts in a way a "traps are recorded" test
+  passes straight through.
+
+The threat this closes is concrete: a hostile guest controls much of a trap's
+text, so a message-derived label lets one component create a new time series per
+request. That is a denial-of-service against whatever scrapes the numbers, and it
+is a security bug rather than a metrics-tidiness bug.
+
+#### §O-057b — My own test found a real double-count, in the series a capacity planner would use
+
+`note_created()` incremented `created`, and `note_acquire(_, false)` incremented
+it too. So a fresh acquisition counted **twice**, and the
+`qqq_instance_created_total` series over-reported by exactly the number of cold
+starts — which is the number a capacity planner reads to decide how large a pool
+should be.
+
+The failure surfaced as a Prometheus-format test asserting the string
+`qqq_instance_created_total 1` against output containing `... 2`. The assertion
+looked like a formatting check and was in fact catching an arithmetic defect two
+layers down.
+
+**The fix was to split the responsibilities rather than to change the number.**
+`note_created` counts an instantiation; `note_acquire` records latency for a
+fresh instance and increments counters only for a pool *hit*. An instance is
+created once and acquired once per use, and the two are separate events — the old
+code conflated them because the call sites happened to be adjacent.
+
+#### §O-057c — Two decisions in the pool that are load-bearing, not stylistic
+
+**The reservation is a compare-exchange loop.** The obvious implementation —
+`if in_use < capacity { in_use += 1 }` — is a load followed by a store. Two
+threads that both read `in_use == capacity - 1` both decide there is room, and
+the pool exceeds its capacity under precisely the contention that makes capacity
+matter. `concurrent_acquires_never_exceed_capacity` runs 16 threads × 500
+attempts against a capacity of 8 and asserts the observed peak never exceeds 8.
+A load-then-store implementation fails it; nothing weaker would have.
+
+**Draining is checked before capacity.** The natural order is to check whether
+there is room, then whether the host is going away. Reversed, a host mid-shutdown
+with one free slot accepts new work and is killed with the request in flight —
+the exact outcome draining exists to prevent, and one whose symptom is a client
+timeout rather than a shutdown bug. The test pins both the refusal *and* the
+absence of a `retry-after` field, because advising a retry against a host that is
+not coming back turns an orderly shutdown into a retry storm that outlives the
+process.
+
+**Discard is not a variant of release.** `Pool::discard` and `Pool::release`
+return the same `ReleaseOutcome` type, but only `release` returns the slot to the
+free list. `a_discarded_instance_is_never_reused` acquires, discards, and asserts
+the *next* acquisition reports `pooled == false` — i.e. that the replacement is
+fresh. This is §4.4 step 14 and `HOST-010`: a trapped instance's memory may hold
+half-written state, and returning it to the pool hands the next request a
+contaminated context.
+
+#### §O-057d — `Retry-After` is computed, and the floor matters more than the formula
+
+`HOST-012` requires 503 with `Retry-After` and says nothing about the value. A
+constant is wrong in both directions at once: too short and every refused client
+retries into the same saturation, keeping the pool at 100 %; too long and clients
+idle while capacity is free. The estimate here is the time for one capacity's
+worth of work at the caller's observed throughput.
+
+The part worth writing down is the **floor of one second**, not the formula. A
+fast-but-saturated host computes a sub-second estimate, and `Retry-After: 0`
+means "retry immediately" to every client library — the precise stampede the
+header exists to prevent. `retry_after_is_never_zero_and_is_bounded` covers the
+fast case (10 000 req/s → 1 s), the ordinary case (10 req/s → 10 s), and the
+absurd case (0.1 req/s → clamped to 60 s rather than an hour).
+
+Passing throughput in as an argument rather than measuring it here keeps `Pool`
+free of a clock and therefore deterministic in tests — the same reason
+`Instance::run_measured` returns a duration instead of logging it.
+
+---
+
 ### §O-056 — `HOST-015`/`HOST-016`: the epoch yield, and the call that forbids synchronous entry
 
 **What was built.** The async execution path in `qqq-host`, which is `HOST-015`

@@ -424,10 +424,29 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-011** Implement the panic hook converting host-function panics into traps, with severity-1 alerting.
   → Partial: the panic hook exists in the trap taxonomy; severity-1 alerting is not built.
-  → Partial: the panic hook exists in the trap taxonomy; severity-1 alerting is not built.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-012** Implement pool-exhaustion backpressure with 503 and `Retry-After`, plus a saturation metric.
+- [x] **HOST-012** Implement pool-exhaustion backpressure with 503 and `Retry-After`, plus a saturation metric.
+  → Done: `crates/qqq-host/src/pool.rs` — `Pool::acquire` returns `QQQ-6001`
+    carrying `reason`, `capacity` and `retry-after` in its context, which
+    `qqq-serve` renders as the 503. `Retry-After` is **computed from observed
+    throughput rather than constant**, because a constant is wrong in both
+    directions at once: too short and every refused client retries into the same
+    saturation, too long and clients idle while capacity is free. It is floored
+    at 1 s so a fast-but-saturated host never emits `Retry-After: 0`, which
+    clients read as "retry immediately".
+  → The plan is a **reservation via compare-exchange**, not load-then-store:
+    two threads that both read `in_use == capacity - 1` would both decide there
+    is room, and the pool would exceed its capacity under exactly the contention
+    that makes capacity matter. Proven by
+    `concurrent_acquires_never_exceed_capacity` — 16 threads × 500 attempts
+    against a capacity of 8, asserting the observed peak never exceeds 8.
+  → Draining is checked **before** capacity. A host mid-shutdown with a free
+    slot that accepted work would be killed mid-request, which is the outcome
+    draining exists to prevent; `a_draining_pool_refuses_even_with_free_capacity`
+    pins that order, and asserts the error does **not** advise a retry.
+  → A drain is orderly: releases still work, so in-flight work completes.
   → §6.1 `qqq-host` — the execution engine
+  → §4.4 Request lifecycle — the detailed path
 - [x] **HOST-013** Implement the AOT `.cwasm` cache with digest+config keying and safe invalidation.
   → Done: `aot_cache_key` keys by component digest, target triple and engine config.
   → §9.4 Specific optimizations planned
@@ -493,9 +512,36 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-018** Implement deterministic-mode engine configuration (NaN canonicalization, seeded RNG, fixed clock).
   → Done: `EngineConfig::deterministic` — fixed clock, seeded RNG, canonical NaN.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **HOST-019** Implement instance metrics: acquire latency histogram, pool occupancy, trap counts by code.
-  → Partial: fuel and duration per execution; the acquire-latency histogram and pool occupancy gauge are not built.
-  → Partial: fuel and duration per execution; the acquire-latency histogram and pool occupancy gauge are not built.
+- [x] **HOST-019** Implement instance metrics: acquire latency histogram, pool occupancy, trap counts by code.
+  → Done: `crates/qqq-host/src/metrics.rs` — a lock-free `Metrics` recorder
+    covering the Instance, Execution and Memory rows of §10.2: created,
+    acquired, released, **discarded**, live, pool saturation, a fixed-bucket
+    acquire-latency histogram with interpolation, fuel consumed, successful
+    executions, traps by bounded label, per-instance peak memory, and a live
+    memory gauge. `render_prometheus` emits all of it, defining the metric
+    *names* once, beside the counters they describe.
+  → **§10.2's cardinality discipline is enforced by the type system, not a
+    lint.** The proposal asks for "a lint on metric definitions", which is hard
+    to write and trivial to bypass because a label is a `&str` at the call site.
+    `TrapLabel` is a closed enum mapping to fixed `ErrorCode`s, there is no
+    `label(name, &str)` API at all, and a test asserts every label string is
+    lowercase, non-empty and distinct. A guest cannot create a time series.
+  → Two design points that are decisions rather than details:
+    **discards are counted separately from releases** (a trap is a security
+    event, and a discard rate is invisible inside a "requests succeeded" count);
+    and **every series is emitted even at zero**, because a `kind` series that
+    vanishes when there are no traps makes `rate()` return no data instead of
+    zero, which is the ambiguity a security dashboard cannot afford.
+  → Writing the tests found a **real double-count in my own code**:
+    `note_created` and a non-pooled `note_acquire` both incremented `created`, so
+    every cold start counted twice — in the one series a capacity planner would
+    use to size a pool. The fix splits the responsibilities; `note_acquire`
+    records latency for a fresh instance and increments counters only for a pool
+    hit.
+  → 18 unit tests including a concurrent-increment test (8 threads × 1000
+    updates; no count lost), a histogram-exhaustiveness test (no observation
+    dropped), and an exposition-format test that checks every sample line is
+    `name value` with exactly one space and every family has both HELP and TYPE.
   → §10.2 Metrics that ship by default
 - [ ] **HOST-020** Write the Wasmtime upgrade runbook and the compatibility-test suite.
   → §15 — Risk Register

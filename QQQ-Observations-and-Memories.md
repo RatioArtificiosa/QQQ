@@ -5000,6 +5000,153 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-069 — `SEC-008`/`SEC-009`: a limit is not enough, the **refusal path** must not be amplifiable
+
+**What `SEC-008` and `SEC-009` actually ask for.** Handle-count limits with proof
+the host survives exhaustion, and subrequest limits to stop guest-driven
+amplification. Both read like "add a counter", and both are not.
+
+**The observation that shaped the design.** Fuel bounds what a guest *computes*.
+It does not bound what a guest *causes*. A loop whose body is `call http.get` then
+`br` costs a handful of fuel units and one outbound request **per iteration**, so
+no fuel budget however tight bounds the fan-out. The same is true of handles:
+`open`/`drop`/`open` is a few fuel units and, without a limit, an unbounded number
+of file descriptors. A limit therefore has to be denominated in **host-effect
+units**, and enforced at the point of the effect — which is why
+`limits.max_subrequests` exists as a manifest field at all rather than being left
+to a per-capability quota.
+
+**The defect the design would have shipped.** The obvious implementation returns
+an error and lets the guest continue. That is itself the vulnerability. The guest
+ignores the error and calls again, and the host rebuilds a full `Error` — a
+`String` message, a two-entry context `Vec`, and a remediation `String` — on every
+iteration. Measured with `cargo run --release --example refusal_probe -p qqq-host`:
+
+| Policy | 100,000 charges |
+|---|---|
+| Advisory (refuse, build the `Error`, continue) | **138.3573 ms** for 99,999 refusals |
+| **Poisoned** (this design) | **48.8 µs** for 100,000 charges — 1 paid, 99,998 free |
+| Ratio | **2835x** |
+| Cost of one refusal, advisory | **1384 ns** |
+
+A refusal costs 1.4 µs; a guest's cheapest loop costs nanoseconds. The host pays
+thousands of times what the guest pays, per iteration, for as long as the guest
+keeps looping. That is the definition of amplification, and **the refusal path was
+it**.
+
+**The fix, and why it is the same fix as `§O-066`.** `SubrequestBudget::charge`
+returns `Charge::Refused` **once** and poisons the budget, so every later charge is
+`Charge::RefusedRepeatedly` — a counter increment, no allocation, no formatting.
+This is structurally the same correction as the memory limiter: there, Wasmtime's
+`StoreLimits` made a refused `memory.grow` *advisory* and the fix was to return
+`Err` so the growth **traps**; here, returning an error and continuing made the
+refusal advisory in exactly the same way, and the fix is to make the second and
+subsequent refusals free. **A limit whose refusal path can be driven in a loop has
+not bounded anything.**
+
+**Why `Charge` is a four-variant enum and not a `bool`.** Three outcomes lead to
+three different host behaviours — continue, warn once, refuse — and collapsing
+warn into continue loses the only *pre-failure* signal. The fourth variant is the
+security-relevant one: it is what lets the caller know it must return a **cheap**
+error rather than building the rich one again. A `bool` cannot express the
+distinction whose whole point is what the caller does next.
+
+**On `SEC-008` specifically: what the count means.** `HandleTable` already
+enforced `max_open_handles`, so the risk was implementing a *second* counter
+beside it — two sources of truth for one number, drifting the first time a remove
+path forgot to credit it, and wrong in whichever direction the drift went
+(permissive = vulnerability, strict = outage). The quota is therefore a **view**
+over the table, and what it adds is what the table lacks: `exhaustion_attempts`,
+which distinguishes "the table reached its ceiling" from "a guest *tried* to go
+past it". The table's limit is what stops the attack; the counter is what makes it
+visible.
+
+**What was proven, and the two controls that make it mean something.** The
+`SEC-008` tests assert the *state* after a failed attempt, not merely that it
+failed — a table that refused but corrupted its accounting would pass `is_err()`.
+Two of the tests are deliberately **negative**: churn (10,000 open/close cycles
+through a table that holds 4) must never be refused, because the limit is on
+*concurrency* and not *throughput* — a rate limit masquerading as a count limit
+would refuse long-lived honest guests and be a production outage. And the budget
+isolation test asserts one instance exhausting its budget does **not** affect
+another, because a `static` guard would turn one tenant's misbehaviour into a
+platform-wide outage.
+
+**Fault injection, both directions.** Disabling the table's limit check fails
+**7 tests**, the new `SEC-008` ones among them. Collapsing `RefusedRepeatedly`
+into `Refused` — the *subtle* regression, where the guard exists but rebuilds the
+error — fails `a_poisoned_refusal_does_no_work` and
+`the_amplification_counter_counts_attempts_by_the_guest`. Both were restored and
+the restoration re-read rather than assumed.
+
+**A correction to my own tests, recorded because it recurred twice.** Four
+assertions I wrote failed against *correct* code, all from the same
+misunderstanding: at a limit of 2 or 4, the **last permitted** charge is
+`AllowedWithWarning`, because the threshold test `spent * 100 >= limit * 80` is
+satisfied by the final charge for small budgets. That is right and useful — a
+guest about to be refused is exactly the guest to warn, and a threshold that could
+never fire for a small budget would vanish where the limit is tightest. The tests
+now assert that explicitly rather than being loosened to `is_allowed()`, because
+loosening would have thrown away the behaviour being pinned.
+
+**What remains open, recorded rather than implied.** The charge call sites inside
+`qqq:http`, `qqq:dns`, `qqq:sqs` and the rest do not exist because those
+interfaces have no host implementation yet (`QQQ-STUB(CON-009)` in the linker).
+`StoreData::charge_subrequest` documents the contract each must honour — charge
+**before** performing the effect — and the linker's stub marker plus the `qqq-abi`
+registry's `implemented` flag are what keep the gap visible rather than implied to
+be closed.
+
+→ §7.2 Adversary model. New files: `crates/qqq-host/src/quota.rs`,
+`crates/qqq-host/tests/subrequest_limits.rs`,
+`crates/qqq-host/tests/refusal_amplification.rs`,
+`crates/qqq-host/examples/refusal_probe.rs`. New code `QQQ-3008`.
+
+---
+
+### §O-068 — Two mechanical decisions in `SEC-008`/`SEC-009`, and the traps each avoided
+
+Recorded separately from `§O-069` because these are small, and each one is a place
+where the obvious choice was the wrong one for a reason that will not be obvious
+to the next reader.
+
+**`max_subrequests` was added to `Limits`, `StoreLimits` and `StoreData`.** The
+temptation was to skip the manifest field and derive the budget from something
+already present — instance count, or a fraction of fuel. Both were rejected:
+§2.5 forbids implicit rules, and a limit an auditor cannot read in `qqq.toml` is a
+limit an auditor cannot verify. The field is also how the *range check* became
+possible (`limit_bounds::SUBREQUESTS_MAX = 10_000`), set deliberately far below
+`HANDLES_MAX = 100_000`: a handle is a locally pooled object, whereas a
+subrequest is an outbound side effect on a **third party**, and 100,000 of those
+from one request is an outage aimed at somebody else.
+
+**`StoreData::default()` and `StoreData::new()` grant a budget of ZERO.** The
+alternative is "unlimited", and `0 == unlimited` is the convention that quietly
+inverts the most restrictive manifest into the most permissive one. Choosing zero
+means a store assembled without limits can drive no outbound effects. The cost is
+that a caller who forgets to install limits gets a confusing refusal — which is
+why `set_limits` re-derives **both** quotas from the same value it takes the
+memory ceiling from, and why `the_limit_set_decides_the_budget_on_a_real_instance`
+asserts the wiring rather than the arithmetic. Refreshing one quota and not the
+other is the single most likely way for this code to go wrong.
+
+**`charge_subrequest` takes no payload and returns no count.** `SEC-011` will add
+input validation at the same boundary, and the two must not be conflated: a
+*malformed* argument is a request to reject with a guest-bug diagnostic
+(`Verdict`/`McpArgumentInvalid`, 7001), while an *over-budget* call is a policy
+refusal (`QQQ-3008`). One is "your code is wrong", the other is "your code is
+doing too much". Merging them would send a developer whose bug is a `String` where
+a `u32` belongs to go raise a limit.
+
+**The warning threshold is a constant, not a field.** `WARN_THRESHOLD_PERCENT =
+80` is fixed because a *configurable* warning threshold in the manifest would be a
+second way to express a limit, and the two would eventually disagree. The
+threshold is a policy of the runtime; the limit is a policy of the deployment.
+
+→ §6.1, §8 telemetry (`capability_use`). No new code beyond `QQQ-3008`.
+
+---
+
 ### §O-067 — Path traversal passed the containment check, and the doc was the only defence
 
 **What was found.** `SEC-010` asks for traversal defences *"with a test corpus"*.
@@ -6539,5 +6686,7 @@ entry is the correction.
 | 2026-09-19 | **`SRV-007` and `SRV-008` implemented: `qqq-serve::tls` (`§O-053`).** An explicit cipher policy — an unspecified algorithm is *refused*, not defaulted — TLS 1.3 preferred with 1.2 permitted, ALPN for `h2`/`http/1.1`, certificate sources (`Files`, `Platform`, and `Acme` refused by name), `ClientAuth` in `None`/`Required`/`Optional`, and `PeerIdentity` from a verified client certificate; 35 unit tests and 21 real-handshake tests. **A real defect was found by the end-to-end mTLS test and by nothing else**: `common_name_of` searched the `Certificate`'s children for tag `[3]`, believing `[3]` wrapped `TBSCertificate` — but `[3]` is the *extensions* field inside TBS, and a real certificate's children are `0x30, 0x30, 0x03`. The search returned `None` for **every** certificate, so an mTLS access log read `(subject has no common name)` for every peer. **The unit tests could not catch it because they encoded the same misunderstanding**: the fixtures wrapped their `Name` in a `[3]` no real certificate produces, and two artifacts sharing a wrong assumption cannot correct each other (`§O-053a`). Three further fixture comments asserted third-party behaviour wrongly — `generate_simple_self_signed` does not derive the subject CN from the SAN; the handshake dialled `localhost` while the certificate was for `qqq-test-server`, turning nine failures into one uninformative `left: None`; and disjoint ALPN lists *refuse* the handshake rather than completing without a protocol (`§O-053b`). Every claim about `rcgen` and `rustls` was a prose comment nobody could check — the project verified its own code and its Proposal, but not its dependencies or its fixtures. Verified by injection: reinstating the `0xA3` search fails the new real-certificate test. | Architect |
 
 | 2026-09-19 | **`cargo deny` was red two ways at once and one hid the other (`§O-054`, `§O-055`).** `cargo check`, `clippy -D warnings` and every test were green while the supply-chain job failed: `rustls-pemfile` is unmaintained (`RUSTSEC-2025-0134`) and was a **direct** dependency of `qqq-serve`, which `deny.toml`'s `unmaintained = "workspace"` policy is precisely shaped to catch. The fix was to **remove the dependency rather than ignore the advisory** — `PemObject` in `rustls-pki-types` is the same code the old crate wrapped, so `pem_slice_iter`/`from_pem_slice` replaced it, and with it went two `BufReader` layers that existed only for `rustls_pemfile`'s `Read` bound. Repairing that exposed a **second, masked failure**: `ISC` was absent from `[licenses].allow` while the comment twenty lines above the list *named it as present*, so prose and list had drifted; `cargo deny` evaluates `advisories` first and exits non-zero on it, so the licence failure never printed. **A red check that fails for reason 1 tells you nothing about reason 2** — the same shape as `§M-006` and `§O-051`. `cargo deny check` now reports `advisories ok, bans ok, licenses ok, sources ok`; the 21 handshake and 35 unit TLS tests pass unchanged. The deeper lesson is `§O-055`: `cargo deny` and `cargo machete` are CI-only steps with no local script, so the rule "verify with real commands" was being satisfied against the commands that were *remembered*. `tools/audit_requirements.py` is the full gate, its last requirement is a clean tree, and it reported **31/32** — which is what made the state visible. **Before every commit, run the audit, not a subset of it.** | Architect |
+
+| 2026-09-20 | **`SEC-008` and `SEC-009` implemented (`§O-068`, `§O-069`), and the refusal path was itself the amplification.** `SEC-009`'s obvious implementation — a counter that refuses and lets the guest continue — is a **loop amplification attack**: the guest ignores the error and the host rebuilds a full `Error` (message, context `Vec`, remediation) every iteration. Measured with `cargo run --release --example refusal_probe -p qqq-host`: the advisory policy took **138.3573 ms** for 99,999 refusals against **48.8 µs** for the poisoned policy's 100,000 charges (1 paid, 99,998 free) — a **2835x** ratio, at **1384 ns per refusal** against a guest loop costing nanoseconds. This is structurally the same defect as §O-066: there Wasmtime made a refused `memory.grow` *advisory*, here returning an error and continuing made the refusal advisory in exactly the same way. `SubrequestBudget::charge` now returns `Charge::Refused` **once**, poisons the budget, and every later charge is `Charge::RefusedRepeatedly` — a counter increment with no allocation. **A limit whose refusal path can be driven in a loop has not bounded anything.** New manifest field `limits.max_subrequests` (`SUBREQUESTS_MAX = 10_000`, deliberately below `HANDLES_MAX` because a subrequest is a side effect on a third party), new code `QQQ-3008 SubrequestLimitExceeded` kept distinct from the retryable `4005 CapabilityQuotaExhausted`, and `StoreData::default()` grants **zero** budget so `0 == unlimited` cannot invert the most restrictive manifest into the most permissive. `SEC-008`'s risk was the opposite — a **second** counter beside `HandleTable`'s existing one, two sources of truth that drift, permissively (a vulnerability) or strictly (an outage) — so `quota::HandleQuota` is a **view** over the table that adds only `exhaustion_attempts`, which separates "the table reached its ceiling" from "a guest *tried* to pass it". Six `handles.rs` tests assert the **state** after a failed attempt rather than that it failed, and the load-bearing one is the **negative control**: 10,000 open/close cycles through a table holding 4 must never be refused, because the limit is on *concurrency* not *throughput*. Fault-injected twice: disabling the limit check fails **7 tests**; collapsing `RefusedRepeatedly` into `Refused` — the subtle regression — fails the two amplification tests. Four of my own assertions failed first against *correct* code, all from one misunderstanding now pinned in the tests: at a small limit the **last permitted** charge is `AllowedWithWarning`, since `spent * 100 >= limit * 80` is satisfied by the final charge. Recorded because loosening them to `is_allowed()` would have discarded the behaviour being pinned. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

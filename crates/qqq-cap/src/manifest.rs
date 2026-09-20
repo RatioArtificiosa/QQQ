@@ -446,6 +446,19 @@ pub struct Limits {
     /// Maximum simultaneously open resource handles.
     #[serde(default = "default_handles")]
     pub max_open_handles: u32,
+    /// Maximum outbound subrequests one instance may drive.
+    ///
+    /// # Why this is a limit about *caused* work rather than *performed* work
+    ///
+    /// Fuel bounds what the guest computes. It does not bound what the guest
+    /// **causes**: a loop that calls `http.get` and ignores the result costs a
+    /// handful of fuel units per iteration and one outbound request per
+    /// iteration. §7.2 names resource exhaustion among the adversary's goals, and
+    /// this is the field that makes the *amplification* variant of it
+    /// enforceable rather than aspirational. See `qqq-host`'s `quota` module for
+    /// the enforcement and the poisoning rule.
+    #[serde(default = "default_subrequests")]
+    pub max_subrequests: u32,
     /// Impose a single scheduler tick after this many instances are polled.
     #[serde(default = "default_poll")]
     pub max_poll_per_tick: u32,
@@ -466,6 +479,9 @@ const fn default_instances() -> u32 {
 const fn default_handles() -> u32 {
     256
 }
+const fn default_subrequests() -> u32 {
+    32
+}
 const fn default_poll() -> u32 {
     10
 }
@@ -478,6 +494,7 @@ impl Default for Limits {
             epoch_deadline_ms: default_epoch_ms(),
             max_instances: default_instances(),
             max_open_handles: default_handles(),
+            max_subrequests: default_subrequests(),
             max_poll_per_tick: default_poll(),
         }
     }
@@ -589,6 +606,14 @@ pub mod limit_bounds {
     pub const INSTANCES_MAX: u32 = 100_000;
     /// Maximum open handles per instance.
     pub const HANDLES_MAX: u32 = 100_000;
+    /// Maximum subrequests per instance.
+    ///
+    /// Lower than [`HANDLES_MAX`] deliberately. A handle is a locally pooled
+    /// object and a hundred thousand of them is merely large; a subrequest is an
+    /// outbound side effect on a **third party**, and a hundred thousand of them
+    /// from one request is an outage aimed at somebody else. The ceiling is the
+    /// range check's job — the operator picks the real number.
+    pub const SUBREQUESTS_MAX: u32 = 10_000;
 }
 
 /// Test whether a limit error applies, generating the message from the same
@@ -939,6 +964,12 @@ impl Manifest {
             &self.limits.max_open_handles,
             &0,
             &limit_bounds::HANDLES_MAX,
+        )?;
+        check_range(
+            "limits.max_subrequests",
+            &self.limits.max_subrequests,
+            &0,
+            &limit_bounds::SUBREQUESTS_MAX,
         )?;
         Ok(())
     }

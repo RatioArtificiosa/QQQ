@@ -1279,10 +1279,94 @@ Items are grouped below by **phase**, because dependency order matters more than
     on a property under test. Asserting one *there* would make the test depend on
     a timing measurement.
   → §7.2 Adversary model
-- [ ] **SEC-008** Implement handle-count limits and prove the host survives handle exhaustion attempts.
+- [x] **SEC-008** Implement handle-count limits and prove the host survives handle exhaustion attempts.
+  → Done: `limits.max_open_handles` was already enforced by `HandleTable`, so the
+    risk here was building a **second** counter beside it. Two sources of truth for
+    one number drift the first time a remove path forgets to credit one, and drift
+    is wrong in *some* direction — permissive is a resource-exhaustion
+    vulnerability, strict is a production outage. `quota::HandleQuota` is therefore
+    a **view** over the table, and what it adds is what the table lacked:
+    `exhaustion_attempts`, which distinguishes "the table reached its ceiling" from
+    "a guest **tried** to go past it".
+  → The proof is six tests in `handles.rs`, each asserting the **state** after a
+    failed attempt rather than merely that it failed — a table that refused but
+    corrupted its accounting would pass a bare `is_err()` check:
+    | Test | Attack shape |
+    |---|---|
+    | `an_accumulating_guest_is_refused_without_disturbing_the_table` | open, never close |
+    | `a_probing_guest_is_rejected_and_the_probes_are_counted` | guess handle values |
+    | `the_limit_holds_across_an_adversarial_interleaving` | 5,000 mixed operations |
+    | `a_zero_limit_refuses_indefinitely_rather_than_sporadically` | no handles declared |
+    | `churn_is_unbounded_because_the_limit_is_on_concurrency_not_throughput` | **control** |
+    | `a_huge_limit_is_representable_and_not_preallocated` | 100,000 declared |
+  → **The control is the load-bearing one.** 10,000 open/close cycles through a
+    table that holds 4 must never be refused, because the limit is on
+    *concurrency* and not *throughput*. A rate limit masquerading as a count limit
+    would refuse long-lived honest guests — an outage from a security control.
+  → **Fault-injected.** Disabling the limit check (`if false && live >= limit`) in
+    `handles.rs` makes **7 tests** fail, the new `SEC-008` ones among them.
+    Restored, and the restore re-read rather than assumed.
+  → Also proven end-to-end: `subrequest_limits.rs` asserts a real
+    `Instance::create` derives its quota from `LimitSet`, and that one instance
+    exhausting its budget does **not** affect another — a `static` guard there
+    would turn one tenant's misbehaviour into a platform-wide outage.
   → §7.2 Adversary model
-- [ ] **SEC-009** Implement subrequest limits to prevent guest-driven request amplification.
-  → §7.2 Adversary model
+- [x] **SEC-009** Implement subrequest limits to prevent guest-driven request amplification.
+  → Done, and **the implementation the item implies would itself have been the
+    vulnerability.** The obvious design is a counter that returns an error and lets
+    the guest continue. That is a **loop amplification attack**: the guest ignores
+    the error, calls again, and the host rebuilds a full `Error` — message, context
+    `Vec`, remediation `String` — every iteration.
+  → **Measured**, `cargo run --release --example refusal_probe -p qqq-host`:
+    | Policy | 100,000 charges |
+    |---|---|
+    | Advisory (refuse, build the `Error`, continue) | **138.3573 ms** for 99,999 refusals |
+    | **Poisoned** (shipped) | **48.8 µs** — 1 paid refusal, 99,998 free |
+    | Ratio | **2835x** |
+    | Cost of one refusal | **1384 ns** |
+  → A refusal costs 1.4 µs; a guest's cheapest loop costs nanoseconds. The host was
+    paying thousands of times what the guest paid, per iteration, forever.
+  → **The fix is structurally the same as the memory defect in §O-066.** There,
+    Wasmtime made a refused `memory.grow` *advisory* and the correction was to make
+    the growth **trap**; here, returning an error and continuing made the refusal
+    advisory in exactly the same way. `SubrequestBudget::charge` returns
+    `Charge::Refused` **once**, poisons the budget, and every later charge is
+    `Charge::RefusedRepeatedly` — a counter increment with no allocation. **A limit
+    whose refusal path can be driven in a loop has not bounded anything.**
+  → `limits.max_subrequests` is a new manifest field with a range check
+    (`SUBREQUESTS_MAX = 10_000`, deliberately far below `HANDLES_MAX = 100_000`):
+    a handle is a locally pooled object, whereas a subrequest is an outbound side
+    effect on a **third party**, and 100,000 of them from one request is an outage
+    aimed at somebody else.
+  → **Why a limit in host-effect units at all.** Fuel bounds what a guest
+    *computes*, not what it *causes*: `call http.get` + `br` in a loop costs a few
+    fuel units and one outbound request per iteration, so no fuel budget bounds the
+    fan-out. Measured, that loop costs the host 1.4 µs per iteration.
+  → Nine tests in `subrequest_limits.rs` — the limit reaches a real instance
+    through `Instance::create`; the refusal carries `QQQ-3008` and is **not
+    retryable** (retrying re-runs the loop); a guest ignoring 10,000 refusals
+    drives exactly **one** paid refusal; a zero limit refuses the very first call;
+    and the host survives an exhausted budget plus a trapped guest.
+  → **Fault-injected twice.** Collapsing `RefusedRepeatedly` into `Refused` — the
+    *subtle* regression where the guard exists but rebuilds the error — fails
+    `a_poisoned_refusal_does_no_work` and
+    `the_amplification_counter_counts_attempts_by_the_guest`. The ratio is asserted
+    at `>= 4x` in CI (a property) while the example prints the real figure (a
+    measurement), because a test that only says `>= 4x` cannot tell a marginal
+    design from a decisive one.
+  → **What is not wired, stated rather than implied.** The charge call sites inside
+    `qqq:http`, `qqq:dns`, `qqq:sqs` and the rest do not exist because those
+    interfaces have no host implementation yet (`QQQ-STUB(CON-009)` in the linker).
+    `StoreData::charge_subrequest` documents the contract each must honour — charge
+    **before** performing the effect — and the stub marker plus the registry's
+    `implemented` flag keep the gap visible. `StoreData::default()` grants **zero**
+    budget, because `0 == unlimited` would invert the most restrictive manifest
+    into the most permissive one.
+  → §7.2 Adversary model. New code `QQQ-3008 SubrequestLimitExceeded`, kept distinct
+    from `4005 CapabilityQuotaExhausted`: that one is a per-capability accounting
+    question and is retryable, this one is a property of the guest's **control
+    flow** and is not. Sharing a code would tell an operator whose problem is a
+    looping guest to back off and retry.
 - [x] **SEC-010** Implement path-traversal defences at the capability boundary, with a test corpus.
   → Done: **and building the corpus found a real vulnerability.** `path_is_within`
     — the containment check `fs_allows` uses as its defence-in-depth re-check —

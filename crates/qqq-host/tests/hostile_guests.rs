@@ -243,6 +243,7 @@ impl Limits {
                 fuel: 50_000,
                 epoch_deadline_ms: 5_000,
                 max_open_handles: 64,
+                max_subrequests: 32,
             },
             Self::LowMemory => LimitSet {
                 // 4 MiB. The hog grows 16 pages (1 MiB) per iteration.
@@ -255,12 +256,14 @@ impl Limits {
                 fuel: 10_000_000_000,
                 epoch_deadline_ms: 30_000,
                 max_open_handles: 64,
+                max_subrequests: 32,
             },
             Self::Ordinary => LimitSet {
                 memory_bytes: 16 * 1024 * 1024,
                 fuel: 500_000_000,
                 epoch_deadline_ms: 5_000,
                 max_open_handles: 64,
+                max_subrequests: 32,
             },
         }
     }
@@ -719,6 +722,7 @@ fn a_guest_that_exceeds_its_memory_limit_is_stopped_and_the_host_survives() {
         fuel: 10_000_000_000,
         epoch_deadline_ms: 30_000,
         max_open_handles: 64,
+        max_subrequests: 32,
     };
 
     let inst = Instance::create(&engine, &prepared, &no_grants(), limits).expect("instantiates");

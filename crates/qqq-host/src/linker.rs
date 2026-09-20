@@ -43,6 +43,7 @@ use std::fmt;
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
+use qqq_core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use wasmtime::component::Linker;
 use wasmtime::StoreLimits;
@@ -92,6 +93,22 @@ pub struct StoreData {
 
     /// The ambient state: clock and RNG, deterministic or not.
     pub ambient: crate::ambient::AmbientState,
+
+    /// The subrequest budget for this instance — `SEC-009`.
+    ///
+    /// # Why the budget lives in the store rather than in each capability
+    ///
+    /// Because amplification is a property of the **guest's control flow**, not
+    /// of one capability: a loop alternating `http.get` and `dns.resolve` doubles
+    /// its fan-out while touching only a third of either interface's own quota.
+    /// One budget per instance is what makes "this request caused N outbound
+    /// effects" a number the host can state and enforce. Per-capability limits
+    /// still exist (`CapabilityQuotaExhausted`, `4005`) and they answer a
+    /// different question — how much of *this capability* was used.
+    pub subrequests: crate::quota::SubrequestBudget,
+
+    /// The handle quota for this instance — `SEC-008`.
+    pub handles: crate::quota::HandleQuota,
 }
 
 impl Default for StoreData {
@@ -105,6 +122,14 @@ impl Default for StoreData {
             limits: None,
             allowed_hashes: Vec::new(),
             ambient: crate::ambient::AmbientState::default(),
+            // Zero, not "unlimited". A store assembled without going through
+            // `from_manifest` or `set_limits` has no declared budget, and the
+            // safe reading of "no budget declared" is that the guest may drive
+            // no outbound effects. An implicit `0 == unlimited` here would make
+            // the default the most permissive possible configuration, which is
+            // the failure mode §2.5 exists to forbid.
+            subrequests: crate::quota::SubrequestBudget::new(0),
+            handles: crate::quota::HandleQuota::new(0),
         }
     }
 }
@@ -119,6 +144,8 @@ impl StoreData {
             limits: None,
             allowed_hashes: Vec::new(),
             ambient: crate::ambient::AmbientState::default(),
+            subrequests: crate::quota::SubrequestBudget::new(0),
+            handles: crate::quota::HandleQuota::new(0),
         }
     }
 
@@ -153,6 +180,11 @@ impl StoreData {
             limits: None,
             allowed_hashes,
             ambient: crate::ambient::AmbientState::default(),
+            // Derived from the manifest so `[limits]` is the single source of
+            // truth. Deriving the ambient state from the manifest and the quotas
+            // from somewhere else is how one of them ends up not being applied.
+            subrequests: crate::quota::SubrequestBudget::new(manifest.limits.max_subrequests),
+            handles: crate::quota::HandleQuota::new(manifest.limits.max_open_handles),
         }
     }
 
@@ -176,6 +208,14 @@ impl StoreData {
     /// takes it; this form exists for stores with no explicit limit.
     pub fn set_limits(&mut self, limiter: StoreLimits, limits: crate::config::StoreLimits) {
         self.resource_limits = TrappingLimiter::new(limiter, usize::MAX);
+        // Re-derive BOTH quotas from the same `limits` value the memory ceiling
+        // came from. Refreshing one and not the other is the single most likely
+        // way for this code to go wrong: a caller who sets limits programmatically
+        // (the test and embedding paths) would silently get a zero subrequest
+        // budget, and every outbound call would fail with a confusing refusal
+        // that names a limit the caller never wrote.
+        self.subrequests = crate::quota::SubrequestBudget::new(limits.max_subrequests);
+        self.handles = crate::quota::HandleQuota::new(limits.max_open_handles);
         self.limits = Some(limits);
     }
 
@@ -194,6 +234,67 @@ impl StoreData {
     #[must_use]
     pub const fn limits(&self) -> Option<crate::config::StoreLimits> {
         self.limits
+    }
+
+    /// Charge one subrequest, enforcing `limits.max_subrequests` — `SEC-009`.
+    ///
+    /// # The contract every outbound host call must honour
+    ///
+    /// Any host function that causes an effect **outside the host process** —
+    /// an HTTP request, a DNS lookup, a queue publish, a SQL round-trip — must
+    /// call this **before** performing the effect, and must return the error to
+    /// the guest when it is refused. The order matters: charging afterwards would
+    /// let the guest exhaust the limit by however many requests fit in flight,
+    /// and charging after a *failed* effect would charge for work that did not
+    /// happen.
+    ///
+    /// # Why the return is `Result` and the poison matters
+    ///
+    /// On the first refusal the caller gets `Err` and returns it to the guest.
+    /// On every later call the charge is free — that is
+    /// [`SubrequestBudget::charge`]'s poisoning, and it is what stops a guest
+    /// that ignores the error from turning the refusal path into its own
+    /// amplification vector. See `crate::quota` for the measurement.
+    ///
+    /// # Errors
+    ///
+    /// `QQQ-3008 SubrequestLimitExceeded` when the budget is exhausted.
+    pub fn charge_subrequest(&mut self) -> Result<()> {
+        use crate::quota::Charge;
+        match self.subrequests.charge() {
+            // A permitted charge, with or without the threshold crossing.
+            //
+            // The two are one arm because the host does the same thing in both
+            // cases: nothing. The warning is recorded *on the budget*
+            // (`warned`), and a caller holding a `Metrics` handle reads it after
+            // the call. Emitting a counter here would mean threading metrics
+            // through every host function for a once-per-instance event, on the
+            // hot path, which is the wrong trade — and the code this replaced
+            // made that decision invisible by giving the two identical arms
+            // separate bodies.
+            Charge::Allowed | Charge::AllowedWithWarning => Ok(()),
+            Charge::Refused => Err(self.subrequests.refusal()),
+            // Deliberately a CHEAP error rather than the full one: the guest
+            // already received that refusal, and constructing the context map
+            // and remediation again is exactly the amplification this module
+            // exists to stop. See `crate::quota` for the 2835x measurement.
+            Charge::RefusedRepeatedly => Err(Error::new(
+                ErrorCode::SubrequestLimitExceeded,
+                "the subrequest budget for this instance remains exhausted",
+            )),
+        }
+    }
+
+    /// The subrequest budget, for diagnostics and tests.
+    #[must_use]
+    pub const fn subrequests(&self) -> &crate::quota::SubrequestBudget {
+        &self.subrequests
+    }
+
+    /// The handle quota, for diagnostics and tests.
+    #[must_use]
+    pub const fn handle_quota(&self) -> &crate::quota::HandleQuota {
+        &self.handles
     }
 }
 

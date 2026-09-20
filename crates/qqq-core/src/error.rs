@@ -210,6 +210,25 @@ pub enum ErrorCode {
     /// **Remediation:** this is a guest bug — fix the indexing or pointer
     /// arithmetic. The backtrace names the faulting function.
     GuestOutOfBounds = 3007,
+    /// The guest exhausted its subrequest budget: it asked the host to make
+    /// more outbound requests than `limits.max_subrequests` allows.
+    ///
+    /// **Distinct from [`Self::CapabilityQuotaExhausted`] on purpose**, and the
+    /// distinction is a security one. That code means *"a capability's runtime
+    /// quota ran out"* — a per-capability accounting question, retryable once
+    /// the quota window resets, and answered with `4005`. This code means
+    /// *"this guest tried to amplify one inbound request into N outbound
+    /// ones"* — a property of the **guest's control flow**, not of a capability's
+    /// usage, and not retryable, because retrying re-runs the loop.
+    ///
+    /// Conflating them would make the trap taxonomy recommend a backoff-and-retry
+    /// to an operator whose actual problem is a guest that loops. The
+    /// amplification counter (`SubrequestBudget::amplification_attempts`) is the
+    /// signal that separates the two at telemetry time.
+    ///
+    /// **Remediation:** raise `limits.max_subrequests` if the fan-out is
+    /// intended, or fix the guest's loop if it is not.
+    SubrequestLimitExceeded = 3008,
 
     // -- 4xxx: capability denials --------------------------------------------
     /// The requested capability is not granted by any configuration layer.
@@ -400,6 +419,7 @@ impl ErrorCode {
             Self::InvalidResourceHandle,
             Self::GuestPanic,
             Self::GuestOutOfBounds,
+            Self::SubrequestLimitExceeded,
             Self::CapabilityOutOfScope,
             Self::CapabilityWideningRefused,
             Self::CapabilityDenied,

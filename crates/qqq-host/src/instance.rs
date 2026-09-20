@@ -1007,6 +1007,7 @@ mod tests {
             fuel: 10_000_000,
             epoch_deadline_ms: 5_000,
             max_open_handles: 64,
+            max_subrequests: 32,
         }
     }
 

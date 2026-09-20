@@ -286,6 +286,14 @@ pub struct StoreLimits {
     pub epoch_deadline_ms: u64,
     /// Maximum simultaneously open resource handles.
     pub max_open_handles: u32,
+    /// Maximum outbound subrequests one instance may drive.
+    ///
+    /// Separate from `fuel` because the two bound different things: fuel bounds
+    /// what the guest *computes*, this bounds what the guest *causes*. A loop
+    /// calling `http.get` costs a few fuel units per iteration and one outbound
+    /// request per iteration, so without this field the fan-out is unbounded
+    /// however tight the fuel budget is. See `crate::quota`.
+    pub max_subrequests: u32,
 }
 
 impl StoreLimits {
@@ -314,6 +322,7 @@ impl StoreLimits {
             fuel: limits.fuel,
             epoch_deadline_ms: limits.epoch_deadline_ms,
             max_open_handles: limits.max_open_handles,
+            max_subrequests: limits.max_subrequests,
         })
     }
 }
@@ -428,6 +437,7 @@ mod tests {
             epoch_deadline_ms: 5_000,
             max_instances: 200,
             max_open_handles: 256,
+            max_subrequests: 32,
             max_poll_per_tick: 10,
         }
     }

@@ -747,4 +747,265 @@ mod tests {
         assert_eq!(s.invalid, 0);
         assert_eq!(s.generations_exhausted, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // SEC-008: handle exhaustion attempts
+    //
+    // The items below are the proof that the host survives a guest that tries to
+    // exhaust the handle table. Two of them are *negative* — they assert that a
+    // legal heavy workload still succeeds — because a table that refused
+    // everything would satisfy every exhaustion assertion while being useless.
+    // -----------------------------------------------------------------------
+
+    /// **The accumulation attack.** A guest that opens handles and never closes
+    /// them is refused at the limit, and the refusal does not disturb the table.
+    ///
+    /// This is the shape `SEC-008` names: "prove the host survives handle
+    /// exhaustion attempts". The assertions are not merely `is_err()` — the
+    /// *state* after the failed attempt is what matters. A table that refused
+    /// but corrupted its own accounting would pass an `is_err()` check and fail
+    /// here.
+    #[test]
+    fn an_accumulating_guest_is_refused_without_disturbing_the_table() {
+        const LIMIT: u32 = 8;
+        let mut t = HandleTable::new(LIMIT);
+        let mut held = Vec::new();
+
+        // Fill exactly to the limit.
+        for i in 0..LIMIT {
+            held.push(t.insert(i).expect("within the limit"));
+        }
+        assert_eq!(t.open(), LIMIT as usize);
+        assert!(t.is_full());
+
+        // Now attempt twenty more. Every one must be refused.
+        for i in 0..20 {
+            let err = t.insert(1000 + i).expect_err("the table is full");
+            assert_eq!(err.code, ErrorCode::InvalidResourceHandle);
+            assert!(err.remediation.is_some());
+        }
+
+        // The refusals changed nothing: still exactly LIMIT live, still LIMIT
+        // slots, and every handle handed out before the attack still works.
+        assert_eq!(
+            t.open(),
+            LIMIT as usize,
+            "a refusal must not change liveness"
+        );
+        assert_eq!(
+            t.slots.len(),
+            LIMIT as usize,
+            "a refusal must not grow slots"
+        );
+        assert_eq!(t.stats().refused, 20);
+        assert_eq!(t.stats().opened, u64::from(LIMIT));
+        assert_eq!(t.stats().closed, 0);
+        for (i, h) in held.iter().enumerate() {
+            assert_eq!(
+                t.get(*h)
+                    .expect("handles from before the attack must still work"),
+                &u32::try_from(i).expect("the limit fits in u32"),
+                "handle {i} was invalidated by a refused insert"
+            );
+        }
+    }
+
+    /// **Handle churn is legal and cheap.** The control that stops the limit
+    /// becoming a denial of service against honest guests.
+    ///
+    /// A table whose limit counted *total* allocations rather than *live* ones
+    /// would refuse a long-lived guest at its limit-th allocation and be a
+    /// production outage. This proves the limit is on concurrency, not on
+    /// throughput — which is the distinction between "handle-count limit" and
+    /// "handle-rate limit", and §6.1 specifies the first.
+    #[test]
+    fn churn_is_unbounded_because_the_limit_is_on_concurrency_not_throughput() {
+        const LIMIT: u32 = 4;
+        let mut t = HandleTable::new(LIMIT);
+
+        // 10,000 open/close cycles through a table that can hold 4.
+        for i in 0..10_000_u64 {
+            let h = t
+                .insert(i)
+                .expect("churn within the limit must never be refused");
+            assert_eq!(t.get(h).expect("live"), &i);
+            assert_eq!(t.remove(h).expect("live"), i);
+        }
+
+        assert_eq!(t.open(), 0);
+        assert_eq!(t.stats().opened, 10_000);
+        assert_eq!(t.stats().closed, 10_000);
+        assert_eq!(
+            t.stats().refused,
+            0,
+            "churn must not consume the concurrency budget"
+        );
+    }
+
+    /// **The probing attack.** A guest guessing handle values is rejected, and
+    /// the rejections are counted so the attack is visible.
+    ///
+    /// Distinct from the exhaustion attack: this one never reaches the limit.
+    /// It is the guest trying to *name* resources it was never given, and the
+    /// generation check is what stops it.
+    #[test]
+    fn a_probing_guest_is_rejected_and_the_probes_are_counted() {
+        let mut t = HandleTable::new(64);
+        let real = t.insert("the one real handle").expect("fits");
+
+        // Probe a wide space, including values adjacent to the real handle's
+        // generation and the extremes of the u64 space.
+        //
+        // `0` and `1` matter here for a reason worth stating: the real handle is
+        // slot 0 generation 0, whose raw value IS `0`. So `0` is not a probe at
+        // all, and the list deliberately contains it to assert that the *real*
+        // handle still resolves after the probing — an earlier version of this
+        // test counted it as a probe and expected 8 rejections out of 8 raw
+        // values, which was arithmetic on the wrong quantity rather than a
+        // finding about the table.
+        let real_raw = real.raw();
+        let mut probes: Vec<u64> = vec![
+            real_raw.wrapping_add(1),
+            real_raw.wrapping_sub(1),
+            real_raw ^ (1 << 32),
+            1,
+            u64::from(u32::MAX),
+            u64::MAX,
+            u64::MAX - 1,
+        ];
+        probes.push(real_raw); // Not a forgery — the control.
+        let forged: Vec<u64> = probes.iter().copied().filter(|r| *r != real_raw).collect();
+
+        let mut rejected = 0;
+        for raw in &forged {
+            if t.get_counted(Handle::from_raw(*raw)).is_err() {
+                rejected += 1;
+            }
+        }
+
+        assert_eq!(
+            rejected,
+            forged.len(),
+            "every probe other than the real handle must be rejected"
+        );
+        assert_eq!(t.stats().invalid, forged.len() as u64);
+        // And the real handle is untouched by the probing.
+        assert!(
+            t.get_counted(real).is_ok(),
+            "the real handle must still work"
+        );
+        assert_eq!(
+            t.stats().invalid,
+            forged.len() as u64,
+            "a valid lookup must not count as invalid"
+        );
+    }
+
+    /// **The interleaved attack.** Fill, free, fill, free — with the probe and
+    /// exhaustion shapes mixed in. The invariant that must hold throughout is
+    /// `live <= limit`, and it must hold for the slot vector too.
+    ///
+    /// This is a property test over an adversarial schedule rather than a
+    /// scripted sequence, because the bug a free-list would have is exactly an
+    /// off-by-one that only appears for some interleaving.
+    #[test]
+    fn the_limit_holds_across_an_adversarial_interleaving() {
+        const LIMIT: u32 = 6;
+        let mut t = HandleTable::new(LIMIT);
+        let mut held: Vec<Handle> = Vec::new();
+
+        // A cheap deterministic PRNG. `rand` is not a dependency of this crate
+        // and adding one for a test would be the tail wagging the dog; this
+        // schedule only needs to be irregular, not statistically sound.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for tick in 0..5_000_u64 {
+            match next() % 4 {
+                // Try to insert.
+                0 | 1 => {
+                    if let Ok(h) = t.insert(tick) {
+                        held.push(h);
+                    }
+                }
+                // Close a random held handle.
+                2 => {
+                    if !held.is_empty() {
+                        // `held.len()` is at most `LIMIT` (6), so the modulo fits
+                        // in `usize` on every target; `try_from` states that
+                        // rather than casting, because a cast here would truncate
+                        // silently on a 16-bit `usize` and index the wrong slot.
+                        let len = u64::try_from(held.len()).expect("a handle count fits in u64");
+                        let idx = usize::try_from(next() % len).expect("index < held.len()");
+                        let h = held.swap_remove(idx);
+                        t.remove(h).expect("a held handle must be live");
+                    }
+                }
+                // Probe a forged handle.
+                _ => {
+                    let _ = t.get_counted(Handle::from_raw(next()));
+                }
+            }
+
+            assert!(
+                t.open() <= LIMIT as usize,
+                "live count {} exceeded the limit at tick {tick}",
+                t.open()
+            );
+            assert!(
+                t.slots.len() <= LIMIT as usize,
+                "the slot vector ({}) exceeded the limit at tick {tick}",
+                t.slots.len()
+            );
+            // Every handle still held must resolve, whatever the schedule did.
+            for h in &held {
+                assert!(
+                    t.get(*h).is_ok(),
+                    "a held handle stopped resolving at tick {tick}; the table \
+                     invalidated a live resource"
+                );
+            }
+        }
+
+        assert_eq!(
+            t.open(),
+            held.len(),
+            "the open count must match what is held"
+        );
+    }
+
+    /// **The zero limit, as a security property.** A manifest that grants no
+    /// handles must hand out none — and must keep refusing, not fail once and
+    /// then permit.
+    #[test]
+    fn a_zero_limit_refuses_indefinitely_rather_than_sporadically() {
+        let mut t = HandleTable::new(0);
+        for i in 0..100 {
+            assert!(
+                t.insert(i).is_err(),
+                "insert {i} succeeded against a zero limit"
+            );
+        }
+        assert_eq!(t.open(), 0);
+        assert_eq!(t.slots.len(), 0);
+        assert_eq!(t.stats().refused, 100);
+    }
+
+    /// The huge limit must not panic or mis-account. A manifest may legitimately
+    /// declare `max_open_handles = 100_000` (the range ceiling).
+    #[test]
+    fn a_huge_limit_is_representable_and_not_preallocated() {
+        let t: HandleTable<u32> = HandleTable::new(100_000);
+        assert_eq!(t.limit(), 100_000);
+        assert_eq!(
+            t.slots.len(),
+            0,
+            "slots must be allocated on demand, not preallocated to the limit"
+        );
+    }
 }

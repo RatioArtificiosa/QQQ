@@ -363,6 +363,7 @@ mod tests {
             fuel,
             epoch_deadline_ms: deadline_ms,
             max_open_handles: 64,
+            max_subrequests: 32,
         }
     }
 

@@ -448,9 +448,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Caps => with_manifest(name, &mut out, args, |loaded| {
             Ok(qqq_run::commands::caps(loaded))
         }),
-        CommandName::Inspect => with_manifest(name, &mut out, args, |loaded| {
-            qqq_run::commands::inspect(loaded)
-        }),
+        CommandName::Inspect => dispatch_inspect(name, args, &mut out),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
         CommandName::Run => dispatch_run(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
@@ -472,6 +470,62 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             let _ = out.emit_error(name, &err);
             ExitCode::from(exit::UNAVAILABLE)
         }
+    }
+}
+
+/// Dispatch `qqqai inspect`.
+///
+/// # Two questions, one command, and why the argument decides
+///
+/// `qqqai inspect` with no argument answers *"what is this project allowed to
+/// do?"* — the manifest's grants. `qqqai inspect <artifact>` answers *"what does
+/// this file require?"* — read from the component's imports, with no manifest
+/// involved.
+///
+/// The two must not be confused, and the previous behaviour confused them: the
+/// path argument was **ignored** and the manifest's capabilities were reported
+/// regardless. A user inspecting an untrusted `.wasm` received a confident
+/// answer about their own `qqq.toml`, with nothing to indicate the answer was to
+/// a different question. On the surface that exists to make a grant auditable
+/// before execution (Proposal §7), a wrong answer is worse than no answer.
+///
+/// So an argument that is **not** a flag always means "inspect this artifact",
+/// and a file that cannot be read or parsed is an error rather than a fallback.
+fn dispatch_inspect(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    // `--manifest` and its value, plus any other flag, are not the artifact.
+    const TAKES_VALUE: [&str; 1] = ["--manifest"];
+    let mut artifact: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if TAKES_VALUE.contains(&a) {
+            i += 1;
+        } else if a.starts_with('-') {
+            // Unknown flags are ignored here rather than rejected: `inspect`
+            // shares the global vocabulary (`--json`) and rejecting a valid
+            // global flag would be worse than tolerating one.
+        } else if artifact.is_none() {
+            artifact = Some(a.to_owned());
+        }
+        i += 1;
+    }
+
+    match artifact {
+        Some(path) => {
+            let p = std::path::PathBuf::from(&path);
+            match qqq_run::commands::inspect_artifact(&p) {
+                Ok(report_value) => report(out, name, &report_value),
+                Err(e) => {
+                    let _ = out.emit_error(name, &e);
+                    ExitCode::from(exit::FAILURE)
+                }
+            }
+        }
+        None => with_manifest(name, out, args, qqq_run::commands::inspect),
     }
 }
 

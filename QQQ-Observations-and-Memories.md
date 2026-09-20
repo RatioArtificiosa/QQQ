@@ -3286,6 +3286,150 @@ behalf about their own intent, and it is invisible in the command they typed.
 
 ---
 
+### §O-038 — `qqqai inspect <artifact>`, and a security report that named the wrong capability
+
+The Proposal is specific about this command. §5.2: *"`qqqai inspect <artifact>`
+— **Static capability report.** What can this do, without running it."* §7 states
+the guarantee it backs: *"Grant is auditable before execution."*
+
+Two defects stood between the code and that claim, and neither was visible
+without pointing the command at a real artifact.
+
+---
+
+#### §O-038a — The command ignored its argument and answered a different question
+
+`qqqai inspect <path>` accepted a path, discarded it, and reported the
+**manifest's** capabilities regardless. Verified against the binary:
+
+```text
+$ qqqai inspect definitely-not-here.wasm
+app: 0 capabilities, 0 interfaces, posture: minimal
+```
+
+A file that does not exist produced a confident report about `qqq.toml`.
+
+For a command whose purpose is auditing an **untrusted artifact**, this is the
+worst available failure. The user asks "what does this file want?", receives a
+precise-looking answer about their own project, and has no way to tell that the
+answer was to a different question. `§O-033a`'s argument applies with more force
+here than anywhere else it has been used: the diagnosis was not merely missing,
+it was **replaced by a plausible wrong one** on the surface whose whole job is to
+be trustworthy.
+
+`inspect` now dispatches on the argument. An artifact path compiles the component
+— without instantiating it — and reads its import list. A path that cannot be
+read or parsed is an **error**, never a fallback to the manifest, because falling
+back is precisely the behaviour being fixed.
+
+The mode split is worth stating plainly, since one command answers two questions:
+
+| Invocation | Question | Source |
+|---|---|---|
+| `qqqai inspect` | what is this project allowed to do? | the manifest |
+| `qqqai inspect <artifact>` | what does this file require? | the component's imports |
+
+Verified that the second needs **no manifest at all** — which matters, because
+the primary use is a file someone handed you, in a directory that is not a
+project.
+
+---
+
+#### §O-038b — Package-level lookup reported the wrong half of `qqq:clock`
+
+With inspection wired up, an artifact importing `qqq:clock/wall-clock@1.0.0` was
+reported as requiring **`clock.monotonic`**.
+
+The cause is a granularity mismatch that had been invisible because only one
+consumer existed. `qqq-abi`'s registry maps capability → interface at **package**
+level:
+
+```text
+"qqq:clock@1.0.0"  unlocked by  [ClockWall, ClockMonotonic]
+```
+
+That is correct for the linker (it binds the package) and correct for an error
+message (the user needs a stanza name). It cannot express *which* of a package's
+interfaces one capability unlocks — and several packages contain several:
+
+| Package | Interfaces |
+|---|---|
+| `qqq:clock` | `wall-clock`, `monotonic-clock` |
+| `qqq:crypto` | `random`, `hashing`, `hmac`, `aead`, `signing` |
+| `qqq:http` | `http`, `incoming-handler` |
+
+So `capability_for_interface` reduced the import to `qqq:clock` and returned
+whichever capability the registry listed first. It happened to be monotonic.
+
+**The fix is a second, precise table** (`interface_path_for`) rather than a change
+to the existing one: the package-level mapping still serves its two consumers,
+and the new function answers the interface-level question that `inspect` needs.
+A lookup that returns the wrong capability on an audit surface is not imprecise,
+it is wrong — so the new function returns `None` for anything it cannot name
+exactly, and the caller reports that as an **unmapped interface** rather than
+papering over it with a plausible neighbour.
+
+Verified against three artifacts, which now produce three distinct answers:
+
+| Import | Capability |
+|---|---|
+| `qqq:clock/wall-clock@1.0.0` | `clock.wall` |
+| `qqq:clock/monotonic-clock@1.0.0` | `clock.monotonic` |
+| `qqq:crypto/aead@1.0.0` | `crypto.aead` |
+
+---
+
+#### §O-038c — Understating authority is the one failure an audit surface must not have
+
+One interface can be unlocked by **several** capabilities, and the two rules
+collide:
+
+* `qqq:fs/filesystem` is unlocked by `FsRead`, `FsWrite` and `FsWatch`.
+* `qqq:http/http` carries both `send` (outbound) and `incoming-authority` (which
+  server is serving), so importing it implies `http.client` **and** `http.server`.
+
+Reporting the first match would understate the artifact — an artifact requiring
+`fs.write` would be reported as `fs.read`, and its posture as `contained` when it
+is `exposed`. So the mapping returns the **strongest** capability implied by the
+interface.
+
+That introduces a coupling that needed pinning: the ranking must agree with
+`classify_posture`'s notion of exposure. If they drifted, a report could be
+internally consistent and still understate the risk. The test iterates **every**
+capability and asserts the two agree — the same positive-control discipline as
+`§M-006`, applied to a pair of functions rather than to a validator.
+
+Two further corrections came from reading the WIT rather than assuming:
+
+* `qqq:http/http` was mapped to `http.client`, which understated a component that
+  can also serve. It is now mapped to the stronger of the pair.
+* `qqq:http/incoming-handler` is **exported** by a server, not imported, so it
+  never appears in an import list. Mapping it was dead code.
+
+---
+
+#### §O-038d — Tests that skip are tests that cannot fail
+
+Five new integration tests build their fixtures with `wasm-tools parse`. The first
+run passed — because every one of them **skipped**: the helper had passed a
+`--features` flag that `wasm-tools parse` does not accept, so no fixture was ever
+built, and a `run_raw` that panicked on a missing program made the failure look
+like an environment problem.
+
+This is `§M-006` in a new place: **a test that cannot fail is worse than no test,
+because it manufactures confidence.** Two changes:
+
+1. The bogus flag was removed, and the skip now prints
+   `SKIPPED: no wasm-tools available - this test did not run` — loud enough that
+   a passing suite does not read as coverage it does not have.
+2. `run_raw` returns a failing `Run` instead of panicking, so "no encoder" is
+   distinguishable from "the encoder rejected my input".
+
+The suite now runs 37 tests with **zero skips**, and the artifact path is
+exercised in 0.03s per test rather than silently bypassed.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3595,5 +3739,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | `§M-007` repeated twice in the same session: an `edit` anchored on a section heading deleted the heading, in `§O-035` and again in `§O-036`. The rule is now stated operationally — when appending a section, never anchor on the boundary the new content sits before. | Architect |
 
 | 2026-09-19 | `CLI-007` implemented: `qqqai update` (`qqq-run::update`), with `--latest` and `--dry-run`. The default strategy honours the manifest's requirement and `--latest` crosses it, because defaulting to the newest version would resolve `^1.2.3` to `2.0.0` while the user believes they asked for a routine refresh (`§O-037a`). `VersionSource` is the seam the registry will plug into, so every decision branch — including ones needing a newer version — is exercised today rather than first tested when `PKG-006` lands (`§O-037c`). A kept package always carries a reason, since a no-op update that explains nothing is indistinguishable from a broken one (`§O-037d`). `--latest` with `exact = true` is refused rather than resolved by precedence (`§O-037e`). | Architect |
+
+| 2026-09-19 | **`qqqai inspect <artifact>` implemented**, and two defects fixed on the way (`§O-038`). The command **ignored its path argument** and reported the manifest's capabilities regardless, so inspecting a nonexistent file produced a confident report about `qqq.toml` — on the surface that exists to make a grant auditable before execution, a plausible wrong answer is worse than none (`§O-038a`). With inspection wired up, an artifact importing `qqq:clock/wall-clock` was reported as requiring `clock.monotonic`, because the registry maps capability → interface at *package* level and several packages hold several interfaces; a precise `interface_path_for` table now answers at interface level (`§O-038b`). One interface can imply several capabilities, so the mapping returns the **strongest** — understating authority is the one failure an audit surface must not have — and a positive-control test asserts the ranking agrees with `classify_posture` for every capability (`§O-038c`). Five fixture-building tests initially **skipped silently** because of an invented `--features` flag; skips are now loud (`§O-038d`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

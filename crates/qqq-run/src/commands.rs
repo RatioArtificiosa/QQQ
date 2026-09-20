@@ -448,6 +448,192 @@ impl CommandOutput for InspectOutput {
     }
 }
 
+/// Report what an artifact can do, without running it.
+///
+/// # This is the security property, not a convenience
+///
+/// Proposal §5.2 lists `qqqai inspect <artifact>` as *"Static capability report.
+/// What can this do, without running it."* §7 states the guarantee it backs:
+/// *"Grant is auditable before execution."*
+///
+/// That guarantee is about an **untrusted artifact**. A user who is handed a
+/// `.wasm` file needs to know what it will ask for before they agree to run it —
+/// and on this machine, that is the only way to find out, because the artifact
+/// carries no manifest.
+///
+/// The command previously ignored its path argument entirely and reported the
+/// *manifest's* capabilities. That is worse than not implementing it: the user
+/// asked "what does this file want?", received a confident answer about their
+/// own `qqq.toml`, and had no way to tell the answer was to a different
+/// question. For an audit surface, a wrong answer is more dangerous than no
+/// answer.
+///
+/// # How the answer is obtained
+///
+/// The component is compiled — not instantiated — and its **import list** is
+/// read from the component type. Imports are what a component declares it needs;
+/// under deny-by-default, every one of them is a capability the host must
+/// explicitly provide, so the import list *is* the capability surface.
+///
+/// Compiling does not execute anything: no start function runs, no memory is
+/// granted, no host function is reachable. The artifact is parsed and typed.
+///
+/// # Errors
+///
+/// * `QQQ-2001` — the artifact could not be read.
+/// * `QQQ-6003` — the artifact is not a valid component. Reported rather than
+///   falling back to a manifest, because silently answering a different
+///   question is the failure this command was fixed for.
+pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        Error::new(
+            ErrorCode::ManifestSyntaxInvalid,
+            format!("could not read `{}`", path.display()),
+        )
+        .with_cause(e.to_string())
+    })?;
+
+    // The default engine configuration: inspection is a read-only static
+    // analysis, so the deterministic clock and seeded RNG that `RunOptions`
+    // can request would change nothing about the answer. Building the default
+    // engine keeps the report identical to what a plain `qqqai run` would see.
+    let engine = crate::run::new_engine(&crate::run::RunOptions::default())?;
+    let component = qqq_host::PreparedComponent::compile(&engine, &bytes).map_err(|e| {
+        // Name the file and say what it is not. A user pointing `inspect` at a
+        // core module, or at a truncated download, needs to know which.
+        Error::new(
+            ErrorCode::ComponentLoadFailed,
+            format!("`{}` is not a valid WebAssembly component", path.display()),
+        )
+        .with_cause(e.to_string())
+        .with_remediation(
+            "check the file is complete, and that it is a component rather \
+             than a core module — `qqqai build` produces components",
+        )
+    })?;
+
+    let imports = component.imported_interfaces(&engine);
+
+    // Map each imported interface to the capability it requires. An import with
+    // no matching capability is *not* dropped: it is reported as unmapped,
+    // because an interface the host cannot name is exactly the thing an auditor
+    // needs to see. Silently omitting it would understate the surface.
+    let mut required = Vec::new();
+    let mut unmapped = Vec::new();
+    for iface in &imports {
+        match crate::run::capability_for_import(iface) {
+            Some(cap) => required.push(CapabilityReport {
+                name: cap.name().to_owned(),
+                interface: iface.clone(),
+            }),
+            None => unmapped.push(iface.clone()),
+        }
+    }
+    required.sort_by(|a, b| (&a.name, &a.interface).cmp(&(&b.name, &b.interface)));
+    required.dedup();
+    unmapped.sort();
+    unmapped.dedup();
+
+    let caps: Vec<Capability> = required
+        .iter()
+        .filter_map(|r| Capability::from_name(&r.name))
+        .collect();
+
+    Ok(ArtifactReport {
+        artifact: path.display().to_string().replace('\\', "/"),
+        digest: format!("sha256:{}", qqq_pkg::Digest::of(&bytes).hex()),
+        size_bytes: bytes.len(),
+        kind: crate::build::ArtifactKind::classify(&bytes)
+            .as_str()
+            .to_owned(),
+        required,
+        unmapped_interfaces: unmapped,
+        posture: classify_posture(&caps),
+    })
+}
+
+/// What an artifact requires, before it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactReport {
+    /// The artifact path, as given.
+    pub artifact: String,
+    /// The digest of the bytes inspected.
+    ///
+    /// Recorded because an inspection result is worthless without knowing
+    /// *which* bytes produced it — an audit log that says "this artifact is
+    /// safe" and does not say which artifact is not an audit log.
+    pub digest: String,
+    /// The artifact size.
+    pub size_bytes: usize,
+    /// `component` or `core-module`.
+    pub kind: String,
+    /// Every capability the artifact requires, with the interface that implies it.
+    pub required: Vec<CapabilityReport>,
+    /// Interfaces the artifact imports that QQQ has no capability for.
+    ///
+    /// Reported rather than omitted. An unmapped import means the artifact needs
+    /// something this host cannot describe — which is a finding, not a detail to
+    /// discard.
+    pub unmapped_interfaces: Vec<String>,
+    /// The security posture implied by the required capabilities.
+    pub posture: Posture,
+}
+
+/// One required capability and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityReport {
+    /// The capability name, e.g. `http.client`.
+    pub name: String,
+    /// The interface whose import implies it.
+    pub interface: String,
+}
+
+impl CommandOutput for ArtifactReport {
+    fn command(&self) -> CommandName {
+        CommandName::Inspect
+    }
+
+    fn summary(&self) -> String {
+        // In human format this is the whole output, so the capabilities are
+        // listed. An artifact inspection that reports a count and withholds the
+        // names would fail the one question it exists to answer (`§O-036a`).
+        let mut out = format!(
+            "{}: {} ({} bytes, {}), {} required capabilit{}",
+            self.artifact,
+            self.kind,
+            self.size_bytes,
+            &self.digest[..self.digest.len().min(23)],
+            self.required.len(),
+            if self.required.len() == 1 { "y" } else { "ies" }
+        );
+
+        if self.required.is_empty() {
+            out.push_str("\n\nThis artifact imports nothing: it can reach no host capability.");
+        } else {
+            out.push_str("\n\nRequired capabilities");
+            for r in &self.required {
+                let _ = write!(out, "\n  {:<20} from {}", r.name, r.interface);
+            }
+        }
+
+        if !self.unmapped_interfaces.is_empty() {
+            out.push_str(
+                "\n\nUnmapped interfaces — imported, but no QQQ capability describes them:",
+            );
+            for i in &self.unmapped_interfaces {
+                let _ = write!(out, "\n  {i}");
+            }
+        }
+
+        let _ = write!(out, "\n\nPosture: {}", self.posture.as_str());
+        out
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
 /// Report what a project can do, without running it.
 ///
 /// This is the static half of the capability report: it needs the manifest,
@@ -935,6 +1121,108 @@ mod tests {
                 "{c} must be classified as exposed"
             );
         }
+    }
+
+    /// The exposure ranking used to pick between capabilities that unlock the
+    /// same interface must agree with posture classification.
+    ///
+    /// This is a real coupling, not a tidiness check. `capability_for_import`
+    /// returns the strongest capability implied by an import; `classify_posture`
+    /// decides whether that capability makes the artifact `Exposed`. If the two
+    /// disagreed, an artifact could be reported as requiring `fs.read` — and
+    /// therefore `Contained` — while the interface it actually imports also
+    /// carries `fs.write`. The report would be internally consistent and wrong.
+    #[test]
+    fn the_exposure_ranking_agrees_with_posture_classification() {
+        for c in Capability::all() {
+            let classified_exposed = classify_posture(&[*c]) == Posture::Exposed;
+            let ranked_exposed = crate::run::exposure_rank(*c) == 2;
+            assert_eq!(
+                classified_exposed, ranked_exposed,
+                "`{c}` is {classified_exposed} by posture but {ranked_exposed} by the ranking"
+            );
+        }
+    }
+
+    /// Two capabilities unlocking one interface resolve to the stronger.
+    ///
+    /// `qqq:fs/filesystem` is unlocked by `FsRead`, `FsWrite` and `FsWatch`.
+    /// Reporting `fs.read` for an artifact importing the whole interface would
+    /// understate it by two thirds.
+    #[test]
+    fn an_interface_unlocked_by_several_capabilities_reports_the_strongest() {
+        let got = crate::run::capability_for_import("qqq:fs/filesystem@1.0.0")
+            .expect("the filesystem interface is mapped");
+        assert_eq!(
+            got,
+            Capability::FsWrite,
+            "the strongest of fs.read / fs.write / fs.watch"
+        );
+    }
+
+    /// The two halves of `qqq:clock` map to two different capabilities.
+    ///
+    /// This is the regression test for the defect this whole change exists for:
+    /// both interfaces sit in one package, so a package-level search reported
+    /// whichever the registry listed first — an artifact importing the wall
+    /// clock was said to need the monotonic clock.
+    #[test]
+    fn the_two_clock_interfaces_map_to_different_capabilities() {
+        let wall = crate::run::capability_for_import("qqq:clock/wall-clock@1.0.0");
+        let mono = crate::run::capability_for_import("qqq:clock/monotonic-clock@1.0.0");
+
+        assert_eq!(wall, Some(Capability::ClockWall));
+        assert_eq!(mono, Some(Capability::ClockMonotonic));
+        assert_ne!(wall, mono, "one package, two capabilities");
+    }
+
+    /// Every sub-interface of a multi-interface package maps distinctly.
+    #[test]
+    fn the_crypto_interfaces_map_to_distinct_capabilities() {
+        let pairs = [
+            ("qqq:crypto/random@1.0.0", Capability::CryptoRandom),
+            ("qqq:crypto/hashing@1.0.0", Capability::CryptoHash),
+            ("qqq:crypto/hmac@1.0.0", Capability::CryptoHmac),
+            ("qqq:crypto/aead@1.0.0", Capability::CryptoAead),
+            ("qqq:crypto/signing@1.0.0", Capability::CryptoSign),
+        ];
+        for (iface, expected) in pairs {
+            assert_eq!(
+                crate::run::capability_for_import(iface),
+                Some(expected),
+                "{iface} must map to {expected}"
+            );
+        }
+    }
+
+    /// A version on the import does not defeat the mapping.
+    #[test]
+    fn the_mapping_ignores_the_interface_version() {
+        for iface in [
+            "qqq:clock/wall-clock@1.0.0",
+            "qqq:clock/wall-clock@1.2.3",
+            "qqq:clock/wall-clock",
+        ] {
+            assert_eq!(
+                crate::run::capability_for_import(iface),
+                Some(Capability::ClockWall),
+                "{iface}"
+            );
+        }
+    }
+
+    /// An interface QQQ has no capability for maps to nothing.
+    ///
+    /// `None` is reported as an unmapped import rather than being papered over
+    /// with a plausible neighbour: an interface the host cannot name is a
+    /// finding an auditor needs, not a detail to discard.
+    #[test]
+    fn an_unknown_interface_maps_to_nothing() {
+        assert_eq!(
+            crate::run::capability_for_import("wasi:filesystem/types@0.2.0"),
+            None
+        );
+        assert_eq!(crate::run::capability_for_import("not-an-interface"), None);
     }
 
     #[test]

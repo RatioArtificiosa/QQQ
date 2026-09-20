@@ -361,6 +361,128 @@ pub fn capability_for_interface(interface: &str) -> Option<qqq_cap::Capability> 
     })
 }
 
+/// Map an imported interface to the capability that unlocks it, **exactly**.
+///
+/// # Why this is separate from [`capability_for_interface`]
+///
+/// The two answer different questions and the difference is a security bug if
+/// conflated.
+///
+/// `capability_for_interface` compares by *package* (`qqq:clock`), which is the
+/// right granularity for an error message: the user is told which stanza to
+/// paste, and a package-level match is enough to name it. It is the **wrong**
+/// granularity for `qqqai inspect`, because several capabilities share one
+/// package. `qqq:clock` unlocks both `clock.wall` and `clock.monotonic`, so the
+/// package-level search returns whichever the registry lists first — and an
+/// artifact importing the wall clock was reported as requiring the *monotonic*
+/// clock.
+///
+/// On an audit surface that is a wrong answer, not an imprecise one: the whole
+/// point is telling the user which authority an artifact needs. So this function
+/// matches the interface path exactly, and returns `None` rather than a
+/// package-mate when nothing matches — an unmapped interface is a finding the
+/// caller must report, not something to paper over with a plausible neighbour.
+#[must_use]
+pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
+    let wanted = strip_version(interface);
+
+    // The precise table first: for a package with several interfaces, this is
+    // the only mapping that can name the right capability.
+    //
+    // **Capabilities come back in a defined order and the strongest wins.** Two
+    // capabilities may legitimately map to one interface: `qqq:http/http`
+    // carries both `send` (outbound) and `incoming-authority` (which server is
+    // serving), so importing it implies `http.client` *and* `http.server`. The
+    // report must name the stronger, because understating what an artifact can
+    // do is the one failure an audit surface must not have.
+    let matches: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
+        .iter()
+        .copied()
+        .filter(|&c| {
+            qqq_abi::registry::interface_path_for(c).is_some_and(|p| strip_version(p) == wanted)
+        })
+        .collect();
+
+    if !matches.is_empty() {
+        return matches.into_iter().max_by_key(|c| exposure_rank(*c));
+    }
+
+    // Then the package-level fallback, for single-interface packages where the
+    // registry's `name` is already exact.
+    //
+    // Two shapes are accepted, because both occur in the registry:
+    //
+    //   * the registry name equals the import exactly (`qqq:dns@1.0.0` for an
+    //     import of `qqq:dns@1.0.0`), and
+    //   * the registry name is the **package** of a sub-interface import
+    //     (`qqq:fs@1.0.0` for `qqq:fs/filesystem@1.0.0`), which is how a
+    //     package whose WIT declares one interface is registered.
+    //
+    // Restricted to capabilities with **no** precise path, so a multi-interface
+    // package can never be matched here by accident — that was the original bug.
+    let wanted_package = package_of(interface);
+    let matching: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
+        .iter()
+        .copied()
+        .filter(|&c| {
+            if qqq_abi::registry::interface_path_for(c).is_some() {
+                return false;
+            }
+            qqq_abi::registry::interface_for(c).is_some_and(|i| {
+                let name = strip_version(&i.name);
+                // Exact match, or the registry named the *package* of a
+                // sub-interface import (`qqq:fs` for `qqq:fs/filesystem`).
+                // `wanted` is checked first so an exact match never falls
+                // through to the package comparison.
+                name == wanted || name == wanted_package
+            })
+        })
+        .collect();
+
+    // Same strongest-wins rule as above. `qqq:fs/filesystem` is unlocked by
+    // `FsRead`, `FsWrite` **and** `FsWatch`; reporting `fs.read` for an
+    // artifact that imports the whole filesystem interface would understate it
+    // by two thirds, and understating is the failure that matters here.
+    if matching.is_empty() {
+        return None;
+    }
+    matching.into_iter().max_by_key(|c| exposure_rank(*c))
+}
+
+/// How much authority a capability grants, for choosing between two that unlock
+/// the same interface.
+///
+/// Ordered so `max_by_key` picks the one that exposes more. This must agree with
+/// [`crate::commands::classify_posture`]'s notion of exposure: if a capability
+/// is `Exposed` there and `Contained` here, an artifact could be reported as
+/// contained by a path that posture classification would call exposed.
+///
+/// The ranking is deliberately coarse — three levels — because a finer one would
+/// invite the belief that the numbers are comparable across capabilities rather
+/// than merely ordered.
+#[must_use]
+pub const fn exposure_rank(c: qqq_cap::Capability) -> u8 {
+    use qqq_cap::Capability::{
+        AiInfer, DnsResolve, FsWatch, FsWrite, HttpClient, HttpServer, KvWrite, QueuePublish,
+        QueueSubscribe, SqlExecute,
+    };
+    match c {
+        FsWrite | FsWatch | HttpClient | HttpServer | SqlExecute | KvWrite | QueuePublish
+        | QueueSubscribe | DnsResolve | AiInfer => 2,
+        _ => 1,
+    }
+}
+
+/// An interface name with its `@version` removed.
+fn strip_version(interface: &str) -> String {
+    interface
+        .split('@')
+        .next()
+        .unwrap_or(interface)
+        .trim()
+        .to_owned()
+}
+
 /// Turn a failed import check into the error a user can act on.
 ///
 /// # Errors

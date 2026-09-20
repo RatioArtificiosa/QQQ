@@ -461,7 +461,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `Capability::all()` — the versioned capability-name registry; `qqqai schema` publishes it.
   → §5.3 The manifest — `qqq.toml`
 - [x] **CON-014** Implement `qqqai inspect`'s static capability analysis from the import table.
-  → Done: `qqqai inspect` reads the import table and reports the interfaces without running.
+  → Done: `qqqai inspect <artifact>` compiles the component (without instantiating it) and reads its import table, mapping each imported interface to the capability it requires. **Correction:** this was ticked when the claim was not yet true — the command accepted a path, discarded it, and reported the *manifest's* capabilities, so an artifact's import table was never read. Verified and fixed in `§O-038a`. The precise interface→capability mapping that makes the report correct is `§O-038b`/`§O-038c`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-015** Define the deprecation mechanics in WIT: `@deprecated` with a removal version.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
@@ -767,6 +767,8 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **CLI-014** Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains.
   → §5.2 The command surface
 - [ ] **CLI-015** Implement `qqqai inspect` with static capability reporting and `--diff`.
+  → Partial: static capability reporting is done. `qqqai inspect` with no argument reports the manifest's grants; `qqqai inspect <artifact>` compiles the component without instantiating it and reports the capabilities its **import table** requires, with the digest and `component`/`core-module` kind, so a report is tied to the bytes that produced it. Unmapped interfaces are listed rather than dropped, and a file that is not a component is an error rather than a fallback to the manifest.
+  → **Remaining:** `--diff <other>`, which answers "what authority does this artifact add over that one?" — the supply-chain question §5.4 makes central. It needs the artifact report to be a comparable value, which it now is.
   → §5.2 The command surface
 - [ ] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
   → §5.2 The command surface

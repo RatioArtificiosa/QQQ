@@ -97,6 +97,73 @@ pub fn interfaces() -> Vec<HostInterface> {
     out
 }
 
+/// The exact WIT interface a capability unlocks, where the package contains
+/// more than one interface.
+///
+/// # Why this table has to exist
+///
+/// [`interface_for`] answers at **package** granularity: `qqq:clock@1.0.0`
+/// unlocks `[ClockWall, ClockMonotonic]`. That is the right answer for its
+/// consumers — the linker needs the package to bind the instance, and an error
+/// message needs a stanza name — but it cannot express *which* of a package's
+/// interfaces a single capability unlocks.
+///
+/// Several packages contain several interfaces:
+///
+/// | Package | Interfaces |
+/// |---|---|
+/// | `qqq:clock` | `wall-clock`, `monotonic-clock` |
+/// | `qqq:crypto` | `random`, `hashing`, `hmac`, `aead`, `signing` |
+/// | `qqq:http` | `http`, `incoming-handler` |
+///
+/// Without this table, `qqqai inspect` — which must map one *imported interface*
+/// back to one capability — can only search by package, so an artifact importing
+/// `qqq:clock/wall-clock@1.0.0` was reported as requiring `clock.monotonic`,
+/// whichever the registry happened to list first. On the surface whose entire
+/// purpose is telling a user which authority an artifact needs, that is a wrong
+/// answer rather than an imprecise one.
+///
+/// `None` means the package has a single interface and the package name is
+/// already exact, or that the capability is not yet mapped — both of which the
+/// caller reports as an unmapped import rather than guessing.
+#[must_use]
+pub fn interface_path_for(c: Capability) -> Option<&'static str> {
+    use Capability::{
+        ClockMonotonic, ClockWall, CryptoAead, CryptoHash, CryptoHmac, CryptoRandom, CryptoSign,
+        HttpClient, HttpServer,
+    };
+
+    Some(match c {
+        // Two interfaces in one package: the distinction the package name loses.
+        ClockWall => "qqq:clock/wall-clock",
+        ClockMonotonic => "qqq:clock/monotonic-clock",
+
+        // Five in one package.
+        CryptoRandom => "qqq:crypto/random",
+        CryptoHash => "qqq:crypto/hashing",
+        CryptoHmac => "qqq:crypto/hmac",
+        CryptoAead => "qqq:crypto/aead",
+        CryptoSign => "qqq:crypto/signing",
+
+        // `qqq:http/http` carries **both** directions: `send` is outbound and
+        // `incoming-authority` reports which server is serving the request. A
+        // component that imports it therefore needs `http.client` for the send
+        // path and `http.server` for the authority query — and since one import
+        // implies both, the capability reported for it must be the *stronger*
+        // of the two.
+        //
+        // Reporting `http.client` here was wrong in the direction that matters:
+        // it understated an artifact that can also serve. `incoming-handler` is
+        // deliberately absent from this table because a server **exports** it
+        // rather than importing it, so it never appears in an import list.
+        HttpServer | HttpClient => "qqq:http/http",
+
+        // The filesystem package has one interface, so the package name is
+        // already exact — handled by the package-level fallback.
+        _ => return None,
+    })
+}
+
 /// The interfaces that represent ambient capabilities: time, randomness,
 /// observability and the privileged `secrets`.
 ///

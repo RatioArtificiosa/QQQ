@@ -50,8 +50,9 @@ pub use build::{
     OUTPUT_DIR,
 };
 pub use commands::{
-    caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,
-    InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput, WhyStep,
+    caps, classify_posture, developer_overlay, fix_stanza_for, inspect, inspect_artifact, why,
+    ArtifactReport, CapabilityReport, CapsOutput, InspectOutput, InterfaceReport, LimitsReport,
+    NamespaceGroup, Posture, WhyOutput, WhyStep,
 };
 pub use deps::{add, remove, DependencyChangeOutput, DependencyEdit};
 pub use dev::{
@@ -68,8 +69,9 @@ pub use output::{
     ErrorPayload, Format, Output,
 };
 pub use run::{
-    capability_for_interface, check_imports, locate_artifact, new_engine, parse_cap_flag, prepare,
-    resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput,
+    capability_for_import, capability_for_interface, check_imports, exposure_rank, locate_artifact,
+    new_engine, parse_cap_flag, prepare, resolve_grants, ImportCheck, Prepared, RunOptions,
+    RunOutcome, RunOutput,
 };
 pub use scaffold::{
     crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,

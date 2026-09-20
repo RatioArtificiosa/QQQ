@@ -86,6 +86,30 @@ impl Sandbox {
             .expect("the binary must be runnable");
         Run::from(out)
     }
+
+    /// Run an arbitrary program in the sandbox, for building test fixtures.
+    ///
+    /// Separate from [`Sandbox::run`] because that one is always `qqqai` — the
+    /// binary under test — and a fixture builder must never be confused with it.
+    ///
+    /// A program that cannot be spawned yields a failing `Run` rather than a
+    /// panic, so a caller that treats "no encoder" as a reason to skip can do
+    /// so. Panicking here would turn a missing optional tool into a test
+    /// failure, which is the opposite of the intent.
+    fn run_raw(&self, args: &[&str]) -> Run {
+        match Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(&self.path)
+            .output()
+        {
+            Ok(out) => Run::from(out),
+            Err(e) => Run {
+                code: -1,
+                stdout: String::new(),
+                stderr: format!("could not run `{}`: {e}", args[0]),
+            },
+        }
+    }
 }
 
 impl Drop for Sandbox {
@@ -647,6 +671,229 @@ fn install_dry_run_does_not_write_a_lockfile() {
         PINNED,
         "a rehearsal must not rewrite the lockfile"
     );
+}
+
+// ---------------------------------------------------------------------------
+// inspect <artifact> — the security property
+// ---------------------------------------------------------------------------
+
+/// A minimal component importing `qqq:clock/wall-clock`.
+///
+/// Hand-written WAT rather than a compiled guest: the test is about what the
+/// *inspector* reads, and depending on a language toolchain to produce the input
+/// would make this test fail for reasons that have nothing to do with
+/// inspection.
+const IMPORTS_WALL_CLOCK: &str = r#"(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c
+    (export "now" (func (result u64)))
+    (export "resolution" (func (result u64)))
+    (export "timezone" (func (result string)))
+  ))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// A component importing the filesystem interface.
+const IMPORTS_FILESYSTEM: &str = r#"(component
+  (import "qqq:fs/filesystem@1.0.0" (instance $c
+    (export "read" (func (result u64)))
+  ))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// A component importing nothing.
+const IMPORTS_NOTHING: &str = r"(component
+  (core module $m)
+  (core instance $i (instantiate $m))
+)";
+
+/// Compile WAT to a component, or `None` when no encoder is available.
+///
+/// `wasm-tools` is present in CI but not necessarily on a developer's machine.
+/// Returning `None` skips the test rather than failing it, because a missing
+/// optional tool is not a defect in `qqqai` — but the tests that *can* run
+/// without it still do.
+fn encode(dir: &Sandbox, name: &str, wat: &str) -> Option<String> {
+    dir.write(&format!("{name}.wat"), wat);
+    // `wasm-tools parse` takes no `--features` flag: component support is
+    // always on in the parser. An earlier version passed one and every fixture
+    // silently failed to build, which made all five tests skip while appearing
+    // to pass.
+    let out = dir.run_raw(&[
+        "wasm-tools",
+        "parse",
+        &format!("{name}.wat"),
+        "-o",
+        &format!("{name}.wasm"),
+    ]);
+    if out.code == 0 && dir.exists(&format!("{name}.wasm")) {
+        Some(format!("{name}.wasm"))
+    } else {
+        None
+    }
+}
+
+/// Inspecting an artifact reports what **it** requires, not what the manifest
+/// grants.
+///
+/// This is the regression test for a real defect. `inspect` ignored its path
+/// argument entirely and reported the project's manifest capabilities, so a user
+/// inspecting an untrusted `.wasm` received a confident answer about their own
+/// `qqq.toml` with nothing indicating the answer was to a different question.
+/// On the surface that exists to make a grant auditable *before execution*
+/// (Proposal §7), that is worse than not answering.
+#[test]
+fn inspect_reports_the_artifacts_requirements_not_the_manifests_grants() {
+    let s = Sandbox::new("inspect-artifact");
+    // A manifest granting something quite different from what the artifact
+    // wants. If the command reports the manifest, this is what it will say.
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.http]\nclient = [\"api.example.com:443\"]\n",
+    );
+
+    let Some(wasm) = encode(&s, "wall", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["inspect", &wasm]);
+    run.assert_ok()
+        .assert_contains("clock.wall")
+        .assert_contains("qqq:clock/wall-clock");
+
+    assert!(
+        !run.all().contains("http.client"),
+        "the manifest's grants leaked into an artifact report:\n{}",
+        run.all()
+    );
+}
+
+/// The two halves of one WIT package map to different capabilities.
+///
+/// `qqq:clock` contains both `wall-clock` and `monotonic-clock`, so a
+/// package-level search returns whichever the registry lists first. An artifact
+/// importing the wall clock was reported as requiring the monotonic clock —
+/// a wrong answer on the surface that exists to give the right one.
+#[test]
+fn inspect_distinguishes_two_interfaces_in_one_package() {
+    let s = Sandbox::new("inspect-clock-split");
+    s.write("qqq.toml", MINIMAL);
+
+    let Some(wall) = encode(&s, "wall", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["inspect", &wall]);
+    run.assert_ok().assert_contains("clock.wall");
+    assert!(
+        !run.all().contains("clock.monotonic"),
+        "the wrong half of the package was reported:\n{}",
+        run.all()
+    );
+}
+
+/// An artifact importing nothing is reported as reaching nothing.
+#[test]
+fn inspect_reports_an_artifact_that_imports_nothing() {
+    let s = Sandbox::new("inspect-empty");
+    s.write("qqq.toml", MINIMAL);
+
+    let Some(wasm) = encode(&s, "bare", IMPORTS_NOTHING) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["inspect", &wasm])
+        .assert_ok()
+        .assert_contains("imports nothing");
+}
+
+/// An artifact that can write is reported as `exposed`.
+///
+/// `qqq:fs/filesystem` is unlocked by `fs.read`, `fs.write` and `fs.watch`, so
+/// the report must name the strongest — understating an artifact's authority is
+/// the one failure an audit surface must not have.
+#[test]
+fn inspect_reports_the_strongest_capability_an_interface_implies() {
+    let s = Sandbox::new("inspect-strongest");
+    s.write("qqq.toml", MINIMAL);
+
+    let Some(wasm) = encode(&s, "fs", IMPORTS_FILESYSTEM) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["inspect", &wasm]);
+    run.assert_ok()
+        .assert_contains("fs.write")
+        .assert_contains("exposed");
+}
+
+/// A file that is not a component is an error, never a fallback to the manifest.
+///
+/// Silently answering a *different* question is the failure this command was
+/// fixed for, so an unreadable artifact must fail rather than degrade.
+#[test]
+fn inspect_refuses_a_file_that_is_not_a_component() {
+    let s = Sandbox::new("inspect-not-wasm");
+    s.write("qqq.toml", MINIMAL);
+    s.write("garbage.wasm", "this is not webassembly at all");
+
+    s.run(&["inspect", "garbage.wasm"])
+        .assert_failed()
+        .assert_contains("garbage.wasm");
+}
+
+/// Inspecting a missing file fails and names the path.
+#[test]
+fn inspect_refuses_a_missing_artifact() {
+    let s = Sandbox::new("inspect-missing");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["inspect", "not-here.wasm"])
+        .assert_failed()
+        .assert_contains("not-here.wasm");
+}
+
+/// Inspecting an artifact works with **no project at all**.
+///
+/// The primary use is a file someone handed you. Requiring a `qqq.toml` in the
+/// directory would make the command unusable in exactly that situation.
+#[test]
+fn inspect_an_artifact_needs_no_manifest() {
+    let s = Sandbox::new("inspect-no-manifest");
+
+    let Some(wasm) = encode(&s, "wall", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["inspect", &wasm])
+        .assert_ok()
+        .assert_contains("clock.wall");
+}
+
+/// Without an argument, `inspect` still reports the project's manifest.
+///
+/// The two modes must both keep working: fixing the artifact path must not break
+/// the manifest report it was originally built for.
+#[test]
+fn inspect_without_an_argument_reports_the_project() {
+    let s = Sandbox::new("inspect-project");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    s.run(&["inspect"])
+        .assert_ok()
+        .assert_contains("app")
+        .assert_contains("crypto.hash");
 }
 
 // ---------------------------------------------------------------------------

@@ -219,7 +219,14 @@ impl<'a> Instance<'a> {
         let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits)?;
         let instance = instantiator(&ready.linker, &mut ready.store, prepared)
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
-        Ok(Self::finish(ready, instance, limits, engine, ExecutionMode::Sync))    }
+        Ok(Self::finish(
+            ready,
+            instance,
+            limits,
+            engine,
+            ExecutionMode::Sync,
+        ))
+    }
 
     /// Create an instance for the **async** entry points.
     ///
@@ -242,7 +249,13 @@ impl<'a> Instance<'a> {
         let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
             .await
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
-        Ok(Self::finish(ready, instance, limits, engine, ExecutionMode::Async))
+        Ok(Self::finish(
+            ready,
+            instance,
+            limits,
+            engine,
+            ExecutionMode::Async,
+        ))
     }
 
     /// The one constructor for the synchronous path, parameterized by context.
@@ -667,9 +680,7 @@ async fn instantiator_async(
     store: &mut Store<StoreData>,
     prepared: &PreparedComponent,
 ) -> std::result::Result<WasmInstance, wasmtime::Error> {
-    linker
-        .instantiate_async(store, prepared.component())
-        .await
+    linker.instantiate_async(store, prepared.component()).await
 }
 
 /// Which entry path a store is being prepared for.
@@ -1465,8 +1476,7 @@ mod tests {
     #[tokio::test]
     async fn the_async_path_runs_a_component_and_returns_its_value() {
         let engine = engine();
-        let prepared =
-            PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
         let instance = Instance::create_async(&engine, &prepared, &none(), limits())
             .await
             .expect("create");
@@ -1532,8 +1542,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_epoch_expiry_yields_on_the_async_path() {
         let engine = engine();
-        let prepared =
-            PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
+        let prepared = PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
 
         let mut instance = Instance::create_async(&engine, &prepared, &none(), limits())
             .await
@@ -1597,8 +1606,7 @@ mod tests {
     #[test]
     fn an_epoch_expiry_traps_on_the_synchronous_path() {
         let engine = engine();
-        let prepared =
-            PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
+        let prepared = PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
 
         // A huge fuel budget, so that the trap this test observes is the
         // **epoch** and not fuel exhaustion. Measured: the spin loop burns the
@@ -1663,10 +1671,8 @@ mod tests {
     #[tokio::test]
     async fn a_poisoned_instance_refuses_to_run_async() {
         let engine = engine();
-        let prepared =
-            PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
-        let mut instance =
-            Instance::create_async(&engine, &prepared, &none(), limits())
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let mut instance = Instance::create_async(&engine, &prepared, &none(), limits())
             .await
             .expect("create");
         instance.poison();

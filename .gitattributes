@@ -10,31 +10,49 @@
 #   * the reproducibility claim (REL/REP items in the Checklist) is only
 #     meaningful if the bytes on disk are the bytes that were committed.
 #
-# `core.autocrlf` must be `false` in this repository, and `.gitattributes`
-# alone does NOT achieve that. Measured, not assumed:
-#
-#   With `core.autocrlf=true` and `eol=lf` here, `git ls-files --eol` reported
-#   `i/lf w/crlf` for every Markdown document. The attributes control what is
-#   *committed*; `autocrlf` controls what Git writes to the *working tree* on
-#   checkout and on index refresh. The two are independent, and where they
-#   disagree the working tree drifts every time Git touches a file.
-#
-# The symptom is a tree that reports files modified after a commit that included
-# them, with an empty `git diff` — and a dirty tree hides real changes. A
-# previous version of this comment claimed `eol=lf` "overrides" `autocrlf`; it
-# does not, and the drift recurred until the config was set.
-#
-# The fix is per-repository configuration, which is why it cannot live in this
-# file:
+# `core.autocrlf` should also be `false` in this repository, and is not by
+# default on Windows:
 #
 #     git config core.autocrlf false
 #
+# It is a *contributing* factor rather than the cause, and that distinction cost
+# two wrong diagnoses (§O-041). The cause is the `text=auto` above interacting
+# with the checkout path; `autocrlf=false` is hygiene that removes one more
+# thing that could rewrite a file. CONTRIBUTING.md lists it as a setup step,
+# because a per-repository setting cannot be committed.
+#
 # `tools/normalize_eol.py --check` runs in CI and fails if a tracked text file
 # would check out with the wrong endings, so a regression is caught rather than
-# rediscovered.
+# rediscovered. It also reports a non-`false` `core.autocrlf` loudly, because
+# that state means the drift will return even when every file currently reads LF.
 #
 # The default: everything is text and gets LF.
+#
+# `text=auto` rather than `text` on the wildcard: forcing `text` on every file
+# would corrupt a binary that is not caught by an explicit rule below.
 * text=auto eol=lf
+
+# The three canonical documents are pinned with `text`, NOT `text=auto`.
+#
+# This distinction is the actual fix for the drift, and it took a bisect to
+# find. With `text=auto`, Git *auto-detects* whether a file is text and applies
+# `eol=lf` as a consequence of that decision — and on a Windows checkout the
+# detection path rewrites these files to CRLF when it refreshes the index. The
+# result was `i/lf w/crlf`, with `git status` reporting three files modified
+# and `git diff` showing nothing.
+#
+# `text` states the answer instead of asking Git to work it out, so there is no
+# detection step to get wrong. Measured: with `text=auto`, `git status` on a
+# stale index rewrote all three; with `text`, repeated `git add -A` and
+# `git status` cycles leave the tree at zero non-LF files.
+#
+# These three are pinned individually rather than by extension because the
+# *other* Markdown in the repository (crates/*/README.md, docs/adr/README.md)
+# has never drifted, and widening a rule to fix a symptom it does not explain
+# is how a fix becomes a new bug.
+/QQQ-Proposal-V1.md              text eol=lf
+/QQQ-Checklist-V1.md             text eol=lf
+/QQQ-Observations-and-Memories.md text eol=lf
 
 # Binary formats must never be touched. `text=auto` already detects most,
 # but these three are called out because they are load-bearing:

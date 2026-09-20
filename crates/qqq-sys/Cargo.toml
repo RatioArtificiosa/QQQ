@@ -12,4 +12,44 @@ description = "QQQ crate: qqq-sys (see QQQ-Proposal-V1.md 4.3)"
 workspace = true
 
 [dependencies]
+# `serde` is unconditional: `HardenReport` is a serialisable diagnostic on every
+# platform, including the ones where every step reports `unsupported`. It sits
+# above the target-specific table deliberately — a TOML table runs until the next
+# header, so a dependency written *after* `[target.'cfg(...)'.dependencies]` would
+# silently become Linux-only, which is a mistake this manifest made once and the
+# compiler caught.
+serde = { workspace = true }
 
+# The platform dependencies exist to AVOID writing `unsafe` in this crate. The
+# full argument is in `src/harden.rs` §"The `unsafe` question"; the short version
+# is that `qqq-sys` carries a bare `#![forbid(unsafe_code)]`, and using it would
+# trigger the §4.3 exception process — a written safety argument plus a **second
+# maintainer** — which `SAFETY.md`'s ledger records as unavailable (`GOV-008`,
+# bus factor 1). Safe wrappers sidestep that block rather than defer to it: an
+# `unsafe` block we write is an obligation we hold forever, while a safe wrapper
+# is an obligation the ecosystem holds and we review once.
+#
+# Linux-only, because §7.5 lists the host-process and syscall hardening as Linux
+# facilities. Declaring them unconditionally would pull a syscall shim into every
+# non-Linux build for code that cannot run there.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Safe `*nix` bindings: `setuid`, `setgid`, `setgroups`, `set_no_new_privs`.
+# Features are explicit rather than `full`, so the dependency surface is the set
+# of modules this crate calls — and that surface is what a reviewer reads.
+nix = { version = "0.31", default-features = false, features = ["user", "process"] }
+# Compiles a BPF seccomp program from a typed filter description and installs it.
+# `apply_filter` is the only entry point, and it is safe.
+seccompiler = "0.5"
+# `libc` is used for exactly two things, both safe and both data: the `SYS_*`
+# syscall-number constants (which differ per architecture and must not be
+# hard-coded) and `EPERM` as the default-deny errno. No `libc` *function* is
+# called, which is why this does not pull the crate into the unsafe exception.
+libc = "0.2"
+
+
+[dev-dependencies]
+# The hardening tests reconstruct a report from a child process, so they need JSON.
+# It is a dev-dependency rather than a real one: the library only ever SERIALISES
+# a report (a HardenReport is an output, never an input), so serde_json is a
+# test-only concern and pulling it into the library would be an unused dependency.
+serde_json = { workspace = true }

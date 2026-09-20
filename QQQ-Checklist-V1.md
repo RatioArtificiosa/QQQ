@@ -1786,10 +1786,110 @@ Items are grouped below by **phase**, because dependency order matters more than
     CSPRNG is a covert channel" (§10.5) — so a guest that never asked for
     randomness cannot reach the generator at all.
   → §7.4 Cryptographic posture
-- [ ] **SEC-019** Implement Linux hardening: dropped privileges, `no_new_privs`, seccomp allowlist.
-  → §7.5 Hardening beyond Wasm
-- [ ] **SEC-020** Audit every `unsafe` block in the three exception crates and record the findings.
-  → §4.3 Crate topology
+- [x] **SEC-019** Implement Linux hardening: dropped privileges, `no_new_privs`, seccomp allowlist.
+  → Done, and **the block on this item was on one implementation of it rather than
+    on the item.** `qqq-sys` is the crate §4.3 designates for `unsafe` OS
+    primitives, and it carries a bare `#![forbid(unsafe_code)]` — so the obvious
+    `libc`-in-`unsafe` approach would trigger the exception process: a safety
+    argument **plus a second maintainer**, and `SAFETY.md`'s ledger records none
+    exists (`GOV-008`, bus factor 1).
+  → **It was sidestepped rather than deferred**, because safe wrappers exist:
+    `nix` provides `setuid`, `setgid`, `setgroups` and `set_no_new_privs`, and
+    `seccompiler` compiles a BPF filter from a typed description. Verified in the
+    installed `nix` 0.31.3 source *before* committing to the approach, and both
+    licences (MIT; Apache-2.0 OR BSD-3-Clause) are on `deny.toml`'s allowlist.
+    **`qqq-sys` still contains no `unsafe`**, the architecture tests pass, and
+    nothing waits on an unsatisfiable precondition. The trade is a dependency
+    instead of an `unsafe` block, and it is the better side independently: an
+    `unsafe` block we write is an obligation we hold forever, while a safe wrapper
+    is one the ecosystem holds and we review once.
+  → **§7.5's design rule is the specification, not a hedge.** *"None of these are
+    required for QQQ's security claim"* shapes the whole module:
+    * hardening **never fails the process** — it returns a `HardenReport`, not a
+      `Result`, because a `?` on it would turn "this kernel has no seccomp" into a
+      startup failure: an availability bug introduced by a defence-in-depth feature;
+    * the outcome has **four** variants, because a `bool` would collapse `Skipped`
+      and `Failed`, making a deployment that quietly did not harden look identical
+      to one that did;
+    * `Unsupported` is deliberately **not** a failure — treating it as one would
+      make QQQ undeployable off Linux, the opposite of "deployable anywhere".
+  → **Two guards that would otherwise be invisible.** `setuid(0)` is refused
+    outright, because dropping to root is a no-op that `setuid` reports as
+    **success** — a report saying `Applied` would claim a privilege drop that never
+    happened. And the seccomp filter is **default-deny with an explicit
+    allowlist**, because a filter listing denials permits every syscall newer than
+    the list, which is the entire history of seccomp bypasses.
+  → **The step order is a security property, asserted rather than assumed:**
+    `no_new_privs` before seccomp (installs without `CAP_SYS_ADMIN` only under it),
+    groups before uid (dropping the uid removes the authority for `setgroups`),
+    seccomp last (the filter refuses `setuid`). Reversing any produces a process
+    that keeps running and is merely *less hardened* — a silent-looking failure —
+    which is why `STEP_ORDER` is a documented constant with a test.
+  → **Deliberately not implemented, named rather than omitted:** `Landlock` needs
+    a newer kernel API than `nix` wraps safely, and `capset` is subsumed for the
+    common deployment (a process at an unprivileged uid has no capabilities left,
+    and dropping capabilities *instead of* the uid would be strictly weaker).
+  → **Testing required an unusual approach.** The steps are irreversible and
+    process-wide — a filter cannot be removed, and installing one in-process would
+    kill every later test with `SIGSYS` — so the tests **re-execute the test
+    binary** with an environment variable naming the step and assert on the child's
+    report. Calling `harden` directly would pass on Linux CI while making the
+    binary un-runnable afterwards: a test that works once, alone.
+  → **The general lesson:** *check whether a block is on the item or on one
+    implementation of it.* `SEC-019` here and the audit in `SEC-017` both looked
+    blockable and both dissolved under a question — and marking either `[!]` would
+    have been defensible and wrong.
+  → §7.5 Hardening beyond Wasm. New: `crates/qqq-sys/src/harden.rs`,
+    `crates/qqq-sys/tests/harden.rs` (18 tests), §8 of `crates/qqq-sys/SAFETY.md`.
+- [x] **SEC-020** Audit every `unsafe` block in the three exception crates and record the findings.
+  → Done. **The finding is zero, and the work was making that zero mean something.**
+    Recorded in `docs/unsafe-audit.md`, reproduced by `python tools/audit_unsafe.py`.
+  → **Scope was widened deliberately.** The item says "the three exception crates",
+    but an `unsafe` block in a crate that is *supposed* to forbid it is a more
+    serious finding than one in a crate allowed to have it — so the audit covers
+    all 85 `.rs` files in the workspace.
+    | Measure | Count |
+    |---|---|
+    | `.rs` files scanned | **85** |
+    | Code-position `unsafe` (`{}`, `fn`, `impl`, `trait`, `extern`) | **0** |
+    | `#[allow(unsafe_code)]` in a code position | **0** |
+    | `cfg_attr(..., allow(unsafe_code))` | **0** |
+    | Crates with a bare `#![forbid(unsafe_code)]` | **11** (every crate) |
+  → **A zero that appears for the wrong reason is worse than a non-zero, because it
+    looks like an achievement.** Two explanations were distinguished rather than
+    assumed:
+    1. **The audit is not blind** — verified by *injecting* an `unsafe` block and
+       confirming it was detected, classified, and caused a non-zero exit. A
+       scanner that reports zero because it is broken cannot pass that test.
+    2. **The primitives are mostly not built** — no `io_uring` ring, no
+       hugepage-backed memory, no signal handler. And `SEC-019`, the one item that
+       *did* need OS primitives, avoided `unsafe` entirely via `nix` +
+       `seccompiler`. That is the strongest available evidence the zero is
+       structural rather than accidental.
+  → **The tool has a self-test, and it found a real defect in the tool.**
+    `--self-test` injects all seven `unsafe` forms and asserts each is detected,
+    **plus three prose controls** — because a scanner whose only tests are
+    injections happily over-reports, and an audit that cries wolf is one people
+    stop running. It caught exactly that: a string literal containing `unsafe {`
+    was flagged as code, because the first classifier only looked for `//` before
+    the position. The classifier now walks the line tracking code/string/comment
+    state, including the lifetime-vs-char-literal ambiguity that would otherwise
+    swallow the rest of a line.
+  → **Gaps named rather than implied:** the scanner does not see what a procedural
+    macro or `build.rs` *generates*, only what is committed — a real gap, not a
+    hypothetical one; and it counts and classifies but does not evaluate soundness
+    (with zero blocks there is nothing to evaluate, and `SAFETY.md` §5's reviewer
+    checklist applies the moment there is).
+  → **What governs the first `unsafe`:** the exception process is enforced by four
+    architecture tests plus `tools/fault_inject_architecture.py`, and it is
+    **currently blocked** — `SAFETY.md`'s ledger records no second maintainer
+    exists (`GOV-008`, bus factor 1). So the honest statement is: the workspace
+    contains no `unsafe`, and the process that would govern the first one is
+    enforced but cannot currently complete. A governance gap, not a code gap.
+  → CI now runs both the audit and its self-test, replacing an inline grep that
+    exempted anything matching `#![cfg_attr` — a broader exemption than the thing
+    it was guarding against — and that only ever ran in CI (`§O-055`'s failure).
+  → §4.3 Crate topology. New: `docs/unsafe-audit.md`, `tools/audit_unsafe.py`.
 - [ ] **SEC-021** Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in, with a standards-watch task.
   → §7.4 Cryptographic posture
 - [ ] **SEC-022** Implement the optional egress proxy with per-tenant policy.

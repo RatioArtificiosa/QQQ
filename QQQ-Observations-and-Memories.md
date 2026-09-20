@@ -5000,6 +5000,195 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-083 — `SEC-020`: making a zero mean something, and the self-test that found a bug in the audit
+
+**What the item asks for.** *Audit every `unsafe` block in the three exception
+crates and record the findings.*
+
+**The finding is zero, and the work was making that zero mean something.** A zero
+that appears for the wrong reason is worse than a non-zero, because it **looks
+like an achievement**. Two explanations produce a zero and they have opposite
+implications:
+
+| Explanation | Implication |
+|---|---|
+| The audit missed the blocks | The real count is unknown; the audit is decoration |
+| The `unsafe`-needing primitives are not built, and what *was* built avoided it | The zero is genuine |
+
+**Both were established rather than assumed.**
+
+1. **The audit is not blind.** Verified by *injecting* an `unsafe` block into
+   `crates/qqq-sys/src/lib.rs` and confirming it was detected, classified as
+   `[block]`, and caused a non-zero exit. A scanner that reports zero because it is
+   broken cannot pass that test; this one did.
+2. **The primitives are mostly not built.** §4.3's three exception crates —
+   `qqq-io-uring`, `qqq-mem-hugepage`, `qqq-sys-signals` — have no implementation
+   here. And `SEC-019`, the one item that *did* need OS primitives, avoided
+   `unsafe` entirely through `nix` and `seccompiler` (`§O-081`). That is the
+   strongest available evidence the zero is structural rather than accidental.
+
+**Scope was widened deliberately.** The item says "the three exception crates",
+but an `unsafe` block in a crate that is *supposed* to forbid it is a **more**
+serious finding than one in a crate allowed to have it. So the audit covers all 85
+`.rs` files in the workspace: 0 code-position `unsafe`, 0 lint escapes, 11 crates
+with `#![forbid(unsafe_code)]`.
+
+**The tool has a self-test, and it found a real defect in the tool.** This session
+has recorded that failure four times (`§O-079`) — a scanner reporting "0 findings"
+is indistinguishable from a broken scanner. So `--self-test` injects all seven
+`unsafe` forms and asserts each is detected, **plus three prose controls**, because
+a scanner whose only tests are injections happily over-reports and an audit that
+cries wolf is one people stop running.
+
+It caught exactly that on the first run: a string literal containing `unsafe {`
+was flagged as **code**, because the first classifier only looked for `//` before
+the position. The fix walks the line tracking code/string/comment state — including
+the lifetime-versus-char-literal ambiguity, where treating `'a` as an opening quote
+would swallow the rest of the line.
+
+**The rule this reinforces.** *A check whose only test is a positive case will
+over-report, and a check whose only test is a negative case will under-report.* The
+self-test needed both directions, and the direction it was missing is the one that
+would have made the audit untrustworthy in the **noisy** way rather than the silent
+one.
+
+**What governs the first `unsafe`, and the governance gap it exposes.** The
+exception process is enforced by four architecture tests plus a fault-injection
+harness, so an `allow(unsafe_code)` cannot land without `SAFETY.md` beside it. But
+the process is **currently blocked**: `SAFETY.md`'s ledger records that no second
+maintainer exists (`GOV-008`, bus factor 1, risk `R-15`), and §4.3 requires the
+argument be reviewed by one. The honest statement is therefore: **the workspace
+contains no `unsafe`, and the process that would govern the first one is enforced
+but cannot currently complete.** That is a governance gap rather than a code gap,
+and the audit records it rather than letting a clean zero imply the process is
+ready.
+
+**One CI improvement.** An inline grep already checked the lint policy, and it was
+replaced for the *count* by the scripted audit — which separates prose from code,
+reports what it scanned (so a scanner pointed at the wrong directory cannot pass),
+covers both lint escapes, and runs identically locally and in CI. The inline
+version also exempted anything matching `#![cfg_attr`, a **broader exemption than
+the thing it was guarding against**.
+
+→ §4.3. New: `docs/unsafe-audit.md`, `tools/audit_unsafe.py` (with `--self-test`),
+and two CI steps.
+
+---
+
+### §O-082 — The blocked-item pass: "is this blocked on the item, or on one way of doing it?"
+
+**Recorded now, while the surrounding work is fresh, for the pass that marks
+non-implementable items `[!]`.**
+
+Several checklist items cannot be implemented by this project at all — external
+security audits (`SEC-024`, `SEC-025`), legal review (`LIC-002`), certain
+governance items (`GOV-008`). The user's instruction was explicit: implement what
+can be implemented, and mark the rest **`[!]` blocked with the reason recorded**.
+
+**The distinction the pass must apply.** An item can be blocked by its *own* nature
+— a third-party audit cannot be performed by the audited party — or blocked by
+*one implementation* of it, and the second kind dissolves under a question. Two
+items this session looked blockable and were not:
+
+* `SEC-019` appeared blocked on the §4.3 second-maintainer requirement, which
+  turned out to attach to the `unsafe` **implementation** rather than to the item:
+  safe wrappers existed (`§O-081`).
+* `SEC-017`'s agility clause looked like it needed a test, and turned out to be
+  enforced by the **type system** (`§O-080`).
+
+So each candidate must be asked **"is this blocked on the item, or on one way of
+doing it?"** before it is marked. Marking `SEC-019` blocked would have been
+defensible and wrong, which is why the question is written down rather than applied
+by feel.
+
+---
+
+### §O-081 — `SEC-019`: the block that was sidestepped rather than deferred
+
+**What the item asks for.** Linux hardening — dropped privileges, `no_new_privs`,
+seccomp allowlist — from §7.5's table.
+
+**The obstacle, and why it looked like a block.** `qqq-sys` is the crate §4.3
+designates for `unsafe` OS primitives, and it carries a bare
+`#![forbid(unsafe_code)]`. The implementation this item implies is `libc` calls in
+`unsafe` blocks, so using the crate as designed would trigger the §4.3 exception
+process: a written safety argument — which exists as a template — **plus a second
+maintainer**, and `SAFETY.md`'s ledger records that no second maintainer exists
+(`GOV-008`, bus factor 1, risk `R-15`). The item looked blocked.
+
+**It was not, because the block assumed the implementation.** `nix` provides
+`setuid`, `setgid`, `setgroups` and `set_no_new_privs` as **safe** functions, and
+`seccompiler` compiles a BPF filter from a typed description and installs it
+safely. Verified before committing to the approach, not assumed: the functions
+were located in the installed `nix` 0.31.3 source, and both crates' licences (MIT;
+Apache-2.0 OR BSD-3-Clause) are on `deny.toml`'s allowlist.
+
+**So the trade was a dependency instead of a block of `unsafe`, and it is the
+better side independently of the block.** An `unsafe` block we write is an
+obligation this project holds **forever** and must re-review at every change to
+the surrounding code; a safe wrapper is an obligation the ecosystem holds, which
+we review once. The `forbid` survives, the architecture test still passes, and
+nothing waits on a precondition that cannot be satisfied.
+
+**The general lesson, which is why this is recorded at length.** *Check whether a
+block is on the item or on one implementation of it.* Three items in this session
+were one step from being marked `[!]` blocked — `SEC-019` on the second-maintainer
+requirement, and the audit in `§O-080` on a claim that turned out to be enforced
+by the type system. Both times the block dissolved under a question rather than a
+workaround, and both times marking it blocked would have been *defensible and
+wrong*.
+
+**What the module does, and the design rule that shaped it.** §7.5 states that
+*"none of these are required for QQQ's security claim"*, and that sentence is the
+specification rather than a hedge:
+
+* Every step is optional and independently skippable, so a deployment that cannot
+  drop privileges still runs.
+* **Hardening never fails the process** — it returns a `HardenReport`, not a
+  `Result`. A `Result` would invite a `?` that turns "this kernel has no seccomp"
+  into a startup failure: an availability bug introduced by a defence-in-depth
+  feature.
+* The outcome has **four** variants, not two, because `bool` would collapse
+  `Skipped` and `Failed` — and then a deployment that quietly did not harden looks
+  identical to one that did.
+* `Unsupported` is deliberately **not** a failure: §7.5 says a host without
+  seccomp is still safe, so treating it as one would make QQQ undeployable off
+  Linux, the opposite of "deployable anywhere".
+
+**Two guards that would otherwise be invisible, and how each is defended.** The
+`setuid(0)` case is refused outright, because dropping to root is a no-op that
+`setuid` reports as **success** — a report saying `Applied` for it would claim a
+privilege drop that never happened. And the seccomp filter is default-deny with an
+explicit allowlist, because a filter listing denials permits every syscall newer
+than the list, which is the entire history of seccomp bypasses.
+
+**The order of the steps is a security property**, not a style: `no_new_privs`
+must precede seccomp (a filter installs without `CAP_SYS_ADMIN` only under it),
+groups must be dropped before the uid (dropping the uid removes the authority to
+call `setgroups`), and seccomp comes last because the filter refuses `setuid`.
+Reversing any of them produces a process that keeps running and is merely less
+hardened — a silent-looking failure — which is why `STEP_ORDER` is a documented
+constant with a test rather than a sequence in a function body.
+
+**What is deliberately not implemented, named rather than omitted.** `Landlock`
+needs a newer kernel API than `nix` wraps safely, and `capset` is subsumed for the
+common deployment (a process that has dropped to an unprivileged uid has no
+capabilities left to drop, and dropping capabilities *instead of* the uid would be
+strictly weaker). Both are recorded in the module documentation as decisions.
+
+**Testing approach, and why it is unusual.** The steps are irreversible and
+process-wide: a `seccomp` filter cannot be removed, and a test that installed one
+in-process would kill every subsequent test in the binary with `SIGSYS`. So the
+tests **re-execute the test binary** with an environment variable naming the step,
+and the parent asserts on the child's report. The alternative — calling `harden`
+directly — would pass on a Linux CI runner while making the binary un-runnable
+afterwards, which is a test that works once, alone.
+
+→ §7.5. New: `crates/qqq-sys/src/harden.rs`, `crates/qqq-sys/tests/harden.rs`
+(18 tests), and §8 of `crates/qqq-sys/SAFETY.md`.
+
+---
+
 ### §O-080 — `SEC-017`/`SEC-018`: the policy was enforced by the type system, and the tests could not say so
 
 **What the items ask for.** `SEC-017`: *named algorithms, no silent defaults, no
@@ -7363,5 +7552,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-016` implemented (`§O-078`), and the finding was a test passing for a reason nobody had checked.** All three mitigations were already implemented and unit-tested — `MAX_HEADERS`/`MAX_HEADER_BYTES`/`MAX_HEAD_BYTES`, `max_request_bytes` enforced *during* streaming, and a `header_timeout` with its own tests — and fault injection confirmed all three are live at that level (2, 3 and 4 tests fail when they are removed). **The gap was one layer up**: `socket.rs` had a body-bomb test but **no socket-level header-bomb or slow-loris test**, and a parser that refuses a bomb after the *server* buffered it has mitigated nothing — `§O-045a`'s two-correct-halves shape again. Added `Server::start_with` (a config seam, because the production 10 s deadline would add ten seconds per run while the *property* tests identically at 200 ms) and three socket tests. **Finding 1:** the slow-loris test took 5.73 s against a 200 ms deadline while passing; the discriminator was that the response was a complete correct `200 OK`, so the server had answered immediately and the 5 s was `read_all` waiting for an EOF a keep-alive server never sends — a **test-helper artefact, not a server defect**. Now asserts time-to-*answer* and runs in **0.72 s**. **Finding 2:** injecting the server's `MAX_HEAD_BYTES` branch left the new large-head test **passing**, so I chased it rather than deleting it — `read_head` reaches `parse_head` by **two routes**, so disabling either alone leaves the other refusing; disabling the parser check *and* the server branch together **did** fail it; and the first fixture was **measuring the wrong limit**, padding each header to 8 KiB, which trips the *per-header* check before the *total* one is consulted. Corrected to 60 headers × 2 KiB with all three preconditions asserted. **The rule: a test that passes is not evidence until its refusal path is named** — four prior findings this session were controls that looked live and were not; this one is the inverse, a control that **is** live where the test proving it did so for an unexamined reason. | Architect |
 
 | 2026-09-20 | **`SEC-017`/`SEC-018` verified (`§O-080`, `§O-079`), and the policy turned out to be enforced by the type system.** A clause-by-clause audit of §7.4 found every row implemented or owned by another item — `CIPHER_SUITES` (8 suites each justified against a row), `PROTOCOL_VERSIONS` (1.3, 1.2), `TlsConfig::build` refusing an unspecified field, `ClientAuth::default()` = `None`, the manifest `crypto.hash` allowlist enforced in `hash_data`, `getrandom::fill` for OS entropy with splitmix64 confined to deterministic mode, and `random.get(length)` taking **no seed** so `SEC-018`'s prohibition holds in the WIT signature. Negative properties were already tested (no RSA key transport, no CBC, forward secrecy at 1.2, no TLS 1.1). **The clause worth testing was the third** — §7.4 says *"no algorithm agility without a version bump"* and the module doc claims *"the lists are fixed"*, but that claim is about code review, not a check. Two widening attacks were attempted and **neither compiles**: rustls 0.23 exports no `TLS_*_CBC_*` suite at all, and `rustls::version` exposes only `TLS12`/`TLS13` (verified in the installed rustls 0.23.43 source). So the agility clause is enforced by the **type system** — stronger than any test. **And that is the finding:** `no_suite_uses_cbc` **cannot fail**, which is belt-and-braces rather than a defect, but means the real enforcement lives where the test's name does not point. Added `the_agility_guarantee_rests_on_these_dependency_exports` to pin the borrowed precondition — a future rustls reintroducing CBC restores the ability to widen, and at that moment the old test becomes load-bearing with nobody noticing. Verified live: widening to three versions fails 3 tests, naming what just became possible. **`§O-079`** records three of my own injection harnesses being wrong before the code was — a filter that ran zero tests, a fixture measuring the wrong ceiling, and an injection that failed to compile — all instances of *verify that the injection reaches the code the test exercises*, one level up from `§M-009`. | Architect |
+
+| 2026-09-20 | **`SEC-019` and `SEC-020` implemented (`§O-081`, `§O-083`), and both looked blocked before they were.** `SEC-019` (Linux hardening) appeared to require triggering the §4.3 `unsafe` exception — a safety argument plus a **second maintainer**, which `SAFETY.md`'s ledger records as unavailable (`GOV-008`, bus factor 1). **The block was on one implementation, not on the item**: `nix` provides `setuid`/`setgid`/`setgroups`/`set_no_new_privs` safely and `seccompiler` compiles a BPF filter from a typed description, so the item was **sidestepped rather than deferred** — `qqq-sys` still contains no `unsafe` and the architecture tests still pass. The module is shaped by §7.5's design rule (*"none of these are required for QQQ's security claim"*): hardening **never fails the process** (returns a report, not a `Result`, since a `?` would turn "no seccomp on this kernel" into a startup failure), the outcome has **four** variants (a `bool` would collapse `Skipped` and `Failed`, making a deployment that quietly did not harden look identical to one that did), and `Unsupported` is not a failure (or QQQ becomes undeployable off Linux). Two invisible-else guards: `setuid(0)` refused because dropping to root is a no-op `setuid` reports as **success**, and the filter is **default-deny** because a deny-list permits every syscall newer than the list. Step order is a security property with a test: `no_new_privs` → groups → uid → seccomp, since reversing any produces a process that keeps running and is merely *less hardened*. Tests **re-execute the binary** because the steps are irreversible and process-wide — a filter installed in-process would kill every later test with `SIGSYS`. `SEC-020`'s finding is **zero `unsafe` across 85 files**, and the work was making that zero mean something: proven not-blind by injecting a block, and explained by the primitives not being built plus `SEC-019` avoiding `unsafe` via safe wrappers. The audit tool's **self-test found a real bug in the tool** — a string literal containing `unsafe {` was flagged as code — which is the over-reporting direction, the one whose absence would have made the audit noisy rather than silent. `§O-082` records the question the blocked-item pass must ask: *is this blocked on the item, or on one way of doing it?* | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

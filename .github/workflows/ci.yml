@@ -378,6 +378,38 @@ jobs:
           fi
           echo "OK: every crate except qqq-sys forbids unsafe code"
 
+      # SEC-020: the `unsafe` audit, as a scripted and self-testing gate.
+      #
+      # # Why this replaces an inline grep rather than duplicating it
+      #
+      # The step above proves the *lint policy* holds. This one proves the
+      # *count* is zero, with three properties the inline version lacks:
+      #
+      #   1. **It separates prose from code.** The inline grep has to be read
+      #      carefully to see that it only matches code positions; a script whose
+      #      doc comment explains its classification is checkable at a glance.
+      #   2. **It reports what it scanned.** "0 findings across 85 files" and
+      #      "0 findings" are different claims, and only the first is falsifiable
+      #      — a scanner pointed at the wrong directory also finds nothing.
+      #   3. **It is one implementation, run identically here and locally.** An
+      #      inline shell pipeline only ever runs in CI, which is the failure
+      #      `§O-055` records: a check the author never sees fail.
+      #
+      # It also covers both lint escapes (`allow` and `cfg_attr(..., allow)`),
+      # where the inline version exempts anything matching `#![cfg_attr` — a
+      # broader exemption than the thing it is guarding against.
+      - name: unsafe audit (SEC-020)
+        run: python tools/audit_unsafe.py
+
+      # The audit's zero is only evidence if the audit can find a one. This
+      # injects all seven `unsafe` forms into a temporary tree and fails if any is
+      # missed -- and it checks three PROSE controls too, because a scanner whose
+      # only tests are injections happily over-reports, and an audit that cries
+      # wolf is one people stop running. It caught exactly that bug during
+      # development: a string literal containing `unsafe {` was flagged as code.
+      - name: unsafe audit is live (SEC-020)
+        run: python tools/audit_unsafe.py --self-test
+
   # ---------------------------------------------------------------------------
   # Supply chain: licences, advisories, unused dependencies.
   # ---------------------------------------------------------------------------

@@ -145,7 +145,7 @@ and the one the enforcement above maintains automatically.
 
 | Item | State |
 |---|---|
-| `qqq-sys` contains `unsafe` | **No** — `#![forbid(unsafe_code)]` |
+| `qqq-sys` contains `unsafe` | **No** — `#![forbid(unsafe_code)]`, and `SEC-019` did **not** add any |
 | This safety argument is complete | **No** — it is the argument *template*, written before the code, which is the correct order |
 | Second maintainer exists | **No** — `GOV-008`, bus factor 1 (risk `R-15`) |
 | Miri coverage configured | **No** — lands with the first `unsafe` |
@@ -155,3 +155,33 @@ and the one the enforcement above maintains automatically.
 and third rows change. That is not a stylistic preference; it is what §4.3's
 "reviewed by a second maintainer" requires, and the test in §6 makes the
 requirement mechanical rather than a matter of memory.
+
+---
+
+## 8. The block that was not deferred: `SEC-019`
+
+`SEC-019` (Linux hardening: dropped privileges, `no_new_privs`, seccomp) is the
+first item to need OS primitives this crate exists to wrap. The obvious
+implementation is `libc` calls in `unsafe` blocks — which would require rows 2 and
+3 of the ledger above to change first, and they cannot (`GOV-008`).
+
+**It was implemented anyway, without adding `unsafe`**, because safe wrappers
+exist: `nix` provides `setuid`, `setgid`, `setgroups` and `set_no_new_privs` as
+safe functions, and `seccompiler` compiles a BPF filter from a typed description.
+
+Two consequences worth recording:
+
+1. **The ledger is unchanged and the invariant holds.** `qqq-sys` still contains
+   no `unsafe`, so §6's enforcement tests still pass and nothing here waits on a
+   second maintainer. The block was **sidestepped rather than deferred**.
+2. **The trade is a dependency, and it is the better side of it.** An `unsafe`
+   block we write is an obligation this project holds forever and must review at
+   every change; a safe wrapper is an obligation the ecosystem holds, which we
+   review once. `§O-081` records the reasoning in full.
+
+**What this does not change.** The ledger's second and third rows still govern any
+*future* `unsafe` in this crate. If `Landlock` (named as unimplemented in
+`src/harden.rs`) or a raw `io_uring` ring is needed later and no safe wrapper
+exists, the exception process is the path — and it remains blocked until a second
+maintainer exists. Recording that here means the next person finds the constraint
+rather than rediscovering it.

@@ -63,10 +63,12 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod conn;
 pub mod http1;
 pub mod response;
 pub mod route;
 
+pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use http1::{
     head_end, is_valid_header_name, parse_head, ParseError, RequestHead, Version, MAX_HEADERS,
     MAX_HEADER_BYTES, MAX_HEAD_BYTES, MAX_REQUEST_BYTES, MAX_TARGET_BYTES,

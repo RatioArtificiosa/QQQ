@@ -614,10 +614,12 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-010** Implement Server-Sent Events.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-011** Implement graceful shutdown with in-flight request draining.
+- [x] **SRV-011** Implement graceful shutdown with in-flight request draining.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-012** Implement per-tenant connection limits and idle timeouts.
+  → Done: `qqq-serve::conn::Connection` — in-flight requests finish, idle connections close at once, the drain deadline is enforced and reported.
+- [x] **SRV-012** Implement per-tenant connection limits and idle timeouts.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Done: `ConnectionLedger` (per-tenant ceiling) and `ConnectionConfig` (idle and header timeouts). The socket layer that drives them is `SRV-001`.
 - [ ] **SRV-013** Implement structured access logging with tenant and trace correlation.
   → §10.3 Logging
 - [ ] **SRV-014** Implement HTTP/3 over QUIC behind a feature flag (beta).

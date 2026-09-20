@@ -319,6 +319,25 @@ mod tests {
         }
     }
 
+    /// Whether `source` contains `func_wrap("name"`, ignoring whitespace.
+    ///
+    /// # Why whitespace is normalised rather than matched literally
+    ///
+    /// An earlier version of these tests matched the exact string
+    /// `func_wrap(\n        "digest"` — eight spaces, one newline. That made the
+    /// test depend on **formatting**, and it failed on the Windows CI runner
+    /// while passing everywhere else: `rustfmt` lays the call out differently
+    /// there, and `include_str!` reads whatever layout the repository holds.
+    ///
+    /// A test whose result depends on where a line breaks is not testing the
+    /// property it names. Stripping whitespace asks the question that was meant
+    /// — "is this function registered?" — independently of how the source is
+    /// laid out. If `rustfmt` reflows the call again, this keeps working.
+    fn registers(source: &str, name: &str) -> bool {
+        let squeezed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        squeezed.contains(&format!("func_wrap(\"{name}\""))
+    }
+
     /// The *unimplemented* interfaces must not be registered. Registering a
     /// stub would replace a clear instantiation failure with a runtime mystery.
     ///
@@ -343,10 +362,8 @@ mod tests {
             "nonce-length",
             "key-length",
         ] {
-            let registration = format!("func_wrap(\n        \"{name}\"");
-            let inline = format!("func_wrap(\"{name}\"");
             assert!(
-                !this_file.contains(&registration) && !this_file.contains(&inline),
+                !registers(this_file, name),
                 "`{name}` belongs to an unimplemented interface (hmac/aead/signing) \
                  and must not be registered as a stub"
             );
@@ -354,18 +371,41 @@ mod tests {
     }
 
     /// The positive control for the test above: `digest` *is* registered, so the
-    /// same detection must find it. Without this, a check that never matches
+    /// same detection must find it. Without this, a check that never matched
     /// anything would look like proof.
     #[test]
     fn the_unregistered_check_can_find_a_registered_name() {
         let this_file = include_str!("host_crypto.rs");
-        let registration = "func_wrap(\n        \"digest\"";
-        let inline = "func_wrap(\"digest\"";
-        assert!(
-            this_file.contains(registration) || this_file.contains(inline),
-            "the detection used by the test above cannot find even a registered \
-             function, so its assertions prove nothing"
-        );
+        for name in ["get", "digest", "digest-many"] {
+            assert!(
+                registers(this_file, name),
+                "the detection used by the test above cannot find `{name}`, which \
+                 certainly is registered, so its assertions prove nothing"
+            );
+        }
+        // And it must not report a name that is genuinely absent.
+        assert!(!registers(this_file, "definitely-not-registered"));
+    }
+
+    /// The detection itself must be formatting-independent. This pins the fix
+    /// for the Windows CI failure: the same call laid out three ways must be
+    /// recognised every time.
+    #[test]
+    fn the_registration_detection_ignores_layout() {
+        for layout in [
+            "inst.func_wrap(\"digest\", |s, p| Ok((vec![],)))",
+            "inst.func_wrap(\n    \"digest\",\n    |s, p| Ok((vec![],)),\n)",
+            "inst\n    .func_wrap(\n        \"digest\",\n        |s, p| Ok((vec![],)),\n    )",
+        ] {
+            assert!(
+                registers(layout, "digest"),
+                "the detection missed a registration written as:\n{layout}"
+            );
+        }
+        assert!(!registers(
+            "inst.func_wrap(\"other\", |s, p| Ok(()))",
+            "digest"
+        ));
     }
 
     #[test]

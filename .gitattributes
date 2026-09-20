@@ -1,0 +1,51 @@
+# Normalize on commit, check out with LF everywhere.
+#
+# This repository is byte-sensitive in ways most are not:
+#
+#   * `qqq-pkg::store` compares content digests, and `qqq-lock`/`qqq.lock`
+#     carries a covering hash over its own bytes. A file that changes line
+#     endings between checkout and commit produces a different digest for
+#     the same logical content.
+#   * fixtures and expected-output files are asserted against exactly.
+#   * the reproducibility claim (REL/REP items in the Checklist) is only
+#     meaningful if the bytes on disk are the bytes that were committed.
+#
+# `core.autocrlf=true` is set on this machine, which would otherwise check
+# LF blobs out as CRLF and make the working tree differ from the index on
+# every text file. Pinning `eol=lf` here overrides that per-repository.
+#
+# The default: everything is text and gets LF.
+* text=auto eol=lf
+
+# Binary formats must never be touched. `text=auto` already detects most,
+# but these three are called out because they are load-bearing:
+#   - `.wasm`/`.cwasm` are compiled artifacts whose digests are compared.
+#   - `.wit` is text, but it is listed as text on purpose for diffs.
+*.wasm  binary
+*.cwasm binary
+*.wat   text eol=lf
+*.wit   text eol=lf
+
+# Vendored/lock data that must round-trip exactly.
+*.lock  text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+
+# Scripts: LF, so they behave the same in CI containers as locally.
+*.sh    text eol=lf
+*.py    text eol=lf
+
+# Windows-native files keep CRLF, because the tooling that reads them
+# (PowerShell, cmd) is inconsistent about bare LF in some contexts.
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Images and archives.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.zip   binary
+*.gz    binary

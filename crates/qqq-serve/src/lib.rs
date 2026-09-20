@@ -67,6 +67,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod body;
+pub mod h2;
 pub mod conn;
 pub mod http1;
 pub mod response;

@@ -1460,11 +1460,24 @@ mod tests {
 
     // -- round trips --------------------------------------------------------
 
-    fn round_trip(frame: Frame<'_>) -> Frame<'_> {
-        let bytes = to_bytes(&frame);
+    /// Serialise `frame`, parse it back, and assert the round trip is exact.
+    ///
+    /// # Why this asserts inside rather than returning the parsed frame
+    ///
+    /// `Frame<'a>` borrows the bytes it was parsed from — frame payloads are
+    /// slices, not copies, so a DATA frame does not allocate. A helper returning
+    /// `Frame<'_>` would return a value borrowing its own local buffer, which the
+    /// borrow checker rejected, correctly.
+    ///
+    /// Copying every payload into an owned frame would sidestep that and would
+    /// also stop testing the property that matters: that the payload is a *slice
+    /// of the input* at the right offset. So the assertion happens here, where
+    /// both the buffer and the parse are alive.
+    fn assert_round_trips(original: &Frame<'_>) {
+        let bytes = to_bytes(original);
         let (parsed, used) = parse_frame(&bytes).expect("must parse what we wrote");
         assert_eq!(used, bytes.len(), "the whole frame must be consumed");
-        parsed
+        assert_eq!(&parsed, original, "the frame must round-trip exactly");
     }
 
     #[test]
@@ -1475,8 +1488,7 @@ mod tests {
             data: b"hello",
             padding: 0,
         };
-        let parsed = round_trip(original.clone());
-        assert_eq!(parsed, original);
+        assert_round_trips(&original.clone());
     }
 
     /// Padding participates in **flow control**: the `DATA` length field counts
@@ -1500,8 +1512,10 @@ mod tests {
             "the length counts the pad octet and the padding"
         );
 
-        let parsed = round_trip(original.clone());
-        assert_eq!(parsed, original);
+        // The payload is inspected from a fresh parse, because a `Frame` borrows
+        // the bytes it came from and cannot outlive this function's buffer.
+        let bytes = to_bytes(&original);
+        let (parsed, _) = parse_frame(&bytes).expect("must parse what we wrote");
         match parsed {
             Frame::Data { data, padding, .. } => {
                 assert_eq!(data, b"abc", "padding must not appear as data");
@@ -1535,7 +1549,7 @@ mod tests {
             padding: None,
             priority: None,
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     /// `HEADERS` with the `PRIORITY` flag is five bytes longer; skipping that
@@ -1554,8 +1568,12 @@ mod tests {
                 weight: 200,
             }),
         };
-        let parsed = round_trip(original.clone());
-        assert_eq!(parsed, original);
+        // The priority block sits between the 9-byte header and the fragment, so
+        // the fragment's offset is what proves it was skipped rather than
+        // swallowed. Parsed here, from a buffer that is still alive.
+        let bytes = to_bytes(&original);
+        let (parsed, used) = parse_frame(&bytes).expect("must parse what we wrote");
+        assert_eq!(used, bytes.len(), "the whole frame must be consumed");
         match parsed {
             Frame::Headers {
                 fragment, priority, ..
@@ -1576,8 +1594,7 @@ mod tests {
             padding: Some(2),
             priority: None,
         };
-        let parsed = round_trip(original.clone());
-        assert_eq!(parsed, original);
+        assert_round_trips(&original.clone());
     }
 
     #[test]
@@ -1590,7 +1607,7 @@ mod tests {
                 weight: 15,
             },
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     /// RFC 9113 §5.3.1: *"A stream cannot depend on itself"* — and it is a
@@ -1612,7 +1629,7 @@ mod tests {
             stream_id: 1,
             error: ErrorCode::EnhanceYourCalm,
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     #[test]
@@ -1624,12 +1641,12 @@ mod tests {
                 (SettingId::Unknown(0xbeef), 1),
             ],
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     #[test]
     fn a_settings_ack_round_trips() {
-        assert_eq!(round_trip(Frame::SettingsAck), Frame::SettingsAck);
+        assert_round_trips(&Frame::SettingsAck);
     }
 
     #[test]
@@ -1638,13 +1655,13 @@ mod tests {
             flags: Flags::none(),
             payload: *b"12345678",
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
 
         let ack = Frame::Ping {
             flags: Flags::from_bits(Flags::ACK),
             payload: [0; 8],
         };
-        assert_eq!(round_trip(ack.clone()), ack);
+        assert_round_trips(&ack.clone());
     }
 
     #[test]
@@ -1655,7 +1672,7 @@ mod tests {
             raw_error: 1,
             debug: b"because",
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     /// An unassigned code is retained rather than dropped: RFC 9113 §7 says it
@@ -1692,13 +1709,13 @@ mod tests {
             stream_id: 0,
             increment: 65_535,
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
 
         let stream = Frame::WindowUpdate {
             stream_id: 1,
             increment: 1,
         };
-        assert_eq!(round_trip(stream.clone()), stream);
+        assert_round_trips(&stream.clone());
     }
 
     /// RFC 9113 §6.9: a zero increment is a `PROTOCOL_ERROR`. Representing it
@@ -1719,7 +1736,7 @@ mod tests {
             flags: Flags::from_bits(Flags::END_HEADERS),
             fragment: b"\x00\x01\x02",
         };
-        assert_eq!(round_trip(original.clone()), original);
+        assert_round_trips(&original.clone());
     }
 
     /// RFC 9113 §4.1: an unrecognised frame type must be **ignored**, which
@@ -1751,21 +1768,35 @@ mod tests {
     }
 
     /// Each fixed-length frame type, checked against RFC 9113 §6.
+    ///
+    /// # Why each case carries its own stream id
+    ///
+    /// This test used `bytes[8] = 1` for every case, and PING failed with
+    /// `BadStreamId` rather than `BadLength` — correctly: PING, SETTINGS and
+    /// GOAWAY are connection-level and must carry stream id 0, and the parser
+    /// checks that before the length. The test was asserting one error while
+    /// triggering a different, earlier one, which is a test that cannot fail for
+    /// its own reason. The stream id is now a per-case field so the length is the
+    /// only thing wrong.
+    ///
+    /// Only `WINDOW_UPDATE` is stream-scoped, and its wrong-length form is a
+    /// 4-byte payload rather than the required 4 + 1.
     #[test]
     fn a_wrong_length_is_refused_for_every_fixed_size_frame() {
-        let cases: [(u8, u32, &str); 4] = [
-            (0x3, 3, "RST_STREAM"),
-            (0x6, 7, "PING"),
-            (0x7, 7, "GOAWAY"),
-            (0x8, 5, "WINDOW_UPDATE"),
+        // (type, wrong length, name, stream id)
+        let cases: [(u8, u32, &str, u32); 4] = [
+            (0x3, 3, "RST_STREAM", 1),
+            (0x6, 7, "PING", 0),
+            (0x7, 7, "GOAWAY", 0),
+            (0x8, 5, "WINDOW_UPDATE", 1),
         ];
-        for (type_byte, length, name) in cases {
+        for (type_byte, length, name, stream_id) in cases {
             let mut bytes = vec![0u8; 9 + length as usize];
             bytes[0] = (length >> 16) as u8;
             bytes[1] = (length >> 8) as u8;
             bytes[2] = length as u8;
             bytes[3] = type_byte;
-            bytes[8] = 1;
+            bytes[4..8].copy_from_slice(&stream_id.to_be_bytes());
             let e = parse_frame(&bytes).unwrap_err();
             assert!(
                 matches!(e, FrameError::BadLength { .. }),

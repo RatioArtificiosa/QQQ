@@ -77,17 +77,12 @@
 //! them into `qqq-core` would need a code outside this module rather than a
 //! guess inside it.
 
-pub mod conn;
 pub mod error;
-pub mod flow;
 pub mod frame;
 pub mod hpack;
 pub mod settings;
-pub mod stream;
 
-pub use conn::{Connection, ConnectionConfig, ConnectionEvent, Request};
 pub use error::{ConnectionError, ErrorCode, StreamError};
-pub use flow::{FlowControl, FlowError};
 pub use frame::{
     parse_frame, to_bytes, write_frame, Flags, Frame, FrameError, FrameHeader, FrameType,
     PrioritySpec, SettingId, CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN,
@@ -96,4 +91,3 @@ pub use frame::{
 pub use hpack::{Decoder, Encoder, HeaderField, HpackError, DEFAULT_HEADER_TABLE_SIZE,
     MAX_HEADER_LIST_SIZE};
 pub use settings::{Settings, SettingsError, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS};
-pub use stream::{FrameKind, Stream, StreamId, StreamState};

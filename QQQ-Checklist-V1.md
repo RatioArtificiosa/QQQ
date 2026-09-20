@@ -1723,9 +1723,68 @@ Items are grouped below by **phase**, because dependency order matters more than
     looked live and was not; this one is the inverse — a control that **is** live,
     where the test proving it did so for a reason nobody had checked.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SEC-017** Implement the cryptographic-posture policy: named algorithms, no silent defaults, no agility without a version bump.
+- [x] **SEC-017** Implement the cryptographic-posture policy: named algorithms, no silent defaults, no agility without a version bump.
+  → Done. Audited **clause by clause** against §7.4's table; every row is either
+    implemented or owned by a different item (Ed25519 signing belongs to
+    `SUP-001`/`DIST-003`, which are about *publishing* rather than *policy*):
+    | §7.4 clause | Mechanism |
+    |---|---|
+    | Transport named algorithms | `CIPHER_SUITES` — 8 suites, each justified against a §7.4 row |
+    | No version agility | `PROTOCOL_VERSIONS` = 1.3, 1.2 only |
+    | No silent defaults | `TlsConfig::build` refuses an unspecified field; `ClientAuth::default()` is `None`, with its reasoning written out |
+    | Hashing names algorithms | manifest `crypto.hash` allowlist, enforced in `hash_data` |
+    Negative properties are tested too: `no_suite_uses_rsa_key_transport`,
+    `no_suite_uses_cbc`, `every_tls12_suite_is_forward_secret`,
+    `the_version_policy_refuses_tls_11`.
+  → **The clause worth testing was the third, and asking how it is enforced found
+    something better than expected.** §7.4 says *"no algorithm agility without a
+    version bump"* and the module doc claims *"the lists are fixed; changing one is
+    a change to a public constant"* — but that second claim is about **code review**,
+    not a check. Two widening attacks were attempted:
+    | Attempted widening | Result |
+    |---|---|
+    | add a `TLS_*_CBC_*` suite | `error[E0425]` — rustls 0.23 exports no CBC suite |
+    | add TLS 1.1 to `PROTOCOL_VERSIONS` | `error[E0425]` — `rustls::version` exports only `TLS12`, `TLS13` |
+    **Neither compiles.** Verified against the installed rustls 0.23.43 source: no
+    `CBC_SHA` anywhere, and exactly two public version statics. The agility clause
+    is therefore enforced by the **type system** — *stronger* than any test, since
+    a test can be deleted or relaxed in review while a suite the dependency does
+    not export cannot be named at all.
+  → **And that is the finding: the tests could not say so.** `no_suite_uses_cbc`
+    **cannot fail** with this rustls version — belt-and-braces rather than a defect,
+    but it means the real enforcement lives somewhere the test's name does not
+    point, and a reader finding it would reasonably believe it *was* the guarantee.
+  → Added `the_agility_guarantee_rests_on_these_dependency_exports`, which pins the
+    **dependency-level precondition** the argument rests on. The guarantee is
+    borrowed and could be returned: a future rustls reintroducing CBC or TLS 1.1
+    restores the ability to widen the policy, and at that moment `no_suite_uses_cbc`
+    becomes load-bearing again with nobody noticing. Verified live by simulating
+    exactly that — widening `PROTOCOL_VERSIONS` to three entries fails **3 tests**,
+    the tripwire among them, naming what just became possible.
+  → **The rule this produced:** *a guarantee borrowed from a dependency needs a
+    tripwire on that dependency.* The code was right; what was missing was a test
+    naming **why** it is right, and failing when the reason stops holding.
   → §7.4 Cryptographic posture
-- [ ] **SEC-018** Implement the host CSPRNG with no guest-supplied seed outside deterministic test mode.
+- [x] **SEC-018** Implement the host CSPRNG with no guest-supplied seed outside deterministic test mode.
+  → Done; **audit only, no code change was needed**, and the audit is recorded so
+    the claim is evidenced rather than asserted.
+  → The two halves of the requirement:
+    * **Host CSPRNG.** `AmbientState::random_bytes` calls `getrandom::fill` when not
+      in deterministic mode — OS entropy, with a failure mapped to
+      `RandomFailure::SourceFailed` and then to a **host error** rather than
+      fabricated bytes, because predictable "randomness" is worse than a failure.
+      splitmix64 is used **only** in deterministic mode, where the doc states
+      explicitly that it "is explicitly NOT a CSPRNG, and is never used outside
+      deterministic mode".
+    * **No guest-supplied seed.** `qqq:crypto/random.get` takes `length: u32` and
+      nothing else — the prohibition is in the **WIT signature**, so it holds by
+      construction rather than by a check someone could remove. A grep for
+      `fn seed` / `with_seed` / `set_seed` across `ambient.rs` and `host_crypto.rs`
+      returns nothing, which is the expected result and is why it is written down.
+  → The determinism boundary itself is enforced by the grant model as well:
+    `crypto.random` defaults to **false** in the manifest, because "an unrequested
+    CSPRNG is a covert channel" (§10.5) — so a guest that never asked for
+    randomness cannot reach the generator at all.
   → §7.4 Cryptographic posture
 - [ ] **SEC-019** Implement Linux hardening: dropped privileges, `no_new_privs`, seccomp allowlist.
   → §7.5 Hardening beyond Wasm

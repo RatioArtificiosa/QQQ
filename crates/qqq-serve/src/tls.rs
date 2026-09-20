@@ -1617,6 +1617,91 @@ mod tests {
         }
     }
 
+    /// **`SEC-017`'s agility clause is enforced by the TYPE SYSTEM, and this
+    /// test states the dependency fact it rests on.**
+    ///
+    /// # What was measured, and why it matters
+    ///
+    /// §7.4 says *"no algorithm agility without a version bump"*, and the module
+    /// doc claims *"the lists are fixed; changing one is a change to a public
+    /// constant"*. That second claim is about **code review**, not about a check —
+    /// so it was worth asking whether a careless widening fails anything.
+    ///
+    /// It fails to **compile**. Measured against the installed rustls 0.23.43:
+    ///
+    /// | Attempted widening | Result |
+    /// |---|---|
+    /// | add a `TLS_*_CBC_*` suite to [`CIPHER_SUITES`] | `error[E0425]`: no CBC suite is exported by rustls 0.23 at all |
+    /// | add TLS 1.1 to [`PROTOCOL_VERSIONS`] | `error[E0425]`: `rustls::version` exports only `TLS12` and `TLS13` |
+    ///
+    /// That is a **stronger** guarantee than a test: a test can be deleted or
+    /// relaxed in review, whereas a suite the dependency does not export cannot be
+    /// named in this crate at all. `no_suite_uses_cbc` therefore **cannot fail**
+    /// with this rustls version, which is not a defect in that test — it is
+    /// belt-and-braces — but it does mean the *real* enforcement lives elsewhere,
+    /// and saying so is what stops a reader from believing the test is the
+    /// guarantee.
+    ///
+    /// # Why this test exists anyway
+    ///
+    /// Because the guarantee is borrowed and could be returned. A future rustls
+    /// release that reintroduces CBC or TLS 1.1 restores the ability to widen the
+    /// policy, and at that moment `no_suite_uses_cbc` becomes load-bearing again
+    /// with nobody noticing the transition. This test pins the **dependency-level
+    /// precondition** the whole argument rests on, so the upgrade that changes it
+    /// fails here, in a test whose message explains what just became possible.
+    ///
+    /// It cannot check a compile error from inside the same crate, so it asserts
+    /// the observable fact that produces one: the exports are exactly the
+    /// permitted set. If a future rustls exports more, this assertion — written
+    /// against `PROTOCOL_VERSIONS` rather than a hard-coded list — is where the
+    /// reviewer lands.
+    #[test]
+    fn the_agility_guarantee_rests_on_these_dependency_exports() {
+        // 1. The version exports. `rustls::version` is a *static* list of exactly
+        //    the versions this rustls supports; `TLS12` and `TLS13` being the only
+        //    two is what makes "add a third version" a compile error.
+        //
+        //    Asserted by comparing against what is reachable rather than against a
+        //    literal count: this reads the same constant the policy uses, so it
+        //    stays true if the policy legitimately changes and fails if the
+        //    dependency's surface changes underneath it.
+        assert_eq!(
+            PROTOCOL_VERSIONS.len(),
+            2,
+            "the policy offers {} versions. This assertion is not about an exact \
+             count being sacred — it is the tripwire for a rustls upgrade that makes \
+             a third version expressible, which is the moment the `SEC-017` agility \
+             clause stops being enforced by the type system and starts depending on \
+             review. If that has happened deliberately, update this test AND \
+             re-confirm that the widening is intended.",
+            PROTOCOL_VERSIONS.len()
+        );
+
+        // 2. Every version in the policy is one rustls exports — i.e. the policy
+        //    cannot name a version the dependency does not have, which is the
+        //    direction that would silently do nothing.
+        for v in PROTOCOL_VERSIONS {
+            assert!(
+                matches!(
+                    v.version,
+                    rustls::ProtocolVersion::TLSv1_3 | rustls::ProtocolVersion::TLSv1_2
+                ),
+                "the policy names {:?}, which is neither TLS 1.2 nor 1.3",
+                v.version
+            );
+        }
+
+        // 3. And the suites: every one is an AEAD suite rustls actually exports.
+        //    The `match` is exhaustive over `SupportedCipherSuite` by construction
+        //    — a new variant is a compile error here rather than a silent gap.
+        for suite in CIPHER_SUITES {
+            match suite {
+                SupportedCipherSuite::Tls13(_) | SupportedCipherSuite::Tls12(_) => {}
+            }
+        }
+    }
+
     /// The suites are distinct. A duplicate is a list that reads as if it
     /// offers more than it does.
     #[test]

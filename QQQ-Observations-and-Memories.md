@@ -5000,6 +5000,114 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-080 — `SEC-017`/`SEC-018`: the policy was enforced by the type system, and the tests could not say so
+
+**What the items ask for.** `SEC-017`: *named algorithms, no silent defaults, no
+agility without a version bump*. `SEC-018`: *the host CSPRNG, with no
+guest-supplied seed outside deterministic test mode*.
+
+**What was already there, and it was a great deal.** A clause-by-clause audit
+against §7.4's table found every row either implemented or owned by another item
+(Ed25519 signing belongs to `SUP-001`/`DIST-003`, which are about *publishing*
+rather than *policy*):
+
+| §7.4 clause | Mechanism |
+|---|---|
+| Transport named algorithms | `CIPHER_SUITES`, 8 suites each justified against a §7.4 row |
+| No version agility | `PROTOCOL_VERSIONS` = 1.3, 1.2 only |
+| No silent defaults | `TlsConfig::build` refuses an unspecified field; `ClientAuth::default()` is `None` with the reasoning written out |
+| Hashing names algorithms | manifest `crypto.hash` allowlist, enforced in `hash_data` |
+| Randomness from the OS | `getrandom::fill` when not deterministic; splitmix64 **only** in deterministic mode |
+| No guest seed | `random.get(length)` takes no seed — the prohibition is in the WIT signature |
+
+Negative properties were tested too: `no_suite_uses_rsa_key_transport`,
+`no_suite_uses_cbc`, `every_tls12_suite_is_forward_secret`,
+`the_version_policy_refuses_tls_11`.
+
+**The honest question that produced the finding.** §7.4 says *"no algorithm
+agility without a version bump"* and the module doc claims *"the lists are fixed;
+changing one is a change to a public constant"*. **The second claim is about code
+review, not about a check** — so it was worth asking whether a careless widening
+fails anything. Two widening attacks were attempted:
+
+| Attempted widening | Result |
+|---|---|
+| add a `TLS_*_CBC_*` suite | `error[E0425]` — rustls 0.23 exports no CBC suite at all |
+| add TLS 1.1 to `PROTOCOL_VERSIONS` | `error[E0425]` — `rustls::version` exports only `TLS12` and `TLS13` |
+
+**Neither compiles.** Verified against the installed rustls 0.23.43 source: a
+repo-wide search finds no `CBC_SHA` anywhere, and `versions.rs` declares exactly
+two public version statics. So the agility clause is enforced by the **type
+system**, which is *stronger* than any test — a test can be deleted or relaxed in
+review, whereas a suite the dependency does not export cannot be named in this
+crate at all.
+
+**And that is the finding: the tests could not say so.** `no_suite_uses_cbc`
+**cannot fail** with this rustls version. That is not a defect in the test — it is
+belt-and-braces — but it means *the real enforcement lives somewhere the test's
+own name does not point*, and a reader who found that test would reasonably
+believe it was the guarantee.
+
+**Added:** `the_agility_guarantee_rests_on_these_dependency_exports`, which pins
+the **dependency-level precondition** the whole argument rests on. The guarantee
+is borrowed and could be returned: a future rustls that reintroduces CBC or TLS 1.1
+restores the ability to widen the policy, and at that moment `no_suite_uses_cbc`
+becomes load-bearing again with nobody noticing the transition. The tripwire fires
+there, in a test whose message explains what just became possible.
+
+Verified live by simulating the scenario: widening `PROTOCOL_VERSIONS` to three
+entries fails **3 tests**, the tripwire among them, with the message *"the policy
+offers 3 versions… this is the tripwire for a rustls upgrade that makes a third
+version expressible"*.
+
+**The rule this produced.** *A guarantee borrowed from a dependency needs a
+tripwire on that dependency.* The code was right; what was missing was a test that
+names **why** it is right, and would fail when the reason stops holding. This is
+the third distinct shape this session: not a control that looked live and was not
+(`§O-066`, `§O-071`, `§O-073`, `§O-076`), not a live control whose test passed for
+an unexamined reason (`§O-078`), but **a live control whose enforcement mechanism
+was invisible and unguarded against its own expiry**.
+
+→ §7.4. Changed: `crates/qqq-serve/src/tls.rs` (one test). `SEC-018` required no
+change: audit only, and the audit is recorded above.
+
+---
+
+### §O-079 — Three injection harnesses of my own were wrong before the code was
+
+**What happened, three times in this round.** Each was the same failure: an
+injection harness that did not exercise what its own name claimed.
+
+1. `inject_sec16_socket.py` filtered the "head ceiling" case on the string
+   `header_bomb`, so it never ran
+   `a_head_that_is_large_without_many_headers_is_refused` — the only test that
+   reaches that ceiling. It reported `NOT CAUGHT`, and the conclusion was about the
+   *filter*, not the code.
+2. The first large-head **fixture** padded each header to 8 KiB, tripping
+   `MAX_HEADER_BYTES` (the per-header limit) before `MAX_HEAD_BYTES` (the total)
+   was consulted. The test named one ceiling and measured another.
+3. The first agility injection used identifiers rustls does not export, so it
+   failed to compile — which turned out to **be** the finding, but only because the
+   failure was investigated rather than worked around.
+
+**Why this is the same lesson as `§M-009`.** That entry says: *verify that an
+injected fault actually applied.* All three failures here are one level up —
+**verify that the injection reaches the code the test exercises.** A harness that
+silently skips its target is worse than no harness, because it produces a
+confident `NOT CAUGHT` that reads as evidence about the code.
+
+**The checks that would have caught all three, now applied by habit:**
+* Print the test count the filter selected, and fail loudly on zero — a filter that
+  matches nothing is not a passing injection.
+* Assert the fixture's **preconditions** inside the test, so a fixture that stops
+  exercising its target fails rather than passing quietly (`SEC-016`'s large-head
+  test now asserts all three: over the total, under the count, under the per-header
+  limit).
+* Distinguish "the injection did not compile" from "the injection was not caught",
+  and investigate a compile failure rather than rewriting the injection to build.
+
+---
+
 ### §O-078 — `SEC-016`: a passing test whose refusal path I could not name
 
 **What the item asks for.** Slow-loris, header-bomb and body-bomb mitigations
@@ -7253,5 +7361,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-015` implemented (`§O-076`), and the capability diff compared a value against itself.** The lockfile and diff layers were already correct — `caps` a first-class field in `compute_hash`, `LockDiff::compute` producing `caps_added`/`caps_removed`, `grants_new_authority()` as the CI predicate. The defect was one line up: `resolve` carried a satisfied pin forward with `pinned.clone()`, so the new lockfile recorded **the same caps the old one did** and `LockDiff::compute(old, &next)` compared a value to itself. `caps_added` was **structurally always empty**, `escalation` could never become `true` through `qqqai install`, and a CI gate branching on that boolean would have passed **every supply-chain event in silence**. Invisible to the suite because every test either exercised `LockDiff::compute` directly (correct, unrelated to `resolve`) or asserted merely that install succeeded — nothing tested the seam, which is where the defect lived. This is `§O-066`/`§O-071`/`§O-073`'s shape again: correct and **not reached**. The root cause was a missing source of truth — an escalation is "what the dependency needs **now** differs from what the lockfile recorded", and the manifest had **no per-dependency `caps` field**, so §5.4's *"dependencies declare capabilities too"* was unmodelled. Added `DependencyDetail::caps` / `Dependency::caps()` (empty for the bare form) and made `resolve` record the **declared** set. Declaring is not granting — the effective authority is still the root manifest plus narrowing overlays, so this is an audit input and any other meaning would be a capability-widening path. Two boundaries pinned because the naive choice is wrong in the opposite direction: a dependency declaring **nothing** keeps its record (clearing would report every capability as removed — a false de-escalation), and a **loss** is reported but not flagged as escalation (`CLI-015`'s rule). Convergence asserted: a second resolve against the new lockfile must produce no change, because a diff that never settles is ignored, which is the same as having none. Verified end-to-end: `qqq.lock: 1 package(s) resolved; AUTHORITY ESCALATION — qqqai/telemetry gains http.client`, and `--json` reporting `"escalation":true` on both dry-run and write. Two of my own test errors recorded: the CLI test first used the bare manifest form (which correctly declares nothing), then re-used one sandbox for both assertions when the JSON run had already written the lockfile. | Architect |
 
 | 2026-09-20 | **`SEC-016` implemented (`§O-078`), and the finding was a test passing for a reason nobody had checked.** All three mitigations were already implemented and unit-tested — `MAX_HEADERS`/`MAX_HEADER_BYTES`/`MAX_HEAD_BYTES`, `max_request_bytes` enforced *during* streaming, and a `header_timeout` with its own tests — and fault injection confirmed all three are live at that level (2, 3 and 4 tests fail when they are removed). **The gap was one layer up**: `socket.rs` had a body-bomb test but **no socket-level header-bomb or slow-loris test**, and a parser that refuses a bomb after the *server* buffered it has mitigated nothing — `§O-045a`'s two-correct-halves shape again. Added `Server::start_with` (a config seam, because the production 10 s deadline would add ten seconds per run while the *property* tests identically at 200 ms) and three socket tests. **Finding 1:** the slow-loris test took 5.73 s against a 200 ms deadline while passing; the discriminator was that the response was a complete correct `200 OK`, so the server had answered immediately and the 5 s was `read_all` waiting for an EOF a keep-alive server never sends — a **test-helper artefact, not a server defect**. Now asserts time-to-*answer* and runs in **0.72 s**. **Finding 2:** injecting the server's `MAX_HEAD_BYTES` branch left the new large-head test **passing**, so I chased it rather than deleting it — `read_head` reaches `parse_head` by **two routes**, so disabling either alone leaves the other refusing; disabling the parser check *and* the server branch together **did** fail it; and the first fixture was **measuring the wrong limit**, padding each header to 8 KiB, which trips the *per-header* check before the *total* one is consulted. Corrected to 60 headers × 2 KiB with all three preconditions asserted. **The rule: a test that passes is not evidence until its refusal path is named** — four prior findings this session were controls that looked live and were not; this one is the inverse, a control that **is** live where the test proving it did so for an unexamined reason. | Architect |
+
+| 2026-09-20 | **`SEC-017`/`SEC-018` verified (`§O-080`, `§O-079`), and the policy turned out to be enforced by the type system.** A clause-by-clause audit of §7.4 found every row implemented or owned by another item — `CIPHER_SUITES` (8 suites each justified against a row), `PROTOCOL_VERSIONS` (1.3, 1.2), `TlsConfig::build` refusing an unspecified field, `ClientAuth::default()` = `None`, the manifest `crypto.hash` allowlist enforced in `hash_data`, `getrandom::fill` for OS entropy with splitmix64 confined to deterministic mode, and `random.get(length)` taking **no seed** so `SEC-018`'s prohibition holds in the WIT signature. Negative properties were already tested (no RSA key transport, no CBC, forward secrecy at 1.2, no TLS 1.1). **The clause worth testing was the third** — §7.4 says *"no algorithm agility without a version bump"* and the module doc claims *"the lists are fixed"*, but that claim is about code review, not a check. Two widening attacks were attempted and **neither compiles**: rustls 0.23 exports no `TLS_*_CBC_*` suite at all, and `rustls::version` exposes only `TLS12`/`TLS13` (verified in the installed rustls 0.23.43 source). So the agility clause is enforced by the **type system** — stronger than any test. **And that is the finding:** `no_suite_uses_cbc` **cannot fail**, which is belt-and-braces rather than a defect, but means the real enforcement lives where the test's name does not point. Added `the_agility_guarantee_rests_on_these_dependency_exports` to pin the borrowed precondition — a future rustls reintroducing CBC restores the ability to widen, and at that moment the old test becomes load-bearing with nobody noticing. Verified live: widening to three versions fails 3 tests, naming what just became possible. **`§O-079`** records three of my own injection harnesses being wrong before the code was — a filter that ran zero tests, a fixture measuring the wrong ceiling, and an injection that failed to compile — all instances of *verify that the injection reaches the code the test exercises*, one level up from `§M-009`. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

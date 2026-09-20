@@ -2149,6 +2149,113 @@ first is the ordering that avoids shipping that.
 
 ---
 
+### §O-028 — The HTTP/1.1 request parser: bombs become test inputs
+
+**What was built.** `qqq-serve::http1` (`SRV-001` parsing half, `SRV-020` limit
+half). 40 tests, all of them attack scenarios.
+
+**The decision that made the tests possible:** parsing takes a byte slice and
+returns a head or an error. It does not read, allocate a socket, or block. Every
+failure mode Proposal §6.4 names is therefore expressible as an input:
+
+| Attack | Input | Result |
+|---|---|---|
+| header bomb | 110 headers | 431, connection closes |
+| oversized header | one 8 KiB+ header | 431, names the header |
+| oversized head | 64 KiB+ head | 431 |
+| request flood | 8 KiB+ target | 431 |
+| smuggling | `Content-Length` + `Transfer-Encoding` | 400, connection closes |
+| smuggling | two `Content-Length` | 400, rejected even when equal |
+| body bomb | declared over the cap | 413, **before** the body is read |
+
+**A parser coupled to a socket can only be tested by being attacked. This one is
+tested by being handed the attack.** That is the whole reason for the separation.
+
+---
+
+#### §O-028a — Limits are checked during the parse, not after buffering
+
+The tempting implementation reads until `\r\n\r\n` and then validates. That is
+**unbounded work driven by the peer**: the check happens after the memory is
+already spent, so a header bomb costs the memory it was designed to cost and the
+limit only decides what error message follows.
+
+Every bound here is checked as the parse proceeds, so a header bomb is refused
+after [`MAX_HEADERS`] headers rather than after the buffer fills. Each limit is a
+count or a length, never a timeout — timeouts depend on the socket and belong to
+`SRV-012`.
+
+---
+
+#### §O-028b — A limit on each part is not a limit on the whole
+
+`MAX_HEADERS` (100) × `MAX_HEADER_BYTES` (8 KiB) is 800 KiB. Each bound is
+satisfied and the total is eight times what the project wants to spend on a
+request head. `MAX_HEAD_BYTES` (64 KiB) is the backstop that makes the total
+bounded, and it is checked *first*, before any scanning.
+
+This is worth stating because the mistake looks like completeness: three limits
+were specified and three were implemented, and the composition is still
+unbounded.
+
+---
+
+#### §O-028c — Three refusals that are security checks rather than validation
+
+**Both framing headers → refuse.** Which of `Content-Length` and
+`Transfer-Encoding` determines the body length is exactly what two
+implementations disagree about, and that disagreement is the attack. Refusing is
+the only answer that does not depend on being right about the other party.
+
+**Two `Content-Length` headers → refuse, even when they agree.** A proxy that
+rewrites one would desynchronise; the redundancy itself is the signature.
+
+**A header name with a space or a control character → refuse.** RFC 9110 §5.1
+defines a field name as a token. A name containing a space is how a header is
+smuggled past a proxy that splits on whitespace where the origin splits on the
+colon.
+
+Each has a positive control: `every_legal_header_name_character_is_accepted`
+walks every character the RFC permits, so the name check cannot degenerate into
+rejecting legitimate headers.
+
+---
+
+#### §O-028d — Keep-alive defaults differ by version, and both directions are tested
+
+HTTP/1.1 defaults to **keep-alive**; HTTP/1.0 defaults to **close**. Assuming
+either unconditionally is a bug in a different direction each way:
+
+* Assume keep-alive: HTTP/1.0 connections are held open until they time out.
+* Assume close: every HTTP/1.1 connection is torn down per request, turning a
+  persistent-connection protocol into a per-request one.
+
+`keep_alive_defaults_differ_by_version` asserts both, and two further tests cover
+`Connection: close` and `Connection: keep-alive` overriding the default in each
+direction.
+
+---
+
+#### §O-028e — Status codes chosen to be actionable, not uniform
+
+| Code | When | Why not 400 |
+|---|---|---|
+| 431 | a limit was hit | the client can obey by sending less; 400 tells them nothing |
+| 413 | the body cap was hit | distinct from a syntax error, and RFC-defined |
+| 505 | an unsupported version | the client asked for something coherent we do not speak |
+| 400 | syntax, smuggling | the request is wrong, and no smaller version of it is right |
+
+The `closes_connection` property is separate from the status, because a 431 for
+an oversized *head* is safe to answer and continue, while a 431 for too many
+headers is not: the parser's view of where this request ends is untrustworthy,
+and continuing to read risks interpreting body bytes as the next request — which
+is the smuggling attack itself.
+
+**Cross-refs:** Checklist `SRV-001`, `SRV-005`, `SRV-020`, `SEC-016`; Proposal
+§6.4.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

@@ -169,6 +169,41 @@ impl fmt::Display for WasmFrame {
     }
 }
 
+/// Convert one `Wasmtime` frame into QQQ's own.
+///
+/// # Why the function name is taken from `func_name` and not from a symbol
+///
+/// `Wasmtime` offers two names for a frame: `func_name`, from the module's name
+/// section, and the DWARF symbols' names. The name section is present in every
+/// build and needs no debug info; the DWARF symbol name is mangled, so it would
+/// have to be demangled to be readable — and demangling is a heuristic that
+/// occasionally returns something wrong.
+///
+/// So: the name section for the name, DWARF for the location. That split means a
+/// frame is *named* even in an artifact built without `debug = true`, which is
+/// the common case, and it keeps this function free of a demangler.
+fn frame_from(info: &wasmtime::FrameInfo) -> WasmFrame {
+    // `symbols()` is the DWARF-derived list; the first entry is the innermost
+    // symbol at this instruction. It is empty when the module was compiled
+    // without `debug_info`, which is the default — see `EngineConfig`.
+    let symbol = info.symbols().first();
+
+    WasmFrame {
+        // The module's own name, when it has one. `Module::name()` reads the
+        // name custom section and returns `None` for a stripped module.
+        module: info.module().name().map(str::to_owned),
+        func: info
+            .func_name()
+            .map_or_else(|| format!("func[{}]", info.func_index()), str::to_owned),
+        // The instruction's offset within the module. This is what
+        // `qqq_debug::SourceMap` is keyed on, so a detached report can be
+        // resolved without the engine.
+        offset: info.module_offset().map(|o| o as u64),
+        file: symbol.and_then(|s| s.file().map(str::to_owned)),
+        line: symbol.and_then(wasmtime::FrameSymbol::line),
+    }
+}
+
 impl Trap {
     /// Build a trap from a raw engine error.
     #[must_use]
@@ -184,13 +219,56 @@ impl Trap {
         }
     }
 
+    /// Build a trap from a real engine error, **keeping its frames**.
+    ///
+    /// # Why this exists next to [`from_engine_error`]
+    ///
+    /// `from_engine_error` takes a formatted string, which is what the caller
+    /// has after `format!("{e:#}")` — and a formatted string has already lost
+    /// the structured backtrace. `Instance::run` used it for that reason, so
+    /// every real trap carried an **empty** `backtrace` while the field, the
+    /// type and `with_backtrace` all existed. The gap was invisible because
+    /// `with_backtrace` had tests: they built frames by hand and asserted on
+    /// them, which proves the field can hold frames and nothing about whether
+    /// anything ever puts them there (`§O-045a`).
+    ///
+    /// This constructor reads `Wasmtime`'s own backtrace, which is where the
+    /// frames are free: the engine already walked them to produce the error, and
+    /// with `debug_info` enabled it has resolved each one to a source file and
+    /// line through the module's DWARF.
+    ///
+    /// # The two mechanisms, and when each applies
+    ///
+    /// | Situation | Source of frames |
+    /// |---|---|
+    /// | A live instance trapped | this function — `Wasmtime`'s frames, resolved in memory |
+    /// | A trap report read later, with no engine | `qqq_debug::SourceMap`, extracted from the artifact |
+    ///
+    /// Both are needed and neither replaces the other. `Wasmtime` cannot resolve a
+    /// frame after the engine is gone — that is the whole reason `qqq-debug`
+    /// exists — and `qqq-debug` cannot name a *function*, which `Wasmtime` knows
+    /// from the module's name section without any DWARF at all.
+    #[must_use]
+    pub fn from_wasmtime_error(err: &wasmtime::Error) -> Self {
+        let mut trap = Self::from_engine_error(&format!("{err:#}"));
+
+        let frames: Vec<WasmFrame> = err
+            .downcast_ref::<wasmtime::WasmBacktrace>()
+            .map(|bt| bt.frames().iter().map(frame_from).collect())
+            .unwrap_or_default();
+
+        if !frames.is_empty() {
+            trap.backtrace = frames;
+        }
+        trap
+    }
+
     /// Attach a parsed backtrace.
     #[must_use]
     pub fn with_backtrace(mut self, frames: Vec<WasmFrame>) -> Self {
         self.backtrace = frames;
         self
     }
-
     /// Attach the peak memory observed.
     #[must_use]
     pub fn with_memory_peak(mut self, bytes: u64) -> Self {

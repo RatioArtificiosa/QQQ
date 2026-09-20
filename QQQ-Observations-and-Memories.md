@@ -4134,6 +4134,75 @@ variable apart.
 
 ---
 
+### §O-046 — The trap backtrace join, and two assertions that could not fail
+
+`HOST-009`'s remaining half is done: a real trap now carries frames.
+
+---
+
+#### §O-046a — The fix was one type change
+
+`Instance::trap_from` took `&str` — the caller's `format!("{e:#}")` — so the
+`Wasmtime` backtrace was discarded **before** anything could read it. Changing
+the parameter to `&wasmtime::Error` is the whole fix, plus a constructor that
+reads `WasmBacktrace::frames()` and maps each `FrameInfo` to a `WasmFrame`.
+
+The name comes from the module's **name section** (`func_name`) and the location
+from **DWARF** (`symbols()`), deliberately split: the name section is present in
+every build and needs no debug info, so a frame is still *named* in an artifact
+built without `debug = true` — the common case — and this way no demangler is
+needed, since a DWARF symbol name is mangled and demangling is a heuristic that
+is occasionally wrong.
+
+`qqqai run` now sets `debug_info = true` on its engine. Both settings are needed
+and they are different: `debug = true` in the project's profile decides whether
+DWARF is **emitted**; `debug_info` on the engine decides whether it is **read**.
+`EngineConfig::default()` leaves the second off — correct for a server, where the
+artifact is untrusted and nobody reads a source line, and wrong for the CLI,
+whose entire audience is a developer staring at a failed run.
+
+---
+
+#### §O-046b — Two of my three new assertions could not fail
+
+Both were caught by fault injection rather than by reading.
+
+**First: `contains("backtrace") || contains("spin")`.** It passed with the frames
+dropped, because the trap's own `detail` string contains `spin` — the assertion
+was satisfied by something other than the property it named. Fixed to
+`contains("frame 0:")`, which is what `Trap::to_error` actually produces when a
+frame exists (each frame becomes a cause).
+
+**Second: `!contains("backtrace: []")`.** It passed in *both* states, because
+nothing ever renders that string. The assertion named a phrase the codebase does
+not emit, and a phrase that is never emitted cannot distinguish anything.
+
+The mechanism that found both was injecting the defect:
+
+```rust
+// trap.rs, from_wasmtime_error
+if !frames.is_empty() {
+    trap.backtrace = frames;
+}
+```
+
+replaced with `drop(frames);`, then running the suite. **Three tests failed, as
+they should** — and the first run of that injection showed only one failing,
+which is how the other two were found to be vacuous.
+
+**This is the round's generalizable finding, and it closes a loop.** `§O-045a`
+recorded that a *test constructed from the same mental model as the code cannot
+refute that model*. These two assertions were written **while fixing that
+defect**, by the same author, in the same file, minutes later — and were equally
+unable to refute anything. The lesson did not transfer by being written down; it
+transferred by injecting a fault and watching which tests stayed green.
+
+The practical rule: **after adding a test for a bug, break the fix and confirm
+the test fails.** If it does not, the test is describing the fix rather than the
+bug, and it will not catch the next one either.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4496,5 +4565,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **The audit reported a missing tool as a validation failure**, turning CI red on the commit that added the topology check. `check_wit.py` needs `wasm-tools`, which the document-checking job does not install; the audit treated its absence as a failed requirement. The two cases are now distinguished — "the tool ran and the interfaces are broken" is a defect, "the tool is not here" is not — because reporting the second as PASS would hide the first and reporting it as FAIL makes the audit depend on what happens to be installed. `check_wit.py` itself is unchanged and correct: absence is failure *for its own job*, and the audit is a different caller with a different question. | Architect |
 
 | 2026-09-19 | **`qqq-debug` implemented** — real DWARF source-map extraction from a built component, with 24 unit tests and 4 end-to-end tests that compile a project and map real offsets. Building it exposed a **wrong tick**: `HOST-009` claimed DWARF mapping while `WasmFrame.file`/`line` were never populated outside tests and `Instance::run` discarded Wasmtime's backtrace into a formatted string; the item is now `Partial` with the join named (`§O-045a`). The DWARF was **one level down**, inside the core module a component wraps, so the first parser reported "no DWARF" for a 265 KB artifact full of it — a right answer about the wrong table (`§O-045b`). And the **scaffold's own debug info covered only the standard library**, because `lto = true` with no exported symbol eliminates the crate; `debug = true` added, with a comment saying it is necessary and *not* sufficient (`§O-045c`). `check [12]` caught the heading deletion a fourth time. | Architect |
+
+| 2026-09-19 | **The trap backtrace join is done** — `HOST-009`'s remaining half. `Instance::trap_from` now takes the `wasmtime::Error` rather than a formatted string, so a real trap carries frames; the name comes from the module's name section and the location from DWARF, deliberately split so a frame is named even without `debug = true`. `qqqai run` sets `debug_info = true`, since a CLI exists to help a developer read a failure (`§O-046a`). **Two of the three new assertions could not fail** and were caught only by injecting the defect: one was satisfied by the trap's own detail string, the other named a phrase the codebase never emits. Both were written *while fixing* `§O-045a`'s "tests cannot refute their own mental model" — the lesson did not transfer by being written down, it transferred by breaking the fix and watching which tests stayed green (`§O-046b`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

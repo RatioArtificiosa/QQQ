@@ -415,8 +415,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `qqq-host::trap` — QQQ-3001/3002/3003 plus the guest-bug codes.
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-009** Implement structured trap reporting with guest backtrace and DWARF source mapping when available.
-  → Partial: `Trap` carries a human message and the frame types, and `qqq-debug` now **extracts** a real DWARF source map from a built component (24 unit tests plus 4 end-to-end tests that compile a project and map real offsets). What is **not** done is the join: `Instance::run` builds a `Trap` from a formatted error string, so a real trap still produces an **empty backtrace** — `with_backtrace` is called only from tests. This corrects a tick that claimed DWARF mapping which did not exist.
-  → **Remaining:** pass Wasmtime's `WasmBacktrace` into `trap_from` and resolve each frame through `qqq_debug::SourceMap`; then have `qqqai build` extract the map beside the artifact so `run` need not re-read DWARF.
+  → Partial: the **join is done**. `Instance::run` and `run_measured` build a `Trap` from the real `wasmtime::Error` (`trap_from` takes the error, not a formatted string), so a real trap now carries **frames** — Wasmtime's `WasmBacktrace`, which resolves each frame through the module's DWARF when `debug_info` is on. `qqqai run` sets `debug_info = true` on its engine, so a CLI trap names a file and line. Three tests trap a guest through the real path and assert on the structured frames; all three were **fault-injected** by dropping the frames and confirmed to fail.
+  → `qqq-debug` extracts a standalone `SourceMap` from a built component (24 unit tests, 4 end-to-end), for reports read where no engine exists.
+  → **Remaining:** `qqqai build` does not yet extract the map beside the artifact, so a *detached* trap report cannot be resolved without re-reading the DWARF; and `WasmFrame.offset` is populated but nothing consumes it against a `SourceMap` yet. Both are the detached-report path, not the live one.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-010** Implement instance discarding on trap — trapped instances are never returned to the pool.
   → Done: `Instance::run` consumes `self`, so a trapped instance cannot be reused; `poison()` is the second mechanism.

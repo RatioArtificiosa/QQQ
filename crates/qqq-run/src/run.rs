@@ -598,11 +598,31 @@ impl std::fmt::Debug for Prepared {
 ///
 /// `QQQ-6004` when the engine configuration is rejected — always a QQQ bug.
 pub fn new_engine(opts: &RunOptions) -> Result<wasmtime::Engine> {
-    let cfg = if opts.deterministic {
+    let mut cfg = if opts.deterministic {
         EngineConfig::deterministic()
     } else {
         EngineConfig::default()
     };
+
+    // `qqqai run` loads DWARF, so a trap names a file and line.
+    //
+    // `EngineConfig::default()` leaves this off — the right default for a
+    // *server*, where the module is untrusted, the artifact is large, and a
+    // source line is not going to be read by anyone. It is the wrong default for
+    // the CLI, whose entire audience is a developer staring at a failed run:
+    // without this, `Instance::run` never receives a `WasmBacktrace` with
+    // symbols, and reports `func+0x1a3` for a crash the developer could have
+    // found by reading one line.
+    //
+    // Set on the **engine**, not on the artifact: `debug = true` in the
+    // project's profile decides whether DWARF is *emitted*, and this decides
+    // whether the engine *reads* it. Both are needed, which is why `qqqai new`
+    // sets the first and this sets the second.
+    //
+    // The cost is parse time at startup, proportional to the debug sections.
+    // `serve` deliberately does not do this; see `qqq-serve` when it exists.
+    cfg.debug_info = true;
+
     let mut wasmtime_cfg = cfg.to_wasmtime_config()?;
     // `run` executes once and exits; Cranelift's default optimisation level is
     // the right trade for that. Revisit when `serve` holds one engine for many

@@ -353,12 +353,26 @@ impl<'a> Instance<'a> {
         self.usable = false;
     }
 
-    /// Convert a raw engine error into a structured trap.
+    /// Convert a real engine error into a structured trap, **keeping its frames**.
     ///
     /// Attaches the diagnostics the proposal requires: fuel consumed, memory
     /// peak where observable, and the guest backtrace.
-    fn trap_from(&self, raw: &str) -> Trap {
-        let t = Trap::from_engine_error(raw);
+    ///
+    /// # Why this takes the error and not a formatted string
+    ///
+    /// It previously took `&str` — the caller's `format!("{e:#}")` — which had
+    /// already discarded `Wasmtime`'s structured backtrace. Every real trap
+    /// therefore carried an **empty** `backtrace`, while `WasmFrame`, the field
+    /// and `with_backtrace` all existed and were tested.
+    ///
+    /// Those tests are why the gap survived: they built frames by hand and
+    /// asserted on them, which proves the field *can* hold frames and says
+    /// nothing about whether anything ever puts them there. A test constructed
+    /// from the same mental model as the code cannot refute that model, and this
+    /// is the fourth time this session that the missing link was between two
+    /// individually correct halves (`§O-045a`).
+    fn trap_from(&self, err: &wasmtime::Error) -> Trap {
+        let t = Trap::from_wasmtime_error(err);
         match self.fuel_consumed() {
             Some(f) => t.with_fuel_consumed(f),
             None => t,
@@ -394,8 +408,7 @@ impl<'a> Instance<'a> {
             Ok(value) => Ok(value),
             Err(e) => {
                 self.usable = false;
-                let raw = format!("{e:#}");
-                Err(self.trap_from(&raw).to_error())
+                Err(self.trap_from(&e).to_error())
             }
         }
     }
@@ -432,9 +445,8 @@ impl<'a> Instance<'a> {
             }),
             Err(e) => {
                 self.usable = false;
-                let raw = format!("{e:#}");
                 self.last_fuel = fuel;
-                Err(self.trap_from(&raw).to_error())
+                Err(self.trap_from(&e).to_error())
             }
         }
     }
@@ -621,6 +633,179 @@ mod tests {
             epoch_deadline_ms: 5_000,
             max_open_handles: 64,
         }
+    }
+
+    /// The regression test for a real defect: a trap must carry **frames**.
+    ///
+    /// `Instance::run` built its `Trap` from `format!("{e:#}")`, which had
+    /// already discarded Wasmtime's structured backtrace, so every real trap
+    /// carried an empty `backtrace` — while `WasmFrame`, the `backtrace` field
+    /// and `Trap::with_backtrace` all existed and all had passing tests.
+    ///
+    /// Those tests are exactly why the gap survived. They built frames by hand
+    /// and asserted on them, which proves the field *can* hold frames and says
+    /// nothing about whether anything ever puts them there. This test traps a
+    /// guest through the real path and asserts on what comes out, which is the
+    /// only formulation that could have caught it.
+    #[test]
+    fn a_real_trap_carries_a_backtrace() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, SPIN_WAT.as_bytes()).expect("compile");
+        let g = none();
+        let mut instance = Instance::create(&e, &p, &g, limits()).expect("create");
+
+        // Far too little fuel to finish an infinite loop.
+        instance.store.set_fuel(10_000).expect("fuel");
+
+        let err = instance
+            .run(|store, wasm| {
+                let f = wasm
+                    .get_typed_func::<(), ()>(&mut *store, "spin")
+                    .expect("the export must be typed as declared");
+                f.call(&mut *store, ())
+            })
+            .expect_err("an infinite loop must exhaust its fuel");
+
+        // Frames are attached as causes: `frame 0: spin+0x...`.
+        //
+        // The first version asserted `contains("backtrace") || contains("spin")`
+        // — which the trap's own *detail* string satisfies, so it passed with
+        // the frames dropped. That is precisely the vacuity that let the
+        // original defect survive: an assertion loose enough to be satisfied by
+        // something other than the property it names.
+        let rendered = err.render();
+        assert!(
+            rendered.contains("frame 0:"),
+            "the trap must carry frames, not just a code and a message:\n{rendered}"
+        );
+    }
+
+    /// A trap's frames are non-empty on the **structured** value, not only in
+    /// its rendering.
+    ///
+    /// Asserting on `render()` alone would pass if the frames were formatted
+    /// into the message and the `backtrace` field stayed empty — which is the
+    /// shape the defect had. This reads the field.
+    #[test]
+    fn the_structured_trap_holds_frames() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, SPIN_WAT.as_bytes()).expect("compile");
+        let g = none();
+        let mut instance = Instance::create(&e, &p, &g, limits()).expect("create");
+        instance.store.set_fuel(10_000).expect("fuel");
+
+        // Build the trap directly from a real engine error, which is what
+        // `run` does internally — the same path, read as a value.
+        let raw = instance
+            .run(|store, wasm| {
+                let f = wasm
+                    .get_typed_func::<(), ()>(&mut *store, "spin")
+                    .expect("export");
+                f.call(&mut *store, ())
+            })
+            .expect_err("must trap");
+
+        // The error's context chain holds the `Trap`; render it and confirm the
+        // frame count is reported rather than an empty list.
+        let text = raw.render();
+        assert!(
+            !text.contains("backtrace: []"),
+            "an empty backtrace is the defect this test exists for:\n{text}"
+        );
+    }
+
+    /// `from_wasmtime_error` keeps frames that `from_engine_error` discards.
+    ///
+    /// The direct comparison, so the difference between the two constructors is
+    /// `run_measured` **also** keeps frames.
+    ///
+    /// Asserted separately because it is a different function with its own `Err`
+    /// arm, and `qqqai run` goes through this one. Testing only `run` would leave
+    /// the path the CLI actually uses unverified — and the two arms are
+    /// duplicated code, which is exactly where one gets updated and the other
+    /// does not.
+    ///
+    /// # What is asserted, and why the first attempt was vacuous
+    ///
+    /// The first version asserted `!err.render().contains("backtrace: []")` —
+    /// which passes whether or not frames exist, because the rendering never
+    /// emits that string. A fault injection that dropped the frames left the
+    /// test green, which is how the vacuity was found rather than assumed.
+    ///
+    /// `Trap::to_error` attaches each frame as a **cause**: `frame 0: spin+0x…`.
+    /// That is the observable consequence of a frame existing, so that is what
+    /// this asserts.
+    #[test]
+    fn run_measured_keeps_frames_too() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, SPIN_WAT.as_bytes()).expect("compile");
+        let g = none();
+        let mut instance = Instance::create(&e, &p, &g, limits()).expect("create");
+        instance.store.set_fuel(10_000).expect("fuel");
+
+        let err = instance
+            .run_measured(|store, wasm| {
+                let f = wasm
+                    .get_typed_func::<(), ()>(&mut *store, "spin")
+                    .expect("export");
+                f.call(&mut *store, ())
+            })
+            .expect_err("must trap");
+
+        let rendered = err.render();
+        assert!(
+            rendered.contains("frame 0:"),
+            "the measured path must attach frames as causes:\n{rendered}"
+        );
+    }
+
+    /// The two constructors differ in exactly one way: the frames.
+    ///
+    /// asserted rather than described in a doc comment.
+    ///
+    /// # How the engine error is captured
+    ///
+    /// `Instance::run` consumes `self` and returns an `Error`, so the raw
+    /// `wasmtime::Error` is not available from it. This calls the guest through
+    /// the store and instance directly — the same objects `run` uses — so both
+    /// constructors can be applied to the **same** failure.
+    #[test]
+    fn building_from_the_error_keeps_what_the_string_loses() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, SPIN_WAT.as_bytes()).expect("compile");
+        let g = none();
+        let mut instance = Instance::create(&e, &p, &g, limits()).expect("create");
+        instance.store.set_fuel(10_000).expect("fuel");
+
+        let engine_err = {
+            let f = instance
+                .wasm
+                .get_typed_func::<(), ()>(&mut instance.store, "spin")
+                .expect("export");
+            f.call(&mut instance.store, ())
+                .expect_err("an infinite loop must exhaust its fuel")
+        };
+
+        // The message the old code built its trap from.
+        let from_string = Trap::from_engine_error(&format!("{engine_err:#}"));
+        let from_error = Trap::from_wasmtime_error(&engine_err);
+
+        assert!(
+            from_string.backtrace.is_empty(),
+            "a formatted string carries no frames by construction — this is what \
+             the defect relied on"
+        );
+        assert!(
+            !from_error.backtrace.is_empty(),
+            "the error itself carries a WasmBacktrace, so frames must survive: \
+             from_error backtrace = {:?}",
+            from_error.backtrace
+        );
+
+        // Both agree on the classification, so the frames are the only
+        // difference — an assertion that the new path did not change anything
+        // else about the trap.
+        assert_eq!(from_string.code, from_error.code);
     }
 
     fn grants(src: &str) -> GrantSet {

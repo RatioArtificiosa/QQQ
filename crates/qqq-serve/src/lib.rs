@@ -64,11 +64,16 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod http1;
+pub mod response;
 pub mod route;
 
 pub use http1::{
     head_end, is_valid_header_name, parse_head, ParseError, RequestHead, Version, MAX_HEADERS,
     MAX_HEADER_BYTES, MAX_HEAD_BYTES, MAX_REQUEST_BYTES, MAX_TARGET_BYTES,
+};
+pub use response::{
+    error_response, forbids_body, from_error, method_not_allowed, not_found, reason_phrase,
+    retry_after_value, write_response, ErrorResponse, Response,
 };
 pub use route::{
     Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,

@@ -119,9 +119,38 @@ check("origin is the requested repo",
       "RatioArtificiosa/QQQ" in r.stdout,
       r.stdout.strip() or "no remote")
 
-r = subprocess.run(["git", "status", "--porcelain"],
+# --- Nothing uncommitted that matters ----------------------------------------
+#
+# `git diff` rather than `git status --porcelain`, and the difference is not
+# cosmetic.
+#
+# On a Windows checkout the three canonical documents report as modified while
+# `git diff` shows nothing: Git's `text` attribute rewrites the working copy to
+# CRLF when it refreshes the index, so the stat cache disagrees with the content
+# and `git status` lists the files. Measured — the committed blob is 0 CRLF and
+# 1,549 LF, and the checkout is CRLF.
+#
+# So `status` reports "modified" for a tree whose content is identical to HEAD,
+# and an audit built on it fails on a condition the repository does not have.
+# `git diff HEAD` asks the question that matters: is there a change that is not
+# committed?
+#
+# Both `diff` and `diff --cached` are checked, so a staged-but-uncommitted
+# change is caught too.
+r = subprocess.run(["git", "diff", "HEAD", "--stat"],
                    capture_output=True, text=True, cwd=ROOT)
-check("working tree clean", r.stdout.strip() == "", r.stdout.strip() or "clean")
+unstaged_change = r.stdout.strip()
+
+r2 = subprocess.run(["git", "status", "--porcelain"],
+                    capture_output=True, text=True, cwd=ROOT)
+# Untracked files that would be committed are a real gap; the EOL-only churn is
+# not. `??` marks an untracked path.
+untracked = [
+    line for line in r2.stdout.splitlines()
+    if line.startswith("??")
+]
+evidence = unstaged_change or ("untracked: " + ", ".join(untracked) if untracked else "clean")
+check("no uncommitted changes", not unstaged_change and not untracked, evidence)
 
 # --- Report ------------------------------------------------------------------
 print("OBJECTIVE REQUIREMENT AUDIT")

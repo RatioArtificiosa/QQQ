@@ -436,9 +436,32 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §9.4 Specific optimizations planned
 - [ ] **HOST-015** Use `*_async` Wasmtime APIs throughout, with the compile-time guard that prevents mixing sync and async.
   → §6.1 `qqq-host` — the execution engine
-- [x] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
-  → Done: Host functions registered per interface in `host_clock` and `host_crypto`.
+  → **Not done — and this blocks `HOST-016`.** Verified in source: `Instance::run`
+    and `run_measured` are **synchronous** (`instance.rs`), calling `TypedFunc::call`
+    on a `&mut Store`, and the crate contains no `call_async`, `instantiate_async`
+    or `func_wrap_async` anywhere. Proposal §6.1's table (line 944) requires
+    *"`*_async` APIs throughout, with `epoch_deadline_async_yield_and_update`"*,
+    and §4.2 says the guest entry runs **async**.
+  → Consequence: a guest that blocks in a host call blocks the calling thread,
+    and `epoch_deadline_async_yield_and_update` — which exists only on the async
+    path — cannot be reached. This is a real architectural gap, not a missing
+    nicety.
+  → Also missing: the compile-time guard against mixing sync and async, which is
+    the other half of this item.
+- [!] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
   → §6.1 `qqq-host` — the execution engine
+  → **CORRECTED — this was ticked and the tick was wrong.** The prior note read
+    *"Done: Host functions registered per interface in `host_clock` and
+    `host_crypto`"*, which describes host-function registration and has nothing to
+    do with epoch yielding. Verified against source: the crate registers **no**
+    epoch deadline callback — no `epoch_deadline_async_yield_and_update`, no
+    `epoch_deadline_callback`, no `epoch_deadline_trap` — so a guest yield has no
+    mechanism at all.
+  → Blocked on `HOST-015`: the `_async` variant requires the async path to exist.
+    `Config::epoch_interruption` is configured (the interrupt machinery is
+    present), which is what the earlier tick appears to have mistaken for this
+    item.
+  → Recorded in `§O-051`; this is the first item found ticked that was not true.
 - [ ] **HOST-017** Implement the invariant that guest-visible blocking host functions bypass host cooperative budgets.
   → §4.2 Process and thread model
 - [x] **HOST-018** Implement deterministic-mode engine configuration (NaN canonicalization, seeded RNG, fixed clock).

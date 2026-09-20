@@ -4632,6 +4632,30 @@ Lesson 3 is the one to keep. An automated check that fails for a reason outside 
 
 **Decision: salvage rather than revert.** The code is good — no stubs, RFC citations, real tests. Three compile errors stood in the way (a `&Option<&str>` deref; a test helper returning `Frame<'_>` that borrowed its own local buffer; two tests referencing a `parsed` the rewrite removed). All three were mechanical.
 
+### §O-051 — The first checklist item found ticked that was not true
+
+**What was found.** Auditing `qqq-host` against its checklist entries, `HOST-016` — *"Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor"* — was marked done with the note *"Done: Host functions registered per interface in `host_clock` and `host_crypto`."*
+
+That note describes host-function registration. It has nothing to do with epoch yielding.
+
+**Verified against source, not inferred.** Searching every crate for epoch machinery:
+
+| Present | Absent |
+|---|---|
+| `Config::epoch_interruption(true)` (`config.rs`) | `epoch_deadline_async_yield_and_update` |
+| `Store::set_epoch_deadline(1)` (`instance.rs`) | `epoch_deadline_callback` |
+| `limits.epoch_deadline_ms` modelled and parsed | `epoch_deadline_trap` |
+
+The interrupt machinery exists and an expiry **traps** — it does not yield. There is no yield mechanism at all, which is precisely what the item asks for.
+
+**And the mis-attribution was already known.** `linker.rs` carries a comment (`§O-020d`) saying in as many words: *"An earlier version cited `HOST-016`, which is `epoch_deadline_async_yield_and_update` — a scheduling concern, not interface implementation."* The wrong citation was corrected **in the code comment** and the checklist tick was never revisited. That is the interesting part: the correction was written down in one artifact and not propagated to the other, so the register a reader actually counts kept claiming work that had not been done.
+
+**Corrected.** `HOST-016` is now `[!]` blocked, with the reason and the blocking item named. `HOST-015` carries the verified evidence that no `*_async` API exists anywhere in `qqq-host` — `Instance::run` is synchronous (`TypedFunc::call` on a `&mut Store`) — which is both the real gap and the reason `HOST-016` cannot proceed: the async variant requires an async path.
+
+**Why this matters more than the item.** A ticked item is a claim to a reader who will not re-derive it. This project's whole method is that claims are verified rather than asserted, and this is the first item in 81 found ticked without the work behind it. One is not a pattern; the *mechanism* is what to watch — a correction recorded in one document and not the other, which `check [8]`/`[9]`/`[10b]` catch for decisions and do not yet catch for checklist ticks.
+
+---
+
 #### §O-049a — Then five tests failed, and every one was the test's fault
 
 This is the part worth recording, because the failure mode is asymmetric. A failing test usually means broken code, and the correct response is to fix the code. Here it was the opposite five times, and *adjusting the implementation until the red went away* would have broken working code in four different places.
@@ -4707,5 +4731,7 @@ This is the one claim in the corpus that a reader should not have to take on fai
 | 2026-09-19 | **The delegated HTTP/2 work was salvaged, and five failing tests were wrong in all five cases (`§O-049`).** A subagent produced the frame layer (70 KB, 35 tests) and HPACK (108 KB, 71 tests) then ran out of context before `flow.rs`, `stream.rs` and `h2/conn.rs`, so `mod.rs` declared modules that did not exist, the whole module was excluded from the tree, and **~234 KB of code had never been compiled by CI** — its 106 tests had never run. Salvaged rather than reverted: the code is good, the three compile errors were mechanical (a `&Option<&str>` deref, a test helper returning `Frame<'_>` that borrowed its own buffer, two tests referencing a removed `parsed`). Then five tests failed and **the code was right every time** — RFC 7541 C.6.2/C.6.3 are the *second and third* blocks of a sequence and cannot be decoded on a fresh table (the `index 65 names no entry` error was correct behaviour, and the first instinct — an HPACK indexing bug — was wrong); `cache-control: no-cache` is 53 bytes and not 54, caught only because the test had four cases and three agreed; a Huffman "compresses" assertion over all 256 bytes is simply false, since high bytes run to 30 bits and 256 bytes expand to 583; and PING's wrong-length case used stream id 1, which is itself illegal, so the parser correctly reported the earlier error. Adjusting the implementation to silence those reds would have broken working code in four places; the tiebreaker was the RFC's own vectors as external ground truth. Verified by injection: moving the dynamic-table lookup by one fails 10 tests including both chained C.6 vectors, so the corrections are evidence and not tests shaped to fit the code (`§O-049b`). | Architect |
 
 | 2026-09-19 | **The narrowing invariant was verified by injection rather than believed (`§O-050`).** §D-008 / `CAP-010` says *no configuration layer may ever widen a grant*, and §8.8 singles it out as the one guarantee whose failure would remove the product's reason to exist. It is enforced **structurally**: `GrantSet::narrow` is the only combinator, there is no union or widen, and a search for `capabilities.insert`/`.extend` across `qqq-cap` finds nothing outside that one function — so widening is prevented by the absence of a code path rather than by a check that could be forgotten. `no_overlay_can_ever_widen` starts from the **empty** set, builds a hostile overlay holding every capability, and tries all six (layer × mode) combinations; injecting a union into `narrow` fails **13 tests**, that one among them. Recorded because a safety invariant asserted only in prose reads as true and therefore never gets tested. | Architect |
+
+| 2026-09-19 | **The first checklist item found ticked that was not true (`§O-051`).** `HOST-016` — `epoch_deadline_async_yield_and_update` — was marked done with a note describing *host-function registration*, which is unrelated. Verified in source: `epoch_interruption(true)` and `set_epoch_deadline(1)` exist (an expiry **traps**), but no `epoch_deadline_async_yield_and_update`, no `epoch_deadline_callback` and no `epoch_deadline_trap` exist anywhere, so there is no yield mechanism at all. `HOST-015` is likewise not done: `Instance::run` is **synchronous** (`TypedFunc::call`) and the crate contains no `*_async` API, against Proposal §6.1 line 944 and §4.2. `HOST-016` is now `[!]` blocked on `HOST-015`. **The mis-attribution was already known** — `linker.rs`'s `§O-020d` comment says the `HOST-016` citation was wrong — but the correction was made in the code and never propagated to the checklist, so the register a reader counts kept claiming work nobody had done. Eight-one items reviewed; one false tick found. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

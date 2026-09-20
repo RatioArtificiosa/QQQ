@@ -73,6 +73,7 @@ pub mod http1;
 pub mod response;
 pub mod route;
 pub mod server;
+pub mod tls;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use http1::{

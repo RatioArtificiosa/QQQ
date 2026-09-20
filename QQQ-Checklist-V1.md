@@ -935,12 +935,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
 ### PKG — Package manager and registry
 
 - [ ] **PKG-001** Implement the content-addressed global store with hard-link/reflink materialization.
+  → Partial: `qqq-pkg::store::{Digest, StoreLayout}` is done — sha256-only digest parsing that refuses other algorithms, a two-level fan-out layout, verified reads, and a case-insensitive sidecar skip. **Materialization is not done**: there is no hard-link or reflink of a stored artifact into a project, which is the second half of this item and the half that makes the store worth having.
   → §6.5 `qqq-pkg` — package manager and registry
 - [ ] **PKG-002** Implement parallel, resumable fetching with HTTP/3 where available.
   → §6.5 `qqq-pkg` — package manager and registry
 - [ ] **PKG-003** Implement the version solver with lockfile-first resolution.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-004** Implement lockfile read/write with `caps` per package and a covering hash.
+- [x] **PKG-004** Implement lockfile read/write with `caps` per package and a covering hash.
+  → Done: `qqq-pkg::lock::{Lockfile, LockPackage}`. `caps` is a first-class field participating in equality and in the covering hash, so a version bump that adds authority changes the lockfile even if the artifact digest somehow does not. The hash is computed over the package list with NUL separators (no field may contain a NUL, so distinct field sets cannot collide) and is **verified on read**, which makes a hand-edited lockfile detectable rather than silently trusted. `caps` is sorted and deduplicated on read, so two lockfiles describing the same authority compare equal regardless of how they were written. An unstamped lockfile parses, so `install` can bootstrap. 21 tests.
   → §5.4 The lockfile — `qqq.lock`
 - [ ] **PKG-005** Resolve open question `OQ-006`: build the registry from day one, or bootstrap on OCI and migrate.
   → §6.5 `qqq-pkg` — package manager and registry

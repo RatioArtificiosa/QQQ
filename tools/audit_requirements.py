@@ -107,6 +107,8 @@ else:
 for script, label in (
     ("tools/check_xrefs.py", "cross-reference validator passes"),
     ("tools/self_test_xrefs.py", _label),
+    ("tools/check_topology.py", "crate topology matches Proposal §4.3"),
+    ("tools/check_wit.py", "every WIT interface parses"),
 ):
     p = subprocess.run([sys.executable, script], capture_output=True,
                        text=True, cwd=ROOT)

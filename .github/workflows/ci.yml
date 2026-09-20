@@ -117,6 +117,19 @@ jobs:
       - name: Validate proposal <-> checklist graph
         run: python tools/check_xrefs.py
 
+      # The crate topology is a stated invariant -- "no crate may depend on a
+      # crate above it in this list" -- and until this check existed it was
+      # enforced by nothing but attention. Two violations had accumulated: the
+      # table listed qqq-host above qqq-abi and qqq-run above qqq-pkg, both of
+      # which are impossible, because the linker is built *from* the interface
+      # registry and the CLI resolves dependencies *via* the package manager.
+      #
+      # Also asserts that qqq-core, which every other crate depends on, has no
+      # I/O -- with a control proving the rule is wired, so it cannot pass
+      # forever by being misconfigured.
+      - name: Verify the crate topology
+        run: python tools/check_topology.py
+
       # A validator that cannot fail manufactures false confidence. This harness
       # deliberately breaks the corpus and asserts each injection is caught; it
       # prints the count it achieved, so the number is never restated here where

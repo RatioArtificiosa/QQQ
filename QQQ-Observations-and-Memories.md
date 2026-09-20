@@ -3962,6 +3962,81 @@ error text, where the real signal would have been lost in a screen of advice.
 
 ---
 
+### §O-044 — The crate topology had two violations, and the document was the thing out of date
+
+Proposal §4.3 states an invariant in bold: **"No crate may depend on a crate
+above it in this list."** Checking it for the first time found two violations.
+
+| Table said | Reality | Why the table is impossible |
+|---|---|---|
+| `qqq-host` above `qqq-abi` | `qqq-host` → `qqq-abi` | the linker is *built from* `qqq_abi::interfaces()`; a host without the ABI would hard-code its own interface list — the duplicated-source-of-truth problem the registry exists to prevent |
+| `qqq-run` above `qqq-pkg` | `qqq-run` → `qqq-pkg` | the CLI resolves and installs dependencies; `qqqai add` is impossible if the package manager depends on the CLI |
+
+Both were correctable in exactly **one** direction. `qqq-abi` must precede
+`qqq-host` because the interface registry lives with the WIT definitions and
+everything else binds to it; `qqq-pkg` must precede `qqq-run` because the CLI is
+a *consumer* of the package manager. Inverting either would have produced a
+build that works and an architecture that cannot be split — which is the
+distribution channel §4.3 gives as its own reason for the topology.
+
+**The document was wrong, not the code.** That is the distinction worth
+recording: an invariant stated in bold, violated by the code, and *false of the
+table that stated it*. A reader who checked — as the invariant invites — would
+have concluded the architecture was broken and had no way to tell that the
+prose was the stale artefact.
+
+The order is now a topological order and is **enforced** by
+`tools/check_topology.py`, which reads `cargo metadata` (the *resolved* graph,
+including any edge a workspace-level dependency would create) rather than the
+`Cargo.toml` files.
+
+---
+
+#### §O-044a — `qqq-core` has no I/O today, and "today" is the problem
+
+The same section says `qqq-core` has **"No I/O"**. It does — `serde` and
+`serde_json` only — but that was a fact about the present, not a rule, and it is
+the crate every other crate depends on. A single `tokio` edge there is pulled
+into all of them, and the way it arrives is a convenience import during some
+later change.
+
+The check now asserts it, and — the part that matters — carries a **control**
+that the rule is wired:
+
+```python
+probe_dep = {"name": "tokio"}
+if probe_dep["name"] not in IO_CRATES:
+    errors.append("the no-I/O denylist does not flag `tokio`, so the rule is "
+                  "misconfigured and would never fire")
+```
+
+Verified by deleting `tokio` from the denylist and watching the run fail with
+exactly that message. Without the control, a misspelled entry or an inverted
+comparison would leave the script printing `TOPOLOGY OK` forever — `§M-006` for
+the fourth time, in a fourth domain.
+
+---
+
+#### §O-044b — Both rules are proven to fire, not merely to pass
+
+The topology check was fault-injected twice before being wired into CI:
+
+| Injection | Result |
+|---|---|
+| swap `qqq-abi`/`qqq-host` in the expected order | `FAIL: qqq-host (position 2) depends on qqq-abi (position 3)` |
+| remove `tokio` from the no-I/O denylist | `FAIL: the denylist does not flag tokio` |
+
+and both restored to `TOPOLOGY OK`. This is the discipline `self_test_xrefs.py`
+established for the document graph, applied to a second kind of invariant: a
+check earns its place in CI by being shown able to fail for the right reason.
+
+It is also now part of the objective audit, so `tools/audit_requirements.py`
+reports **32** requirements rather than 30 — the two additions being the crate
+topology and WIT validation, both of which were being run in CI already but were
+not part of the "is the objective met?" answer.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4318,5 +4393,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | The `--trials` fix (`§O-042b`) was **correct and insufficient**: CI failed again for two further reasons — `--verbose` emitting `Fresh`/`Finished` lines on a warm build, and `CARGO_TERM_COLOR=always` wrapping verbs in SGR escapes. **Both were named in one line of output by the trial-divergence diagnostic added in the same change**, the instrument that prints *what* differed rather than only that something did (`§O-042d`). Rules are now shape-based rather than an enumerated prefix list, since an enumerated list is the same mistake as enumerating a toolchain's error variants. Building it surfaced three further real defects and one wrong test of mine. **Green on CI** — the only proof that counts for a defect that appears nowhere else. | Architect |
 
 | 2026-09-19 | **`qqqai run` enforced correctly and advised incorrectly.** The refusal of an ungranted import is right; the remediation named `clock.monotonic` for a component importing `qqq:clock/wall-clock` — the other half of the same package, so following the advice would leave the component still failing (`§O-043a`). This was the **same defect** fixed in `inspect` last session, missed here because `run` shows it in a remediation line rather than a report: a reader already looking at an error is likelier to follow a wrong instruction than to believe a wrong fact (`§O-043b`). The structural fix was **deleting the second mapping**, not updating the caller — a shared helper fixed at one call site leaves the others wrong, and they are harder to find because the codebase feels corrected. Also: a bare positional was appended to the *component's* arguments, so `qqqai run ./x.wasm` ran the built component and reported success (`§O-043c`). Five integration tests now cover the enforcement path, which had none. `check [12]` caught the section-heading deletion again. | Architect |
+
+| 2026-09-19 | **The crate topology had two violations of its own stated invariant** — "no crate may depend on a crate above it in this list". The table listed `qqq-host` above `qqq-abi` and `qqq-run` above `qqq-pkg`; both are impossible, because the linker is *built from* the interface registry and the CLI resolves dependencies *via* the package manager. **The document was wrong, not the code** — an invariant stated in bold, false of the table that stated it, so a reader who checked would have concluded the architecture was broken (`§O-044`). `tools/check_topology.py` now enforces it from `cargo metadata`, and asserts `qqq-core` has no I/O **with a control proving the rule is wired** (`§O-044a`). Both rules were fault-injected before being wired into CI (`§O-044b`), and both joined the objective audit, which now reports **32** requirements. `check [12]` caught the section-heading deletion a third time. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

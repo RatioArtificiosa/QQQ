@@ -519,15 +519,36 @@ Deliberately modular. Every crate has a single responsibility, a stated stabilit
 |---|---|---|
 | `qqq-core` | stable | Shared types: IDs, error model, version, `Result`/`Error` codes. No I/O. |
 | `qqq-cap` | stable | Capability model: manifest parsing, grant resolution, policy evaluation, audit records. |
+| `qqq-abi` | stable | WIT package + the interface registry: which capability unlocks which interface. |
 | `qqq-host` | stable | Wasmtime integration: engine config, component compilation, pooling, fuel, epochs, store data. |
-| `qqq-abi` | stable | WIT package + generated bindings for all host interfaces. |
 | `qqq-io` | stable | Reactor abstraction over Tokio / io_uring. |
 | `qqq-serve` | stable | The HTTP/dev server: routing, listener shards, HTTP/1.1, HTTP/2, HTTP/3 (QUIC) behind a flag. |
-| `qqq-run` | stable | The CLI orchestration: `new`, `build`, `run`, `dev`, `test`, `deploy`. |
 | `qqq-pkg` | beta | Registry client, solver, lockfile, content-addressed store. |
+| `qqq-run` | stable | The CLI orchestration: `new`, `build`, `run`, `dev`, `test`, `inspect`, `mcp`. |
 | `qqq-registry` | beta | Server side of the registry. |
 | `qqq-debug` | beta | DWARF → source mapping, trap diagnostics, time-travel replay. |
 | `qqq-fabric` | commercial | Org policy, attestation, SSO/RBAC, compliance evidence. **Separate repository and licence** (§13.2). |
+
+**Two corrections to this table, made against the built system rather than kept as
+written.** The original listed `qqq-host` above `qqq-abi` and `qqq-run` above
+`qqq-pkg`; both are impossible, and `tools/check_topology.py` now fails CI on
+either:
+
+* **`qqq-abi` precedes `qqq-host`.** The interface registry lives with the WIT
+  definitions, and the linker is *built from* the registry —
+  `Linker` is constructed by iterating `qqq_abi::interfaces()`, which is what
+  makes adding an interface a one-place change. A host that did not depend on
+  the ABI would have to hard-code its own list, which is precisely the
+  duplicated-source-of-truth problem the registry exists to prevent.
+* **`qqq-pkg` precedes `qqq-run`.** The CLI resolves and installs dependencies,
+  so it depends on the package manager, not the other way round. As originally
+  ordered, `qqqai add` would have been impossible without inverting the graph.
+
+The rule itself is unchanged and is now enforced: the list is a **topological
+order**, and a dependency edge pointing upward is a defect. That was true of the
+statement and false of the table, which is the worst combination — a reader who
+checked would have found the architecture violated and had no way to tell that
+the *document* was the thing out of date.
 
 **`unsafe` policy.** `#![forbid(unsafe_code)]` at the root of every crate above. The only exceptions are three narrowly-scoped crates that require it (`qqq-io-uring`, `qqq-mem-hugepage`, `qqq-sys-signals`), each with a written safety argument, each reviewed by a second maintainer, each with Miri coverage where applicable.
 

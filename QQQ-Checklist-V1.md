@@ -1405,8 +1405,73 @@ Items are grouped below by **phase**, because dependency order matters more than
     `the_prefix_implementation_would_have_admitted_these`, so reverting to a prefix
     match breaks **two** tests rather than one.
   → §7.2 Adversary model
-- [ ] **SEC-011** Implement input validation at every guest-to-host boundary crossing.
-  → §2.2 NN-2 — Security and Isolation Are Non-Optional
+- [x] **SEC-011** Implement input validation at every guest-to-host boundary crossing.
+  → Done: `qqq-host::boundary` is a **table-driven** validation layer, in the same
+    shape this project uses for faults and traversals. The load-bearing word in the
+    item is *every*, and a check each host function calls when its author remembers
+    is not a boundary layer — it is a set of decisions that diverge, and the
+    divergence is always in the function nobody considered.
+  → **Four classes of check**, each named for the failure it prevents:
+    | Class | Question | Failure prevented |
+    |---|---|---|
+    | Range | Is this integer a host-defined member? | Enum confusion; a discriminant the host indexes with |
+    | Size | Is this within the host's budget? | Host allocation on the guest's instruction |
+    | Shape | Is this well-formed for its type? | Traversal, injection, a name that is not a name |
+    | Consistency | Do two supplied values agree? | The half-updated state a pair creates |
+  → `list_size` enforces **two axes because each catches what the other misses**: a
+    list of 100 million *empty* strings is zero payload bytes and 100 million
+    `String` headers, so a byte ceiling alone lets a guest drive ~2.4 GB of metadata
+    from a few kilobytes of input; a count ceiling alone lets three 1 GiB elements
+    through. One function, both checks — splitting them would let a caller apply one
+    and believe it had applied the other.
+  → **The central control:** `every_registered_host_function_is_declared_in_the_boundary_table`
+    scans `func_wrap("…")` in the host modules and fails if a boundary is missing
+    from the table, so *every* is checked rather than asserted. Its reverse
+    (`every_declared_boundary_names_a_real_function`) fails if the table lists one
+    that no longer exists. Injecting a rename fails **both**.
+  → **And the finding, which took two injections to reach.** The check was written,
+    wired into `random.get`, and invisible to the suite:
+    1. Neuter the *helper* (`boundary::size(…, 0, …)`) → **all 15 tests still
+       passed**, because every boundary test exercised a helper directly, proving
+       the helper correct and nothing about whether a host call used it.
+    2. Fixed by extracting `random_length_verdict` and testing the pair (ceiling
+       from the ambient state, rejection past it). The helper injection now fails.
+    3. Neuter the **call site** (`let _check_disabled = …;`) with the helper
+       correct → **all 16 tests still passed**. Extracting the helper had closed
+       only half the hole.
+    4. Fixed by `the_call_site_applies_the_boundary_check`, which asserts in source
+       that the registration body calls the helper and propagates with `?`. The
+       call-site injection now fails.
+  → **The fix is structural, and says so rather than implying otherwise.** Proving
+    the call site *behaviourally* needs a guest importing `qqq:crypto/random`, and
+    hand-written WAT against that interface has failed to instantiate four times in
+    this project (the lowered `result<list<u8>, random-error>` needs a return-area
+    pointer and a fully-declared error variant; each attempt failed *whether or not*
+    the capability was granted, making the ungranted case pass for the wrong
+    reason). Source inspection is **weaker** than execution and **stronger than
+    nothing**, which was the previous state.
+  → **The general lesson:** *a check that is written is not a check that runs, and a
+    check that runs is not a check that is reached.* Found three times now — the
+    memory limit was installed but advisory; the refusal path was the
+    amplification; this check was wired but unreachable by any test. All three were
+    invisible to reasoning and all three were found by injecting a defect and
+    watching nothing happen.
+  → Two smaller defects it produced: the table's first version used the *qualified*
+    name (`wall-clock.now`) while `func_wrap` registers the **bare** name (`now`)
+    within an interface instance, so the completeness test reported five undeclared
+    clock functions — which is how the mismatch surfaced, and a table that cannot be
+    checked against the code is a document rather than a control. And the name
+    extractor read **doc comments**, inventing `name` as a boundary because
+    `host_crypto.rs` writes `` `func_wrap("name"` `` in its own prose; it now strips
+    comments, pinned by `the_detector_ignores_comments_and_doc_examples`.
+  → Also added `HASH_ALGORITHM_COUNT` with
+    `the_hash_algorithm_count_agrees_with_the_wit`, which *counts* the WIT enum's
+    members rather than restating a literal — a member added to the WIT without
+    updating it would make the host refuse a valid algorithm, and `algorithm_name`
+    would agree with the stale constant, so nothing else would catch it.
+  → §2.2 NN-2 — Security and Isolation Are Non-Optional. New file
+    `crates/qqq-host/src/boundary.rs` (33 tests); 17 validation calls across 8
+    boundaries in 4 interfaces.
 - [ ] **SEC-012** Establish the fuzzing programme covering the host interfaces, manifest parser and component loader.
   → §2.2 NN-2 — Security and Isolation Are Non-Optional
 - [ ] **SEC-013** Add `cargo-fuzz` targets to CI with a nightly fuzzing schedule.

@@ -176,6 +176,19 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 if !store.data().grants.grants(Capability::CryptoRandom) {
                     return Err(denied(Capability::CryptoRandom));
                 }
+                // **`SEC-011`: the boundary check, before any host work.**
+                //
+                // Charged ahead of the allocation, not after: `random_bytes`
+                // allocates `length` bytes on the guest's instruction, so a check
+                // that ran afterwards would have already paid the cost it exists
+                // to prevent. The ceiling is read from the state, so the boundary
+                // and the allocation cannot disagree. `ambient` enforces it too,
+                // and that redundancy is deliberate: this is the boundary's own
+                // statement of its contract, and `ambient` may be reached from
+                // callers that have no boundary.
+                random_length_verdict(length, &store.data().ambient)
+                    .into_result("length")
+                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
                 store
                     .data()
                     .ambient
@@ -218,13 +231,26 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (algorithm, data): (u32, Vec<u8>)|
          -> wasmtime::Result<(Vec<u8>,)> {
             crate::guard::guard("qqq:crypto@1.0.0/hashing.digest", || {
+                // **`SEC-011`: the discriminant is validated through the shared
+                // boundary layer**, so the check is the same one the registry
+                // declares and the same one `digest-many` applies. `algorithm_name`
+                // still performs its own match — the two are not redundant in the
+                // way a duplicated check normally is: `algorithm_name` maps a
+                // validated index to a name, and the boundary states the contract
+                // "this index is a member of the set the host defined" *before*
+                // any work happens.
+                crate::boundary::discriminant(
+                    "algorithm",
+                    algorithm,
+                    crate::ambient::HASH_ALGORITHM_COUNT,
+                )
+                .into_result("algorithm")
+                .map_err(|e| wasmtime::Error::msg(e.render()))?;
                 let name = algorithm_name(algorithm)?;
-                if data.len() > MAX_HASH_INPUT {
-                    return Err(wasmtime::Error::msg(format!(
-                        "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
-                        data.len()
-                    )));
-                }
+                // Size, through the boundary layer.
+                crate::boundary::size("data", data.len(), MAX_HASH_INPUT)
+                    .into_result("data")
+                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
                 hash_data(store.data(), name, &data)
                     .map(|d| (d,))
                     .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
@@ -242,15 +268,35 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (algorithm, inputs): (u32, Vec<Vec<u8>>)|
          -> wasmtime::Result<(Vec<Vec<u8>>,)> {
             crate::guard::guard("qqq:crypto@1.0.0/hashing.digest-many", || {
+                // **`SEC-011`: the list boundary, on BOTH axes.**
+                //
+                // This is the case the two-axis check exists for. The earlier
+                // version only bounded each element's length, so a guest passing a
+                // hundred million *empty* lists allocated a `Vec<Vec<u8>>` of
+                // headers — zero payload bytes, gigabytes of metadata. Neither axis
+                // alone catches it, which is why `list_size` states both.
+                let total_bytes: usize = inputs.iter().map(Vec::len).sum();
+                crate::boundary::discriminant(
+                    "algorithm",
+                    algorithm,
+                    crate::ambient::HASH_ALGORITHM_COUNT,
+                )
+                .into_result("algorithm")
+                .map_err(|e| wasmtime::Error::msg(e.render()))?;
+                crate::boundary::list_size("inputs", inputs.len(), total_bytes)
+                    .into_result("inputs")
+                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
+
                 let name = algorithm_name(algorithm)?;
                 let mut out = Vec::with_capacity(inputs.len());
-                for input in &inputs {
-                    if input.len() > MAX_HASH_INPUT {
-                        return Err(wasmtime::Error::msg(format!(
-                            "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
-                            input.len()
-                        )));
-                    }
+                for (i, input) in inputs.iter().enumerate() {
+                    // The per-element limit is still separate from the list
+                    // limits: a single 1 GiB input is one element and within
+                    // neither of them.
+                    crate::boundary::size("inputs", input.len(), MAX_HASH_INPUT)
+                        .with_field("inputs")
+                        .into_result(&format!("inputs[{i}]"))
+                        .map_err(|e| wasmtime::Error::msg(e.render()))?;
                     out.push(
                         hash_data(store.data(), name, input)
                             .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?,
@@ -262,6 +308,49 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// The `SEC-011` boundary verdict for a `random.get` length.
+///
+/// # Why this is a named function rather than an inline expression
+///
+/// Because an inline check inside a `func_wrap` closure **cannot be tested** —
+/// reaching it needs a compiled component importing `qqq:crypto/random`, and
+/// hand-written WAT against that interface is a trap this project has fallen into
+/// four times (the lowered `result<list<u8>, random-error>` needs a return-area
+/// pointer and a fully-declared error variant, and each attempt failed to
+/// instantiate *whether or not* the capability was granted, making the ungranted
+/// case pass for the wrong reason — see `tests/hostile_guests.rs`).
+///
+/// That untestability has a measurable cost, found by injection rather than by
+/// reasoning: neutering the inline check so it could never reject left **every**
+/// test in this module green. Extracting it gives the test a seam, and
+/// `the_random_length_boundary_accepts_to_the_ceiling_and_refuses_past_it` now
+/// fails when the *helper* is wrong.
+///
+/// # The second gap, and why `the_call_site_applies_the_boundary_check` exists
+///
+/// Extracting the helper closes only half the hole. A **second** injection —
+/// neutering the call site while leaving the helper correct — also left every
+/// test green, because a test that calls the helper directly proves the helper
+/// works and proves nothing about whether the host function uses it. Probing the
+/// function's *result* is what remains untestable without a real component, so
+/// the call site is asserted **structurally** instead: the registration body must
+/// reference `random_length_verdict` and must propagate its rejection with `?`.
+/// That is weaker than an execution test and strictly stronger than nothing, and
+/// the test says so rather than implying otherwise.
+fn random_length_verdict(
+    length: u32,
+    ambient: &crate::ambient::AmbientState,
+) -> crate::quota::Verdict {
+    // The ceiling comes from the ambient state rather than a constant here, so
+    // the boundary states the *same* limit the allocation enforces. A second copy
+    // of the number would be a second source of truth that drifts.
+    crate::boundary::size(
+        "length",
+        length as usize,
+        ambient.max_random_bytes() as usize,
+    )
 }
 
 /// Map the WIT `algorithm` enum discriminant to its name.
@@ -427,6 +516,61 @@ mod tests {
         );
     }
 
+    /// **The anti-drift test for `SEC-011`'s range boundary.**
+    ///
+    /// `HASH_ALGORITHM_COUNT` is the number the boundary check validates a raw
+    /// guest-supplied discriminant against. It is a property of the WIT
+    /// declaration order — an ABI — so a member added to the WIT without updating
+    /// the constant would make the host **refuse a valid algorithm**, and a member
+    /// removed without updating it would let the host accept one that no longer
+    /// exists. Both are silent in every other test, because `algorithm_name`
+    /// matches the same three names and would agree with a stale constant.
+    ///
+    /// The check counts the members of the WIT `enum algorithm` block rather than
+    /// asserting a literal, so the test follows the WIT instead of restating it.
+    #[test]
+    fn the_hash_algorithm_count_agrees_with_the_wit() {
+        let wit = include_str!("../../../wit/qqq-crypto.wit");
+
+        let start = wit
+            .find("enum algorithm {")
+            .expect("the `algorithm` enum must exist in qqq-crypto.wit");
+        let body = &wit[start..];
+        let end = body.find('}').expect("the `algorithm` enum must be closed");
+        let block = &body[..end];
+
+        // Members are the non-empty lines that are not doc comments, are not the
+        // `enum` header, and do not contain `{` or `}`. Each ends with a comma.
+        let members: Vec<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter(|l| !l.starts_with("///") && !l.starts_with("//"))
+            .filter(|l| !l.starts_with("enum "))
+            .filter(|l| l.ends_with(','))
+            .collect();
+
+        assert_eq!(
+            members.len(),
+            crate::ambient::HASH_ALGORITHM_COUNT as usize,
+            "the WIT declares {} algorithm member(s) {members:?} but \
+             HASH_ALGORITHM_COUNT is {}. The boundary check would refuse a valid \
+             algorithm (if the constant is low) or accept a non-existent one (if \
+             high), and `algorithm_name` would agree with the stale constant, so \
+             nothing else would catch this.",
+            members.len(),
+            crate::ambient::HASH_ALGORITHM_COUNT
+        );
+
+        // And the declaration order is the ABI the discriminant relies on.
+        assert_eq!(
+            members,
+            vec!["sha256,", "sha512,", "blake3,"],
+            "the discriminant numbering depends on declaration order; reordering \
+             the WIT silently changes what a guest's `1` means"
+        );
+    }
+
     #[test]
     fn the_interface_paths_match_the_wit() {
         let wit = include_str!("../../../wit/qqq-crypto.wit");
@@ -563,6 +707,156 @@ mod tests {
         assert!(
             !has_func(&mut without, RANDOM, "get"),
             "a hash-only grant must not expose random"
+        );
+    }
+
+    /// **`SEC-011`: the boundary checks are reached, not merely declared.**
+    ///
+    /// # Why this test exists, and how its absence was found
+    ///
+    /// Every other boundary test in this crate exercises a helper directly
+    /// (`boundary::size(…)`), which proves the helper is correct and proves
+    /// **nothing about whether a live host call invokes it**. Neutering the call
+    /// inside `random.get` — replacing `length` with a constant `0`, so the check
+    /// can never reject — left every test in this module passing. A boundary check
+    /// that is wired in and never exercised is indistinguishable from one that is
+    /// absent, and only an injection found that.
+    ///
+    /// # Why the check is a named function rather than an inline expression
+    ///
+    /// So that a test can assert the *call site* rather than the helper. The
+    /// inline form was untestable without a compiled component importing
+    /// `qqq:crypto/random`, and hand-written WAT against that interface is a trap
+    /// this project has already fallen into four times (see the extended note in
+    /// `tests/hostile_guests.rs`): the lowered signature of `result<list<u8>,
+    /// random-error>` needs a return-area pointer and a fully-declared error
+    /// variant, and every hand-written attempt failed to instantiate **whether or
+    /// not the capability was granted** — which made the ungranted case pass for
+    /// the wrong reason.
+    ///
+    /// Naming the check gives the test a seam without inventing a fake guest.
+    #[test]
+    fn the_random_length_boundary_accepts_to_the_ceiling_and_refuses_past_it() {
+        let ambient = crate::ambient::AmbientState::default();
+        let ceiling = ambient.max_random_bytes();
+
+        // At the ceiling: accepted. The limit is inclusive, so a guest asking for
+        // exactly the maximum is served rather than refused by an off-by-one.
+        assert!(
+            random_length_verdict(ceiling, &ambient).is_accept(),
+            "a request of exactly {ceiling} bytes (the ceiling) must be served"
+        );
+
+        // One past: rejected.
+        if let Some(over) = ceiling.checked_add(1) {
+            let v = random_length_verdict(over, &ambient);
+            assert!(
+                v.is_reject(),
+                "a request of {over} bytes must be refused by the boundary check"
+            );
+            // The rejection names the argument, which is what makes it actionable
+            // rather than a bare "invalid".
+            assert!(
+                v.reason().is_some_and(|r| r.contains("length")),
+                "the rejection must name `length`: {:?}",
+                v.reason()
+            );
+        }
+
+        // The enforcement underneath must agree with the boundary, or the
+        // boundary is checking a different limit from the one that applies — the
+        // two-sources-of-truth failure this project records as `§O-068`.
+        assert!(
+            ambient.random_bytes(ceiling).is_ok(),
+            "the enforcement must accept the ceiling the boundary accepts"
+        );
+        if let Some(over) = ceiling.checked_add(1) {
+            assert!(
+                ambient.random_bytes(over).is_err(),
+                "the enforcement must refuse what the boundary refuses"
+            );
+        }
+
+        // A small request is accepted, so the check is not a blanket refusal.
+        assert!(random_length_verdict(32, &ambient).is_accept());
+    }
+
+    /// **The call-site check, asserted structurally — `SEC-011`.**
+    ///
+    /// # Why this is structural rather than behavioural, stated plainly
+    ///
+    /// The property is "the registered `random.get` host function applies
+    /// `random_length_verdict` and propagates its rejection." Proving that by
+    /// execution needs a guest that imports `qqq:crypto/random` and calls `get`
+    /// with an oversized length — and hand-written WAT against that interface has
+    /// failed to instantiate four times in this project (see the note in
+    /// `tests/hostile_guests.rs`), each failure making the case pass for the wrong
+    /// reason.
+    ///
+    /// So this asserts the call site in source. It is **weaker** than an
+    /// execution test: it cannot prove the check runs before the allocation, and
+    /// a sufficiently determined refactor could satisfy it while breaking the
+    /// property. It is **stronger than nothing**, which is what the previous
+    /// state was — demonstrated, not assumed: neutering the call site left all 16
+    /// tests in this module green.
+    ///
+    /// The honest description of the coverage is therefore: the helper is proven
+    /// by execution, the wiring is proven by source inspection, and the
+    /// end-to-end path is unproven until a generated fixture exists. That
+    /// limitation is recorded here rather than left for a reader to discover.
+    #[test]
+    fn the_call_site_applies_the_boundary_check() {
+        let source = include_str!("host_crypto.rs");
+
+        // Locate the `random.get` registration body. The registration is
+        // `func_wrap("get", …)`, and the body runs until the closing `)?;`.
+        let squeezed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        let at = squeezed
+            .find("func_wrap(\"get\"")
+            .expect("`random.get` must be registered");
+        let body_end = squeezed[at..]
+            .find(")?;")
+            .map(|o| at + o)
+            .expect("the registration must be closed");
+        let body = &squeezed[at..body_end];
+
+        assert!(
+            body.contains("random_length_verdict("),
+            "the `random.get` registration body does not call `random_length_verdict`; \
+             the boundary check is defined but NOT APPLIED, so an oversized length \
+             reaches the allocation unchecked. SEC-011 requires validation at the \
+             crossing, not merely a function that could perform it."
+        );
+
+        // And the rejection must be PROPAGATED. A body that computed the verdict
+        // and ignored it would satisfy the assertion above while doing nothing —
+        // which is exactly the injection (`let _check = …;`) that went undetected
+        // before this test existed.
+        //
+        // The propagation is `?` on the `into_result(...).map_err(...)` chain. The
+        // slice above ends at the `)` of `)?;`, so the `?` itself is the next
+        // character after the slice — which is why this asserts on the *chain*
+        // rather than reaching for a `?` that the delimiter already consumed. The
+        // first version of this test asserted `?;` inside the slice and failed
+        // against a body that was, in fact, correct.
+        assert!(
+            body.contains("into_result(\"length\")") && body.contains("map_err("),
+            "the `random.get` body computes the boundary verdict but does not \
+             convert and propagate the rejection; a check whose result is discarded \
+             is not a check. Body tail: …{}",
+            &body[body.len().saturating_sub(80)..]
+        );
+
+        // The `?` is the character immediately following the slice, because the
+        // slice stops at the `)` of `)?;`. Asserting that placement — rather than
+        // merely that a `?` exists somewhere later in the file — is what ties the
+        // propagation to THIS chain.
+        assert!(
+            squeezed[body_end..].starts_with(")?;"),
+            "the boundary check's rejection must be propagated with `?` immediately \
+             after the chain, so the host function returns before performing the \
+             allocation the check exists to prevent. Found: {:?}",
+            &squeezed[body_end..(body_end + 8).min(squeezed.len())]
         );
     }
 

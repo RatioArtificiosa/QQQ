@@ -67,6 +67,7 @@ const _: () = assert!(
 
 pub mod admission;
 pub mod ambient;
+pub mod boundary;
 pub mod config;
 pub mod guard;
 pub mod handles;
@@ -83,6 +84,12 @@ pub mod trap;
 
 pub use admission::{admit, Admitted, HostCapacity, Refusal};
 pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
+pub use boundary::{
+    all, boundaries_checking, consistent_length, discriminant, interfaces, list_size, one_of,
+    path_component, path_shape, range_within, render_for_diagnostic, size, text, Boundary,
+    CheckClass, Rejection, BOUNDARIES, MAX_ECHO_BYTES, MAX_IDENTIFIER_BYTES, MAX_LIST_BYTES,
+    MAX_LIST_ELEMENTS, MAX_PATH_BYTES,
+};
 pub use config::{
     aot_cache_key, build_engine, build_pooling, target_triple, EngineConfig,
     StoreLimits as LimitSet,

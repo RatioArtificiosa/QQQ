@@ -5000,6 +5000,129 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-071 — `SEC-011`: the check existed, ran, and was never reached
+
+**What the item asks for.** Validation at *every* guest-to-host boundary
+crossing, from §2.2 NN-2. The load-bearing word is **every**.
+
+**Why "add checks where needed" is not an implementation of it.** A validator each
+host function calls when its author remembers is not a boundary layer; it is a set
+of independent decisions that diverge, and the divergence is always in the function
+nobody thought about. So `qqq-host::boundary` is table-driven and centralised, in
+the same shape this project uses for faults and traversals: one place that knows
+the checks, one place a new boundary registers itself, and a test that fails when a
+boundary is added without a declaration.
+
+**The four classes, and the failure each prevents.**
+
+| Class | Question | Failure prevented |
+|---|---|---|
+| **Range** | Is this integer a member of a host-defined set? | Enum confusion; a discriminant the host indexes with |
+| **Size** | Is this within the host's budget? | Host allocation on the guest's instruction |
+| **Shape** | Is this well-formed for its type? | Traversal, injection, a name that is not a name |
+| **Consistency** | Do two supplied values agree? | The half-updated state a pair of unvalidated arguments creates |
+
+**`list_size` enforces two axes because each catches what the other misses.** A
+list of 100 million *empty* strings is zero payload bytes and 100 million `String`
+headers — so a byte ceiling alone lets a guest drive ~2.4 GB of metadata from a few
+kilobytes of input. A count ceiling alone lets three 1 GiB elements through. One
+function, both checks, because splitting them would let a caller apply one and
+believe it had applied the other.
+
+**The finding, and it took two injections to reach.** The boundary check was
+written, wired into `random.get`, and **invisible to the test suite**:
+
+1. First injection — neuter the *helper* (`boundary::size(…, 0, …)`) so it can
+   never reject. **All 15 tests in the module still passed.** Every boundary test
+   exercised a helper directly, proving the helper correct and proving nothing
+   about whether any host call used it.
+2. Fix: extract the check into `random_length_verdict` and test the *pair* — the
+   ceiling comes from the ambient state and the verdict rejects past it. The
+   helper injection now fails.
+3. Second injection — neuter the **call site** (`let _check_disabled = …;`) while
+   leaving the helper correct. **All 16 tests still passed.** Extracting the helper
+   had closed only half the hole.
+4. Fix: `the_call_site_applies_the_boundary_check` asserts in source that the
+   `random.get` registration body calls the helper and propagates the rejection.
+   The call-site injection now fails.
+
+**Why the second fix is structural, and stated as such rather than implied.**
+Proving the call site *behaviourally* needs a guest importing `qqq:crypto/random`
+and calling `get` with an oversized length — and hand-written WAT against that
+interface has failed to instantiate **four times** in this project (the lowered
+`result<list<u8>, random-error>` needs a return-area pointer and a fully-declared
+error variant, and each attempt failed *whether or not* the capability was granted,
+making the ungranted case pass for the wrong reason). So the wiring is asserted by
+source inspection. That is **weaker** than execution and **stronger than nothing**,
+which is what the previous state was — and the test says so instead of implying
+execution coverage it does not have.
+
+**The general lesson, which is the one worth keeping.** *A check that is written is
+not a check that runs, and a check that runs is not a check that is reached.* This
+project has now found that shape three times: `§O-066` (the memory limit was
+installed but advisory), `§O-069` (the refusal path was the amplification), and
+here (the boundary check was wired but unreachable by any test). Each was invisible
+to reasoning and each was found by injecting a defect and watching nothing happen.
+
+**Two smaller defects the work produced.**
+* The boundary table's first version used the *qualified* name (`wall-clock.now`)
+  while `func_wrap` registers the **bare** name (`now`) within an interface
+  instance. The completeness test reported all five clock functions as undeclared,
+  which is how the mismatch surfaced. A table that cannot be checked against the
+  code is a document, not a control — and the test that could not exist under the
+  old naming is why the naming was wrong.
+* The extraction of registered names read **doc comments**: `host_crypto.rs`
+  explains its own anti-drift test by writing `` `func_wrap("name"` ``, and `name`
+  was duly extracted as a registered host function. A detector that reads prose
+  invents phantom boundaries, and each phantom is a false failure that pressures
+  whoever hits it to weaken the check. It now strips comments first, and
+  `the_detector_ignores_comments_and_doc_examples` pins that.
+
+**Also added:** `HASH_ALGORITHM_COUNT` with
+`the_hash_algorithm_count_agrees_with_the_wit`, which *counts* the WIT enum's
+members rather than restating a literal. A member added to the WIT without updating
+the constant would make the host refuse a valid algorithm, and nothing else would
+catch it — `algorithm_name` matches the same three names and would agree with the
+stale constant.
+
+→ §2.2 NN-2. New file `crates/qqq-host/src/boundary.rs`, 33 tests. 17 validation
+calls across 8 boundaries in 4 interfaces.
+
+---
+
+### §O-070 — Stale incremental artifacts made a restored file look broken, twice
+
+**What happened.** After fault-injecting `boundary.rs` and `host_crypto.rs` and
+restoring them, `cargo test` kept reporting the **injected** assertion failure
+while `grep` found no trace of the injection in the source. `Select-String` on the
+raw bytes confirmed the file was clean; the test binary was not.
+
+**Why, and why `include_str!` did not save us.** One of the tests reads its own
+source through `include_str!("host_crypto.rs")`, which *should* register a
+dependency — and does in a clean build. The stale result appeared after a sequence
+of write-restore-write-restore cycles within one second, where filesystem timestamp
+granularity left the incremental cache believing its artifact was newer than the
+source it was built from.
+
+**The rule.** When a test reads its own source and a restore has just happened, run
+`cargo clean -p <crate>` before believing a failure. And the check that
+distinguishes the two cases is cheap: **grep the source for the injected marker
+first.** If the marker is absent and the failure message still quotes it, the binary
+is stale — the failure is an artifact of the build, not of the code. Accepting it as
+real would have sent me editing a file that was already correct.
+
+**What made this worth recording rather than shrugging at.** Twice in one session I
+nearly recorded a *false* defect — first concluding the boundary table was wrong at
+restore, then concluding the call-site check was broken. Both times the source was
+already right. A build artifact that lies in the *safe* direction is merely
+annoying; one that lies in the *unsafe* direction would have been a defect I
+"fixed" by weakening a check that was working.
+
+→ `§M-009` is the related lesson about verifying that an injected fault actually
+applied. This is its mirror: verifying that a *restore* actually applied.
+
+---
+
 ### §O-069 — `SEC-008`/`SEC-009`: a limit is not enough, the **refusal path** must not be amplifiable
 
 **What `SEC-008` and `SEC-009` actually ask for.** Handle-count limits with proof
@@ -6688,5 +6811,7 @@ entry is the correction.
 | 2026-09-19 | **`cargo deny` was red two ways at once and one hid the other (`§O-054`, `§O-055`).** `cargo check`, `clippy -D warnings` and every test were green while the supply-chain job failed: `rustls-pemfile` is unmaintained (`RUSTSEC-2025-0134`) and was a **direct** dependency of `qqq-serve`, which `deny.toml`'s `unmaintained = "workspace"` policy is precisely shaped to catch. The fix was to **remove the dependency rather than ignore the advisory** — `PemObject` in `rustls-pki-types` is the same code the old crate wrapped, so `pem_slice_iter`/`from_pem_slice` replaced it, and with it went two `BufReader` layers that existed only for `rustls_pemfile`'s `Read` bound. Repairing that exposed a **second, masked failure**: `ISC` was absent from `[licenses].allow` while the comment twenty lines above the list *named it as present*, so prose and list had drifted; `cargo deny` evaluates `advisories` first and exits non-zero on it, so the licence failure never printed. **A red check that fails for reason 1 tells you nothing about reason 2** — the same shape as `§M-006` and `§O-051`. `cargo deny check` now reports `advisories ok, bans ok, licenses ok, sources ok`; the 21 handshake and 35 unit TLS tests pass unchanged. The deeper lesson is `§O-055`: `cargo deny` and `cargo machete` are CI-only steps with no local script, so the rule "verify with real commands" was being satisfied against the commands that were *remembered*. `tools/audit_requirements.py` is the full gate, its last requirement is a clean tree, and it reported **31/32** — which is what made the state visible. **Before every commit, run the audit, not a subset of it.** | Architect |
 
 | 2026-09-20 | **`SEC-008` and `SEC-009` implemented (`§O-068`, `§O-069`), and the refusal path was itself the amplification.** `SEC-009`'s obvious implementation — a counter that refuses and lets the guest continue — is a **loop amplification attack**: the guest ignores the error and the host rebuilds a full `Error` (message, context `Vec`, remediation) every iteration. Measured with `cargo run --release --example refusal_probe -p qqq-host`: the advisory policy took **138.3573 ms** for 99,999 refusals against **48.8 µs** for the poisoned policy's 100,000 charges (1 paid, 99,998 free) — a **2835x** ratio, at **1384 ns per refusal** against a guest loop costing nanoseconds. This is structurally the same defect as §O-066: there Wasmtime made a refused `memory.grow` *advisory*, here returning an error and continuing made the refusal advisory in exactly the same way. `SubrequestBudget::charge` now returns `Charge::Refused` **once**, poisons the budget, and every later charge is `Charge::RefusedRepeatedly` — a counter increment with no allocation. **A limit whose refusal path can be driven in a loop has not bounded anything.** New manifest field `limits.max_subrequests` (`SUBREQUESTS_MAX = 10_000`, deliberately below `HANDLES_MAX` because a subrequest is a side effect on a third party), new code `QQQ-3008 SubrequestLimitExceeded` kept distinct from the retryable `4005 CapabilityQuotaExhausted`, and `StoreData::default()` grants **zero** budget so `0 == unlimited` cannot invert the most restrictive manifest into the most permissive. `SEC-008`'s risk was the opposite — a **second** counter beside `HandleTable`'s existing one, two sources of truth that drift, permissively (a vulnerability) or strictly (an outage) — so `quota::HandleQuota` is a **view** over the table that adds only `exhaustion_attempts`, which separates "the table reached its ceiling" from "a guest *tried* to pass it". Six `handles.rs` tests assert the **state** after a failed attempt rather than that it failed, and the load-bearing one is the **negative control**: 10,000 open/close cycles through a table holding 4 must never be refused, because the limit is on *concurrency* not *throughput*. Fault-injected twice: disabling the limit check fails **7 tests**; collapsing `RefusedRepeatedly` into `Refused` — the subtle regression — fails the two amplification tests. Four of my own assertions failed first against *correct* code, all from one misunderstanding now pinned in the tests: at a small limit the **last permitted** charge is `AllowedWithWarning`, since `spent * 100 >= limit * 80` is satisfied by the final charge. Recorded because loosening them to `is_allowed()` would have discarded the behaviour being pinned. | Architect |
+
+| 2026-09-20 | **`SEC-011` implemented (`§O-071`), and the boundary check was written, wired, and unreachable — found by injection.** `qqq-host::boundary` is a table-driven validation layer (Range / Size / Shape / Consistency) whose central control scans every `func_wrap("…")` in the host modules and fails if a boundary is missing from the table, so *every* — the load-bearing word in the item — is checked rather than asserted. Injecting a rename fails **both** that test and its reverse. `list_size` enforces element count **and** byte total because each catches what the other misses: 100 million empty strings is zero payload bytes and ~2.4 GB of `String` headers. **The finding took two injections to reach.** The check was written and wired into `random.get`, then (1) neutering the *helper* left **all 15 tests passing**, because every boundary test exercised a helper directly — proving the helper correct and proving nothing about whether a host call used it; fixed by extracting `random_length_verdict` and testing the pair. Then (2) neutering the **call site** while leaving the helper correct also left **all 16 tests passing** — extracting the helper had closed only half the hole; fixed by `the_call_site_applies_the_boundary_check`, which asserts in source that the registration body calls the helper and propagates with `?`. That fix is **structural**, and the test says so: proving it behaviourally needs a guest importing `qqq:crypto/random`, and hand-written WAT against that interface has failed to instantiate four times here. **The general lesson: a check that is written is not a check that runs, and a check that runs is not a check that is reached** — found three times now (the memory limit was advisory; the refusal path was the amplification; this check was unreachable). Two smaller defects: the table's first version used the *qualified* name while `func_wrap` registers the **bare** one, so the completeness test reported five undeclared clock functions; and the name extractor read **doc comments**, inventing `name` as a boundary because the source writes `` `func_wrap("name"` `` in its own prose. `§O-070` records the mirror of `§M-009`: stale incremental artifacts made a *restored* file look broken twice, and the cheap discriminator is to grep the source for the injected marker before believing the failure. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

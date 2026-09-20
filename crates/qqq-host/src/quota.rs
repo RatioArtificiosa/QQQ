@@ -374,6 +374,41 @@ impl Verdict {
         matches!(self, Self::Reject { .. })
     }
 
+    /// Record **which argument** a rejection is about, in the reason text.
+    ///
+    /// # Why the field is folded into the reason rather than stored beside it
+    ///
+    /// [`Verdict`] has exactly two variants and a caller pattern-matches on them.
+    /// Adding a third field to `Reject` would force every existing match to
+    /// destructure two bindings and would make `Verdict::Reject { reason }`
+    /// literals in tests stop compiling — a real cost paid for a value that is
+    /// only ever consumed by [`Verdict::into_result`], which already takes the
+    /// field name as its own parameter. Folding it into the reason keeps the
+    /// variant shape stable and makes the text self-describing when it is logged
+    /// without going through `into_result`, which is exactly what a boundary
+    /// check's rejection does.
+    ///
+    /// A no-op on [`Verdict::Accept`], so a check can be written as
+    /// `verdict_of(...).with_field(field)` without branching on whether it passed.
+    #[must_use]
+    pub fn with_field(self, field: &str) -> Self {
+        match self {
+            Self::Accept => Self::Accept,
+            Self::Reject { reason } => Self::Reject {
+                reason: format!("`{field}` {reason}"),
+            },
+        }
+    }
+
+    /// The rejection reason, if any.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Accept => None,
+            Self::Reject { reason } => Some(reason),
+        }
+    }
+
     /// Turn a rejection into the `QQQ-1004` error a host call returns.
     ///
     /// # Errors

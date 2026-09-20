@@ -37,6 +37,30 @@ use sha2::{Digest, Sha256, Sha512};
 
 use crate::linker::StoreData;
 
+/// The largest single `random.get` request the host will serve, in bytes.
+///
+/// # Why this is a named constant rather than a literal in the constructor
+///
+/// Because it is the **boundary limit** `SEC-011` names in its registry, and the
+/// boundary check in `host_crypto` and the enforcement inside `random_bytes` must
+/// agree. A literal inside a constructor is a number two places could drift from;
+/// a constant is one number with a name an auditor can grep for.
+///
+/// 1 MiB: a guest asking for more is either buggy or attacking the host's memory,
+/// and a bound is cheaper than an investigation.
+pub const DEFAULT_MAX_RANDOM_BYTES: u32 = 1024 * 1024;
+
+/// The number of members of the WIT `algorithm` enum.
+///
+/// # Why this is a constant rather than `HashAlgorithm::all().len()`
+///
+/// The boundary check validates a **raw discriminant** the guest supplied, before
+/// any of it has been mapped to a [`HashAlgorithm`]. The count is a property of
+/// the WIT declaration order (`sha256=0, sha512=1, blake3=2`), which is an ABI —
+/// and a test asserts this constant agrees with the WIT file, so the two cannot
+/// drift silently.
+pub const HASH_ALGORITHM_COUNT: u32 = 3;
+
 /// The deterministic clock and RNG state carried by a store.
 ///
 /// # Why the state lives in the store
@@ -102,7 +126,7 @@ impl AmbientState {
             rng_state: AtomicU64::new(0x5151_5151_5151_5151),
             // 1 MiB. A guest asking for more is either buggy or attacking the
             // host's memory, and a bound is cheaper than an investigation.
-            max_random_bytes: 1024 * 1024,
+            max_random_bytes: DEFAULT_MAX_RANDOM_BYTES,
             origin: OnceLock::new(),
         }
     }
@@ -111,6 +135,17 @@ impl AmbientState {
     #[must_use]
     pub const fn is_deterministic(&self) -> bool {
         self.deterministic
+    }
+
+    /// The largest `random.get` this state will serve, in bytes.
+    ///
+    /// Exposed so `SEC-011`'s boundary check can state the *same* ceiling the
+    /// allocation path enforces, rather than a second copy of the number. A
+    /// boundary that validated against its own constant would be checking a
+    /// different limit from the one that applies.
+    #[must_use]
+    pub const fn max_random_bytes(&self) -> u32 {
+        self.max_random_bytes
     }
 
     /// The current virtual time, in nanoseconds since the epoch.

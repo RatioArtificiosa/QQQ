@@ -727,7 +727,45 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §10.2 Metrics that ship by default
 - [ ] **HOST-020** Write the Wasmtime upgrade runbook and the compatibility-test suite.
   → §15 — Risk Register
-- [ ] **HOST-021** Implement the module-preloading strategy for scale-out (compile on deploy, not on first request).
+- [x] **HOST-021** Implement the module-preloading strategy for scale-out (compile on deploy, not on first request).
+  → Done: `crates/qqq-host/src/preload.rs` — `preload(items, limits, engine_config,
+    capacity)` compiles a whole set against **one** engine and returns a
+    `PreloadReport` with per-item outcomes and timings. 12 unit tests.
+  → **The cost it removes is real and specific.** §2.3 gives two budgets for the
+    same operation: instantiation <= 100 µs warm-pool and **<= 5 ms
+    cold-from-cache**. The second is an AOT `.cwasm` compiled ahead of time.
+    Compiling from source is a different order of magnitude — Cranelift on a real
+    component is tens to hundreds of milliseconds — so the first request to a
+    freshly deployed host pays a cost no later request pays, and it appears as a
+    latency spike on exactly the request an operator is watching after a deploy.
+  → **One engine, not one per item.** An `Engine` holds the Cranelift compiler and
+    the pooling allocator's *reservation*, which is expensive to construct and
+    cheap to reuse. One per component would multiply the reservation by the
+    component count — the over-commit failure `HOST-023` exists to prevent — and
+    would make preloading **cost** memory rather than save latency.
+  → **Partial success is the only useful outcome**, and the module is built around
+    that judgement. A preloader that returned `Err` on the first bad artifact
+    would leave an operator with *nothing* preloaded and one error, which is
+    strictly worse than ninety-nine preloaded and one error. So `preload` returns
+    `Err` only when the whole set cannot be admitted (a whole-set failure with no
+    per-item outcome to report), and a bad component is reported in the report for
+    the deploy tool to judge — it knows whether that component mattered.
+  → **`failures()` is derived, not stored.** A stored count is a second source of
+    truth for the same fact, and the two drifting is how `is_complete()` starts
+    lying. Pinned by `the_failure_count_agrees_with_the_failed_iterator`.
+  → **It does no file I/O.** The `.cwasm` bytes are handed back for the caller to
+    write, which keeps the module testable without a filesystem and keeps §4.3's
+    layering intact — `qqq-host` owns the engine, not the disk.
+  → `cache_key_for` is exposed rather than left to the caller because the key must
+    agree between the process that **writes** the cache and the process that
+    **reads** it, and those are different deploys. A key computed differently in
+    the two places is a cache that silently never hits — which makes an AOT cache
+    look useless rather than broken. A test pins that the key changes with
+    `EngineConfig`, so a deployment that switched to deterministic mode cannot
+    load artifacts compiled under the other and break §10.5's bit-identical replay.
+  → `PreloadItem`'s `Debug` is manual so a log line prints `4096 B` rather than
+    the bytes — asserted by a test, because a 4 KB dump in a log is the kind of
+    thing nobody notices until the log is unreadable.
   → §9.4 Specific optimizations planned
 - [ ] **HOST-022** Implement resource-handle table pooling and lifetime diagnostics.
   → §4.5 The ABI boundary — what crosses and at what cost

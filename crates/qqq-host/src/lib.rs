@@ -75,6 +75,7 @@ pub mod instance;
 pub mod linker;
 pub mod metrics;
 pub mod pool;
+pub mod preload;
 pub mod trap;
 
 pub use admission::{admit, Admitted, HostCapacity, Refusal};
@@ -94,4 +95,5 @@ pub use linker::{
 };
 pub use metrics::{Histogram, Metrics, TrapLabel};
 pub use pool::{exhausted_error, Acquired, Exhausted, Pool, ReleaseOutcome};
+pub use preload::{cache_key_for, preload, PreloadItem, PreloadOutcome, PreloadReport};
 pub use trap::{classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame};

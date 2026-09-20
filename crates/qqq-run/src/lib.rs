@@ -40,8 +40,9 @@ pub mod run;
 pub mod scaffold;
 
 pub use build::{
-    plan, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact, ArtifactKind,
-    BuildOptions, BuildOutput, BuildPlan, ToolRequirement, COMPONENT_EXTENSION, OUTPUT_DIR,
+    plan, plan_pure, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact,
+    ArtifactKind, BuildOptions, BuildOutput, BuildPlan, ToolRequirement, COMPONENT_EXTENSION,
+    OUTPUT_DIR,
 };
 pub use commands::{
     caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,

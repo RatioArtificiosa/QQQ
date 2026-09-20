@@ -265,14 +265,95 @@ impl BuildOptions {
     }
 }
 
-/// Plan a build.
+/// Plan a build, checking that the toolchain is actually present.
+///
+/// This is the entry point the CLI uses. It performs every check in
+/// [`plan_pure`] and then **probes the environment** for the required programs.
 ///
 /// # Errors
 ///
-/// * `QQQ-1003` — the manifest names a language or profile this build cannot
-///   drive.
-/// * `QQQ-1001` — the output directory could not be created.
+/// As [`plan_pure`], plus `QQQ-1003` when a required program is missing.
 pub fn plan(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPlan> {
+    let spec = &loaded.manifest.build;
+    let target = opts.target.as_deref().unwrap_or(spec.target.as_str());
+
+    // The pure half first: it validates the request without touching the host.
+    let plan = plan_pure(loaded, opts)?;
+
+    let Some(toolchain) = toolchain_for(&spec.language, target) else {
+        // `plan_pure` only returns `Ok` for a language with a driver, so this
+        // is unreachable — but returning an error rather than panicking keeps
+        // the contract total if the two functions ever disagree.
+        return Err(Error::new(
+            ErrorCode::CompilationFailed,
+            format!(
+                "the `{}` toolchain driver is not implemented yet",
+                spec.language
+            ),
+        )
+        .with_remediation(format!(
+            "Rust is fully supported today; `{}` is tracked by the language matrix in \
+             QQQ-Checklist-V1.md (LANG-001..LANG-040)",
+            spec.language
+        )));
+    };
+
+    // Missing tools are reported here, before any work, naming every one that
+    // is absent. Reporting them one at a time would make a fresh machine take
+    // three attempts to learn three facts.
+    let missing: Vec<&ToolRequirement> = toolchain
+        .iter()
+        .filter(|t| probe(t.program, t.version_args).is_none())
+        .collect();
+    if let Some(first) = missing.first() {
+        let all = missing
+            .iter()
+            .map(|t| format!("{} ({} — install with `{}`)", t.program, t.why, t.install))
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        return Err(Error::new(
+            ErrorCode::MissingTarget,
+            format!(
+                "missing {} required for a `{}` build",
+                noun(&missing),
+                spec.language
+            ),
+        )
+        .with_cause(format!("missing:\n  {all}"))
+        // The first missing tool's install line, not an arbitrary one: the
+        // probe order is the dependency order, so the first is the one that
+        // unblocks the rest.
+        .with_remediation(first.install));
+    }
+
+    Ok(plan)
+}
+
+/// Plan a build **without consulting the host**.
+///
+/// # Why this is separate from [`plan`]
+///
+/// Because the two answer different questions and have different testability.
+/// "Given this manifest and these flags, what command should run?" is a pure
+/// function of committed inputs. "Is `wasm-tools` installed here?" depends on
+/// the machine.
+///
+/// Conflating them made three tests fail on CI while passing locally: they
+/// asserted the *arguments* (`cargo build --release --target …`) but called
+/// `plan`, which failed first with "missing wasm-tools" on a runner that had
+/// never installed it. The tests were not wrong about the behaviour they
+/// checked — they were checking it through a door that was locked on that
+/// machine.
+///
+/// Splitting the function means argument construction is testable everywhere,
+/// and toolchain availability is tested where it can be controlled.
+///
+/// # Errors
+///
+/// * `QQQ-1003` — the manifest names a language or target this build cannot
+///   drive.
+/// * `QQQ-7001` — `--release` and `--debug` were both passed.
+pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPlan> {
     let spec: &BuildSpec = &loaded.manifest.build;
 
     if !BuildSpec::supports_language(&spec.language) {
@@ -332,33 +413,10 @@ pub fn plan(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPlan> {
         ))
     })?;
 
-    // Missing tools are reported here, before any work, naming every one that
-    // is absent. Reporting them one at a time would make a fresh machine take
-    // three attempts to learn three facts.
-    let missing: Vec<&ToolRequirement> = toolchain
-        .iter()
-        .filter(|t| probe(t.program, t.version_args).is_none())
-        .collect();
-    if let Some(first) = missing.first() {
-        let all = missing
-            .iter()
-            .map(|t| format!("{} ({} — install with `{}`)", t.program, t.why, t.install))
-            .collect::<Vec<_>>()
-            .join("\n  ");
-        return Err(Error::new(
-            ErrorCode::MissingTarget,
-            format!(
-                "missing {} required for a `{}` build",
-                noun(&missing),
-                spec.language
-            ),
-        )
-        .with_cause(format!("missing:\n  {all}"))
-        // The first missing tool's install line, not an arbitrary one: the
-        // probe order is the dependency order, so the first is the one that
-        // unblocks the rest.
-        .with_remediation(first.install));
-    }
+    // `toolchain` is intentionally unused beyond proving a driver exists:
+    // probing for the programs it names is `plan`'s job, and doing it here
+    // would make this function depend on the host.
+    let _ = toolchain;
 
     let args = match spec.language.as_str() {
         "rust" => rust_args(profile, target),
@@ -1046,13 +1104,37 @@ mod tests {
     }
 
     // -- planning ----------------------------------------------------------
+    //
+    // These call `plan_pure`, not `plan`. `plan` additionally probes the host
+    // for `wasm-tools`, which is not installed on a bare CI runner — so these
+    // assertions about *argument construction* failed there while passing
+    // locally. The property under test is a pure function of the manifest and
+    // the flags, so it is tested through the pure entry point.
 
     #[test]
     fn a_rust_project_plans_a_cargo_build() {
-        let plan = plan(&loaded(RUST), &BuildOptions::default()).expect("must plan");
+        let plan = plan_pure(&loaded(RUST), &BuildOptions::default()).expect("must plan");
         assert_eq!(plan.program, "cargo");
         assert!(plan.args.contains(&"build".to_owned()));
         assert!(plan.render().contains("wasm32-wasip2"));
+    }
+
+    /// The planning half must never consult the host. If it did, this test
+    /// would fail on a machine without `wasm-tools` — which is exactly the bug
+    /// this split fixes.
+    #[test]
+    fn pure_planning_does_not_depend_on_the_toolchain() {
+        // Planning succeeds regardless of what is installed, for every
+        // template and language combination that has a driver.
+        for profile in ["debug", "release"] {
+            let src = format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nprofile = \"{profile}\"\n"
+            );
+            assert!(
+                plan_pure(&loaded(&src), &BuildOptions::default()).is_ok(),
+                "pure planning must not depend on the host for profile `{profile}`"
+            );
+        }
     }
 
     /// `--release` and `--debug` is a contradiction. Letting one silently win is
@@ -1060,7 +1142,7 @@ mod tests {
     #[test]
     fn contradictory_profile_flags_are_refused() {
         let opts = BuildOptions::from_flags(BuildOptions::RELEASE | BuildOptions::DEBUG, None);
-        let e = plan(&loaded(RUST), &opts).unwrap_err();
+        let e = plan_pure(&loaded(RUST), &opts).unwrap_err();
         assert_eq!(e.code, ErrorCode::McpArgumentInvalid);
         assert!(e.remediation.is_some());
     }
@@ -1069,22 +1151,47 @@ mod tests {
     fn the_release_flag_overrides_the_manifest_profile() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nprofile = \"debug\"\n";
         let opts = BuildOptions::from_flags(BuildOptions::RELEASE, None);
-        let plan = plan(&loaded(src), &opts).expect("must plan");
+        let plan = plan_pure(&loaded(src), &opts).expect("must plan");
         assert!(plan.args.contains(&"--release".to_owned()));
     }
 
     #[test]
     fn the_manifest_profile_is_used_when_no_flag_is_given() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nprofile = \"debug\"\n";
-        let plan = plan(&loaded(src), &BuildOptions::default()).expect("must plan");
+        let plan = plan_pure(&loaded(src), &BuildOptions::default()).expect("must plan");
         assert!(!plan.args.contains(&"--release".to_owned()));
+    }
+
+    /// The environment-aware entry point must agree with the pure one about the
+    /// *arguments*: `plan` adds a probe, not a second interpretation.
+    ///
+    /// Skipped where the toolchain is incomplete, because that is the one case
+    /// where the two legitimately differ — and the difference is the point.
+    #[test]
+    fn the_probing_plan_agrees_with_the_pure_plan_when_tools_are_present() {
+        let opts = BuildOptions::default();
+        let pure = plan_pure(&loaded(RUST), &opts).expect("pure planning must succeed");
+        match plan(&loaded(RUST), &opts) {
+            Ok(probed) => assert_eq!(
+                probed.args, pure.args,
+                "the toolchain probe must not change the command"
+            ),
+            Err(e) => {
+                // Only a missing tool may make the two differ.
+                assert_eq!(e.code, ErrorCode::MissingTarget);
+                assert!(
+                    e.remediation.is_some(),
+                    "a missing tool must name its install line"
+                );
+            }
+        }
     }
 
     /// A language that parses but has no driver must fail with an honest
     /// "not implemented yet" naming the checklist area, not a fake success.
     #[test]
     fn an_unimplemented_language_is_declared_not_faked() {
-        let e = plan(&loaded(TS), &BuildOptions::default()).unwrap_err();
+        let e = plan_pure(&loaded(TS), &BuildOptions::default()).unwrap_err();
         assert_eq!(e.code, ErrorCode::CompilationFailed);
         assert!(
             e.message.contains("not implemented yet"),
@@ -1097,7 +1204,7 @@ mod tests {
     #[test]
     fn an_unsupported_target_override_is_refused() {
         let opts = BuildOptions::from_flags(0, Some("x86_64-unknown-linux-gnu".to_owned()));
-        let e = plan(&loaded(RUST), &opts).unwrap_err();
+        let e = plan_pure(&loaded(RUST), &opts).unwrap_err();
         assert_eq!(e.code, ErrorCode::MissingTarget);
         assert!(e
             .remediation

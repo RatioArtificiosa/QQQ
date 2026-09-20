@@ -69,6 +69,7 @@ pub mod admission;
 pub mod ambient;
 pub mod config;
 pub mod guard;
+pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
 pub mod instance;
@@ -85,6 +86,7 @@ pub use config::{
     StoreLimits as LimitSet,
 };
 pub use guard::{guard, guard_reporting, PanicReport};
+pub use handles::{Handle, HandleStats, HandleTable};
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
     ExecutionOutcome, Instance, PreparedComponent,

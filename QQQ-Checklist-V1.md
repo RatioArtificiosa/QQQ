@@ -767,7 +767,46 @@ Items are grouped below by **phase**, because dependency order matters more than
     the bytes — asserted by a test, because a 4 KB dump in a log is the kind of
     thing nobody notices until the log is unreadable.
   → §9.4 Specific optimizations planned
-- [ ] **HOST-022** Implement resource-handle table pooling and lifetime diagnostics.
+- [x] **HOST-022** Implement resource-handle table pooling and lifetime diagnostics.
+  → Done: `crates/qqq-host/src/handles.rs` — `HandleTable<T>` with generation-tagged
+    handles, slot reuse, limit enforcement and lifetime counters. 16 unit tests.
+  → **The security property is the generation, not the table.** A handle the guest
+    holds is guest-controlled input, and two attacks follow directly. **Forgery:**
+    the guest passes `9999` when three handles exist. **Recycling:** the guest
+    closes handle 3, the host reuses slot 3 for a *different* resource, and a
+    stale copy of the old value now reaches a resource it never legitimately
+    opened. Both are addressed by packing a generation counter beside the slot
+    index (`| generation:32 | slot:32 |`), incremented on every free — so a
+    recycled slot is **unaddressable** by the stale handle, turning a
+    use-after-free into a clean `QQQ-3005`.
+  → `a_recycled_slot_is_not_addressable_by_a_stale_handle` asserts the slot is
+    genuinely reused (`old.slot() == new.slot()`, so the fixture really exercises
+    recycling) and that the old handle is dead. Without the generation that test
+    fails, which is what makes it a security test rather than a unit test.
+  → **A wrapped generation refuses the slot rather than reusing it.** At
+    `u32::MAX` the counter cannot advance, and racing it would re-validate an old
+    handle — the same attack the generation exists to stop. The slot is retired
+    and counted, so the wrap is an error rather than a silent unsoundness.
+  → **The diagnostics distinguish a leak from churn, which a live count cannot.**
+    A guest that opens 256 handles and closes 256 is healthy; a guest that never
+    closes is leaking; both show the same `open()` value. `opened`/`closed`
+    together make the leak visible, and `invalid` is the attack signature — a
+    steady non-zero value means a guest is guessing handles, holding stale ones,
+    or has a bug.
+  → **`get_counted` exists because `get` cannot count.** `&self` cannot mutate a
+    counter, and adding a `Cell` to every table for one diagnostic is the wrong
+    trade. Rather than hide the asymmetry, the module documents it and offers the
+    `&mut self` form for callers that want the metric accurate.
+  → **`remove` assigns the next generation into the slot rather than clearing it
+    then repopulating**, so the slot never passes through a state where an old
+    handle would match.
+  → Three defects found while writing it, all in the *test* rather than the code
+    (`§O-064`): `the_table_never_exceeds_its_limit` called `insert` twice per
+    iteration and panicked inside its own assertion helper; `get_mut` could not
+    compile because it built the error while holding a mutable borrow of
+    `slots`; and clippy's `unused_self` showed that the `invalid()` helper had a
+    dead receiver left over from an earlier design. Each is recorded where it was
+    found rather than silently corrected.
   → §4.5 The ABI boundary — what crosses and at what cost
 - [x] **HOST-023** Implement `ResourcesRequired`-based admission control: refuse to load a component whose declared minimums exceed the host's capacity.
   → Done: `crates/qqq-host/src/admission.rs` — `admit(limits, capacity)` is a

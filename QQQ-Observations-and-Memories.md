@@ -2568,7 +2568,104 @@ and `:1`, and the test that pins this is named for the case.
 
 ---
 
-#### §O-031e — Clippy caught a `MutexGuard` held across an `await`
+### §O-032 — `qqq-pkg` begins: semver, the lockfile, and the content store
+
+The package layer has three jobs before any solver can exist: decide what a
+version *means* (`semver.rs`), record what was resolved (`lock.rs`), and hold the
+bytes (`store.rs`). Each was written against the Checklist item that names it,
+and the section closes at **78 tests** for the crate, **754** for the workspace,
+with clippy clean at `-D warnings`.
+
+---
+
+#### §O-032a — `Version` has no pre-release field, and `^1.0.0` therefore over-promises
+
+`qqq-core::ids::Version` is `{ major, minor, patch }` and its parser *rejects*
+pre-release (`1.2.3-beta`) and build metadata (`1.2.3+build`). That was a
+deliberate simplification, and writing the semver layer made its consequence
+concrete rather than theoretical:
+
+> `^1.0.0` cannot express "must not adopt `1.1.0-beta.1`", because
+> `1.1.0-beta.1` is not representable in the type the requirement ranges over.
+
+This is not a bug in the parser — the parser is honest, and it refuses input it
+cannot represent instead of silently truncating `1.2.3-beta` to `1.2.3`. It is a
+gap in the version model that propagates into `PKG-007`'s promise that a locked
+version is **immutable**. If the registry ever publishes a pre-release, a
+caret requirement will treat it as its release, and the lockfile's guarantee is
+weaker than the documentation claims.
+
+The gap is now *recorded in the tests* rather than in a comment:
+`pre_releases_are_not_representable_and_this_records_it` asserts the parse
+fails, and names the checklist item it constrains. Four tests that had been
+written against an imagined `Version.pre` field — which never existed — were
+deleted; they were not testing the code, they were testing my memory of it.
+
+The fix is a real change to `PKG-007` semantics (adding `pre: Option<String>`
+and ordering rules) and is deferred, not forgotten. `§O-032a` is the record.
+
+---
+
+#### §O-032b — The caret rule under `1.0`, and why `^0.2.3` is not `>=0.2.3`
+
+The caret operator is the one piece of semver where a plausible implementation is
+wrong in a way that only bites in production. Above `1.0.0` the rule is
+mechanical: `^1.2.3` = `>=1.2.3, <2.0.0`. Below `1.0.0` it is not:
+
+| Requirement | Correct range | The naive `>=x, <x+1` |
+|---|---|---|
+| `^0.2.3` | `>=0.2.3, <0.3.0` | `>=0.2.3, <1.0.0` ← admits breaking changes |
+| `^0.0.3` | `>=0.0.3, <0.0.4` | `>=0.0.3, <0.1.0` ← admits breaking changes |
+
+Cargo's rule is that the caret pins everything left of the first non-zero
+component. A naive implementation passes every test written with `^1.x`
+requirements and then silently accepts an incompatible `0.x` upgrade — exactly
+the class of defect that reaches users, because `0.x` is what pre-1.0 libraries
+publish. The tests include the two rows above by name.
+
+---
+
+#### §O-032c — The lockfile covers itself with a hash, and verifies it on read
+
+`qqq.lock` is a file a human can edit, and a lockfile that has been edited is
+indistinguishable from one that has not unless something checks. Every entry is
+hashed together with a covering hash, computed over fields joined by NUL
+separators — chosen because no field may contain a NUL, so no two distinct field
+sets can produce the same digest input. A hand-edited lockfile is therefore
+*detected* on read rather than trusted.
+
+The NUL separator is the whole defence. Joining with `-` or `:` would let
+`["a-b", "c"]` and `["a", "b-c"]` collide, and the collision is silent: the file
+would verify and the wrong packages would install.
+
+---
+
+#### §O-032d — Two clippy findings that were real, and one that was mine
+
+Clippy at `-D warnings` failed the new crate three times, and the three cases
+split cleanly:
+
+1. **`match_same_arms` in `lock.rs`** — `Syntax` and `EmptyField` had the same
+   remediation string. The lint is right that the arms are identical, but merging
+   them would have been the wrong fix: the two failures have *different causes*
+   (malformed TOML versus a present-but-empty field) and the remediation should
+   say which. Fixed by giving each a remediation that names its own cause, which
+   is what the user actually needs at the moment they see it.
+2. **`case_sensitive_file_extension_comparisons` in `store.rs`** — `list()`
+   skipped sidecars with `name.ends_with(".meta")`. On a case-insensitive
+   filesystem a `.META` file is the *same file* as `.meta`, so the store would
+   list a phantom artifact on Linux and not on macOS or Windows. That is a
+   genuine platform divergence, and `listing_treats_an_upper_case_sidecar_as_a_sidecar`
+   now pins it.
+3. **`implicit_clone`** — my own new test called `.to_path_buf()` on a value
+   `with_extension` already returned as `PathBuf`. Mine, and trivial.
+
+The pattern in (1) and (2) is the same one `§O-029a` and `§O-031e` recorded, and
+it is worth stating plainly: **on this project clippy has repeatedly flagged
+correctness, not taste.** The instinct to `#[allow]` a lint that fires on new
+code has been wrong every time it has been tempting.
+
+---
 
 In one of the new integration tests, a lock guard was held while awaiting. That
 is a real deadlock hazard rather than a style nit: the guard is not `Send`-safe
@@ -2851,5 +2948,6 @@ If someone reads nothing else in this file, these are the items that cost the mo
 |---|---|---|
 | 2026-09-19 | Document opened. Initial decisions `§D-001` … `§D-009`, observations `§O-001` … `§O-008`, mistakes `§M-001` … `§M-006`, corrections `§C-001` … `§C-006`, stubs `§S-001` … `§S-005`, questions `§Q-001` … `§Q-012`. | Architect |
 | 2026-09-19 | Verification round. All four load-bearing architecture claims verified against Wasmtime 48.0.2 (`§O-006`); four WAT/ABI findings recorded (`§O-007`); two Wasmtime API differences recorded (`§O-008`); validator self-test built and **7/7 fault injections detected** (`§M-006`), which exposed and fixed two real defects: Appendix A/Observations correction drift, and Proposal decision citations that were write-only. `check [8]`, `[9]`, `[10]`, `[11]` added to the validator; self-test wired into CI. | Architect |
+| 2026-09-19 | `qqq-pkg` opened (`§O-032`). `semver.rs` (`Requirement`/`Op`, caret-under-1.0 rule), `lock.rs` (`Lockfile`, `LockDiff::compute`, NUL-separated covering hash verified on read), `store.rs` (`Digest`, two-level fan-out `StoreLayout`, verified reads). The pre-release gap in `qqq-core::Version` recorded as `§O-032a` with the test that pins it; four tests written against a non-existent `Version.pre` field deleted. Three clippy findings fixed, two of which were real defects (`§O-032d`). Workspace: **754 tests pass**, clippy clean at `-D warnings`. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

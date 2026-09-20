@@ -930,6 +930,14 @@ dependencies = [
 [[package]]
 name = "qqq-pkg"
 version = "0.0.0"
+dependencies = [
+ "qqq-cap",
+ "qqq-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
 
 [[package]]
 name = "qqq-run"

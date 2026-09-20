@@ -738,9 +738,30 @@ impl ReadyStore {
             .instances(1)
             .tables(16)
             .build();
-        store.data_mut().set_limits(wasm_limits, limits);
-        // The limiter borrows from the store's own data, which is what keeps
-        // the limits travelling with the instance they constrain.
+        store.data_mut().set_limits(wasm_limits.clone(), limits);
+        // **The limiter is the *trapping* one, and that is the whole point.**
+        //
+        // Wasmtime permits exactly one limiter per store, so the choice is
+        // between Wasmtime's own `StoreLimits` and `TrappingLimiter`. The
+        // difference is measured, not theoretical:
+        //
+        // | `memory_growing` returns | `memory.grow` does | Consequence |
+        // |---|---|---|
+        // | `Ok(false)` (what `StoreLimits` does) | returns -1 | The ceiling is **advisory**: the guest keeps running |
+        // | `Err` (what `TrappingLimiter` does) | **traps** | The ceiling is **enforced** |
+        //
+        // With `StoreLimits` alone, a hostile guest that ignored the failed grow
+        // ran 97 seconds at full CPU against a 4 MiB ceiling before *fuel* stopped
+        // it, and one that trapped on the failure reported `GuestPanic` rather
+        // than `MemoryLimitExceeded` — so `QQQ-3001` was unreachable through this
+        // path. Measured with `cargo run --example memory_probe -p qqq-host`.
+        //
+        // `TrappingLimiter` wraps `StoreLimits`, so the per-instance, per-table
+        // and per-memory *counts* still apply; only `memory_growing` is overridden.
+        //
+        // The closure form is required because `Store::limiter` needs a reference
+        // that outlives the store, and the limiter is owned by the store's data.
+        store.data_mut().install_trapping_limiter(wasm_limits);
         store.limiter(|d| d.limiter_mut());
 
         // -- Fuel --------------------------------------------------------

@@ -1161,13 +1161,93 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 - [ ] **SEC-001** Write the threat model document covering §7.1 assets and §7.2 adversaries.
   → §7.1 What we are defending, precisely
-- [ ] **SEC-002** Implement the rule that an ungranted import is absent, not merely denied, and prove it by test.
+- [x] **SEC-002** Implement the rule that an ungranted import is absent, not merely denied, and prove it by test.
+  → Done: the property was already implemented — `build_linker` populates the
+    linker **from the grants alone**, so an ungranted import is not present and
+    instantiation fails (`QQQ-6003` naming the interface) rather than the call
+    being denied. It is now **proven**: `an_ungranted_import_is_absent_rather_than_denied`
+    asserts the failure occurs at instantiation and that the error names the
+    missing interface, and the hostile-guest table carries **56** ungranted-import
+    cases.
+  → **The distinction matters and is worth stating.** "Absent" means the component
+    cannot be *instantiated*; "denied" would mean it instantiates and fails when
+    the import is called. A denied import means the **guest ran** — and a guest
+    that runs has consumed resources and may have had side effects before the
+    denial, which is why §7.3 places this gate at *instantiate* rather than at
+    *call*.
+  → **What this test does not prove, stated rather than implied.** There is no
+    granted control, and the reason is recorded in the test itself: a control
+    needs a component importing an interface the linker *does* provide, and
+    hand-written WAT against a real interface failed **four** times with
+    *"instance export ... has the wrong type"* — a component declaring the wrong
+    export set does not instantiate whether or not the capability is granted, so
+    each attempt made the ungranted case pass for the wrong reason. The failure
+    half is proven here; the positive half is covered where fixtures are
+    generated rather than hand-written (`tests/engine.rs`, `linker.rs`'s own
+    tests), and a granted control belongs here once Phase P5's toolchains can
+    produce a component from WIT.
   → §7.3 The defence timeline — where we stop an attack
 - [ ] **SEC-003** Implement manifest capability validation with a deny-by-default posture throughout.
   → §7.2 Adversary model
-- [ ] **SEC-004** Build the hostile-guest test suite (≥200 cases) with a specified expected failure for each.
+- [x] **SEC-004** Build the hostile-guest test suite (≥200 cases) with a specified expected failure for each.
+  → Done: `crates/qqq-host/tests/hostile_guests.rs` — a **table-driven** suite of
+    **200 hostile guests**, each naming the exact `ErrorCode` it must produce. Six
+    tests, 102 seconds.
+  → **"In a specified way" is the load-bearing phrase**, and it is why the suite
+    is not a list of `assert!(result.is_err())`. A test that only asserts failure
+    cannot distinguish the right failure from the wrong one — a guest rejected for
+    the wrong reason would pass, and the reason is exactly what the suite checks.
+    Every case names its code, and the runner fails on a *different* one.
+  → **The property every case asserts beyond its own code: the host survives.**
+    After each guest, a fresh instance on the **same engine** runs a benign
+    component to completion — which separates "the guest was stopped" from "the
+    guest took the host with it", the claim §7.1 lists first under assets.
+  → **Distribution is asserted, not just the total.** `traps >= 140`,
+    `instantiation_failures >= 56`, `controls >= 4` — so the suite cannot
+    degenerate into 200 copies of one case while still reporting success. The
+    count is checked by `the_suite_meets_its_size_requirement`, because a suite
+    claiming 200 cases while running 40 is the `§M-006` failure: a check whose
+    declared strength is not its real strength.
+  → The benign control is in the table *and* has its own test
+    (`the_limits_do_not_stop_a_benign_guest`, under all three limit profiles). A
+    runtime that trapped everything would satisfy every hostile assertion while
+    being useless.
+  → **What this suite is not**, stated in the module doc: it drives guests that
+    misbehave within Wasm and checks the runtime's response. It is not a fuzzer
+    (`SEC-012`/`SEC-013`), it does not attempt sandbox escapes via engine bugs
+    (Wasmtime's responsibility, `SEC-014`), and it does not cover HTTP
+    (`SEC-016`).
   → §7.2 Adversary model
-- [ ] **SEC-005** Implement memory-limit enforcement and prove the host survives a guest OOM.
+- [x] **SEC-005** Implement memory-limit enforcement and prove the host survives a guest OOM.
+  → Done: **and writing the test found a real security defect.** The memory
+    ceiling was installed with Wasmtime's own `StoreLimits`, which makes
+    `memory.grow` **return -1** — so the limit was **advisory**: the grow failed,
+    the guest kept running, and nothing trapped. Wasmtime documents the
+    alternative: returning `Err` from `ResourceLimiter::memory_growing` makes the
+    growth behave *"as if a trap has been raised"*.
+  → **Measured before and after**, with a temporary probe against a 4 MiB ceiling
+    and a 10-billion-fuel budget:
+    | Guest behaviour on a refused grow | Before | After |
+    |---|---|---|
+    | Traps on it | `GuestPanic` in 487 µs | **`MemoryLimitExceeded` in 476 µs** |
+    | Ignores it and loops | `FuelExhausted` in **97.68 s** | **`MemoryLimitExceeded` in 144 µs** |
+  → Two consequences, both bad and neither visible without measuring. **`QQQ-3001
+    MemoryLimitExceeded` was unreachable through this path** — the taxonomy
+    documents it as the memory-limit code and nothing could produce it, so a
+    memory-limited guest reported a *panic* or *fuel exhaustion* and sent an
+    operator to the wrong fix. And **a hostile guest was not stopped promptly**:
+    97 seconds at full CPU for one guest against a 4 MiB ceiling is not an
+    enforced limit. The fix is **679,000× faster** to stop it.
+  → `TrappingLimiter` in `linker.rs` implements `ResourceLimiter` and returns
+    `Err` on a breach, delegating every non-memory limit to the `StoreLimits` it
+    wraps so the per-instance, per-table and per-memory *counts* still apply.
+    `StoreData::resource_limits` now holds the trapping form, and
+    `install_trapping_limiter` reads the ceiling from the manifest's limits.
+  → The hostile guest that exposes this **ignores the refused grow and loops**,
+    which is the hostile shape: a guest that checks the return value and stops is
+    behaving correctly. `MEMORY_HOG` is documented with that reasoning, because a
+    guest that merely *spins* would trap on fuel and let an absent limiter pass —
+    which is exactly what the first version of this fixture did.
   → §7.2 Adversary model
 - [ ] **SEC-006** Implement fuel-limit enforcement and prove the host survives fuel exhaustion.
   → §7.2 Adversary model

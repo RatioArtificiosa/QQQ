@@ -62,16 +62,22 @@ pub struct StoreData {
     /// same wrong answer twice.
     pub grants: GrantSet,
 
-    /// The Wasmtime resource limiter, applied to every store.
+    /// The resource limiter, applied to every store.
     ///
-    /// # Why the resource limiter lives inside the store data
+    /// # Why the limiter lives inside the store data
     ///
-    /// `Store::limiter` takes a closure returning `&mut StoreLimits`, and the
-    /// returned reference must outlive the store. Storing it in the store's own
-    /// data is the only arrangement that satisfies that without self-reference
-    /// — and it keeps the limits travelling with the instance they constrain,
-    /// so they cannot be swapped by mistake.
-    resource_limits: StoreLimits,
+    /// `Store::limiter` takes a closure returning `&mut impl ResourceLimiter`,
+    /// and the returned reference must outlive the store. Storing it in the
+    /// store's own data is the only arrangement that satisfies that without
+    /// self-reference — and it keeps the limits travelling with the instance they
+    /// constrain, so they cannot be swapped by mistake.
+    ///
+    /// # Why it is a [`TrappingLimiter`] and not a bare `StoreLimits`
+    ///
+    /// Because a bare `StoreLimits` makes the memory ceiling **advisory** —
+    /// see that type for the measurement. The trapping wrapper delegates every
+    /// non-memory limit, so nothing is lost by using it.
+    resource_limits: TrappingLimiter,
 
     /// The QQQ-level limits, for diagnostics and fuel accounting.
     limits: Option<crate::config::StoreLimits>,
@@ -95,7 +101,7 @@ impl Default for StoreData {
     fn default() -> Self {
         Self {
             grants: GrantSet::empty(),
-            resource_limits: StoreLimits::default(),
+            resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
             ambient: crate::ambient::AmbientState::default(),
@@ -109,7 +115,7 @@ impl StoreData {
     pub fn new(grants: GrantSet) -> Self {
         Self {
             grants,
-            resource_limits: StoreLimits::default(),
+            resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
             ambient: crate::ambient::AmbientState::default(),
@@ -143,7 +149,7 @@ impl StoreData {
 
         Self {
             grants,
-            resource_limits: StoreLimits::default(),
+            resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes,
             ambient: crate::ambient::AmbientState::default(),
@@ -159,20 +165,155 @@ impl StoreData {
 
     /// Mutable access to the resource limiter, for `Store::limiter`.
     #[must_use]
-    pub fn limiter_mut(&mut self) -> &mut StoreLimits {
+    pub fn limiter_mut(&mut self) -> &mut TrappingLimiter {
         &mut self.resource_limits
     }
 
     /// Install the Wasmtime limiter and record the QQQ limits.
+    ///
+    /// The default ceiling is `usize::MAX` because the caller that knows the
+    /// manifest's memory limit is [`StoreData::install_trapping_limiter`], which
+    /// takes it; this form exists for stores with no explicit limit.
     pub fn set_limits(&mut self, limiter: StoreLimits, limits: crate::config::StoreLimits) {
-        self.resource_limits = limiter;
+        self.resource_limits = TrappingLimiter::new(limiter, usize::MAX);
         self.limits = Some(limits);
+    }
+
+    /// Install a limiter that **traps** at `ceiling` bytes per linear memory.
+    ///
+    /// This is the enforced form. See [`TrappingLimiter`] for why the advisory
+    /// alternative is not good enough.
+    pub fn install_trapping_limiter(&mut self, limiter: StoreLimits) {
+        let ceiling = self.limits.map_or(usize::MAX, |l| {
+            usize::try_from(l.memory_bytes).unwrap_or(usize::MAX)
+        });
+        self.resource_limits = TrappingLimiter::new(limiter, ceiling);
     }
 
     /// The QQQ-level limits, when set.
     #[must_use]
     pub const fn limits(&self) -> Option<crate::config::StoreLimits> {
         self.limits
+    }
+}
+
+/// **The memory limit, enforced as a trap rather than as a failed grow.**
+///
+/// # The defect this fixes, measured
+///
+/// The obvious way to install a memory ceiling is `Store::limiter` with
+/// Wasmtime's own `StoreLimits` — and that is what this crate did. Wasmtime
+/// documents what that does:
+///
+/// > If `Ok(false)` is returned then this will cause the `memory.grow`
+/// > instruction in a module to **return -1 (failure)** … If `Err(e)` is
+/// > returned then the `memory.grow` function will behave **as if a trap has
+/// > been raised**.
+///
+/// So a `StoreLimits` ceiling is **advisory to the guest**: the grow fails and
+/// the guest keeps running. Measured with `cargo run --example memory_probe -p
+/// qqq-host` against a 4 MiB ceiling and a 10-billion-fuel budget:
+///
+/// | Guest behaviour on a failed grow | Outcome | Time to stop |
+/// |---|---|---|
+/// | Traps (`unreachable`) | `GuestPanic` — **not** `MemoryLimitExceeded` | 487 µs |
+/// | Ignores it and loops | `FuelExhausted` — **not** `MemoryLimitExceeded` | **97 seconds** |
+///
+/// Two consequences, both bad and neither visible without measuring:
+///
+/// 1. **`QQQ-3001 MemoryLimitExceeded` was unreachable through this path.** The
+///    taxonomy documents it as the memory-limit code, and nothing could produce
+///    it — so a memory-limited guest reported a *panic* or *fuel exhaustion*
+///    instead, sending an operator to the wrong fix.
+/// 2. **A hostile guest was not stopped promptly.** 97 seconds at full CPU for
+///    one guest, when the ceiling it exceeded was 4 MiB, is not an enforced limit.
+///
+/// `SEC-005` requires that a guest OOM be stopped *and* that the host survive. An
+/// advisory ceiling satisfies the second and fails the first, which is why this
+/// type exists.
+///
+/// # What it does
+///
+/// Implements [`wasmtime::ResourceLimiter`] and returns **`Err`** on a breach, so
+/// the grow traps — Wasmtime's documented behaviour for that return — carrying a
+/// message the trap taxonomy classifies as `MemoryLimitExceeded`. Everything
+/// within the limit is admitted by delegating to the inner limits, so the
+/// per-instance and per-table ceilings still apply.
+///
+/// # Why it is a separate type rather than a flag on `StoreData`
+///
+/// `Store::limiter` borrows from the store's data, and a limiter that must know
+/// both the ceiling *and* the configured limit belongs beside the data it reads.
+/// Keeping it a distinct type also means the two enforcement strategies can be
+/// compared in a test rather than described in a comment — see
+/// `tests/hostile_guests.rs`, which asserts the trapping behaviour.
+#[derive(Debug)]
+pub struct TrappingLimiter {
+    inner: StoreLimits,
+    /// The QQQ ceiling, in bytes, for the trap message.
+    memory_ceiling: usize,
+}
+
+impl TrappingLimiter {
+    /// Build a limiter that traps at `memory_ceiling` bytes per memory.
+    #[must_use]
+    pub const fn new(inner: StoreLimits, memory_ceiling: usize) -> Self {
+        Self {
+            inner,
+            memory_ceiling,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for TrappingLimiter {
+    /// Admit a growth within the ceiling; **trap** on one beyond it.
+    ///
+    /// Returns `Err` rather than `Ok(false)` deliberately: `Ok(false)` is the
+    /// silent-failure path that makes this limit advisory, and `Err` is the one
+    /// Wasmtime documents as behaving "as if a trap has been raised".
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if desired > self.memory_ceiling {
+            return Err(wasmtime::Error::msg(format!(
+                "memory limit exceeded: growing to {desired} bytes would pass the \
+                 {}-byte limit (currently {current} bytes)",
+                self.memory_ceiling
+            )));
+        }
+        self.inner.memory_growing(current, desired, maximum)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
     }
 }
 

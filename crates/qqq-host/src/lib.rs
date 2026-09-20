@@ -97,7 +97,7 @@ pub use instance::{
 };
 pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,
-    BuiltLinker, StoreData,
+    BuiltLinker, StoreData, TrappingLimiter,
 };
 pub use metrics::{Histogram, Metrics, TrapLabel};
 pub use pool::{exhausted_error, Acquired, Exhausted, Pool, ReleaseOutcome};

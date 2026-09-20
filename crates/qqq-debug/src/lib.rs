@@ -48,7 +48,19 @@
 //! same order. Entries are sorted by address, so a lookup is a binary search and
 //! a `--json` diff of two runs is byte-identical.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
+// A **bare** `forbid`, not `cfg_attr(not(test), forbid(...))`.
+//
+// The conditional form permits `unsafe` under `cfg(test)`, which means the
+// guarantee is a property of the build configuration rather than of the source:
+// a test helper could introduce `unsafe` and the release build's claim would
+// still read as true. §4.3 requires `#![forbid(unsafe_code)]` on every crate
+// except the named exception crates, and `qqq-debug` is not one of them — it
+// contains no `unsafe` at all, so the escape hatch was defensive rather than
+// necessary.
+//
+// Found by `crates/qqq-core/tests/architecture.rs`, which reads this attribute
+// and reports the conditional form separately from its absence. See `§O-059`.
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]

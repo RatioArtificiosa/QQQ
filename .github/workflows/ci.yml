@@ -152,6 +152,22 @@ jobs:
       - name: Prove the panic-guard check detects an unguarded host function
         run: python tools/fault_inject_guard.py
 
+      # `ARCH-002`, `ARCH-004` and `ARCH-008` are statements about the
+      # *workspace* -- that no crate depends upward, that every crate except the
+      # named exceptions forbids `unsafe`, and that no widening primitive exists
+      # on `GrantSet`. Each test asserts an ABSENCE, and an absence is trivially
+      # satisfied by a scanner that finds nothing, so this harness injects three
+      # real violations -- a valid upward dependency, a bare `allow(unsafe_code)`
+      # and a `fn union(` on `GrantSet` -- and asserts each makes its own test go
+      # red.
+      #
+      # Every injection must be valid Rust or valid TOML. An injection that
+      # breaks the build (for instance by creating a dependency CYCLE rather
+      # than merely an upward edge) proves nothing about the check, and the
+      # harness reports that case separately as BROKEN rather than as DETECTED.
+      - name: Prove the architecture tests detect real violations
+        run: python tools/fault_inject_architecture.py
+
       # The objective audit: does the deliverable set actually satisfy the
       # brief? It checks that all three documents exist and are English, that
       # the Proposal covers the required sections, that the Checklist is fully

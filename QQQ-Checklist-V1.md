@@ -352,11 +352,40 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 - [ ] **ARCH-001** Write the layered-architecture ADR fixing the nine layers and the authority-flow invariant.
   → §4.1 The layer cake
-- [ ] **ARCH-002** Implement and test the invariant that authority only narrows downward.
+- [x] **ARCH-002** Implement and test the invariant that authority only narrows downward.
+  → Done: the invariant is enforced **structurally** — `GrantSet::narrow` is the
+    only combinator that produces a grant set from a grant set, there is no
+    union/widen/merge, and a search of the whole workspace source confirms it.
+    The behavioural half is `qqq-cap`'s own `no_overlay_can_ever_widen`
+    (`§O-050`), which starts from the empty set and tries all six (layer × mode)
+    combinations against a hostile overlay holding every capability.
+  → What this item adds is the half `qqq-cap` **cannot test about itself**: a
+    future `GrantSet::union` or `add_capability` anywhere in the workspace would
+    break the invariant **silently**, because no existing test would call it.
+    `no_widening_constructor_on_grants_exists_anywhere` in
+    `crates/qqq-core/tests/architecture.rs` scans every crate for the widening
+    names and fails on the first; a positive control asserts the scanner found
+    real `impl GrantSet` blocks, so a green result means "checked and clean"
+    rather than "checked nothing".
   → §4.1 The layer cake
 - [ ] **ARCH-003** Implement the compile-time rule that a host function without a WIT definition cannot enter a release build.
   → §4.1 The layer cake
-- [ ] **ARCH-004** Add an architecture test that no crate depends on a crate above it in the topology.
+- [x] **ARCH-004** Add an architecture test that no crate depends on a crate above it in the topology.
+  → Done: `no_crate_depends_on_a_crate_above_it` in
+    `crates/qqq-core/tests/architecture.rs`, reading every crate's manifest and
+    ranking each `qqq-*` edge against the §4.3 order. **`[dev-dependencies]`
+    count**, because a dev-edge from `qqq-core` to `qqq-host` would make the
+    bottom of the graph's *test suite* require the whole Wasmtime stack.
+  → Complements `tools/check_topology.py` rather than duplicating it: the tool
+    reads `cargo metadata` (the **resolved** graph, including edges a workspace
+    dependency introduces) and this reads the manifest text (the **declared**
+    graph). They answer different questions, and a shared list would make one
+    inherit the other's blind spot.
+  → Lives in `qqq-core` because these are statements about the *workspace*:
+    `qqq-core` is the one crate everything depends on and that depends on
+    nothing, so a test there cannot create a cycle — and `qqq-core` is this
+    rule's own strictest case, asserted separately by
+    `qqq_core_depends_on_no_other_qqq_crate`.
   → §4.3 Crate topology
 - [ ] **ARCH-005** Write the process-and-thread-model ADR including the explicit rejection of a Tokio replacement.
   → §4.2 Process and thread model
@@ -369,8 +398,31 @@ Items are grouped below by **phase**, because dependency order matters more than
     loop accepts, carries data, balances across shards, and stops on shutdown.
 - [ ] **ARCH-007** Create all crates listed in the topology with correct names, tiers and empty implementations.
   → §4.3 Crate topology
-- [ ] **ARCH-008** Enforce `#![forbid(unsafe_code)]` on every crate except the three named exceptions.
+- [x] **ARCH-008** Enforce `#![forbid(unsafe_code)]` on every crate except the three named exceptions.
+  → Done: `every_non_exception_crate_forbids_unsafe_code` in
+    `crates/qqq-core/tests/architecture.rs` reads the crate-level attribute of
+    every workspace member and fails for a crate outside the exception list that
+    lacks a bare `#![forbid(unsafe_code)]`.
+  → **It found a real defect.** `qqq-debug` and `qqq-sys` both declared
+    `#![cfg_attr(not(test), forbid(unsafe_code))]`, and the conditional form
+    permits `unsafe` under `cfg(test)` — so the guarantee was a property of the
+    build configuration rather than of the source, and `unsafe` introduced behind
+    a `#[cfg(test)]` gate would have been silently legal. Neither crate contains
+    a single `unsafe`, so the escape hatch was defensive rather than necessary.
+    Both are now bare `forbid`s (`§O-059b`).
+  → The test reports the **conditional** form separately from its absence, which
+    is why it caught this: `#![forbid(unsafe_code)]` and a `cfg_attr`-wrapped one
+    both contain the words, and a substring check would have accepted both.
+  → The exception list is `qqq-sys`, `qqq-io-uring`, `qqq-mem-hugepage` and
+    `qqq-sys-signals` — §4.3's three named crates plus the one this workspace
+    carries. `the_unsafe_exception_was_granted_through_its_process` requires the
+    exception to be granted through its **process** rather than by an edit: it
+    asserts the crate is in one of exactly two states — a stub with a `forbid`
+    and no `SAFETY.md`, or a real crate with a `SAFETY.md` and no `forbid`. Any
+    third combination fails, which is what stops an `allow(unsafe_code)` landing
+    with no written argument.
   → §4.3 Crate topology
+  → §2.2 NN-2 — Security and Isolation Are Non-Optional
 - [ ] **ARCH-009** Write the safety argument document for each `unsafe`-permitting crate.
   → §4.3 Crate topology
 - [ ] **ARCH-010** Publish the crate stability tiers and the API-stability contract per tier.

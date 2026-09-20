@@ -4797,6 +4797,117 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-059 — Architecture tests: three absences, one real defect, and a control for each
+
+**What was built.** `crates/qqq-core/tests/architecture.rs` — 8 tests covering
+`ARCH-002`, `ARCH-004` and `ARCH-008`, plus `tools/fault_inject_architecture.py`,
+which injects three real violations and asserts each is detected.
+
+#### §O-059a — Why these tests live in `qqq-core`, and why they read the filesystem
+
+They are statements about the *workspace*, not about a crate. `qqq-core` is the
+only crate every other crate depends on and that itself depends on nothing, so a
+test there cannot create a cycle and cannot become unreachable — and `qqq-core` is
+`ARCH-004`'s own strictest case, which gets a dedicated test.
+
+They read the tree rather than using `include_str!`, and the reason is the point:
+`include_str!` needs each path named at compile time, so **a newly created crate
+would be invisible** — which is the exact failure these tests exist to prevent.
+Reading the directory finds the new crate and fails on it, which is the right
+response to an unannounced workspace member.
+
+The cost is that a source-reading test is weaker than a compiler check. That is
+acknowledged in the module docs rather than glossed: where a compiler check was
+possible it was used, and these cover the residue no compiler can see — *which
+crates exist* and *what their declared lint policy is*.
+
+#### §O-059b — `ARCH-008` found a real defect: two crates weakened their own guarantee
+
+`qqq-debug` and `qqq-sys` both declared:
+
+```rust
+#![cfg_attr(not(test), forbid(unsafe_code))]
+```
+
+That form permits `unsafe` under `cfg(test)`. So the guarantee was a property of
+the **build configuration** rather than of the **source**: an `unsafe` block
+introduced behind a `#[cfg(test)]` gate would have been silently legal, and the
+release build's claim would still have read as true.
+
+Neither crate contains a single `unsafe` — verified by searching every source
+file — so the escape hatch was defensive rather than necessary. Both are now bare
+`#![forbid(unsafe_code)]`, matching the other eight crates.
+
+**Why the test caught it, which is the design detail.** The check does not ask
+"does the file mention `forbid` and `unsafe_code`". It asks whether the attribute
+is a **bare `#![forbid(...)]` or a `cfg_attr`-wrapped one**, and reports the two
+separately. Both contain the same words, so a substring check would have accepted
+the weaker form — and the weaker form is precisely the one that fails silently.
+
+This is the second defect this checklist item has surfaced in code that looked
+correct (`§O-053`'s `0xA3` search was the first), and both were found by a check
+that distinguished a *form* rather than a *presence*.
+
+#### §O-059c — The topology injection created a cycle, and a cycle is a different protection
+
+The first version of the `ARCH-004` injection gave `qqq-cap` a dependency on
+`qqq-serve`. Cargo rejected the workspace outright:
+
+```
+error: cyclic package dependency: package `qqq-abi` depends on itself
+```
+
+`qqq-serve` already depends on `qqq-cap`, so the injected edge closed a loop. The
+harness reported **`BROKEN`, not `DETECTED`** — correctly, because the test never
+ran. **Cargo prevents cycles; it does not prevent upward edges**, and those are
+different properties: `qqq-cap → qqq-serve` with no existing path back would have
+compiled fine and inverted the layering silently.
+
+The injection now targets `qqq-debug` (position 9, which depends only on
+`qqq-core`), giving an edge that is upward **and** acyclic. That is the case the
+test exists to catch, and it is now detected.
+
+**The general rule this establishes**, and it is the same one `§O-058e` reached
+from the other direction: an injection must be **valid but wrong**. A dependency
+cycle is invalid, so Cargo catches it and the test under test is never consulted.
+A fault-injection harness that accepts "the build broke" as success is measuring
+the compiler, not the check.
+
+#### §O-059d — Three absences, and a positive control for each
+
+Every one of the three tests asserts an *absence*: no upward dependency, no
+missing `forbid`, no widening constructor. **An absence is trivially satisfied by
+a scanner that finds nothing**, which is the failure mode `§M-006` names.
+
+Each therefore has a control:
+
+| Test | Control |
+|---|---|
+| `no_crate_depends_on_a_crate_above_it` | asserts `checked > 0` — at least one `qqq-*` edge was actually examined |
+| `every_non_exception_crate_forbids_unsafe_code` | asserts `checked >= 9` — nine crates were inspected |
+| `no_widening_constructor_on_grants_exists_anywhere` | asserts an `impl GrantSet` block was found, so the scanner reads real code |
+| **all of them** | `the_architecture_scanner_finds_real_files` — asserts `crate_dirs`, `walk` and `package_name` all return real data |
+
+And the injections in §O-059e prove each test can fail *for its own reason*, which
+is the strongest form: a control proves the input was real, an injection proves
+the assertion is live.
+
+#### §O-059e — All three injections detected
+
+```
+  DETECTED  topology (upward dependency)
+  DETECTED  unsafe policy (bare allow)
+  DETECTED  grant widening (union on GrantSet)
+
+ALL 3 ARCHITECTURE FAULT INJECTIONS DETECTED
+```
+
+The harness restores from a `tempfile` copy — not from `.scratch/`, which is
+gitignored and absent on a fresh checkout (`§O-058f`), and it verifies the
+restore by re-reading the file rather than trusting `finally`. Wired into CI.
+
+---
+
 ### §O-058 — `HOST-011`: a guard that compiles away, and the check that had to be a source check
 
 **What was built.** `crates/qqq-host/src/guard.rs`, wired into all six registered

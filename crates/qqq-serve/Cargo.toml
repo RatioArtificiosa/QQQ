@@ -12,4 +12,5 @@ description = "QQQ crate: qqq-serve (see QQQ-Proposal-V1.md 4.3)"
 workspace = true
 
 [dependencies]
+qqq-core = { path = "../qqq-core", version = "0.0.0" }
 

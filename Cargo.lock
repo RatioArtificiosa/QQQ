@@ -926,6 +926,9 @@ dependencies = [
 [[package]]
 name = "qqq-serve"
 version = "0.0.0"
+dependencies = [
+ "qqq-core",
+]
 
 [[package]]
 name = "qqq-sys"

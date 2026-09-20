@@ -556,14 +556,15 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-002** Implement HTTP/2 including multiplexing and flow control.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-003** Implement the compile-time route table as a radix trie.
+- [x] **SRV-003** Implement the compile-time route table as a radix trie.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-004** Implement streaming bodies end to end with backpressure propagation.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-005** Implement `max_request_bytes` enforcement during streaming, not after buffering.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-006** Resolve open question `OQ-007`: decide whether `wasi:http` is the foundation or whether a custom interface is required.
+- [x] **SRV-006** Resolve open question `OQ-007`: decide whether `wasi:http` is the foundation or whether a custom interface is required.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Resolved: `wasi:http` **is** the foundation, and `qqq:http` extends it. Reasoning in Observations §O-027.
 - [ ] **SRV-007** Implement TLS with rustls and the documented cipher policy.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-008** Implement mTLS as a supported `default_auth` mode.
@@ -1380,7 +1381,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §4.7 Concurrency model for guests
 - [ ] **OQ-006** Decide whether to build the registry now or bootstrap on OCI.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **OQ-007** Decide whether `wasi:http` is sufficient or a custom HTTP interface is required.
+- [x] **OQ-007** Decide whether `wasi:http` is sufficient or a custom HTTP interface is required.
+  → Resolved: `wasi:http` is the foundation and `qqq:http` extends it — routing, per-route
+    capability scoping and stream-shaped bodies are QQQ's contribution, carried as an
+    extension rather than a fork. Reasoning in Observations §O-027.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **OQ-008** Choose the exact Fabric licence.
   → §13.2 The licence model, and why NN-8 still holds

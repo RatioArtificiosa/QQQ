@@ -2009,6 +2009,146 @@ Proposal §6.6, §12.1.
 
 ---
 
+### §O-027 — `qqq-serve` begins: the route table, and `OQ-007` resolved
+
+**What was built.** `qqq-serve::route` (`SRV-003`): a segment radix trie that
+turns a request path into a handler, built once at load and never mutated.
+
+**`OQ-007` is resolved, and the checklist left it genuinely open.** Checklist
+`SRV-006` asks whether `wasi:http` is the foundation or whether a custom
+interface is required. **`wasi:http` is the foundation; `qqq:http` extends it.**
+
+The reasoning:
+
+* `wasi:http` is the only HTTP interface a component can import without
+  QQQ-specific toolchain support. Building on it is what makes the
+  five-language claim real rather than aspirational — a Go or Python component
+  reaches QQQ's server through the interface it would use anywhere else.
+* But `wasi:http` has no route table, no per-route capability scoping, and no
+  way to express "this handler may read but not write". Those are QQQ's
+  contributions, and they belong in an extension rather than a fork.
+* The `qqq:http` WIT in this repository already said so — its module comment
+  reads *"Built over `wasi:http`, adding the routing and headers an application
+  actually needs while keeping the guest's view of a body a **stream** rather
+  than a buffer."* The WIT had answered the question before the checklist asked
+  it, which is a sign the interface was designed rather than accreted.
+
+**The consequence that matters:** the route table is **host-side**. A guest never
+sees a pattern; it is handed a matched request with parameters already extracted.
+Pattern syntax therefore stays out of the ABI and can change without a WIT
+version bump — the property that makes an extension safe to evolve.
+
+---
+
+#### §O-027a — Two bugs the tests caught, both in the trie's shared structure
+
+Both were found by tests written *before* the fix, and both were cases a
+hand-written router gets wrong.
+
+**Bug one: a wildcard did not match an empty remainder.** `walk` returned early
+when the path was exhausted and no handler sat on the node — so `/files/*rest`
+never answered `/files`, because the wildcard is a *child* and the early return
+never reached it. The terminal case must try **both** a handler on this node and
+a wildcard child.
+
+**Bug two: capture names collided between routes sharing a prefix.** This is the
+subtle one, and it is structural rather than a slip.
+
+The trie is **shared** between patterns that differ only in their capture names.
+`/a/:x/c` and `/a/:y/b` walk the same `a` node and the same param child; only the
+final segment differs. A node-level `param_name` can therefore hold only one of
+`x` or `y` — whichever registered first — and the other route reports the wrong
+parameter name.
+
+The test that caught it was written for a *different* purpose. It was checking
+that a failed branch does not leak parameters into a succeeding branch, using two
+patterns that happened to share a prefix:
+
+```rust
+let t = table(&[("/a/:x/c", "xc"), ("/a/:y/b", "yb")]);
+let m = t.match_route(Method::Get, "/a/1/b").expect("must match");
+assert_eq!(m.params.get("y"), Some("1"));   // got None
+```
+
+**The fix was to move the names off the trie entirely.** The trie now carries
+only *structure*; each `Route` carries its own pattern's segments, so the names
+travel with the route that declared them. The walk produces capture *values* in
+pattern order and `bind` pairs them with the matched route's names.
+
+That is a better design regardless of the bug: it means two routes can share every
+node but their terminals, which is the entire point of a trie, without the nodes
+having to arbitrate between them.
+
+**The generalisation.** A shared structure must hold only what is genuinely
+shared. A node that caches a name from whichever pattern created it first is
+holding per-route data in a per-tree slot, and the collision is then a matter of
+registration order — invisible until two routes happen to differ in a capture
+name, which is exactly the case a small test table misses.
+
+---
+
+#### §O-027b — Why a segment trie rather than a character trie
+
+"Radix trie" in routing means two different things and the difference matters:
+
+* A **character** trie shares string prefixes, so `/api/v1` and `/api/v2` share
+  the `/api/v` chain.
+* A **segment** trie splits on `/` and stores one node per segment.
+
+Segment wins here because **every route parameter is a whole segment**.
+`/orders/:id` matches `/orders/42`, never `/orders/4x2`. With a character trie, a
+parameter node must carry "match until the next `/`" logic, and every wildcard
+boundary becomes a place to get an off-by-one wrong. With a segment trie a
+parameter is a node meaning "whatever segment is here", and the boundary is
+`split('/')` — which the standard library gets right.
+
+The memory saving of a character trie is real and irrelevant at this scale: a
+routing table is tens to hundreds of entries, built once, held for the process's
+lifetime.
+
+---
+
+#### §O-027c — Priority is a total order, and it is not insertion order
+
+When several patterns could match, exactly one must win, and the choice must not
+depend on the order routes appear in `qqq.toml`. Otherwise reordering a config
+file silently changes which handler runs — a bug nearly invisible in a diff.
+
+| Rank | Kind | Example |
+|---|---|---|
+| 0 | literal | `/orders/new` |
+| 1 | parameter | `/orders/:id` |
+| 2 | wildcard | `/files/*rest` |
+
+The walk implements this directly by trying literal, then param, then wildcard,
+and returning the first hit — no post-filtering, no tie-break step. A test
+(`specificity_does_not_depend_on_insertion_order`) builds the same table in both
+orders and asserts every path matches identically.
+
+The failure this prevents is specific: with a parameter ranked above a literal,
+`/orders/new` could never be reached — it would always be captured as an order
+id, and the bug would present as a confusing 404 from inside the wrong handler.
+
+---
+
+#### §O-027d — What `qqq-serve` does not do, stated in the crate root
+
+The crate lists its own gaps in a table at the top of `lib.rs`: HTTP/1.1
+(`SRV-001`), HTTP/2 (`SRV-002`), streaming bodies (`SRV-004`), TLS (`SRV-007`),
+WebSockets and SSE (`SRV-009`, `SRV-010`). A reader of the file knows exactly
+what exists without reading the checklist.
+
+The reason to name them is the same as §O-026g: a listener that accepted
+connections **without** the limits `SRV-005` and `SRV-011` require — no
+`max_request_bytes` enforced during streaming, no graceful drain — would be worse
+than no listener, because it would look like a server. Building the route table
+first is the ordering that avoids shipping that.
+
+**Cross-refs:** Checklist `SRV-003`, `SRV-006`, `OQ-007`, `CON-007`; Proposal
+§6.4, §4.3.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

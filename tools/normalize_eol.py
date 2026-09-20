@@ -73,30 +73,63 @@ def core_autocrlf() -> str:
     return out.stdout.strip() or "(unset)"
 
 
+def index_eol_report() -> list[str]:
+    """Files whose **committed** bytes are not LF, from Git itself.
+
+    This is the check that matters, and it is different from inspecting the
+    working tree.
+
+    # What was measured
+
+    With `text eol=lf` on the three documents, the committed blob is correct —
+    `git cat-file -p HEAD:QQQ-Checklist-V1.md` gives 0 CRLF and 1,549 LF — while
+    the *working copy* still reports `w/crlf` and `git status` still warns that
+    it "will be replaced by LF". So the repository content is right and the
+    checkout is untidy.
+
+    A check that fails on the untidy checkout reports a defect the commit does
+    not have, and a check that fails spuriously is one people learn to ignore —
+    which is the failure mode this whole tool exists to avoid.
+
+    The honest report is therefore in two parts: **FAIL** if any committed blob
+    holds CRLF (a real defect in what was committed), and **WARN** if the
+    working tree drifts (untidy, self-correcting at commit, worth saying out
+    loud rather than pretending is absent).
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "--eol"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    bad: list[str] = []
+    for line in out.stdout.splitlines():
+        # Format: `i/<index-eol> w/<worktree-eol> attr/<attrs>\t<path>`
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        meta, path = parts[0], parts[1]
+        if path.endswith(".gitattributes"):
+            continue
+        index_eol = meta.split()[0] if meta.split() else ""
+        # `i/lf` is correct. `i/mixed` or `i/crlf` means the blob is wrong.
+        if index_eol and index_eol != "i/lf" and index_eol != "i/none":
+            bad.append(f"{path} ({index_eol})")
+    return bad
+
+
 def main() -> int:
     check_only = "--check" in sys.argv
-
-    # The root cause, checked first and reported loudly.
-    #
-    # `.gitattributes` controls what is *committed*; `core.autocrlf` controls
-    # what Git writes to the *working tree*. `eol=lf` in the attributes does NOT
-    # override `autocrlf=true`, which was measured rather than assumed — with
-    # both set, `git ls-files --eol` reported `i/lf w/crlf` for every Markdown
-    # document, and the tree drifted on every index refresh.
-    #
-    # A per-repository setting cannot be committed, so a fresh clone will not
-    # have it. Reporting it here is what makes the gap visible instead of leaving
-    # the next person to rediscover the same drift.
     autocrlf = core_autocrlf()
-    if autocrlf in ("true", "input"):
-        print(
-            f"core.autocrlf is `{autocrlf}` in this repository.\n"
-            "  This causes the working tree to drift to CRLF even with\n"
-            "  `eol=lf` in .gitattributes, because the attribute controls the\n"
-            "  commit and autocrlf controls the checkout.\n"
-            "  Fix: git config core.autocrlf false\n"
-        )
 
+    # --- Part 1: the committed bytes. A failure here is a real defect. -------
+    bad_blobs = index_eol_report()
+    if bad_blobs:
+        print("FAIL: committed content holds CRLF (this is a real defect):")
+        for path in bad_blobs:
+            print(f"  {path}")
+        print("\nFix: python tools/normalize_eol.py, then commit.")
+        return 1
+
+    # --- Part 2: the working tree. Drift here is untidy, not broken. ---------
     drifted: list[Path] = []
     for path in git_files():
         suffix = path.suffix.lower()
@@ -119,26 +152,33 @@ def main() -> int:
             path.write_bytes(raw.replace(b"\r\n", b"\n"))
 
     if not drifted:
-        print("all tracked text files use LF")
+        print("committed content is LF; working tree matches")
         if autocrlf in ("true", "input"):
             print(
-                "note: core.autocrlf is still enabled, so the drift will return "
-                "on the next index refresh"
+                f"note: core.autocrlf is `{autocrlf}`, which is not required for "
+                "correctness but removes one more thing that could rewrite a file"
             )
-            return 1
         return 0
 
     verb = "would normalize" if check_only else "normalized"
-    print(f"{verb} {len(drifted)} file(s) from CRLF to LF:")
+    print(f"{verb} {len(drifted)} working-tree file(s) from CRLF to LF:")
     for path in drifted:
         print(f"  {path.relative_to(ROOT)}")
 
     if check_only:
+        # **Exit 0.** The committed content is correct -- that was verified
+        # above -- so this is an untidy checkout, not a defect. Failing CI on it
+        # would be a check that fires on a condition the repository does not
+        # actually have, and a spurious failure is one people learn to ignore.
+        #
+        # It is still printed, because a reader comparing `git status` against
+        # an empty `git diff` deserves to know why they disagree.
         print(
-            "\nRun `python tools/normalize_eol.py` to fix. The committed bytes "
-            "are already LF; this is the working tree drifting."
+            "\nThis is a working-tree difference only; the committed bytes are "
+            "LF.\nRun `python tools/normalize_eol.py` to tidy the checkout. "
+            "No action is required to merge."
         )
-        return 1
+        return 0
     return 0
 
 

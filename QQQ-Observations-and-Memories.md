@@ -4898,6 +4898,55 @@ functions but only 4 are wrapped"*, and the file is restored to 5 guards with no
 
 ---
 
+#### §O-058f — The fault-injector could never have run in CI, and it failed on the first push
+
+The commit that added `tools/fault_inject_guard.py` went red on CI immediately:
+
+```
+FileNotFoundError: [Errno 2] No such file or directory:
+'.scratch/host_clock_inject.bak'
+```
+
+`.scratch/` is gitignored (`.gitignore` line 52), so it does not exist on a fresh
+`actions/checkout`. **The script passed locally and could never have passed in
+CI** — verified rather than assumed: `git ls-files` reports 134 tracked files and
+not one under `.scratch/`.
+
+That is an environment-dependent defect *inside a check*, which is the worst
+place to have one. A check whose result depends on what happens to be on the
+machine is not measuring the repository; it is measuring the machine. The whole
+point of this harness is to prove the guard check is live, and it was itself
+proving nothing outside one developer's working tree.
+
+The backup moved to `tempfile.TemporaryDirectory`, which always exists and cleans
+up after itself. Two further changes came from the same incident:
+
+* **The restore is verified, not trusted.** A `finally` covers an exception but
+  not a hard kill, and a fault-injection harness that leaves the tree modified on
+  failure is worse than no harness — it converts a red check into a corrupted
+  working tree. The script re-reads the file after restoring and exits `3` if it
+  differs from the original.
+* **The compile-failure branch no longer overlaps the detection branch**, and all
+  three properties are written into the docstring so the next injector does not
+  rediscover them.
+
+Green after the fix, with the new step running on Linux for the first time.
+
+**The pattern, now with five instances.** Every one of `§M-008`, `§O-048c`,
+`§O-056e`, `§O-058e` and now `§O-058f` is a *tool that reports on itself rather
+than on the system under test*: a stale backup, an injection that did not
+compile, a stale test binary, a syntactically invalid injection, and a path that
+exists only locally. They cluster because fault-injection and restore tooling is
+the only place this project writes a file backward — and that operation is where
+an instrument silently stops measuring what it claims to.
+
+**The check that would have caught this one**, and did not exist: run the
+injector from a clean checkout before wiring it into CI. The `git ls-files`
+comparison above is the cheap version of that, and it is worth doing for any
+script that touches paths outside the tracked tree.
+
+---
+
 ### §O-057 — Metrics and the pool: the cardinality rule made structural, and a double-count in my own test
 
 **What was built.** `crates/qqq-host/src/metrics.rs` and

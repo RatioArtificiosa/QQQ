@@ -896,6 +896,172 @@ fn inspect_without_an_argument_reports_the_project() {
         .assert_contains("crypto.hash");
 }
 
+/// A component importing the monotonic clock.
+const IMPORTS_MONO_CLOCK: &str = r#"(component
+  (import "qqq:clock/monotonic-clock@1.0.0" (instance $c
+    (export "now" (func (result u64)))
+    (export "resolution" (func (result u64)))
+  ))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// Two artifacts with the same authority report no change, and exit zero.
+///
+/// The exit code matters: if this returned non-zero, `--diff` could not be used
+/// as a CI gate, because a clean comparison would fail the build.
+#[test]
+fn a_diff_of_identical_artifacts_reports_no_change_and_succeeds() {
+    let s = Sandbox::new("diff-same");
+    let Some(wasm) = encode(&s, "wall", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["inspect", &wasm, "--diff", &wasm])
+        .assert_ok()
+        .assert_contains("no authority change");
+}
+
+/// Gaining authority is reported as an escalation **and exits non-zero**.
+///
+/// This is the whole point of the flag: an artifact that grew its authority must
+/// be gateable in CI without parsing output. A report that named the gain but
+/// exited `0` would be unusable as a gate, which is how the `doctor` defect
+/// (`§O-036b`) presented.
+#[test]
+fn a_diff_that_gains_authority_exits_non_zero() {
+    let s = Sandbox::new("diff-escalate");
+    let Some(clock_only) = encode(&s, "clock", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+    let Some(with_fs) = encode(&s, "fs", IMPORTS_FILESYSTEM) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["inspect", &with_fs, "--diff", &clock_only]);
+    run.assert_failed()
+        .assert_contains("ESCALATION")
+        .assert_contains("fs.write")
+        .assert_contains("exposed");
+}
+
+/// Losing authority is reported but does **not** fail.
+///
+/// A reduction cannot hurt anyone, and failing CI on it would train people to
+/// bypass the check — which costs more than the check is worth.
+///
+/// Direction matters: `inspect A --diff B` reads as **B → A**, so `A` is the
+/// "after". Here the after-artifact is the clock-only component, which is the
+/// reduction from the filesystem one.
+#[test]
+fn a_diff_that_loses_authority_reports_but_succeeds() {
+    let s = Sandbox::new("diff-reduce");
+    let Some(clock_only) = encode(&s, "clock", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+    // Two imports, one of them `fs.write`, so the *before* state has more
+    // authority than the *after* state.
+    let Some(double) = encode(&s, "double", DOUBLE_IMPORT) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    // after = clock_only, before = double: authority was given up.
+    s.run(&["inspect", &clock_only, "--diff", &double])
+        .assert_ok()
+        .assert_contains("fs.write");
+}
+
+/// A component importing both a benign and an exposing capability.
+const DOUBLE_IMPORT: &str = r#"(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $w
+    (export "now" (func (result u64)))
+  ))
+  (import "qqq:fs/filesystem@1.0.0" (instance $f
+    (export "read" (func (result u64)))
+  ))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// Gaining a **covert channel** escalates even when the posture band holds.
+///
+/// `clock.wall` is `Ambient`, so it can never lift a component out of
+/// `Contained` — but Proposal §10.5 singles it out as an information channel the
+/// audit stream cannot see. A diff that only compared posture bands would let
+/// such a gain through silently.
+#[test]
+fn gaining_a_covert_channel_escalates_within_the_same_posture() {
+    let s = Sandbox::new("diff-covert");
+    let Some(wall) = encode(&s, "wall", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+    let Some(mono) = encode(&s, "mono", IMPORTS_MONO_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["inspect", &wall, "--diff", &mono]);
+    run.assert_failed()
+        .assert_contains("ESCALATION")
+        .assert_contains("covert channel");
+
+    // The posture band is unchanged, which is exactly why the covert-channel
+    // rule has to exist separately.
+    assert!(
+        run.all().contains("contained → contained"),
+        "posture should not have moved: {}",
+        run.all()
+    );
+}
+
+/// `--diff` reports the digest of both artifacts.
+///
+/// A diff that does not name the bytes is not evidence: "this artifact is safe"
+/// without saying *which* artifact cannot be reviewed later.
+#[test]
+fn a_diff_ties_itself_to_both_digests() {
+    let s = Sandbox::new("diff-digests");
+    s.write("qqq.toml", MINIMAL);
+    let Some(a) = encode(&s, "a", IMPORTS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+    let Some(b) = encode(&s, "b", IMPORTS_FILESYSTEM) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    // The comparison gains `fs.write`, so it exits non-zero — that is asserted
+    // elsewhere. What matters here is the JSON, which `Run` captures either way.
+    let run = s.run(&["inspect", &a, "--diff", &b, "--json"]);
+    let line = run.stdout.lines().next().unwrap_or("");
+    assert!(
+        line.matches("sha256:").count() >= 2,
+        "both digests must appear: {line}"
+    );
+    assert!(
+        line.contains("before_digest") && line.contains("after_digest"),
+        "the digests must be named fields, not prose: {line}"
+    );
+}
+
+/// `--diff` without an artifact is refused with the reason.
+#[test]
+fn a_diff_without_an_artifact_is_refused() {
+    let s = Sandbox::new("diff-noarg");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["inspect", "--diff", "other.wasm"])
+        .assert_failed()
+        .assert_contains("--diff");
+}
+
 // ---------------------------------------------------------------------------
 // global contracts
 // ---------------------------------------------------------------------------

@@ -766,9 +766,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §9.1 The honest benchmark position
 - [ ] **CLI-014** Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains.
   → §5.2 The command surface
-- [ ] **CLI-015** Implement `qqqai inspect` with static capability reporting and `--diff`.
-  → Partial: static capability reporting is done. `qqqai inspect` with no argument reports the manifest's grants; `qqqai inspect <artifact>` compiles the component without instantiating it and reports the capabilities its **import table** requires, with the digest and `component`/`core-module` kind, so a report is tied to the bytes that produced it. Unmapped interfaces are listed rather than dropped, and a file that is not a component is an error rather than a fallback to the manifest.
-  → **Remaining:** `--diff <other>`, which answers "what authority does this artifact add over that one?" — the supply-chain question §5.4 makes central. It needs the artifact report to be a comparable value, which it now is.
+- [x] **CLI-015** Implement `qqqai inspect` with static capability reporting and `--diff`.
+  → Done: `qqqai inspect` with no argument reports the manifest's grants; `qqqai inspect <artifact>` compiles the component without instantiating it and reports the capabilities its **import table** requires, with the digest and `component`/`core-module` kind so a report is tied to the bytes that produced it. Unmapped interfaces are listed rather than dropped, and a file that is not a component is an error rather than a fallback to the manifest.
+  → `--diff <other>` reports the **authority** delta between two artifacts, which is §5.4's central supply-chain question: which capabilities did this build add? A gain **exits non-zero** so the flag is usable as a CI gate without parsing output; a loss reports but succeeds, because failing on a reduction would train people to bypass the check. A gain of a *covert channel* (`clock.wall`, `crypto.random`) escalates even though it cannot move the posture band — the §10.5 distinction.
   → §5.2 The command surface
 - [ ] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
   → §5.2 The command surface

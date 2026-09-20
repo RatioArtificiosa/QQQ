@@ -3430,6 +3430,80 @@ exercised in 0.03s per test rather than silently bypassed.
 
 ---
 
+### §O-039 — `inspect --diff`: the authority delta as a CI gate
+
+`CLI-015`'s remaining half. `qqqai inspect A --diff B` reports the authority
+difference between two artifacts. The direction reads **B → A**: the artifact
+named with `--diff` is the *before*.
+
+---
+
+#### §O-039a — A gain fails the process; a loss does not
+
+The asymmetry is deliberate and is the same reasoning as `§O-036b`:
+
+| Delta | Exit | Why |
+|---|---|---|
+| authority gained | **non-zero** | the event §5.4 exists to surface |
+| authority lost | `0` | a reduction cannot hurt anyone |
+| unchanged | `0` | a clean comparison must not fail the build |
+
+Exiting non-zero on a gain is what makes the flag usable as a CI gate **without
+parsing output**. Exiting non-zero on a *loss* would be worse than useless: it
+would fail builds for changes that improve security, and a check that fires on
+improvements is a check people learn to bypass — which costs more than the check
+was worth.
+
+---
+
+#### §O-039b — A covert channel escalates even when the posture band does not move
+
+The subtle rule, and the one worth recording. Posture is a three-level band
+(`minimal` < `contained` < `exposed`), and some genuinely significant grants
+cannot move it:
+
+* `clock.wall` and `crypto.random` are `Ambient`. Added to a component that
+  already imports anything else, the band stays `contained`.
+
+But §10.5 singles exactly these out: *"a guest that reads the wall clock can
+encode information in **when** something happened, which is a covert channel the
+audit stream cannot see."*
+
+So `escalation` is true if the posture worsened **or** if any added capability
+`is_covert_channel()`. A diff that compared only posture bands would silently
+pass an artifact that just gained an unobservable information channel.
+
+Verified against real artifacts — adding `clock.wall` to a monotonic-only
+component:
+
+```text
+AUTHORITY ESCALATION: mono.wasm → wall2.wasm
+  + clock.wall           (ambient)  [covert channel]
+  - clock.monotonic      (ambient)
+
+Posture: contained → contained
+```
+
+Same band, escalation flagged, exit `1`. The capability's own kind and channel
+status are carried into the output rather than left for the reader to look up,
+because the reader is the person deciding whether to accept the change.
+
+---
+
+#### §O-039c — The comparison is over capabilities, not interfaces
+
+Two artifacts may import different interfaces whose capability sets overlap. An
+artifact that stops importing `qqq:clock/wall-clock` while starting to import
+`qqq:clock/monotonic-clock` has not gained or lost anything, and an
+interface-level diff would report two changes that cancel — leaving the reader to
+work out that nothing happened.
+
+The question is about **authority**, so the comparison is over authority. Both
+digests are carried so the diff is tied to the bytes it describes; "this artifact
+gained `fs.write`" without saying *which* artifact is not evidence.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3741,5 +3815,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | `CLI-007` implemented: `qqqai update` (`qqq-run::update`), with `--latest` and `--dry-run`. The default strategy honours the manifest's requirement and `--latest` crosses it, because defaulting to the newest version would resolve `^1.2.3` to `2.0.0` while the user believes they asked for a routine refresh (`§O-037a`). `VersionSource` is the seam the registry will plug into, so every decision branch — including ones needing a newer version — is exercised today rather than first tested when `PKG-006` lands (`§O-037c`). A kept package always carries a reason, since a no-op update that explains nothing is indistinguishable from a broken one (`§O-037d`). `--latest` with `exact = true` is refused rather than resolved by precedence (`§O-037e`). | Architect |
 
 | 2026-09-19 | **`qqqai inspect <artifact>` implemented**, and two defects fixed on the way (`§O-038`). The command **ignored its path argument** and reported the manifest's capabilities regardless, so inspecting a nonexistent file produced a confident report about `qqq.toml` — on the surface that exists to make a grant auditable before execution, a plausible wrong answer is worse than none (`§O-038a`). With inspection wired up, an artifact importing `qqq:clock/wall-clock` was reported as requiring `clock.monotonic`, because the registry maps capability → interface at *package* level and several packages hold several interfaces; a precise `interface_path_for` table now answers at interface level (`§O-038b`). One interface can imply several capabilities, so the mapping returns the **strongest** — understating authority is the one failure an audit surface must not have — and a positive-control test asserts the ranking agrees with `classify_posture` for every capability (`§O-038c`). Five fixture-building tests initially **skipped silently** because of an invented `--features` flag; skips are now loud (`§O-038d`). | Architect |
+
+| 2026-09-19 | **`qqqai inspect --diff` implemented** (`CLI-015` complete): the authority delta between two artifacts, which is §5.4's central supply-chain question. A gain **exits non-zero** so the flag is a CI gate without parsing output, while a loss reports and succeeds — failing on a security *improvement* is a check people learn to bypass (`§O-039a`). A gain of a **covert channel** escalates even when the posture band does not move, because `clock.wall` and `crypto.random` are `Ambient` and §10.5 singles them out as channels the audit stream cannot see (`§O-039b`). The comparison is over capabilities rather than interfaces, so an artifact that swaps one interface for another with the same authority reports no change (`§O-039c`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

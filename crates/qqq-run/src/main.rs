@@ -496,13 +496,27 @@ fn dispatch_inspect(
     args: &[String],
     out: &mut Output<std::io::Stdout>,
 ) -> ExitCode {
-    // `--manifest` and its value, plus any other flag, are not the artifact.
-    const TAKES_VALUE: [&str; 1] = ["--manifest"];
+    // `--manifest` and `--diff` take values, so their values must not be
+    // mistaken for artifact paths. This is the same reasoning as
+    // `build_options`'s `TAKES_VALUE`: a flag's value that is read as a
+    // positional silently inspects the wrong file.
+    const TAKES_VALUE: [&str; 2] = ["--manifest", "--diff"];
     let mut artifact: Option<String> = None;
+    let mut diff_against: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        if TAKES_VALUE.contains(&a) {
+        if a == "--diff" {
+            let Some(v) = args.get(i + 1) else {
+                let e = missing_value("--diff");
+                let _ = out.emit_error(name, &e);
+                return ExitCode::from(exit::USAGE);
+            };
+            diff_against = Some(v.clone());
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--diff=") {
+            diff_against = Some(v.to_owned());
+        } else if TAKES_VALUE.contains(&a) {
             i += 1;
         } else if a.starts_with('-') {
             // Unknown flags are ignored here rather than rejected: `inspect`
@@ -514,18 +528,56 @@ fn dispatch_inspect(
         i += 1;
     }
 
-    match artifact {
-        Some(path) => {
-            let p = std::path::PathBuf::from(&path);
-            match qqq_run::commands::inspect_artifact(&p) {
-                Ok(report_value) => report(out, name, &report_value),
-                Err(e) => {
-                    let _ = out.emit_error(name, &e);
-                    ExitCode::from(exit::FAILURE)
-                }
-            }
+    // `--diff` without an artifact has nothing to compare *from*, and comparing
+    // against the manifest would be a category error — the two sides would be a
+    // declaration and an import list. Refused with the reason rather than
+    // guessed at.
+    let Some(path) = artifact else {
+        if diff_against.is_some() {
+            let e = qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                "`--diff` needs an artifact to compare from",
+            )
+            .with_remediation(format!(
+                "for example: {} inspect new.wasm --diff old.wasm",
+                qqq_core::BINARY_NAME
+            ));
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
         }
-        None => with_manifest(name, out, args, qqq_run::commands::inspect),
+        return with_manifest(name, out, args, qqq_run::commands::inspect);
+    };
+
+    let after = match qqq_run::commands::inspect_artifact(std::path::Path::new(&path)) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    let Some(against) = diff_against else {
+        return report(out, name, &after);
+    };
+
+    let before = match qqq_run::commands::inspect_artifact(std::path::Path::new(&against)) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    let diff = qqq_run::commands::diff_artifacts(&before, &after);
+    // An escalation exits non-zero so `qqqai inspect --diff` is usable as a CI
+    // gate without parsing output: the same reasoning as `doctor` (`§O-036b`).
+    // `--fail-on` will make the threshold configurable; today a *gain* of any
+    // authority is the only thing that can fail, which is the safe default.
+    let code = report(out, name, &diff);
+    if diff.escalation && code == ExitCode::from(exit::OK) {
+        ExitCode::from(exit::FAILURE)
+    } else {
+        code
     }
 }
 

@@ -50,9 +50,10 @@ pub use build::{
     OUTPUT_DIR,
 };
 pub use commands::{
-    caps, classify_posture, developer_overlay, fix_stanza_for, inspect, inspect_artifact, why,
-    ArtifactReport, CapabilityReport, CapsOutput, InspectOutput, InterfaceReport, LimitsReport,
-    NamespaceGroup, Posture, WhyOutput, WhyStep,
+    caps, classify_posture, developer_overlay, diff_artifacts, fix_stanza_for, inspect,
+    inspect_artifact, why, ArtifactDiff, ArtifactReport, CapabilityChange, CapabilityReport,
+    CapsOutput, InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput,
+    WhyStep,
 };
 pub use deps::{add, remove, DependencyChangeOutput, DependencyEdit};
 pub use dev::{

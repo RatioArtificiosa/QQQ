@@ -448,6 +448,173 @@ impl CommandOutput for InspectOutput {
     }
 }
 
+/// The authority difference between two artifacts.
+///
+/// # The question this answers
+///
+/// `qqqai inspect --diff` exists for one scenario: **an artifact changed, and you
+/// need to know whether its authority did.** Proposal §5.4 makes the authority
+/// delta the central supply-chain signal, because an update that changes no code
+/// but gains `http.client` is an event no mainstream tool can currently show.
+///
+/// Pointed at two builds — the version you ship and the version proposed — this
+/// reports exactly which capabilities the second adds and drops.
+///
+/// # Why the comparison is over capabilities, not interfaces
+///
+/// The two artifacts may import different interfaces whose capability sets
+/// overlap. An artifact that stops importing `qqq:clock/wall-clock` while
+/// starting to import `qqq:clock/monotonic-clock` has not gained or lost
+/// anything, and an interface-level diff would report two changes that cancel.
+/// The question is about authority, so the comparison is over authority.
+#[must_use]
+pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> ArtifactDiff {
+    use std::collections::BTreeSet;
+
+    let before_caps: BTreeSet<&str> = before.required.iter().map(|c| c.name.as_str()).collect();
+    let after_caps: BTreeSet<&str> = after.required.iter().map(|c| c.name.as_str()).collect();
+
+    let describe = |name: &str| -> Option<CapabilityChange> {
+        // A name that does not resolve cannot happen for a report this crate
+        // produced, but returning `None` rather than unwrapping means a future
+        // capability rename degrades to a missing line instead of a panic in an
+        // audit command.
+        Capability::from_name(name).map(|c| CapabilityChange {
+            name: c.name().to_owned(),
+            kind: c.kind().as_str().to_owned(),
+            covert_channel: c.is_covert_channel(),
+        })
+    };
+
+    let added: Vec<CapabilityChange> = after_caps
+        .difference(&before_caps)
+        .filter_map(|n| describe(n))
+        .collect();
+    let removed: Vec<CapabilityChange> = before_caps
+        .difference(&after_caps)
+        .filter_map(|n| describe(n))
+        .collect();
+    let mut unchanged: Vec<String> = before_caps
+        .intersection(&after_caps)
+        .map(|n| (*n).to_owned())
+        .collect();
+    unchanged.sort();
+
+    // Posture can worsen without any capability being added: an artifact that
+    // keeps only the exposed half of a pair is a different risk even when the
+    // number of names it imports is unchanged.
+    let posture_worsened = posture_rank(after.posture) > posture_rank(before.posture);
+
+    // A gain of a covert channel is an escalation even when the posture band
+    // does not move. `clock.wall` and `crypto.random` are `Ambient` and would
+    // never lift a component out of `Contained`, but they are exactly the grants
+    // §10.5 singles out as information channels the audit stream cannot see.
+    let gained_channel = added.iter().any(|c| c.covert_channel);
+
+    ArtifactDiff {
+        before: before.artifact.clone(),
+        after: after.artifact.clone(),
+        before_digest: before.digest.clone(),
+        after_digest: after.digest.clone(),
+        added,
+        removed,
+        unchanged,
+        escalation: posture_worsened || gained_channel,
+        before_posture: before.posture.as_str().to_owned(),
+        after_posture: after.posture.as_str().to_owned(),
+    }
+}
+
+/// The authority difference between two artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactDiff {
+    /// The artifact compared from.
+    pub before: String,
+    /// The artifact compared to.
+    pub after: String,
+    /// The digest of the first, so a diff is tied to the bytes it describes.
+    pub before_digest: String,
+    /// The digest of the second.
+    pub after_digest: String,
+    /// Capabilities the second requires and the first did not.
+    pub added: Vec<CapabilityChange>,
+    /// Capabilities the first required and the second does not.
+    pub removed: Vec<CapabilityChange>,
+    /// Capabilities both require.
+    pub unchanged: Vec<String>,
+    /// Whether the second artifact's authority **grew**.
+    ///
+    /// Denormalized so CI can branch on it in one comparison. This is the flag
+    /// §5.4's whole argument rests on being checkable.
+    pub escalation: bool,
+    /// The posture before.
+    pub before_posture: String,
+    /// The posture after.
+    pub after_posture: String,
+}
+
+/// One capability, with the context a reader needs to judge it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityChange {
+    /// The capability name.
+    pub name: String,
+    /// `ambient`, `resource` or `operation`.
+    pub kind: String,
+    /// Whether it is a covert channel or exfiltration path.
+    pub covert_channel: bool,
+}
+
+/// How exposed a posture is, for comparing two.
+const fn posture_rank(p: Posture) -> u8 {
+    match p {
+        Posture::Minimal => 0,
+        Posture::Contained => 1,
+        Posture::Exposed => 2,
+    }
+}
+
+impl CommandOutput for ArtifactDiff {
+    fn command(&self) -> CommandName {
+        CommandName::Inspect
+    }
+
+    fn summary(&self) -> String {
+        // The escalation leads when there is one, for the same reason
+        // `install`'s capability diff does: it is the signal, and burying it
+        // after a list of unchanged capabilities invites skimming past it.
+        let mut out = if self.escalation {
+            format!("AUTHORITY ESCALATION: {} → {}", self.before, self.after)
+        } else if self.added.is_empty() && self.removed.is_empty() {
+            format!("no authority change: {} → {}", self.before, self.after)
+        } else {
+            format!("authority changed: {} → {}", self.before, self.after)
+        };
+
+        for c in &self.added {
+            let mark = if c.covert_channel {
+                "  [covert channel]"
+            } else {
+                ""
+            };
+            let _ = write!(out, "\n  + {:<20} ({}){mark}", c.name, c.kind);
+        }
+        for c in &self.removed {
+            let _ = write!(out, "\n  - {:<20} ({})", c.name, c.kind);
+        }
+
+        let _ = write!(
+            out,
+            "\n\nPosture: {} → {}",
+            self.before_posture, self.after_posture
+        );
+        out
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
 /// Report what an artifact can do, without running it.
 ///
 /// # This is the security property, not a convenience

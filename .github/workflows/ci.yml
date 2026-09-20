@@ -268,6 +268,41 @@ jobs:
       - name: Prove the typed-error check detects violations
         run: python tools/fault_inject_wit_errors.py
 
+      # §2.5 forbids hidden global state in the runtime: no environment-variable
+      # reads, no CWD dependencies, no implicit config discovery. A SOURCE check
+      # rather than a runtime test, because the violation is an absence of
+      # discipline in code no test exercises -- a host interface reading
+      # `QQQ_CONFIG` on a path nobody tests behaves identically to a correct one
+      # under every test that does not set it.
+      #
+      # `std::env::consts::*` is allowed: those are compile-time constants of the
+      # BUILD, not of the running environment. Two exemptions are named in the
+      # tool with their justifications, and they are scoped to
+      # (file, construct) rather than to the file -- so the exempted `var_os` in
+      # `RealEnv` does not blanket-cover a bare `var` beside it.
+      - name: Validate no hidden global state (CON-010 / CON-018)
+        run: python tools/check_no_ambient.py
+
+      - name: Prove the ambient-state check detects violations
+        run: python tools/fault_inject_no_ambient.py
+
+      # §4.5: "a host interface that would naturally be called in a loop must
+      # instead accept a batch" (CON-012). The operative phrase is a judgement
+      # about usage, which NO checker can make -- so this checks the decidable
+      # half: every DECLARED batch pair must be real, must actually take a
+      # collection, and must agree with its singular form on the error type.
+      #
+      # It deliberately does not demand a batch form for every singular function.
+      # An earlier version did, and produced 23 demanded classifications
+      # including `sql.txn.commit` and `trace.span.event` -- operations that are
+      # inherently singular. A tool demanding a written excuse for each of those
+      # generates paperwork, and paperwork gets allow-ed away.
+      - name: Validate the batch-first rule where it is decidable (CON-012)
+        run: python tools/check_batch_first.py
+
+      - name: Prove the batch-first check detects pair defects
+        run: python tools/fault_inject_batch_first.py
+
   # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.
   # ---------------------------------------------------------------------------

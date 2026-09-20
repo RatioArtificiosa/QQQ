@@ -5000,6 +5000,126 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-063 — Two more contract checks, and the one where the first implementation certified the bug
+
+**What was built.** `tools/check_no_ambient.py` (`CON-010`, `CON-018`) and
+`tools/check_batch_first.py` (`CON-012`), each with a fault-injection harness.
+Five checkers and five harnesses now guard the WIT contract surface.
+
+#### §O-063a — `CON-010`: the allowlist is the load-bearing part
+
+The rule is §2.5's *"no environment-variable reads, no CWD dependencies, no
+implicit config discovery inside the runtime."* It is checked at the **source**,
+because the violation is an absence of discipline in code no test exercises: a
+host interface reading `QQQ_CONFIG` on a path nobody tests behaves identically to
+a correct one under every test that does not set it, and differently on a
+developer's machine.
+
+The interesting design question is not what to forbid but **how to exempt**.
+Three decisions:
+
+| Construct | Verdict | Why |
+|---|---|---|
+| `std::env::consts::{ARCH,OS,FAMILY}` | allowed | Compile-time constants of the **build**, not of the running environment. `config.rs` uses them for the target triple and is correct to |
+| `cap::normalize::RealEnv`'s `var_os` | exempt, **per construct** | Environment access there goes through the `HostEnv` **trait** with a fake in tests — the remedy NN-5 asks for, not a violation of it |
+| A `#[cfg(test)]` `temp_dir` | exempt | Forbidding it pushes test authors toward fixed repository paths, which is worse |
+
+**The exemption is scoped to `(file, construct)`, not to the file.** That is
+asserted by an injection rather than trusted: the harness plants a bare
+`std::env::var` *beside* the exempted `var_os` in the same file, and it must still
+fail. A file-level exemption would have passed it silently — and would have been
+the obvious way to "fix" a false positive.
+
+The harness also carries a **negative control**: a `temp_dir` inside
+`#[cfg(test)]` must NOT be reported. A checker that flags test code gets worked
+around rather than obeyed, and a harness that never tested this would not notice
+if the exemption broke.
+
+#### §O-063b — `CON-012`: the rule is only half decidable, and pretending otherwise generates paperwork
+
+§4.5: *"a host interface that would naturally be called in a loop must instead
+accept a batch."* The operative phrase — *would naturally be called in a loop* —
+is a judgement about usage.
+
+**The first implementation demanded that every singular function be classified.**
+It produced 23 demanded classifications, including `sql.txn.commit`,
+`trace.span.event`, `http.incoming-handler.handle`, `kv.store.delete` and
+`trace.start-span`. Those are *inherently* singular: committing a transaction in a
+loop is not a chatty interface, it is what transactions are. A tool that demands a
+written excuse for each of them is not enforcing a rule — it is generating
+**paperwork**, and paperwork gets `# allow`-ed away, at which point the check is
+dead while appearing to pass.
+
+So the scope was narrowed to the decidable half:
+
+> **Every declared batch pair must be real, must actually take a collection, and
+> must agree with its singular form on the error type.**
+
+The pair list is **declared**, not inferred from the `-many` naming convention:
+inference works today and breaks the first time a batch form is named
+differently, and a declared entry naming a function that no longer exists is
+itself a failure, so the list cannot rot.
+
+The negative control is that adding a new **unpaired** singular function must
+**not** fail — which is precisely the behaviour the first version got wrong.
+
+#### §O-063c — "Does the signature contain `list<`" certified the exact defect it existed to find
+
+The second rule is *"the batch form must actually take a collection."* The first
+implementation asked whether the signature contained `list<`. It does — in
+`digest-many(input: list<u8>)`, which is **one buffer**: exactly what the singular
+form already takes. A batch form in name only, and the crude test **passed it**.
+
+That is the worst class of checker defect. Not a false positive, which is noisy
+and gets fixed, and not a false negative in code nobody looks at — but a check
+that **certifies the specific bug it was written for**, so the bug ships with a
+green tick beside it.
+
+The fix inspects the **element type**: a scalar element (`u8`, `u16`, …) means a
+buffer rather than a collection, while `list<list<_>>`, `list<string>`,
+`list<tuple<_>>` and `stream<_>` count. The injection that exposed it —
+`digest-many` rewritten to take one buffer — is now a permanent part of the
+harness.
+
+This is the second time in two items that writing the harness found a defect in
+the *checker* rather than in the corpus (`§O-062b` was the first), and both were
+found by an injection, not by reading the code.
+
+#### §O-063d — A WIT scoping rule the injection had to respect
+
+The error-mismatch injection went through three attempts, and the middle one
+taught something about the language:
+
+```
+$ wasm-tools component wit bad.wit
+error: name `hmac-error` does not exist
+```
+
+**WIT types are interface-scoped.** `hmac-error` is declared in the
+`hmac` interface, so it is invisible from `hashing` even though both live in
+`qqq-crypto.wit`. Constructing the defect therefore requires the second variant
+to be declared **in the same interface** as the pair — verified with a two-variant
+probe before writing the injection.
+
+Worth recording because it is a constraint on any future checker that reasons
+about type names: a name is not global to a file, so file-level name resolution
+is wrong in the same way `(file, function)` keys were wrong in `§O-062b`.
+
+#### §O-063e — Five checkers, five harnesses
+
+| Checker | Rule | Injections | Control |
+|---|---|---|---|
+| `check_wit.py` | every interface parses | — (external: `wasm-tools`) | — |
+| `check_wit_since.py` | `@since` mandatory | 3 | — |
+| `check_wit_errors.py` | typed errors | 3 | — |
+| `check_no_ambient.py` | no hidden global state | 4 | test code not reported |
+| `check_batch_first.py` | batch pairs consistent | 3 | unpaired singular accepted |
+
+**13 injections plus 2 negative controls**, all passing. Every one of the five
+harnesses has found a defect in its own checker at least once.
+
+---
+
 ### §O-062 — The typed-error rule: three checker defects, each of which called a correct file broken
 
 **What was built.** `tools/check_wit_errors.py` (`CON-009`) and

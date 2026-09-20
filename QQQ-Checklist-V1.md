@@ -836,11 +836,64 @@ Items are grouped below by **phase**, because dependency order matters more than
     type, and a stale allowlist entry — every one of which leaves the file
     **parseable**.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-010** Implement the CI check that no host interface reads an environment variable or the working directory implicitly.
+- [x] **CON-010** Implement the CI check that no host interface reads an environment variable or the working directory implicitly.
+  → Done: `tools/check_no_ambient.py` — 40 source files across the six
+    guest-reachable crates, wired into CI with a fault-injection harness.
+    Also serves `CON-018`, which is the same rule stated as an architecture test.
+  → **A source check rather than a runtime test, and the reason is the failure
+    mode.** A host interface that reads `QQQ_CONFIG` on a path nobody tests
+    behaves identically to a correct one under every test that does not set it —
+    and differently on a developer's machine. That divergence appears only in the
+    environment where nobody is looking.
+  → **The load-bearing part is the allowlist discipline.** A prohibition with no
+    exemptions gets worked around by the first person who hits it, so:
+    `std::env::consts::{ARCH,OS,FAMILY}` is allowed because those are
+    compile-time constants of the **build**, not of the running environment; and
+    the two exemptions are scoped to **(file, construct)** rather than to the
+    file, so the exempted `var_os` in `cap::normalize::RealEnv` does not
+    blanket-cover a bare `var` beside it. That scoping is asserted by an
+    injection, not by reading the code.
+  → `cap::normalize` is the *remedy* rather than an exemption from the rule:
+    environment access there goes through the `HostEnv` **trait**, with `RealEnv`
+    as the production implementation and a fake in tests. The rule forbids
+    *implicit* reads; an explicit, injected, mockable implementation is what NN-5
+    asks for.
+  → Injected: an ambient env read, a CWD dependency, an ambient `temp_dir`,
+    and **a second construct inside the exempted file** — all four detected, plus
+    a negative control proving a `#[cfg(test)]` use is NOT reported (a checker
+    that flags test code gets worked around rather than obeyed).
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-011** Write the WIT style guide and enforce it in review.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **CON-012** Enforce the batch-first rule: implement a lint that flags list-shaped operations accepting single elements.
+- [x] **CON-012** Enforce the batch-first rule: implement a lint that flags list-shaped operations accepting single elements.
+  → Done: `tools/check_batch_first.py`, wired into CI with a fault-injection
+    harness. **5 declared batch pairs verified complete and consistent.**
+  → **The scope is deliberately narrower than the item's wording, and that is the
+    finding.** §4.5's rule is *"a host interface that would naturally be called
+    in a loop must instead accept a batch"* — the operative phrase is a judgement
+    about usage, which **no checker can make**. An earlier version demanded that
+    every singular function be classified, and produced 23 demanded
+    classifications including `sql.txn.commit`, `trace.span.event` and
+    `http.incoming-handler.handle`. Those are *inherently* singular: committing a
+    transaction in a loop is not a chatty interface, it is what transactions are.
+    A tool demanding a written excuse for each of them is not enforcing a rule,
+    it is generating **paperwork** — and paperwork gets `allow`-ed away.
+  → What is decidable, and therefore checked: every **declared** batch pair must
+    be real, must actually take a collection, and must agree with its singular
+    form on the error type. The pair list is declared rather than inferred from
+    the `-many` naming convention, because inference breaks the first time a
+    batch form is named differently; and a declared entry naming a function that
+    no longer exists is itself a failure, so the list cannot rot.
+  → **The second rule caught a real weakness in my own first implementation.**
+    "Does the signature contain `list<`" passes `digest-many(input: list<u8>)` —
+    one buffer, not a batch — so the crude test **certified the exact defect it
+    existed to find**. The check now inspects the element type: a scalar element
+    means a buffer rather than a collection, while `list<list<_>>`,
+    `list<string>`, `list<tuple<_>>` and `stream<_>` all count.
+  → Injected: a renamed sibling, a batch form taking no collection, and an
+    error-type mismatch between the two halves — all detected, plus a negative
+    control proving a new *unpaired* singular function does **not** fail (which is
+    the paperwork failure the redesign avoided).
   → §4.5 The ABI boundary — what crosses and at what cost
 - [x] **CON-013** Implement the capability-name registry with a published, versioned list.
   → Done: `Capability::all()` — the versioned capability-name registry; `qqqai schema` publishes it.

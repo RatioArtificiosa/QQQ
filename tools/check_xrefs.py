@@ -359,6 +359,24 @@ def main() -> int:
             errors.append(f"[10] proposal cites Observations decision §{did}, which is not defined")
 
     # ----------------------------------------------------------------------
+    # 10b. Every decision must be cited from the Proposal.
+    #
+    # The reverse of [10], and the check that was missing. Six of the nine
+    # decisions were once *write-only*: they existed in Observations and appeared
+    # nowhere in the Proposal, so a reader of the Proposal alone would never learn
+    # they existed. [10] could not catch that -- it only knows about citations
+    # that exist. This was found by reading, not by the validator.
+    #
+    # An identifier defined but never referenced is a decorative identifier, and
+    # the whole point of the cross-reference graph is that it is load-bearing.
+    # ----------------------------------------------------------------------
+    for did in sorted(obs_decisions):
+        if not re.search(r"§" + re.escape(did) + r"\b", proposal):
+            errors.append(
+                f"[10b] Observations defines §{did} but the Proposal never cites it"
+            )
+
+    # ----------------------------------------------------------------------
     # 11. Stub parity is bidirectional
     # ----------------------------------------------------------------------
     if obs_stub_count and not marker_ids:

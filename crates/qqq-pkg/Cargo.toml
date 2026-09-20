@@ -1,21 +1,26 @@
 [package]
 name = "qqq-pkg"
+description = "QQQ dependency manager: content-addressed store, lockfile with a covering hash, version requirements, and the capability diff that makes an authority change visible."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "QQQ crate: qqq-pkg (see QQQ-Proposal-V1.md 4.3)"
+documentation.workspace = true
+readme = "README.md"
+keywords = ["qqq", "package-manager", "lockfile", "wasm"]
+categories = ["wasm", "development-tools"]
 
 [lints]
 workspace = true
 
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
-qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
 serde = { workspace = true }
-serde_json = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 

@@ -1,8 +1,9 @@
 name: CI
 
-# Implements: FND-004, FND-005, DOC-007, CON-016
+# Implements: FND-004, FND-005, DOC-007, CON-016, LIC-010
 # Proposal:  §11.1 Install channels, in priority order
 #            §2.2 NN-2 — Security and Isolation Are Non-Optional
+#            §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
 #            §0.4 How to read the cross-references
 
 on:
@@ -16,6 +17,63 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # DCO: every commit in a pull request must carry a Signed-off-by line.
+  #
+  # Pull requests only. A push to `main` is either a merge of an
+  # already-checked pull request or a maintainer's direct commit, and the DCO
+  # is a contributor certification — requiring it on a revert or a merge commit
+  # would fail on commits nobody signed, which is how a check gets disabled.
+  # ---------------------------------------------------------------------------
+  dco:
+    name: DCO
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The full history is required: an ancestry-based check needs the
+          # commits, not just the merge result.
+          fetch-depth: 0
+
+      - name: Every commit is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Commits between the merge base and the head -- i.e. exactly the ones
+          # this pull request adds.
+          commits=$(git rev-list --no-merges "$BASE..$HEAD")
+          if [ -z "$commits" ]; then
+            echo "No non-merge commits to check."
+            exit 0
+          fi
+
+          missing=0
+          for c in $commits; do
+            subject=$(git log -1 --pretty=%s "$c")
+            # A trailer is the last block of the message; `git log --format=%B`
+            # gives the raw body, and the `Signed-off-by:` line must appear in
+            # it. Matching the whole body rather than the last line tolerates a
+            # commit edited by tooling that appends after the trailer.
+            if git log -1 --pretty=%B "$c" | grep -qE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "  ok    $c $(git log -1 --pretty=%h "$c") $subject"
+            else
+              echo "  FAIL  $c $subject  -- no Signed-off-by line"
+              missing=$((missing + 1))
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "$missing commit(s) are missing a Signed-off-by line."
+            echo "Amend with: git commit --amend -s"
+            echo "Or rebase:  git rebase --signoff $BASE"
+            exit 1
+          fi
+          echo "All commits are signed off."
+
   # ---------------------------------------------------------------------------
   # The cross-reference graph is the thing that keeps three documents honest.
   # If it breaks, nothing else matters. Run it first and cheaply.
@@ -150,10 +208,19 @@ jobs:
       - name: Install cargo-machete
         uses: taiki-e/install-action@cargo-machete
 
+      # Both checks are now **required**, not advisory.
+      #
+      # They previously carried `continue-on-error: true`, with a note that
+      # `deny.toml` would land with LIC-007. Without that file cargo-deny fell
+      # back to its default allowlist and rejected `Apache-2.0 OR MIT`, so it
+      # failed on every run — and a red check that everyone knows is red stops
+      # being read. cargo-machete was also finding three real unused
+      # dependencies, which are now removed.
+      #
+      # Removing the escape hatch is the point: an unconditionally-failing check
+      # and an unconditionally-passing one carry the same information (`§M-006`).
       - name: cargo-deny (licences + advisories)
         run: cargo deny check
-        continue-on-error: true # deny.toml lands with LIC-007
 
       - name: cargo-machete (unused dependencies)
         run: cargo machete
-        continue-on-error: true

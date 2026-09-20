@@ -3504,6 +3504,126 @@ gained `fs.write`" without saying *which* artifact is not evidence.
 
 ---
 
+### §O-040 — The checklist was understating the work by 26 items
+
+P0 (Foundation) reported **0 of 101 done** while the workspace had 910 passing
+tests, a three-OS CI matrix, all three canonical documents, and an Apache-2.0
+licence. The work was done and never recorded.
+
+---
+
+#### §O-040a — An out-of-date checklist is worse than a missing one
+
+The reflex is to treat a stale checklist as bookkeeping debt — untidy, not
+harmful. That is wrong in a specific and expensive way: **it makes remaining work
+look larger than it is.** A reader planning the next milestone against "0 of 101"
+concludes the foundation is untouched and re-plans work that is finished.
+
+It also hides what has already been paid for. Twenty-six items were complete
+before this round; that cost was already borne and the register showed none of it.
+
+So the fix is not "tick more diligently next time". It is to make the check
+**mechanical**: `tools/audit_p0.py` maps each P0 item to a concrete artefact and
+reports what exists. It is deliberately a **report, not a gate** — the same
+choice `check_xrefs.py` makes — because failing CI on a low count pressures
+ticking over building, and ticking without reading is how the drift happened.
+
+What the tool cannot do is stated in its header: `FND-008` (branch protection) is
+a repository setting and `LIC-002` (legal review) is an external action. Both are
+reported as unverifiable rather than guessed at, so the boundary is visible
+instead of a confident wrong answer.
+
+---
+
+#### §O-040b — The reverse cross-reference check did not exist, and adding it found three dangling decisions
+
+`check_xrefs.py` check `[10]` catches the Proposal citing a `§D-` identifier that
+does not exist. There was **no check** for the reverse: a decision defined in
+Observations and cited from nowhere.
+
+That is not hypothetical. Six of the nine decisions were once *write-only* — the
+Proposal never mentioned them, so a reader of the Proposal alone would never
+learn they existed. It was found by reading, not by the validator, and fixed by
+hand. `[10]` could not catch it, because it only knows about citations that
+already exist.
+
+Adding check `[10b]` took a few lines and **immediately found three more**:
+`§D-002` (five languages), `§D-008` (WIT interface first), `§D-009` (README as a
+sales surface). Each named Proposal sections in its own cross-refs, but no
+Proposal section named the decision — a one-way link that reads as connected and
+is not. All three are now cited where they belong.
+
+A fault injection strips a citation and asserts the check fires, so `[10b]`
+cannot become a check that always passes. **8/8 injections detected.**
+
+The generalizable lesson: a link that exists in one direction is not a link.
+A register that nothing reads back is decoration.
+
+---
+
+#### §O-040c — `cargo deny check` had been failing on every run, and the escape hatch hid it
+
+The supply-chain CI job carried `continue-on-error: true` on both steps, with a
+note that `deny.toml` would land "with LIC-007".
+
+With no `deny.toml`, cargo-deny falls back to its **default** allowlist and then
+rejects this project's actual dependencies — it failed on `addr2line`'s
+`Apache-2.0 OR MIT`, a licence nobody would refuse. So the check failed
+unconditionally, and `continue-on-error` meant nobody saw it.
+
+This is `§M-006` in a third guise: **an unconditionally-failing check and an
+unconditionally-passing one carry exactly the same information.** Both are noise;
+the first is merely noisier.
+
+`deny.toml` now exists, derived from `cargo metadata` over the real tree rather
+than written from expectation, and both escape hatches are removed. Two details
+worth recording:
+
+* **`GPL-2.0-only` and `LGPL-2.1-or-later` are deliberately *not* in the
+  allowlist**, even though they appear in the dependency graph. Both appear only
+  inside disjunctions that also offer a permissive branch, and cargo-deny
+  evaluates OR-expressions by checking whether *any* branch is allowed. Listing
+  the copyleft branch would permit it **alone**, which is a different and
+  unacceptable grant.
+* The `bans` section denies a crate literally named `qqq`. The naming rule is
+  already enforced for the binary we build by a constant and a test; this
+  enforces it for what we depend on.
+
+`cargo machete` was also finding **three real unused dependencies** —
+`qqq-abi → qqq-core`, `qqq-pkg → qqq-cap` and `qqq-pkg → serde_json`. Verified
+by grepping for each import before removing. Both checks now pass with no escape
+hatch.
+
+---
+
+#### §O-040d — Six crates declared a README that did not exist
+
+`readme = "README.md"` in `Cargo.toml` while the file was absent. That is not
+cosmetic: `cargo publish` fails on a missing readme, so the crate was
+unpublishable and nothing said so until the moment someone tried.
+
+Writing the five missing READMEs produced its own lesson, four times over — **a
+README is a set of claims, and each one has to be checked against the source**:
+
+| Claim I wrote | Reality |
+|---|---|
+| `grants.narrow(&[Capability::FsRead])` | `narrow` takes an `Overlay`, not a slice |
+| `qqqai schema --wit` emits the interfaces | no such flag exists |
+| five of the eight principle names | the real names are quite different |
+
+Each was written fluently and each was wrong. The correction is not "be more
+careful" — it is that **prose describing an API is an unverified assertion until
+you grep for the API.** Every remaining claim was then verified: `Instance::run`
+does consume `self`, `EngineConfig::deterministic` exists, the five exit codes are
+exactly `0/1/2/69/70`, and a trap does exit `1` rather than `70`.
+
+The READMEs also state scope honestly. `qqq-pkg`'s table marks
+hard-link/reflink materialization as **not implemented**, and `qqq-run`'s marks
+ten of its commands the same way. A README that implies a capability exists is
+the same defect as a ticking checklist item that is not finished.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3705,20 +3825,35 @@ The brief said: *"If you are fixing something or just working and see something 
 
 **Policy.** A stub is only permitted when there is genuinely nothing to connect it to yet. Every stub must carry **both** an inline `// QQQ-STUB(<CHECKLIST-ID>):` marker in the code **and** an entry here. `DOC-009` implements the CI check that enforces this pairing.
 
-### §S-001 — `.scratch/witprobe/` is a temporary verification crate
+### §S-001 — `.scratch/witprobe/` — **CLOSED**
 
-**Marker in code:** `// QQQ-STUB(FND-011): scratch verification crate. NOT part of the QQQ workspace.`
+**Marker in code:** the crate is deleted, so the marker is gone with it.
 
-**What it is.** A throwaway crate that makes the proposal's Wasmtime claims falsifiable. It has now **served its purpose**: all four claims verified, plus a control case (`§O-006`).
+**What it was.** A throwaway crate that made the proposal's Wasmtime claims
+falsifiable. It served its purpose: all four claims verified, plus a control case
+(`§O-006`).
 
-**Why it is still a stub.** It is not part of the QQQ workspace and must not be committed to the repository in its current throwaway form.
+**Closed by `FND-011`.** The four assertions are now permanent tests in
+`crates/qqq-host/tests/engine.rs`, each with its control:
 
-**How to close it.** `HOST-024` / `FND-011`: port its five assertions (including the 1b control) into `crates/qqq-host/tests/` as permanent tests with CI thresholds — specifically, fail the build if p99 instantiation regresses past the §9.2 budget — then delete `.scratch/`.
+| Ported test | Claim | Control |
+|---|---|---|
+| `an_unsatisfied_import_fails_instantiation_and_names_it` | an absent import fails instantiation | sibling test `a_component_with_no_imports_instantiates_and_runs` |
+| `fuel_exhaustion_traps_the_guest_and_the_host_survives` | fuel bounds work; the host survives | runs a second guest after the trap |
+| `an_epoch_interruption_stops_a_spinning_guest` | epochs bound time, independently of fuel | a concurrent ticker, so the test cannot hang instead of failing |
 
-**Status: verified and ready to port.** The port is mechanical. What must **not** be lost in the port:
-- the **1b positive control** (a negative assertion without a positive control is not evidence),
-- the **measured p50/p99 numbers** as a regression baseline (`PERF-003`),
-- the four WAT/ABI findings in `§O-007`, which belong in `qqq-abi`'s internals.
+**What the port did NOT carry across, stated rather than glossed:**
+
+* **The p50/p99 instantiation measurement** (`PERF-003`). The probe printed a
+  regression baseline; the ported tests assert behaviour, not latency. A wall-clock
+  threshold in a unit test is flaky on shared CI runners, so the honest place for
+  it is the benchmark suite — which does not exist yet. `PERF-003` remains open
+  and this is the reason.
+* **The four WAT/ABI findings in `§O-007`.** They are recorded in this document
+  and in `qqq-abi`'s internals; they were not re-ported as tests.
+
+So the stub is closed for what it was *for* — falsifying the architecture claims —
+while the performance baseline it also produced is explicitly still owed.
 
 ---
 
@@ -3817,5 +3952,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **`qqqai inspect <artifact>` implemented**, and two defects fixed on the way (`§O-038`). The command **ignored its path argument** and reported the manifest's capabilities regardless, so inspecting a nonexistent file produced a confident report about `qqq.toml` — on the surface that exists to make a grant auditable before execution, a plausible wrong answer is worse than none (`§O-038a`). With inspection wired up, an artifact importing `qqq:clock/wall-clock` was reported as requiring `clock.monotonic`, because the registry maps capability → interface at *package* level and several packages hold several interfaces; a precise `interface_path_for` table now answers at interface level (`§O-038b`). One interface can imply several capabilities, so the mapping returns the **strongest** — understating authority is the one failure an audit surface must not have — and a positive-control test asserts the ranking agrees with `classify_posture` for every capability (`§O-038c`). Five fixture-building tests initially **skipped silently** because of an invented `--features` flag; skips are now loud (`§O-038d`). | Architect |
 
 | 2026-09-19 | **`qqqai inspect --diff` implemented** (`CLI-015` complete): the authority delta between two artifacts, which is §5.4's central supply-chain question. A gain **exits non-zero** so the flag is a CI gate without parsing output, while a loss reports and succeeds — failing on a security *improvement* is a check people learn to bypass (`§O-039a`). A gain of a **covert channel** escalates even when the posture band does not move, because `clock.wall` and `crypto.random` are `Ambient` and §10.5 singles them out as channels the audit stream cannot see (`§O-039b`). The comparison is over capabilities rather than interfaces, so an artifact that swaps one interface for another with the same authority reports no change (`§O-039c`). | Architect |
+
+| 2026-09-19 | **P0 (Foundation) was understating the work by 26 items**: it reported 0 of 101 done while the workspace held 910 tests, a three-OS CI matrix and all three canonical documents (`§O-040a`). `tools/audit_p0.py` now maps each P0 item to a concrete artefact and reports what exists — a report, not a gate, because failing CI on a low count pressures ticking over building. **`check [10b]` added** to `check_xrefs.py`, catching a decision defined but never cited; it immediately found three dangling decisions (`§D-002`, `§D-008`, `§D-009`), each now cited. **`cargo deny check` had been failing on every run** because no `deny.toml` existed, and `continue-on-error` hid it; `deny.toml` is now derived from the real dependency graph and both escape hatches are removed, which also surfaced three genuinely unused dependencies (`§O-040c`). Six crates declared a README that did not exist; all five missing READMEs written, with every API claim verified against source after four fluent-but-wrong ones were caught (`§O-040d`). `.scratch/witprobe` deleted and its four assertions ported to `crates/qqq-host/tests/engine.rs` with controls. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

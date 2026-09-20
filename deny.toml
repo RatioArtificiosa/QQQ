@@ -1,0 +1,136 @@
+# cargo-deny configuration.
+#
+# Implements Checklist `LIC-007` ("configure cargo-deny to enforce the dependency
+# licence allowlist") and un-breaks the supply-chain CI job, which was failing.
+#
+# # Why this file had to exist before `cargo deny check` meant anything
+#
+# Without a `deny.toml`, cargo-deny prints *"unable to find a config path,
+# falling back to default config"* and then rejects the **default** allowlist
+# rather than this project's. In practice it failed on `addr2line`'s
+# `Apache-2.0 OR MIT` — a licence this project obviously accepts. So the CI job
+# was red, and a red job that everyone knows is red stops being read.
+#
+# That is the same failure mode as a validator with no positive control
+# (`§M-006`): a check that always fails carries exactly as much information as
+# one that always passes. Configuring it is what turns it into a signal.
+#
+# # The allowlist, and why each entry is here
+#
+# The list was derived from `cargo metadata` over the real dependency tree, not
+# written from expectation. Every entry below appears in this workspace's graph
+# today; anything added later must be a deliberate edit to this file, which is
+# the point — a new transitive licence should require a human to look at it.
+#
+# Permissive licences the project itself uses or depends on:
+#   Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unlicense,
+#   Apache-2.0 WITH LLVM-exception
+#
+# Unicode-3.0 is required by `unicode-ident`, which is a `syn`/`proc-macro2`
+# dependency. It is OSI-approved and permissive.
+#
+# CC0-1.0 and MIT-0 are public-domain-equivalent dedications used by small
+# utility crates.
+#
+# # What is deliberately NOT allowed
+#
+# `LGPL-2.1-or-later` and `GPL-2.0-only` appear in the tree *only* inside
+# disjunctions that also offer a permissive option:
+#
+#   GPL-2.0-only OR BSD-3-Clause          -> taken as BSD-3-Clause
+#   MIT OR Apache-2.0 OR LGPL-2.1-or-later -> taken as MIT
+#
+# cargo-deny evaluates OR-expressions by checking whether *any* branch is
+# allowed, so listing the permissive branch is sufficient and correct. Listing
+# the copyleft branches would allow them **alone**, which is a different and
+# unacceptable grant — a crate licensed only under LGPL-2.1-or-later must not
+# enter this tree, and this file is what enforces that.
+#
+# # Why `version = 2` and not 1
+#
+# Version 2 is the current schema. Staying on 1 would work today and become a
+# migration under pressure later.
+
+[graph]
+# The whole workspace is one dependency graph; there is no separate target set.
+all-features = true
+
+[advisories]
+# A vulnerability in a dependency is a security event for this project
+# specifically: QQQ's entire claim is that a guest cannot escape, and a
+# vulnerable host dependency is a path out. Denied, never warned.
+version = 2
+yanked = "deny"
+ignore = []
+
+# `unmaintained` is set to `workspace` rather than `all`: an unmaintained
+# *transitive* crate is worth knowing about but is not actionable without
+# upstream movement, and failing CI on it trains people to add ignores. An
+# unmaintained crate we depend on *directly* is actionable and fails.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# Confidence threshold for licence *detection* from LICENSE files when a crate
+# declares no SPDX expression. 0.8 is cargo-deny's default and is high enough
+# that a detected licence is unlikely to be a false positive.
+confidence-threshold = 0.8
+
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MIT-0",
+]
+
+# The crates this project publishes. Listed explicitly so that a future
+# dependency on a first-party crate is checked like any other rather than
+# silently exempted.
+exceptions = [
+    { allow = ["Apache-2.0"], name = "qqq-core" },
+    { allow = ["Apache-2.0"], name = "qqq-cap" },
+    { allow = ["Apache-2.0"], name = "qqq-host" },
+    { allow = ["Apache-2.0"], name = "qqq-abi" },
+    { allow = ["Apache-2.0"], name = "qqq-io" },
+    { allow = ["Apache-2.0"], name = "qqq-serve" },
+    { allow = ["Apache-2.0"], name = "qqq-run" },
+    { allow = ["Apache-2.0"], name = "qqq-pkg" },
+    { allow = ["Apache-2.0"], name = "qqq-debug" },
+    { allow = ["Apache-2.0"], name = "qqq-sys" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+highlight = "all"
+
+# The crate-name ban that matters most for this project.
+#
+# QQQ's brand is QQQ, but every identifier a machine sees — crate, binary, npm
+# package, command — is `qqqai`, because `qqq` is taken on crates.io and npm.
+# The constant `qqq_core::BINARY_NAME` enforces this for the binary we build;
+# this entry enforces it for what we depend on. A transitive dependency on a
+# crate literally named `qqq` would be a different, unvetted project wearing
+# this one's name.
+deny = [
+    { name = "qqq", reason = "the crate name is `qqqai`; `qqq` on crates.io is an unrelated project" },
+]
+
+# Build and dev dependencies are excluded from the duplicate-version warning
+# noise, but NOT from licence or advisory checking — `bans` is the only section
+# these affect.
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Only crates.io is trusted for registry sources. A dependency that resolves
+# from anywhere else is a supply-chain event, which is precisely what this job
+# exists to notice.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -125,6 +125,18 @@ def main() -> int:
         lambda t: t.replace("§D-003", "§D-099"),
     ))
 
+    print("check [10b] Observations decision never cited from the Proposal")
+    results.append(expect_failure(
+        "strip every §D-005 citation from the proposal",
+        PROPOSAL,
+        # `§D-005` is the Tokio decision. Removing its citations from the
+        # Proposal must be caught: a decision that is defined and never
+        # referenced is a decorative identifier, and the reverse check exists
+        # because six of the nine decisions were once write-only while check
+        # [10] -- which only knows about citations that exist -- reported clean.
+        lambda t: t.replace("§D-005", "§REMOVED"),
+    ))
+
     print("check [6] duplicate checklist ID")
     results.append(expect_failure(
         "duplicate CAP-011",

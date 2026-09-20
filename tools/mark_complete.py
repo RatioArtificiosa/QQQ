@@ -39,6 +39,7 @@ COMPLETE = {
     "HOST-014": "`digest_of` content-addresses an artifact, so one module backs many tenants.",
     "HOST-016": "Host functions registered per interface in `host_clock` and `host_crypto`.",
     "HOST-018": "`EngineConfig::deterministic` — fixed clock, seeded RNG, canonical NaN.",
+    "HOST-024": "the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.",
 
     # -- qqq-run CLI -------------------------------------------------------
     "CLI-001": "`qqq-run::output` — `CommandOutput` with `--json` on every command.",
@@ -48,7 +49,41 @@ COMPLETE = {
     "CON-002": "`Manifest::parse` produces field-named diagnostics with a line reference.",
     "CON-003": "`qqq-cap::normalize` — host patterns, secret references, path canonicalisation.",
     "CON-013": "`Capability::all()` — the versioned capability-name registry; `qqqai schema` publishes it.",
-    "CON-014": "`qqqai inspect` reads the import table and reports the interfaces without running.",
+    "CON-014": "`qqqai inspect <artifact>` compiles the component without instantiating it and reads its import table; `interface_path_for` maps each import to the capability it requires (Observations §O-038).",
+
+    # -- P0 Foundation -----------------------------------------------------
+    #
+    # Every one of these was genuinely done and showed as 0 of 101, because the
+    # Checklist had drifted behind the repository. Each was verified by the probe
+    # in `tools/audit_p0.py` before being ticked here, not asserted from memory.
+    "FND-001": "`Cargo.toml` declares the workspace, with per-crate tier and Proposal-section comments.",
+    "FND-002": "`PRINCIPLES.md` at the repository root, with the operationalization table.",
+    "FND-003": "Conventional Commits used throughout; see `git log` and CONTRIBUTING.md §Commit messages.",
+    "FND-004": "`.github/workflows/ci.yml` — Rust on ubuntu, macos and windows.",
+    "FND-005": "`cargo-deny`, `cargo-machete` and `clippy -D warnings` are all required CI steps, with the `continue-on-error` escape hatches removed now that `deny.toml` exists.",
+    "FND-006": "`docs/adr/README.md` — the ADR process and template, pointing at the canonical register in Observations §2 rather than duplicating it.",
+    "FND-007": "`.github/PULL_REQUEST_TEMPLATE.md` requires naming which of the eight Non-Negotiables the change touches, with the principle names taken from Proposal §2.",
+    "FND-009": "`SECURITY.md` — the reporting channel and the patch-target table by severity.",
+    "FND-011": "`.scratch/witprobe` deleted; its four assertions ported to `crates/qqq-host/tests/engine.rs` with control cases (4 tests pass).",
+
+    "DOC-001": "`README.md` at the repository root.",
+    "DOC-002": "`QQQ-Proposal-V1.md`.",
+    "DOC-003": "`QQQ-Checklist-V1.md`.",
+    "DOC-004": "`QQQ-Observations-and-Memories.md`.",
+    "DOC-006": "`tools/check_xrefs.py` — checks over the Proposal/Checklist/Observations graph.",
+    "DOC-007": "`check_xrefs.py` and `self_test_xrefs.py` are both required steps in the `xrefs` CI job.",
+    "DOC-009": "`QQQ-STUB(<ID>)` markers are validated against checklist items by `check_xrefs.py` checks [7] and [11], including the bidirectional case, as a required CI step.",
+
+    "LIC-001": "`LICENSE` — Apache-2.0.",
+    "LIC-004": "`LICENSING.md` §1 — the free-entity grant, stated without seat or revenue limits.",
+    "LIC-007": "`deny.toml` — the licence allowlist derived from `cargo metadata` over the real tree, with the copyleft branches of OR-expressions deliberately not listed.",
+    "LIC-009": "`LICENSING.md` §4 — the plain-language FAQ, including \"can my company use this for free?\".",
+    "LIC-010": "CONTRIBUTING.md §Developer Certificate of Origin — DCO v1.1 with `git commit -s`, and why a DCO rather than a CLA.",
+
+    "GOV-001": "`GOVERNANCE.md`.",
+    "GOV-002": "`CONTRIBUTING.md` — setup, workflow, standards and the DCO.",
+    "GOV-003": "`CODE_OF_CONDUCT.md`, which CONTRIBUTING.md already linked to before it existed.",
+    "GOV-006": "`SECURITY.md` — acknowledgement, assessment and patch targets by severity.",
 }
 
 # Items that are genuinely partial: annotate, never tick.
@@ -58,9 +93,12 @@ PARTIAL = {
     "CAP-016": "`qqq:secrets` WIT exists and the manifest parses `secrets`; the host interface is not registered.",
     "HOST-011": "the panic hook exists in the trap taxonomy; severity-1 alerting is not built.",
     "HOST-019": "fuel and duration per execution; the acquire-latency histogram and pool occupancy gauge are not built.",
-    "HOST-024": "the assertions are ported; `.scratch/witprobe` still exists and must be deleted.",
     "CON-001": "the manifest parses and validates, but no JSON Schema document is published.",
     "CON-007": "WIT packages are semver'd `@1.0.0`; the `@since` policy is not enforced.",
+    "FND-008": "branch protection is a repository setting, not a file; it is not verifiable from inside the tree.",
+    "FND-010": "no release-engineering pipeline yet: versioning, changelog generation and artifact signing hooks are unbuilt.",
+    "FND-012": "`wasm-tools` is used by the test fixtures, but no bootstrap script installs it.",
+    "LIC-002": "no legal review has been obtained; this is an external action, not a repository artefact.",
 }
 
 

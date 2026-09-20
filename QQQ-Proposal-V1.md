@@ -109,6 +109,16 @@ When a human picks a stack, they read a blog post and form a vibe. When an agent
 | [`QQQ-Checklist-V1.md`](./QQQ-Checklist-V1.md) | Executable work breakdown; every item cites this document | Engineers, project managers, agents doing the work |
 | [`QQQ-Observations-and-Memories.md`](./QQQ-Observations-and-Memories.md) | Decisions, rationale, mistakes, corrections, stubs, open threads | Future maintainers — human and machine |
 
+**Decisions live in Observations §2**, as entries `§D-001` … `§D-009`, and are
+cited from here by identifier. The register is not duplicated under `docs/adr/`;
+that directory explains the *process* and points at the register, because two
+registers drift and one is checked (`docs/adr/README.md`).
+
+The repository root carries a fourth surface: `README.md` is the **public front
+door**, written to the "premium tech" standard rather than as a build
+instruction file. It is a sales surface and a credibility asset, and the decision
+to treat it that way is `§D-009`.
+
 → **Checklist:** `DOC-001`, `DOC-002`, `DOC-003`, `DOC-004`, `DOC-005`
 
 ---
@@ -442,6 +452,12 @@ Nine relevant comparators. Columns are the axes that actually decide adoption.
 ## §4.1 The layer cake
 
 QQQ is nine layers. Data flows down on the request path; authority flows down on the trust path and never flows back up.
+
+> **Decision `§D-008`** — every host capability is a WIT interface first and a
+> language binding second. If a feature cannot be expressed in WIT, it does not
+> ship. That rule is what makes the multi-language claim structural rather than
+> aspirational, and it is why an agent can read one interface definition and
+> generate correct code in any of the five target languages.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -1117,6 +1133,10 @@ Tier 1 is the breakthrough: because the guest is a *component instance*, not a l
 ## §6.10 Language toolchains — one per target language
 
 The multi-language promise lives or dies here. Honest per-language status:
+
+> **Decision `§D-002`** — V1 supports five languages, all five held to the same
+> conformance suite, with gaps published in a generated parity matrix rather than
+> hidden.
 
 | Language | Compile path | V1 tier | Honest difficulty |
 |---|---|---|---|

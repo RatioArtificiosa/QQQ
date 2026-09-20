@@ -110,6 +110,31 @@ Signed commits are required on `main`.
 
 ---
 
+## Developer Certificate of Origin
+
+Every commit must carry a `Signed-off-by` line certifying the
+[Developer Certificate of Origin v1.1](https://developercertificate.org/):
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+Use `git commit -s` (or `-sS` to sign cryptographically as well). The
+certification is that you wrote the contribution, or have the right to submit it
+under this project's licence — nothing more. It is not a copyright assignment,
+and you keep your copyright.
+
+**Why a DCO and not a CLA.** A Contributor Licence Agreement asks contributors to
+grant rights they may not realise they are granting, and it is the single most
+common reason a first-time contributor does not send a second patch. The DCO
+asks for the narrowest thing that makes the contribution legally usable, and it
+is what NN-8's stewardship commitment can be kept with.
+
+The check runs in CI. Where it is absent — a merge commit, a revert — the
+maintainer records why in the pull request.
+
+---
+
 ## Code of conduct
 
 See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Be decent. Technical disagreement is welcome; contempt is not.

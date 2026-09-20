@@ -3801,6 +3801,67 @@ a test printed before theorising about why it printed it is the same lesson as
 
 ---
 
+#### §O-042d — The local fix was correct and insufficient, and one diagnostic found both CI bugs
+
+`--trials` was fixed locally (`§O-042b`) and **CI still failed** with the same
+report. The check was right that something differed; the fix had simply not
+addressed the real cause.
+
+Two differences in CI's environment, neither present locally:
+
+| Difference | Effect |
+|---|---|
+| `--verbose` on a warm build | emits `Fresh <crate>` and `Finished … in 0.47s`, which a local run never printed because nothing was fresh |
+| `CARGO_TERM_COLOR=always` | wraps every verb in SGR escapes, so `starts_with("Blocking")` never matched `\x1b[1m\x1b[92m    Blocking\x1b[0m …` |
+
+**Both were found by the same instrument**, added in the same change that fixed
+the first bug: a diagnostic that prints **what differed** rather than only that
+something did. Its first output, verbatim:
+
+```text
+qqqai test: trial divergence in `tests::adding_works`:
+  line 4: "\u{1b}[1m\u{1b}[92m    Blocking\u{1b}[0m waiting for file lock on
+  package cache" vs "\u{1b}[1m\u{1b}[92m    Finished\u{1b}[0m … in 0.02s"
+```
+
+Two CI-only causes named in one line, after two rounds of theorising had found
+neither. The generalizable rule: **a diagnostic that reports a difference must
+print the difference.** Reporting only its existence forces guessing, and the
+guessing was the expensive part — `§O-042c` had already spent two fixes on the
+wrong component for exactly this reason.
+
+The rules are now by **shape** rather than an enumerated prefix list: a line is
+kept if it carries test behaviour, dropped if it reports on the runner. An
+enumerated list is the same mistake as enumerating a toolchain's error variants
+— correct until the environment changes, and then wrong in a way that implicates
+the code under observation. The conservative direction is deliberate: an
+unmatched line is **kept**, so a stripper that fails to recognise something
+cannot hide a real divergence.
+
+**Three further real defects surfaced while building it**, each caught by a test:
+
+1. `strip_ansi` used a peekable iterator and tried to rewind it. A consuming
+   iterator cannot be rewound, so the lookahead had already advanced and the
+   "put it back" step targeted the wrong position — bytes vanished silently.
+2. The replacement scanned up to 24 bytes for any `m`. On `ESC[1no terminator`
+   it found the `m` inside "ter**m**inator" and deleted everything before it,
+   producing `"inator"`. A stripper that eats arbitrary text is the dangerous
+   direction, because the bytes it removes are the ones being compared. The scan
+   now accepts only digits and semicolons before the `m`.
+3. A byte-wise copy mangled multi-byte UTF-8, so a test printing accented text
+   would have its output corrupted **deterministically** — which reads as
+   agreement rather than as damage.
+
+And one wrong test of mine: I asserted that `ESC[1mno terminator` was unchanged,
+but `ESC[1m` *is* a complete SGR sequence. Reading the assertion's own two values
+made that obvious in seconds; theorising would not have.
+
+Verified with the exact CI command under CI's colour setting: three consecutive
+clean runs locally, then **green on CI** — the only proof that counts for a
+defect that appears nowhere else.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4153,5 +4214,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **The objective audit passes: 30/30**, after three wrong diagnoses of one symptom. `git status` listed three documents modified while `git diff` showed nothing; each diagnosis was written into a comment as fact and each was wrong. What settled it was measuring the **committed blob** (`git cat-file -p HEAD:…` → 0 CRLF, 1,549 LF) rather than the working tree: the checkout drifts, the content is correct. Both `normalize_eol.py` and `audit_requirements.py` now test committed content, removing a check that failed on a condition the repository does not have (`§O-041a`). The audit label `"passes (7/7)"` was a hardcoded literal that went stale when an eighth injection was added; labels are now read from the run (`§O-041b`). `check [12]` added after the Observations heading was deleted for the **fourth** time — and building it caught a real defect in the check itself, which used a substring search and would have passed on a document that lost its section (`§M-007`). | Architect |
 
 | 2026-09-19 | **`CLI-012` implemented: `qqqai test`** (`qqq-run::test_runner`). Discovery runs **each test binary directly**, which makes a test's source file exact rather than inferred — after two wrong attempts, the second of which produced plausible paths that were wrong (`§O-042a`). `--trials N`, the first architecture-enabled feature from §6.7, **reported a perfectly deterministic suite as nondeterministic** because it compared raw output including libtest's `finished in 0.01s`; output is now normalised, with a positive control asserting a real difference is still detected (`§O-042b`). I diagnosed that as test flakiness twice before reading the failure's stdout, which had the answer in it (`§O-042c`). `check [12]` caught the section-heading deletion this round, which is what it was built for. | Architect |
+
+| 2026-09-19 | The `--trials` fix (`§O-042b`) was **correct and insufficient**: CI failed again for two further reasons — `--verbose` emitting `Fresh`/`Finished` lines on a warm build, and `CARGO_TERM_COLOR=always` wrapping verbs in SGR escapes. **Both were named in one line of output by the trial-divergence diagnostic added in the same change**, the instrument that prints *what* differed rather than only that something did (`§O-042d`). Rules are now shape-based rather than an enumerated prefix list, since an enumerated list is the same mistake as enumerating a toolchain's error variants. Building it surfaced three further real defects and one wrong test of mine. **Green on CI** — the only proof that counts for a defect that appears nowhere else. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

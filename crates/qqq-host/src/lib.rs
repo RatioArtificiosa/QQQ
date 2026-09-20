@@ -30,6 +30,41 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+/// How many epoch ticks a yielding guest is granted before it is asked to yield
+/// again.
+///
+/// # Why one, and not a larger number
+///
+/// The epoch deadline is set to `1` tick beyond the current epoch at instance
+/// creation ([`instance::Instance::create`]), and this constant is the `delta`
+/// the async yield policy uses to extend it. A value of `1` means *"yield at
+/// every tick"*, which is the finest-grained fairness the mechanism offers.
+///
+/// A larger delta trades scheduling fairness for fewer executor round-trips. It
+/// is not configurable in V1 because there is no measurement yet that would
+/// justify a particular larger number, and an unmeasured tuning knob is a
+/// liability: it reads as meaningful, so somebody changes it, and nothing
+/// detects whether that helped (`PERF-015` owns the measurement that would
+/// close this).
+///
+/// # Why the non-zero rule is a compile-time check
+///
+/// A `delta` of `0` would extend the deadline by nothing, so the guest would
+/// yield on every tick and never progress — a livelock that presents as a hung
+/// guest with no trap to explain it. That is a property of the *constant*, so
+/// it is enforced by the compiler below rather than by a test: a runtime
+/// `assert!(EPOCH_YIELD_TICKS > 0)` is a constant expression, which clippy
+/// rejects (`assertions_on_constants`) and which could never fail anyway. A
+/// check that cannot fail carries no information (`§M-006`).
+pub const EPOCH_YIELD_TICKS: u64 = 1;
+
+// The livelock guard, checked when this crate is compiled.
+const _: () = assert!(
+    EPOCH_YIELD_TICKS > 0,
+    "EPOCH_YIELD_TICKS must be at least 1: a delta of 0 extends the deadline by \
+     nothing, so a yielding guest would yield forever without making progress"
+);
+
 pub mod ambient;
 pub mod config;
 pub mod host_clock;
@@ -43,8 +78,8 @@ pub use config::{
     aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
 };
 pub use instance::{
-    digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionOutcome,
-    Instance, PreparedComponent,
+    digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
+    ExecutionOutcome, Instance, PreparedComponent,
 };
 pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,

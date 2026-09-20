@@ -4797,6 +4797,119 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-056 — `HOST-015`/`HOST-016`: the epoch yield, and the call that forbids synchronous entry
+
+**What was built.** The async execution path in `qqq-host`, which is `HOST-015`
+(*"Use `*_async` Wasmtime APIs throughout"*) and `HOST-016` (*"Implement
+`epoch_deadline_async_yield_and_update` so a guest yield does not stall the
+reactor"*). `HOST-016` had been marked `[!]` blocked on `HOST-015` after `§O-051`
+found it falsely ticked.
+
+`Instance::create_async` / `Instance::run_async` /
+`Instance::run_async_measured` join the existing synchronous trio, and
+`ExecutionMode` records which path an instance was built for. Four tests cover
+it, including a pair that differ in exactly one variable — the entry point — and
+assert **opposite** outcomes on the same spinning guest and the same engine.
+
+#### §O-056a — `epoch_deadline_async_yield_and_update` is not a policy, it is an entry-point restriction
+
+The first implementation installed the yield policy on **every** store, with a
+comment asserting it was "a no-op under the synchronous path". That was wrong,
+and every synchronous test in the module failed immediately with:
+
+```
+store configuration requires that `*_async` functions are used instead
+```
+
+Read in Wasmtime's source rather than inferred from the message. `Store::
+epoch_deadline_async_yield_and_update` (`runtime/store/async_.rs`) calls
+`set_async_required(Asyncness::Yes)`, and `StoreOpaque::validate_sync_call`
+(`runtime/store.rs`) is the first thing a synchronous entry point runs:
+
+```rust
+pub(crate) fn validate_sync_call(&self) -> Result<()> {
+    if self.async_state.async_required {
+        bail!("store configuration requires that `*_async` functions are used instead");
+    }
+}
+```
+
+So the call does not merely *take effect* on async entry — **it forbids
+synchronous entry outright, starting at instantiation**, because instantiation
+is itself a synchronous entry. The consequence for the design is that the two
+paths need two constructors and two instantiators (`instantiate` vs
+`instantiate_async`), and that `ExecutionMode` documents a fact Wasmtime
+enforces rather than a convention this crate maintains.
+
+**This is the third time this session that a comment stated a third-party
+behaviour wrongly and only the compiler or a test caught it** (`§O-053b` is the
+second). The pattern is consistent: a claim about a dependency's semantics is
+written as prose where nothing checks it.
+
+#### §O-056b — The test deadlocked, and the deadlock was the finding
+
+`#[tokio::test]` builds a **current-thread** runtime. A yielding guest returns
+`Pending` on the executor it is running on; on a single-threaded runtime there
+is no other thread to fire the timer that drives the next epoch tick, so the
+test did not fail — it **hung the entire suite**, twice, for ten minutes each,
+leaving orphaned `qqq_host-*.exe` processes that then held the test binary and
+produced a *second*, unrelated failure (`LNK1104: cannot open file`).
+
+The fix is `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`, but
+the finding is larger than the fix: **a reactor that is single-threaded cannot
+use this yield at all.** The mechanism depends on a timer firing concurrently
+with the guest's continuation, which is exactly what a single-threaded executor
+cannot provide. That is a constraint on `qqq-serve`, which must therefore run a
+multi-threaded reactor if it wants CPU-bound guests to timeslice rather than
+monopolise the loop.
+
+Diagnosed by running the tests `--test-threads=1` and watching which name was
+last printed before silence. The alternative — reading the test body and
+reasoning about it — had already produced two wrong conclusions (fuel budget,
+tick interval), both of which were "fixed" without effect.
+
+#### §O-056c — Three test failures that were the test's arithmetic, not the code
+
+The yield test failed three times before passing, and **all three failures were
+in the test**:
+
+| Attempt | What it asserted | What actually happened |
+|---|---|---|
+| 1 | guest still running after a 20 ms tick | `QQQ-3002 FuelExhausted` — the 10 M default budget burns in ~2 ms |
+| 2 | same, with 100 G and 5 ms ticks | still `FuelExhausted` — the guest burns ~1 G **per millisecond** |
+| 3 | same, with 10 T and 1 ms ticks | **passed**, and the probe confirmed 4 ticks fired |
+
+The sync control had the same defect in the other direction: with the default
+fuel it reported `QQQ-3002`, and only after raising the budget did it report
+`QQQ-3003 the guest exceeded its wall-clock deadline` — the epoch trap it was
+supposed to observe. **A control that passes for the wrong reason is worse than
+no control**, because it certifies the wrong mechanism.
+
+One further wrong assertion, worth recording because it is the `§O-051` shape:
+the sync test searched the trap's *text* for "epoch" or "interrupt". Wasmtime's
+message for an epoch preemption is *"wasm trap: interrupt"*, which contains
+neither — `trap.rs` already maps it to `ErrorCode::EpochDeadlineExceeded`, has
+its own test for that mapping, and the assertion belonged on the code all along.
+
+#### §O-056d — The livelock guard, moved from a test to the compiler
+
+A `delta` of `0` would extend the epoch deadline by nothing, so a guest would
+yield forever without progressing — a livelock presenting as a hung guest with
+no trap to explain it. The first version guarded this with
+`assert!(EPOCH_YIELD_TICKS > 0)` in a test. Clippy's `assertions_on_constants`
+rejected it, correctly: an assertion over a `const` is a constant expression
+that either always passes or never compiles, so it carries no information
+(`§M-006`).
+
+The rule is now a `const _: () = assert!(...)` in `lib.rs`, evaluated at compile
+time. **Verified by injection**: setting the constant to `0` fails the build
+with `error[E0080]: evaluation panicked: EPOCH_YIELD_TICKS must be at least 1`,
+and restoring it compiles. The test that remains asserts only the *pinned value*
+(`== 1`), so retuning the constant is a deliberate edit with a failing test
+rather than a silent change.
+
+---
+
 ### §O-054 — `cargo deny` was failing two ways at once, and one was hiding the other
 
 **What was found.** The workspace was green on `cargo check`, `cargo clippy -D

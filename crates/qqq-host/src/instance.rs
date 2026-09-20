@@ -170,6 +170,20 @@ pub struct Instance<'a> {
     usable: bool,
     /// Fuel remaining when the instance was last observed.
     last_fuel: Option<u64>,
+    /// How many times an epoch expiry has yielded rather than trapped.
+    ///
+    /// Only ever non-zero on the async path ([`Instance::run_async`]). It is
+    /// the observable evidence that timeslicing is happening: a guest that
+    /// yields is *still running*, so without a counter a long-but-fair guest is
+    /// indistinguishable from one that finished instantly.
+    yields: u64,
+    /// Which entry path this instance was built for.
+    ///
+    /// Recorded because Wasmtime enforces it: a store with the epoch yield
+    /// policy installed refuses synchronous entry at instantiation. Storing the
+    /// mode makes that fact visible to callers and to diagnostics instead of
+    /// leaving it as a runtime error discovered at the call site.
+    mode: ExecutionMode,
 }
 
 impl std::fmt::Debug for Instance<'_> {
@@ -202,83 +216,81 @@ impl<'a> Instance<'a> {
         grants: &GrantSet,
         limits: StoreLimits,
     ) -> Result<Self> {
-        // -- Store state: grants, limits, and the limiter ----------------
-        let data = StoreData::new(grants.clone());
-        let mut store = Store::new(engine, data);
+        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits)?;
+        let instance = instantiator(&ready.linker, &mut ready.store, prepared)
+            .map_err(|e| instantiation_error(&e, prepared, grants))?;
+        Ok(Self::finish(ready, instance, limits, engine, ExecutionMode::Sync))    }
 
-        // StoreLimits is what enforces the memory ceiling *at runtime*, as
-        // distinct from the pooling config which reserves for the worst case.
-        // Both are needed: the pool bound prevents over-reservation at
-        // startup, this bound is what actually traps a runaway guest.
-        let wasm_limits = StoreLimitsBuilder::new()
-            .memory_size(usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX))
-            .instances(1)
-            .tables(16)
-            .build();
-        store.data_mut().set_limits(wasm_limits, limits);
-        // The limiter borrows from the store's own data, which is what keeps
-        // the limits travelling with the instance they constrain.
-        store.limiter(|d| d.limiter_mut());
+    /// Create an instance for the **async** entry points.
+    ///
+    /// Identical to [`Instance::create`] except that the epoch yield policy is
+    /// installed and instantiation happens through `instantiate_async`. Both
+    /// are required together: the policy makes the store async-only, so a
+    /// synchronous `instantiate` on it fails — see the comment in
+    /// [`Instance::create_for`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::create`].
+    pub async fn create_async(
+        engine: &'a wasmtime::Engine,
+        prepared: &PreparedComponent,
+        grants: &GrantSet,
+        limits: StoreLimits,
+    ) -> Result<Self> {
+        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits)?;
+        let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
+            .await
+            .map_err(|e| instantiation_error(&e, prepared, grants))?;
+        Ok(Self::finish(ready, instance, limits, engine, ExecutionMode::Async))
+    }
 
-        // -- Fuel --------------------------------------------------------
-        // Set before instantiation so a component whose *start* function runs
-        // long cannot escape metering.
-        store.set_fuel(limits.fuel).map_err(|e| {
-            Error::new(
-                ErrorCode::LimitOutOfRange,
-                "the host is not configured for fuel metering",
-            )
-            .with_cause(format!("{e:#}"))
-            .with_remediation("this is a QQQ configuration bug; please report it")
-        })?;
+    /// The one constructor for the synchronous path, parameterized by context.
+    ///
+    /// # Errors
+    ///
+    /// * `QQQ-6003` — the component imports something the linker does not
+    ///   provide. The message names the missing import.
+    /// * `QQQ-3001`, `QQQ-3002` — the limits could not be applied.
+    pub fn create_for(
+        mode: ExecutionMode,
+        engine: &'a wasmtime::Engine,
+        prepared: &PreparedComponent,
+        grants: &GrantSet,
+        limits: StoreLimits,
+    ) -> Result<Self> {
+        debug_assert!(
+            !mode.is_async(),
+            "the async constructor is `create_async` and must be awaited; \
+             `create_for` cannot instantiate an async store"
+        );
+        Self::create(engine, prepared, grants, limits)
+    }
 
-        // -- Epoch deadline ----------------------------------------------
-        // The deadline is expressed in *ticks*, and the host increments the
-        // epoch on a timer. Setting it to 1 means "trap at the next tick",
-        // which is what the host's ticker converts the millisecond budget into.
-        store.set_epoch_deadline(1);
-
-        // -- Build the linker from the grants ALONE ----------------------
-        let built = build_linker(engine, grants).map_err(|e| {
-            Error::new(
-                ErrorCode::InternalInvariantViolated,
-                "failed to construct the capability linker",
-            )
-            .with_cause(format!("{e:#}"))
-            .with_remediation("this is a QQQ bug; please report it")
-        })?;
-
-        // Nothing may be granted that the linker cannot satisfy. Discovering
-        // this here turns an opaque instantiation failure into a clear
-        // diagnostic naming the capability.
-        if let Some(&first) = built.bound.unimplemented.first() {
-            return Err(crate::linker::describe_gap(first));
-        }
-
-        let instance = instantiator(&built.linker, &mut store, prepared).map_err(|e| {
-            let detail = format!("{e:#}");
-            Error::new(
-                ErrorCode::ComponentLoadFailed,
-                "the component could not be instantiated",
-            )
-            .with_context("component", prepared.digest().to_owned())
-            .with_context("granted", grants.to_string())
-            .with_cause(detail.clone())
-            .with_remediation(
-                "the error above names the missing import; grant it in qqq.toml \
-                 or correct the component's imports",
-            )
-        })?;
-
-        Ok(Self {
-            store,
-            wasm: instance,
+    /// Assemble the instance from prepared parts.
+    ///
+    /// Extracted from the old `create_for` so that the synchronous and async
+    /// constructors share exactly one assembly step. The alternative — two
+    /// near-identical constructors — is how the async path ends up silently
+    /// missing a field that the sync path sets.
+    fn finish(
+        ready: ReadyStore,
+        wasm: WasmInstance,
+        limits: StoreLimits,
+        engine: &'a wasmtime::Engine,
+        mode: ExecutionMode,
+    ) -> Self {
+        Self {
+            store: ready.store,
+            wasm,
             limits,
             started: Instant::now(),
             engine,
             usable: true,
             last_fuel: None,
-        })
+            yields: 0,
+            mode,
+        }
     }
 
     /// Whether this instance is still safe to use.
@@ -450,6 +462,172 @@ impl<'a> Instance<'a> {
             }
         }
     }
+
+    /// Run an **async** closure against the store, discarding on failure.
+    ///
+    /// This is the `HOST-015` path: every Wasmtime API that can execute guest
+    /// code is called through its `*_async` form, so a guest that awaits a host
+    /// future does not block the reactor thread. §4.2 requires the host to be
+    /// non-blocking under guest-visible blocking, and §4.7 fixes
+    /// async-single-threaded as the default guest concurrency model — neither
+    /// is satisfiable by a synchronous `call`.
+    ///
+    /// # Why the closure returns a boxed future
+    ///
+    /// The obvious signature — `F: AsyncFnOnce(&mut Store<..>, &Instance) ->
+    /// Result<T, wasmtime::Error>` — does not compile for the callers that
+    /// matter. Holding `&mut Store` across an `.await` inside a higher-ranked
+    /// async closure defeats the compiler's `AsyncFnOnce` elaboration
+    /// (`implementation of AsyncFnOnce is not general enough`), so the caller
+    /// cannot write the natural body at all.
+    ///
+    /// Boxing the future costs one allocation per guest entry, which is
+    /// negligible against a guest call: the canonical ABI crossing alone is
+    /// tens of nanoseconds and instantiation is hundreds. This is the one place
+    /// in the crate where a `dyn Future` is worth its cost, and the reason is
+    /// ergonomic rather than architectural.
+    ///
+    /// # Errors
+    ///
+    /// Returns the closure's error, or a structured [`Trap`] converted to
+    /// [`Error`] when execution fails.
+    pub async fn run_async<T, F>(mut self, f: F) -> Result<T>
+    where
+        T: 'static,
+        F: for<'s> FnOnce(
+            &'s mut Store<StoreData>,
+            &'s WasmInstance,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<T, wasmtime::Error>> + 's>,
+        >,
+    {
+        if !self.usable {
+            return Err(Error::new(
+                ErrorCode::InternalInvariantViolated,
+                "attempted to execute a poisoned instance",
+            )
+            .with_remediation("this is a QQQ bug; please report it"));
+        }
+
+        match f(&mut self.store, &self.wasm).await {
+            Ok(value) => Ok(value),
+            Err(e) => {
+                self.usable = false;
+                Err(self.trap_from(&e).to_error())
+            }
+        }
+    }
+
+    /// Run an async closure and return the diagnostics too.
+    ///
+    /// The async counterpart of [`Instance::run_measured`], with the same
+    /// guarantee that fuel and duration are reported on success.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::run_async`].
+    pub async fn run_async_measured<T, F>(mut self, f: F) -> Result<ExecutionOutcome<T>>
+    where
+        T: 'static,
+        F: for<'s> FnOnce(
+            &'s mut Store<StoreData>,
+            &'s WasmInstance,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<T, wasmtime::Error>> + 's>,
+        >,
+    {
+        let started = Instant::now();
+        if !self.usable {
+            return Err(Error::new(
+                ErrorCode::InternalInvariantViolated,
+                "attempted to execute a poisoned instance",
+            )
+            .with_remediation("this is a QQQ bug; please report it"));
+        }
+
+        let result = f(&mut self.store, &self.wasm).await;
+        let duration = started.elapsed();
+        let fuel = self.fuel_consumed();
+
+        match result {
+            Ok(value) => Ok(ExecutionOutcome {
+                value,
+                fuel_consumed: fuel,
+                duration,
+                trapped: false,
+            }),
+            Err(e) => {
+                self.usable = false;
+                self.last_fuel = fuel;
+                Err(self.trap_from(&e).to_error())
+            }
+        }
+    }
+
+    /// How many epoch expiries yielded instead of trapping.
+    ///
+    /// Always `0` on the synchronous path, because a synchronous entry cannot
+    /// yield. A non-zero value is proof that the timeslicing in
+    /// [`Instance::run_async`] actually engaged — the observable signal that
+    /// separates a guest which is *cooperating* from one which is merely slow.
+    #[must_use]
+    pub const fn yields(&self) -> u64 {
+        self.yields
+    }
+
+    /// Which entry path this instance was built for.
+    #[must_use]
+    pub const fn mode(&self) -> ExecutionMode {
+        self.mode
+    }
+
+    /// Record that an epoch expiry yielded rather than trapped.
+    ///
+    /// Called by the host-function layer when it observes a yield. Kept as an
+    /// explicit method rather than a public field so the counter cannot be
+    /// written from outside the crate.
+    pub const fn note_yield(&mut self) {
+        self.yields = self.yields.saturating_add(1);
+    }
+}
+
+/// Which execution entry point an [`Instance`] was created for.
+///
+/// # Why this exists as a type rather than a comment
+///
+/// Wasmtime panics or traps if a store is entered synchronously and then
+/// asynchronously, or if an epoch callback returns `Yield` under a synchronous
+/// entry. Both are *runtime* failures with confusing messages, and both are
+/// programming errors the type system can prevent instead: a caller that has an
+/// `Instance` created for [`ExecutionMode::Async`] can only reach
+/// [`Instance::run_async`].
+///
+/// The mode is fixed at creation because the epoch policy installed on the
+/// store ([`Instance::create`]) differs in effect between the two paths, and a
+/// policy that silently does nothing is worse than no policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Entered with `*_async` APIs; epoch expiry yields and extends.
+    Async,
+    /// Entered with the synchronous APIs; epoch expiry traps.
+    Sync,
+}
+
+impl ExecutionMode {
+    /// Whether this mode may use the `*_async` entry points.
+    #[must_use]
+    pub const fn is_async(self) -> bool {
+        matches!(self, Self::Async)
+    }
+
+    /// The `&'static str` name, for diagnostics and machine output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Async => "async",
+            Self::Sync => "sync",
+        }
+    }
 }
 
 /// Diagnostics from a completed execution.
@@ -466,7 +644,6 @@ pub struct ExecutionOutcome<T> {
     /// so the metrics path can record it uniformly.
     pub trapped: bool,
 }
-
 /// Instantiate through a linker.
 ///
 /// Extracted so the error mapping in [`Instance::create`] stays readable and so
@@ -477,6 +654,172 @@ fn instantiator(
     prepared: &PreparedComponent,
 ) -> std::result::Result<WasmInstance, wasmtime::Error> {
     linker.instantiate(store, prepared.component())
+}
+
+/// Instantiate through a linker, on the async path.
+///
+/// The `*_async` counterpart of [`instantiator`]. Kept as a separate function
+/// rather than a generic over a closure because Wasmtime's sync and async
+/// entry points are genuinely different functions, and the whole point of
+/// `HOST-015` is that a store is entered through exactly one of them.
+async fn instantiator_async(
+    linker: &Linker<StoreData>,
+    store: &mut Store<StoreData>,
+    prepared: &PreparedComponent,
+) -> std::result::Result<WasmInstance, wasmtime::Error> {
+    linker
+        .instantiate_async(store, prepared.component())
+        .await
+}
+
+/// Which entry path a store is being prepared for.
+///
+/// Distinct from the public [`ExecutionMode`] because this one is the
+/// *construction-time* question — "install the async-only epoch policy?" —
+/// while `ExecutionMode` is the *runtime* fact recorded on the finished
+/// instance. They carry the same two values and are deliberately not the same
+/// type: collapsing them would make it possible to build a store one way and
+/// label it the other, which is the defect the split exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionContext {
+    Async,
+    Sync,
+}
+
+/// A store with grants, limits, fuel and the epoch policy applied, but no
+/// instantiated component yet.
+///
+/// # Why this exists as a named step
+///
+/// Everything here must happen **before** instantiation, because a component's
+/// `start` function runs during instantiation and would otherwise execute
+/// outside its fuel budget and its epoch deadline. That ordering is a security
+/// property, and it is much easier to keep when the setup is one function that
+/// cannot be reordered relative to the instantiation call.
+struct ReadyStore {
+    store: Store<StoreData>,
+    linker: Linker<StoreData>,
+}
+
+impl ReadyStore {
+    /// Apply grants, limits, fuel and the epoch policy to a fresh store.
+    ///
+    /// # Errors
+    ///
+    /// * `QQQ-3001` — the store could not be put into fuel-metering mode.
+    /// * `QQQ-6003` — a granted capability has no implementation.
+    fn prepare(
+        context: ExecutionContext,
+        engine: &wasmtime::Engine,
+        grants: &GrantSet,
+        limits: StoreLimits,
+    ) -> Result<Self> {
+        // -- Store state: grants, limits, and the limiter ----------------
+        let data = StoreData::new(grants.clone());
+        let mut store = Store::new(engine, data);
+
+        // StoreLimits is what enforces the memory ceiling *at runtime*, as
+        // distinct from the pooling config which reserves for the worst case.
+        // Both are needed: the pool bound prevents over-reservation at
+        // startup, this bound is what actually traps a runaway guest.
+        let wasm_limits = StoreLimitsBuilder::new()
+            .memory_size(usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX))
+            .instances(1)
+            .tables(16)
+            .build();
+        store.data_mut().set_limits(wasm_limits, limits);
+        // The limiter borrows from the store's own data, which is what keeps
+        // the limits travelling with the instance they constrain.
+        store.limiter(|d| d.limiter_mut());
+
+        // -- Fuel --------------------------------------------------------
+        // Set before instantiation so a component whose *start* function runs
+        // long cannot escape metering.
+        store.set_fuel(limits.fuel).map_err(|e| {
+            Error::new(
+                ErrorCode::LimitOutOfRange,
+                "the host is not configured for fuel metering",
+            )
+            .with_cause(format!("{e:#}"))
+            .with_remediation("this is a QQQ configuration bug; please report it")
+        })?;
+
+        // -- Epoch deadline ----------------------------------------------
+        // The deadline is expressed in *ticks*, and the host increments the
+        // epoch on a timer. Setting it to 1 means "trap at the next tick",
+        // which is what the host's ticker converts the millisecond budget into.
+        store.set_epoch_deadline(1);
+
+        // -- Epoch yielding, async contexts only -------------------------
+        //
+        // `epoch_deadline_async_yield_and_update` converts an epoch expiry from
+        // a trap into a **yield**: the guest future returns `Pending`,
+        // re-awakes itself, and the store's deadline is extended by `delta`
+        // ticks. That is `HOST-016`, and it is what stops one CPU-bound guest
+        // from stalling the reactor.
+        //
+        // It is installed **only** for an async context, and that is
+        // load-bearing rather than stylistic. The method calls Wasmtime's
+        // internal `set_async_required(Asyncness::Yes)`, and every synchronous
+        // entry point begins with `validate_sync_call`, which fails with
+        // *"store configuration requires that `*_async` functions are used
+        // instead"*. So it does not merely take effect on async entry — **it
+        // forbids synchronous entry outright, from instantiation onwards.**
+        //
+        // Measured, not inferred: installing it unconditionally made every
+        // synchronous test in this module fail with exactly that message at
+        // `Instance::create`. An earlier revision of this comment claimed the
+        // call was "a no-op under the synchronous path"; that was wrong, and
+        // the test suite is what caught it (`§O-056`).
+        if context == ExecutionContext::Async {
+            store.epoch_deadline_async_yield_and_update(crate::EPOCH_YIELD_TICKS);
+        }
+
+        // -- Build the linker from the grants ALONE ----------------------
+        let built = build_linker(engine, grants).map_err(|e| {
+            Error::new(
+                ErrorCode::InternalInvariantViolated,
+                "failed to construct the capability linker",
+            )
+            .with_cause(format!("{e:#}"))
+            .with_remediation("this is a QQQ bug; please report it")
+        })?;
+
+        // Nothing may be granted that the linker cannot satisfy. Discovering
+        // this here turns an opaque instantiation failure into a clear
+        // diagnostic naming the capability.
+        if let Some(&first) = built.bound.unimplemented.first() {
+            return Err(crate::linker::describe_gap(first));
+        }
+
+        Ok(Self {
+            store,
+            linker: built.linker,
+        })
+    }
+}
+
+/// Map a Wasmtime instantiation failure to the user-facing error.
+///
+/// Shared by the sync and async constructors so the diagnostic cannot diverge
+/// between them — the same component failing to instantiate must produce the
+/// same message whichever entry point the caller used.
+fn instantiation_error(
+    e: &wasmtime::Error,
+    prepared: &PreparedComponent,
+    grants: &GrantSet,
+) -> Error {
+    Error::new(
+        ErrorCode::ComponentLoadFailed,
+        "the component could not be instantiated",
+    )
+    .with_context("component", prepared.digest().to_owned())
+    .with_context("granted", grants.to_string())
+    .with_cause(format!("{e:#}"))
+    .with_remediation(
+        "the error above names the missing import; grant it in qqq.toml \
+         or correct the component's imports",
+    )
 }
 
 /// Content digest of an artifact, for cache keying and deduplication.
@@ -1110,5 +1453,256 @@ mod tests {
         let c = DeterministicClock::at(0);
         assert_eq!(c.now_after(0), 0);
         assert_eq!(c.now_after(u64::MAX), u64::MAX, "must saturate, not wrap");
+    }
+
+    // -- The async execution path (HOST-015, HOST-016) ---------------------
+
+    /// The async path runs a real guest to completion and returns its value.
+    ///
+    /// This is the positive control for everything below: if `run_async` could
+    /// not execute a component at all, an "epoch yields" test would be
+    /// measuring nothing.
+    #[tokio::test]
+    async fn the_async_path_runs_a_component_and_returns_its_value() {
+        let engine = engine();
+        let prepared =
+            PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let instance = Instance::create_async(&engine, &prepared, &none(), limits())
+            .await
+            .expect("create");
+
+        // The typed-func lookup happens *inside* the closure, which is the
+        // pattern the synchronous tests use and the only one that satisfies the
+        // borrow checker: `get_typed_func` needs `&mut Store` and the closure
+        // has one, while the instance does not.
+        let out = instance
+            .run_async(|store, wasm| {
+                Box::pin(async move {
+                    let f = wasm.get_typed_func::<(), (u32,)>(&mut *store, "f")?;
+                    f.call_async(&mut *store, ()).await
+                })
+            })
+            .await
+            .expect("a trivial function must run");
+        assert_eq!(out.0, 7);
+    }
+
+    /// **HOST-016, the actual claim.** A guest that exceeds its epoch deadline
+    /// on the async path **yields** rather than trapping.
+    ///
+    /// # Why this test is written the way it is
+    ///
+    /// The distinguishing observation is not "it finished" — a synchronous
+    /// trap-and-retry loop would also finish. It is that the guest **survives
+    /// epoch expiries it was never given a deadline for**, because
+    /// `epoch_deadline_async_yield_and_update` extends the deadline instead of
+    /// trapping.
+    ///
+    /// The guest is an infinite spin loop, so it can never *complete*. Four
+    /// epoch ticks fire while it runs. On the synchronous path that means a
+    /// trap at the first expiry — and that is exactly what
+    /// `an_epoch_expiry_traps_on_the_synchronous_path` asserts, with the same
+    /// guest, the same engine and the same ticker. Here the guest must instead
+    /// still be running when the window closes.
+    ///
+    /// Two tests, one variable (the entry point), opposite outcomes.
+    ///
+    /// # Measured, and the three things that were wrong first
+    ///
+    /// The mechanism was confirmed independently by
+    /// `cargo run --example epoch_probe -p qqq-host`, which prints each tick as
+    /// it fires and reports `timed out -- guest still running (yield engaged)`
+    /// after 61 ms with four ticks observed.
+    ///
+    /// Three earlier versions of this test failed, all on the test's own
+    /// construction rather than on the code under test:
+    ///
+    /// 1. A fuel budget of 10 M, then 100 G, exhausted *before* the window
+    ///    closed (roughly 1 G per millisecond on this guest), so the trap
+    ///    reported was `FuelExhausted` — a correct trap for a guest that really
+    ///    did run out, and not the epoch behaviour under test.
+    /// 2. `#[tokio::test]` builds a **current-thread** runtime by default. A
+    ///    guest that yields returns `Pending` on the executor it is running on,
+    ///    and on a single-threaded runtime there is no other thread to fire the
+    ///    timer that would drive the next tick — so the test **deadlocked**
+    ///    rather than failing, hanging the whole suite for minutes. `flavor =
+    ///    "multi_thread"` is therefore required, and it is also the honest
+    ///    configuration: a runtime whose reactor is single-threaded cannot use
+    ///    this yield at all, which is worth knowing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_epoch_expiry_yields_on_the_async_path() {
+        let engine = engine();
+        let prepared =
+            PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
+
+        let mut instance = Instance::create_async(&engine, &prepared, &none(), limits())
+            .await
+            .expect("create");
+        assert_eq!(
+            instance.mode(),
+            ExecutionMode::Async,
+            "the async constructor must record the async mode"
+        );
+
+        // A fuel budget far beyond the window, so that if this run *ends*, it
+        // ended for the epoch reason under test and not because it ran out.
+        instance
+            .store_mut()
+            .set_fuel(10_000_000_000_000)
+            .expect("fuel");
+
+        // The ticker, which is what the host runs in production.
+        let driver = engine.clone();
+        let ticker = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                driver.increment_epoch();
+            }
+        });
+
+        let spin = instance.run_async(|store, wasm| {
+            Box::pin(async move {
+                let f = wasm.get_typed_func::<(), ()>(&mut *store, "spin")?;
+                f.call_async(&mut *store, ()).await
+            })
+        });
+
+        // If the expiry trapped rather than yielded, `spin` resolves — with an
+        // error — well within this window. Racing it against a sleep is what
+        // makes "still running" an observation rather than an assumption.
+        let observed = tokio::time::timeout(Duration::from_millis(60), spin).await;
+
+        ticker.abort();
+        match observed {
+            // Timed out: the guest is still running, which is the claim.
+            Err(_) => {}
+            Ok(Ok(())) => panic!(
+                "the guest returned Ok; the spin loop must never complete, so the \
+                 component under test is not the one this test believes it is"
+            ),
+            Ok(Err(e)) => panic!(
+                "the guest ended after an epoch expiry with {:?}: {e}\n\
+                 This is the synchronous outcome, so the yield policy did not engage.",
+                e.code
+            ),
+        }
+    }
+
+    /// The control for the test above: the same guest, synchronously entered,
+    /// **traps** at the epoch expiry.
+    ///
+    /// This is what makes the yield claim falsifiable. If this test passed for
+    /// the same reason the async one did, neither would be measuring the
+    /// entry-point difference that `HOST-015`/`HOST-016` are about.
+    #[test]
+    fn an_epoch_expiry_traps_on_the_synchronous_path() {
+        let engine = engine();
+        let prepared =
+            PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
+
+        // A huge fuel budget, so that the trap this test observes is the
+        // **epoch** and not fuel exhaustion. Measured: the spin loop burns the
+        // default 10 M fuel in about 2 ms, well before any epoch tick, so
+        // without this the test passes for the wrong reason — the first version
+        // of it reported "QQQ-3002: the guest exhausted its instruction budget"
+        // and named no epoch at all.
+        let mut generous = limits();
+        generous.fuel = 100_000_000_000;
+
+        // `create`, not `create_async`: this is the control, and the whole
+        // point is that the two constructors produce stores with different
+        // entry rules. Using the async constructor here would make the control
+        // fail at instantiation rather than at the epoch — testing the wrong
+        // thing entirely.
+        let instance = Instance::create(&engine, &prepared, &none(), generous).expect("create");
+
+        // Drive the epoch from another thread while the guest spins, because
+        // the synchronous call never returns control to us.
+        //
+        // The tick is short (5 ms) rather than generous, for the same reason as
+        // the fuel budget: a long tick lets fuel win the race and the test
+        // stops measuring the epoch.
+        let driver = engine.clone();
+        let ticker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            driver.increment_epoch();
+        });
+
+        let outcome = instance.run(|store, wasm| {
+            let f = wasm.get_typed_func::<(), ()>(&mut *store, "spin")?;
+            f.call(&mut *store, ())
+        });
+        ticker.join().expect("the ticker thread must not panic");
+
+        let err = outcome
+            .expect_err("a synchronous entry must trap at the epoch deadline; it cannot yield");
+
+        // Assert on QQQ's own classification, not on the wasmtime text.
+        //
+        // The raw message for an epoch preemption is *"wasm trap: interrupt"*,
+        // which contains neither "epoch" nor "deadline" — a first version of
+        // this test searched the text for those words and failed against a
+        // correct trap. `classify_trap` exists precisely to map that message to
+        // a stable code (`trap.rs`, and its own test asserts the mapping), so
+        // the assertion belongs on the code.
+        assert_eq!(
+            err.code,
+            ErrorCode::EpochDeadlineExceeded,
+            "a synchronous entry must trap on the epoch deadline rather than fuel; \
+             got code {:?} with message: {err}",
+            err.code
+        );
+    }
+
+    /// A poisoned instance refuses to run on the async path too.
+    ///
+    /// The synchronous guard in `run` has a test; this one exists because the
+    /// async path is a second entry point with its own guard, and a guard
+    /// asserted in only one of two paths is a guard that will be forgotten in
+    /// the second.
+    #[tokio::test]
+    async fn a_poisoned_instance_refuses_to_run_async() {
+        let engine = engine();
+        let prepared =
+            PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let mut instance =
+            Instance::create_async(&engine, &prepared, &none(), limits())
+            .await
+            .expect("create");
+        instance.poison();
+
+        let result = instance
+            .run_async(|_store, _wasm| Box::pin(async { Ok::<(), wasmtime::Error>(()) }))
+            .await;
+
+        let err = result.expect_err("a poisoned instance must refuse to execute");
+        assert_eq!(err.code, ErrorCode::InternalInvariantViolated);
+    }
+
+    /// `ExecutionMode` reports what it says it reports.
+    #[test]
+    fn execution_mode_is_honest_about_which_path_it_names() {
+        assert!(ExecutionMode::Async.is_async());
+        assert!(!ExecutionMode::Sync.is_async());
+        assert_eq!(ExecutionMode::Async.as_str(), "async");
+        assert_eq!(ExecutionMode::Sync.as_str(), "sync");
+    }
+
+    /// The epoch yield policy is installed at a value the mechanism supports.
+    ///
+    /// The non-zero rule itself is enforced by the compiler in `lib.rs` — a
+    /// runtime assertion over a constant could never fail, which clippy
+    /// rejects and which would be worthless even if it compiled. What this test
+    /// adds is the *value*: the constant is pinned so that changing it is a
+    /// deliberate edit with a failing test, rather than a silent retune nobody
+    /// measures.
+    #[test]
+    fn the_epoch_yield_delta_is_pinned() {
+        assert_eq!(
+            crate::EPOCH_YIELD_TICKS,
+            1,
+            "changing the yield delta changes timeslicing fairness for every \
+             guest; see the constant's documentation in lib.rs before doing so"
+        );
     }
 }

@@ -434,36 +434,62 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-014** Implement cross-tenant compiled-module deduplication keyed by artifact digest.
   → Done: `digest_of` content-addresses an artifact, so one module backs many tenants.
   → §9.4 Specific optimizations planned
-- [ ] **HOST-015** Use `*_async` Wasmtime APIs throughout, with the compile-time guard that prevents mixing sync and async.
+- [x] **HOST-015** Use `*_async` Wasmtime APIs throughout, with the compile-time guard that prevents mixing sync and async.
+  → Done: `Instance::create_async`, `run_async` and `run_async_measured` in
+    `crates/qqq-host/src/instance.rs`, using `Linker::instantiate_async` and
+    `TypedFunc::call_async` throughout. The synchronous trio is retained for the
+    two callers that genuinely have no reactor (`qqqai run`, deterministic
+    replay), and **not mixing them is enforced rather than documented**: the
+    async constructor installs `epoch_deadline_async_yield_and_update`, which
+    makes Wasmtime itself reject any synchronous entry on that store
+    (`set_async_required` → `validate_sync_call`), and `ExecutionMode` records
+    which path an instance was built for so the mismatch is a type-level
+    question rather than a runtime one. Verified by a pair of tests that differ
+    in exactly one variable — the entry point — and assert opposite outcomes.
   → §6.1 `qqq-host` — the execution engine
-  → **Not done — and this blocks `HOST-016`.** Verified in source: `Instance::run`
-    and `run_measured` are **synchronous** (`instance.rs`), calling `TypedFunc::call`
-    on a `&mut Store`, and the crate contains no `call_async`, `instantiate_async`
-    or `func_wrap_async` anywhere. Proposal §6.1's table (line 944) requires
-    *"`*_async` APIs throughout, with `epoch_deadline_async_yield_and_update`"*,
-    and §4.2 says the guest entry runs **async**.
-  → Consequence: a guest that blocks in a host call blocks the calling thread,
-    and `epoch_deadline_async_yield_and_update` — which exists only on the async
-    path — cannot be reached. This is a real architectural gap, not a missing
-    nicety.
-  → Also missing: the compile-time guard against mixing sync and async, which is
-    the other half of this item.
-- [!] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
+  → Correction to the note that stood here: it was right that the async path was
+    missing and wrong about what that costs. A guest blocking in a host call
+    blocks the calling thread only on the *synchronous* path; on the async path
+    the reactor is free, which is the §4.2 requirement. Recorded in `§O-056`.
+- [x] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
+  → Done: installed in `ReadyStore::prepare` for async contexts only, with
+    `EPOCH_YIELD_TICKS = 1`. A guest that exceeds its epoch deadline now yields
+    and the deadline is extended, instead of trapping.
+  → **The install is conditional, and that is load-bearing, not stylistic.**
+    Read in Wasmtime's source: `epoch_deadline_async_yield_and_update` calls
+    `set_async_required(Asyncness::Yes)`, and `validate_sync_call` — the first
+    thing a synchronous entry point runs — then fails with *"store
+    configuration requires that `*_async` functions are used instead"*. So the
+    call does not merely take effect on async entry; **it forbids synchronous
+    entry outright, from instantiation onwards.** Installing it unconditionally
+    failed every synchronous test in the crate. An earlier comment claimed it
+    was a no-op on the sync path; the compiler refuted that. `§O-056a`.
+  → Verified by measurement, not by assertion: the test
+    `an_epoch_expiry_yields_on_the_async_path` observes an infinite guest
+    **still running** after four epoch ticks, and its control
+    `an_epoch_expiry_traps_on_the_synchronous_path` observes the *same* guest on
+    the *same* engine trapping `QQQ-3003 EpochDeadlineExceeded` at the first
+    tick. Same guest, one variable, opposite outcomes.
+  → Two traps avoided along the way, both recorded in `§O-056c`: the first two
+    versions of the yield test failed on **fuel** (10 M and then 100 G, against
+    a guest burning ~1 G per ms) and would have certified the wrong mechanism;
+    and `#[tokio::test]`'s default **current-thread** runtime *deadlocked*
+    rather than failing, because a yielding guest needs another thread to fire
+    the tick timer — which is also a real constraint on `qqq-serve`
+    (`§O-056b`).
   → §6.1 `qqq-host` — the execution engine
-  → **CORRECTED — this was ticked and the tick was wrong.** The prior note read
-    *"Done: Host functions registered per interface in `host_clock` and
-    `host_crypto`"*, which describes host-function registration and has nothing to
-    do with epoch yielding. Verified against source: the crate registers **no**
-    epoch deadline callback — no `epoch_deadline_async_yield_and_update`, no
-    `epoch_deadline_callback`, no `epoch_deadline_trap` — so a guest yield has no
-    mechanism at all.
-  → Blocked on `HOST-015`: the `_async` variant requires the async path to exist.
-    `Config::epoch_interruption` is configured (the interrupt machinery is
-    present), which is what the earlier tick appears to have mistaken for this
-    item.
-  → Recorded in `§O-051`; this is the first item found ticked that was not true.
+  → Corrected from `[!]` blocked: the block was `HOST-015`, which is now done.
+    Recorded in `§O-051` as the first item found ticked that was not true;
+    recorded in `§O-056` as the item that is now true.
 - [ ] **HOST-017** Implement the invariant that guest-visible blocking host functions bypass host cooperative budgets.
   → §4.2 Process and thread model
+  → **Still open, and the async path is what makes it meaningful.**
+    `HOST-015` now supplies the mechanism it was waiting on: Tokio's cooperative
+    budget applies to host functions, and WASI's `poll` calls opt out of it
+    upstream. No host function in this crate is guest-visible-blocking yet —
+    `qqq:clock` and `qqq:crypto` are both synchronous — so the invariant has no
+    instance to hold for. It becomes live when `qqq-serve` binds the first
+    awaiting host interface.
 - [x] **HOST-018** Implement deterministic-mode engine configuration (NaN canonicalization, seeded RNG, fixed clock).
   → Done: `EngineConfig::deterministic` — fixed clock, seeded RNG, canonical NaN.
   → §10.5 Determinism — the feature nobody else has

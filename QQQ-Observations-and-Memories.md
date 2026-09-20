@@ -2568,6 +2568,23 @@ and `:1`, and the test that pins this is named for the case.
 
 ---
 
+#### §O-031e — Clippy caught a `MutexGuard` held across an `await`
+
+In one of the new integration tests, a lock guard was held while awaiting. That
+is a real deadlock hazard rather than a style nit: the guard is not `Send`-safe
+across a suspension point in the general case, and the failure mode is a hang
+that appears only under contention.
+
+The fix is a scope, and the reason it is worth recording is that this is the
+second time in this round that a lint pointed at a genuine defect rather than a
+formatting preference (`§O-029a` was the first). Silencing such a lint would have
+shipped the hazard.
+
+**Cross-refs:** Checklist `ARCH-006`, `PERF-016`, `PERF-003`, `SRV-001`,
+`ARCH-011`; Proposal §4.2, §4.4, §6.4.
+
+---
+
 ### §O-032 — `qqq-pkg` begins: semver, the lockfile, and the content store
 
 The package layer has three jobs before any solver can exist: decide what a
@@ -2667,18 +2684,118 @@ code has been wrong every time it has been tempting.
 
 ---
 
-In one of the new integration tests, a lock guard was held while awaiting. That
-is a real deadlock hazard rather than a style nit: the guard is not `Send`-safe
-across a suspension point in the general case, and the failure mode is a hang
-that appears only under contention.
+### §O-033 — `[dependencies]` was silently ignored, and how it was found
 
-The fix is a scope, and the reason it is worth recording is that this is the
-second time in this round that a lint pointed at a genuine defect rather than a
-formatting preference (`§O-029a` was the first). Silencing such a lint would have
-shipped the hazard.
+Starting `CLI-005` (`qqqai add`) required knowing where a dependency *goes*, so
+the manifest model in `qqq-cap` was the first thing to read. It did not model
+`[dependencies]` at all.
 
-**Cross-refs:** Checklist `ARCH-006`, `PERF-016`, `PERF-003`, `SRV-001`,
-`ARCH-011`; Proposal §4.2, §4.4, §6.4.
+That alone would be an ordinary gap. What made it a defect is the interaction
+with two other facts:
+
+1. `Manifest` is **not** `deny_unknown_fields` at the top level (deliberately —
+   the per-capability structs below it are, which gives a better error).
+2. So a `qqq.toml` containing `[dependencies]` parsed **successfully**, with the
+   table discarded.
+
+Verified against the real binary, not reasoned about: a manifest with a
+dependency and `qqqai caps` printed `app: no capabilities granted` and exited
+`0`. The user had written a dependency; the tool had read the file; nothing
+connected the two. The failure mode is the worst shape available — a silent
+success, on the one input a package manager exists to process.
+
+---
+
+#### §O-033a — A dependency that silently does not exist is worse than one that fails to resolve
+
+The instinct is to rank failures by severity: a resolution error is annoying, a
+silent no-op is harmless because nothing broke. That ranking is backwards here,
+and the reason is *who discovers it and when*.
+
+A resolution failure is discovered by the person who just typed the command, in
+the directory they are working in, seconds after they wrote the line — holding
+all the context needed to fix it. A silently-dropped dependency is discovered by
+whoever runs the code, at the point the import is missing or the behaviour is
+wrong, in an environment they may not control, with a stack trace that points at
+their own source. The cheap failure and the expensive failure are the same event
+with the diagnosis attached or removed.
+
+This is why `[dependencies]` is now modelled rather than tolerated, and why the
+regression test asserts the **count** and not just `is_ok`: the old code also
+returned `Ok`, so a test that only checked for success would have passed before
+the fix and would pass again if the field were ever removed.
+
+---
+
+#### §O-033b — Writing the test found a second instance of the same bug
+
+`[dev-dependencies]` is spelled with a hyphen; the Rust field is
+`dev_dependencies`. Serde does not bridge that automatically, so the field
+parsed as **empty** — the identical silent-drop defect I was in the middle of
+fixing, reproduced in my own new code, four lines away from the comment
+explaining why silent drops are unacceptable.
+
+The test caught it on the first run (`left: 0, right: 1`). This is the third time
+this round that a test written to *pin* a property instead found a defect, and
+it is the strongest argument for the discipline in `§O-032a`: a test that asserts
+a value is a claim that can be refuted, while a test that asserts `is_ok()` is a
+claim that cannot. `is_ok()` would have passed here.
+
+The fix is `#[serde(rename = "dev-dependencies")]`, and the serialization test
+was updated to check the hyphenated key — otherwise it would have asserted the
+absence of a key that was never going to be present.
+
+---
+
+#### §O-033c — Where a requirement is validated, when the crate graph forbids the obvious answer
+
+The natural place to reject `>=1.0 <2.0` is the real `Requirement` parser, which
+lives in `qqq-pkg::semver` and has its own tests. `qqq-cap` cannot call it:
+`qqq-pkg` depends on `qqq-cap`, so the call would be a cycle.
+
+Three options, and the reasoning matters more than the choice:
+
+| Option | Why not |
+|---|---|
+| Duplicate the parser in `qqq-cap` | Two implementations of "is this a valid requirement" that would eventually disagree; the disagreement appears as a resolution failure on a manifest that validated. |
+| Move `Requirement` down into `qqq-core` | Arguable, but `qqq-core` is the error/identity layer and a requirement grammar is neither. |
+| **Shape-check in `qqq-cap`, grammar-check in `qqqai add`** | Chosen. Each crate checks what it can decide honestly. |
+
+The last row is the honest division. `qqq-cap` decides what is decidable from
+the string alone — empty, absurdly long, whitespace without a comma — and names
+the **table and package** in the error. `qqqai add`, which links `qqq-pkg`,
+parses the real grammar *before writing*, which is the only moment the user is
+still present to be told about a typo.
+
+The error text is the deliverable here. Verified through the binary:
+
+```
+error[QQQ-2002]: field `dev-dependencies.qqqai/assert` is invalid:
+  `>=1.0 <2.0` contains a space but no comma; a range is written `>=1.0, <2.0`
+```
+
+Serde alone cannot produce this. The `Dependency` enum is untagged, so a
+malformed entry reports `field <unknown>: data did not match any variant` — true,
+and useless. Validating after parse is what makes the message name the entry.
+
+---
+
+#### §O-033d — Clippy's `unused_self`, and a wrong fix caught before committing
+
+`validate_dependencies` was written as a method and read nothing from `self`.
+Clippy flagged it, correctly, and the fix is to make it an associated function.
+
+Worth recording because the *first* attempt at that fix was wrong: I edited a doc
+comment instead of the signature, which duplicated the comment and left `&self`
+in place. Re-reading the region showed the function was already correct, so the
+bad edit was discarded rather than committed — two edits were then needed in the
+right places: the signature, and the two call sites.
+
+The general lesson: `edit` anchored on a doc comment is a poor way to change a
+signature, because doc comments repeat across a file. Anchoring on the code
+being changed is what makes the edit unambiguous.
+
+---
 
 ---
 
@@ -2948,6 +3065,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 |---|---|---|
 | 2026-09-19 | Document opened. Initial decisions `§D-001` … `§D-009`, observations `§O-001` … `§O-008`, mistakes `§M-001` … `§M-006`, corrections `§C-001` … `§C-006`, stubs `§S-001` … `§S-005`, questions `§Q-001` … `§Q-012`. | Architect |
 | 2026-09-19 | Verification round. All four load-bearing architecture claims verified against Wasmtime 48.0.2 (`§O-006`); four WAT/ABI findings recorded (`§O-007`); two Wasmtime API differences recorded (`§O-008`); validator self-test built and **7/7 fault injections detected** (`§M-006`), which exposed and fixed two real defects: Appendix A/Observations correction drift, and Proposal decision citations that were write-only. `check [8]`, `[9]`, `[10]`, `[11]` added to the validator; self-test wired into CI. | Architect |
-| 2026-09-19 | `qqq-pkg` opened (`§O-032`). `semver.rs` (`Requirement`/`Op`, caret-under-1.0 rule), `lock.rs` (`Lockfile`, `LockDiff::compute`, NUL-separated covering hash verified on read), `store.rs` (`Digest`, two-level fan-out `StoreLayout`, verified reads). The pre-release gap in `qqq-core::Version` recorded as `§O-032a` with the test that pins it; four tests written against a non-existent `Version.pre` field deleted. Three clippy findings fixed, two of which were real defects (`§O-032d`). Workspace: **754 tests pass**, clippy clean at `-D warnings`. | Architect |
+| 2026-09-19 | `qqq-pkg` opened (`§O-032`). `semver.rs` (`Requirement`/`Op`, caret-under-1.0 rule), `lock.rs` (`Lockfile`, `LockDiff::compute`, NUL-separated covering hash verified on read), `store.rs` (`Digest`, two-level fan-out `StoreLayout`, verified reads). The pre-release gap in `qqq-core::Version` recorded as `§O-032a` with the test that pins it; four tests written against a non-existent `Version.pre` field deleted. Three clippy findings fixed, two of which were real defects (`§O-032d`). | Architect |
+| 2026-09-19 | `[dependencies]` and `[dev-dependencies]` were **silently ignored** by `Manifest`: the struct did not model them and is not `deny_unknown_fields` at the top level, so a manifest declaring a dependency parsed successfully with the table discarded (`qqqai caps` printed "no capabilities granted" and exited 0). Both tables are now modelled, validated, and named in errors (`§O-033`). Writing the test found the *same* defect again in new code — `[dev-dependencies]` needs an explicit serde `rename`, and the hyphenated key parsed as empty (`§O-033b`). Requirement validation is split by what each crate can honestly decide, because `qqq-pkg` depends on `qqq-cap` and the real parser is therefore unreachable from the manifest layer (`§O-033c`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

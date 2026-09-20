@@ -52,6 +52,84 @@ pub struct Manifest {
     /// `[limits]` — enforceable resource bounds.
     #[serde(default)]
     pub limits: Limits,
+    /// `[dependencies]` — packages this project links against.
+    ///
+    /// Modelled explicitly rather than left to be ignored. Before this field
+    /// existed, a manifest containing `[dependencies]` parsed **successfully**
+    /// and the dependencies were silently dropped: `qqqai` reported no
+    /// capabilities from a dependency it had not seen, and the user had no
+    /// indication that the table was inert. A dependency that silently does not
+    /// exist is worse than one that fails to resolve, because the first is
+    /// discovered at runtime by the person least able to explain it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, Dependency>,
+    /// `[dev-dependencies]` — packages needed only for tests and benchmarks.
+    ///
+    /// Kept separate because a dev-dependency's capabilities must **not** be
+    /// granted to the shipped component. Merging the two tables would let a
+    /// test-only package widen the production authority surface, which is
+    /// precisely the supply-chain shape §5.4 exists to make visible.
+    #[serde(
+        default,
+        rename = "dev-dependencies",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub dev_dependencies: BTreeMap<String, Dependency>,
+}
+
+/// One entry in `[dependencies]`.
+///
+/// Written as a table (`{ version = "1.2", features = ["simd"] }`) per §5.3, but
+/// a bare version string (`"qqqai/json" = "1.2"`) is accepted too: it is the
+/// spelling every other ecosystem uses and there is no ambiguity to resolve.
+/// Rejecting it would be a gratuitous difference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Dependency {
+    /// `"qqqai/json" = "1.2"` — a version requirement and nothing else.
+    Version(String),
+    /// `"qqqai/json" = { version = "1.2", features = [...], ... }`.
+    Full(Box<DependencyDetail>),
+}
+
+/// The full form of a dependency entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyDetail {
+    /// The semver requirement, e.g. `1.2`, `^1.2.3`, `>=1.0, <2.0`.
+    pub version: String,
+    /// Optional features to enable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    /// An alternative source: `path+…`, `git+…`, `registry+…`.
+    ///
+    /// Recorded because two packages with the same name and version from
+    /// different sources are different packages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Pin to exactly this version, ignoring the usual caret widening.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
+}
+
+impl Dependency {
+    /// The version requirement string, whichever form was written.
+    #[must_use]
+    pub fn requirement(&self) -> &str {
+        match self {
+            Self::Version(v) => v,
+            Self::Full(d) => &d.version,
+        }
+    }
+
+    /// The source, if one was given. A bare version string has none.
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::Version(_) => None,
+            Self::Full(d) => d.source.as_deref(),
+        }
+    }
 }
 
 /// `[package]` — the project's identity.
@@ -746,6 +824,80 @@ impl Manifest {
         Ok(())
     }
 
+    /// Validate one dependency table.
+    ///
+    /// `table` is the TOML table name (`dependencies` or `dev-dependencies`) so
+    /// the error can point at the right one — the two tables can hold the same
+    /// package name, and "the error is in the other table" is a confusing thing
+    /// to have to work out.
+    ///
+    /// An associated function rather than a method because it reads nothing from
+    /// the manifest: everything it needs is passed in. Clippy's `unused_self`
+    /// flagged exactly that, and it was right — a `&self` that is never read
+    /// suggests the function is more coupled to the manifest than it is.
+    fn validate_dependencies(
+        deps: &BTreeMap<String, Dependency>,
+        table: &str,
+    ) -> Result<(), ManifestError> {
+        for (name, dep) in deps {
+            // The name must be a usable identifier. A dependency key is what
+            // appears in a lockfile and in a capability diff, so a malformed
+            // one is rejected at the source rather than surfacing later as a
+            // resolution failure.
+            if name.trim().is_empty() {
+                return Err(ManifestError::InvalidField {
+                    field: table.to_owned(),
+                    reason: "a dependency name must not be empty".to_owned(),
+                });
+            }
+
+            let req = dep.requirement();
+            if req.trim().is_empty() {
+                return Err(ManifestError::InvalidField {
+                    field: format!("{table}.{name}"),
+                    reason: "the version requirement must not be empty".to_owned(),
+                });
+            }
+
+            // Shape-checked here; *semantics* deliberately not.
+            //
+            // `qqq-cap` owns the manifest, and requirement syntax is part of a
+            // manifest's shape. Resolving it is `qqq-pkg`'s job, and the crate
+            // graph runs qqq-pkg -> qqq-cap, so qqq-cap cannot call the real
+            // parser without a dependency cycle. Duplicating the parser would
+            // be worse than not checking: two implementations of "is this a
+            // valid requirement" would eventually disagree, and the
+            // disagreement would surface as a resolution failure on a manifest
+            // that validated cleanly.
+            //
+            // So the check here is limited to what this crate can decide
+            // honestly: the string is non-empty and contains no whitespace-only
+            // nonsense. `qqqai add` (which links `qqq-pkg`) validates the real
+            // grammar before writing, which is where the user can still be
+            // told about a typo.
+            if req.len() > 64 {
+                return Err(ManifestError::InvalidField {
+                    field: format!("{table}.{name}"),
+                    reason: format!(
+                        "`{req}` is {} characters; a version requirement is far shorter \
+                         than that, which suggests the wrong value was pasted here",
+                        req.len()
+                    ),
+                });
+            }
+            if req.contains(char::is_whitespace) && !req.contains(',') {
+                return Err(ManifestError::InvalidField {
+                    field: format!("{table}.{name}"),
+                    reason: format!(
+                        "`{req}` contains a space but no comma; a range is written \
+                         `>=1.0, <2.0`"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Validate every `[limits]` field against the range the host can enforce.
     ///
     /// A limit outside the enforceable range is rejected rather than clamped:
@@ -814,6 +966,15 @@ impl Manifest {
 
         // -- limits ------------------------------------------------------
         self.validate_limits()?;
+
+        // -- dependencies ------------------------------------------------
+        // Validated here rather than left to serde so the error can name the
+        // offending *package*, which serde cannot do: the untagged `Dependency`
+        // enum reports "data did not match any variant", and the key is out of
+        // its scope by then. A user who typo'd a field inside one entry needs
+        // to be told which entry.
+        Self::validate_dependencies(&self.dependencies, "dependencies")?;
+        Self::validate_dependencies(&self.dev_dependencies, "dev-dependencies")?;
 
         // -- filesystem capabilities -------------------------------------
         for (i, fs) in self.capabilities.fs.iter().enumerate() {
@@ -1519,5 +1680,187 @@ reproducible = true
         assert_eq!(quoted(&["a"]), "`a`");
         assert_eq!(quoted(&["a", "b"]), "`a` or `b`");
         assert_eq!(quoted(&["a", "b", "c"]), "`a`, `b` or `c`");
+    }
+
+    // -- [dependencies] -----------------------------------------------------
+    //
+    // These exist because of a real defect. `Manifest` did not model
+    // `[dependencies]` and is not `deny_unknown_fields` at the top level, so a
+    // manifest containing the table parsed **successfully** with the
+    // dependencies silently dropped. `qqqai caps` on such a project reported
+    // "no capabilities granted" and exited 0 — the user had written a
+    // dependency, the tool had read the file, and nothing connected the two.
+
+    /// The regression test for that silence.
+    ///
+    /// The assertion is deliberately on the *count*, not just on `is_ok`: the
+    /// old code also returned `Ok`. A test that only checked for success would
+    /// have passed before the fix and would pass again if the field were ever
+    /// removed.
+    #[test]
+    fn a_dependency_table_is_parsed_not_silently_dropped() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = { version = \"1.2\" }\n";
+        let m = Manifest::parse(src).expect("must parse");
+
+        assert_eq!(
+            m.dependencies.len(),
+            1,
+            "the dependency must be visible, not dropped: {:?}",
+            m.dependencies
+        );
+        let d = m
+            .dependencies
+            .get("qqqai/json")
+            .expect("the key is present");
+        assert_eq!(d.requirement(), "1.2");
+        assert_eq!(d.source(), None, "no source was given");
+    }
+
+    /// The bare-string form is what every other ecosystem uses; refusing it
+    /// would be a gratuitous difference, so it is accepted and means the same.
+    #[test]
+    fn a_bare_version_string_is_accepted_as_a_dependency() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = \"1.2\"\n";
+        let m = Manifest::parse(src).expect("must parse");
+        let d = m.dependencies.get("qqqai/json").expect("present");
+        assert_eq!(d.requirement(), "1.2");
+    }
+
+    #[test]
+    fn the_full_dependency_form_carries_features_and_source() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\
+                   \"qqqai/json\" = { version = \"1.2\", features = [\"simd\"], \
+                   source = \"registry+https://pkg.qqq.dev\" }\n";
+        let m = Manifest::parse(src).expect("must parse");
+        let d = m.dependencies.get("qqqai/json").expect("present");
+        assert_eq!(d.source(), Some("registry+https://pkg.qqq.dev"));
+        match d {
+            Dependency::Full(detail) => assert_eq!(detail.features, vec!["simd"]),
+            Dependency::Version(v) => panic!("expected the full form, got version {v}"),
+        }
+    }
+
+    /// Dev-dependencies are a separate table on purpose.
+    ///
+    /// A test-only package must not be able to widen the shipped component's
+    /// authority, so the two tables must not be merged. If they ever are, this
+    /// test fails rather than silently granting production capabilities to a
+    /// benchmarking helper.
+    #[test]
+    fn dev_dependencies_are_a_separate_table() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = \"1.2\"\n\
+                   [dev-dependencies]\n\"qqqai/assert\" = \"1.0\"\n";
+        let m = Manifest::parse(src).expect("must parse");
+
+        assert_eq!(m.dependencies.len(), 1, "only the real dependency");
+        assert_eq!(m.dev_dependencies.len(), 1, "only the dev dependency");
+        assert!(m.dependencies.contains_key("qqqai/json"));
+        assert!(!m.dependencies.contains_key("qqqai/assert"));
+        assert!(m.dev_dependencies.contains_key("qqqai/assert"));
+    }
+
+    /// A typo inside a dependency table is an error, matching `[build]`.
+    ///
+    /// The same argument as `an_unknown_build_field_is_rejected_not_ignored`:
+    /// `verison = "1.2"` silently ignored means the dependency resolves at
+    /// whatever the registry defaults to, and the user finds out in production.
+    #[test]
+    fn an_unknown_dependency_field_is_rejected_not_ignored() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = { verison = \"1.2\" }\n";
+        assert!(
+            Manifest::parse(src).is_err(),
+            "a typo'd dependency field must be an error, not silently ignored"
+        );
+    }
+
+    /// An empty version requirement is refused, and the error names the package.
+    ///
+    /// Naming the package is the point: serde cannot do it for an untagged enum
+    /// (it reports "data did not match any variant"), and a user with several
+    /// dependencies needs to know which one to open.
+    #[test]
+    fn an_empty_requirement_names_its_package() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = { version = \"\" }\n";
+        let e = Manifest::parse(src).unwrap_err();
+        let text = e.to_string();
+        assert!(
+            text.contains("qqqai/json"),
+            "the error must name the package: {text}"
+        );
+    }
+
+    /// A dev-dependency error must name the dev table, not the main one.
+    ///
+    /// The same package name can appear in both tables, so an error that says
+    /// only `dependencies.qqqai/json` would send the user to the wrong line.
+    #[test]
+    fn a_dev_dependency_error_names_the_dev_table() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dev-dependencies]\n\"qqqai/assert\" = { version = \"\" }\n";
+        let e = Manifest::parse(src).unwrap_err();
+        let text = e.to_string();
+        assert!(
+            text.contains("dev-dependencies"),
+            "the error must name the dev table: {text}"
+        );
+    }
+
+    /// A range written without a comma is a common typo and gets its own message.
+    #[test]
+    fn a_range_without_a_comma_is_explained() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [dependencies]\n\"qqqai/json\" = { version = \">=1.0 <2.0\" }\n";
+        let e = Manifest::parse(src).unwrap_err();
+        assert!(
+            e.to_string().contains("comma"),
+            "the error should explain the missing comma: {e}"
+        );
+    }
+
+    /// Ordinary requirements pass the shape check.
+    #[test]
+    fn normal_requirements_are_accepted() {
+        for req in ["1.2", "1", "^1.2.3", "~1.2.3", ">=1.0, <2.0", "=1.2.3", "*"] {
+            let src = format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                 [dependencies]\n\"qqqai/json\" = {{ version = \"{req}\" }}\n"
+            );
+            assert!(
+                Manifest::parse(&src).is_ok(),
+                "`{req}` must be accepted as a requirement shape"
+            );
+        }
+    }
+
+    /// A manifest with no dependencies is unchanged: the field defaults empty,
+    /// so existing projects parse exactly as they did before the field existed.
+    ///
+    /// Serialization is asserted through serde directly rather than through a
+    /// `to_toml` helper, because no such helper exists yet — an earlier draft of
+    /// this test called one that was never written. The `skip_serializing_if`
+    /// attributes are what keep the empty tables out of any future writer, so
+    /// that is the property worth pinning.
+    #[test]
+    fn a_manifest_without_dependencies_has_none_and_serializes_clean() {
+        let m = Manifest::parse(MINIMAL).expect("must parse");
+        assert!(m.dependencies.is_empty());
+        assert!(m.dev_dependencies.is_empty());
+
+        let value = serde_json::to_value(&m).expect("must serialize");
+        let obj = value.as_object().expect("a manifest is a table");
+        assert!(
+            !obj.contains_key("dependencies"),
+            "an empty dependency table must not appear when serialized: {value}"
+        );
+        assert!(
+            !obj.contains_key("dev-dependencies"),
+            "an empty dev-dependency table must not appear when serialized: {value}"
+        );
     }
 }

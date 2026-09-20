@@ -84,12 +84,24 @@ def main() -> int:
 
     print("check [4] checklist item with no Proposal citation")
     results.append(expect_failure(
-        "strip CAP-001's citation line",
+        "strip CAP-011's citation line",
         CHECKLIST,
+        # # Why CAP-011 and not CAP-001
+        #
+        # This injection used CAP-001, which has since been ticked `- [x]` and
+        # gained a `→ Done:` line. The old pattern anchored on `- [ ]` and
+        # stopped matching, so the mutation became a no-op and the harness
+        # reported SKIP — which is the harness working correctly: it noticed its
+        # own injection had gone stale rather than silently passing.
+        #
+        # The fix is to use an item that is still open, and to match either
+        # checkbox state so a future tick does not silently disable it again.
         lambda t: re.sub(
-            r"(?m)^- \[ \] \*\*CAP-001\*\*.*?\r?\n\s*→ §[^\r\n]*",
-            "- [ ] **CAP-001** Implement the three capability kinds.",
-            t, count=1),
+            r"(?m)^- \[[ x]\] \*\*CAP-011\*\*.*?\r?\n\s*→ §[^\r\n]*",
+            "- [ ] **CAP-011** Implement the restricted policy expression language.",
+            t,
+            count=1,
+        ),
     ))
 
     print("check [8] Appendix A <-> Observations correction parity")
@@ -115,11 +127,16 @@ def main() -> int:
 
     print("check [6] duplicate checklist ID")
     results.append(expect_failure(
-        "duplicate CAP-001",
+        "duplicate CAP-011",
         CHECKLIST,
-        lambda t: t.replace(
-            "- [ ] **CAP-002**",
-            "- [ ] **CAP-001** duplicate", 1),
+        # Matches either checkbox state, so ticking the item later cannot turn
+        # this injection into a silent no-op the way it did before.
+        lambda t: re.sub(
+            r"(?m)^- \[[ x]\] \*\*CAP-012\*\*",
+            "- [ ] **CAP-011** duplicate",
+            t,
+            count=1,
+        ),
     ))
 
     # Final state must be clean again.

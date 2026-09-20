@@ -367,6 +367,47 @@ def main() -> int:
     # ----------------------------------------------------------------------
     # Report
     # ----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Progress accounting
+    #
+    # Reported on every run so the achieved fraction is visible without
+    # grepping. The reason this exists: items were being implemented and left
+    # unchecked, so the checklist understated the work and there was no signal
+    # that anything was wrong. A number that appears every time is one that
+    # gets noticed when it stops moving.
+    #
+    # Deliberately a *report*, not a gate. The checklist is not the work; it is
+    # a description of the work, and failing CI because a count is low would
+    # create pressure to tick boxes rather than to build things.
+    # ----------------------------------------------------------------------
+    done_items = re.findall(r"^- \[x\] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
+    open_items = re.findall(r"^- \[ \] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
+    partial = len(re.findall(r"^  → Partial:", checklist, re.M))
+    total = len(done_items) + len(open_items)
+    pct = (100 * len(done_items) / total) if total else 0
+
+    # A crate with a substantial implementation and no ticked items is the
+    # symptom that started this: work happening where the checklist cannot see
+    # it. Reported as a warning rather than an error, because a crate can
+    # legitimately be in progress with nothing finished.
+    implemented_crates = {}
+    crates_dir = root / "crates"
+    if crates_dir.is_dir():
+        for crate in sorted(crates_dir.iterdir()):
+            src = crate / "src"
+            if not src.is_dir():
+                continue
+            lines = 0
+            for rs in src.rglob("*.rs"):
+                try:
+                    lines += len(rs.read_text(encoding="utf-8").splitlines())
+                except OSError:
+                    pass
+            # Past the stub threshold: a skeleton lib.rs is ~10 lines, so any
+            # crate over 500 lines has real content.
+            if lines > 500:
+                implemented_crates[crate.name] = lines
+
     print("QQQ cross-reference validation")
     print("=" * 60)
     print(f"Proposal sections/anchors : {len(anchors)}")
@@ -375,6 +416,12 @@ def main() -> int:
     print(f"Stub markers in source    : {len(marker_ids)}")
     print(f"Stub entries in Observations: {obs_stub_count}")
     print("-" * 60)
+    print(f"Checklist progress        : {len(done_items)}/{total} ({pct:.1f}%) checked"
+          + (f", {partial} annotated partial" if partial else ""))
+    if implemented_crates:
+        print("Implemented crates (>500 lines):")
+        for name, lines in implemented_crates.items():
+            print(f"  {name:<12} {lines:>6} lines of Rust")
 
     if warnings:
         print(f"\n{len(warnings)} warning(s):")

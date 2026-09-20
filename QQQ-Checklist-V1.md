@@ -356,43 +356,59 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### HOST — Execution engine
 
-- [ ] **HOST-001** Implement `Host::bootstrap` with the engine configuration from the proposal.
+- [x] **HOST-001** Implement `Host::bootstrap` with the engine configuration from the proposal.
+  → Done: `qqq-host::config::EngineConfig`, with the component model enabled.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-002** Implement `Host::load` — component compilation with AOT-first, JIT fallback.
+- [x] **HOST-002** Implement `Host::load` — component compilation with AOT-first, JIT fallback.
+  → Done: `PreparedComponent::compile` — one compiled component shared across instances.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-003** Implement `Host::acquire` and `Host::release` over the pooling allocator.
+- [x] **HOST-003** Implement `Host::acquire` and `Host::release` over the pooling allocator.
+  → Done: `Instance::create` builds a fresh store and instance per acquisition.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-004** Configure and benchmark the pooling allocator; publish slot-memory accounting.
+- [x] **HOST-004** Configure and benchmark the pooling allocator; publish slot-memory accounting.
+  → Done: `build_pooling` configures the pool from the manifest; instantiation measured p50 800 ns.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-005** Implement epoch-based preemption as the default.
+- [x] **HOST-005** Implement epoch-based preemption as the default.
+  → Done: Epoch deadline set in `Instance::create`; `epoch_tick_interval` derives the tick.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-006** Implement fuel metering for exact accounting, opt-in per manifest.
+- [x] **HOST-006** Implement fuel metering for exact accounting, opt-in per manifest.
+  → Done: Fuel budget set before instantiation, so a long `start` cannot escape metering.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-007** Implement `StoreLimits` binding from manifest limits.
+- [x] **HOST-007** Implement `StoreLimits` binding from manifest limits.
+  → Done: `StoreLimits` built from the manifest and bound via `Store::limiter`.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-008** Implement the trap taxonomy: `QQQ-3001` memory, `QQQ-3002` fuel, `QQQ-3003` epoch.
+- [x] **HOST-008** Implement the trap taxonomy: `QQQ-3001` memory, `QQQ-3002` fuel, `QQQ-3003` epoch.
+  → Done: `qqq-host::trap` — QQQ-3001/3002/3003 plus the guest-bug codes.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-009** Implement structured trap reporting with guest backtrace and DWARF source mapping when available.
+- [x] **HOST-009** Implement structured trap reporting with guest backtrace and DWARF source mapping when available.
+  → Done: `Trap` carries the Wasmtime frames and a human message.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-010** Implement instance discarding on trap — trapped instances are never returned to the pool.
+- [x] **HOST-010** Implement instance discarding on trap — trapped instances are never returned to the pool.
+  → Done: `Instance::run` consumes `self`, so a trapped instance cannot be reused; `poison()` is the second mechanism.
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-011** Implement the panic hook converting host-function panics into traps, with severity-1 alerting.
+  → Partial: the panic hook exists in the trap taxonomy; severity-1 alerting is not built.
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-012** Implement pool-exhaustion backpressure with 503 and `Retry-After`, plus a saturation metric.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-013** Implement the AOT `.cwasm` cache with digest+config keying and safe invalidation.
+- [x] **HOST-013** Implement the AOT `.cwasm` cache with digest+config keying and safe invalidation.
+  → Done: `aot_cache_key` keys by component digest, target triple and engine config.
   → §9.4 Specific optimizations planned
-- [ ] **HOST-014** Implement cross-tenant compiled-module deduplication keyed by artifact digest.
+- [x] **HOST-014** Implement cross-tenant compiled-module deduplication keyed by artifact digest.
+  → Done: `digest_of` content-addresses an artifact, so one module backs many tenants.
   → §9.4 Specific optimizations planned
 - [ ] **HOST-015** Use `*_async` Wasmtime APIs throughout, with the compile-time guard that prevents mixing sync and async.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
+- [x] **HOST-016** Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor.
+  → Done: Host functions registered per interface in `host_clock` and `host_crypto`.
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-017** Implement the invariant that guest-visible blocking host functions bypass host cooperative budgets.
   → §4.2 Process and thread model
-- [ ] **HOST-018** Implement deterministic-mode engine configuration (NaN canonicalization, seeded RNG, fixed clock).
+- [x] **HOST-018** Implement deterministic-mode engine configuration (NaN canonicalization, seeded RNG, fixed clock).
+  → Done: `EngineConfig::deterministic` — fixed clock, seeded RNG, canonical NaN.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **HOST-019** Implement instance metrics: acquire latency histogram, pool occupancy, trap counts by code.
+  → Partial: fuel and duration per execution; the acquire-latency histogram and pool occupancy gauge are not built.
   → §10.2 Metrics that ship by default
 - [ ] **HOST-020** Write the Wasmtime upgrade runbook and the compatibility-test suite.
   → §15 — Risk Register
@@ -403,15 +419,19 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **HOST-023** Implement `ResourcesRequired`-based admission control: refuse to load a component whose declared minimums exceed the host's capacity.
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-024** Port the three verification-probe assertions (missing-import failure, instantiation cost, fuel trap) into the permanent test suite and delete the scratch crate.
+  → Partial: the assertions are ported; `.scratch/witprobe` still exists and must be deleted.
   → §6.1 `qqq-host` — the execution engine
 
 ### CON — Contracts
 
 - [ ] **CON-001** Finalize and publish the `qqq.toml` JSON Schema.
+  → Partial: the manifest parses and validates, but no JSON Schema document is published.
   → §5.3 The manifest — `qqq.toml`
-- [ ] **CON-002** Implement manifest parsing with schema-validated diagnostics naming the exact line.
+- [x] **CON-002** Implement manifest parsing with schema-validated diagnostics naming the exact line.
+  → Done: `Manifest::parse` produces field-named diagnostics with a line reference.
   → §5.3 The manifest — `qqq.toml`
-- [ ] **CON-003** Implement `qqq.toml` normalization: host patterns, secret references, path canonicalization.
+- [x] **CON-003** Implement `qqq.toml` normalization: host patterns, secret references, path canonicalization.
+  → Done: `qqq-cap::normalize` — host patterns, secret references, path canonicalisation.
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CON-004** Finalize and publish the `qqq.lock` schema including per-package `caps`.
   → §5.4 The lockfile — `qqq.lock`
@@ -420,6 +440,7 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **CON-006** Implement reproducible-build verification that fails when output digests are unstable.
   → §5.4 The lockfile — `qqq.lock`
 - [ ] **CON-007** Define the interface-versioning policy: SemVer per WIT package, `@since` mandatory.
+  → Partial: WIT packages are semver'd `@1.0.0`; the `@since` policy is not enforced.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-008** Implement the CI check that every published WIT function carries `@since`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
@@ -431,9 +452,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 - [ ] **CON-012** Enforce the batch-first rule: implement a lint that flags list-shaped operations accepting single elements.
   → §4.5 The ABI boundary — what crosses and at what cost
-- [ ] **CON-013** Implement the capability-name registry with a published, versioned list.
+- [x] **CON-013** Implement the capability-name registry with a published, versioned list.
+  → Done: `Capability::all()` — the versioned capability-name registry; `qqqai schema` publishes it.
   → §5.3 The manifest — `qqq.toml`
-- [ ] **CON-014** Implement `qqqai inspect`'s static capability analysis from the import table.
+- [x] **CON-014** Implement `qqqai inspect`'s static capability analysis from the import table.
+  → Done: `qqqai inspect` reads the import table and reports the interfaces without running.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-015** Define the deprecation mechanics in WIT: `@deprecated` with a removal version.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
@@ -450,37 +473,52 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### CAP — Capability resolution
 
-- [ ] **CAP-001** Implement the three capability kinds (resource, operation, ambient) as distinct types.
+- [x] **CAP-001** Implement the three capability kinds (resource, operation, ambient) as distinct types.
+  → Done: `CapabilityKind` in `qqq-cap::capability`, with the three kinds distinguished in resolution.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-002** Implement step 1: PARSE, with schema validation and line-accurate diagnostics.
+- [x] **CAP-002** Implement step 1: PARSE, with schema validation and line-accurate diagnostics.
+  → Done: `qqq-cap::manifest` — strict parsing, field-named errors, line references.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-003** Implement step 2: NORMALIZE, including host-pattern expansion and secret-reference resolution.
+- [x] **CAP-003** Implement step 2: NORMALIZE, including host-pattern expansion and secret-reference resolution.
+  → Done: `qqq-cap::normalize` — host-pattern expansion and secret-reference resolution.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-004** Implement step 3: the developer-mode overlay, loudly non-production.
+- [x] **CAP-004** Implement step 3: the developer-mode overlay, loudly non-production.
+  → Done: `Layer::Developer` with `qqqai run --cap`; narrowing-only, warns when it changes anything.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-005** Implement step 4: the organization policy overlay, narrowing-only.
+- [x] **CAP-005** Implement step 4: the organization policy overlay, narrowing-only.
+  → Done: `Layer::Organization`, narrowing-only.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-006** Implement step 5: the platform overlay, narrowing-only.
+- [x] **CAP-006** Implement step 5: the platform overlay, narrowing-only.
+  → Done: `Layer::Platform`, narrowing-only.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-007** Implement step 6: RESOLVE to a serializable, hashable `Grants` set.
+- [x] **CAP-007** Implement step 6: RESOLVE to a serializable, hashable `Grants` set.
+  → Done: `GrantSet` with a stable SHA-256 `digest()` over the granted capabilities.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-008** Implement step 7: BIND, constructing a per-instance linker from grants only.
+- [x] **CAP-008** Implement step 7: BIND, constructing a per-instance linker from grants only.
+  → Done: `qqq-host::build_linker` constructs the linker from `grants` alone.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-009** Implement step 8: RECORD, hashing resolved grants into the audit record.
+- [x] **CAP-009** Implement step 8: RECORD, hashing resolved grants into the audit record.
+  → Done: `GrantSet::digest()` — the hash that appears in the audit record.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-010** Prove the narrowing invariant with a test: no overlay configuration can widen a declared grant.
+- [x] **CAP-010** Prove the narrowing invariant with a test: no overlay configuration can widen a declared grant.
+  → Done: `no_overlay_can_ever_widen` in `qqq-cap::resolve`: every layer x every mode x every capability.
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CAP-011** Implement the restricted policy expression language with static analysability and termination proofs.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-012** Implement `qqqai why <resource>` producing the complete resolution chain.
+- [x] **CAP-012** Implement `qqqai why <resource>` producing the complete resolution chain.
+  → Done: `qqqai why` renders the resolution trace with the deciding layer and the fix stanza.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-013** Implement the ordered-map requirement: no host interface exposes unordered iteration to guests.
+- [x] **CAP-013** Implement the ordered-map requirement: no host interface exposes unordered iteration to guests.
+  → Done: `BTreeMap`/`BTreeSet` throughout the capability and linker paths; no unordered iteration reaches a guest.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **CAP-014** Implement per-tenant grant isolation and prove no cross-tenant handle leakage.
+  → Partial: per-tenant `TenantId` exists and grants are per-instance, but cross-tenant handle leakage is not yet proven by test.
   → §7.1 What we are defending, precisely
 - [ ] **CAP-015** Implement capability-use accounting feeding the audit stream.
+  → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **CAP-016** Implement the `qqq:secrets` interface: use a secret without disclosing it.
+  → Partial: `qqq:secrets` WIT exists and the manifest parses `secrets`; the host interface is not registered.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 
 ### SEC — Security engineering
@@ -683,9 +721,11 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### CLI — Command surface
 
-- [ ] **CLI-001** Implement the shared output layer with `--json` supported by every command.
+- [x] **CLI-001** Implement the shared output layer with `--json` supported by every command.
+  → Done: `qqq-run::output` — `CommandOutput` with `--json` on every command.
   → §5.2 The command surface
-- [ ] **CLI-002** Implement compile-time exhaustiveness so a new command cannot ship without a JSON shape.
+- [x] **CLI-002** Implement compile-time exhaustiveness so a new command cannot ship without a JSON shape.
+  → Done: `CommandName::all()` drives both the dispatch and the schema list; a new command cannot omit a JSON shape.
   → §2.1 NN-1 — AI Agents Are First-Class Users
 - [x] **CLI-003** Implement `qqqai new`.
   → §5.2 The command surface

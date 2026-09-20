@@ -18,8 +18,14 @@ workspace = true
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-io = { path = "../qqq-io", version = "0.0.0" }
+rustls.workspace = true
+rustls-pemfile = "2.2.0"
 # `sync` is added to the workspace's feature set because the connection ledger is
 # shared across connection tasks. Cargo unions features across the graph, so this
 # enables it for every crate in the workspace — which is why the reason is
 # recorded here rather than left as a bare feature name.
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14.10", features = ["pem"] }
+tokio-rustls = "0.26.5"

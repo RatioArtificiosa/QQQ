@@ -30,6 +30,7 @@ pub mod build;
 pub mod commands;
 pub mod deps;
 pub mod dev;
+pub mod install;
 pub mod manifest_loader;
 pub mod output;
 pub mod run;
@@ -55,6 +56,10 @@ pub use deps::{add, remove, DependencyChangeOutput, DependencyEdit};
 pub use dev::{
     build_once, capability_warning, run as run_dev, select_tier, watch_roots, watch_rules,
     DevOptions, DevOutput, ReloadRecord, ReloadTier,
+};
+pub use install::{
+    cannot_fetch, lockfile_path, lockfile_required, lockfile_stale, read_lockfile, resolve,
+    CapabilityChangeReport, InstallOptions, InstallOutput, LockMode, Resolution,
 };
 pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{

@@ -2921,6 +2921,119 @@ differently, not from reasoning harder about the code.
 
 ---
 
+### §O-035 — `qqqai install`, and the capability diff §5.4 exists for
+
+`CLI-006` is implemented in `qqq-run::install`. The command reads and verifies
+`qqq.lock`, resolves the manifest against its pins, prints the **capability
+diff**, and writes the lockfile atomically.
+
+---
+
+#### §O-035a — The command's job is showing authority, not downloading
+
+§5.4 states the reason `qqq-pkg` exists before the registry does:
+
+> *"`caps` is recorded per dependency. `qqqai install` prints a **capability
+> diff** — 'this update adds `http.client` to `qqqai/telemetry`'. Supply-chain
+> attacks today hide in code; here the **authority** delta is visible in the
+> diff."*
+
+So the deliverable is not "fetch packages". It is **showing what an install does
+to the project's authority**, and the implementation is shaped around that:
+
+* `escalation` is a **denormalized top-level field**, not something an agent
+  computes by walking a list. §5.4's claim is that CI can branch on an authority
+  change; a claim like that is only true if branching is one comparison.
+* The summary **leads with the escalation** when there is one, rather than
+  burying it after "wrote lockfile". A supply-chain signal that appears in the
+  fourth clause of a sentence is a signal that gets skimmed.
+* The test asserts the §5.4 example directly: `qqqai/telemetry` going
+  `1.0.0 → 1.1.0` while gaining `http.client` must set `has_escalation()`.
+
+---
+
+#### §O-035b — Three booleans became an enum, because the flags are ordered
+
+`--locked`, `--frozen` and `--offline` were first written as three `bool` fields.
+Clippy's `struct_excessive_bools` fired, and unlike a style lint this one pointed
+at a real modelling error: **the flags are ordered by strictness**, and
+independent booleans let a caller express contradictions — `frozen` without
+`locked`, or `frozen` *and* `offline` meaning two different things at once.
+
+`LockMode` is now `Update < Offline < Locked < Frozen`, with:
+
+| Mode | Requires current lockfile | Forbids network | May write |
+|---|---|---|---|
+| `Update` | no | no | yes |
+| `Offline` | no | **yes** | yes |
+| `Locked` | **yes** | no | no |
+| `Frozen` | **yes** | **yes** | no |
+
+Combining flags takes the **strictest**, so no combination can silently weaken
+the strongest flag the user wrote. `--frozen --offline` resolving to `frozen` is
+pinned by a test.
+
+The strictness order is a hand-written `strictness()` rank rather than
+`#[derive(Ord)]`. A derived order would depend on which line each variant sits
+on, so reordering the enum for readability would silently change what a flag
+combination means.
+
+**The same lint fired a second time on `InstallOutput`, and there the correct
+answer was different.** Those booleans describe *outcomes*, not a mode, so an
+enum would be wrong. Inspecting them showed `locked` and `offline` were both
+derivable from `mode` — the same fact recorded twice, which is how `--json`
+output drifts out of agreement with itself. They were **deleted**, and `mode` is
+now the single source of truth. One lint, two findings, two different fixes, and
+neither was `#[allow]`.
+
+---
+
+#### §O-035c — Writing a lockfile that lists unfetched packages would be the worst outcome available
+
+There is no registry (`PKG-006`), so nothing can be fetched. The tempting
+implementation resolves what it can, writes a lockfile containing the rest
+"optimistically", and reports success.
+
+That is rejected, and the reason is what a lockfile *is*: a promise about bytes.
+The next command would trust it, and the content-addressed store would be asked
+for a digest it has never seen — producing a failure at a later step, in a
+different command, with no indication that the cause was an install that lied.
+This is `§O-033a`'s argument applied to a second surface: **the cheap failure
+with the diagnosis attached beats the expensive one without it.**
+
+So the command does the half that is real and is precise about the half that is
+not:
+
+```
+error[QQQ-5001]: could not fetch `qqqai/json`: it is not in `qqq.lock` and
+  there is no registry to resolve it from
+
+  → the QQQ registry is not built yet (Checklist `PKG-006`), so only
+    dependencies already in `qqq.lock` resolve
+```
+
+The ordering of the checks is deliberate too: `--locked` is evaluated **before**
+the fetch check, so a CI job with a stale lockfile reports "out of date" — which
+the developer can act on — rather than "no registry", which they cannot.
+
+---
+
+#### §O-035d — A pin the manifest no longer accepts must not survive
+
+`resolve` carries a lockfile pin across only if it still satisfies the manifest's
+requirement. Carrying it unconditionally would be simpler and wrong: a manifest
+edited to demand `2.0` while the lockfile pins `1.2` is exactly the state
+`--locked` exists to catch, and preserving the pin would make `--locked` pass on
+a lockfile that contradicts its manifest.
+
+The failure mode of the *check* is the subtle one. `satisfies` returns `false`
+when the requirement fails to parse — not `true`. Returning `true` on a parse
+error would let a malformed requirement silently keep a stale pin, which is the
+opposite of the intent, and it is the sort of default that reads as reasonable
+until it ships.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3005,6 +3118,20 @@ error: manifest path `E:\QQQ\.scratch\witprobe\Cargo.toml` does not exist
 - **A validator must be tested by breaking things, not by observing that it passes.** The self-test is wired into CI (`DOC-007`).
 - **"Write-only" identifiers are a silent form of drift.** If an ID is defined but never cited, the cross-reference graph is decorative. Checks `[9]` and `[10]` exist specifically to catch this class.
 - **Your own fault injections can be wrong.** Two manual injections initially did not fire; investigation showed the *injections* were faulty (a mismatched literal, and a replace that left one instance of the target string intact), not the checks. Always inspect a non-firing injection before concluding a check is dead.
+
+---
+
+### §M-007 — Four changelog rows destroyed by anchoring `edit` on the last row
+
+**What happened.** Appending a row to the change-log table in this document was done four times by passing the *previous last row* as `old_string` and the old row plus the new one as `new_string`. Each time, the replacement was written correctly in intent but the old row was dropped from the replacement text on at least one attempt, silently deleting the row above the one being added.
+
+The deletions were only caught because each new row was preceded by re-reading the table to confirm the previous entry survived — which is exactly the check that should have been unnecessary. Three of the four were caught immediately; the fourth was caught only when searching for an unrelated string.
+
+**Fix.** The rows were restored from `git diff`, and the pattern in the repository is now: when appending to a table or list, `old_string` is the **smallest anchor that is unique** — a heading or a blank line — never a large block that has to be reproduced verbatim in `new_string`.
+
+**Lesson.** This is the same class as `§O-033d`: **an `edit` anchored on a long literal is a rewrite, not an insertion.** The tool replaces exactly what it is given, so any part of `old_string` not repeated in `new_string` is deleted. For a one-line addition, the anchor should be one line, not five. A writer who has to reproduce existing content in order to append to it will eventually reproduce it wrong.
+
+**Evidence it was a real risk and not just carelessness:** the loss was silent. `edit` reported success, the document still parsed, the validator still passed — because a missing changelog row breaks no invariant. Only a human or a targeted search would notice. A destructive edit to prose has no compiler.
 
 ---
 
@@ -3190,5 +3317,6 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | `qqq-pkg` opened (`§O-032`). `semver.rs` (`Requirement`/`Op`, caret-under-1.0 rule), `lock.rs` (`Lockfile`, `LockDiff::compute`, NUL-separated covering hash verified on read), `store.rs` (`Digest`, two-level fan-out `StoreLayout`, verified reads). The pre-release gap in `qqq-core::Version` recorded as `§O-032a` with the test that pins it; four tests written against a non-existent `Version.pre` field deleted. Three clippy findings fixed, two of which were real defects (`§O-032d`). | Architect |
 | 2026-09-19 | `[dependencies]` and `[dev-dependencies]` were **silently ignored** by `Manifest`: the struct did not model them and is not `deny_unknown_fields` at the top level, so a manifest declaring a dependency parsed successfully with the table discarded (`qqqai caps` printed "no capabilities granted" and exited 0). Both tables are now modelled, validated, and named in errors (`§O-033`). Writing the test found the *same* defect again in new code — `[dev-dependencies]` needs an explicit serde `rename`, and the hyphenated key parsed as empty (`§O-033b`). Requirement validation is split by what each crate can honestly decide, because `qqq-pkg` depends on `qqq-cap` and the real parser is therefore unreachable from the manifest layer (`§O-033c`). | Architect |
 | 2026-09-19 | `CLI-005` implemented: `qqqai add` and `qqqai remove` (`qqq-run::deps`), with `--dev`, `--exact`, `--feature`, `--registry`, `name@version` and `--json`. The manifest is edited as **text** so comments and formatting survive, written atomically via temp-file + rename, and re-parsed before publishing (`§O-034b`, §O-034c). The first end-to-end run refuted the version model: `1.2` — the spelling Proposal §5.3 itself writes — was rejected because `Version` requires three components, so a partial-version rule with zero-fill now widens instead of refusing (`§O-034a`). | Architect |
+| 2026-09-19 | `CLI-006` implemented: `qqqai install` (`qqq-run::install`), with `--locked`, `--frozen`, `--offline`, `--force` and `--dry-run`. `--locked`/`--frozen`/`--offline` were three booleans until clippy's `struct_excessive_bools` showed they are **ordered by strictness**, so they are now the `LockMode` enum with `Update < Offline < Locked < Frozen`; the same lint on the output struct showed `locked` and `offline` were derivable from `mode` and they were deleted (`§O-035b`). Reports the §5.4 capability diff with `escalation` as a first-class field. Fails with `QQQ-5001` rather than writing a lockfile that promises bytes nobody fetched, because a lockfile that lies is discovered by a later command with no trace of the cause (`§O-035c`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -743,7 +743,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Fixed on the way: `[dependencies]` was not modelled at all and was silently dropped (`§O-033`), and the requirement parser rejected `"1.2"` — the form Proposal §5.3 itself writes (`§O-034a`).
   → §5.2 command surface; §5.3 `qqq.toml`
   → §5.2 The command surface
-- [ ] **CLI-006** Implement `qqqai install` with `--locked`, `--frozen`, `--offline`.
+- [x] **CLI-006** Implement `qqqai install` with `--locked`, `--frozen`, `--offline`.
+  → Done: `qqq-run::install`, dispatched from `main.rs`. `LockMode` is an **enum ordered by strictness** rather than three booleans, so `frozen` without `locked` is unrepresentable; combining flags takes the strictest. Reads and verifies `qqq.lock`, resolves the manifest against its pins (a pin the manifest no longer accepts is dropped rather than carried), reports the §5.4 **capability diff** with `escalation` as a first-class field, and writes the lockfile atomically via the shared atomic write.
+  → Honest about the registry gap: with no registry (`PKG-006`) anything not already pinned fails with `QQQ-5001` naming the package, rather than writing a lockfile that promises bytes nobody fetched. `--locked` on a missing or stale lockfile fails with `QQQ-5003` and the exact next command.
+  → §5.2 command surface; §5.4 the lockfile and the capability diff
   → §6.5 `qqq-pkg` — package manager and registry
 - [ ] **CLI-007** Implement `qqqai update` with `--latest` and `--dry-run`.
   → §5.2 The command surface

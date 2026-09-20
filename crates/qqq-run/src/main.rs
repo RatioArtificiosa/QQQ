@@ -433,6 +433,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Dev => dispatch_dev(name, args, &mut out),
         CommandName::Add => dispatch_add(name, args, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
+        CommandName::Install => dispatch_install(name, args, flags, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -858,6 +859,187 @@ fn dispatch_remove(
     with_manifest(name, out, args, |loaded| {
         qqq_run::deps::remove(&loaded.path, table, &pkg)
     })
+}
+
+/// Dispatch `qqqai install`.
+///
+/// # Why this reports rather than pretends
+///
+/// There is no registry yet, so nothing can be fetched. The command does the
+/// half that is real — reading the lockfile, resolving the manifest against it,
+/// and printing the capability diff that Proposal §5.4 exists for — and then
+/// **fails**, naming the packages it could not fetch.
+///
+/// The alternative, writing a lockfile that lists packages never fetched, is the
+/// worst available outcome: a lockfile is a promise about bytes, the next
+/// command would trust it, and the content-addressed store would be asked for a
+/// digest it has never seen. A tool that reports success for work it did not do
+/// is worse than one that reports it could not do the work (`§O-033a`).
+fn dispatch_install(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match install_options(args, flags) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        // The manifest's two dependency tables, flattened in a deterministic
+        // order so the lockfile and the diff do not depend on map iteration.
+        let mut deps: Vec<(String, String)> = loaded
+            .manifest
+            .dependencies
+            .iter()
+            .map(|(n, d)| (n.clone(), d.requirement().to_owned()))
+            .collect();
+        // Dev-dependencies are installed too — a test suite needs them — but
+        // they are recorded with the same shape, and the capability diff will
+        // show them separately because their `caps` differ.
+        deps.extend(
+            loaded
+                .manifest
+                .dev_dependencies
+                .iter()
+                .map(|(n, d)| (n.clone(), d.requirement().to_owned())),
+        );
+        deps.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let path = qqq_run::lockfile_path(&loaded.path);
+        let previous = qqq_run::read_lockfile(&path)?;
+
+        // `--locked`/`--frozen` require a lockfile to exist. Checked before
+        // resolving so the error names the missing file rather than the
+        // first package that would have been added.
+        if opts.mode.requires_current() && previous.is_none() {
+            return Err(qqq_run::lockfile_required(&path));
+        }
+
+        let resolution = qqq_run::resolve(&deps, previous.as_ref());
+
+        // A `--locked` run must fail if the lockfile would change, and it must
+        // fail *before* reporting the diff as though it had been applied.
+        if opts.mode.requires_current() {
+            if !resolution.unresolved.is_empty() {
+                return Err(qqq_run::lockfile_stale(&format!(
+                    "`{}` does not resolve {}: the lockfile is out of date",
+                    path.display(),
+                    resolution.unresolved.join(", ")
+                )));
+            }
+            if !resolution.diff.is_empty() {
+                return Err(qqq_run::lockfile_stale(&format!(
+                    "`{}` would change ({} package(s)); --locked forbids that",
+                    path.display(),
+                    resolution.diff.changes.len()
+                )));
+            }
+        }
+
+        // Nothing can be fetched, so anything unresolved is a hard stop. This is
+        // checked after the `--locked` path so that CI reports "out of date"
+        // rather than "no registry" — the first is actionable, the second is not.
+        if let Some(missing) = resolution.unresolved.first() {
+            return Err(qqq_run::cannot_fetch(
+                missing,
+                "it is not in `qqq.lock` and there is no registry to resolve it from",
+            ));
+        }
+
+        let wrote = if opts.may_write() {
+            let mut lock = resolution.lockfile.clone();
+            lock.stamp(&format!(
+                "{} {}",
+                qqq_core::BINARY_NAME,
+                qqq_core::SCHEMA_VERSION
+            ));
+            let text = lock.render()?;
+            std::fs::write(&path, text).map_err(|e| {
+                qqq_core::Error::new(
+                    qqq_core::ErrorCode::LockfileOutOfDate,
+                    format!("could not write `{}`", path.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+            true
+        } else {
+            false
+        };
+
+        Ok(qqq_run::InstallOutput {
+            manifest: qqq_run::deps::display_manifest(&loaded.path),
+            lockfile: qqq_run::deps::display_manifest(&path),
+            packages: resolution.lockfile.len(),
+            wrote_lockfile: wrote,
+            dry_run: opts.dry_run,
+            mode: opts.mode.as_str().to_owned(),
+            capability_changes: resolution
+                .diff
+                .capability_changes
+                .iter()
+                .map(|d| qqq_run::CapabilityChangeReport {
+                    package: d.package.clone(),
+                    added: d.added.clone(),
+                    removed: d.removed.clone(),
+                })
+                .collect(),
+            changes: resolution.diff.changes.len(),
+            escalation: resolution.diff.has_escalation(),
+        })
+    })
+}
+
+/// Decode `qqqai install`'s flags.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag.
+fn install_options(
+    args: &[String],
+    flags: GlobalFlags,
+) -> Result<qqq_run::InstallOptions, qqq_core::Error> {
+    let mut opts = qqq_run::InstallOptions {
+        // The global `--dry-run` applies here too: a rehearsal of an install is
+        // useful precisely because it shows the capability diff without
+        // committing to it.
+        dry_run: flags.dry_run(),
+        ..Default::default()
+    };
+
+    // The strictest flag given wins. `--frozen --offline` is a frozen install,
+    // not a contradiction: the two agree on forbidding the network, and frozen
+    // adds the lockfile requirement. Taking the strictest value means no
+    // combination of flags can weaken the strongest one the user wrote.
+    let mut mode = qqq_run::LockMode::Update;
+    for a in args {
+        match a.as_str() {
+            "--locked" => mode = mode.max(qqq_run::LockMode::Locked),
+            "--frozen" => mode = mode.max(qqq_run::LockMode::Frozen),
+            "--offline" => mode = mode.max(qqq_run::LockMode::Offline),
+            "--force" => opts.force = true,
+            // Consumed by `with_manifest`, which reads the value itself.
+            "--manifest" => {}
+            other if other.starts_with('-') => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `install`"),
+                )
+                .with_remediation(
+                    "`install` accepts --locked, --frozen, --offline, --force, \
+                     --dry-run and --manifest",
+                ));
+            }
+            _ => {}
+        }
+    }
+    opts.mode = mode;
+
+    Ok(opts)
 }
 
 /// The parsed form of a `qqqai add` invocation.

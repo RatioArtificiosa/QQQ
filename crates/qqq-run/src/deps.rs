@@ -438,6 +438,17 @@ impl crate::output::CommandOutput for DependencyChangeOutput {
     }
 }
 
+/// Render a manifest or lockfile path for output.
+///
+/// Public because `install` reports two paths (the manifest and the lockfile)
+/// and they must be rendered exactly as `add` renders its one — an agent
+/// diffing the output of the two commands must not see `/proj/qqq.toml` from
+/// one and `qqq.toml` from the other.
+#[must_use]
+pub fn display_manifest(path: &Path) -> String {
+    display_path(path)
+}
+
 /// Render a path relative to the working directory when it is underneath it.
 fn display_path(path: &Path) -> String {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

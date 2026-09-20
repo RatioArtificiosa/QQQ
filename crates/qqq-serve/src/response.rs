@@ -294,7 +294,7 @@ pub fn error_response(error: &Error, soft_fuel: bool) -> ErrorResponse {
         body: format!("{}\n", reason_phrase(class.status())),
         retry_after: class
             .should_retry()
-            .then(|| retry_after_value(class.status())),
+            .then(|| retry_after_value(class.status(), Some(error))),
         close: class.must_close(),
         log_code: Some(code.id()),
     }
@@ -516,18 +516,44 @@ pub fn classify(code: ErrorCode, soft_fuel: bool) -> Failure {
 
 /// The `Retry-After` value to send.
 ///
-/// A fixed one second rather than an estimate: QQQ has no predictive model of
-/// when capacity returns, and a fabricated estimate is worse than a
-/// conservative one because clients back off *to* whatever is advertised. One
-/// second is short enough that a transient shed is invisible to a user and long
-/// enough to relieve a pool that is genuinely saturated.
+/// # Why this now prefers the host's own estimate
+///
+/// It used to be a hardcoded `"1"`, with a comment explaining that QQQ had no
+/// predictive model of when capacity returns. That was true when it was written
+/// and is no longer: `HOST-012` now computes an estimate from the pool's
+/// capacity and the throughput the caller has observed
+/// ([`qqq_host::Pool::retry_after_seconds`]), and a saturated pool carrying that
+/// estimate in its error context means the server can send a *real* number
+/// instead of a placeholder.
+///
+/// The fallback keeps the old reasoning, because it is still correct when there
+/// is no estimate to use: a fabricated value is worse than a conservative one,
+/// since clients back off *to* whatever is advertised.
+///
+/// `error` is consulted for a `retry-after` context entry, which is the field
+/// the host uses for exactly this purpose — the mapping is by *name*, so any
+/// error that carries the estimate is honoured without this function needing to
+/// know which subsystem produced it.
 ///
 /// It takes the status so the signature can carry a policy later without a
 /// breaking change — a 429 from a rate limiter may well want a different value
 /// than a 503 from a pool.
 #[must_use]
-pub fn retry_after_value(status: u16) -> String {
+pub fn retry_after_value(status: u16, error: Option<&Error>) -> String {
     let _ = status;
+    if let Some(seconds) = error
+        .and_then(|e| e.context.iter().find(|(k, _)| k == "retry-after"))
+        .map(|(_, v)| v.as_str())
+    {
+        // The value must be a bare integer per RFC 9110 §10.2.3 — either a
+        // delay in seconds or an HTTP-date. Anything else is dropped in favour
+        // of the conservative default rather than forwarded, because a malformed
+        // `Retry-After` is ignored by clients and would silently become "retry
+        // whenever", which is the stampede the header prevents.
+        if !seconds.is_empty() && seconds.bytes().all(|b| b.is_ascii_digit()) {
+            return seconds.to_owned();
+        }
+    }
     "1".to_owned()
 }
 
@@ -1052,12 +1078,83 @@ mod tests {
     #[test]
     fn retry_after_is_a_whole_number_of_seconds() {
         for status in [503, 500] {
-            let v = retry_after_value(status);
+            let v = retry_after_value(status, None);
             assert!(
                 v.parse::<u32>().is_ok(),
                 "Retry-After `{v}` must be a number of seconds"
             );
         }
+    }
+
+    /// A host-supplied estimate is used verbatim when it is a valid value.
+    #[test]
+    fn retry_after_prefers_the_hosts_estimate() {
+        let err = Error::new(
+            ErrorCode::InstancePoolExhausted,
+            "the instance pool is saturated",
+        )
+        .with_context("retry-after", "7");
+
+        assert_eq!(
+            retry_after_value(503, Some(&err)),
+            "7",
+            "the pool's computed estimate must reach the client"
+        );
+    }
+
+    /// A malformed estimate is discarded rather than forwarded.
+    ///
+    /// A client that cannot parse `Retry-After` ignores it and retries
+    /// immediately, which is the stampede the header exists to prevent — so an
+    /// invalid value is worse than the conservative default.
+    #[test]
+    fn a_malformed_retry_after_falls_back_to_the_default() {
+        for bad in [
+            "",
+            "soon",
+            "7s",
+            "-1",
+            "1.5",
+            " ",
+            "9999999999999999999999x",
+        ] {
+            let err = Error::new(ErrorCode::InstancePoolExhausted, "saturated")
+                .with_context("retry-after", bad);
+            assert_eq!(
+                retry_after_value(503, Some(&err)),
+                "1",
+                "`{bad}` is not a valid Retry-After and must not be forwarded"
+            );
+        }
+    }
+
+    /// An error with no estimate uses the conservative default, which is the
+    /// documented behaviour when the host has nothing better to offer.
+    #[test]
+    fn an_error_without_an_estimate_uses_the_default() {
+        let err = Error::new(ErrorCode::InstancePoolExhausted, "saturated");
+        assert_eq!(retry_after_value(503, Some(&err)), "1");
+    }
+
+    /// End to end: the error the pool actually produces must render a 503 whose
+    /// `Retry-After` is the pool's estimate, not the placeholder.
+    ///
+    /// This is the join `HOST-012` and the server both depend on, and neither
+    /// side's own tests can see it: the pool asserts the estimate is *in the
+    /// context*, the response tests assert a value *renders*, and only this
+    /// checks the two agree on the field name.
+    #[test]
+    fn a_real_pool_error_renders_its_estimate() {
+        let err = qqq_host::exhausted_error(qqq_host::Exhausted::AllBusy, 64, 12);
+        let rendered = error_response(&err, false);
+
+        assert_eq!(rendered.status, 503);
+        assert_eq!(
+            rendered.retry_after.as_deref(),
+            Some("12"),
+            "the pool computed 12 seconds and the response must say so"
+        );
+        assert_eq!(rendered.log_code.as_deref(), Some("QQQ-6001"));
     }
 
     // -- convenience responses ---------------------------------------------

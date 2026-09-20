@@ -18,6 +18,14 @@ workspace = true
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-io = { path = "../qqq-io", version = "0.0.0" }
+# For the instance pool: `HOST-012`'s 503 + `Retry-After` is *decided* by the
+# host and only *rendered* here. §4.3 places `qqq-host` above `qqq-serve` in the
+# topological order, so this edge points downward and
+# `tools/check_topology.py` verifies it — but the placement is not arbitrary:
+# a server that computed its own saturation estimate would need its own copy of
+# the pool's state, which is the duplicated-source-of-truth problem the
+# capability registry already exists to avoid.
+qqq-host = { path = "../qqq-host", version = "0.0.0" }
 rustls.workspace = true
 # **Not** `rustls-pemfile`. That crate is unmaintained (`RUSTSEC-2025-0134`,
 # archived August 2025) and `cargo deny check advisories` fails on it; PEM

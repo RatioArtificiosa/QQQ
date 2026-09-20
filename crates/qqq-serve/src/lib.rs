@@ -15,11 +15,15 @@
 //! |---|---|
 //! | Route table (radix trie) | **implemented** (`SRV-003`) |
 //! | `OQ-007` — `wasi:http` vs custom | **resolved** (`SRV-006`) |
-//! | HTTP/1.1, keep-alive, timeouts | not implemented (`SRV-001`) |
+//! | HTTP/1.1 request-head parsing | **implemented** (`SRV-001` parsing half) |
+//! | Header-bomb and framing limits | **implemented** (`SRV-020`) |
+//! | HTTP/1.1 responses, keep-alive loop, timeouts | not implemented (`SRV-001`) |
 //! | HTTP/2, multiplexing, flow control | not implemented (`SRV-002`) |
 //! | Streaming bodies, backpressure | not implemented (`SRV-004`) |
+//! | `max_request_bytes` enforced during streaming | declared size checked; streaming is `SRV-005` |
 //! | TLS, mTLS | not implemented (`SRV-007`, `SRV-008`) |
 //! | `WebSockets`, SSE | not implemented (`SRV-009`, `SRV-010`) |
+//! | Graceful shutdown, connection limits | not implemented (`SRV-011`, `SRV-012`) |
 //!
 //! Each of those is named rather than silently absent. A listener that accepted
 //! connections without the limits `SRV-005` and `SRV-011` require would be worse
@@ -59,8 +63,13 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod http1;
 pub mod route;
 
+pub use http1::{
+    head_end, is_valid_header_name, parse_head, ParseError, RequestHead, Version, MAX_HEADERS,
+    MAX_HEADER_BYTES, MAX_HEAD_BYTES, MAX_REQUEST_BYTES, MAX_TARGET_BYTES,
+};
 pub use route::{
     Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,
 };

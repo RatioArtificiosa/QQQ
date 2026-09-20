@@ -554,6 +554,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 - [ ] **SRV-001** Implement HTTP/1.1 with keep-alive, timeouts and connection limits.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Partial: request-head parsing with framing validation is done (`qqq-serve::http1`).
+    The response writer, the keep-alive connection loop, socket timeouts and
+    connection limits remain.
 - [ ] **SRV-002** Implement HTTP/2 including multiplexing and flow control.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **SRV-003** Implement the compile-time route table as a radix trie.
@@ -593,6 +596,8 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.3 The manifest — `qqq.toml`
 - [ ] **SRV-020** Implement request-body size and count limits enforced per tenant, with metrics.
   → §10.2 Metrics that ship by default
+  → Partial: header-count and header-size caps, and a declared-body cap, are enforced
+    in `qqq-serve::http1`. Per-tenant accounting and metrics remain.
 
 ### ABI — WIT packages
 

@@ -29,11 +29,23 @@
 //! | `>=1.2.3` | at least | |
 //! | `>`, `<`, `<=` | the usual meanings | |
 //! | `*` | any | |
+//! | `>=1.0, <2.0` | **all** clauses must hold | conjunction |
 //!
-//! **Deliberately absent:** `1.2.*` wildcards, `||` unions, and comma lists. A
-//! requirement that needs a union is a requirement that should be two
-//! dependencies, and a wildcard patch is how a build silently picks up a
-//! different version than the author tested.
+//! **Deliberately absent:** `1.2.*` wildcards and `||` unions. A requirement
+//! that needs a union is a requirement that should be two dependencies, and a
+//! wildcard patch is how a build silently picks up a different version than the
+//! author tested.
+//!
+//! **Comma lists are supported, and the distinction is the point.** A comma is
+//! a *conjunction* — `>=1.0, <2.0` means both, which is exactly the bounded
+//! range the caret and tilde already expand into. A `||` is a *disjunction*,
+//! which admits versions from unrelated ranges and is the form that hides a
+//! dependency's true span. An earlier version of this module rejected both
+//! together, which was wrong for two reasons: it contradicted the remediation
+//! text this crate's own errors print, and it contradicted `qqq-cap`, which
+//! requires a comma in a range-shaped requirement. A parser that refuses the
+//! syntax its own error messages recommend is telling the user to write
+//! something it will not accept.
 
 use std::fmt;
 
@@ -55,8 +67,22 @@ pub use qqq_core::Version;
 // ---------------------------------------------------------------------------
 
 /// A version requirement.
+///
+/// Holds one or more clauses, **all** of which must hold. A single-clause
+/// requirement is the common case and is what every operator form produces; a
+/// comma list produces several. Modelling it as a list rather than adding a
+/// `range: Option<(Version, Version)>` field means the general case needs no
+/// special handling in [`Requirement::matches`] — a conjunction of one is just
+/// a conjunction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
+    /// The clauses. Never empty: `*` is represented as a single `Any` clause.
+    clauses: Vec<Clause>,
+}
+
+/// One comparison within a requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Clause {
     /// The comparison operator.
     op: Op,
     /// The version it compares against, absent for `*`.
@@ -114,48 +140,42 @@ impl Requirement {
         if s.is_empty() {
             return Err(bad(s, "a requirement cannot be empty"));
         }
-        if s == "*" {
+
+        // A comma separates clauses, **all** of which must hold. Splitting on
+        // the comma first means each clause is an ordinary single-bound
+        // requirement, so the operator lexing below is unchanged and there is
+        // exactly one implementation of it.
+        //
+        // An empty clause is refused explicitly. `>=1.0,` splitting to
+        // `[">=1.0", ""]` would otherwise report "a requirement cannot be
+        // empty", which is true of the requirement but not of what the user
+        // wrote — they wrote a trailing comma.
+        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+        if parts.len() == 1 && parts[0] == "*" {
             return Ok(Self {
-                op: Op::Any,
-                version: None,
+                clauses: vec![Clause {
+                    op: Op::Any,
+                    version: None,
+                }],
             });
         }
 
-        // Longest operator first: `>=` must not be read as `>` followed by `=`.
-        // This is the classic off-by-one in operator lexing, and it produces a
-        // requirement that parses and means something different.
-        let (op, rest) = if let Some(r) = s.strip_prefix(">=") {
-            (Op::GreaterOrEqual, r)
-        } else if let Some(r) = s.strip_prefix("<=") {
-            (Op::LessOrEqual, r)
-        } else if let Some(r) = s.strip_prefix('^') {
-            (Op::Caret, r)
-        } else if let Some(r) = s.strip_prefix('~') {
-            (Op::Tilde, r)
-        } else if let Some(r) = s.strip_prefix('>') {
-            (Op::Greater, r)
-        } else if let Some(r) = s.strip_prefix('<') {
-            (Op::Less, r)
-        } else if let Some(r) = s.strip_prefix('=') {
-            (Op::Exact, r)
-        } else {
-            // A bare version means "compatible with", which is what every
-            // package manager converges on because it is what the author
-            // almost always means.
-            (Op::Caret, s)
-        };
-
-        let rest = rest.trim();
-        if rest.is_empty() {
-            return Err(bad(s, "the operator has no version after it"));
+        let mut clauses = Vec::with_capacity(parts.len());
+        for part in &parts {
+            if part.is_empty() {
+                return Err(bad(
+                    s,
+                    if parts.len() > 1 {
+                        "a clause between commas is empty; write `>=1.0, <2.0`"
+                    } else {
+                        "a requirement cannot be empty"
+                    },
+                ));
+            }
+            clauses.push(parse_clause(part, s)?);
         }
 
-        let version = parse_partial_version(rest, s)?;
-
-        Ok(Self {
-            op,
-            version: Some(version),
-        })
+        Ok(Self { clauses })
     }
 
     /// Whether a version satisfies this requirement.
@@ -177,6 +197,51 @@ impl Requirement {
     /// dead code that looked like support.
     #[must_use]
     pub fn matches(&self, candidate: &Version) -> bool {
+        // A conjunction: **every** clause must hold. An empty clause list is
+        // impossible (the constructors never produce one), but `all` on an
+        // empty iterator is `true`, which is the correct reading anyway — a
+        // requirement with no constraints constrains nothing.
+        self.clauses.iter().all(|c| c.matches(candidate))
+    }
+
+    /// The first clause's operator.
+    ///
+    /// Single-clause requirements are the common case, and callers that present
+    /// one (the `why` output, the lockfile's diagnostics) need the operator
+    /// without destructuring. For a comma list this is the *first* bound, which
+    /// is the one a human reads first.
+    #[must_use]
+    pub fn op(&self) -> Op {
+        self.clauses.first().map_or(Op::Any, |c| c.op)
+    }
+
+    /// The first clause's version.
+    #[must_use]
+    pub fn version(&self) -> Option<&Version> {
+        self.clauses.first().and_then(|c| c.version.as_ref())
+    }
+
+    /// How many clauses the requirement has.
+    ///
+    /// Exposed so a caller can tell a bounded range (`>=1.0, <2.0`, two) from a
+    /// single bound (`>=1.0`, one) — the two are different promises about a
+    /// dependency, and the difference is invisible if only the first clause is
+    /// inspected.
+    #[must_use]
+    pub fn clause_count(&self) -> usize {
+        self.clauses.len()
+    }
+
+    /// Whether this is the `*` requirement.
+    #[must_use]
+    pub fn is_any(&self) -> bool {
+        self.clauses.len() == 1 && self.clauses[0].op == Op::Any
+    }
+}
+
+impl Clause {
+    /// Whether a version satisfies this single clause.
+    fn matches(&self, candidate: &Version) -> bool {
         let Some(base) = &self.version else {
             return true; // `*`
         };
@@ -214,29 +279,76 @@ impl Requirement {
             }
         }
     }
-
-    /// The operator.
-    #[must_use]
-    pub const fn op(&self) -> Op {
-        self.op
-    }
-
-    /// The version the requirement compares against.
-    #[must_use]
-    pub const fn version(&self) -> Option<&Version> {
-        self.version.as_ref()
-    }
 }
 
 impl fmt::Display for Requirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.op, &self.version) {
-            (Op::Any, _) => f.write_str("*"),
-            (op, Some(v)) => write!(f, "{}{v}", op.as_str()),
-            // Unreachable: a non-`Any` operator always carries a version.
-            (op, None) => f.write_str(op.as_str()),
-        }
+        // Round-trips to what was parsed: a comma list prints comma-separated,
+        // so `to_string().parse()` returns an equal requirement. Without this,
+        // a requirement echoed back into an error message would read as though
+        // its later bounds had been silently dropped.
+        let rendered: Vec<String> = self
+            .clauses
+            .iter()
+            .map(|c| match (&c.op, &c.version) {
+                (Op::Any, _) => "*".to_owned(),
+                (op, Some(v)) => format!("{}{v}", op.as_str()),
+                // Unreachable: a non-`Any` operator always carries a version.
+                (op, None) => op.as_str().to_owned(),
+            })
+            .collect();
+        f.write_str(&rendered.join(", "))
     }
+}
+
+/// Parse one comma-separated clause.
+///
+/// `whole` is the original requirement text, used only so an error quotes what
+/// the user actually wrote rather than the clause that failed — a distinction
+/// that matters once there is more than one clause.
+fn parse_clause(part: &str, whole: &str) -> Result<Clause> {
+    if part == "*" {
+        return Ok(Clause {
+            op: Op::Any,
+            version: None,
+        });
+    }
+
+    // Longest operator first: `>=` must not be read as `>` followed by `=`.
+    // This is the classic off-by-one in operator lexing, and it produces a
+    // requirement that parses and means something different.
+    let (op, rest) = if let Some(r) = part.strip_prefix(">=") {
+        (Op::GreaterOrEqual, r)
+    } else if let Some(r) = part.strip_prefix("<=") {
+        (Op::LessOrEqual, r)
+    } else if let Some(r) = part.strip_prefix('^') {
+        (Op::Caret, r)
+    } else if let Some(r) = part.strip_prefix('~') {
+        (Op::Tilde, r)
+    } else if let Some(r) = part.strip_prefix('>') {
+        (Op::Greater, r)
+    } else if let Some(r) = part.strip_prefix('<') {
+        (Op::Less, r)
+    } else if let Some(r) = part.strip_prefix('=') {
+        (Op::Exact, r)
+    } else {
+        // A bare version means "compatible with", which is what every package
+        // manager converges on because it is what the author almost always
+        // means.
+        (Op::Caret, part)
+    };
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err(bad(whole, "an operator has no version after it"));
+    }
+
+    let version = parse_partial_version(rest, whole)?;
+
+    Ok(Clause {
+        op,
+        version: Some(version),
+    })
 }
 
 /// Parse a version that may omit trailing components.
@@ -579,7 +691,7 @@ mod tests {
     #[test]
     fn a_two_component_requirement_parses_as_the_proposal_writes_it() {
         let r = Requirement::parse("1.2").expect("`1.2` is what §5.3 writes and must parse");
-        assert_eq!(r.op, Op::Caret, "a bare version means compatible");
+        assert_eq!(r.op(), Op::Caret, "a bare version means compatible");
         let v = r.version().expect("carries a version");
         assert_eq!((v.major, v.minor, v.patch), (1, 2, 0));
     }
@@ -670,5 +782,127 @@ mod tests {
                 "`{text}` must not be accepted as a version"
             );
         }
+    }
+
+    // -- comma ranges -------------------------------------------------------
+
+    /// A comma list is a **conjunction**: every clause must hold.
+    ///
+    /// This form was rejected outright until an end-to-end test caught the
+    /// contradiction: `qqqai add`'s own remediation text tells the user to
+    /// write `>=1.0, <2.0`, and `qqq-cap`'s shape check requires a comma in a
+    /// range-shaped requirement. A parser that refuses the syntax its own error
+    /// messages recommend is telling the user to write something it will not
+    /// accept.
+    #[test]
+    fn a_comma_list_requires_every_clause() {
+        let r = Requirement::parse(">=1.0, <2.0").expect("must parse");
+
+        assert!(r.matches(&"1.0.0".parse().unwrap()), "the lower bound");
+        assert!(r.matches(&"1.9.9".parse().unwrap()), "inside the range");
+        assert!(
+            !r.matches(&"2.0.0".parse().unwrap()),
+            "the upper bound is exclusive"
+        );
+        assert!(
+            !r.matches(&"0.9.9".parse().unwrap()),
+            "below the lower bound"
+        );
+        assert_eq!(r.clause_count(), 2);
+    }
+
+    /// A conjunction is distinct from a disjunction, and the difference is the
+    /// reason `||` stays out while `,` comes in.
+    ///
+    /// `>=1.0, <2.0` admits a single bounded span. A `||` would admit versions
+    /// from unrelated ranges, which is the form that hides a dependency's true
+    /// span — the opposite of what this project is for.
+    #[test]
+    fn a_conjunction_admits_one_span_not_two() {
+        let r = Requirement::parse(">=1.0, <2.0").expect("must parse");
+        // `3.0.0` satisfies a hypothetical first clause but not the second.
+        assert!(!r.matches(&"3.0.0".parse().unwrap()));
+        // And a version below the first bound is excluded even though it
+        // satisfies the second.
+        assert!(!r.matches(&"0.5.0".parse().unwrap()));
+    }
+
+    /// Whitespace around the comma is optional, since humans write both.
+    #[test]
+    fn comma_spacing_is_flexible() {
+        for text in [">=1.0,<2.0", ">=1.0, <2.0", ">=1.0 , <2.0", " >=1.0 ,<2.0 "] {
+            let r = Requirement::parse(text).unwrap_or_else(|e| panic!("`{text}`: {e}"));
+            assert!(r.matches(&"1.5.0".parse().unwrap()), "`{text}`");
+            assert!(!r.matches(&"2.1.0".parse().unwrap()), "`{text}`");
+        }
+    }
+
+    /// Partial versions compose with comma ranges.
+    #[test]
+    fn a_comma_range_accepts_partial_versions() {
+        let r = Requirement::parse(">=1, <2").expect("must parse");
+        assert!(r.matches(&"1.0.0".parse().unwrap()));
+        assert!(r.matches(&"1.99.99".parse().unwrap()));
+        assert!(!r.matches(&"2.0.0".parse().unwrap()));
+    }
+
+    /// A trailing, leading or doubled comma is refused, with a message about
+    /// the comma rather than a confusing "requirement cannot be empty".
+    #[test]
+    fn an_empty_clause_between_commas_is_refused() {
+        for text in [">=1.0,", ",>=1.0", ">=1.0,,<2.0", ","] {
+            let e = Requirement::parse(text)
+                .err()
+                .unwrap_or_else(|| panic!("`{text}` must be refused"));
+            assert_eq!(e.code, ErrorCode::VersionUnsatisfiable, "`{text}`");
+        }
+    }
+
+    /// The error quotes the whole requirement, not the failing clause.
+    ///
+    /// With one clause these are the same string, so the distinction only
+    /// exists once there are several — which is exactly when quoting the wrong
+    /// one would confuse the reader.
+    #[test]
+    fn an_error_in_a_later_clause_quotes_the_whole_requirement() {
+        let e = Requirement::parse(">=1.0, 2.x").unwrap_err();
+        assert!(
+            e.render().contains(">=1.0, 2.x"),
+            "the whole requirement should be quoted: {}",
+            e.render()
+        );
+    }
+
+    /// A requirement round-trips through `Display`, including ranges.
+    ///
+    /// Without this a range echoed into an error message would read as though
+    /// its later bounds had been dropped.
+    #[test]
+    fn a_bounded_requirement_round_trips_through_display() {
+        for text in [">=1.0, <2.0", "1.2.3", "^1.2.3", "~1.2.3", "*"] {
+            let r = Requirement::parse(text).expect("must parse");
+            let printed = r.to_string();
+            let reparsed = Requirement::parse(&printed)
+                .unwrap_or_else(|e| panic!("`{printed}` must re-parse: {e}"));
+            assert_eq!(r, reparsed, "`{text}` printed as `{printed}`");
+        }
+    }
+
+    /// `*` is still recognised, now as a single `Any` clause.
+    #[test]
+    fn the_any_requirement_is_a_single_clause() {
+        let r = Requirement::parse("*").expect("must parse");
+        assert!(r.is_any());
+        assert_eq!(r.clause_count(), 1);
+        assert!(r.matches(&"0.0.1".parse().unwrap()));
+        assert!(r.matches(&"99.99.99".parse().unwrap()));
+    }
+
+    /// A single clause is not reported as a range.
+    #[test]
+    fn a_single_bound_is_one_clause() {
+        assert_eq!(Requirement::parse(">=1.0").unwrap().clause_count(), 1);
+        assert_eq!(Requirement::parse("1.2").unwrap().clause_count(), 1);
+        assert!(!Requirement::parse(">=1.0").unwrap().is_any());
     }
 }

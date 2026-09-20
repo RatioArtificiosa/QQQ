@@ -1,0 +1,605 @@
+//! End-to-end tests that run the **real `qqqai` binary** and inspect its output.
+//!
+//! # Why these exist, and why they are separate from the unit tests
+//!
+//! Three defects reached a built binary this project despite hundreds of unit
+//! tests passing around them:
+//!
+//! 1. `[dependencies]` was parsed **successfully** and silently discarded.
+//! 2. `version = "1.2"` — the spelling Proposal §5.3 itself writes — was
+//!    rejected by the requirement parser.
+//! 3. `qqqai doctor` exited `0` when a check failed, and its human output never
+//!    named the checks.
+//!
+//! Every one of them was invisible to the unit tests for the same reason: **the
+//! tests were written from the same mental model as the code**, so they asserted
+//! what the code did rather than what a user needs. A unit test can confirm that
+//! `DoctorOutput` contains a failing check; only running the binary reveals that
+//! the process still exits `0`.
+//!
+//! These tests therefore make no use of the library's internals. They spawn the
+//! binary, read stdout/stderr and the exit code, and assert on the *user-facing*
+//! contract — the same contract a script or CI job depends on. Where a bug is
+//! found by running the program, the regression test belongs here.
+//!
+//! # Why `Home` is redirected
+//!
+//! The binary reads nothing outside the directories passed to it today, but a
+//! test that inherits the developer's environment is a test that passes on one
+//! machine and fails on another. `HOME`/`USERPROFILE` are pointed at the temp
+//! directory so any future cache or config lookup is isolated.
+
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+/// The binary under test, located through Cargo's own variable.
+///
+/// `CARGO_BIN_EXE_<name>` is set by Cargo for integration tests and points at
+/// the freshly built artifact, so the test can never accidentally run a stale
+/// binary from a different target directory.
+fn qqqai() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_qqqai"));
+    let home = std::env::temp_dir().join("qqq-cli-test-home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
+    cmd.env("USERPROFILE", &home);
+    cmd
+}
+
+/// A scratch directory that is removed on drop.
+struct Sandbox {
+    path: PathBuf,
+}
+
+impl Sandbox {
+    fn new(tag: &str) -> Self {
+        let mut path = std::env::temp_dir();
+        path.push(format!("qqq-cli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create sandbox");
+        Self { path }
+    }
+
+    /// Write a file relative to the sandbox root.
+    fn write(&self, name: &str, content: &str) {
+        let target = self.path.join(name);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&target, content).expect("write file");
+    }
+
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.path.join(name)).expect("read file")
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.path.join(name).exists()
+    }
+
+    /// Run `qqqai <args>` with the sandbox as the working directory.
+    fn run(&self, args: &[&str]) -> Run {
+        let out = qqqai()
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .expect("the binary must be runnable");
+        Run::from(out)
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// The result of one invocation, decoded.
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl From<Output> for Run {
+    fn from(o: Output) -> Self {
+        Self {
+            // A process killed by a signal has no code; `-1` makes that
+            // distinguishable from a real exit rather than aliasing it to 0.
+            code: o.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+        }
+    }
+}
+
+impl Run {
+    /// Everything the user would see, for assertions that do not care which
+    /// stream a message went to.
+    fn all(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+
+    fn assert_ok(&self) -> &Self {
+        assert_eq!(
+            self.code, 0,
+            "expected success, got exit {}\nstdout:\n{}\nstderr:\n{}",
+            self.code, self.stdout, self.stderr
+        );
+        self
+    }
+
+    fn assert_failed(&self) -> &Self {
+        assert_ne!(
+            self.code, 0,
+            "expected failure, got exit 0\nstdout:\n{}\nstderr:\n{}",
+            self.stdout, self.stderr
+        );
+        self
+    }
+
+    fn assert_contains(&self, needle: &str) -> &Self {
+        let all = self.all();
+        assert!(
+            all.contains(needle),
+            "output must contain {needle:?}\nstdout:\n{}\nstderr:\n{}",
+            self.stdout,
+            self.stderr
+        );
+        self
+    }
+}
+
+const MINIMAL: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
+
+// ---------------------------------------------------------------------------
+// doctor — the diagnostic must be able to fail
+// ---------------------------------------------------------------------------
+
+/// A failing check must fail the **process**, not merely print a complaint.
+///
+/// This is the regression test for a real defect. `qqqai doctor` printed "1 of
+/// 3 checks need attention" and exited `0`, so `qqqai doctor || exit 1` in CI
+/// treated a broken environment as healthy. A diagnostic that cannot fail
+/// manufactures the false confidence it exists to remove (`§M-006`).
+#[test]
+fn doctor_exits_non_zero_when_a_check_fails() {
+    let s = Sandbox::new("doctor-fail");
+    // No qqq.toml, so the manifest check must fail.
+    let run = s.run(&["doctor"]);
+
+    run.assert_failed().assert_contains("need attention");
+    assert_eq!(
+        run.code, 69,
+        "a failing check should exit UNAVAILABLE (69), not a generic failure: \
+         nothing is broken inside qqqai, the environment is not ready"
+    );
+}
+
+/// A passing run exits zero, so the code is a genuine signal in both directions.
+///
+/// Without this the previous test would also pass if `doctor` always failed.
+#[test]
+fn doctor_exits_zero_when_every_check_passes() {
+    let s = Sandbox::new("doctor-ok");
+    s.write("qqq.toml", MINIMAL);
+    s.run(&["doctor"]).assert_ok();
+}
+
+/// The failing check must be **named**, with its detail and its fix.
+///
+/// "1 of 3 checks need attention" is a riddle, not a diagnosis: the user cannot
+/// act on it without knowing which check. The unit test asserted the struct
+/// contained the names; only running the binary shows whether the human output
+/// ever prints them.
+#[test]
+fn doctor_names_the_failing_check_and_its_fix() {
+    let s = Sandbox::new("doctor-names");
+    let run = s.run(&["doctor"]);
+
+    run.assert_failed()
+        .assert_contains("manifest")
+        .assert_contains("no qqq.toml")
+        .assert_contains("fix:");
+}
+
+/// The passing checks are listed too.
+///
+/// A bare "all 3 checks passed" is a claim the reader cannot audit; naming the
+/// checks is what shows the tool actually looked.
+#[test]
+fn doctor_lists_the_passing_checks() {
+    let s = Sandbox::new("doctor-passes");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["doctor"]);
+
+    run.assert_ok()
+        .assert_contains("all 3 checks passed")
+        .assert_contains("manifest")
+        .assert_contains("binary-name");
+}
+
+// ---------------------------------------------------------------------------
+// caps and inspect — the listing commands must list
+// ---------------------------------------------------------------------------
+
+/// `caps` must name the capabilities, not only count them.
+///
+/// The command's entire purpose is telling the user *which* capabilities a
+/// project holds. It printed "2 capabilities across 2 namespaces" and the names
+/// were reachable only through `--json`.
+#[test]
+fn caps_names_the_capabilities_in_human_output() {
+    let s = Sandbox::new("caps-names");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    s.run(&["caps"])
+        .assert_ok()
+        .assert_contains("crypto.hash")
+        .assert_contains("crypto");
+}
+
+/// A deny-all project is explained rather than summarised.
+#[test]
+fn caps_explains_a_deny_all_project() {
+    let s = Sandbox::new("caps-deny");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["caps"])
+        .assert_ok()
+        .assert_contains("no capabilities granted")
+        .assert_contains("denied");
+}
+
+/// `inspect` must show the interfaces and limits it counted.
+#[test]
+fn inspect_shows_interfaces_and_limits() {
+    let s = Sandbox::new("inspect");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.http]\nserver = true\n",
+    );
+
+    let run = s.run(&["inspect"]);
+    run.assert_ok()
+        .assert_contains("posture:")
+        .assert_contains("http.server");
+
+    assert_eq!(
+        run.all().matches("Interfaces").count(),
+        1,
+        "the interfaces section must appear exactly once:\n{}",
+        run.all()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// why — the answer, not the verdict
+// ---------------------------------------------------------------------------
+
+/// A denial must print the exact stanza that would grant the capability.
+///
+/// This is the command's whole reason for existing: it is run at the moment a
+/// capability is refused. It printed `fs.read DENIED` and dropped the stanza,
+/// which the scaffolded `qqq.toml` explicitly promises it prints.
+#[test]
+fn why_prints_the_stanza_for_a_denied_capability() {
+    let s = Sandbox::new("why-denied");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["why", "fs.read"])
+        .assert_ok()
+        .assert_contains("DENIED")
+        .assert_contains("capabilities.fs")
+        .assert_contains("qqq.toml");
+}
+
+/// The stanza is not wrapped a second time.
+///
+/// `fix_stanza_for` already emits its own `add to qqq.toml:` preamble. An
+/// earlier version of the human renderer added another, so the terminal showed
+/// the phrase twice — a defect no test that merely checks for presence can see.
+#[test]
+fn why_does_not_repeat_the_stanza_preamble() {
+    let s = Sandbox::new("why-preamble");
+    s.write("qqq.toml", MINIMAL);
+
+    let run = s.run(&["why", "fs.read"]);
+    run.assert_ok();
+    assert_eq!(
+        run.all().matches("add to qqq.toml:").count(),
+        1,
+        "the preamble must appear exactly once:\n{}",
+        run.all()
+    );
+}
+
+/// A granted capability names the deciding layer.
+#[test]
+fn why_names_the_deciding_layer_for_a_grant() {
+    let s = Sandbox::new("why-granted");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    s.run(&["why", "crypto.hash"])
+        .assert_ok()
+        .assert_contains("GRANTED")
+        .assert_contains("manifest");
+}
+
+/// A typo gets a suggestion, because a typo is why the command is run.
+#[test]
+fn why_suggests_a_correction_for_a_typo() {
+    let s = Sandbox::new("why-typo");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["why", "crypto.hassh"])
+        .assert_failed()
+        .assert_contains("crypto.hash");
+}
+
+// ---------------------------------------------------------------------------
+// add / remove — the manifest round trip
+// ---------------------------------------------------------------------------
+
+/// `add` writes a dependency the parser can read back.
+#[test]
+fn add_writes_a_dependency_that_parses() {
+    let s = Sandbox::new("add");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["add", "qqqai/json@1.2"])
+        .assert_ok()
+        .assert_contains("qqqai/json");
+
+    let text = s.read("qqq.toml");
+    assert!(text.contains("[dependencies]"), "{text}");
+    assert!(text.contains("\"qqqai/json\" = \"1.2\""), "{text}");
+
+    // The strongest check available without linking the library: the binary's
+    // own parser must accept the file it just wrote.
+    s.run(&["caps"]).assert_ok();
+}
+
+/// A two-component version is accepted.
+///
+/// `1.2` is the spelling Proposal §5.3 writes, and it was rejected outright by
+/// the first end-to-end run of this command (`§O-034a`).
+#[test]
+fn add_accepts_the_version_form_the_proposal_writes() {
+    let s = Sandbox::new("add-partial");
+    s.write("qqq.toml", MINIMAL);
+
+    for version in ["1", "1.2", "1.2.3", "^1.2", "~1.2.3", ">=1.0, <2.0", "*"] {
+        let spec = format!("qqqai/json@{version}");
+        s.run(&["add", &spec])
+            .assert_ok()
+            .assert_contains("qqqai/json");
+    }
+}
+
+/// Comments survive an edit.
+///
+/// `qqq.toml` is human-owned and its comments record the reasoning behind
+/// security decisions. A round-tripping implementation would delete them.
+#[test]
+fn add_preserves_comments_in_the_manifest() {
+    let s = Sandbox::new("add-comments");
+    let original = "[package]\nname = \"app\"\nversion = \"0.1.0\"  # the name\n\
+                    \n[limits]\n# reasoned about in TICKET-4021\nfuel = 1000\n";
+    s.write("qqq.toml", original);
+
+    s.run(&["add", "qqqai/json@1.2"]).assert_ok();
+
+    let text = s.read("qqq.toml");
+    assert!(text.contains("# the name"), "inline comment lost:\n{text}");
+    assert!(
+        text.contains("# reasoned about in TICKET-4021"),
+        "standalone comment lost:\n{text}"
+    );
+    assert!(
+        text.contains("fuel = 1000"),
+        "the limits table was disturbed"
+    );
+}
+
+/// `remove` deletes exactly one entry.
+#[test]
+fn remove_deletes_only_the_named_dependency() {
+    let s = Sandbox::new("remove");
+    s.write("qqq.toml", MINIMAL);
+    s.run(&["add", "qqqai/json@1.2"]).assert_ok();
+    s.run(&["add", "qqqai/validate@2.0"]).assert_ok();
+
+    s.run(&["remove", "qqqai/json"]).assert_ok();
+
+    let text = s.read("qqq.toml");
+    assert!(!text.contains("qqqai/json"), "the entry survived:\n{text}");
+    assert!(
+        text.contains("qqqai/validate"),
+        "the wrong entry went:\n{text}"
+    );
+}
+
+/// Removing something absent fails rather than silently succeeding.
+#[test]
+fn removing_an_absent_dependency_fails() {
+    let s = Sandbox::new("remove-absent");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["remove", "qqqai/nope"])
+        .assert_failed()
+        .assert_contains("qqqai/nope");
+}
+
+/// A malformed requirement is refused **before** anything is written.
+#[test]
+fn add_refuses_a_malformed_requirement_without_writing() {
+    let s = Sandbox::new("add-bad");
+    s.write("qqq.toml", MINIMAL);
+    let before = s.read("qqq.toml");
+
+    s.run(&["add", "qqqai/json@1.2.3.4"])
+        .assert_failed()
+        .assert_contains("1.2.3.4");
+
+    assert_eq!(
+        s.read("qqq.toml"),
+        before,
+        "a refused add must not touch the manifest"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// install — the lockfile contract
+// ---------------------------------------------------------------------------
+
+/// `--locked` with no lockfile fails and names the file.
+#[test]
+fn install_locked_without_a_lockfile_fails() {
+    let s = Sandbox::new("install-locked");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["install", "--locked"])
+        .assert_failed()
+        .assert_contains("qqq.lock");
+}
+
+/// With no registry, an unpinned dependency fails instead of being invented.
+///
+/// The alternative — writing a lockfile listing packages never fetched — would
+/// make the next command trust a promise about bytes nobody has.
+#[test]
+fn install_reports_the_registry_gap_rather_than_inventing_versions() {
+    let s = Sandbox::new("install-registry");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+
+    s.run(&["install"])
+        .assert_failed()
+        .assert_contains("qqqai/json")
+        .assert_contains("PKG-006");
+}
+
+/// A pinned dependency installs, and `--locked` then agrees.
+#[test]
+fn a_pinned_dependency_installs_and_locks() {
+    let s = Sandbox::new("install-ok");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    s.write(
+        "qqq.lock",
+        "version = 1\n\n[[package]]\nname = \"qqqai/json\"\nversion = \"1.2.3\"\n",
+    );
+
+    s.run(&["install"]).assert_ok();
+    assert!(s.exists("qqq.lock"), "the lockfile must exist");
+
+    // The written lockfile must be readable by the next run, and `--locked`
+    // must accept it — which is the actual CI contract.
+    s.run(&["install", "--locked"]).assert_ok();
+}
+
+/// A tampered lockfile is refused, not silently rewritten.
+///
+/// The covering hash exists so a hand-edited lockfile is *detected*. A command
+/// that ignored the failure and overwrote the file would destroy the evidence
+/// of what changed.
+#[test]
+fn install_refuses_a_tampered_lockfile() {
+    let s = Sandbox::new("install-tampered");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    // A lockfile whose recorded hash cannot match its contents.
+    s.write(
+        "qqq.lock",
+        "version = 1\n\n[[package]]\nname = \"qqqai/json\"\nversion = \"1.2.3\"\n\n\
+         [metadata]\n\"lockfile-hash\" = \"deadbeef\"\n",
+    );
+
+    s.run(&["install"])
+        .assert_failed()
+        .assert_contains("qqq.lock");
+}
+
+// ---------------------------------------------------------------------------
+// global contracts
+// ---------------------------------------------------------------------------
+
+/// Every command emits valid JSON with the stable envelope under `--json`.
+///
+/// An agent branches on these fields, so their presence is a contract rather
+/// than a formatting choice.
+#[test]
+fn every_command_emits_the_json_envelope() {
+    let s = Sandbox::new("json-envelope");
+    s.write("qqq.toml", MINIMAL);
+
+    for args in [
+        vec!["caps", "--json"],
+        vec!["inspect", "--json"],
+        vec!["doctor", "--json"],
+        vec!["why", "crypto.hash", "--json"],
+        vec!["schema", "--json"],
+    ] {
+        let run = s.run(&args);
+        let line = run.stdout.lines().next().unwrap_or("");
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "`{}` did not emit a JSON object: {line:?}",
+            args.join(" ")
+        );
+        for field in ["producer", "schema_version", "command", "ok"] {
+            assert!(
+                line.contains(&format!("\"{field}\"")),
+                "`{}` is missing `{field}`: {line}",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// The producer name is `qqqai`, never `qqq`.
+///
+/// The naming is settled: the brand is QQQ, the binary and every identifier a
+/// machine sees are `qqqai`. A build producing `qqq` is a defect.
+#[test]
+fn the_binary_reports_itself_as_qqqai() {
+    let s = Sandbox::new("naming");
+    s.write("qqq.toml", MINIMAL);
+
+    let run = s.run(&["caps", "--json"]);
+    run.assert_ok().assert_contains("\"producer\":\"qqqai\"");
+    assert!(
+        !run.all().contains("\"producer\":\"qqq\""),
+        "the producer must never be `qqq`:\n{}",
+        run.all()
+    );
+}
+
+/// An unknown capability is rejected with a code, not a panic.
+#[test]
+fn an_unknown_capability_is_an_error_not_a_crash() {
+    let s = Sandbox::new("unknown-cap");
+    s.write("qqq.toml", MINIMAL);
+
+    let run = s.run(&["why", "not.a.capability"]);
+    run.assert_failed().assert_contains("QQQ-");
+}

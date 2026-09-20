@@ -9,6 +9,14 @@
 //! `inspect` among "the surfaces that make QQQ different". Neither claim is
 //! worth anything until the commands exist.
 
+// `fmt::Write` for `write!`/`writeln!` into a `String`.
+//
+// Used instead of `push_str(&format!(..))` because that allocates a second
+// string and immediately discards it. Clippy's `format_push_string` flagged
+// every site, and it is right in a path that builds output on every command
+// invocation — the allocation is pure overhead for a formatting operation.
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
 use qqq_abi::registry;
@@ -57,11 +65,46 @@ impl CommandOutput for WhyOutput {
     }
 
     fn summary(&self) -> String {
-        if self.granted {
+        // The verdict alone is not the answer to "why". This command is run at
+        // the moment a capability has been denied, and the two things the
+        // person needs are *which layer decided* and *the exact text that
+        // would change it*. Printing only `http.server DENIED` — which is what
+        // this did before — answers a question the user already knew the
+        // answer to, while the stanza they came for sat unread in `fix`.
+        //
+        // The human-readable output is the one most users see; if it omits the
+        // payload, the command has failed even though the JSON is complete.
+        let mut out = if self.granted {
             format!("{} GRANTED", self.capability)
         } else {
             format!("{} DENIED", self.capability)
+        };
+
+        if let Some(layer) = &self.decided_by {
+            let _ = write!(out, " by {layer}");
+        } else if !self.granted {
+            // No layer changed anything, which means it was never granted
+            // anywhere. Saying so is better than silence: it tells the reader
+            // the denial is the default rather than a rule they can go find.
+            out.push_str(" (default: not granted by any layer)");
         }
+
+        if let Some(fix) = &self.fix {
+            // Printed **verbatim**. `fix_stanza_for` produces the complete,
+            // ready-to-read block — its own `add to qqq.toml:` preamble and its
+            // own indentation — because it is also emitted in the JSON `fix`
+            // field, which has no renderer to add either. An earlier version of
+            // this function added a second preamble and re-indented every line,
+            // so the terminal showed "add to qqq.toml:" twice and left trailing
+            // whitespace inside the stanza.
+            //
+            // The lesson is the usual one: the string was correct, and the
+            // surface re-processed it. Print what the producer produced.
+            out.push_str("\n\n");
+            out.push_str(fix);
+        }
+
+        out
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -189,15 +232,53 @@ impl CommandOutput for CapsOutput {
     }
 
     fn summary(&self) -> String {
+        // In human format this function *is* the output — the renderer writes
+        // nothing else — so a command listing capabilities must list them.
+        //
+        // It previously printed only `app: 2 capabilities across 2 namespaces`,
+        // which is the answer to a question nobody asks: the user ran `caps` to
+        // find out *which* capabilities, and the names were sitting unread in
+        // the JSON envelope. A count is a useful heading and a useless answer.
         if self.deny_all {
-            return format!("{}: no capabilities granted", self.project);
+            return format!(
+                "{}: no capabilities granted\n\nNothing is granted, which is the default: a \
+                 capability\nabsent from qqq.toml is denied. Run `qqqai why <capability>` to\n\
+                 get the exact stanza that would grant one.",
+                self.project
+            );
         }
-        format!(
-            "{}: {} capabilities across {} namespaces",
+
+        let mut out = format!(
+            "{}: {} capabilities across {} namespace{}\n",
             self.project,
             self.grants.len(),
-            self.by_namespace.len()
-        )
+            self.by_namespace.len(),
+            if self.by_namespace.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+
+        for ns in &self.by_namespace {
+            let _ = write!(out, "\n  {}\n", ns.namespace);
+            for cap in &ns.capabilities {
+                let _ = writeln!(out, "    {cap}");
+            }
+        }
+        out.pop();
+
+        if !self.layers.is_empty() {
+            let _ = write!(out, "\n\nGranted by: {}", self.layers.join(", "));
+        }
+        if !self.covert_channels.is_empty() {
+            let _ = write!(
+                out,
+                "\nCovert channels not yet closed: {}",
+                self.covert_channels.join(", ")
+            );
+        }
+        out
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -323,13 +404,43 @@ impl CommandOutput for InspectOutput {
     }
 
     fn summary(&self) -> String {
-        format!(
+        // As with `caps`: in human format this is the whole output, so the
+        // counts must be followed by the things counted. The interfaces are
+        // what the project actually exposes, and the limits are what bounds it
+        // — both were JSON-only.
+        let mut out = format!(
             "{}: {} capabilities, {} interfaces, posture: {}",
             self.project,
             self.capabilities.len(),
             self.interfaces.len(),
             self.posture.as_str()
-        )
+        );
+
+        if !self.interfaces.is_empty() {
+            out.push_str("\n\nInterfaces\n");
+            for iface in &self.interfaces {
+                let _ = writeln!(out, "  {}", iface.name);
+            }
+            out.pop();
+        }
+
+        if !self.capabilities.is_empty() {
+            out.push_str("\n\nCapabilities\n");
+            for cap in &self.capabilities {
+                let _ = writeln!(out, "  {cap}");
+            }
+            out.pop();
+        }
+
+        let limits = &self.limits;
+        let _ = write!(
+            out,
+            "\n\nLimits\n  memory            {}\n  fuel              {}\n  \
+             epoch_deadline_ms {}",
+            limits.memory, limits.fuel, limits.epoch_deadline_ms
+        );
+
+        out
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -490,6 +601,137 @@ mod tests {
         assert!(e.remediation.is_some());
     }
 
+    // -- the human-output contract ------------------------------------------
+    //
+    // In human format `summary()` *is* the output: `Output::emit` writes that
+    // string and nothing else. So a command whose payload matters must carry
+    // the payload in `summary()`, and a test that only inspects the struct
+    // fields cannot detect a summary that drops them.
+    //
+    // These tests exist because exactly that happened. `qqqai caps` printed
+    // "2 capabilities across 2 namespaces" and never named a capability;
+    // `qqqai why http.server` printed "DENIED" and omitted the fix stanza the
+    // scaffold's own comments promise. The structs were complete and their JSON
+    // was correct in both cases — the data was right and the surface dropped it.
+
+    /// `caps` must name the capabilities, not merely count them.
+    #[test]
+    fn caps_lists_the_capabilities_it_counted() {
+        let l = loaded(CRYPTO);
+        let out = caps(&l);
+        let text = out.summary();
+
+        assert!(text.contains("crypto.hash"), "the name must appear: {text}");
+        assert!(
+            text.contains("crypto.random"),
+            "every granted capability must appear: {text}"
+        );
+        // The count is still a useful heading, so it should survive.
+        assert!(text.contains("2 capabilities"), "{text}");
+    }
+
+    /// A deny-all project gets an explanation, not a bare count.
+    #[test]
+    fn caps_explains_a_deny_all_project() {
+        let l = loaded(DENY_ALL);
+        let text = caps(&l).summary();
+        assert!(text.contains("no capabilities granted"), "{text}");
+        assert!(
+            text.contains("denied"),
+            "it should say that absence means denial: {text}"
+        );
+    }
+
+    /// `why` on a denial must print the stanza, not only the verdict.
+    ///
+    /// This is the command's entire purpose: it is run the moment a capability
+    /// is refused, and the person needs the text that would change it.
+    #[test]
+    fn why_prints_the_fix_stanza_in_human_output() {
+        let l = loaded(DENY_ALL);
+        let out = why(&l, "sql.query").expect("must explain");
+        let text = out.summary();
+
+        assert!(text.contains("DENIED"), "{text}");
+        assert!(
+            text.contains("capabilities.sql"),
+            "the stanza must be in the human output, not only in JSON: {text}"
+        );
+    }
+
+    /// The stanza is printed verbatim, with no second preamble.
+    ///
+    /// `fix_stanza_for` already emits `add to qqq.toml:`; an earlier version of
+    /// `summary` added its own, so the terminal showed the phrase twice. The
+    /// duplication is invisible to any test that only checks the string is
+    /// present.
+    #[test]
+    fn the_fix_stanza_is_not_wrapped_a_second_time() {
+        let l = loaded(DENY_ALL);
+        let out = why(&l, "fs.read").expect("must explain");
+        let text = out.summary();
+
+        assert_eq!(
+            text.matches("add to qqq.toml:").count(),
+            1,
+            "the preamble must appear exactly once: {text}"
+        );
+    }
+
+    /// No line of the human output has trailing whitespace.
+    ///
+    /// The first attempt at indenting the stanza added four spaces to a blank
+    /// line, which is invisible on screen and shows up in every diff that
+    /// quotes the output.
+    #[test]
+    fn the_human_output_has_no_trailing_whitespace() {
+        let l = loaded(DENY_ALL);
+        for command in ["fs.read", "crypto.sign", "http.client"] {
+            let text = why(&l, command).expect("must explain").summary();
+            for (i, line) in text.lines().enumerate() {
+                assert_eq!(
+                    line,
+                    line.trim_end(),
+                    "`{command}` line {i} has trailing whitespace: {line:?}"
+                );
+            }
+        }
+
+        let caps_text = caps(&loaded(CRYPTO)).summary();
+        for (i, line) in caps_text.lines().enumerate() {
+            assert_eq!(
+                line,
+                line.trim_end(),
+                "caps line {i} has trailing whitespace: {line:?}"
+            );
+        }
+    }
+
+    /// A granted capability names the deciding layer.
+    #[test]
+    fn why_names_the_layer_that_decided() {
+        let l = loaded(CRYPTO);
+        let text = why(&l, "crypto.hash").expect("must explain").summary();
+        assert!(
+            text.contains("GRANTED by manifest"),
+            "the deciding layer is the useful part of a grant: {text}"
+        );
+    }
+
+    /// A denial decided by no layer says so, rather than leaving a blank.
+    ///
+    /// The distinction matters: "not granted by any layer" tells the reader
+    /// this is the deny-by-default state and there is no rule to go find.
+    #[test]
+    fn a_default_denial_says_it_is_the_default() {
+        let l = loaded(DENY_ALL);
+        let text = why(&l, "kv.write").expect("must explain").summary();
+        assert!(
+            text.contains("not granted by any layer"),
+            "a default denial must read as the default: {text}"
+        );
+    }
+
     #[test]
     fn why_gives_guidance_for_a_wholly_unknown_name() {
         let l = loaded(DENY_ALL);
@@ -549,10 +791,39 @@ mod tests {
         assert_eq!(out.by_namespace.len(), 1);
         assert_eq!(out.by_namespace[0].namespace, "crypto");
         assert_eq!(out.by_namespace[0].capabilities.len(), 2);
-        // The summary reports counts; the namespace names live in the
-        // structured field, which is what an agent reads.
+        // The summary reports counts *and* the things counted.
+        //
+        // An earlier version of this test asserted only the counts, on the
+        // reasoning that "the namespace names live in the structured field,
+        // which is what an agent reads". That reasoning was the bug: humans
+        // read the human output, and in human format `summary()` is the entire
+        // output, so the names were unreachable for the people most likely to
+        // run the command.
         assert!(out.summary().contains("2 capabilities"));
-        assert!(out.summary().contains("1 namespaces"));
+        // Singular, because there is one namespace. The plural agreement is
+        // asserted here rather than left to chance.
+        assert!(
+            out.summary().contains("1 namespace"),
+            "singular agreement: {}",
+            out.summary()
+        );
+        assert!(!out.summary().contains("1 namespaces"));
+        assert!(
+            out.summary().contains("crypto.hash"),
+            "the names must be in the human output: {}",
+            out.summary()
+        );
+    }
+
+    /// Plural agreement, so the fix above does not overcorrect.
+    #[test]
+    fn caps_pluralises_namespaces_correctly() {
+        let two = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                   [capabilities.crypto]\nhash = [\"sha256\"]\n\
+                   [capabilities.clock]\nwall = true\n";
+        let text = caps(&loaded(two)).summary();
+        assert!(text.contains("2 namespaces"), "{text}");
+        assert!(!text.contains("2 namespace\n"), "{text}");
     }
 
     /// `crypto.random` is a covert channel and must be called out, because it

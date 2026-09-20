@@ -13,6 +13,11 @@
 //! exhaustiveness check so a new command cannot be forgotten in either.
 
 use std::io::Write;
+// Aliased because this file uses **both** traits: `io::Write` for the terminal
+// streams in `print_help`, and `fmt::Write` for building output strings. Using
+// `write!` on a `String` requires the latter in scope, and importing it
+// unaliased would shadow the former.
+use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use qqq_run::output::{CommandName, Format, Output};
@@ -400,7 +405,27 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         }
         CommandName::Doctor => {
             let checks = run_doctor();
-            report(&mut out, name, &DoctorOutput { checks })
+            // A failing check must fail the process.
+            //
+            // This returned `0` unconditionally, which made the command useless
+            // in the one place it is most valuable: a CI step or a shell
+            // `qqqai doctor || exit 1` would report a broken environment as
+            // healthy. A diagnostic that cannot fail is not a diagnostic — it
+            // is the same class as a validator with no positive control
+            // (`§M-006`), and it manufactures exactly the false confidence
+            // `doctor` exists to remove.
+            //
+            // The exit code is `UNAVAILABLE` rather than `FAILURE`: nothing is
+            // broken inside QQQ, the *environment* is not ready. That
+            // distinction matters to a caller deciding whether to retry, report
+            // or reinstall.
+            let failed = checks.iter().filter(|c| !c.ok).count();
+            let code = report(&mut out, name, &DoctorOutput { checks });
+            if failed > 0 && code == ExitCode::from(exit::OK) {
+                ExitCode::from(exit::UNAVAILABLE)
+            } else {
+                code
+            }
         }
         CommandName::Why => {
             // The capability argument is extracted before `out` is borrowed by
@@ -1563,12 +1588,41 @@ impl qqq_run::output::CommandOutput for DoctorOutput {
         CommandName::Doctor
     }
     fn summary(&self) -> String {
+        // The checks are listed, not just counted. `doctor` exists to diagnose,
+        // and "2 of 3 checks need attention" without naming them is a riddle
+        // rather than a diagnosis — the failing check's name, its detail and
+        // its fix are the entire reason the command was run.
+        //
+        // Passing checks are shown too, but compactly: their names are what
+        // tell the reader the tool actually looked, which is the difference
+        // between "all 3 checks passed" and a claim the user cannot audit.
         let failed = self.checks.iter().filter(|c| !c.ok).count();
-        if failed == 0 {
+        let mut out = if failed == 0 {
             format!("all {} checks passed", self.checks.len())
         } else {
             format!("{failed} of {} checks need attention", self.checks.len())
+        };
+
+        // Failures first, in full.
+        for check in self.checks.iter().filter(|c| !c.ok) {
+            let _ = write!(out, "\n\n  FAIL  {}\n        {}", check.name, check.detail);
+            if let Some(fix) = &check.fix {
+                let _ = write!(out, "\n        fix: {fix}");
+            }
         }
+
+        // Then the passes, named but not expounded.
+        let passes: Vec<&str> = self
+            .checks
+            .iter()
+            .filter(|c| c.ok)
+            .map(|c| c.name)
+            .collect();
+        if !passes.is_empty() {
+            let _ = write!(out, "\n\n  ok    {}", passes.join(", "));
+        }
+
+        out
     }
     fn to_json(&self) -> serde_json::Value {
         serde_json::json!({"checks": self.checks})

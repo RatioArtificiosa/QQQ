@@ -3034,6 +3034,146 @@ until it ships.
 
 ---
 
+### §O-036 — Running the scaffolded project found four defects the test suite could not
+
+Having learned in `§O-033`/`§O-034` that the binary finds what tests miss, this
+round began by *using* a project rather than reading code: `qqqai new`, then
+`add`, `install`, `caps`, `inspect`, `why`, `doctor`, `build` — the first ten
+minutes of Proposal §12.1, run for real.
+
+Four defects, all of them in the surface rather than the engine, and all of them
+invisible to the 256 unit tests that passed at the time.
+
+---
+
+#### §O-036a — In human format, `summary()` **is** the output
+
+The root cause of three of the four. `Output::emit` does this:
+
+```rust
+Format::Human => self.write_line(&value.summary()),
+```
+
+There is no second renderer. A command's `summary()` is its complete human
+output, so **any field not included there does not exist for a human reader**.
+Every one of these commands had complete, correct `to_json` output while the
+terminal showed a fragment:
+
+| Command | Printed | Withheld |
+|---|---|---|
+| `qqqai caps` | `app: 2 capabilities across 2 namespaces` | **the capability names** |
+| `qqqai inspect` | `app: 2 capabilities, 2 interfaces, posture: exposed` | the interfaces, the limits |
+| `qqqai why fs.read` | `fs.read DENIED` | **the stanza that grants it** |
+| `qqqai doctor` | `all 3 checks passed` | which checks ran |
+
+`caps` is the clearest case. The command whose entire purpose is *listing
+capabilities* printed a count and not one name, and the names were sitting in a
+struct field two lines away.
+
+**Why the tests missed it.** The unit tests asserted on struct fields and on
+`summary().contains("2 capabilities")` — which passed. One test even rationalized
+the gap in a comment: *"the summary reports counts; the namespace names live in
+the structured field, which is what an agent reads."* That reasoning is the bug
+stated as a justification. Humans read the human output; designing the
+human surface for a machine reader is how a tool becomes unusable by the people
+it was built for.
+
+**The fix is a contract, not four patches.** In human format the output must
+carry the payload, and the tests now assert it that way — on the strings a user
+sees, for the reasons a user ran the command.
+
+---
+
+#### §O-036b — `qqqai doctor` exited `0` when a check failed
+
+The most serious finding of the round, and the one with real-world consequences:
+`doctor` printed *"1 of 3 checks need attention"* and returned exit code **0**.
+
+A CI step, or a shell `qqqai doctor || exit 1`, would treat a broken environment
+as healthy. This is `§M-006`'s lesson in a new place — **a diagnostic that
+cannot fail is not a diagnostic** — and it is worse than a missing feature,
+because it gives a caller false confidence in exactly the situation where
+certainty was requested.
+
+Now exits **69 (`UNAVAILABLE`)** on failure and `0` on success. `UNAVAILABLE`
+rather than `FAILURE` deliberately: nothing is broken inside QQQ, the
+*environment* is not ready, and a caller deciding whether to retry, report or
+reinstall needs that distinction.
+
+Both directions are pinned by tests: a failing run must exit non-zero, and a
+passing run must exit zero. Without the second, the first would also pass if
+`doctor` simply always failed.
+
+---
+
+#### §O-036c — The parser refused the syntax its own error messages recommend
+
+`qqqai add qqqai/json@">=1.0, <2.0"` failed with:
+
+```text
+error[QQQ-5004]: `>=1.0, <2.0` is not a version requirement
+```
+
+while the remediation printed beneath it says:
+
+```text
+→ write a version like `1.2`, `^1.2.3`, `~1.2.3`, `>=1.0, <2.0` or `*`
+```
+
+The parser's module docs justified this: *"Deliberately absent: `1.2.*`
+wildcards, `||` unions, and comma lists."* The first two exclusions are sound. The
+third conflated two different things:
+
+* **`,` is a conjunction.** `>=1.0, <2.0` means both bounds hold — which is
+  precisely the bounded range the caret and tilde already expand into
+  internally. Refusing it is refusing a syntax the engine already computes.
+* **`||` is a disjunction.** It admits versions from unrelated spans, which is
+  the form that hides a dependency's true range.
+
+`qqq-cap`'s shape check (written in this same session, `§O-033c`) *requires* a
+comma in a range-shaped requirement, so three parts of the codebase disagreed
+about the grammar and only the end-to-end test noticed.
+
+`Requirement` now holds a `Vec<Clause>` that must **all** hold. A single-bound
+requirement is a conjunction of one, so `matches` needs no special case, and
+`||` remains excluded.
+
+**The generalizable failure:** an error message is an interface. It makes a
+promise about what the tool accepts, and that promise has to be tested like any
+other. `add_accepts_the_version_form_the_proposal_writes` now parses every form
+appearing in the remediation text — the test would have failed before the fix.
+
+---
+
+#### §O-036d — `qqq-run` had no integration tests, which is why all of the above shipped
+
+Three defects reached a built binary with 256 passing unit tests around them,
+and the reason is structural rather than careless: **every test was written from
+the same mental model as the code.** A unit test can confirm `DoctorOutput`
+contains a failing check; it cannot observe that the *process* still exits `0`.
+
+`crates/qqq-run/tests/cli.rs` now spawns the real binary and asserts on what a
+user or a CI job sees — stdout, stderr, and exit codes, never library internals.
+24 tests, covering:
+
+* the exit-code contract in both directions (`doctor` pass and fail);
+* human output carrying its payload (`caps` names, `inspect` lists, `why` stanza,
+  `doctor` checks);
+* the `add`/`remove` manifest round trip, including comment preservation;
+* `install`'s lockfile contract, including refusing a tampered file;
+* the JSON envelope and the `qqqai` naming invariant.
+
+The suite is deliberately hermetic: `HOME`/`USERPROFILE` are redirected into the
+sandbox, so no test can pass because of the developer's machine.
+
+This is the layer that was missing. `§O-032a` said a test written from the same
+mental model as the code cannot refute that model; the corollary, learned here,
+is that the refutation has to be *structural* — a separate suite that consumes
+the artifact the way a user does, rather than a better-written test inside the
+same module.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3132,6 +3272,26 @@ The deletions were only caught because each new row was preceded by re-reading t
 **Lesson.** This is the same class as `§O-033d`: **an `edit` anchored on a long literal is a rewrite, not an insertion.** The tool replaces exactly what it is given, so any part of `old_string` not repeated in `new_string` is deleted. For a one-line addition, the anchor should be one line, not five. A writer who has to reproduce existing content in order to append to it will eventually reproduce it wrong.
 
 **Evidence it was a real risk and not just carelessness:** the loss was silent. `edit` reported success, the document still parsed, the validator still passed — because a missing changelog row breaks no invariant. Only a human or a targeted search would notice. A destructive edit to prose has no compiler.
+
+**Repeated in the same session, which is the more useful finding.** While writing
+`§O-036`, an `edit` anchored on `## 4. MISTAKES AND FIXES` used that heading as
+its trailing context and did not reproduce it, so **the section heading was
+deleted**. It was caught only because the section list was re-checked afterwards.
+The same thing had happened earlier to the `§M-001` boundary in `§O-035`.
+
+So the fix written above — "anchor on the smallest unique string" — was correct
+and was then not followed twice more within the hour. Recording that plainly,
+because the pattern is now clear enough to name:
+
+> **An `edit` whose `old_string` contains a heading is an edit that will delete
+> the heading.** When appending a section, the anchor must be the *existing*
+> content that stays, never the boundary that the new content is meant to sit
+> before. If the new text ends with `## 4. MISTAKES AND FIXES`, the heading is
+> still in `new_string`; if it does not, the heading is gone.
+
+The reliable check, which caught it both times, is to re-list the document's
+top-level headings after any edit that touches a section boundary. That check is
+now the habit; a note in this document was not enough.
 
 ---
 
@@ -3318,5 +3478,8 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | `[dependencies]` and `[dev-dependencies]` were **silently ignored** by `Manifest`: the struct did not model them and is not `deny_unknown_fields` at the top level, so a manifest declaring a dependency parsed successfully with the table discarded (`qqqai caps` printed "no capabilities granted" and exited 0). Both tables are now modelled, validated, and named in errors (`§O-033`). Writing the test found the *same* defect again in new code — `[dev-dependencies]` needs an explicit serde `rename`, and the hyphenated key parsed as empty (`§O-033b`). Requirement validation is split by what each crate can honestly decide, because `qqq-pkg` depends on `qqq-cap` and the real parser is therefore unreachable from the manifest layer (`§O-033c`). | Architect |
 | 2026-09-19 | `CLI-005` implemented: `qqqai add` and `qqqai remove` (`qqq-run::deps`), with `--dev`, `--exact`, `--feature`, `--registry`, `name@version` and `--json`. The manifest is edited as **text** so comments and formatting survive, written atomically via temp-file + rename, and re-parsed before publishing (`§O-034b`, §O-034c). The first end-to-end run refuted the version model: `1.2` — the spelling Proposal §5.3 itself writes — was rejected because `Version` requires three components, so a partial-version rule with zero-fill now widens instead of refusing (`§O-034a`). | Architect |
 | 2026-09-19 | `CLI-006` implemented: `qqqai install` (`qqq-run::install`), with `--locked`, `--frozen`, `--offline`, `--force` and `--dry-run`. `--locked`/`--frozen`/`--offline` were three booleans until clippy's `struct_excessive_bools` showed they are **ordered by strictness**, so they are now the `LockMode` enum with `Update < Offline < Locked < Frozen`; the same lint on the output struct showed `locked` and `offline` were derivable from `mode` and they were deleted (`§O-035b`). Reports the §5.4 capability diff with `escalation` as a first-class field. Fails with `QQQ-5001` rather than writing a lockfile that promises bytes nobody fetched, because a lockfile that lies is discovered by a later command with no trace of the cause (`§O-035c`). | Architect |
+
+| 2026-09-19 | **Four defects found by *using* a scaffolded project**, all in the surface and all invisible to 256 passing unit tests (`§O-036`). `qqqai caps` printed a count and not one capability name; `inspect`, `why` and `doctor` likewise withheld their payload — because in human format `summary()` **is** the entire output and the tests asserted on struct fields (`§O-036a`). `qqqai doctor` **exited `0` when a check failed**, so CI treated a broken environment as healthy; now exits 69 (`§O-036b`). The requirement parser **refused `>=1.0, <2.0`** — the syntax its own remediation text recommends — because the design note conflated a comma *conjunction* with a `\|\|` *disjunction*; comma lists are now supported as a `Vec<Clause>` (`§O-036c`). Structural fix: `crates/qqq-run/tests/cli.rs`, 24 tests that spawn the real binary and assert on stdout, stderr and exit codes rather than library internals (`§O-036d`). | Architect |
+| 2026-09-19 | `§M-007` repeated twice in the same session: an `edit` anchored on a section heading deleted the heading, in `§O-035` and again in `§O-036`. The rule is now stated operationally — when appending a section, never anchor on the boundary the new content sits before. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

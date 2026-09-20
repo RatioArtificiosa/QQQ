@@ -349,12 +349,15 @@ pub fn build_linker<'a>(
             "qqq:clock@1.0.0" => {
                 crate::host_clock::register(&mut linker, grants)?;
             }
-            // QQQ-STUB(CON-009): `qqq:crypto`, `qqq:fs`, `qqq:http` and the
-            // rest have host logic in `ambient.rs` but no registered interface
-            // yet. `qqq:clock` is the first and only interface wired up so far.
-            // Recording the gap keeps a partially-implemented milestone honest:
-            // a component that imports the others gets a clear diagnostic
-            // naming the capability, not Wasmtime's "unknown import".
+            "qqq:crypto@1.0.0" => {
+                crate::host_crypto::register(&mut linker, grants)?;
+            }
+            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:http`, `qqq:sql` and the rest
+            // have no registered interface yet. `qqq:clock` and `qqq:crypto`
+            // are the two wired up so far. Recording the gap keeps a
+            // partially-implemented milestone honest: a component that imports
+            // the others gets a clear diagnostic naming the capability, not
+            // Wasmtime's "unknown import".
             //
             // Two notes on the reference, because getting it wrong twice is
             // itself worth recording (Observations §O-020d):
@@ -366,9 +369,15 @@ pub fn build_linker<'a>(
             //   functions of interface X". `CON-009` is the closest governing
             //   item: it fixes the contract each host call must honour
             //   (`result<T, E>` on every fallible call), which is what
-            //   `host_clock.rs` is written against. Per-interface work is
-            //   tracked by the WIT files themselves and by the `implemented`
-            //   flag in the `qqq-abi` registry.
+            //   `host_clock.rs` and `host_crypto.rs` are written against.
+            //   Per-interface work is tracked by the WIT files themselves and
+            //   by the `implemented` flag in the `qqq-abi` registry.
+            //
+            // Note that `qqq:crypto` is only *partially* implemented — `random`
+            // and `hashing` are real, `hmac`/`aead`/`signing` are absent on
+            // purpose. A component importing the latter therefore still gets
+            // this diagnostic, which is the correct outcome: `host_crypto`
+            // registers what exists and the rest stays visibly missing.
             _ => {
                 for &c in &grants.capabilities() {
                     if interface_for(c) == Some(iface) {
@@ -633,9 +642,22 @@ mod tests {
         assert!(built.bound.unimplemented.is_empty());
     }
 
-    /// A granted capability binds its interface and is reported as
-    /// *unimplemented* until the host implementation lands — a loud, inspectable
-    /// gap rather than a silent one.
+    /// A granted capability binds its interface, and one whose interface the
+    /// host does not implement is reported as *unimplemented* — a loud,
+    /// inspectable gap rather than a silent one.
+    ///
+    /// # Why this no longer uses `crypto.hash`
+    ///
+    /// It did, until `host_crypto.rs` landed and `qqq:crypto` became a real
+    /// implementation for `random` and `hashing`. The test then failed, which is
+    /// exactly right: it was asserting a gap that had been closed. Repointed at
+    /// `fs.read`, which has no registered interface, so the property stays under
+    /// test instead of being deleted along with its example.
+    ///
+    /// The general lesson, recorded because it keeps recurring: **a test that
+    /// names a specific unfinished feature is a test with an expiry date.** When
+    /// one fails after a feature lands, the fix is to repoint it at something
+    /// still unfinished, not to remove the assertion.
     #[test]
     fn a_granted_capability_binds_its_interface_and_reports_the_gap() {
         let mut cfg = wasmtime::Config::new();
@@ -643,18 +665,45 @@ mod tests {
         let engine = wasmtime::Engine::new(&cfg).unwrap();
         let g = grants_from(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+             [[capabilities.fs]]\npath = \"/tmp\"\nmode = \"read-only\"\n",
         );
         let built = build_linker(&engine, &g).unwrap();
-        assert!(built.bound.has("qqq:crypto@1.0.0"));
+        assert!(built.bound.has("qqq:fs@1.0.0"));
         assert!(
-            built.bound.unimplemented.contains(&Capability::CryptoHash),
+            built.bound.unimplemented.contains(&Capability::FsRead),
             "the unimplemented capability must be reported: {:?}",
             built.bound
         );
         // And crucially: nothing outside the grants is bound.
-        assert!(!built.bound.has("qqq:fs@1.0.0"));
         assert!(!built.bound.has("qqq:sql@1.0.0"));
+        assert!(!built.bound.has("qqq:http@1.0.0"));
+    }
+
+    /// The converse, now that `qqq:clock` and `qqq:crypto` are implemented: a
+    /// capability whose interface *is* registered must **not** be reported as
+    /// unimplemented. Without this, a change that marked everything
+    /// unimplemented would leave the test above passing.
+    #[test]
+    fn an_implemented_capability_is_not_reported_as_a_gap() {
+        let mut cfg = wasmtime::Config::new();
+        cfg.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&cfg).unwrap();
+
+        for (stanza, cap) in [
+            ("[capabilities.crypto]\nhash = [\"sha256\"]\n", Capability::CryptoHash),
+            ("[capabilities.crypto]\nrandom = true\n", Capability::CryptoRandom),
+            ("[capabilities.clock]\nwall = true\n", Capability::ClockWall),
+            ("[capabilities.clock]\nmonotonic = true\n", Capability::ClockMonotonic),
+        ] {
+            let src =
+                format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\n{stanza}");
+            let built = build_linker(&engine, &grants_from(&src)).unwrap();
+            assert!(
+                !built.bound.unimplemented.contains(&cap),
+                "{cap} has a host implementation and must not be reported as a gap: {:?}",
+                built.bound
+            );
+        }
     }
 
     /// **The core security test.** A component importing a capability we did

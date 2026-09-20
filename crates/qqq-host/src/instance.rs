@@ -811,24 +811,53 @@ mod tests {
 
     /// A granted-but-unimplemented capability must fail at *create* time with a
     /// clear diagnostic, not at first call with a Wasmtime error.
+    ///
+    /// # Why this no longer uses `crypto.hash`
+    ///
+    /// It did, until `qqq:crypto` gained a real implementation. `fs.read` has no
+    /// registered interface, so the property stays under test. See the note on
+    /// the sibling test in `linker.rs`: a test naming a specific unfinished
+    /// feature expires when that feature lands, and the fix is to repoint it at
+    /// something still unfinished rather than delete the assertion.
     #[test]
     fn a_granted_but_unimplemented_capability_is_reported_clearly() {
         let e = engine();
         let p = PreparedComponent::compile(&e, OK_WAT.as_bytes()).unwrap();
         let g = grants(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+             [[capabilities.fs]]\npath = \"/tmp\"\nmode = \"read-only\"\n",
         );
         let Err(err) = Instance::create(&e, &p, &g, limits()) else {
             panic!("an unimplemented capability must be reported");
         };
         assert_eq!(err.code, ErrorCode::InternalInvariantViolated);
         assert!(
-            err.message.contains("crypto.hash"),
+            err.message.contains("fs.read"),
             "must name the capability: {}",
             err.message
         );
-        assert!(err.render().contains("qqq:crypto@1.0.0"));
+        assert!(err.render().contains("qqq:fs@1.0.0"));
+    }
+
+    /// The converse: a capability that *is* implemented must not block
+    /// instantiation.
+    ///
+    /// Without this, a change marking everything unimplemented would leave the
+    /// test above passing while breaking every real component.
+    #[test]
+    fn an_implemented_capability_does_not_block_instantiation() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, OK_WAT.as_bytes()).unwrap();
+        let g = grants(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nhash = [\"sha256\"]\nrandom = true\n",
+        );
+        let instance = Instance::create(&e, &p, &g, limits());
+        assert!(
+            instance.is_ok(),
+            "a fully-implemented grant must not block instantiation: {:?}",
+            instance.err()
+        );
     }
 
     // -- Epoch configuration ----------------------------------------------

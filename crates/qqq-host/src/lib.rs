@@ -33,6 +33,7 @@
 pub mod ambient;
 pub mod config;
 pub mod host_clock;
+pub mod host_crypto;
 pub mod instance;
 pub mod linker;
 pub mod trap;

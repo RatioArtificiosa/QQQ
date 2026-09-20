@@ -1469,8 +1469,111 @@ This is the first time a QQQ component has actually called into a host
 capability. The refusal happens **before any instruction runs**, and names the
 exact interface and the exact stanza that would resolve it.
 
-**Cross-refs:** Checklist `CLI-008`, `CLI-009`, `HOST-016`, `PKG-001`, `SEC-002`,
-`DET-002`; Proposal §4.6, §5.2, §5.3, §6.1, §10.5.
+**Cross-refs:** Checklist `CLI-008`, `CLI-009`, `PKG-001`, `SEC-002`, `DET-002`,
+`CON-009`; Proposal §4.6, §5.2, §5.3, §6.1, §10.5.
+
+---
+
+### §O-021 — `qqq:crypto` becomes real: two interfaces, and the tests that expired
+
+**What was built.** `qqq-host::host_crypto` registers the `random` and `hashing`
+interfaces of `qqq:crypto@1.0.0`, following the pattern `host_clock` established:
+per-capability registration, a call-time re-check, and hand-written bindings
+pinned to the WIT by tests.
+
+**Scope, stated precisely — unchanged from `§O-018`'s honesty.** `hmac`, `aead`
+and `signing` remain **unimplemented and deliberately unregistered**. The
+registry still reports `qqq:crypto@1.0.0` as `implemented: false`, and
+`qqq-abi`'s test still pins that. Partial service must not claim completeness: a
+component needing AEAD would otherwise pass admission and fail at first call.
+
+**Verification — three real components, by running them:**
+
+| Component imports | Manifest grant | Result | Exit |
+|---|---|---|---|
+| `qqq:crypto/hashing` (digest + digest-many) | `hash = ["sha256"]` | instantiated, 13 µs | **0** |
+| `qqq:crypto/hashing` | `random = true` only | `QQQ-6003`, hashing not exposed | **1** |
+| `qqq:crypto/hashing` | deny-all | `QQQ-6003`, refused at import check | **1** |
+| `qqq:clock/wall-clock` | `wall = true` | instantiated, 28 µs | **0** |
+
+`cargo test --workspace` → **378 pass**; `clippy -D warnings` → clean.
+
+---
+
+#### §O-021a — Two tests expired the moment the feature landed, and that is correct behaviour
+
+Wiring `qqq:crypto` broke two tests that had been green:
+
+* `linker::a_granted_capability_binds_its_interface_and_reports_the_gap`
+* `instance::a_granted_but_unimplemented_capability_is_reported_clearly`
+
+Both used `crypto.hash` as their example of a capability with **no host
+implementation**. Once `host_crypto` landed, that example stopped being true and
+the assertions failed.
+
+**They were right to fail.** The tests were correct and the code changed under
+them. The instructive part is what a careless fix looks like: deleting the
+assertions, or relaxing them, would have silently removed the only coverage of
+"an unimplemented capability is reported clearly" — a property that still
+matters, because eight capabilities remain unimplemented.
+
+**The fix.** Both tests were **repointed** at `fs.read`, which has no registered
+interface, and each gained a converse test proving an *implemented* capability
+is **not** reported as a gap. That second test catches a regression in the other
+direction: marking everything unimplemented would otherwise leave the original
+assertions passing while breaking every real component.
+
+**The generalisation, worth stating because it will recur many times as this
+runtime fills in:** *a test that names a specific unfinished feature has an
+expiry date.* When such a test fails, the failure is information — the feature
+landed — not noise. Repoint it at something still unfinished, and add the
+converse.
+
+---
+
+#### §O-021b — `ComponentNamedList` is implemented for tuples, not for bare types
+
+A host function's parameters and return must satisfy `ComponentNamedList`. That
+trait is implemented for **tuples**, so a function returning one value must
+return `(T,)`:
+
+```rust
+// does not compile — Vec<u8> is not a ComponentNamedList
+|store, (length,): (u32,)| -> Result<Vec<u8>>
+
+// compiles — the one-element tuple is the named list
+|store, (length,): (u32,)| -> Result<(Vec<u8>,)>
+```
+
+`Vec<T>` *is* the Rust type for WIT `list<T>`, which is what made the error
+confusing: the element type was right and the container was wrong. The
+distinction is between a **component type** (`ComponentType`, satisfied by
+`Vec<u8>`) and a **named list of component types** (`ComponentNamedList`,
+satisfied by tuples of them). The Component Model's flat parameter
+representation is what forces this, not a stylistic choice.
+
+Found by compiling, in one attempt. No amount of reading the WIT would have
+surfaced it — the WIT was correct and the Rust was wrong.
+
+---
+
+#### §O-021c — A test that greps prose tests the prose
+
+One of the new tests asserted that the names of unimplemented interface
+functions (`compute`, `encrypt`, `sign`, …) do not appear in `host_crypto.rs`.
+It failed — because the word `compute` appears in that file's own documentation
+explaining which interfaces are unimplemented.
+
+**The property was right; the detection was wrong.** The assertion should be "no
+host function is *registered* under this name", and registrations are written
+`func_wrap("name"`. Matching the registration form rather than the bare word
+tests the property. A positive control
+(`the_unregistered_check_can_find_a_registered_name`) asserts the same detection
+*finds* `digest`, which is registered — without it, a matcher that never matched
+anything would look like proof.
+
+**Cross-refs:** Checklist `CON-009`, `CON-012`, `CAP-001`, `SEC-002`, `DET-003`;
+Proposal §4.5, §6.3, §7.4, §10.5.
 
 ---
 

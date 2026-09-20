@@ -120,12 +120,21 @@ fn ambient_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:crypto@1.0.0",
             &[CryptoRandom, CryptoHash, CryptoHmac, CryptoAead, CryptoSign],
-            // Partially implemented: `random` and `hash` are real (see
-            // `qqq-host::ambient`); `hmac`, `aead` and `sign` are not yet.
-            // The flag is `false` until the whole interface is servable —
+            // Partially implemented: `random` and `hashing` are real and bound
+            // (`qqq-host::host_crypto`, backed by `qqq-host::ambient`);
+            // `hmac`, `aead` and `signing` are not registered at all.
+            //
+            // The flag stays `false` until the whole interface is servable —
             // claiming `true` for a partially-served interface would let a
             // guest that needs AEAD pass admission and fail at first call,
             // which is exactly the opaque failure this flag exists to prevent.
+            //
+            // Note the two levels at which this is enforced, and that they are
+            // deliberately redundant: this flag is what `qqqai inspect` reports
+            // *statically*, while `build_linker` is what actually refuses at
+            // instantiation. A component importing `qqq:crypto/hmac` fails
+            // there regardless of what this flag says, because no host function
+            // is registered for it.
             false,
             "Randomness, hashing, HMAC, AEAD and signatures, all explicitly named",
         ),

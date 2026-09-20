@@ -490,14 +490,22 @@ fn strip_version(interface: &str) -> String {
 /// Always `QQQ-6003`, with a remediation naming the capability to grant.
 fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     let missing = check.missing.join(", ");
-    // Try to name a concrete capability and the stanza that grants it. When the
-    // interface maps to nothing we know, say so rather than guessing — a wrong
-    // suggestion is worse than none, because it sends the user to edit a file
-    // that will not help.
-    let implicated: Option<qqq_cap::Capability> = check
-        .missing
-        .iter()
-        .find_map(|i| capability_for_interface(i));
+    // Name the capability the **failing interface** implies, using the precise
+    // mapping.
+    //
+    // This used `capability_for_interface`, which compares by *package*, and
+    // several packages hold several interfaces. Measured on a real artifact: a
+    // component importing `qqq:clock/wall-clock` was told to grant
+    // `clock.monotonic` — the other half of the same package. The advice named a
+    // stanza that would have left the component still failing, on the one error
+    // whose entire purpose is telling the user what to add.
+    //
+    // The same defect was found and fixed in `qqqai inspect` (`§O-038b`); this
+    // path was missed because the two commands reach the mapping differently —
+    // `inspect` had a visible wrong answer in its report, while `run` only shows
+    // it in a remediation line that a reader is already primed to trust.
+    let implicated: Option<qqq_cap::Capability> =
+        check.missing.iter().find_map(|i| capability_for_import(i));
 
     let mut e = Error::new(
         ErrorCode::ComponentLoadFailed,

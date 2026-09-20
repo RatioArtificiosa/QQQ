@@ -1248,6 +1248,160 @@ fn a_non_numeric_trial_count_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
+// run — the capability enforcement path
+// ---------------------------------------------------------------------------
+
+/// A component importing `qqq:clock/wall-clock`, as WAT.
+const NEEDS_WALL_CLOCK: &str = r#"(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c
+    (export "now" (func (result u64)))
+    (export "resolution" (func (result u64)))
+    (export "timezone" (func (result string)))
+  ))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// An ungranted import is **refused**, and the error names the right capability.
+///
+/// This is the runtime half of the project's central claim. `inspect` reports
+/// what an artifact needs; `run` is what enforces it, and an enforcement path
+/// with no test is a claim rather than a guarantee.
+///
+/// The capability assertion is the regression test for a real defect: `run` used
+/// the *package-level* mapping, so a component importing
+/// `qqq:clock/wall-clock` was told to grant `clock.monotonic` — the other half
+/// of the same package. That advice would have left the component still
+/// failing, on the one error whose entire purpose is saying what to add.
+#[test]
+fn run_refuses_an_ungranted_import_and_names_the_right_capability() {
+    let s = Sandbox::new("run-ungranted");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "wall", NEEDS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["run", &wasm]);
+    run.assert_failed()
+        .assert_contains("qqq:clock/wall-clock")
+        .assert_contains("capability: clock.wall");
+
+    // The stanza lists both options for the package, which is correct — the
+    // user may want either. What must **not** happen is the diagnostic naming
+    // the wrong capability as the one implicated, which is what the defect did.
+    //
+    // Asserted on the `capability:` line specifically, not on the whole output:
+    // a blunt `!contains("clock.monotonic")` failed on the legitimate stanza and
+    // would have hidden the real check in a screen of text.
+    // Bound first: `all()` builds a `String`, and the iterator would borrow a
+    // temporary.
+    let output = run.all();
+    let implicated: Vec<&str> = output
+        .lines()
+        .filter(|l| l.trim_start().starts_with("capability:"))
+        .collect();
+    assert_eq!(implicated.len(), 1, "exactly one implicated capability");
+    assert!(
+        implicated[0].contains("clock.wall"),
+        "the implicated capability must be the interface's own, not its package-mate: {}",
+        implicated[0]
+    );
+}
+
+/// The same component **runs** once the capability is granted.
+///
+/// The positive control. Without it, a `run` that refused everything would pass
+/// the test above and the enforcement would look correct while being useless.
+#[test]
+fn run_executes_when_the_capability_is_granted() {
+    let s = Sandbox::new("run-granted");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.clock]\nwall = true\n",
+    );
+    let Some(wasm) = encode(&s, "wall", NEEDS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["run", &wasm]).assert_ok().assert_contains("ran in");
+}
+
+/// `--cap` **cannot widen** what the manifest granted.
+///
+/// The narrowing-only invariant, asserted at the command line rather than only
+/// in the resolver's unit tests. A flag that could add authority would be a way
+/// to defeat the manifest, which is the one thing the design forbids — and the
+/// place to prove it is the interface a user actually types.
+#[test]
+fn a_cap_flag_cannot_widen_the_manifest() {
+    let s = Sandbox::new("run-widen");
+    // The manifest grants nothing at all.
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "wall", NEEDS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["run", &wasm, "--cap", "clock.wall"])
+        .assert_failed()
+        .assert_contains("no grant provides");
+}
+
+/// A bare positional names the **artifact**, not a component argument.
+///
+/// The regression test for a real defect: the positional was appended to the
+/// component's arguments, so `qqqai run ./needs-clock.wasm` silently ran the
+/// project's built component instead and reported success. The user got a
+/// confident answer about something they had not asked for — the same class as
+/// `qqqai inspect` discarding its path (`§O-038a`).
+#[test]
+fn a_positional_names_the_artifact() {
+    let s = Sandbox::new("run-positional");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "wall", NEEDS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    // If the positional were still treated as a component argument, this would
+    // succeed by running the (absent) built artifact and the import check would
+    // never see the file.
+    s.run(&["run", &wasm])
+        .assert_failed()
+        .assert_contains("qqq:clock/wall-clock");
+}
+
+/// `--dry-run` rehearses the whole pre-flight and runs nothing.
+#[test]
+fn run_dry_run_checks_grants_without_executing() {
+    let s = Sandbox::new("run-dry");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.clock]\nwall = true\n",
+    );
+    let Some(wasm) = encode(&s, "wall", NEEDS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["run", "--dry-run", &wasm]);
+    run.assert_ok().assert_contains("would run");
+}
+
+// ---------------------------------------------------------------------------
 // global contracts
 // ---------------------------------------------------------------------------
 

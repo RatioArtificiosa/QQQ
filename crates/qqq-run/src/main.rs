@@ -1872,7 +1872,23 @@ fn run_options(
                          use `--` before arguments meant for the component",
                     ));
                 }
-                // A bare positional is passed to the component.
+                // A bare positional names the artifact, when no `--artifact`
+                // was given.
+                //
+                // It previously went into `opts.args` — passed to the *component*
+                // — which meant `qqqai run ./needs-clock.wasm` silently ran the
+                // project's built component instead, and reported success. That
+                // is the same defect `qqqai inspect` had (`§O-038a`): the
+                // argument was accepted and discarded, so the user got a
+                // confident answer about something they had not asked for.
+                //
+                // The remediation text already told users to put component
+                // arguments after `--`, so this makes the code match the
+                // documented contract rather than inventing one.
+                else if opts.artifact.is_none() && !after_separator {
+                    opts.artifact = Some(std::path::PathBuf::from(a));
+                }
+                // Anything after `--` belongs to the component.
                 else {
                     opts.args.push(a.to_owned());
                 }

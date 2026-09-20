@@ -96,9 +96,10 @@ impl Server {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
         stream.write_all(first.as_bytes()).await.expect("write 1");
         stream.flush().await.expect("flush 1");
-        // Read the first response before writing the second, so the test does
-        // not depend on the server pipelining — which is HTTP/1.1-legal but not
-        // something this server implements.
+        // Read the first response before writing the second, so this test does
+        // not depend on pipelining. Pipelining **is** implemented and is covered
+        // by `a_pipelined_request_survives_a_body_less_drain`; keeping the two
+        // concerns apart means a failure here names one cause rather than two.
         let one = read_response(&mut stream).await;
         stream.write_all(second.as_bytes()).await.expect("write 2");
         stream.flush().await.expect("flush 2");
@@ -378,8 +379,6 @@ async fn a_body_is_drained_so_the_next_request_parses() {
 
 /// A **pipelined** second request survives the drain of a body-less request.
 ///
-/// # What this pins that the test above does not
-///
 /// `drain_body` returns early when no `content-length` is declared, and in that
 /// case anything left in the buffer is the start of the *next* request. Clearing
 /// it there would silently drop that request, and `read_head` no longer clearing
@@ -438,6 +437,109 @@ async fn a_pipelined_request_survives_a_body_less_drain() {
         answered, 2,
         "both pipelined requests must be answered; a drain that cleared the \
          buffer instead of preserving it drops the second:\n{all}"
+    );
+}
+
+/// A **chunked** request body no longer costs the connection.
+///
+/// # What this pins
+///
+/// `drain_body` used to return `false` for any `Transfer-Encoding: chunked`
+/// request, ending the connection, because reading-and-discarding chunked
+/// framing without decoding it leaves the offset at a place only a decoder
+/// knows — a request-smuggling shape. That was the honest answer while no
+/// decoder existed.
+///
+/// `qqq-serve::body::BodyReader` is that decoder (`SRV-004`), so the same
+/// request must now be answered **and** the connection reused. This test asserts
+/// both halves, because either alone would pass for a server that is still
+/// wrong: answering then closing satisfies a status assertion, and reusing
+/// without decoding would answer the second request from the middle of a chunk.
+#[tokio::test]
+async fn a_chunked_body_is_decoded_and_the_connection_is_reused() {
+    let table = table_with(&[(Method::Post, "/echo", "echo")]);
+    let server = Server::start(table, echo_handler()).await;
+
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+
+    // A chunked body split across two chunks, plus a chunk extension, to make
+    // the decoder take its real path rather than the one-chunk shortcut.
+    stream
+        .write_all(
+            b"POST /echo HTTP/1.1\r\nhost: localhost\r\ntransfer-encoding: chunked\r\n\r\n\
+              5;ext=1\r\nHELLO\r\n6\r\n WORLD\r\n0\r\n\r\n",
+        )
+        .await
+        .expect("write chunked");
+    stream.flush().await.expect("flush chunked");
+
+    let first = read_response(&mut stream).await;
+    assert!(
+        first.starts_with("HTTP/1.1 200"),
+        "a chunked body must be answered, not end the connection:\n{first}"
+    );
+
+    // The reuse half: a second request on the same connection must parse from
+    // the right offset, which is only true if the chunk framing was decoded
+    // exactly to its final CRLF.
+    stream
+        .write_all(b"POST /echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: 2\r\n\r\nOK")
+        .await
+        .expect("write 2");
+    stream.flush().await.expect("flush 2");
+    let second = read_response(&mut stream).await;
+
+    assert!(
+        second.starts_with("HTTP/1.1 200"),
+        "the connection must be reused after a chunked body; if the framing \
+         offset were wrong, this request parses from inside the previous body:\n{second}"
+    );
+}
+
+/// A chunked body past `max_request_bytes` ends the connection rather than being
+/// drained without bound.
+///
+/// # Why this is asserted at the socket, not only in the unit tests
+///
+/// `crates/qqq-serve/tests/body.rs` proves the reader refuses a body past the
+/// cap. What it cannot prove is that the **server** hands the reader the cap:
+/// `drain_body` could pass a `u64::MAX` and every body unit test would stay
+/// green. This is the join, and the join is where this project's defects have
+/// lived (`§O-045a`).
+#[tokio::test]
+async fn a_chunked_body_past_the_cap_is_cut_off() {
+    let table = table_with(&[(Method::Post, "/echo", "echo")]);
+    let server = Server::start(table, echo_handler()).await;
+
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+
+    // 3 MiB in one chunk, over the 2 MiB cap. Sent as a declared chunk size, so
+    // the server must stop at the cap rather than drain all of it.
+    let oversize = 3 * 1024 * 1024;
+    let head = format!(
+        "POST /echo HTTP/1.1\r\nhost: localhost\r\ntransfer-encoding: chunked\r\n\r\n{oversize:x}\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.expect("write head");
+
+    // Push the payload in pieces and ignore write errors: the server is expected
+    // to close mid-stream, so a broken pipe here is the *expected* outcome and
+    // not a test failure.
+    let payload = vec![b'x'; 64 * 1024];
+    for _ in 0..(oversize / payload.len()) {
+        if stream.write_all(&payload).await.is_err() {
+            break;
+        }
+    }
+    let _ = stream.flush().await;
+
+    let response = read_all(&mut stream).await;
+    // Either an error response or a close is acceptable — the server may have
+    // closed before writing. What is NOT acceptable is a 200 for a body over the
+    // cap, so that is the assertion.
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "a body over max_request_bytes must not be accepted:\n{}",
+        response.chars().take(200).collect::<String>()
     );
 }
 

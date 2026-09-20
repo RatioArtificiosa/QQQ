@@ -4578,6 +4578,54 @@ Backing `server.rs` up for fault injection, injecting, then restoring from that 
 
 ---
 
+### §O-048 — Streaming bodies, and a cap that was enforced one step too late
+
+**What was built.** `qqq-serve::body` — `SRV-004` and `SRV-005`. A pull-based body decoder: `BodyReader::poll_chunk(io, max)` yields the next piece of a `Content-Length` or `Transfer-Encoding: chunked` body, decoding chunk framing incrementally, skipping and discarding trailers, and enforcing `max_request_bytes` **as the bytes arrive**. 22 tests in `crates/qqq-serve/tests/body.rs`, 12 in `tests/socket.rs`.
+
+**Why pull-based, in one sentence.** §6.4 says the cap is a *cap*, not a buffer: if the check happens after buffering, a client that sends 2 GiB to a 2 MiB limit has already made the host allocate it. Backpressure is the same argument from the other side — a decoder that pre-buffers has read from the socket regardless of what the handler wanted.
+
+---
+
+#### §O-048a — The cap was enforced, but only after the guest had already answered
+
+`server::serve_connection` dispatched the handler and **then** drained the body. Every unit test passed, because the decoder was correct.
+
+The socket test `a_chunked_body_past_the_cap_is_cut_off` sent a 3 MiB chunked body against a 2 MiB cap and got:
+
+```
+HTTP/1.1 200 OK
+```
+
+The guest ran, the response was written, and only then did the drain discover the body was too large. `SRV-005` says the cap is enforced *during* streaming; here it was enforced during streaming but **after the request had already succeeded**, which is the same as not enforcing it for the purpose the limit exists.
+
+**Fix.** The body is consumed before dispatch. A body that is malformed or over the cap is answered `413`-class (`QQQ-6006`, added to the taxonomy — a *client* fault that must not be a 5xx) and the connection closes, because the framing offset is no longer knowable. The post-response drain was deleted rather than kept: two consumers of one body is two places to be wrong.
+
+**Verified by injection, not by the passing suite.** The ordering defect was put back — drain moved to after the response — and `a_chunked_body_past_the_cap_is_cut_off` **failed**, while the other 11 socket tests and all 22 body tests stayed green. That is a test aimed at exactly one defect, which is what a test should be. Note the converse case too: removing the drain *entirely* made that test **pass** (nothing is read, so no 200 is produced) while two others failed — a reminder that "the test is green" says nothing until you know which failures it can and cannot see.
+
+---
+
+#### §O-048b — The decoder closed a connection the server had been closing for want of it
+
+`drain_body` returned `false` for any chunked body, ending the connection, with a comment saying why: discarding chunked framing without decoding it leaves the offset at a place only a decoder knows, and that is a request-smuggling shape. That was honest while no decoder existed.
+
+With the decoder built, the same request must now be answered **and** the connection reused. `a_chunked_body_is_decoded_and_the_connection_is_reused` asserts both halves, because either alone passes for a server that is still wrong: answering then closing satisfies a status assertion, and reusing without decoding answers the second request from the middle of a chunk.
+
+---
+
+#### §O-048c — Six fault injections, and a false alarm that was worth more than the injections
+
+`tools/fault_inject_body.ps1` breaks one invariant at a time and reports which tests catch it. **All 6 were detected**: cap not enforced; chunk CRLF not consumed; trailers not consumed; caller's `max` ignored (backpressure); dual-framing head accepted (smuggling); chunk-size line ignored.
+
+Writing it produced three silent-failure lessons in one file, each of which would have made the script lie:
+
+1. **The first version matched `"\r\n"` against an LF-only file**, so every injection silently failed to apply and the script reported "ALL DETECTED" against unmodified source. Injections now assert they applied before the suite runs, and the *absence* of the marker after restore is a separate check (`§M-008`).
+2. **`Set-Content -NoNewline` on multi-line replacements concatenated lines**, corrupting the file while the diff looked plausible. The script is line-based now.
+3. **The final "everything restored" run reported 7 failures** on a file that was **byte-identical to its backup**. The cause was cargo running the previously compiled test binary: the script rewrites the source several times per second and the rebuild decision was ambiguous. Each run now stamps the mtime first, and a failing final run prints the backup hash comparison before anything else is concluded.
+
+Lesson 3 is the one to keep. An automated check that fails for a reason outside the system under test is worse than no check, because the natural response is to distrust the *result* rather than the harness — and the fix was in the harness.
+
+---
+
 ## 9. CHANGE LOG
 
 | Date | Change | Author |
@@ -4616,5 +4664,7 @@ Backing `server.rs` up for fault injection, injecting, then restoring from that 
 | 2026-09-19 | **The trap backtrace join is done** — `HOST-009`'s remaining half. `Instance::trap_from` now takes the `wasmtime::Error` rather than a formatted string, so a real trap carries frames; the name comes from the module's name section and the location from DWARF, deliberately split so a frame is named even without `debug = true`. `qqqai run` sets `debug_info = true`, since a CLI exists to help a developer read a failure (`§O-046a`). **Two of the three new assertions could not fail** and were caught only by injecting the defect: one was satisfied by the trap's own detail string, the other named a phrase the codebase never emits. Both were written *while fixing* `§O-045a`'s "tests cannot refute their own mental model" — the lesson did not transfer by being written down, it transferred by breaking the fix and watching which tests stayed green (`§O-046b`). | Architect |
 
 | 2026-09-19 | **`SRV-001` complete — the accept loop is joined, and finishing it found the defect the WIP had introduced (`§O-047`).** The half-built work left three compile errors: a missing `Failure::BadRequest` arm in `as_str`, and `parse_error_response` referenced but never written. Completing the taxonomy surfaced a **real body-drain desync**: `read_head` preserved the bytes after the head terminator (`buf.drain(..end)`) while `drain_body` read the body from the *socket* — so a client whose head and body arrived in one segment had its body discarded and the connection advanced past it. `§O-047a`. **The test written for that defect could not fail for it**: with `buf.clear()` reinstated, all nine socket tests still passed, because the kernel delivered head and body in separate reads so the body never entered the buffer. `§O-047b` (the `§O-046b` trap, fifth occurrence). A new pipelining test now reaches the body-less drain branch with 59 bytes buffered and **fails on injection, passes without** — `§O-047c`. Writing it produced two wrong diagnoses of my own, both recorded: a `connection: close` on the second pipelined request fails against a *correct* server because the half-close races the read, and `read_response` decodes one buffer so it returns **both** responses at once. Tracing `write_all` (96 then 115 bytes) is what distinguished server correctness from test assumption. `§O-047d`. | Architect |
+
+| 2026-09-19 | **`SRV-004` and `SRV-005` implemented — `qqq-serve::body`, a pull-based body decoder for `Content-Length` and chunked bodies, 22 unit tests and 12 socket tests (`§O-048`).** The design is forced by §6.4: the cap must be a cap and not a buffer, or a client that sends 2 GiB to a 2 MiB limit has already made the host allocate it; and backpressure is not expressible over a buffer, because a decoder that pre-buffers has read from the socket regardless of what the handler wanted. **The server had been enforcing the cap one step too late**: the handler was dispatched *before* the body was drained, so a 3 MiB chunked body against a 2 MiB cap was answered `**200 OK**` — the guest ran, the response was written, and only then did the drain find the body too large (`§O-048a`). The body is now consumed before dispatch, the answer is `QQQ-6006` (new code — a *client* fault that must not be a 5xx), and the post-response drain was deleted so one body has one consumer. Verified by putting the ordering defect back: `a_chunked_body_past_the_cap_is_cut_off` **failed** while the other 11 socket and all 22 body tests stayed green — and, conversely, deleting the drain *entirely* made that test **pass** while two others failed, which is why "the suite is green" is worth nothing until you know which failures a test can see. The chunked-body connection close that `drain_body` had been doing for want of a decoder is now gone: `§O-048b`. `tools/fault_inject_body.ps1` breaks six invariants and **all six were detected**, but the script itself lied three times before it worked: a `\r\n` match against an LF-only file made every injection no-op while reporting success; `-NoNewline` concatenated lines; and the final run reported **7 failures on a file byte-identical to its backup** because cargo ran a stale test binary. All three fixed, and the third — a check failing outside the system under test — is recorded as the most expensive kind of false alarm (`§O-048c`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

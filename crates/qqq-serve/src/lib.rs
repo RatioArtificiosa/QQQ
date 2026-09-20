@@ -6,28 +6,31 @@
 //!
 //! ## Scope, stated honestly
 //!
-//! This crate currently implements the **route table** — the compile-time radix
-//! trie that turns a request path into a handler. It is the piece the rest of
-//! the server is built on, and it is the piece that is entirely pure, so it can
-//! be exhaustively tested before a socket exists.
-//!
 //! | Area | State |
 //! |---|---|
 //! | Route table (radix trie) | **implemented** (`SRV-003`) |
 //! | `OQ-007` — `wasi:http` vs custom | **resolved** (`SRV-006`) |
-//! | HTTP/1.1 request-head parsing | **implemented** (`SRV-001` parsing half) |
+//! | HTTP/1.1 request-head parsing | **implemented** |
 //! | Header-bomb and framing limits | **implemented** (`SRV-020`) |
-//! | HTTP/1.1 responses, keep-alive loop, timeouts | not implemented (`SRV-001`) |
+//! | HTTP/1.1 responses, keep-alive, timeouts, connection limits | **implemented** (`SRV-001`) |
+//! | Accept loop, per-tenant ledger, graceful drain | **implemented** (`SRV-001`, `SRV-011`, `SRV-012`) |
 //! | HTTP/2, multiplexing, flow control | not implemented (`SRV-002`) |
 //! | Streaming bodies, backpressure | not implemented (`SRV-004`) |
 //! | `max_request_bytes` enforced during streaming | declared size checked; streaming is `SRV-005` |
 //! | TLS, mTLS | not implemented (`SRV-007`, `SRV-008`) |
 //! | `WebSockets`, SSE | not implemented (`SRV-009`, `SRV-010`) |
-//! | Graceful shutdown, connection limits | not implemented (`SRV-011`, `SRV-012`) |
 //!
 //! Each of those is named rather than silently absent. A listener that accepted
 //! connections without the limits `SRV-005` and `SRV-011` require would be worse
 //! than no listener: it would look like a server.
+//!
+//! ## The one place this crate deliberately closes a connection
+//!
+//! `server::drain_body` returns `false` for a `chunked` request body, ending the
+//! connection. De-chunking is `SRV-004`'s job and does not exist yet, and
+//! reading-and-discarding a chunked body without decoding it would leave the
+//! connection at an offset only a decoder knows — a request-smuggling shape.
+//! Closing is the honest answer until the decoder lands.
 //!
 //! ## Why the route table is first
 //!
@@ -63,6 +66,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod body;
 pub mod conn;
 pub mod http1;
 pub mod response;

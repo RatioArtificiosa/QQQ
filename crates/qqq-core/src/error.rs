@@ -288,6 +288,17 @@ pub enum ErrorCode {
     /// The host ran out of a system resource (file descriptors, memory).
     /// **Remediation:** retryable after backoff; otherwise raise OS limits.
     HostResourceExhausted = 6005,
+    /// A request body exceeded `max_request_bytes` **while** it was arriving.
+    ///
+    /// Distinct from [`Self::MemoryLimitExceeded`] on purpose, and the
+    /// distinction is the one `SRV-005` exists to draw: this is a *client* that
+    /// sent too much, and the remediation is on the caller's side. It is
+    /// therefore the class that maps to a 4xx, not a 5xx — telling the client to
+    /// fix its request rather than paging an operator about a host fault.
+    ///
+    /// **Remediation:** send a smaller body, or raise `max_request_bytes` in
+    /// `qqq.toml`.
+    RequestBodyTooLarge = 6006,
 
     // -- 7xxx: agent / protocol ----------------------------------------------
     /// An MCP tool call had arguments that failed schema validation.

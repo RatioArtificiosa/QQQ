@@ -125,6 +125,15 @@ pub enum Served {
     HeaderTimeout,
     /// A parse error ended the connection.
     BadRequest,
+    /// The request body was malformed or exceeded `max_request_bytes`, so it was
+    /// answered with an error and the connection closed.
+    ///
+    /// Kept distinct from [`Self::BadRequest`] because the two are different
+    /// client mistakes with different fixes, and an access log that merges them
+    /// tells an operator "malformed request" for a client that simply sent too
+    /// much — the diagnosis this project has repeatedly found harder than the
+    /// bug (`§O-043b`).
+    BodyRejected,
     /// The server is draining and closed it.
     Drained,
     /// The handler asked to close.
@@ -323,6 +332,45 @@ async fn serve_connection(
         let client_wants_keep_alive = wants_keep_alive(&head);
         conn.on_request_parsed(client_wants_keep_alive);
 
+        // Consume the body **before** dispatching, so `max_request_bytes` is
+        // enforced while the bytes arrive rather than after the guest has been
+        // asked to serve them.
+        //
+        // This ordering is `SRV-005`, and getting it wrong is not a slow path —
+        // it is a failure of the cap. A first version dispatched first and
+        // drained afterwards, so a 3 MiB chunked body against a 2 MiB cap was
+        // answered **200 OK**: the guest ran, the response was written, and only
+        // then did the drain discover the body was too large. The client was
+        // told the request succeeded.
+        //
+        // Found by `a_chunked_body_past_the_cap_is_cut_off` in
+        // `tests/socket.rs`, which asserts on the response rather than on an
+        // error value — the unit tests in `tests/body.rs` all passed, because
+        // the decoder was correct and the *server* was asking it too late
+        // (`§O-047a`'s shape again: two correct halves joined in the wrong
+        // order).
+        //
+        // The body is still only drained, not delivered: handing a stream to the
+        // guest is the capability path, and what exists today is the enforcement
+        // that must happen regardless of whether anyone reads it.
+        if !drain_body(&mut stream, &mut buf, &head).await {
+            // The body was malformed or exceeded the cap. A 413 is the honest
+            // answer, and the connection closes because the framing offset is no
+            // longer knowable.
+            let resp = response::error_response(
+                &Error::new(
+                    ErrorCode::RequestBodyTooLarge,
+                    "the request body exceeded max_request_bytes while arriving",
+                ),
+                false,
+            );
+            let bytes = response::write_response(&response::from_error(&resp), head.version, false);
+            let _ = stream.write_all(&bytes).await;
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+            return Served::BodyRejected;
+        }
+
         let response = if let Some(m) = table.match_route(head.method, path) {
             handler(
                 &head,
@@ -376,13 +424,11 @@ async fn serve_connection(
             let _ = stream.shutdown().await;
             return Served::HandlerClosed;
         }
-
-        // Consume the body if there is one, so the next request on this
-        // connection starts at the right offset. A keep-alive connection that
-        // skipped the body would parse the body as a request line.
-        if !drain_body(&mut stream, &mut buf, &head).await {
-            return Served::ClientClosed;
-        }
+        // The body was consumed **before** the handler ran, so the connection is
+        // already positioned at the next request. There is deliberately no drain
+        // here: a second consumer of the same body would either read the next
+        // request as this request's body or block waiting for bytes that were
+        // already accounted for.
     }
 }
 
@@ -528,78 +574,76 @@ async fn read_head(
     }
 }
 
-/// Consume a declared body so the next request parses from the right offset.
+/// Consume a body so the next request parses from the right offset.
 ///
 /// Returns `false` when the body could not be consumed, which means the
 /// connection cannot be reused.
 ///
-/// # Why this takes `buf`
+/// # Why this is built on the streaming decoder
 ///
 /// The body may be **partly or wholly already in the buffer**: `read_head` stops
 /// at the head terminator and keeps whatever followed it, and a client that
 /// wrote a small request in one segment delivers head and body together. Reading
 /// only from the socket would therefore skip those bytes and leave the
 /// connection advanced past the body by exactly the amount already buffered —
-/// the desync that produced a 400 on the second request.
+/// the desync that produced a 400 on the second request (`§O-047a`).
 ///
-/// So the buffered remainder is consumed **first**, and the socket is read only
-/// for what is still owed. At the end the buffer is empty: whatever it held was
-/// either body (consumed here) or, on a body-less request, nothing.
+/// A first version of this function hand-rolled the two framing cases and
+/// returned `false` for a `chunked` body, ending the connection, because
+/// reading-and-discarding chunked framing without decoding it leaves the offset
+/// at a place only a decoder knows — a request-smuggling shape.
 ///
-/// # Why a chunked body ends the connection
+/// `qqq_serve::body::BodyReader` is that decoder (`SRV-004`), so this now
+/// delegates: the framing knowledge lives in one place, and a chunked body no
+/// longer costs a connection. It also means the **cap is enforced during the
+/// drain** (`SRV-005`) rather than only at parse time, so a body that declares a
+/// length under the cap but streams more cannot be drained without bound.
 ///
-/// De-chunking is `SRV-004`'s job and is not built. Reading-and-discarding a
-/// chunked body without decoding it would leave the connection at an offset only
-/// the decoder knows, so the honest choice is to close. A keep-alive connection
-/// whose framing is wrong turns one bad request into a stream of misparsed ones,
-/// which is a request-smuggling shape.
+/// # The buffered prefix, which is the only thing this function still owns
+///
+/// `BodyReader` reads from anything `AsyncRead`. The bytes already in `buf` are
+/// ahead of the socket, so they are fed to the decoder through a chained reader:
+/// a cursor over the buffer first, then the socket. That is the whole trick —
+/// the decoder sees one continuous stream, and the buffer is empty afterwards,
+/// so the connection's framing offset is exactly right.
 async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHead) -> bool {
-    /// Drop `n` bytes of buffered body, if any are buffered.
-    ///
-    /// Returns how many were taken, so the caller's count of what is still owed
-    /// stays honest rather than assuming the buffer was non-empty.
-    fn take_buffered(buf: &mut Vec<u8>, n: u64) -> u64 {
-        let available = u64::try_from(buf.len()).unwrap_or(u64::MAX);
-        let taken = n.min(available);
-        let taken_usize = usize::try_from(taken).unwrap_or(buf.len());
-        buf.drain(..taken_usize);
-        taken
+    // No body declared: anything buffered is the start of the **next** request —
+    // a pipelined one. It must be preserved, not cleared, or a client that
+    // pipelines loses its second request.
+    if !head.chunked && head.content_length.is_none_or(|n| n == 0) {
+        return true;
     }
 
-    if head.chunked {
+    let Ok(mut reader) = crate::body::BodyReader::from_head(head, config_max_request_bytes())
+    else {
+        // `from_head` refuses a head declaring both framings. `http1` already
+        // rejects that at parse time, so reaching here means the two disagree,
+        // and the connection is not trustworthy.
         return false;
-    }
-    let Some(len) = head.content_length else {
-        // No body is declared, so anything buffered is the start of the **next**
-        // request — a pipelined one. It must be preserved, not cleared, or a
-        // client that pipelines loses its second request.
-        return true;
     };
-    if len == 0 {
-        return true;
-    }
 
-    // Whatever the head read already pulled in is body, and it is consumed here
-    // rather than refetched from a socket that no longer holds it.
-    let mut remaining = len - take_buffered(buf, len);
-    if remaining == 0 {
-        return true;
-    }
+    // Take the buffered prefix out, leaving `buf` empty for the next request.
+    let prefix = std::mem::take(buf);
+    let mut combined = std::io::Cursor::new(prefix).chain(stream);
 
-    // The parser already refused a body over `MAX_REQUEST_BYTES`, so this
-    // cannot read unbounded bytes — the bound is enforced where the length is
-    // parsed rather than twice.
-    let mut sink = [0u8; 8192];
-    while remaining > 0 {
-        let want = usize::try_from(remaining.min(sink.len() as u64)).unwrap_or(sink.len());
-        match stream.read(&mut sink[..want]).await {
-            // The peer closed mid-body, or the read failed. Either way the
-            // connection cannot be reused: the framing offset is unknown.
-            Ok(0) | Err(_) => return false,
-            Ok(n) => remaining -= u64::try_from(n).unwrap_or(remaining),
-        }
-    }
-    true
+    // A malformed body or one past the cap both mean the framing offset is no
+    // longer trustworthy, so the connection closes — and the caller's `false`
+    // is what expresses that. The two cases are not distinguished *here*
+    // because the caller's action is identical either way; the reason is
+    // reported by `BodyReader` to a caller that wants it.
+    crate::body::discard(&mut reader, &mut combined)
+        .await
+        .is_ok()
+}
+
+/// The `max_request_bytes` a drained body is held to.
+///
+/// The parser (`http1`) enforces the same cap on a *declared* length, and this
+/// is the streaming enforcement for what actually arrives. It reads the shared
+/// constant rather than holding a second number, because two limits is how the
+/// ground between them becomes a smuggle window.
+fn config_max_request_bytes() -> u64 {
+    http1::MAX_REQUEST_BYTES
 }
 
 /// Split a request target into path and query.

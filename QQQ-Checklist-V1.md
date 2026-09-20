@@ -661,10 +661,46 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **SRV-003** Implement the compile-time route table as a radix trie.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-004** Implement streaming bodies end to end with backpressure propagation.
+- [x] **SRV-004** Implement streaming bodies end to end with backpressure propagation.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-005** Implement `max_request_bytes` enforcement during streaming, not after buffering.
+  → Done as a **pull-based decoder**: `qqq-serve::body::BodyReader::poll_chunk(io, max)`
+    yields the next piece of a body and nothing else. `Content-Length` and
+    `Transfer-Encoding: chunked` are both decoded incrementally; chunk
+    extensions are skipped, a chunk's own CRLF is consumed at its boundary, and
+    a trailer section is consumed and **discarded** (a trailer is not
+    authenticated in V1, and surfacing it would let a client add headers after
+    the head was routed).
+  → **Backpressure** is the caller's `max` plus the pull: a handler that asks for
+    1 KiB holds 1 KiB, and while it is not asking nothing is read from the
+    socket. Asserted by `a_reader_never_reads_more_than_the_caller_asked_for`.
+  → The chunked-body connection close that `drain_body` did for want of a decoder
+    is gone: a chunked request is answered and the connection reused
+    (`a_chunked_body_is_decoded_and_the_connection_is_reused`).
+  → Evidence: `crates/qqq-serve/tests/body.rs` (22 tests, including the framing
+    offset left exactly at the next request) and `tests/socket.rs` (12).
+  → Verified: `tools/fault_inject_body.ps1` breaks six invariants and **all six
+    are detected** — chunk CRLF not consumed, trailers not consumed, the
+    caller's `max` ignored, and others.
+  → Not covered: handing a **`stream<u8>` to the guest** — that is the
+    capability path (`qqq-host` + `qqq:http`), and what exists here is the
+    server-side framing and enforcement it will sit on.
+- [x] **SRV-005** Implement `max_request_bytes` enforced during streaming, not after buffering.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Done. `BodyReader::account` charges each piece **before it is returned**, so a
+    body one byte past the cap is refused without the caller ever holding those
+    bytes, and `a_length_delimited_body_past_the_cap_fails_without_reading_it_all`
+    asserts the *consumed offset* stayed near the cap rather than reaching the
+    100 bytes available — the assertion that distinguishes "enforced during
+    streaming" from "checked after buffering".
+  → **Found and fixed a real ordering defect while completing this**: the handler
+    was dispatched *before* the body was drained, so a 3 MiB chunked body against
+    a 2 MiB cap was answered **`200 OK`** — the guest ran, the response was
+    written, and only then was the body found too large. The body is now consumed
+    before dispatch, and the refusal is `QQQ-6006` (a new code: a *client* fault,
+    so a 4xx-class answer rather than a 5xx). `§O-048a`.
+  → Verified by injection: restoring the ordering defect makes
+    `a_chunked_body_past_the_cap_is_cut_off` fail while every other socket and
+    body test stays green.
 - [x] **SRV-006** Resolve open question `OQ-007`: decide whether `wasi:http` is the foundation or whether a custom interface is required.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Resolved: `wasi:http` **is** the foundation, and `qqq:http` extends it. Reasoning in Observations §O-027.

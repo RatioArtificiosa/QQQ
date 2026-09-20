@@ -619,6 +619,34 @@ impl Stream {
     /// connection errors; the two are distinguished by
     /// [`StreamError::rule_scope`].
     pub fn accepts(&self, kind: FrameKind) -> Result<(), StreamError> {
+        self.accepts_direction(kind, true)
+    }
+
+    /// Whether a frame is legal, given whether it is **arriving** or being sent.
+    ///
+    /// # Why direction is a parameter and not implied
+    ///
+    /// §5.1's two half-closed rows are direction-dependent, and the state name
+    /// says which direction is *closed*, not which direction the frame travels:
+    ///
+    /// * `half-closed (local)` — we sent END_STREAM, so a frame **from the peer**
+    ///   is refused and our own is fine.
+    /// * `half-closed (remote)` — the peer sent END_STREAM, so a frame **from the
+    ///   peer** is refused and **our own response is legal**.
+    ///
+    /// The second is the normal state of a request being served. A check that
+    /// collapsed the two — or that always assumed "incoming" — refuses the
+    /// server's own response on every request, which is a failure that looks like
+    /// a hang rather than an error. [`Stream::accepts`] defaults to the incoming
+    /// reading, because that is what the connection layer asks on ingest and what
+    /// the RFC's table is written to describe.
+    ///
+    /// `incoming` is `true` for a frame the peer sent.
+    pub fn accepts_direction(
+        &self,
+        kind: FrameKind,
+        incoming: bool,
+    ) -> Result<(), StreamError> {
         // -- Frames legal in nearly every state, checked first --------------
         //
         // PRIORITY, WINDOW_UPDATE and RST_STREAM are the three §5.1 exempts for
@@ -658,6 +686,26 @@ impl Stream {
             _ => {}
         }
 
+        // -- PUSH_PROMISE, refused in every state ---------------------------
+        //
+        // RFC 9113 §8.4: only a **server** may push, so a server receiving a
+        // PUSH_PROMISE is being spoken to by a client that claims our role. It is
+        // refused before the state match because the refusal must hold in *every*
+        // state — an `open` stream would otherwise accept it under the "any frame"
+        // rule below, and the peer's role violation would go unnoticed on exactly
+        // the streams where it is most likely to be attempted.
+        if kind == FrameKind::PushPromise {
+            return Err(StreamError::protocol(
+                ErrorCode::ProtocolError,
+                format!(
+                    "PUSH_PROMISE on stream {}: a server must never receive one \
+                     (RFC 9113 §8.4) — push is the server's, and this endpoint is a \
+                     server",
+                    self.id
+                ),
+            ));
+        }
+
         // -- SETTINGS, PING, GOAWAY -----------------------------------------
         //
         // Connection-scoped frames name stream 0 and never reach a stream's
@@ -673,81 +721,125 @@ impl Stream {
         match self.state {
             // §5.1, `idle`: *"Receiving any frame other than HEADERS or PRIORITY
             // on a stream in this state MUST be treated as a connection error of
-            // type PROTOCOL_ERROR."* That is `DATA`, `CONTINUATION` and
-            // `PUSH_PROMISE` — the three that remain after the exempts above.
-            StreamState::Idle => Err(StreamError::protocol(
-                ErrorCode::ProtocolError,
-                format!(
-                    "{kind} on idle stream {}: the stream was never opened, so this \
-                     frame invents an id with no HEADERS to introduce it \
-                     (RFC 9113 §5.1) — a connection error",
-                    self.id
-                ),
-            )),
+            // type PROTOCOL_ERROR."*
+            //
+            // HEADERS is therefore **the** frame that opens a stream, and it must
+            // be accepted here — refusing it would make the very first frame of
+            // every request a protocol error. What remains refused is DATA and
+            // CONTINUATION (PRIORITY, WINDOW_UPDATE, RST_STREAM and PUSH_PROMISE
+            // were all handled above), each of which names a stream that no
+            // HEADERS introduced.
+            StreamState::Idle => match kind {
+                FrameKind::Headers => Ok(()),
+                _ => Err(StreamError::protocol(
+                    ErrorCode::ProtocolError,
+                    format!(
+                        "{kind} on idle stream {}: only HEADERS may open a stream, so \
+                         this frame invents an id with no HEADERS to introduce it \
+                         (RFC 9113 §5.1) — a connection error",
+                        self.id
+                    ),
+                )),
+            },
 
-            // §5.1, `reserved (local)`: we promised this stream. `HEADERS` (the
-            // response) and `RST_STREAM` are ours to send; `DATA` is not, because
-            // the promise is not a response yet.
-            StreamState::ReservedLocal => Err(StreamError::protocol(
-                ErrorCode::ProtocolError,
-                format!(
-                    "{kind} on stream {}: the stream is reserved by us and no response \
-                     has been sent (RFC 9113 §5.1)",
-                    self.id
-                ),
-            )),
+            // §5.1, `reserved (local)`: we promised this stream. On the send side
+            // `HEADERS` (the response) is ours to send; on the receive side
+            // nothing from the peer is legal except the three exempts handled
+            // above, because a promised stream has no peer frames yet.
+            StreamState::ReservedLocal => match (incoming, kind) {
+                (false, FrameKind::Headers) => Ok(()),
+                _ => Err(StreamError::protocol(
+                    ErrorCode::ProtocolError,
+                    format!(
+                        "{kind} on stream {}: the stream is reserved by us and no \
+                         response has been sent (RFC 9113 §5.1)",
+                        self.id
+                    ),
+                )),
+            },
 
             // §5.1, `reserved (remote)`: the peer promised this stream. `DATA` and
-            // `HEADERS` are illegal from the peer; `WINDOW_UPDATE` and
+            // `HEADERS` are illegal *from the peer* in both directions' reading —
+            // the promise is not a response yet — and `WINDOW_UPDATE` and
             // `RST_STREAM` were already handled above.
-            StreamState::ReservedRemote => Err(StreamError::protocol(
-                ErrorCode::ProtocolError,
-                format!(
-                    "{kind} on stream {}: the stream is reserved by the peer and only \
-                     WINDOW_UPDATE or RST_STREAM are legal (RFC 9113 §5.1)",
-                    self.id
-                ),
-            )),
+            StreamState::ReservedRemote => match (incoming, kind) {
+                (false, FrameKind::Headers) => Ok(()),
+                _ => Err(StreamError::protocol(
+                    ErrorCode::ProtocolError,
+                    format!(
+                        "{kind} on stream {}: the stream is reserved by the peer and only \
+                         WINDOW_UPDATE or RST_STREAM are legal (RFC 9113 §5.1)",
+                        self.id
+                    ),
+                )),
+            },
 
             // §5.1, `open`: *"Any type of frame can be sent"*, so nothing is
             // refused. This is the state the bulk of a request lives in, and an
             // over-eager check here is how a valid request body gets rejected.
             StreamState::Open => Ok(()),
 
-            // §5.1, `half-closed (local)`: we have sent END_STREAM, so the peer
-            // must not send DATA or HEADERS — that is a **stream** error,
-            // `STREAM_CLOSED`, not a connection error, because it means one
-            // request raced our response rather than that the connection is
-            // corrupt. CONTINUATION is in the same clause: it continues a HEADERS
-            // frame the peer sent before it learned we were done.
-            StreamState::HalfClosedLocal => Err(StreamError::Closed),
-
-            // §5.1, `half-closed (remote)`: the peer has sent END_STREAM, so it
-            // may not send more DATA or HEADERS. A stream error, for the same
-            // reason — and this is the *normal* request state, so getting it wrong
-            // means every request with a body fails.
-            StreamState::HalfClosedRemote => Err(StreamError::Closed),
-
-            // §5.1, `closed`: this is the row with two different error kinds in
-            // it, and the RFC states both explicitly.
+            // §5.1, the two half-closed rows. **These are the direction-dependent
+            // rows**, and they are the reason this function takes a direction
+            // rather than only a state.
             //
-            // * HEADERS on a closed stream is a **stream** error of type
-            //   `STREAM_CLOSED` — a request that raced its own cancellation is
-            //   routine.
-            // * Any other frame (here: DATA and CONTINUATION, the remaining
-            //   stream-scoped kinds) is a **connection** error of type
-            //   `STREAM_CLOSED`. The reason for the asymmetry is timing: a
-            //   HEADERS arriving after we closed is explainable by
-            //   request/response overlap, while DATA arriving after is evidence
-            //   the peer is writing into a stream it should have finished.
-            StreamState::Closed => match kind {
-                FrameKind::Headers => Err(StreamError::Closed),
-                _ => Err(StreamError::protocol(
+            // `half-closed (local)` means *we* have sent END_STREAM. The frame
+            // arriving from the peer is therefore the one that must be refused if
+            // it is DATA or HEADERS. `half-closed (remote)` means the *peer* has
+            // sent END_STREAM, so a peer frame is refused but **our own** frame is
+            // perfectly legal — and that is the normal request state, so a check
+            // that ignored direction would refuse the server's own response on
+            // every request that ends with a body.
+            StreamState::HalfClosedLocal => match incoming {
+                // The peer must not send more: a stream error, `STREAM_CLOSED`,
+                // because it means one request raced our response rather than that
+                // the connection is corrupt.
+                true => Err(StreamError::Closed),
+                // Nothing about our own send is restricted: if the peer has not
+                // also finished, we are still the ones who can send.
+                false => Ok(()),
+            },
+            StreamState::HalfClosedRemote => match incoming {
+                // §5.1: the peer has already sent END_STREAM, so DATA and HEADERS
+                // from it are a stream error. This is the state a normal GET sits
+                // in while the response is built, so getting it backwards fails
+                // every request.
+                true => Err(StreamError::Closed),
+                // We have not finished, so our own DATA and HEADERS are legal.
+                false => Ok(()),
+            },
+
+            // §5.1, `closed`: the row with two different error kinds in it. The
+            // RFC states both explicitly, and both are about frames **arriving**:
+            //
+            // * HEADERS is a **stream** error of type `STREAM_CLOSED` — a request
+            //   that raced its own cancellation is routine.
+            // * Any other stream-scoped frame is a **connection** error of type
+            //   `STREAM_CLOSED`. The asymmetry is about timing: a HEADERS arriving
+            //   after we closed is explainable by request/response overlap, while
+            //   DATA arriving after is evidence the peer is writing into a stream
+            //   it should have finished.
+            //
+            // A frame *we* send on a closed stream is neither: it is our own
+            // bookkeeping bug, and it would put a protocol violation on the wire
+            // that the peer reports as our fault. Reported as `INTERNAL_ERROR` so
+            // it is never confused with the peer's violation.
+            StreamState::Closed => match (incoming, kind) {
+                (true, FrameKind::Headers) => Err(StreamError::Closed),
+                (true, _) => Err(StreamError::protocol(
                     ErrorCode::StreamClosed,
                     format!(
                         "{kind} on closed stream {}: only HEADERS is a stream error here; \
                          any other frame is a connection error of type STREAM_CLOSED \
                          (RFC 9113 §5.1)",
+                        self.id
+                    ),
+                )),
+                (false, _) => Err(StreamError::protocol(
+                    ErrorCode::InternalError,
+                    format!(
+                        "we tried to send {kind} on closed stream {}: the stream is over, \
+                         so this is our bug, not the peer's",
                         self.id
                     ),
                 )),
@@ -774,23 +866,44 @@ impl Stream {
     /// drifting.
     #[must_use]
     pub fn refusal_is_fatal(&self, kind: FrameKind) -> bool {
-        if self.accepts(kind).is_ok() {
+        self.refusal_is_fatal_direction(kind, true)
+    }
+
+    /// [`Stream::refusal_is_fatal`], with the direction made explicit.
+    ///
+    /// The half-closed rows refuse only in one direction, so the classification
+    /// has to know which direction was asked about or it would report "this is
+    /// fatal" for a frame that is not refused at all.
+    #[must_use]
+    pub fn refusal_is_fatal_direction(&self, kind: FrameKind, incoming: bool) -> bool {
+        if self.accepts_direction(kind, incoming).is_ok() {
             return false;
         }
+        // PUSH_PROMISE is refused in every state because a server must never
+        // receive one (§8.4). That is a statement about the peer's *role*, not
+        // about one stream, so it is fatal everywhere — including on an `open`
+        // stream, where the state match below would otherwise find nothing to
+        // blame.
+        if kind == FrameKind::PushPromise {
+            return true;
+        }
         match self.state {
-            // Idle: every refusal is the §5.1 connection error, except the
-            // RST_STREAM case, which is also a connection-level rule (the peer is
-            // resetting a stream it never opened).
+            // Idle: every remaining refusal is the §5.1 connection error, except
+            // the RST_STREAM case, which is also a connection-level rule (the peer
+            // is resetting a stream it never opened).
             StreamState::Idle => true,
             // The reserved states' refusals are §5.1 connection errors.
             StreamState::ReservedLocal | StreamState::ReservedRemote => true,
             // The half-closed states refuse only as STREAM_CLOSED stream errors.
             StreamState::HalfClosedLocal | StreamState::HalfClosedRemote => false,
-            // Closed: HEADERS is a stream error, everything else fatal.
-            StreamState::Closed => !matches!(kind, FrameKind::Headers),
-            // Open refuses nothing, so this arm is unreachable; returning `false`
-            // states the safe default rather than panicking on an invariant the
-            // caller cannot have broken.
+            // Closed: an incoming HEADERS is a stream error; an incoming DATA or
+            // CONTINUATION is the connection error. A frame *we* tried to send on
+            // a closed stream is our own bug (`INTERNAL_ERROR`), which is never
+            // fatal to a connection whose peer did nothing wrong.
+            StreamState::Closed => incoming && !matches!(kind, FrameKind::Headers),
+            // Open refuses nothing except PUSH_PROMISE, handled above; returning
+            // `false` states the safe default rather than panicking on an
+            // invariant the caller cannot have broken.
             StreamState::Open => false,
         }
     }
@@ -802,11 +915,12 @@ impl Stream {
     /// # Errors
     ///
     /// [`StreamError`] when the frame is not legal in the current state, by
-    /// [`Stream::accepts`]. Checked rather than assumed: a server that sends
-    /// `HEADERS` on a stream it already answered produces a protocol violation
-    /// the peer will report as *our* fault, and it is far cheaper to catch here.
+    /// [`Stream::accepts_direction`] with `incoming = false`. Checked rather than
+    /// assumed: a server that sends `HEADERS` on a stream it already answered
+    /// produces a protocol violation the peer will report as *our* fault, and it
+    /// is far cheaper to catch here.
     pub fn on_send(&mut self, kind: FrameKind, end_stream: bool) -> Result<(), StreamError> {
-        self.accepts(kind)?;
+        self.accepts_direction(kind, false)?;
         match (self.state, kind, end_stream) {
             // Opening: only HEADERS can move `idle` on the send side, and only
             // from `reserved (local)` in practice (a server does not open a
@@ -1176,16 +1290,28 @@ impl StreamRegistry {
         kind: FrameKind,
         end_stream: bool,
     ) -> Result<StreamId, RecvAdmissionError> {
-        let id = StreamId::client_from_frame(raw_id).map_err(RecvAdmissionError::Fatal)?;
+        let id = StreamId::client_from_frame(raw_id).map_err(RecvAdmissionError::fatal)?;
         if self.contains(id) {
             let stream = self
                 .get_mut(id)
-                .ok_or(RecvAdmissionError::Fatal(StreamError::protocol(
+                .ok_or_else(|| RecvAdmissionError::fatal(StreamError::protocol(
                     ErrorCode::InternalError,
                     "stream vanished between contains() and get_mut()",
                 )))?;
-            stream.on_recv(kind, end_stream)?;
-            return Ok(id);
+            // The scope is computed **before** the transition attempt, while the
+            // stream's pre-refusal state is still readable: §5.1's classification
+            // depends on that state (`DATA` on `idle` is fatal, `HEADERS` on
+            // `closed` is not), so reading it afterwards would classify against a
+            // state the frame may have changed.
+            let fatal = stream.refusal_is_fatal_direction(kind, true);
+            return match stream.on_recv(kind, end_stream) {
+                Ok(()) => Ok(id),
+                Err(e) => Err(if fatal {
+                    RecvAdmissionError::fatal(e)
+                } else {
+                    RecvAdmissionError::stream_scoped(e)
+                }),
+            };
         }
         let id = if kind == FrameKind::Headers {
             self.admit(raw_id, end_stream)?
@@ -1194,7 +1320,7 @@ impl StreamRegistry {
             // §5.1's connection error. It cannot be admitted, because admitting it
             // would give an illegal id an entry and make a later HEADERS on the
             // *real* stream look like a reuse.
-            return Err(RecvAdmissionError::Fatal(StreamError::protocol(
+            return Err(RecvAdmissionError::fatal(StreamError::protocol(
                 ErrorCode::ProtocolError,
                 format!(
                     "{kind} on idle stream {raw_id}: only HEADERS may open a stream \
@@ -1227,14 +1353,30 @@ impl StreamRegistry {
 /// Why [`StreamRegistry::on_recv`] failed.
 ///
 /// Two error types in one result because the caller needs both: an existing
-/// stream's failure is a `RST_STREAM`, while a new stream's admission failure may
-/// end the connection. Returning a single rewritten [`StreamError`] would lose the
-/// `REFUSED_STREAM` distinction that §8.7 depends on.
+/// stream's failure resets that stream, while a new stream's admission failure
+/// may end the connection. Returning a single rewritten [`StreamError`] would
+/// lose the `REFUSED_STREAM` distinction that §8.7 depends on.
+///
+/// # Why `Stream` carries a `fatal` flag
+///
+/// A failure on an *existing* stream still has a scope, and it is not always the
+/// stream: §5.1 makes `DATA` on a closed stream a **connection** error while
+/// making `HEADERS` on that same closed stream a **stream** error. So "the error
+/// came from a known stream" does not imply "the stream is what dies", and a type
+/// that conflated the two would either kill the connection for one cancelled
+/// request or let a corrupted id space pass. The flag is computed by
+/// [`Stream::refusal_is_fatal`] at the point the refusal was decided, where the
+/// state and the frame kind are both known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecvAdmissionError {
-    /// A condition that ends the connection.
-    Fatal(StreamError),
-    /// The stream was refused, and the connection continues.
+    /// A refusal from an existing stream.
+    Stream {
+        /// The stream-level error to report.
+        error: StreamError,
+        /// Whether it ends the connection rather than the stream (§5.1).
+        fatal: bool,
+    },
+    /// A new stream could not be admitted, and the connection continues.
     Admission(AdmissionError),
 }
 
@@ -1243,7 +1385,7 @@ impl RecvAdmissionError {
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
         match self {
-            Self::Fatal(e) => e.code(),
+            Self::Stream { error, .. } => error.code(),
             Self::Admission(a) => a.code(),
         }
     }
@@ -1252,7 +1394,7 @@ impl RecvAdmissionError {
     #[must_use]
     pub const fn is_fatal(&self) -> bool {
         match self {
-            Self::Fatal(_) => true,
+            Self::Stream { fatal, .. } => *fatal,
             Self::Admission(a) => a.is_fatal(),
         }
     }
@@ -1261,11 +1403,42 @@ impl RecvAdmissionError {
     #[must_use]
     pub fn into_stream(self) -> StreamError {
         match self {
-            Self::Fatal(e) => e,
+            Self::Stream { error, .. } => error,
             Self::Admission(a) => match a {
                 AdmissionError::BadId(e) => e,
                 other => StreamError::protocol(other.code(), other.to_string()),
             },
+        }
+    }
+
+    /// The connection-level view, when this ends the connection.
+    ///
+    /// `None` when only a stream is affected — the caller resets that stream and
+    /// carries on, which is the whole point of having two scopes.
+    #[must_use]
+    pub fn as_connection_error(&self) -> Option<ConnectionError> {
+        if self.is_fatal() {
+            Some(ConnectionError::protocol(self.code(), self.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Build a fatal refusal from an existing stream.
+    #[must_use]
+    pub const fn fatal(error: StreamError) -> Self {
+        Self::Stream {
+            error,
+            fatal: true,
+        }
+    }
+
+    /// Build a stream-scoped refusal from an existing stream.
+    #[must_use]
+    pub const fn stream_scoped(error: StreamError) -> Self {
+        Self::Stream {
+            error,
+            fatal: false,
         }
     }
 }
@@ -1277,15 +1450,20 @@ impl From<AdmissionError> for RecvAdmissionError {
 }
 
 impl From<StreamError> for RecvAdmissionError {
+    /// Defaults a conversion with no state attached to **fatal**, because the
+    /// only `StreamError`s that lack a scope are the protocol-level ones the
+    /// registry raises itself (`INTERNAL_ERROR`, §5.1's connection errors). The
+    /// scoped cases are built explicitly by [`RecvAdmissionError::stream_scoped`]
+    /// at the call site that knows the stream's state.
     fn from(value: StreamError) -> Self {
-        Self::Fatal(value)
+        Self::fatal(value)
     }
 }
 
 impl fmt::Display for RecvAdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Fatal(e) => write!(f, "{e}"),
+            Self::Stream { error, .. } => write!(f, "{error}"),
             Self::Admission(a) => write!(f, "{a}"),
         }
     }
@@ -1594,22 +1772,51 @@ mod tests {
         s.on_send(FrameKind::Headers, true).unwrap();
         assert_eq!(s.state(), StreamState::Closed);
 
-        // We end first, then the peer does.
-        let mut s = Stream::new(sid(3), StreamState::Idle);
-        s.on_recv(FrameKind::Headers, false).unwrap();
-        s.on_send(FrameKind::Headers, false).unwrap();
-        assert_eq!(s.state(), StreamState::Open);
-        s.on_send(FrameKind::Data, true).unwrap();
-        assert_eq!(s.state(), StreamState::HalfClosedLocal);
-        s.on_recv(FrameKind::Data, true).unwrap();
+        // We end first, then the peer does. Once we are `half-closed (local)`,
+        // §5.1 permits the peer only PRIORITY, WINDOW_UPDATE and RST_STREAM — so
+        // a peer DATA frame carrying END_STREAM is **not** a legal way to reach
+        // `closed`, and the transition to `closed` on this path is reached by the
+        // peer resetting. That is a real property of the protocol, not a gap: the
+        // RFC's Figure 2 shows the same edge, and an implementation that allowed
+        // peer DATA here would accept a body on a stream it had already answered.
+        s.on_recv(FrameKind::Data, true)
+            .expect_err("the peer may not send DATA once we have ended");
+        assert_eq!(
+            s.state(),
+            StreamState::HalfClosedLocal,
+            "a refused frame must not advance the state"
+        );
+
+        // The legal way for the peer to finish from `half-closed (local)`.
+        s.on_recv(FrameKind::RstStream, false).unwrap();
         assert_eq!(s.state(), StreamState::Closed);
     }
 
-    /// A `RST_STREAM` closes from any state in either direction.
+    /// §5.1: the peer's END_STREAM on an **open** stream closes out its half, and
+    /// our END_STREAM on top of that closes the stream. This is the normal
+    /// request-then-response lifetime, walked end to end.
+    #[test]
+    fn the_normal_request_lifetime_reaches_closed() {
+        let mut s = Stream::new(sid(1), StreamState::Idle);
+        // The request arrives complete.
+        s.on_recv(FrameKind::Headers, true).unwrap();
+        assert_eq!(s.state(), StreamState::HalfClosedRemote);
+        // We send the response, ending it.
+        s.on_send(FrameKind::Headers, true).unwrap();
+        assert_eq!(
+            s.state(),
+            StreamState::Closed,
+            "both directions are finished, so the stream is closed — this is the \
+             ordinary completion of a request"
+        );
+    }
+
+    /// A `RST_STREAM` closes from any state **except `idle`**, where §4.2 makes it
+    /// a connection error: a stream must be opened by HEADERS before it can be
+    /// reset, and resetting an unopened id would record it as used.
     #[test]
     fn reset_closes_from_any_state() {
         for state in [
-            StreamState::Idle,
             StreamState::Open,
             StreamState::HalfClosedLocal,
             StreamState::HalfClosedRemote,
@@ -1624,6 +1831,16 @@ mod tests {
             s.on_send(FrameKind::RstStream, false).unwrap();
             assert_eq!(s.state(), StreamState::Closed, "send reset from {state}");
         }
+
+        // Idle is the exception, and it is a connection error rather than a
+        // stream error — the peer has reset a stream that never existed.
+        let idle = Stream::new(sid(1), StreamState::Idle);
+        assert!(idle.accepts(FrameKind::RstStream).is_err());
+        assert!(idle.refusal_is_fatal(FrameKind::RstStream));
+        assert_eq!(
+            idle.accepts(FrameKind::RstStream).unwrap_err().code(),
+            ErrorCode::ProtocolError
+        );
     }
 
     /// A transition attempted on an illegal frame fails **before** mutating, so a

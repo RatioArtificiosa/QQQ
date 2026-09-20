@@ -28,3 +28,9 @@ getrandom = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The async execution path (`HOST-015`, `HOST-016`) is tested against a real
+# runtime, because `call_async` and `epoch_deadline_async_yield_and_update` only
+# have meaning inside one — a test that drove them without a reactor would be
+# asserting the shape of the API rather than that it works. Tokio is already a
+# workspace dependency and is in `Cargo.lock`, so this adds no new crate.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

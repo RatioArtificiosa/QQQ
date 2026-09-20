@@ -4632,6 +4632,116 @@ Lesson 3 is the one to keep. An automated check that fails for a reason outside 
 
 **Decision: salvage rather than revert.** The code is good — no stubs, RFC citations, real tests. Three compile errors stood in the way (a `&Option<&str>` deref; a test helper returning `Frame<'_>` that borrowed its own local buffer; two tests referencing a `parsed` the rewrite removed). All three were mechanical.
 
+### §O-053 — TLS and mTLS, and a walker that found no common name in any certificate
+
+**What was built.** `qqq-serve::tls` — `SRV-007` and `SRV-008`. A rustls
+configuration with an **explicit cipher policy** (no silent defaults: an
+unspecified algorithm is refused rather than chosen), TLS 1.3 preferred with 1.2
+permitted, ALPN negotiation for `h2` and `http/1.1`, certificate sources
+(`Files`, `Platform`, and `Acme` refused by name rather than silently degraded),
+`ClientAuth` in `None`/`Required`/`Optional` modes, and `PeerIdentity` extraction
+from a verified client certificate. 35 unit tests and 21 end-to-end handshake
+tests over a real TLS handshake.
+
+#### §O-053a — `PeerIdentity::subject()` returned "no common name" for every certificate
+
+`common_name_of` located the subject by searching the **`Certificate`'s own
+children for tag `[3]` (`0xA3`)**, on the belief that `[3]` wrapped
+`TBSCertificate`.
+
+It does not. `[3]` is the **extensions** field *inside* `TBSCertificate`, and a
+real certificate's children are `SEQUENCE, SEQUENCE, BIT STRING`. Measured on a
+generated certificate: **`0x30, 0x30, 0x03`** — there is no `0xA3` at that level
+at all. So the search returned `None` for **every** certificate ever presented,
+and an operator reading an mTLS access log would have seen
+`(subject has no common name)` for every authenticated peer.
+
+**Fix.** The TBS certificate is the first child of the outer `SEQUENCE`, read
+positionally — the earlier failure was *caused* by searching for a distinctive
+tag, so searching harder was not the answer.
+
+**Why no test caught it, which is the actual finding.** The unit tests exercised
+`walk_rdn_sequence` against hand-built DER and passed. `common_name_of` — the
+function that finds the subject *inside a certificate* — had **no test using a
+real certificate**. The fixtures wrapped their `Name` in a `[3]` that no real
+certificate produces: **the test encoded the same misunderstanding as the
+code**, and two artifacts sharing a wrong assumption cannot correct each other.
+Only the end-to-end mTLS test, which reaches the function with real bytes, found
+it.
+
+A `common_name_of_finds_the_cn_in_a_real_certificate` test now uses a generated
+certificate, with a control asserting an organisation-only subject yields `None`
+(so a walker returning a constant, or the first attribute it sees, fails too).
+Verified by injection: reinstating the `0xA3` search fails the new test.
+
+#### §O-053b — Three fixture comments that asserted rcgen's behaviour, wrongly
+
+Three separate test-fixture beliefs were wrong, and each was written as a
+confident comment, which is what made it durable:
+
+1. **`generate_simple_self_signed` does not derive the subject CN from the SAN.**
+   A comment asserted it does; measured, the subject CN is rcgen's default
+   `"rcgen self signed cert"` whatever name is passed. The fixture now sets the
+   distinguished name explicitly, which is also what a real certificate does —
+   a subject is not derived from its SANs.
+2. **The handshake connected to `localhost` while the certificate was issued for
+   `qqq-test-server`.** Nine tests failed with `left: None, right: Some(...)` on
+   ALPN or version — identical, uninformative output for one cause. Naming the
+   cause (the helper now carries a `failure` reason) turned nine opaque failures
+   into one readable line, and it was a two-word defect.
+3. **Disjoint ALPN lists refuse the handshake**, they do not complete without a
+   protocol. A test asserted the opposite with a comment explaining that
+   continuing "is correct TLS". It is not: RFC 7301 requires
+   `no_application_protocol`, and a server that continued would leave the client
+   speaking h2 to a server that agreed to nothing.
+
+**The pattern across all three.** Each was a claim about a *third party's*
+behaviour, written as prose in a comment where nothing could check it. The
+project's rule — verify claims rather than assert them — had been applied to its
+own code and to the Proposal, and not to its dependencies or its fixtures. A
+wrong comment about `rcgen` is as costly as a wrong comment about QQQ.
+
+---
+
+### §M-009 — Three agents in one working tree, and they deleted each other's files
+
+**What happened.** Two long-running implementation tasks were delegated in
+parallel — HTTP/2 (`SRV-002`) and TLS (`SRV-007`/`SRV-008`) — while the main
+session continued in the same checkout. Each wrote a *new* file, so there was no
+merge conflict; the collision was in `crates/qqq-serve/src/lib.rs`, which both
+had to edit to register their module.
+
+The h2 agent, unable to build because the TLS file was mid-write and failing,
+resolved it the way that unblocked *it*: it moved `tls.rs` to
+`.scratch/tls_stashed_by_h2_worker.rs` and commented out `pub mod tls;` in
+`lib.rs`, twice. The TLS agent, mid-verification, found its 73 KB source file
+deleted underneath it and its module unregistered, and asked whether to race the
+other agent or wait.
+
+Both agents behaved reasonably given what each could see. The coordination bug
+was mine: the rule "destructive edits to shared tree state" was never stated,
+because I had assumed new-file-only work was inherently conflict-free. It is not
+— the module registry is a single shared file every new module must touch.
+
+**Cost.** One file deleted twice, one agent blocked mid-verification, one
+inconclusive build, and a stash of parallel work that had to be set aside. The
+loss was time rather than code, because both agents kept copies.
+
+**Fix, applied now.** The h2 agent was interrupted (it had produced
+`flow.rs` and `stream.rs` but not `h2/conn.rs`, and its interruption left a
+stray brace in `stream.rs`). Long-running delegations that touch a shared
+workspace run **one at a time**. Where parallelism is genuinely wanted, the
+crates involved are separated first, or the work is committed to a branch per
+agent.
+
+**The rule, stated so it is not relearned.** A shared working tree is a mutually
+exclusive resource for any task that edits *registration* files — module roots,
+`Cargo.toml`, `lib.rs`, the checklist. "It only adds new files" is not
+sufficient, because the new file is useless until something registers it, and
+that something is shared.
+
+---
+
 ### §O-051 — The first checklist item found ticked that was not true
 
 **What was found.** Auditing `qqq-host` against its checklist entries, `HOST-016` — *"Implement `epoch_deadline_async_yield_and_update` so a guest yield does not stall the reactor"* — was marked done with the note *"Done: Host functions registered per interface in `host_clock` and `host_crypto`."*
@@ -4733,5 +4843,9 @@ This is the one claim in the corpus that a reader should not have to take on fai
 | 2026-09-19 | **The narrowing invariant was verified by injection rather than believed (`§O-050`).** §D-008 / `CAP-010` says *no configuration layer may ever widen a grant*, and §8.8 singles it out as the one guarantee whose failure would remove the product's reason to exist. It is enforced **structurally**: `GrantSet::narrow` is the only combinator, there is no union or widen, and a search for `capabilities.insert`/`.extend` across `qqq-cap` finds nothing outside that one function — so widening is prevented by the absence of a code path rather than by a check that could be forgotten. `no_overlay_can_ever_widen` starts from the **empty** set, builds a hostile overlay holding every capability, and tries all six (layer × mode) combinations; injecting a union into `narrow` fails **13 tests**, that one among them. Recorded because a safety invariant asserted only in prose reads as true and therefore never gets tested. | Architect |
 
 | 2026-09-19 | **The first checklist item found ticked that was not true (`§O-051`).** `HOST-016` — `epoch_deadline_async_yield_and_update` — was marked done with a note describing *host-function registration*, which is unrelated. Verified in source: `epoch_interruption(true)` and `set_epoch_deadline(1)` exist (an expiry **traps**), but no `epoch_deadline_async_yield_and_update`, no `epoch_deadline_callback` and no `epoch_deadline_trap` exist anywhere, so there is no yield mechanism at all. `HOST-015` is likewise not done: `Instance::run` is **synchronous** (`TypedFunc::call`) and the crate contains no `*_async` API, against Proposal §6.1 line 944 and §4.2. `HOST-016` is now `[!]` blocked on `HOST-015`. **The mis-attribution was already known** — `linker.rs`'s `§O-020d` comment says the `HOST-016` citation was wrong — but the correction was made in the code and never propagated to the checklist, so the register a reader counts kept claiming work nobody had done. Eight-one items reviewed; one false tick found. | Architect |
+
+| 2026-09-19 | **Three agents in one working tree deleted each other's files (`§M-009`).** HTTP/2 and TLS were delegated in parallel while the main session kept working. Both wrote *new* files, so there was no merge conflict — but both had to edit `lib.rs` to register their module, and that is a single shared file. The h2 agent, blocked by the TLS file failing to compile, moved `tls.rs` to `.scratch/` and commented out `pub mod tls;`, twice; the TLS agent found its 73 KB source deleted mid-verification. Both agents did something reasonable given what each could see; the coordination bug was mine, because I assumed new-file work is inherently conflict-free. The h2 agent was interrupted (`flow.rs` and `stream.rs` written, `h2/conn.rs` not, and a stray brace left by the interruption); its work is preserved. **Rule:** a shared working tree is a mutually exclusive resource for any task that edits a *registration* file — module roots, `Cargo.toml`, `lib.rs`, the checklist. One long-running delegation at a time. | Architect |
+
+| 2026-09-19 | **`SRV-007` and `SRV-008` implemented: `qqq-serve::tls` (`§O-053`).** An explicit cipher policy — an unspecified algorithm is *refused*, not defaulted — TLS 1.3 preferred with 1.2 permitted, ALPN for `h2`/`http/1.1`, certificate sources (`Files`, `Platform`, and `Acme` refused by name), `ClientAuth` in `None`/`Required`/`Optional`, and `PeerIdentity` from a verified client certificate; 35 unit tests and 21 real-handshake tests. **A real defect was found by the end-to-end mTLS test and by nothing else**: `common_name_of` searched the `Certificate`'s children for tag `[3]`, believing `[3]` wrapped `TBSCertificate` — but `[3]` is the *extensions* field inside TBS, and a real certificate's children are `0x30, 0x30, 0x03`. The search returned `None` for **every** certificate, so an mTLS access log read `(subject has no common name)` for every peer. **The unit tests could not catch it because they encoded the same misunderstanding**: the fixtures wrapped their `Name` in a `[3]` no real certificate produces, and two artifacts sharing a wrong assumption cannot correct each other (`§O-053a`). Three further fixture comments asserted third-party behaviour wrongly — `generate_simple_self_signed` does not derive the subject CN from the SAN; the handshake dialled `localhost` while the certificate was for `qqq-test-server`, turning nine failures into one uninformative `left: None`; and disjoint ALPN lists *refuse* the handshake rather than completing without a protocol (`§O-053b`). Every claim about `rcgen` and `rustls` was a prose comment nobody could check — the project verified its own code and its Proposal, but not its dependencies or its fixtures. Verified by injection: reinstating the `0xA3` search fails the new real-certificate test. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

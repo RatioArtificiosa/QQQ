@@ -232,7 +232,16 @@ fn tls_error(message: impl Into<String>) -> Error {
 ///
 /// Proposal §6.4 names three sources. Two are implemented; the third is refused
 /// explicitly, which is the point of making this an enum rather than a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Why this is not `Clone`
+///
+/// [`Self::Platform`] carries a [`PrivateKeyDer`], which is deliberately not
+/// `Clone` upstream (see [`ResolvedCertificate`]). A `Clone` here would hand out
+/// a second copy of a private key wherever a caller was merely trying to pass a
+/// configuration along, which is exactly the copy `rustls-pki-types` refuses to
+/// make implicitly. Callers that need to share a source use an `Arc`, and callers
+/// that need a second key call [`PrivateKeyDer::clone_key`].
+#[derive(Debug, PartialEq, Eq)]
 pub enum CertificateSource {
     /// A PEM certificate chain and a PEM private key, read from files.
     Files {
@@ -314,18 +323,45 @@ impl CertificateSource {
     pub fn resolve(&self) -> Result<ResolvedCertificate> {
         match self {
             Self::Files { cert, key } => {
-                let chain = load_cert_chain(cert)?;
+                // **The key is loaded first, deliberately.** Both loads can fail,
+                // and when both do, one of the two errors is reported. Loading
+                // the certificate first meant a missing key file was reported as
+                // a problem with the *certificate* whenever the certificate
+                // happened not to parse either — the reader is then sent to the
+                // wrong file.
+                //
+                // Caught by `a_missing_key_file_names_the_key`, whose temporary
+                // certificate fixture was deliberately unusable: the assertion
+                // "the error must name the key" failed with the message "the
+                // certificate file `…/c.pem` contains no certificate".
+                //
+                // Neither order is universally correct — with key-first, a
+                // missing certificate is now masked by a bad key — but the
+                // *file* named is the one whose load is attempted first, and a
+                // reader who fixes one path is re-run and told about the other.
+                // There is no arrangement in which one message reports both, and
+                // inventing one would mean this function collected errors rather
+                // than failing fast.
                 let key = load_private_key(key)?;
+                let chain = load_cert_chain(cert)?;
                 Ok(ResolvedCertificate { chain, key })
             }
             Self::Platform { chain, key } => {
+                // Both checks below are `InternalInvariantViolated`, not a
+                // configuration error: `Self::Platform` is constructed by the
+                // caller, so an empty chain or an empty certificate is a caller
+                // bug rather than something an operator can fix in a manifest.
+                // The docs on `resolve` say `QQQ-6004` for exactly this reason,
+                // and an earlier version returned the configuration code here —
+                // caught by `a_platform_source_with_an_empty_chain_is_an_invariant_violation`.
                 if chain.is_empty() {
-                    return Err(tls_error(
+                    return Err(Error::new(
+                        ErrorCode::InternalInvariantViolated,
                         "a platform certificate source was given an empty certificate chain",
                     )
                     .with_remediation(
-                        "supply at least the leaf certificate; a TLS server has nothing to \
-                         present otherwise",
+                        "this is a caller bug: supply at least the leaf certificate; a TLS \
+                         server with no certificate has nothing to present",
                     )
                     .with_context("source", "platform"));
                 }
@@ -368,11 +404,23 @@ impl CertificateSource {
 ///
 /// The output of [`CertificateSource::resolve`]. A separate type rather than a
 /// tuple so that a caller cannot pass the two in the wrong order.
-#[derive(Debug, Clone)]
+///
+/// # Why this is not `Clone`
+///
+/// `PrivateKeyDer` is deliberately not `Clone` in `rustls-pki-types`: cloning a
+/// private key is how a copy ends up somewhere it is not zeroized. It provides
+/// [`PrivateKeyDer::clone_key`] instead, which names the copy explicitly, and
+/// that is what [`CertificateSource::resolve`] uses for the `Platform` variant.
+/// Deriving `Clone` here would reintroduce the implicit copy upstream removed.
+#[derive(Debug)]
 pub struct ResolvedCertificate {
     /// The chain, leaf first.
     pub chain: Vec<CertificateDer<'static>>,
     /// The private key.
+    ///
+    /// Taken by value by `ServerConfig::with_single_cert`, so a caller building
+    /// two configurations from one source needs two resolutions or an explicit
+    /// [`PrivateKeyDer::clone_key`].
     pub key: PrivateKeyDer<'static>,
 }
 
@@ -388,13 +436,16 @@ pub struct ResolvedCertificate {
 /// [`TlsConfig::build`]'s explicit check are the two places that happens.
 fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let file = std::fs::File::open(path).map_err(|e| {
-        tls_error(format!("could not open the certificate file `{}`", path.display()))
-            .with_cause(e.to_string())
-            .with_remediation(
-                "check the path and that the process may read it; a certificate file is \
+        tls_error(format!(
+            "could not open the certificate file `{}`",
+            path.display()
+        ))
+        .with_cause(e.to_string())
+        .with_remediation(
+            "check the path and that the process may read it; a certificate file is \
                  usually mounted read-only",
-            )
-            .with_context("file", path.display().to_string())
+        )
+        .with_context("file", path.display().to_string())
     })?;
 
     let mut reader = std::io::BufReader::new(file);
@@ -426,7 +477,75 @@ fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
         .with_context("file", path.display().to_string()));
     }
 
+    // **A PEM block is not a certificate.**
+    //
+    // `rustls_pemfile::certs` validates the *base64* and the `CERTIFICATE` label,
+    // and nothing else. Measured while writing this module: a file containing
+    // `-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----` parses
+    // successfully into a three-byte `CertificateDer`, because `AAAA` is valid
+    // base64. That value then reaches `with_single_cert` and produces a
+    // `ServerConfig` that fails on the first client instead of at startup —
+    // exactly the failure mode `SRV-007` asks this function to prevent.
+    //
+    // So each entry is checked to be a DER `Certificate` (`SEQUENCE` containing
+    // a `SEQUENCE`) before it is accepted. This is a *shape* check, not a
+    // signature or validity check — verifying those is `rustls-webpki`'s job at
+    // handshake time, and duplicating them here would be a second, weaker
+    // authority on the same question.
+    for (i, cert) in chain.iter().enumerate() {
+        if !looks_like_a_der_certificate(cert.as_ref()) {
+            return Err(tls_error(format!(
+                "certificate {i} in `{}` is not a DER certificate",
+                path.display()
+            ))
+            .with_remediation(
+                "the PEM block decoded, but its contents are not an X.509 certificate. A \
+                 placeholder or truncated file is the usual cause; check it with \
+                 `openssl x509 -in <file> -noout -subject`",
+            )
+            .with_context("file", path.display().to_string())
+            .with_context("bytes", cert.as_ref().len().to_string()));
+        }
+    }
+
     Ok(chain)
+}
+
+/// Whether these bytes have the outer shape of a DER X.509 `Certificate`.
+///
+/// ```text
+/// Certificate ::= SEQUENCE { tbsCertificate SEQUENCE, signatureAlgorithm, signatureValue }
+/// ```
+///
+/// Deliberately shallow: it checks the outer `SEQUENCE` and that the first
+/// element inside it is the `tbsCertificate` `SEQUENCE`. Anything deeper is
+/// `rustls-webpki`'s job.
+///
+/// # Why not `rustls::server::ParsedCertificate`
+///
+/// `rustls::server::ParsedCertificate` does exactly this and is the obvious
+/// choice, but it is produced by the *verifier* path — constructing one outside
+/// a verification context is not part of the public API in a way that reads
+/// clearly here. This few-line check is narrow enough to audit at a glance, and
+/// it is a *shallow* check on purpose: its only job is to stop a well-formed
+/// PEM wrapper around non-certificate bytes.
+fn looks_like_a_der_certificate(der: &[u8]) -> bool {
+    /// A universal, constructed `SEQUENCE`.
+    const SEQUENCE: u8 = 0x30;
+
+    let Some((tag, header, content)) = split_element(der) else {
+        return false;
+    };
+    if tag != SEQUENCE {
+        return false;
+    }
+    // The declared length must account for exactly the rest of the input; a
+    // trailing-garbage certificate is not one this server should present.
+    if header.checked_add(content.len()) != Some(der.len()) {
+        return false;
+    }
+    // And the first thing inside must be the `tbsCertificate` `SEQUENCE`.
+    matches!(split_element(content), Some((SEQUENCE, _, _)))
 }
 
 /// Read a PEM private key from a file.
@@ -456,14 +575,17 @@ fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 /// at startup, by name, not by the first client.
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path).map_err(|e| {
-        tls_error(format!("could not open the private key file `{}`", path.display()))
-            .with_cause(e.to_string())
-            .with_remediation(
-                "check the path and that the process may read it. A key file readable by \
+        tls_error(format!(
+            "could not open the private key file `{}`",
+            path.display()
+        ))
+        .with_cause(e.to_string())
+        .with_remediation(
+            "check the path and that the process may read it. A key file readable by \
                  every user is itself a problem, so this error is worth reading rather \
                  than working around by loosening permissions",
-            )
-            .with_context("file", path.display().to_string())
+        )
+        .with_context("file", path.display().to_string())
     })?;
 
     let mut reader = std::io::BufReader::new(file);
@@ -604,14 +726,36 @@ impl ClientAuth {
     ///
     /// `QQQ-2002` when the CA file cannot be read or holds no usable CA
     /// certificate.
-    fn verifier(&self) -> Result<Option<Arc<dyn rustls::server::ClientCertVerifier>>> {
+    ///
+    /// # Why the verifier needs the crypto provider
+    ///
+    /// In rustls 0.23 the certificate verifier does not pick its own signature
+    /// algorithms: it is built *against* a provider, so that the algorithms used
+    /// to check a client certificate's signature are the ones this server
+    /// deliberately selected. Passing the provider in is therefore not plumbing
+    /// convenience — it is what keeps the mTLS path and the suite policy the same
+    /// policy.
+    ///
+    /// # Why the trait path is spelled `server::danger`
+    ///
+    /// rustls places `ClientCertVerifier` under `rustls::server::danger` because
+    /// implementing it wrongly means accepting certificates that should not be
+    /// accepted. This module does **not** implement it: it uses
+    /// [`WebPkiClientVerifier`], the audited webpki-backed implementation, so the
+    /// dangerous surface is *consumed* rather than reimplemented. The path is
+    /// written in full at the one place it appears so that reading this module
+    /// makes that evident.
+    fn verifier(
+        &self,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
         let ca_file = match self {
             Self::None => return Ok(None),
             Self::Required { ca_file } | Self::Optional { ca_file } => ca_file,
         };
 
         let roots = Arc::new(load_trust_roots(ca_file)?);
-        let builder = WebPkiClientVerifier::builder(roots);
+        let builder = WebPkiClientVerifier::builder_with_provider(roots, provider);
 
         // This is the only behavioural difference between the two modes, and it
         // is one method call. `allow_unauthenticated` is what makes a missing
@@ -800,45 +944,128 @@ impl fmt::Display for PeerIdentity {
 /// lossily decoded, which is reported honestly by a replacement character rather
 /// than by a wrong string.
 fn common_name_of(cert_der: &[u8]) -> Option<String> {
-    /// `id-at-commonName`.
-    const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
-    /// Context-specific constructed tag `[3]`, which begins `TBSCertificate`.
-    const TAG_TBS: u8 = 0xA3;
-
-    let tbs = first_child_with_tag(cert_der, TAG_TBS)?;
-    // Inside `[3]`: version `[0]`, serial, signature, issuer, validity, subject.
-    // Skipping by *position* is fragile, so each field's tag is checked as it is
-    // skipped and a mismatch abandons the walk.
-    let mut rest = tbs;
-    let _version = take_element(rest, 0xA0).or_else(|| take_element(rest, 0x02))?;
-    if let Some(after) = take_element(rest, 0xA0).map(|_| advance(rest)?) {
-        rest = after;
+    // `Certificate ::= SEQUENCE { tbsCertificate SEQUENCE, signatureAlgorithm,
+    //                              signatureValue }`
+    //
+    // # The defect this shape replaced
+    //
+    // The walker used to search the `Certificate`'s own children for tag `[3]`
+    // (`0xA3`), on the belief that `[3]` wrapped `TBSCertificate`. It does not:
+    // `[3]` is the **extensions** field *inside* `TBSCertificate`, and the
+    // `Certificate`'s children are `SEQUENCE, SEQUENCE, BIT STRING` — measured
+    // on a real rcgen certificate: `0x30, 0x30, 0x03`, with no `0xA3` at that
+    // level at all.
+    //
+    // So the search returned `None` for **every** certificate, and
+    // `PeerIdentity::from_verified` reported `"(subject has no common name)"` for
+    // a certificate whose subject plainly had one. The unit test passed because
+    // it hand-built a `[3]`-wrapped structure that no real certificate produces:
+    // the test encoded the same misunderstanding as the code, so neither could
+    // catch the other. Only the end-to-end mTLS test reaches this function with
+    // real bytes, and that is where it was found.
+    let (_, _, certificate_body) = split_element(cert_der)?;
+    let (tbs_tag, _, tbs) = children(certificate_body).next()?;
+    // The first child of `Certificate` is the TBS certificate, tag `0x30`. Read
+    // positionally rather than by searching for a distinctive tag, precisely
+    // because the earlier search-by-tag was the bug.
+    if tbs_tag != 0x30 {
+        return None;
     }
-    for _ in 0..4 {
-        // serialNumber, signature, issuer, validity — then subject.
-        rest = advance(rest)?;
-    }
-    let subject = take_element(rest, 0x30)?;
-    walk_rdn_sequence(subject)
-}
 
-/// Walk a `Name` (`SEQUENCE OF SET OF AttributeTypeAndValue`) for the CN.
-fn walk_rdn_sequence(subject: &[u8]) -> Option<String> {
-    /// `id-at-commonName`, as DER content bytes.
-    const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
-
-    for rdn in children(subject) {
-        for attr in children(rdn) {
-            let mut parts = children(attr);
-            let oid = parts.next()?;
-            let value = parts.next()?;
-            if oid.0 == 0x06 && oid.2 == OID_COMMON_NAME {
-                let (_, _, content) = value;
-                return Some(String::from_utf8_lossy(content).into_owned());
+    // Inside TBSCertificate the fields are: version `[0]`, serialNumber,
+    // signature, issuer, validity, subject, …
+    //
+    // Rather than counting fields — which breaks the moment a certificate uses a
+    // shape this walker did not anticipate — each child is *identified by its
+    // tag*, and the subject is taken as the second plain `SEQUENCE` that is a
+    // `Name`. Both issuer and subject are `Name`, so tag alone cannot separate
+    // them; position can, and the position is stable because RFC 5280 fixes the
+    // field order. So the walk counts only the `Name`-shaped fields it cares
+    // about and ignores everything else.
+    let mut names_seen = 0usize;
+    for (tag, _, content) in children(tbs) {
+        // `[0]` version and the `BIT STRING` / `AlgorithmIdentifier` fields are
+        // skipped by tag: only a plain `SEQUENCE` can be a `Name`.
+        if tag != 0x30 {
+            continue;
+        }
+        // A `SEQUENCE` inside TBSCertificate is either a `Name` (issuer, then
+        // subject) or the `AlgorithmIdentifier` of `signature` — which is also a
+        // `SEQUENCE`, but is not a `SEQUENCE OF SET`, and `walk_rdn_sequence`
+        // returns `None` for it rather than a wrong name.
+        //
+        // Counting *matches* rather than raw sequences is what makes this
+        // order-independent with respect to the algorithm identifier's position.
+        if walk_rdn_sequence(content).is_some() {
+            names_seen += 1;
+            if names_seen == 2 {
+                // The second `Name` in TBSCertificate is the subject.
+                return walk_rdn_sequence(content);
             }
         }
     }
     None
+}
+
+/// Walk the **content** of a `Name` (`SEQUENCE OF SET OF
+/// AttributeTypeAndValue`) for the CN.
+///
+/// # The argument is content, not a whole element
+///
+/// This takes the bytes *inside* the `Name`'s `SEQUENCE`, matching what
+/// [`split_element`] hands out and what [`common_name_of`] passes in. A caller
+/// that passes a whole element — header included — gets `None`, because the first
+/// child it sees is then the outer `SEQUENCE` rather than a `SET`, and the
+/// "not a `Name`" check below rejects it.
+///
+/// That is a real trap, and it caught this module's own test: the first version
+/// of `the_common_name_walker_matches_by_oid` passed `der_sequence(...)` — the
+/// whole element, header and all — and asserted `Some("alice@")` against a walker
+/// that correctly returned `None`. The walker was right and the test was wrong.
+///
+/// Returns `None` unless the input really is a `Name`: a sequence of `SET`s, each
+/// holding `SEQUENCE`-of-`(OID, value)` pairs. That strictness is what lets
+/// [`common_name_of`] tell a `Name` apart from the `AlgorithmIdentifier` that
+/// also appears inside `TBSCertificate`.
+///
+/// The common name is matched by **OID**, not by position, so a subject whose
+/// first RDN is an organisation still yields the CN.
+fn walk_rdn_sequence(subject: &[u8]) -> Option<String> {
+    /// `id-at-commonName`, as DER content bytes (the OID minus its tag/length).
+    const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
+
+    let mut found: Option<String> = None;
+    let mut rdn_count = 0usize;
+
+    for (rdn_tag, _, rdn_content) in children(subject) {
+        // Every RDN is a `SET` (0x31). If this is not one, this is not a
+        // `Name`, and `None` is the honest answer.
+        if rdn_tag != 0x31 {
+            return None;
+        }
+        rdn_count += 1;
+
+        for (attr_tag, _, attr_content) in children(rdn_content) {
+            // Each `AttributeTypeAndValue` is a `SEQUENCE` of exactly two:
+            // the OID, then the value.
+            if attr_tag != 0x30 {
+                return None;
+            }
+            let mut parts = children(attr_content);
+            let (oid_tag, _, oid) = parts.next()?;
+            let (_, _, value) = parts.next()?;
+            if oid_tag == 0x06 && oid == OID_COMMON_NAME && found.is_none() {
+                found = Some(String::from_utf8_lossy(value).into_owned());
+            }
+        }
+    }
+
+    // An empty subject is legal but is not a `Name` we can attribute anything
+    // to; report it as unfound rather than as an empty identity.
+    if rdn_count == 0 {
+        return None;
+    }
+    found
 }
 
 /// Split a DER element into `(tag, header_len, content)`.
@@ -850,7 +1077,7 @@ fn split_element(bytes: &[u8]) -> Option<(u8, usize, &[u8])> {
     let first = *bytes.get(1)?;
     if first & 0x80 == 0 {
         let len = usize::from(first);
-        let start = 2;
+        let start = 2usize;
         let end = start.checked_add(len)?;
         return Some((tag, start, bytes.get(start..end)?));
     }
@@ -862,31 +1089,13 @@ fn split_element(bytes: &[u8]) -> Option<(u8, usize, &[u8])> {
     }
     let mut len = 0usize;
     for i in 0..n {
-        len = len.checked_mul(256)?.checked_add(usize::from(*bytes.get(2 + i)?))?;
+        len = len
+            .checked_mul(256)?
+            .checked_add(usize::from(*bytes.get(2 + i)?))?;
     }
-    let start = 2 + n;
+    let start = 2usize.checked_add(n)?;
     let end = start.checked_add(len)?;
     Some((tag, start, bytes.get(start..end)?))
-}
-
-/// Move past one element, returning what follows it.
-fn advance(bytes: &[u8]) -> Option<&[u8]> {
-    let (_, header, content) = split_element(bytes)?;
-    bytes.get(header.checked_add(content.len())?..)
-}
-
-/// Take an element only if it carries `tag`, returning its content.
-fn take_element(bytes: &[u8], tag: u8) -> Option<&[u8]> {
-    let (found, _, content) = split_element(bytes)?;
-    (found == tag).then_some(content)
-}
-
-/// Find the first child of a constructed element whose tag matches.
-fn first_child_with_tag(bytes: &[u8], tag: u8) -> Option<&[u8]> {
-    let (_, _, content) = split_element(bytes)?;
-    children(content)
-        .find(|(t, _, _)| *t == tag)
-        .map(|(_, _, c)| c)
 }
 
 /// Iterate the immediate children of a constructed element's content.
@@ -930,7 +1139,13 @@ fn sha256_fingerprint(der: &[u8]) -> String {
 /// fields are all visible, so "what is this server configured to do" is
 /// answerable by reading one value — and [`Self::build`] refuses the
 /// combinations that cannot be answered.
-#[derive(Debug, Clone)]
+///
+/// # Why this is not `Clone`
+///
+/// Because [`CertificateSource`] is not: a `TlsConfig` that cloned itself would
+/// clone a private key wherever a caller passed a configuration along. A caller
+/// that needs to share one uses an `Arc<TlsConfig>`.
+#[derive(Debug)]
 pub struct TlsConfig {
     /// Where the certificate and key come from.
     pub certificate: CertificateSource,
@@ -1025,35 +1240,58 @@ impl TlsConfig {
     /// `builder_with_protocol_versions` is used rather than `builder`, so the
     /// rustls default version list is never in play — there is no code path here
     /// through which a version this server did not name can be negotiated.
-    /// `with_cipher_suites` does the same for suites.
+    ///
+    /// # How the cipher policy is actually installed
+    ///
+    /// This is the part of rustls 0.23 that is easy to get wrong, so it is worth
+    /// stating plainly: **there is no `with_cipher_suites` on the builder.** The
+    /// suite list belongs to the [`rustls::crypto::CryptoProvider`], and the
+    /// builder receives it through
+    /// [`ServerConfig::builder_with_provider`].
+    ///
+    /// So [`CIPHER_SUITES`] is installed by constructing a provider from
+    /// `aws_lc_rs::default_provider()` with its `cipher_suites` field replaced.
+    /// Everything else in that provider — the random source, the key-exchange
+    /// groups, the signature-verification algorithms, the key loader — is left as
+    /// the audited default.
+    ///
+    /// That is a deliberate boundary, and it is the honest scope of what
+    /// [`CIPHER_SUITES`] pins:
+    ///
+    /// * The **suite list** is this server's, and cannot be changed by a rustls
+    ///   patch release.
+    /// * The **key-exchange groups** are the provider's. `SEC-021` (hybrid
+    ///   X25519+ML-KEM) will change this field, and when it does the groups
+    ///   become an explicit list here too — for the same reason the suites are
+    ///   one now.
+    ///
+    /// The one provider is built once and used for **both** the suite list and
+    /// the client-certificate verifier, so the mTLS path and the suite path
+    /// cannot drift onto different providers.
     pub fn build(&self) -> Result<Arc<ServerConfig>> {
         // `SEC-017`: an unspecified field is an error, not a default. These two
         // checks are the enforcement of that sentence, and they run *before*
         // any certificate file is touched, so a caller who forgot to fill in the
         // policy is told that rather than being told about a file.
         if self.versions.is_empty() {
-            return Err(tls_error(
-                "the TLS configuration names no protocol version",
-            )
-            .with_remediation(
-                "set `TlsConfig::versions` to `PROTOCOL_VERSIONS`. There is deliberately no \
+            return Err(tls_error("the TLS configuration names no protocol version")
+                .with_remediation(
+                    "set `TlsConfig::versions` to `PROTOCOL_VERSIONS`. There is deliberately no \
                  default: a version list that fills itself in is a version list that can \
                  change without anyone reviewing the change, which is what `SEC-017` \
                  forbids.",
-            )
-            .with_context("field", "versions"));
+                )
+                .with_context("field", "versions"));
         }
         if self.cipher_suites.is_empty() {
-            return Err(tls_error(
-                "the TLS configuration names no cipher suite",
-            )
-            .with_remediation(
-                "set `TlsConfig::cipher_suites` to `CIPHER_SUITES`, or to an explicitly \
+            return Err(tls_error("the TLS configuration names no cipher suite")
+                .with_remediation(
+                    "set `TlsConfig::cipher_suites` to `CIPHER_SUITES`, or to an explicitly \
                  reviewed list. There is deliberately no default: rustls' default suite \
                  set is the library's opinion and can change in a patch release, and a \
                  cipher policy that changes on a dependency bump is not a policy.",
-            )
-            .with_context("field", "cipher_suites"));
+                )
+                .with_context("field", "cipher_suites"));
         }
 
         let resolved = self.certificate.resolve()?;
@@ -1064,21 +1302,47 @@ impl TlsConfig {
         // against different things: `resolve` protects the file path, this
         // protects the invariant "a `ServerConfig` never has an empty chain".
         if resolved.chain.is_empty() {
-            return Err(tls_error(
-                "the TLS configuration has no certificate to present",
-            )
-            .with_remediation(
-                "a TLS server must have at least one certificate. Configure \
+            return Err(
+                tls_error("the TLS configuration has no certificate to present")
+                    .with_remediation(
+                        "a TLS server must have at least one certificate. Configure \
                  `CertificateSource::files` with a PEM certificate, or supply the platform's \
                  certificate through `CertificateSource::platform`.",
-            )
-            .with_context("source", self.certificate.describe()));
+                    )
+                    .with_context("source", self.certificate.describe()),
+            );
         }
 
-        let builder = ServerConfig::builder_with_protocol_versions(self.versions);
-        let builder = builder.with_cipher_suites(self.cipher_suites, &[]);
+        // --- The provider carries the cipher policy -------------------------
+        //
+        // There is no `with_cipher_suites` on the builder (see this method's
+        // docs). The suite list is a field of the provider, so the policy is
+        // installed by replacing exactly that field and leaving every other
+        // component at the audited default.
+        //
+        // `default_provider()` is not a "silent default" in the `SEC-017`
+        // sense: the suites — the thing the policy is *about* — are replaced
+        // unconditionally on the next line, so no suite can reach the handshake
+        // that this constant did not name. What remains default is the random
+        // source, the key-exchange groups, the signature algorithms and the key
+        // loader.
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        provider.cipher_suites = self.cipher_suites.to_vec();
+        let provider = Arc::new(provider);
 
-        let builder = match self.client_auth.verifier()? {
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider));
+        let builder = builder.with_protocol_versions(self.versions).map_err(|e| {
+            tls_error("the protocol versions and cipher suites are incompatible")
+                .with_cause(e.to_string())
+                .with_remediation(
+                    "every suite in `cipher_suites` must belong to a version in \
+                         `versions`; rustls refuses a policy with no usable combination",
+                )
+                .with_context("versions", format!("{:?}", self.versions.len()))
+                .with_context("cipher_suites", self.cipher_suites.len().to_string())
+        })?;
+
+        let builder = match self.client_auth.verifier(Arc::clone(&provider))? {
             Some(verifier) => builder.with_client_cert_verifier(verifier),
             // `with_no_client_auth` sends no `CertificateRequest`, which is what
             // distinguishes `ClientAuth::None` on the wire. It is *not* a
@@ -1163,7 +1427,10 @@ impl Negotiated {
     }
 
     /// The fallback for a protocol version this build does not classify.
-    fn unclassified(other: Option<rustls::ProtocolVersion>, conn: &rustls::ServerConnection) -> Self {
+    fn unclassified(
+        other: Option<rustls::ProtocolVersion>,
+        conn: &rustls::ServerConnection,
+    ) -> Self {
         Self {
             version: format!("{other:?}"),
             cipher_suite: cipher_suite_name(conn.negotiated_cipher_suite()),
@@ -1260,7 +1527,11 @@ mod tests {
                 rustls::ProtocolVersion::TLSv1_1,
                 "TLS 1.1 must never be offered"
             );
-            assert_ne!(v.version, rustls::ProtocolVersion::SSLv3, "SSLv3 is not TLS");
+            assert_ne!(
+                v.version,
+                rustls::ProtocolVersion::SSLv3,
+                "SSLv3 is not TLS"
+            );
         }
     }
 
@@ -1355,7 +1626,9 @@ mod tests {
     fn a_config_with_no_versions_is_refused() {
         let mut c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
         c.versions = &[];
-        let e = c.build().expect_err("an empty version list must be refused");
+        let e = c
+            .build()
+            .expect_err("an empty version list must be refused");
         assert_eq!(e.code, ErrorCode::ManifestSchemaViolation);
         assert!(
             e.message.contains("protocol version"),
@@ -1363,7 +1636,10 @@ mod tests {
             e.message
         );
         assert!(
-            e.remediation.as_deref().unwrap_or("").contains("no default"),
+            e.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("no default"),
             "the remediation must say why there is no default: {:?}",
             e.remediation
         );
@@ -1397,27 +1673,77 @@ mod tests {
 
     // -- certificate sources ----------------------------------------------
 
+    /// A missing certificate file is named as the certificate.
+    ///
+    /// # Why this calls `load_cert_chain` rather than `resolve`
+    ///
+    /// `resolve` loads the **key first** (see the comment there), so reaching the
+    /// certificate load through it requires a key file that genuinely parses —
+    /// and this crate's unit tests have no way to produce one: `rcgen` is a
+    /// dev-dependency of the *test targets*, and fabricating a valid PKCS#8 key by
+    /// hand is not something a test should do.
+    ///
+    /// Two earlier versions of this test tried `resolve` with placeholder keys and
+    /// both failed, each time naming the key instead of the certificate. Rather
+    /// than weaken the assertion to "some error was returned" — which would pass
+    /// while the property under test was absent — it now exercises the function
+    /// that actually produces the certificate-not-found error, and
+    /// `tests/tls.rs` covers the same path end-to-end through `resolve` with a
+    /// real generated key.
     #[test]
     fn a_missing_certificate_file_names_the_file() {
-        let e = CertificateSource::files("no/such/cert.pem", "no/such/key.pem")
-            .resolve()
+        let e = load_cert_chain(Path::new("no/such/cert.pem"))
             .expect_err("a missing certificate file must not panic");
         assert_eq!(e.code, ErrorCode::ManifestSchemaViolation);
         assert!(
             e.message.contains("no/such/cert.pem"),
-            "the error must name the path: {}",
+            "the error must name the certificate path: {}",
             e.message
         );
-        assert!(e.remediation.is_some());
+        assert!(
+            e.remediation.is_some(),
+            "a missing file must come with an actionable next step"
+        );
     }
 
+    /// With **both** paths absent, the error names the key — the one loaded
+    /// first. Pinned as a test because which error surfaces when two things are
+    /// wrong is a property a reader will otherwise assume the other way round.
+    #[test]
+    fn with_both_paths_absent_the_key_is_named_first() {
+        let e = CertificateSource::files("no/such/cert.pem", "no/such/key.pem")
+            .resolve()
+            .expect_err("must be refused");
+        assert!(
+            e.message.contains("key.pem"),
+            "the load order is key-first, so the key is named: {}",
+            e.message
+        );
+    }
+
+    /// A missing key file is named as the key.
+    ///
+    /// # Why the certificate here is a *valid* one
+    ///
+    /// The first version of this test wrote `PEM_NOT_A_CERT` as the certificate
+    /// and asserted that the missing key was named. It failed, naming the
+    /// certificate instead — because `resolve` loaded the certificate first and
+    /// that fixture has no `CERTIFICATE` block either.
+    ///
+    /// That is a real property of the code, not a test artifact: when **both**
+    /// files are wrong, only one error is reported, and which one depends on the
+    /// load order. `resolve` now loads the key first (see the comment there), so
+    /// this test writes a genuinely valid certificate and a genuinely absent key
+    /// and asserts the key is named — which is the case an operator actually
+    /// hits, since a certificate that exists and a key path that is wrong is the
+    /// common deployment mistake.
     #[test]
     fn a_missing_key_file_names_the_key() {
         let dir = tempdir();
         let cert = dir.join("c.pem");
-        std::fs::write(&cert, PEM_NOT_A_CERT).expect("write");
+        std::fs::write(&cert, valid_cert_pem()).expect("write");
         let e = CertificateSource::Files {
-            cert: cert.clone(),
+            cert,
             key: dir.join("absent.key"),
         }
         .resolve()
@@ -1429,6 +1755,54 @@ mod tests {
         );
     }
 
+    /// **A PEM block is not a certificate.**
+    ///
+    /// This test originally asserted only that a file consigning a non-certificate
+    /// PEM block was refused, and it failed: `rustls_pemfile::certs` accepted
+    /// `AAAA` (valid base64) and produced a three-byte `CertificateDer`. The
+    /// assertion is therefore now on *which* refusal, and it is this test that
+    /// forced `looks_like_a_der_certificate` into existence.
+    #[test]
+    fn a_pem_block_that_is_not_der_is_refused() {
+        let dir = tempdir();
+        let cert = dir.join("c.pem");
+        std::fs::write(&cert, PEM_NOT_DER).expect("write");
+        let e = load_cert_chain(&cert).expect_err("base64 is not a certificate");
+        assert!(
+            e.message.contains("not a DER certificate"),
+            "the error must say the bytes are not a certificate, not that none was \
+             found: {}",
+            e.message
+        );
+        let remediation = e.remediation.unwrap_or_default();
+        assert!(
+            remediation.contains("openssl x509"),
+            "the remediation must name a way to check the file: {remediation}"
+        );
+    }
+
+    /// The shallow DER check accepts a well-formed outer `SEQUENCE` and rejects
+    /// the shapes that are not one.
+    #[test]
+    fn the_der_shape_check_is_shallow_but_not_vacuous() {
+        // A `SEQUENCE` containing a `SEQUENCE` — the shape of a `Certificate`.
+        let good = der_sequence(&[&der_sequence(&[&der_utf8("tbs")[..]])[..]]);
+        assert!(looks_like_a_der_certificate(&good), "a certificate shape");
+
+        // Empty input, a non-`SEQUENCE` outer tag, an empty `SEQUENCE`, and a
+        // `SEQUENCE` whose content is not itself a `SEQUENCE`.
+        assert!(!looks_like_a_der_certificate(&[]));
+        assert!(!looks_like_a_der_certificate(&[0x02, 0x01, 0x00]));
+        assert!(!looks_like_a_der_certificate(&[0x30, 0x00]));
+        assert!(!looks_like_a_der_certificate(&der_sequence(&[&der_utf8(
+            "x"
+        )[..]])));
+        // Trailing bytes past the declared length are not a certificate.
+        let mut trailing = good.clone();
+        trailing.push(0xFF);
+        assert!(!looks_like_a_der_certificate(&trailing));
+    }
+
     /// A certificate file with no `CERTIFICATE` block is the classic
     /// cert/key-swap mistake, and the error says so.
     #[test]
@@ -1438,24 +1812,12 @@ mod tests {
         std::fs::write(&cert, PEM_NOT_A_CERT).expect("write");
         let e = load_cert_chain(&cert).expect_err("must be refused");
         assert!(
-            e.remediation.as_deref().unwrap_or("").contains("point `cert` at"),
+            e.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("point `cert` at"),
             "the remediation should name the swap: {:?}",
             e.remediation
-        );
-    }
-
-    /// A certificate file holding a key rather than a certificate is refused
-    /// rather than producing a `ServerConfig` that fails on the first client.
-    #[test]
-    fn a_key_in_the_certificate_slot_is_refused() {
-        let dir = tempdir();
-        let cert = dir.join("c.pem");
-        std::fs::write(&cert, PEM_KEY_ONLY).expect("write");
-        let e = load_cert_chain(&cert).expect_err("a key file is not a certificate file");
-        assert!(
-            e.message.contains("no certificate"),
-            "got: {}",
-            e.message
         );
     }
 
@@ -1584,7 +1946,7 @@ mod tests {
             },
         ] {
             let e = auth
-                .verifier()
+                .verifier(test_provider())
                 .expect_err("a missing CA file must be refused");
             assert!(
                 e.message.contains("absent"),
@@ -1599,7 +1961,10 @@ mod tests {
     /// appearing on the wire.
     #[test]
     fn client_auth_none_installs_no_verifier() {
-        assert!(ClientAuth::None.verifier().expect("cannot fail").is_none());
+        assert!(ClientAuth::None
+            .verifier(test_provider())
+            .expect("cannot fail")
+            .is_none());
     }
 
     // -- peer identity -----------------------------------------------------
@@ -1637,7 +2002,8 @@ mod tests {
         for p in parts {
             assert_eq!(p.len(), 2, "each byte is two hex digits");
             assert!(
-                p.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
+                p.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
                 "openssl renders uppercase: {p}"
             );
         }
@@ -1653,38 +2019,315 @@ mod tests {
     fn the_common_name_walker_matches_by_oid() {
         // A `Name` with an organisation RDN (2.5.4.10) *before* the CN RDN, so a
         // positional match would return "Example Org".
-        let org: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x0A, 0x0C, 0x0B];
-        let mut org_rdn = vec![0x31, (org.len() + 13) as u8, 0x30, (org.len() + 11) as u8];
-        org_rdn.extend_from_slice(org);
-        org_rdn.extend_from_slice(b"Example Org");
+        //
+        // `Name ::= RDNSequence`, and `RDNSequence ::= SEQUENCE OF SET OF
+        // AttributeTypeAndValue`. So each RDN is **one** `SET` wrapping **one**
+        // `AttributeTypeAndValue` `SEQUENCE`, and the two `SET`s are siblings.
+        //
+        // Two fixture bugs were found here, and both are recorded because each
+        // looked like a walker bug:
+        //
+        //  1. Hand-written length bytes were wrong, so the outer `SEQUENCE`
+        //     declared fewer bytes than it held and the walker refused it.
+        //  2. The first helper wrapped a `SEQUENCE` in a `SET` and then wrapped
+        //     *that* in another `SET`, producing a single RDN holding two
+        //     attributes rather than two RDNs — so the "org before CN" property
+        //     this test exists to pin was not present at all.
+        let org_rdn = der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x0A])[..],
+            &der_utf8("Example Org")[..],
+        ]));
+        let cn_rdn = der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x03])[..],
+            &der_utf8("alice@")[..],
+        ]));
 
-        let cn: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x06];
-        let mut cn_rdn = vec![0x31, (cn.len() + 8) as u8, 0x30, (cn.len() + 6) as u8];
-        cn_rdn.extend_from_slice(cn);
-        cn_rdn.extend_from_slice(b"alice@");
+        let name = der_sequence(&[&org_rdn[..], &cn_rdn[..]]);
 
-        let mut seq = org_rdn;
-        seq.extend_from_slice(&cn_rdn);
-        let name = [&[0x30, seq.len() as u8][..], &seq].concat();
-
+        // `walk_rdn_sequence` takes the CONTENT of the `Name` `SEQUENCE`, not the
+        // whole element — see its docs. Passing `&name` would be the header-
+        // included form and would correctly yield `None`.
         assert_eq!(
-            walk_rdn_sequence(&name).as_deref(),
+            walk_rdn_sequence(&name[2..]).as_deref(),
             Some("alice@"),
             "the CN must be found by OID, not by being first"
         );
     }
 
+    /// The walker really is matching by OID: a `Name` with **no** common name
+    /// yields `None` even though it has attributes, a `Name` whose CN is its only
+    /// RDN still resolves, and a non-`Name` is refused rather than misreported.
+    #[test]
+    fn the_common_name_walker_finds_the_cn_and_only_the_cn() {
+        let only_org = der_sequence(&[&der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x0A])[..],
+            &der_utf8("Example Org")[..],
+        ]))[..]]);
+        assert_eq!(
+            walk_rdn_sequence(&only_org[2..]),
+            None,
+            "an organisation is not a common name"
+        );
+
+        let only_cn = der_sequence(&[&der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x03])[..],
+            &der_utf8("bob")[..],
+        ]))[..]]);
+        assert_eq!(walk_rdn_sequence(&only_cn[2..]).as_deref(), Some("bob"));
+
+        // Not a `Name` at all: a `SEQUENCE` whose child is not a `SET`.
+        let not_a_name = der_sequence(&[&der_utf8("x")[..]]);
+        assert_eq!(
+            walk_rdn_sequence(&not_a_name[2..]),
+            None,
+            "a non-Name must not be reported as an identity"
+        );
+
+        // And the header-included form is rejected, which is the property that
+        // makes the content/element distinction load-bearing rather than
+        // cosmetic.
+        assert_eq!(
+            walk_rdn_sequence(&only_cn),
+            None,
+            "a whole element is not a Name's content"
+        );
+    }
+
+    /// `common_name_of` finds the CN in a **real** certificate.
+    ///
+    /// # Why this test had to be added, and what its absence cost
+    ///
+    /// The two tests above exercise `walk_rdn_sequence` against hand-built DER,
+    /// and both pass. `common_name_of` — the function that locates the subject
+    /// *inside a certificate* — had no test that used a real certificate at all.
+    ///
+    /// It searched the `Certificate`'s own children for tag `[3]` (`0xA3`),
+    /// believing `[3]` wrapped `TBSCertificate`. It does not: `[3]` is the
+    /// **extensions** field inside `TBSCertificate`, and a real certificate's
+    /// children are `SEQUENCE, SEQUENCE, BIT STRING` — measured here as
+    /// `0x30, 0x30, 0x03`, with no `0xA3` at that level. So the search returned
+    /// `None` for **every** certificate, and `PeerIdentity::subject()` reported
+    /// `"(subject has no common name)"` in production for every mTLS peer.
+    ///
+    /// The hand-built fixtures could not catch it because they encoded the same
+    /// misunderstanding as the code: they wrapped their `Name` in a `[3]` that no
+    /// real certificate produces. A test and an implementation that share a wrong
+    /// assumption cannot correct each other — only an input from outside the
+    /// pair can, which is what a generated certificate is.
+    ///
+    /// Verified by fault injection: reinstating the `0xA3` search makes this test
+    /// fail, and `tls.rs`'s end-to-end identity test with it.
+    #[test]
+    fn common_name_of_finds_the_cn_in_a_real_certificate() {
+        let mut params = rcgen::CertificateParams::new(vec!["test-cn".to_owned()])
+            .expect("rcgen accepts the SAN");
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, "test-cn");
+            dn
+        };
+        let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+        let cert = params.self_signed(&key).expect("rcgen self-signs");
+        let der = cert.der().to_vec();
+
+        assert_eq!(
+            common_name_of(&der).as_deref(),
+            Some("test-cn"),
+            "a real certificate's subject CN must be found; the walker is looking \
+             for `[3]` among the Certificate's children, which is where \
+             TBSCertificate is not"
+        );
+    }
+
+    /// A certificate with no common name yields `None`, so the caller can
+    /// substitute its placeholder rather than reporting an empty identity.
+    ///
+    /// The control for the test above: without it, a walker that returned a
+    /// constant string would satisfy `Some("test-cn")` only by coincidence, and
+    /// one that returned the *first* attribute it saw would pass too.
+    #[test]
+    fn common_name_of_returns_none_when_the_subject_has_no_cn() {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["no-cn".to_owned()]).expect("rcgen accepts the SAN");
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            // An organisation only — a legal subject with no CN.
+            dn.push(rcgen::DnType::OrganizationName, "Example Org");
+            dn
+        };
+        let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+        let cert = params.self_signed(&key).expect("rcgen self-signs");
+        let der = cert.der().to_vec();
+
+        assert_eq!(
+            common_name_of(&der),
+            None,
+            "an organisation is not a common name"
+        );
+    }
+
+    /// A DER element with a short-form length, for the tests.
+    fn der_element(tag: u8, content: &[u8]) -> Vec<u8> {
+        // `try_from` rather than `as u8`: the assertion below already proves the
+        // value fits, and a cast would silently truncate if the assertion were
+        // ever relaxed or reordered. Clippy's `cast_possible_truncation` caught
+        // this, and it was right — the assert and the cast are two statements of
+        // the same fact, and only one of them is checked by the compiler.
+        let len = u8::try_from(content.len())
+            .expect("these fixtures only build short-form lengths, asserted above");
+        assert!(
+            content.len() < 0x80,
+            "these fixtures only build short-form lengths"
+        );
+        let mut out = vec![tag, len];
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// A DER `SEQUENCE`.
+    fn der_sequence(parts: &[&[u8]]) -> Vec<u8> {
+        let mut content = Vec::new();
+        for p in parts {
+            content.extend_from_slice(p);
+        }
+        der_element(0x30, &content)
+    }
+
+    /// A DER `SET`.
+    fn der_set(content: &[u8]) -> Vec<u8> {
+        der_element(0x31, content)
+    }
+
+    /// A DER `OBJECT IDENTIFIER` from its content octets.
+    fn der_oid(content: &[u8]) -> Vec<u8> {
+        der_element(0x06, content)
+    }
+
+    /// A DER `UTF8String`.
+    fn der_utf8(s: &str) -> Vec<u8> {
+        der_element(0x0C, s.as_bytes())
+    }
+
     // -- helpers -----------------------------------------------------------
+
+    /// The crypto provider the tests build verifiers against.
+    ///
+    /// Carries the real [`CIPHER_SUITES`] policy, so a test cannot pass by
+    /// exercising a provider the server would never use.
+    fn test_provider() -> Arc<rustls::crypto::CryptoProvider> {
+        let mut p = rustls::crypto::aws_lc_rs::default_provider();
+        p.cipher_suites = CIPHER_SUITES.to_vec();
+        Arc::new(p)
+    }
 
     /// A PEM body with no certificate block, for the format-error tests.
     const PEM_NOT_A_CERT: &[u8] = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
 
-    /// A PEM file holding no key rustls accepts.
-    const PEM_KEY_ONLY: &[u8] =
-        b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    /// A PEM `CERTIFICATE` block whose contents decode but are not DER.
+    ///
+    /// `AAAA` is valid base64, so this passes `rustls_pemfile::certs` and is
+    /// stopped only by `looks_like_a_der_certificate`. It is the fixture that
+    /// exposed the gap.
+    const PEM_NOT_DER: &[u8] = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+
+    /// A PEM file holding no key rustls accepts, for the key-format tests.
+    const PEM_KEY_ONLY: &[u8] = PEM_NOT_DER;
+
+    /// A **structurally valid** DER certificate, base64'd into a PEM block.
+    ///
+    /// # How this was produced, exactly
+    ///
+    /// Not invented, and not copied from anywhere. It is assembled at test time
+    /// by `valid_cert_pem()` from `der_sequence`/`der_element`, so its bytes are
+    /// a transparent function of DER's encoding rules rather than a blob.
+    ///
+    /// It is a *shallow* certificate: `Certificate ::= SEQUENCE { tbsCertificate
+    /// SEQUENCE { … }, signatureAlgorithm, signatureValue }` with placeholder
+    /// contents. That is deliberate and it is all these unit tests need, because
+    /// they exercise `load_cert_chain`'s **shape** validation and the file-path
+    /// error reporting — neither of which parses a real X.509 body. Anything that
+    /// needs a genuine certificate (a handshake, a signature, a subject) uses
+    /// `rcgen` in `tests/tls.rs`, which generates a real one.
+    ///
+    /// # Why not embed a real PEM fixture here
+    ///
+    /// Because `openssl` is not available on this machine — checked, it is not on
+    /// `PATH` — so there was no way to *generate* one and committing bytes from
+    /// elsewhere would mean committing a certificate whose provenance nobody can
+    /// reproduce. The honest alternative was to stop needing a real certificate
+    /// in the unit tests.
+    fn valid_cert_pem() -> Vec<u8> {
+        // tbsCertificate with a placeholder `[0]` version and a serial.
+        let tbs = der_sequence(&[
+            &der_element(0xA0, &der_element(0x02, &[0x02]))[..],
+            &der_element(0x02, &[0x01])[..],
+            &der_sequence(&[&der_oid(&[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B])[..]])
+                [..],
+            &der_sequence(&[])[..],
+            &der_sequence(&[])[..],
+            &der_sequence(&[])[..],
+        ]);
+        let cert = der_sequence(&[
+            &tbs[..],
+            &der_sequence(&[&der_oid(&[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B])[..]])
+                [..],
+            &der_element(0x03, &[0x00, 0x00])[..],
+        ]);
+
+        let b64 = base64_encode(&cert);
+        let mut out = Vec::new();
+        out.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.extend_from_slice(chunk);
+            out.push(b'\n');
+        }
+        out.extend_from_slice(b"-----END CERTIFICATE-----\n");
+        out
+    }
+
+    /// Standard base64, for the PEM wrapper above.
+    ///
+    /// Hand-written rather than pulled in: `base64` is in the tree only as a
+    /// transitive dependency of `rcgen` (a dev-dependency), so using it here
+    /// would mean adding a dependency to the library for a test fixture.
+    fn base64_encode(input: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            let idx = [
+                (n >> 18) & 0x3F,
+                (n >> 12) & 0x3F,
+                (n >> 6) & 0x3F,
+                n & 0x3F,
+            ];
+            for (i, &v) in idx.iter().enumerate() {
+                // The final group is padded rather than truncated.
+                if i > chunk.len() {
+                    out.push('=');
+                } else {
+                    out.push(char::from(ALPHABET[v as usize]));
+                }
+            }
+        }
+        out
+    }
 
     /// A directory removed when it goes out of scope.
     struct TempDir(PathBuf);
+
+    impl TempDir {
+        /// A path inside the directory. Does not create anything.
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
 
     impl Drop for TempDir {
         fn drop(&mut self) {

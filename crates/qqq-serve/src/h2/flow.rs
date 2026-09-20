@@ -1073,18 +1073,17 @@ mod tests {
             "the stream window is the smaller one and must be the answer"
         );
 
-        // Now drain the *connection* window below the stream's. The fields are
-        // module-private and the tests are in this module, so the connection
-        // window is reachable directly rather than through a test-only setter —
-        // a setter that existed only for tests would be an API a real caller
-        // could use to bypass the ceiling checks.
+        // Now make the *connection* window the smaller one: drain it to 1535 and
+        // leave the stream's at 64 535, so the minimum is the connection's.
         let mut fc = fc_with_stream(1);
         fc.send.connection.try_consume(None, 64_000).unwrap();
+        assert_eq!(fc.send.connection().size(), 1_535);
         fc.send.stream_mut(1).unwrap().try_consume(Some(1), 1_000).unwrap();
+        assert_eq!(fc.send.stream(1).unwrap().size(), 64_535);
         assert_eq!(
             fc.available_send(1),
-            535,
-            "the connection window is now the smaller one"
+            1_535,
+            "the connection window is now the smaller one and must be the answer"
         );
     }
 
@@ -1490,8 +1489,21 @@ mod tests {
              — with clamping it would have reached 64 535 and over-granted"
         );
         assert_eq!(fc.available_send(1), 0);
+        // The connection window is also drained at this point (65535 bytes were
+        // sent), so `available_send` is the minimum of two zeros. Replenish the
+        // *connection* window so the assertion below is genuinely about the
+        // stream's negative window rather than about the connection's zero — a
+        // test that passes because of the other window is a test that would not
+        // notice the stream window being wrong.
+        fc.apply_window_update(0, 65_535).unwrap();
+        assert_eq!(fc.available_send(1), 0, "still blocked by the stream's window");
+
         fc.apply_window_update(1, 1).unwrap();
-        assert_eq!(fc.available_send(1), 1);
+        assert_eq!(
+            fc.available_send(1),
+            1,
+            "one byte of credit above zero is now sendable"
+        );
     }
 
     /// A window driven negative is not itself an error; only exceeding the ceiling

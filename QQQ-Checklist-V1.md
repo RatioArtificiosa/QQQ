@@ -727,10 +727,38 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **SRV-006** Resolve open question `OQ-007`: decide whether `wasi:http` is the foundation or whether a custom interface is required.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Resolved: `wasi:http` **is** the foundation, and `qqq:http` extends it. Reasoning in Observations §O-027.
-- [ ] **SRV-007** Implement TLS with rustls and the documented cipher policy.
+- [x] **SRV-007** Implement TLS with rustls and the documented cipher policy.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **SRV-008** Implement mTLS as a supported `default_auth` mode.
+  → Done: `qqq-serve::tls`. rustls 0.23 with an **explicit** cipher policy — an
+    unspecified algorithm is *refused* rather than defaulted (`SEC-017`'s
+    "named algorithms, no silent defaults") — TLS 1.3 preferred with 1.2
+    permitted, ALPN negotiating `h2` / `http/1.1`, and certificate sources
+    `Files` (PEM; PKCS#8, PKCS#1 and SEC1 keys) and `Platform`. `Acme` is
+    refused **by name** with a successor, not silently degraded (`FUT`).
+  → Evidence: 35 unit tests; 21 end-to-end tests in `tests/tls.rs` that drive a
+    **real handshake** over an in-memory duplex and assert the negotiated
+    version, the negotiated cipher, the ALPN outcome, and the refusal cases.
+  → Tampered and broken configurations are errors naming the file rather than
+    panics; a missing or unusable key, a certificate in the key slot, and a key
+    in the certificate slot are each covered.
+- [x] **SRV-008** Implement mTLS as a supported `default_auth` mode.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Done: `ClientAuth::{None, Required, Optional}` over
+    `WebPkiClientVerifier`, with a configurable trust root, plus `PeerIdentity`
+    (subject CN, leaf DER, SHA-256 fingerprint) extracted from the verified
+    chain for request attribution. Authorization policy is deliberately **not**
+    implemented and says so — this is identity, not a decision about it.
+  → Verified end to end: `Required` refuses a client with no certificate *and* a
+    client presenting an untrusted one; `Optional` accepts one that declines;
+    a presented trusted certificate yields the expected CN.
+  → **A real defect was found here and only here**: `common_name_of` returned
+    `None` for every certificate, so `subject()` reported
+    `"(subject has no common name)"` for every mTLS peer. It searched for tag
+    `[3]` among the `Certificate`'s children, where `TBSCertificate` is a plain
+    `SEQUENCE` — measured, the children are `0x30, 0x30, 0x03` with no `0xA3`.
+    The hand-built unit fixtures encoded the same wrong assumption, so they
+    passed; only real bytes found it. A real-certificate test with a control now
+    pins it, verified by injection. `§O-053a`.
 - [ ] **SRV-009** Implement WebSockets over HTTP/1.1 and HTTP/2.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SRV-010** Implement Server-Sent Events.

@@ -4906,6 +4906,52 @@ The harness restores from a `tempfile` copy — not from `.scratch/`, which is
 gitignored and absent on a fresh checkout (`§O-058f`), and it verifies the
 restore by re-reading the file rather than trusting `finally`. Wired into CI.
 
+#### §O-059f — Three `unsafe` exception crates, merged into one — a deviation from §4.3
+
+`ARCH-009` requires a written safety argument *per `unsafe`-permitting crate*.
+The Proposal names three:
+
+| §4.3 crate | Purpose | This workspace |
+|---|---|---|
+| `qqq-io-uring` | io_uring reactor backend (`PERF-014`) | **merged into `qqq-sys`** |
+| `qqq-mem-hugepage` | Hugepage-backed linear memory | **merged into `qqq-sys`** |
+| `qqq-sys-signals` | Signal handling for epoch ticking | **merged into `qqq-sys`** |
+
+**The decision.** One exception crate, `qqq-sys`, with one `SAFETY.md` and one
+review process, rather than three.
+
+**Why.** Three crates each holding one `forbid` to remove is three documents,
+three reviews and three places a policy can drift — and the drift is exactly what
+`ARCH-009`'s per-crate argument exists to prevent. Multiplying the paperwork that
+prevents drift is a poor way to prevent it. One document covering the whole
+exception surface is strictly easier to keep correct.
+
+**The cost, which is real.** One crate means one boundary to cross rather than
+three narrow ones, so a mistake in the exception process has a larger blast
+radius. The mitigation is that the process is enforced by a test
+(`the_unsafe_exception_was_granted_through_its_process`, plus
+`tools/fault_inject_safety_arg.py`) rather than by the crate boundary — so the
+guarantee does not depend on having chosen the right granularity.
+
+**Revisit when.** `qqq-sys` exceeds roughly 1,500 lines, or the three concerns
+develop genuinely different review requirements. The split is mechanical: the
+modules already map one-to-one onto the three named crates.
+
+**Why this is recorded here and not as an `OQ-` entry.** `OQ-001` … `OQ-012` are
+all allocated and mirrored in Proposal Appendix C, and the cross-reference
+validator rejects an `OQ-` identifier the Proposal does not cite. This is a
+decision the repository can make and defend, not a question requiring a founder —
+so it belongs in the observations register, which is what `docs/adr/README.md`
+says the register is for.
+
+**The `SAFETY.md` was written before the code.** That is deliberate, and it
+initially *failed* the exception-process test, whose first version treated
+"argument present, `unsafe` still forbidden" as stale. That was wrong: writing the
+argument **ahead** of the implementation is how an argument gets reviewed as a
+design decision rather than rationalised afterwards. The test was corrected to
+permit that state, and `tools/fault_inject_safety_arg.py` now injects only the one
+state that is a genuine violation — `unsafe` permitted with nothing written down.
+
 ---
 
 ### §O-058 — `HOST-011`: a guard that compiles away, and the check that had to be a source check

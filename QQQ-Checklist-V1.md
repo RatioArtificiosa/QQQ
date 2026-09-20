@@ -417,13 +417,40 @@ Items are grouped below by **phase**, because dependency order matters more than
     `qqq-sys-signals` — §4.3's three named crates plus the one this workspace
     carries. `the_unsafe_exception_was_granted_through_its_process` requires the
     exception to be granted through its **process** rather than by an edit: it
-    asserts the crate is in one of exactly two states — a stub with a `forbid`
-    and no `SAFETY.md`, or a real crate with a `SAFETY.md` and no `forbid`. Any
-    third combination fails, which is what stops an `allow(unsafe_code)` landing
-    with no written argument.
+    asserts that `unsafe` is never permitted while no `SAFETY.md` exists beside
+    it. The other three combinations are all legitimate points in the process —
+    including the argument written **ahead** of the code, which is how it gets
+    reviewed as a design decision rather than rationalised afterwards.
+    `tools/fault_inject_safety_arg.py` injects the one violating state and
+    asserts the check fires.
   → §4.3 Crate topology
   → §2.2 NN-2 — Security and Isolation Are Non-Optional
-- [ ] **ARCH-009** Write the safety argument document for each `unsafe`-permitting crate.
+- [x] **ARCH-009** Write the safety argument document for each `unsafe`-permitting crate.
+  → Done: `crates/qqq-sys/SAFETY.md` — a complete safety argument written **before**
+    any `unsafe` exists, which is the order that makes it a design decision rather
+    than a description of what was already built.
+  → It answers the three questions a safety argument has to answer, and says so
+    explicitly: **what invariant is asserted** (§2 — three rules, the third being
+    "no `unsafe` block may span more than the call it exists for", because that is
+    the rule that decays first); **who maintains it** (a five-point reviewer
+    checklist in §5); and **how a mistake would be caught** (§6 — the enforcing
+    tests, named individually, plus the one thing no test here *can* check, which
+    is whether the argument is correct).
+  → §3 states the hazards and their containment **and the hazard that is not
+    contained**: `qqq-sys` cannot defend against a caller that obtained a pointer
+    unsoundly elsewhere. The guarantee is local — it does not launder unsoundness
+    from its callers — and that boundary is why a safe `fn` with an unchecked
+    precondition would export a false guarantee upward.
+  → §7 is a status ledger, and its honest state is that the argument is complete
+    but the **grant is not**: the crate still forbids `unsafe`, no second
+    maintainer exists (`GOV-008`, bus factor 1), and Miri is not configured. The
+    ledger says no `unsafe` may be added until two of its rows change.
+  → **One deviation from §4.3, recorded rather than left implicit.** The Proposal
+    names three exception crates; this workspace merges them into one `qqq-sys`.
+    The reasoning and the cost are in `§O-059f`: three crates is three documents
+    and three places a policy drifts, and multiplying the paperwork that prevents
+    drift is a poor way to prevent it — at the cost of a larger blast radius,
+    mitigated by the process being test-enforced rather than crate-enforced.
   → §4.3 Crate topology
 - [ ] **ARCH-010** Publish the crate stability tiers and the API-stability contract per tier.
   → §4.3 Crate topology

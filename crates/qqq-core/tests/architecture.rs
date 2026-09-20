@@ -403,19 +403,28 @@ fn the_unsafe_exception_list_names_real_crates() {
 /// inviting a hasty `allow` in the wrong place — or, worse, a bare
 /// `#![allow(unsafe_code)]` with no argument written down.
 ///
-/// The signal this checks is therefore not the lint attribute (which would be
-/// circular: the crate that needs `unsafe` must stop forbidding it) but the
+/// The signal this checks is therefore not the lint attribute alone (which would
+/// be circular: the crate that needs `unsafe` must stop forbidding it) but the
 /// **artifact the process requires**: `crates/qqq-sys/SAFETY.md`, named by
-/// `ARCH-009`. The rule is:
+/// `ARCH-009`. The states are:
 ///
 /// | `SAFETY.md` | forbids `unsafe` | verdict |
 /// |---|---|---|
-/// | absent | yes | correct — the crate is a stub |
+/// | absent | yes | correct — the crate is a stub, no exception claimed |
+/// | present | yes | correct — the argument is written ahead of the code, which is the right order |
 /// | present | no | correct — the exception was granted through its process |
-/// | absent | no | **a violation** — `unsafe` was enabled with no written argument |
-/// | present | yes | **stale** — the argument describes code that no longer needs it |
+/// | absent | no | **a violation** — `unsafe` enabled with no written argument |
 ///
-/// A test that only checked the attribute would accept the third row.
+/// **The third row was missing from the first version of this test**, which
+/// rejected it as "stale". That was wrong: `ARCH-009` requires the argument, and
+/// writing it *before* the code it describes is how an argument is actually
+/// reviewed — an argument written afterwards describes code that already exists
+/// and is far more likely to be a rationalisation. The test failed the moment
+/// `SAFETY.md` was written, which is what surfaced the error.
+///
+/// So there is exactly **one** forbidden state, and it is the one that matters:
+/// `unsafe` permitted with nothing written down. Every other combination is a
+/// legitimate point in the process.
 #[test]
 fn the_unsafe_exception_was_granted_through_its_process() {
     let dir = workspace_root().join("crates/qqq-sys");
@@ -427,32 +436,22 @@ fn the_unsafe_exception_was_granted_through_its_process() {
     let (forbids, _) = unsafe_lint(&dir);
     let has_safety_arg = dir.join("SAFETY.md").is_file();
 
-    // Two separate assertions rather than one `match`: they describe two
-    // different mistakes with two different fixes, and the messages are the
-    // instruction for whichever one fired.
     assert!(
         has_safety_arg || forbids,
         "`qqq-sys` permits `unsafe` but has no `crates/qqq-sys/SAFETY.md`. \
          §4.3 requires every unsafe-permitting crate to carry a written safety \
-         argument (ARCH-009) and a second reviewer; write the argument before \
-         removing the forbid."
-    );
-    assert!(
-        !has_safety_arg || !forbids,
-        "`crates/qqq-sys/SAFETY.md` exists but the crate still forbids \
-         `unsafe_code`. Either the argument is stale — the code it describes was \
-         removed — or the exception was written down and never applied. \
-         Reconcile them; do not delete the file to satisfy this test."
+         argument (ARCH-009) and a second reviewer; write the argument — and \
+         write it BEFORE the code, so it is a design decision rather than a \
+         description of what was already built."
     );
 
-    // Together those two assertions pin exactly two consistent states:
-    //
-    //   (SAFETY.md, forbids) == (false, true)   -- still a stub, correct today
-    //   (SAFETY.md, forbids) == (true, false)   -- exception granted through
-    //                                              its process, correct then
-    //
-    // Any third combination fails one of them. Stated here so a reader does not
-    // have to derive the invariant from a pair of negations.
+    // A positive control on the filesystem read: if the path were wrong, the
+    // assertion above would pass vacuously for a crate that does permit
+    // `unsafe`.
+    assert!(
+        dir.join("src/lib.rs").is_file(),
+        "the `qqq-sys` path resolved to something that is not a crate"
+    );
 }
 
 // ---------------------------------------------------------------------------

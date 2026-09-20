@@ -168,6 +168,17 @@ jobs:
       - name: Prove the architecture tests detect real violations
         run: python tools/fault_inject_architecture.py
 
+      # `ARCH-009` + §4.3 require every `unsafe`-permitting crate to carry a
+      # written safety argument. Exactly one of the four combinations of
+      # (`SAFETY.md` present, `unsafe` forbidden) is a violation -- `unsafe`
+      # permitted with nothing written down -- and the other three are all
+      # legitimate points in the process, including the argument written AHEAD
+      # of the code. This harness injects the one violating state and asserts the
+      # check fires; injecting either of the legitimate ones would report a false
+      # failure and teach the next person to weaken the test.
+      - name: Prove the safety-argument check detects an unwritten exception
+        run: python tools/fault_inject_safety_arg.py
+
       # The objective audit: does the deliverable set actually satisfy the
       # brief? It checks that all three documents exist and are English, that
       # the Proposal covers the required sections, that the Checklist is fully

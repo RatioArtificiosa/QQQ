@@ -335,53 +335,31 @@ pub fn package_of(interface: &str) -> String {
     }
 }
 
-/// The capability that unlocks a component import, when one is identifiable.
-///
-/// # Why this is a reverse lookup over the registry
-///
-/// `qqq-abi`'s registry goes capability → interface (`interface_for`). The
-/// question here is the opposite: given the interface a component imports,
-/// which capability would satisfy it? Answering it by searching the registry
-/// rather than by a hand-written match means a new interface is covered the day
-/// it is registered, instead of the day someone remembers to update a second
-/// list.
-///
-/// The comparison uses [`package_of`], so an import of `qqq:clock/now@1.0.0`
-/// matches a registry entry of `qqq:clock@1.0.0`. Without that, the error would
-/// name no capability and give the user no stanza to paste — the least useful
-/// moment to have no advice.
-///
-/// Returning `Option` and *not* guessing matters: a wrong suggestion sends the
-/// user to edit a file that cannot help, which is worse than saying nothing.
-#[must_use]
-pub fn capability_for_interface(interface: &str) -> Option<qqq_cap::Capability> {
-    let wanted = package_of(interface);
-    qqq_cap::Capability::all().iter().copied().find(|&c| {
-        qqq_abi::registry::interface_for(c).is_some_and(|i| package_of(&i.name) == wanted)
-    })
-}
-
 /// Map an imported interface to the capability that unlocks it, **exactly**.
 ///
-/// # Why this is separate from [`capability_for_interface`]
+/// # There is only one mapping, and this is it
+///
+/// An earlier version of this module carried a second, package-level function
+/// and justified it as "the right granularity for an error message, where a
+/// package-level match is enough to name a stanza". That justification was
+/// wrong, and the defect it caused is the reason the function is gone:
+///
+/// * For a component importing `qqq:clock/wall-clock`, it returned
+///   `clock.monotonic` — the other half of the same package. The advice would
+///   have left the component still failing, on the one error whose entire
+///   purpose is saying what to add.
+/// * It was fixed in `qqqai inspect` (`§O-038b`) and left in place in `run`,
+///   because the two commands reach the mapping differently: `inspect` had a
+///   visibly wrong answer in its report, while `run` only shows it in a
+///   remediation line a reader is already primed to trust.
+///
+/// A second mapping that is *nearly* right is a trap: it compiles, it has
+/// passing tests, its doc comment explains why it is fine, and every new caller
+/// has to know which of the two to pick. Deleting it is the fix — `run` now uses
+/// this one, and nothing else does.
 ///
 /// The two answer different questions and the difference is a security bug if
 /// conflated.
-///
-/// `capability_for_interface` compares by *package* (`qqq:clock`), which is the
-/// right granularity for an error message: the user is told which stanza to
-/// paste, and a package-level match is enough to name it. It is the **wrong**
-/// granularity for `qqqai inspect`, because several capabilities share one
-/// package. `qqq:clock` unlocks both `clock.wall` and `clock.monotonic`, so the
-/// package-level search returns whichever the registry lists first — and an
-/// artifact importing the wall clock was reported as requiring the *monotonic*
-/// clock.
-///
-/// On an audit surface that is a wrong answer, not an imprecise one: the whole
-/// point is telling the user which authority an artifact needs. So this function
-/// matches the interface path exactly, and returns `None` rather than a
-/// package-mate when nothing matches — an unmapped interface is a finding the
-/// caller must report, not something to paper over with a plausible neighbour.
 #[must_use]
 pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
     let wanted = strip_version(interface);
@@ -1174,19 +1152,19 @@ mod tests {
         assert_eq!(package_of(""), "");
     }
 
+    /// A package-spelled import still resolves, through the fallback branch.
+    ///
+    /// The old package-level function matched `qqq:clock@1.0.0` directly because
+    /// that is the registry's spelling. The precise mapping delegates to a
+    /// package-level fallback for single-interface packages, so this asserts the
+    /// registry's own spelling is not left unresolvable now that the second
+    /// function is gone.
     #[test]
-    fn capability_lookup_matches_through_the_package() {
-        // The interface form a component actually imports.
-        let by_interface = capability_for_interface("qqq:clock/now@1.0.0");
-        // The package form the registry publishes.
-        let by_package = capability_for_interface("qqq:clock@1.0.0");
-        assert_eq!(
-            by_interface, by_package,
-            "both spellings must find the same capability"
-        );
+    fn the_registrys_package_spelling_still_resolves() {
+        // `qqq:fs` has one interface, so its package spelling is exact.
         assert!(
-            by_interface.is_some(),
-            "the clock package must map to a capability"
+            capability_for_import("qqq:fs@1.0.0").is_some(),
+            "the registry's own spelling must resolve"
         );
     }
 
@@ -1195,7 +1173,24 @@ mod tests {
     /// not help.
     #[test]
     fn capability_lookup_refuses_to_guess() {
-        assert!(capability_for_interface("qqq:nonexistent/thing@1.0.0").is_none());
-        assert!(capability_for_interface("wasi:cli/stdout@0.2.0").is_none());
+        assert!(capability_for_import("qqq:nonexistent/thing@1.0.0").is_none());
+        assert!(capability_for_import("wasi:cli/stdout@0.2.0").is_none());
+    }
+
+    /// The two halves of `qqq:clock` resolve to **different** capabilities.
+    ///
+    /// The regression test for the defect that removed the second mapping. It
+    /// lives here as well as in `commands.rs` because `run`'s remediation is
+    /// where the wrong answer reached a user.
+    #[test]
+    fn the_clock_halves_do_not_collapse() {
+        assert_eq!(
+            capability_for_import("qqq:clock/wall-clock@1.0.0"),
+            Some(qqq_cap::Capability::ClockWall)
+        );
+        assert_eq!(
+            capability_for_import("qqq:clock/monotonic-clock@1.0.0"),
+            Some(qqq_cap::Capability::ClockMonotonic)
+        );
     }
 }

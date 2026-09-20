@@ -3862,6 +3862,106 @@ defect that appears nowhere else.
 
 ---
 
+### §O-043 — `qqqai run` enforced the right thing and said the wrong thing
+
+Pointing `run` at a real artifact — rather than reading the code — found two
+defects on the path that enforces the project's central claim.
+
+---
+
+#### §O-043a — The enforcement works; the advice for fixing it did not
+
+Running a component that imports `qqq:clock/wall-clock@1.0.0` on a manifest that
+grants nothing produces:
+
+```text
+error[QQQ-6003]: the component imports `qqq:clock/wall-clock@1.0.0` that no grant provides
+  missing: qqq:clock/wall-clock@1.0.0
+  capability: clock.monotonic          <-- wrong
+```
+
+The refusal is correct. The **remediation is wrong**: it names `clock.monotonic`,
+the other half of the same package, so a user following the advice adds a stanza
+that leaves the component still failing — on the one error whose entire purpose
+is saying what to add.
+
+`run` used the package-level mapping that `§O-038b` removed from `inspect`. Same
+defect, same function, one surface fixed and the other missed.
+
+---
+
+#### §O-043b — Fixing a defect in one surface is not fixing it in the others
+
+This is the round's generalizable finding, and it is worth stating as a rule:
+
+> When a defect is caused by a **shared** helper, fixing it at one call site
+> leaves every other call site wrong — and the remaining ones are harder to find,
+> because the fix has already been made and the codebase *feels* corrected.
+
+Why `run` was missed while `inspect` was fixed:
+
+| | `inspect` | `run` |
+|---|---|---|
+| How the wrong answer appeared | a wrong capability **in the report** | a wrong capability **in a remediation line** |
+| Who reads it | anyone inspecting an artifact | someone already looking at an error, primed to trust the fix |
+| Visibility | the report is the deliverable | the advice is an aside |
+
+The second column is uniformly worse: the reader is in a hurry, has just been
+told something failed, and is looking for something to *do*. A wrong instruction
+is more likely to be followed there than a wrong fact is to be believed.
+
+**The structural fix was to delete the second mapping, not to update the caller.**
+`capability_for_interface` is gone; `capability_for_import` is the only function
+that answers this question, and the trap it leaves behind — a doc comment
+explaining that the package-level answer is "the right granularity for an error
+message" — is gone with it.
+
+That comment is the part worth dwelling on. It was *specific*, *plausible*, and
+*about the exact case that was wrong*. It had survived because it was true often
+enough, and because a second helper that is nearly right compiles, has passing
+tests, and requires every new caller to know which of the two to pick.
+
+**The audit that found it:** `grep capability_for_interface` across the whole
+workspace. After the `run` fix the only remaining uses were tests — so the
+function had no production caller at all and still existed, which is what a
+"shared helper" looks like once its last real user has moved on.
+
+---
+
+#### §O-043c — A bare positional named the artifact, or rather did not
+
+`qqqai run ./needs-clock.wasm` **succeeded**, because the positional was appended
+to the component's arguments: the command ran the project's built component
+instead, and reported `app: ran in 63 µs`.
+
+The user gets a confident answer about a file they did not run. This is the same
+class as `inspect` discarding its path (`§O-038a`) — the argument is accepted and
+silently ignored — and it is the more dangerous variant, because `run`
+**executes** something.
+
+The remediation text beside the code already said *"use `--` before arguments
+meant for the component"*, so the fix was to make the code match the documented
+contract rather than invent one. Proposal §5.2 lists `--args` for passing
+component arguments; a bare positional naming the artifact is what a user types.
+
+The `run` enforcement path now has five integration tests, having had none:
+
+| Test | Property |
+|---|---|
+| `run_refuses_an_ungranted_import_and_names_the_right_capability` | refusal, **and** the implicated capability is asserted on the `capability:` line specifically |
+| `run_executes_when_the_capability_is_granted` | the **positive control** — without it, a `run` that refused everything would pass the first test |
+| `a_cap_flag_cannot_widen_the_manifest` | narrowing-only, asserted at the command line rather than only in the resolver |
+| `a_positional_names_the_artifact` | the §O-043c fix |
+| `run_dry_run_checks_grants_without_executing` | the rehearsal pre-flights but does not execute |
+
+One of those tests was wrong before it was right: a blunt
+`!output.contains("clock.monotonic")` failed on the **legitimate** stanza, which
+lists both options for the package. The assertion now checks the `capability:`
+line alone — which is the line that was wrong — rather than searching the whole
+error text, where the real signal would have been lost in a screen of advice.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4216,5 +4316,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **`CLI-012` implemented: `qqqai test`** (`qqq-run::test_runner`). Discovery runs **each test binary directly**, which makes a test's source file exact rather than inferred — after two wrong attempts, the second of which produced plausible paths that were wrong (`§O-042a`). `--trials N`, the first architecture-enabled feature from §6.7, **reported a perfectly deterministic suite as nondeterministic** because it compared raw output including libtest's `finished in 0.01s`; output is now normalised, with a positive control asserting a real difference is still detected (`§O-042b`). I diagnosed that as test flakiness twice before reading the failure's stdout, which had the answer in it (`§O-042c`). `check [12]` caught the section-heading deletion this round, which is what it was built for. | Architect |
 
 | 2026-09-19 | The `--trials` fix (`§O-042b`) was **correct and insufficient**: CI failed again for two further reasons — `--verbose` emitting `Fresh`/`Finished` lines on a warm build, and `CARGO_TERM_COLOR=always` wrapping verbs in SGR escapes. **Both were named in one line of output by the trial-divergence diagnostic added in the same change**, the instrument that prints *what* differed rather than only that something did (`§O-042d`). Rules are now shape-based rather than an enumerated prefix list, since an enumerated list is the same mistake as enumerating a toolchain's error variants. Building it surfaced three further real defects and one wrong test of mine. **Green on CI** — the only proof that counts for a defect that appears nowhere else. | Architect |
+
+| 2026-09-19 | **`qqqai run` enforced correctly and advised incorrectly.** The refusal of an ungranted import is right; the remediation named `clock.monotonic` for a component importing `qqq:clock/wall-clock` — the other half of the same package, so following the advice would leave the component still failing (`§O-043a`). This was the **same defect** fixed in `inspect` last session, missed here because `run` shows it in a remediation line rather than a report: a reader already looking at an error is likelier to follow a wrong instruction than to believe a wrong fact (`§O-043b`). The structural fix was **deleting the second mapping**, not updating the caller — a shared helper fixed at one call site leaves the others wrong, and they are harder to find because the codebase feels corrected. Also: a bare positional was appended to the *component's* arguments, so `qqqai run ./x.wasm` ran the built component and reported success (`§O-043c`). Five integration tests now cover the enforcement path, which had none. `check [12]` caught the section-heading deletion again. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

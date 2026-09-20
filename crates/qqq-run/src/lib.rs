@@ -77,9 +77,9 @@ pub use output::{
     ErrorPayload, Format, Output,
 };
 pub use run::{
-    capability_for_import, capability_for_interface, check_imports, exposure_rank, locate_artifact,
-    new_engine, parse_cap_flag, prepare, resolve_grants, ImportCheck, Prepared, RunOptions,
-    RunOutcome, RunOutput,
+    capability_for_import, check_imports, exposure_rank, locate_artifact, new_engine,
+    parse_cap_flag, prepare, resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome,
+    RunOutput,
 };
 pub use scaffold::{
     crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,

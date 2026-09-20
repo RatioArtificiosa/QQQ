@@ -476,39 +476,39 @@ fn run_once(project_dir: &Path, program: &str, run_args: &[&str], name: &str) ->
     }
 }
 
-/// Strip the parts of a libtest run that differ between identical runs.
+/// Strip the parts of a libtest/cargo run that differ between identical runs.
 ///
-/// See [`run_once`] for why this is necessary rather than cosmetic. Each filter
-/// targets a line whose content measures the **runner**, not the test under it.
+/// See [`run_once`] for why this is necessary rather than cosmetic.
 ///
-/// The exit status carries pass/fail, so dropping libtest's summary line loses
-/// no information about the outcome. What is kept is everything that reflects
-/// the test's own behaviour: its name and status, its panic message, and
-/// anything it printed.
+/// # Why the filter is by shape, not by an enumerated prefix list
+///
+/// The first version listed the prefixes it knew about — `Compiling`,
+/// `Finished`, `Running` — which worked locally and **failed on CI**. Under
+/// `cargo test --verbose`, which CI runs, cargo emits `Fresh <crate> v0.0.0
+/// (...)` and a `Finished ... in 0.47s` line that the nested invocation had not
+/// produced locally, because nothing was fresh. The determinism check then
+/// reported a divergence in lines that measure the *build*, not the test.
+///
+/// Enumerating output lines from a tool that is free to add them is the same
+/// mistake as enumerating a toolchain's error variants: it works until the
+/// environment changes, and the failure looks like a bug in the code under
+/// observation. So the rules below match on shape:
+///
+/// * a line is **kept** if it carries test behaviour — a test's name and status,
+///   a panic message, or anything the test printed;
+/// * a line is **dropped** if it is cargo/libtest reporting on itself.
+///
+/// The conservative direction matters: dropping a behavioural line would hide a
+/// real divergence, so the drop rules are narrow — a leading status word
+/// followed by something that looks like timing or a version.
 #[must_use]
 fn normalise_run_output(raw: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
 
     for line in raw.lines() {
-        let t = line.trim();
-
-        // The summary line carries a duration, and its "filtered out" count
-        // depends on the filter applied.
-        if t.starts_with("test result:") && t.contains("finished in") {
+        if is_runner_bookkeeping(line) {
             continue;
         }
-
-        // cargo's own bookkeeping, reprinted on every invocation.
-        if t.starts_with("Compiling ")
-            || t.starts_with("Finished ")
-            || t.starts_with("Running ")
-            || t.starts_with("Blocking ")
-            || t.starts_with("Doc-tests ")
-        {
-            continue;
-        }
-
-        // `test <name> ... ok` / `... FAILED` is behaviour and is kept.
         kept.push(line);
     }
 
@@ -529,6 +529,166 @@ fn normalise_run_output(raw: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Whether a line reports on the runner rather than on the test.
+///
+/// Split out so the rule can be tested directly against real cargo output,
+/// which is how the CI failure was finally diagnosed.
+#[must_use]
+fn is_runner_bookkeeping(line: &str) -> bool {
+    // cargo's progress and completion lines, in every form observed — including
+    // the `Fresh` and `Finished ... in 0.47s` shapes that appear only under
+    // `--verbose`, and only on a warm build. Declared at the top of the
+    // function because a `const` after statements reads as though it takes
+    // effect at that point, which it does not.
+    const CARGO_VERBS: [&str; 8] = [
+        "Compiling",
+        "Finished",
+        "Running",
+        "Blocking",
+        "Fresh",
+        "Dirty",
+        "Doc-tests",
+        "Documenting",
+    ];
+
+    // **ANSI escapes first.** CI sets `CARGO_TERM_COLOR=always`, so cargo wraps
+    // its verbs in colour codes and a naive `starts_with("Blocking")` never
+    // matches: the line begins `\x1b[1m\x1b[92m    Blocking\x1b[0m …`.
+    //
+    // This was the second CI-only failure of the same check, and the trial
+    // divergence diagnostic is what named it — the report showed the escape
+    // codes verbatim, and the cause was obvious the moment the difference was
+    // printed rather than merely reported (`§O-042b`).
+    let stripped = strip_ansi(line);
+    let t = stripped.trim();
+
+    // A test's own status line — `test foo ... ok` / `... FAILED` — is
+    // behaviour and is never dropped, even though it starts like one of the
+    // others.
+    if t.starts_with("test ") && !t.starts_with("test result") {
+        return false;
+    }
+
+    // The summary line: carries a duration, and a `filtered out` count that
+    // depends on the filter. The exit status carries pass/fail.
+    if t.starts_with("test result:") {
+        return true;
+    }
+
+    if CARGO_VERBS.iter().any(|verb| {
+        t.starts_with(verb) && (t.len() == verb.len() || t.as_bytes()[verb.len()] == b' ')
+    }) {
+        return true;
+    }
+
+    // A `running N test(s)` count differs when a filter selects differently
+    // between trials, which is not the test's behaviour.
+    if t.starts_with("running ") && t.contains(" test") {
+        return true;
+    }
+
+    false
+}
+
+/// Remove ANSI SGR escape sequences from a line.
+///
+/// `CARGO_TERM_COLOR=always` — which CI sets — makes cargo and libtest wrap
+/// their output in colour codes. Any rule that matches on a line's *beginning*
+/// therefore has to look past them.
+///
+/// Only the SGR form (`ESC [ … m`) is handled: that is what cargo uses, and a
+/// general ANSI parser would be more machinery than the problem needs. A line
+/// containing some other escape sequence is returned unchanged, which is the
+/// safe direction — an unmatched line is *kept*, so a real divergence cannot be
+/// hidden by a stripper that failed to recognise something.
+#[must_use]
+fn strip_ansi(line: &str) -> String {
+    // Operate on the byte string rather than with a peekable char iterator.
+    //
+    // The earlier version tried to look ahead and then rewind, which cannot work
+    // with a consuming iterator: the lookahead had already advanced, so the "put
+    // it back" step targeted the wrong position and the bytes silently vanished.
+    // Byte indexing makes the rewind explicit and obviously correct.
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Not ESC: copy one whole UTF-8 **character**, not one byte. A byte-wise
+        // copy would corrupt any multi-byte character, and cargo's output is not
+        // guaranteed to be ASCII — a test printing an accented word would have
+        // it mangled, and the mangling would differ between runs only by luck.
+        if bytes[i] != 0x1b {
+            let ch = line[i..].chars().next().unwrap_or('\u{fffd}');
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        // ESC present. An SGR sequence is `ESC [ parameters m`, where the
+        // parameters are digits and semicolons.
+        //
+        // **The scan must stop at anything else.** An earlier version searched
+        // up to 24 bytes for an `m` of any kind, so on `ESC[1no terminator` it
+        // found the `m` inside the word "terminator" and deleted everything up
+        // to it, producing `"inator"`. A stripper that eats arbitrary text is
+        // the dangerous direction: the bytes it removes are compared, so a real
+        // divergence could be erased, and the erasure is deterministic — it
+        // corrupts the same way every run and so looks like agreement.
+        if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'm' && j > i + 2 {
+                // A well-formed sequence: `ESC [ <digits/semicolons> m`.
+                i = j + 1;
+                continue;
+            }
+            // `ESC [ m` with no parameters is also valid — it is a reset.
+            if j == i + 2 && j < bytes.len() && bytes[j] == b'm' {
+                i = j + 1;
+                continue;
+            }
+        }
+
+        // Not an SGR sequence: emit the ESC and move on one byte, so nothing is
+        // swallowed. An unmatched line must survive intact — it is compared, and
+        // losing bytes from it could hide a real divergence.
+        out.push('\u{1b}');
+        i += 1;
+    }
+    out
+}
+
+/// The first line on which two trials differ, for a diagnostic.
+///
+/// Reports the **content** of the difference, not merely its existence. See the
+/// caller for why that matters: a report that something differs but not what is
+/// a report the reader cannot act on.
+#[must_use]
+fn first_difference(outputs: &[String]) -> String {
+    let Some(first) = outputs.first() else {
+        return "no trials".to_owned();
+    };
+    let Some(second) = outputs.iter().skip(1).find(|o| *o != first) else {
+        return "no difference".to_owned();
+    };
+
+    let a: Vec<&str> = first.lines().collect();
+    let b: Vec<&str> = second.lines().collect();
+    for i in 0..a.len().max(b.len()) {
+        let left = a.get(i).copied().unwrap_or("<absent>");
+        let right = b.get(i).copied().unwrap_or("<absent>");
+        if left != right {
+            return format!("line {}: {left:?} vs {right:?}", i + 1);
+        }
+    }
+    // Same lines, different overall: only trailing newlines can differ, which
+    // `lines()` hides, so say so rather than returning nothing.
+    "identical lines, differing trailing bytes".to_owned()
 }
 
 /// Execute the discovered tests.
@@ -605,6 +765,23 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
             trial_outputs,
             duration_ms: started.elapsed().as_millis(),
         };
+
+        // When the trials disagreed, record **how** — the first differing line,
+        // from the first two trials that differ.
+        //
+        // Without this, a nondeterminism report says only that outputs differ,
+        // and the reader cannot tell whether the difference is meaningful (a
+        // panic message) or environmental (a timing line the normaliser missed).
+        // That ambiguity cost a full debugging round on CI (`§O-042b`), where
+        // the report was correct that something differed and useless about
+        // what.
+        if outcome.trials_passed > 0 && outcome.is_nondeterministic() {
+            eprintln!(
+                "qqqai test: trial divergence in `{}`: {}",
+                outcome.test.name,
+                first_difference(&outcome.trial_outputs)
+            );
+        }
 
         outcomes.push(OutcomeReport {
             name: outcome.test.name.clone(),
@@ -853,7 +1030,143 @@ benches::throughput: benchmark
 
     // -- output normalisation -----------------------------------------------
 
-    /// Two runs of the same test differ only in timing, and must compare equal.
+    /// The exact lines that broke this on CI.
+    ///
+    /// The first normaliser enumerated the prefixes it knew — `Compiling`,
+    /// `Finished`, `Running` — which was enough locally and **not** on CI, where
+    /// `cargo test --verbose` on a warm build also emits `Fresh <crate>` and a
+    /// `Finished ... in 0.47s` line. The determinism check then reported a
+    /// divergence in lines that measure the *build*.
+    ///
+    /// These are copied from the CI run that failed, not invented.
+    #[test]
+    fn verbose_cargo_bookkeeping_is_ignored() {
+        let verbose = concat!(
+            "       Fresh qqq-run v0.0.0 (E:\\QQQ\\crates\\qqq-run)\n",
+            "    Finished `test` profile [optimized + debuginfo] target(s) in 0.47s\n",
+            "     Running unittests src/lib.rs (target/debug/deps/app-1.exe)\n",
+            "\n",
+            "running 1 test\n",
+            "test tests::adding_works ... ok\n",
+            "\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+        );
+        let normalised = normalise_run_output(verbose);
+
+        assert!(
+            normalised.contains("test tests::adding_works ... ok"),
+            "the test's own status is kept: {normalised}"
+        );
+        for gone in [
+            "Fresh",
+            "Finished",
+            "Running unittests",
+            "running 1 test",
+            "test result:",
+        ] {
+            assert!(
+                !normalised.contains(gone),
+                "runner bookkeeping `{gone}` survived: {normalised}"
+            );
+        }
+    }
+
+    /// CI's colour codes do not defeat the bookkeeping rules.
+    ///
+    /// The **second** CI-only failure of this check, and the reason the trial
+    /// divergence diagnostic exists: the first version of it printed the
+    /// difference verbatim, showing `\x1b[1m\x1b[92m    Blocking\x1b[0m …` and
+    /// making the cause obvious at a glance.
+    ///
+    /// `CARGO_TERM_COLOR=always` is set by CI, so cargo wraps its verbs and a
+    /// `starts_with` on the plain text never matches.
+    #[test]
+    fn ansi_colour_codes_do_not_defeat_the_rules() {
+        let coloured =
+            "\u{1b}[1m\u{1b}[92m    Blocking\u{1b}[0m waiting for file lock on package cache";
+        assert!(
+            is_runner_bookkeeping(coloured),
+            "a coloured `Blocking` line is still bookkeeping"
+        );
+
+        let coloured_finished = "\u{1b}[1m\u{1b}[92m    Finished\u{1b}[0m `test` profile in 0.02s";
+        assert!(is_runner_bookkeeping(coloured_finished));
+
+        // And a coloured *test* line is still kept.
+        let coloured_test = "\u{1b}[32mtest tests::adding_works ... ok\u{1b}[0m";
+        assert!(
+            !is_runner_bookkeeping(coloured_test),
+            "colour must not turn a test result into bookkeeping"
+        );
+    }
+
+    /// `strip_ansi` removes SGR sequences and leaves everything else.
+    #[test]
+    fn ansi_stripping_is_exact() {
+        assert_eq!(strip_ansi("\u{1b}[1mbold\u{1b}[0m"), "bold");
+        assert_eq!(strip_ansi("\u{1b}[92mgreen\u{1b}[0m text"), "green text");
+        // No escapes: unchanged.
+        assert_eq!(strip_ansi("plain text"), "plain text");
+        // Genuinely unterminated: no `m` follows, so it is not SGR and must
+        // survive intact rather than being eaten.
+        //
+        // An earlier version of this test used `"\u{1b}[1mno terminator"` and
+        // asserted it was unchanged — but `ESC[1m` *is* a complete SGR sequence
+        // (`bold`), and stripping it is correct. The test was wrong, not the
+        // code, and it took reading the assertion's own values to see that.
+        assert_eq!(strip_ansi("\u{1b}[1no terminator"), "\u{1b}[1no terminator");
+        // A lone ESC survives.
+        assert_eq!(strip_ansi("a\u{1b}b"), "a\u{1b}b");
+        // A complete sequence followed by text strips only the sequence.
+        assert_eq!(strip_ansi("\u{1b}[1mbold text"), "bold text");
+        // Multi-byte characters are not mangled. A byte-wise copy would turn
+        // `é` into two replacement characters, and a test printing accented text
+        // would have its output corrupted — invisibly, since the corruption is
+        // deterministic *within* a run.
+        assert_eq!(strip_ansi("\u{1b}[32mcafé\u{1b}[0m"), "café");
+        assert_eq!(strip_ansi("日本語のテスト"), "日本語のテスト");
+    }
+
+    /// `Blocking ... waiting for file lock` is bookkeeping.
+    ///
+    /// It appears only under contention — a warm cache makes it vanish — which
+    /// is why it surfaced on CI and not locally, and why it is named here.
+    #[test]
+    fn a_lock_wait_line_is_bookkeeping() {
+        assert!(is_runner_bookkeeping(
+            "    Blocking waiting for file lock on package cache"
+        ));
+    }
+    ///
+    /// The drop rules match a leading word, so a test called `test
+    /// Compiling_works ... ok` must survive — matching on the first token alone
+    /// would silently discard a real result line.
+    #[test]
+    fn a_test_line_is_never_treated_as_bookkeeping() {
+        for line in [
+            "test Compiling_works ... ok",
+            "test Finished_early ... ok",
+            "test Running_fast ... FAILED",
+            "test Fresh_again ... ok",
+        ] {
+            assert!(
+                !is_runner_bookkeeping(line),
+                "`{line}` is a test result, not bookkeeping"
+            );
+        }
+    }
+
+    /// A bare verb with no following word is bookkeeping; a word that merely
+    /// starts with one is not.
+    #[test]
+    fn the_verb_match_requires_a_word_boundary() {
+        assert!(is_runner_bookkeeping("Fresh qqq-run v0.0.0"));
+        assert!(is_runner_bookkeeping("Finished `test` profile"));
+        // `Freshly` is not the verb `Fresh`.
+        assert!(!is_runner_bookkeeping(
+            "Freshly squeezed output from the test"
+        ));
+    }
     ///
     /// The regression test for a real defect: `--trials 3` compared raw output,
     /// saw libtest's `finished in 0.01s`, and reported a deterministic suite as

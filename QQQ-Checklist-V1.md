@@ -634,11 +634,29 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### SRV — Server
 
-- [ ] **SRV-001** Implement HTTP/1.1 with keep-alive, timeouts and connection limits.
+- [x] **SRV-001** Implement HTTP/1.1 with keep-alive, timeouts and connection limits.
   → §6.4 `qqq-serve` — the HTTP and application server
-  → Partial: request-head parsing with framing validation is done (`qqq-serve::http1`).
-    The response writer, the keep-alive connection loop, socket timeouts and
-    connection limits remain.
+  → Done. `qqq-serve::server` is the accept loop joining the parts:
+    `http1` (head parse + framing validation), `route` (radix trie), `response`
+    (writer + error mapping), `conn` (keep-alive, idle/header deadlines,
+    request ceiling, graceful drain) and `qqq-io::listener` (socket, shards).
+  → Verified in source, not asserted: `Connection::will_keep_alive` (keep-alive),
+    `ConnectionConfig::{idle_timeout, header_timeout}` (timeouts),
+    `ConnectionConfig::max_requests` (per-connection ceiling),
+    `ConnectionLedger::admit` (per-tenant connection limit, checked **before**
+    the first byte is read).
+  → Evidence: `crates/qqq-serve/tests/socket.rs`, 10 tests against a real
+    socket — routing, 404/405/400, keep-alive and `close`, HTTP/1.0 default
+    close, body drain across two requests, **pipelining**, graceful shutdown.
+  → Defect found and fixed while completing it: `read_head` preserved the bytes
+    after the head terminator while `drain_body` refetched the body from the
+    socket, desyncing the framing offset when head and body shared a segment
+    (`§O-047a`). The test that named this could not fail for it
+    (`§O-047b`); its replacement fails on injection and passes without it
+    (`§O-047c`).
+  → Not covered here: HTTP/2 (`SRV-002`) and streaming bodies (`SRV-004`).
+    `drain_body` closes the connection on a `chunked` body rather than
+    de-chunking, which is `SRV-004`'s work and is stated in `§O-047a`.
 - [ ] **SRV-002** Implement HTTP/2 including multiplexing and flow control.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **SRV-003** Implement the compile-time route table as a radix trie.

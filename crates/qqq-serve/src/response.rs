@@ -300,6 +300,42 @@ pub fn error_response(error: &Error, soft_fuel: bool) -> ErrorResponse {
     }
 }
 
+/// Map a **protocol-level** client error to an HTTP response.
+///
+/// # Why this is not [`error_response`]
+///
+/// The two answer different questions, and conflating them was a real defect
+/// caught by the socket test in `tests/socket.rs`.
+///
+/// `error_response` maps a [`qqq_core::ErrorCode`] — a condition *inside QQQ*
+/// with a stable `QQQ-XXXX` identifier. A malformed request line is not that:
+/// the client sent bytes HTTP cannot parse, nothing inside QQQ failed, and no
+/// `ErrorCode` describes it truthfully. Routing it through the error taxonomy
+/// meant inventing a code, and `ParseError::to_error` invented
+/// `ManifestSchemaViolation` — so a garbage request line produced
+/// **`500 Internal Server Error`** with a log code pointing an operator at the
+/// manifest.
+///
+/// This function therefore builds the response from the class directly. It
+/// carries no `log_code`, because there is no QQQ fault to key the log on, and
+/// the detail string is deliberately **not** echoed into the body: a malformed
+/// request is attacker-controlled input, and reflecting it is how a response
+/// becomes a vector rather than an answer.
+///
+/// `detail` is accepted for the caller's log line and is not sent.
+#[must_use]
+pub fn parse_error_response(detail: &str) -> ErrorResponse {
+    let class = Failure::BadRequest;
+    let _ = detail;
+    ErrorResponse {
+        status: class.status(),
+        body: format!("{}\n", reason_phrase(class.status())),
+        retry_after: None,
+        close: class.must_close(),
+        log_code: None,
+    }
+}
+
 /// What a failure means for the client, which is what determines the status.
 ///
 /// # Why this is an enum and not a `(status, retry, close)` tuple
@@ -317,6 +353,18 @@ pub fn error_response(error: &Error, soft_fuel: bool) -> ErrorResponse {
 /// instead of about a number that several reasons share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
+    /// The **client** sent something HTTP cannot parse.
+    ///
+    /// Added after an integration test against a real socket showed a malformed
+    /// request line producing `500 Internal Server Error`. The taxonomy had no
+    /// client-error class at all, so every parse failure became a server fault —
+    /// which sends an operator hunting for a bug in QQQ when the peer sent
+    /// garbage.
+    ///
+    /// This is also the one class where the server's own logs should **not** be
+    /// alarmed: a 400 is a normal event on a public listener, and treating it as
+    /// a fault is how a log fills with noise that hides the real 500s.
+    BadRequest,
     /// The guest malfunctioned. The client's request was fine.
     GuestFault,
     /// The deployment is misconfigured — most often a capability the manifest
@@ -337,6 +385,8 @@ impl Failure {
     #[must_use]
     pub const fn status(self) -> u16 {
         match self {
+            // The only 4xx class, and the only one whose fix is on the client.
+            Self::BadRequest => 400,
             Self::GuestFault | Self::Misconfiguration | Self::HardLimit | Self::ListenerFault => {
                 500
             }
@@ -344,6 +394,16 @@ impl Failure {
             Self::Timeout => 504,
             Self::OverCapacity => 503,
         }
+    }
+
+    /// Whether this class indicates a fault in the **server**.
+    ///
+    /// `BadRequest` is `false`, which is the reason the variant exists: access
+    /// logs and alerting key on this, and a listener that pages an operator for
+    /// every malformed request is one whose alerts get ignored.
+    #[must_use]
+    pub const fn is_server_fault(self) -> bool {
+        !matches!(self, Self::BadRequest)
     }
 
     /// Whether the client should be told to try again.
@@ -372,6 +432,7 @@ impl Failure {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::BadRequest => "bad-request",
             Self::GuestFault => "guest-fault",
             Self::Misconfiguration => "misconfiguration",
             Self::HardLimit => "hard-limit",

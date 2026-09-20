@@ -4528,6 +4528,53 @@ If someone reads nothing else in this file, these are the items that cost the mo
 10. **The honest timeline is ~23 months and $2.3M–$4.5M.** A plan that says twelve months is lying, and it will be discovered.
 11. **The biggest risks are organizational, not technical** — runway (`R-09`) and bus factor (`R-15`).
 12. **Publishing where we lose is the strongest credibility asset this project has.** Do not let marketing remove it. (`§D-009`, `MKT-011`)
+13. **When a test fails, ask *which artifact is wrong* — code, test, or helper — and measure the observable.** Two diagnoses were written as fact in one session and both were backwards; one `eprintln!` of bytes actually written settled each in a single run. (`§O-047d`)
+14. **A test whose failure mode has not been demonstrated is not evidence.** Five times now, an assertion named a defect it could not refute. Reinject the defect and watch which tests stay green. (`§O-047b`, `§O-046b`, `§M-006`)
+
+---
+
+### §O-047 — The accept loop is joined, and a body was preserved by one half and refetched by the other
+
+**What was built.** `qqq-serve::server` — the accept loop joining the pieces §6.4 specifies, each of which had been built and tested *separately*: the route table, the head parser, the response writer, the connection state machine, and the `qqq-io` listener. Every part existed and nothing ran them together. `SRV-001` is now complete: HTTP/1.1 with keep-alive, idle and header timeouts, a per-tenant ceiling, graceful drain on shutdown, and a real socket suite (`crates/qqq-serve/tests/socket.rs`).
+
+#### §O-047a — The defect
+
+`read_head` stops at the head terminator and keeps the remainder, with a comment saying it must not be discarded — those bytes are the body and the kernel has already delivered them (`buf.drain(..end)`). `drain_body` then consumed the body **from the socket** (`stream.read(...)`), reading bytes the buffer already held.
+
+When head and body arrive in one segment, one `read` puts both in `buf`; the head is parsed, the body is set aside, and `drain_body` then waits on the socket for `content-length` bytes that are no longer there. The framing offset drifts by exactly the buffered amount and the **next** request line begins mid-body — a `400` on the second request of a connection whose first was answered perfectly.
+
+**Fix.** `drain_body` takes `&mut buf` and consumes the buffered remainder first, reading the socket only for what is still owed; `read_head` no longer clears the buffer, which it had no right to do since `buf` outlives one call and belongs to the connection loop. With **no** `content-length`, the buffer is deliberately preserved, because it holds the next pipelined request.
+
+**Class, not incident.** Two correct halves disagreed about **who owns a piece of state** — `§O-045a`'s shape a third time (the DWARF one level down; `is_open` vs `will_keep_alive`). When one function preserves something, the consumer of that thing must read the preservation, and the handoff must be observable.
+
+#### §O-047b — The test could not fail for it
+
+A test already existed naming this exact failure mode, and it passed throughout. The defect was reinjected to check the suite was live — `buf.clear()` restored — and **all nine socket tests still passed**, so the test was evidence of nothing.
+
+Established by instrumentation, not reasoning: `eprintln!("buf.len()={}", buf.len())` at the top of `drain_body` reported `5` *with the defect present*, so the body was still buffered and the clear had nothing to discard. `write_all` of 71 bytes over loopback was delivered as **two** reads here — head, then body — so the body never entered `buf` on the head's iteration and the path under test never ran. This is the **fifth** occurrence of `§O-046b`: an assertion that cannot refute what it names. The lesson was written down four times and still did not transfer, because writing it down is not what prevents it — **breaking the fix and watching which tests stay green is.**
+
+#### §O-047c — A test that fails on injection and passes without it
+
+`a_pipelined_request_survives_a_body_less_drain` writes two requests before reading either response, so the first `read` necessarily pulls the second into `buf`. Instrumented, the drain reports `buf.len()=59 cl=None` — 59 bytes, exactly the second request's size, with no `content-length` on the first. It is the only test reaching the preservation branch with bytes present, the branch that had a comment and no coverage, and it counts response starts rather than reusing a helper that assumes one response per read. Verified by injection: **fails** with `buf.clear()`, **passes** without.
+
+#### §O-047d — Two wrong diagnoses of my own
+
+The new test failed twice against a server that was **correct**, and both diagnoses were written into comments as fact before being checked — `§O-041a` again.
+
+1. **Blamed the server's framing.** It was the test: the second request carried `connection: close`, which half-closes the socket after writing, so the read raced the FIN. Tracing `write_all` showed **96 then 115 bytes** actually written — both requests had been answered all along. Evidence said change the test.
+2. **Blamed a buffer-clear bug.** It was the helper: `read_response` decodes one buffer, so both responses arriving together are returned by the **first** call and the second returns nothing. `read_until_two_responses` replaces it, and the file's own claim that pipelining is "not something this server implements" was refuted by the trace showing both responses on one socket.
+
+**Rule.** On a failing test the first question is *which artifact is wrong*, answered by measuring the observable — one `eprintln!` each time — not by reading code and forming a theory.
+
+**Also fixed:** clippy `-D warnings` was failing on two `unnested_or_patterns` in the WIP test file, which would have been red on CI. Workspace is green under `cargo fmt`, clippy, and the full suite.
+
+---
+
+### §M-008 — A restore from a stale backup silently reintroduced the defect
+
+Backing `server.rs` up for fault injection, injecting, then restoring from that backup **put the original defect back**, because the backup predated the first fix. The suite failed and time was spent re-diagnosing a fixed defect.
+
+**Fix.** Injection backups are re-taken at the moment the file is known-good, and after every restore the injected string is grepped for rather than assumed absent. A restore is an operation that needs verifying, not merely doing.
 
 ---
 
@@ -4567,5 +4614,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **`qqq-debug` implemented** — real DWARF source-map extraction from a built component, with 24 unit tests and 4 end-to-end tests that compile a project and map real offsets. Building it exposed a **wrong tick**: `HOST-009` claimed DWARF mapping while `WasmFrame.file`/`line` were never populated outside tests and `Instance::run` discarded Wasmtime's backtrace into a formatted string; the item is now `Partial` with the join named (`§O-045a`). The DWARF was **one level down**, inside the core module a component wraps, so the first parser reported "no DWARF" for a 265 KB artifact full of it — a right answer about the wrong table (`§O-045b`). And the **scaffold's own debug info covered only the standard library**, because `lto = true` with no exported symbol eliminates the crate; `debug = true` added, with a comment saying it is necessary and *not* sufficient (`§O-045c`). `check [12]` caught the heading deletion a fourth time. | Architect |
 
 | 2026-09-19 | **The trap backtrace join is done** — `HOST-009`'s remaining half. `Instance::trap_from` now takes the `wasmtime::Error` rather than a formatted string, so a real trap carries frames; the name comes from the module's name section and the location from DWARF, deliberately split so a frame is named even without `debug = true`. `qqqai run` sets `debug_info = true`, since a CLI exists to help a developer read a failure (`§O-046a`). **Two of the three new assertions could not fail** and were caught only by injecting the defect: one was satisfied by the trap's own detail string, the other named a phrase the codebase never emits. Both were written *while fixing* `§O-045a`'s "tests cannot refute their own mental model" — the lesson did not transfer by being written down, it transferred by breaking the fix and watching which tests stayed green (`§O-046b`). | Architect |
+
+| 2026-09-19 | **`SRV-001` complete — the accept loop is joined, and finishing it found the defect the WIP had introduced (`§O-047`).** The half-built work left three compile errors: a missing `Failure::BadRequest` arm in `as_str`, and `parse_error_response` referenced but never written. Completing the taxonomy surfaced a **real body-drain desync**: `read_head` preserved the bytes after the head terminator (`buf.drain(..end)`) while `drain_body` read the body from the *socket* — so a client whose head and body arrived in one segment had its body discarded and the connection advanced past it. `§O-047a`. **The test written for that defect could not fail for it**: with `buf.clear()` reinstated, all nine socket tests still passed, because the kernel delivered head and body in separate reads so the body never entered the buffer. `§O-047b` (the `§O-046b` trap, fifth occurrence). A new pipelining test now reaches the body-less drain branch with 59 bytes buffered and **fails on injection, passes without** — `§O-047c`. Writing it produced two wrong diagnoses of my own, both recorded: a `connection: close` on the second pipelined request fails against a *correct* server because the half-close races the read, and `read_response` decodes one buffer so it returns **both** responses at once. Tracing `write_all` (96 then 115 bytes) is what distinguished server correctness from test assumption. `§O-047d`. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -271,11 +271,65 @@ impl Connection {
         self.client_wants_keep_alive = client_wants_keep_alive;
     }
 
+    /// Whether a response written now may advertise `keep-alive`.
+    ///
+    /// # Why this exists separately from [`is_open`]
+    ///
+    /// `is_open` answers "has this connection been closed?" — which is `true`
+    /// for the whole duration of a request that is about to be the last one.
+    /// A caller that uses it to choose the `Connection` header therefore
+    /// advertises keep-alive on the response that closes the connection.
+    ///
+    /// Measured: an HTTP/1.0 request, which defaults to close, received
+    /// `Connection: keep-alive`. The encoder was correct, the state machine was
+    /// correct, and the *caller* asked the wrong question — so the two correct
+    /// halves disagreed on the wire, which is the defect this session has found
+    /// in four different modules (`§O-045a`, `§O-046a`).
+    ///
+    /// This answers the question the caller actually has: after a response is
+    /// written with `server_wants_close`, will the connection persist? It mirrors
+    /// the decision [`on_response_sent`] will make, and the `debug_assert` there
+    /// keeps the two in step — a header that disagrees with the lifecycle is a
+    /// protocol bug, not a cosmetic one.
+    #[must_use]
+    pub fn will_keep_alive(&self, server_wants_close: bool) -> bool {
+        if server_wants_close || !self.client_wants_keep_alive {
+            return false;
+        }
+        if self.closed.is_some() || self.draining {
+            return false;
+        }
+        // The next request would exceed the ceiling, so this response is the
+        // last one and must say so.
+        self.served.saturating_add(1) < self.config.max_requests
+    }
+
     /// Mark that a response was written.
     ///
     /// `server_wants_close` is the response's own `Connection: close`. It wins
     /// over the client's preference, because the server may be draining or may
     /// have decided the connection is unusable.
+    ///
+    /// # How this stays in step with `will_keep_alive`
+    ///
+    /// The two must agree: `will_keep_alive` decides the `Connection` header and
+    /// this decides the connection's life, and a disagreement puts one answer on
+    /// the wire and another in the lifecycle. A client told `keep-alive` on a
+    /// socket that then closes has its next request fail; a client told `close`
+    /// on a socket that stays open holds a connection it will not reuse.
+    ///
+    /// There is deliberately **no `debug_assert` tying them together**. A first
+    /// draft added one, and it would have been circular: this function computes
+    /// `will_keep_alive` from the same fields it is about to mutate, so the
+    /// assertion would evaluate `true` in every reachable state and could not
+    /// fail. That is the vacuous-assertion trap recorded in `§O-046b`, and this
+    /// is the fourth time this session that the instinct to add a check produced
+    /// one that cannot refute anything.
+    ///
+    /// What actually keeps them in step is the integration test in
+    /// `tests/socket.rs`, which reads the header off a real socket and checks the
+    /// connection's behaviour directly — two independent observations rather
+    /// than one restated.
     pub fn on_response_sent(&mut self, now: Instant, server_wants_close: bool) {
         self.in_flight = false;
         self.served = self.served.saturating_add(1);

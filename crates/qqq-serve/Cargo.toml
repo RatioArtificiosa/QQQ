@@ -1,16 +1,25 @@
 [package]
 name = "qqq-serve"
+description = "QQQ HTTP server: the compile-time route table, the HTTP/1.1 parser and connection state machine, and the accept loop that binds them to a socket."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "QQQ crate: qqq-serve (see QQQ-Proposal-V1.md 4.3)"
+documentation.workspace = true
+readme = "README.md"
+keywords = ["qqq", "http", "server", "wasm"]
+categories = ["wasm", "web-programming::http-server"]
 
 [lints]
 workspace = true
 
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
-
+qqq-io = { path = "../qqq-io", version = "0.0.0" }
+# `sync` is added to the workspace's feature set because the connection ledger is
+# shared across connection tasks. Cargo unions features across the graph, so this
+# enables it for every crate in the workspace — which is why the reason is
+# recorded here rather than left as a bare feature name.
+tokio = { workspace = true, features = ["sync"] }

@@ -72,6 +72,7 @@ pub mod guard;
 pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
+pub mod host_secrets;
 pub mod instance;
 pub mod linker;
 pub mod metrics;
@@ -87,6 +88,9 @@ pub use config::{
 };
 pub use guard::{guard, guard_reporting, PanicReport};
 pub use handles::{Handle, HandleStats, HandleTable};
+pub use host_secrets::{
+    PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore, MAX_SECRET_INPUT,
+};
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
     ExecutionOutcome, Instance, PreparedComponent,

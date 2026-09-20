@@ -1107,10 +1107,55 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.
   → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **CAP-016** Implement the `qqq:secrets` interface: use a secret without disclosing it.
-  → Partial: `qqq:secrets` WIT exists and the manifest parses `secrets`; the host interface is not registered.
-  → Partial: `qqq:secrets` WIT exists and the manifest parses `secrets`; the host interface is not registered.
+- [x] **CAP-016** Implement the `qqq:secrets` interface: use a secret without disclosing it.
+  → Done: `crates/qqq-host/src/host_secrets.rs` — `SecretStore`, `SecretMaterial`,
+    `PermittedOp`, `RequestedOp` and the `SecretCrypto` delegation trait. 22 unit
+    tests.
+  → **The inversion §6.3 describes is enforced structurally, not by convention.**
+    The guest sends a *name* and an *operation*; the host holds the material and
+    returns only the operation's result. `SecretMaterial`'s value is a **private
+    field with no accessor at all** — not a `pub` field and not a `value()`
+    method, because either would make the guarantee a convention that the first
+    caller to want it "just for logging" would break everywhere.
+  → **Three properties, each with a test that would fail without it:**
+    the material never appears in a result (asserted against the *key bytes*, not
+    the result shape — a shape check passes even when the key is returned); the
+    value does reach the primitive (the **control**, because proving the key does
+    not leak is vacuous if it never reached the crypto); and an out-of-range
+    `secret-op` discriminant is rejected, since the WIT variant lowers to a `u32`
+    the guest controls entirely. A test pins the discriminants against the WIT
+    declaration order, because a mismatch would make a guest's `sign` invoke
+    `verify`.
+  → **Order is a security decision.** The grant check runs **before** the material
+    lookup, so an ungranted guest learns nothing about which secret names the host
+    holds. `the_grant_check_precedes_the_material_lookup` uses a store where a
+    secret is *resolved but not granted* and asserts `not-granted` — reversing the
+    order would report `unavailable` and leak the material's existence.
+  → **`Debug` is manual, and `debug_never_prints_the_material` pins it.** A
+    derived `Debug` prints the bytes, and a secret in a log line is exactly the
+    leak this interface exists to prevent. The manual form prints the name and the
+    permitted operations — diagnostic and harmless. The length is withheld too,
+    because length is a fact about the secret.
+  → **It delegates rather than reimplementing crypto.** Signing, HMAC and AEAD
+    already live in `qqq:crypto`; a second implementation would be a second source
+    of truth for the algorithm choices (§4.3). `SecretCrypto` is the seam, which
+    is also what lets the tests assert **access control** rather than a cipher's
+    behaviour — `each_operation_dispatches_to_its_own_primitive` checks that
+    `apply` reaches the right primitive, since dispatching to the wrong permitted
+    one would pass every permission test.
+  → **It reads no ambient state.** Resolution (`SecretRef`, `env:ORDERS_DB_URL`)
+    happens once in the deploy layer; resolving per call would read the
+    environment on the request path, which §2.5 forbids and
+    `tools/check_no_ambient.py` enforces. A store is constructed with material
+    already resolved.
+  → **The test double had a defect, and the security test caught it** (`§O-065`):
+    `FakeCrypto::public_key` returned `PUB` ++ key, modelling a *buggy* primitive
+    that leaks the private half through its public key — so
+    `the_secret_material_never_appears_in_a_result` failed, correctly. A fake has
+    to model a correct implementation, or every test using it tests the fake's
+    defect instead.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
+  → §7.1 What we are defending, precisely
 
 ### SEC — Security engineering
 

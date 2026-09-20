@@ -947,6 +947,7 @@ dependencies = [
  "qqq-cap",
  "qqq-core",
  "qqq-host",
+ "qqq-pkg",
  "serde",
  "serde_json",
  "wasmtime",

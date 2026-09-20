@@ -738,7 +738,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [x] **CLI-004** Implement `qqqai init`.
   → §5.2 The command surface
-- [ ] **CLI-005** Implement `qqqai add` and `qqqai remove`.
+- [x] **CLI-005** Implement `qqqai add` and `qqqai remove`.
+  → Done: `qqq-run::deps::add`/`remove`, dispatched from `main.rs`. Edits `qqq.toml` as **text**, preserving every comment and byte outside the changed line; writes atomically via temp-file + rename so a crash cannot truncate the manifest; re-parses the result before publishing it. `--dev`, `--exact`, `--feature`, `--registry`, `name@version`, and `--json` all work. Requirement is validated with the real `qqq_pkg::Requirement` parser before writing.
+  → Fixed on the way: `[dependencies]` was not modelled at all and was silently dropped (`§O-033`), and the requirement parser rejected `"1.2"` — the form Proposal §5.3 itself writes (`§O-034a`).
+  → §5.2 command surface; §5.3 `qqq.toml`
   → §5.2 The command surface
 - [ ] **CLI-006** Implement `qqqai install` with `--locked`, `--frozen`, `--offline`.
   → §6.5 `qqq-pkg` — package manager and registry

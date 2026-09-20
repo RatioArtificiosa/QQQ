@@ -150,14 +150,7 @@ impl Requirement {
             return Err(bad(s, "the operator has no version after it"));
         }
 
-        let version: Version = rest.parse().map_err(|e| {
-            Error::new(
-                ErrorCode::VersionUnsatisfiable,
-                format!("`{rest}` is not a valid version"),
-            )
-            .with_cause(format!("{e}"))
-            .with_remediation("versions look like `1.2.3`, optionally with `-pre` or `+build`")
-        })?;
+        let version = parse_partial_version(rest, s)?;
 
         Ok(Self {
             op,
@@ -166,7 +159,6 @@ impl Requirement {
     }
 
     /// Whether a version satisfies this requirement.
-    ///
     /// # Pre-releases are not representable, and that is a recorded gap
     ///
     /// `qqq_core::Version` is strictly `major.minor.patch` — it has no
@@ -245,6 +237,75 @@ impl fmt::Display for Requirement {
             (op, None) => f.write_str(op.as_str()),
         }
     }
+}
+
+/// Parse a version that may omit trailing components.
+///
+/// # Why partial versions must be accepted
+///
+/// Proposal §5.3 writes dependencies as `version = "1.2"` and `version = "2.0"`.
+/// Every ecosystem's manifest does the same, and it is what a human types. A
+/// requirement parser that demanded `1.2.0` would reject the documented form of
+/// the file format it exists to read — which is exactly what happened on the
+/// first end-to-end run of `qqqai add`:
+///
+/// ```text
+/// error[QQQ-5004]: `1.2` is not a version requirement: `1.2` is not a valid version
+/// ```
+///
+/// # The fill rule, and why it is `0`
+///
+/// A missing component is read as `0`:
+///
+/// | Written | Means | As a caret requirement |
+/// |---|---|---|
+/// | `1` | `1.0.0` | `>=1.0.0, <2.0.0` |
+/// | `1.2` | `1.2.0` | `>=1.2.0, <2.0.0` |
+/// | `1.2.3` | `1.2.3` | `>=1.2.3, <2.0.0` |
+///
+/// Filling with zero is right because it makes the requirement *wider*, never
+/// narrower. Widget-and-fill (`1.2` → `1.2.*`) would be equally defensible for
+/// the bare form but would disagree with the operator forms: `>=1.2` already
+/// means `>=1.2.0`, and having `>=1.2` and `^1.2` interpret the missing
+/// component differently is the kind of inconsistency that produces a
+/// resolution that no one can explain.
+///
+/// A component count above three is refused rather than ignored: `1.2.3.4` is
+/// not a version, and silently dropping the fourth number would accept a typo.
+fn parse_partial_version(rest: &str, whole: &str) -> Result<Version> {
+    let parts: Vec<&str> = rest.split('.').collect();
+    if parts.len() > 3 {
+        return Err(bad(
+            whole,
+            &format!(
+                "`{rest}` has {} components; a version has at most three \
+                 (major.minor.patch)",
+                parts.len()
+            ),
+        ));
+    }
+
+    let mut nums = [0u32; 3];
+    for (i, part) in parts.iter().enumerate() {
+        // Reject an empty component explicitly: `1..3` splits into
+        // `["1", "", "3"]`, and `"".parse::<u32>()` fails with a message about
+        // an empty string rather than about the malformed version.
+        if part.is_empty() {
+            return Err(bad(
+                whole,
+                &format!("`{rest}` has an empty component; expected `major.minor.patch`"),
+            ));
+        }
+        nums[i] = part
+            .parse::<u32>()
+            .map_err(|_| bad(whole, &format!("`{part}` in `{rest}` is not a number")))?;
+    }
+
+    Ok(Version {
+        major: nums[0],
+        minor: nums[1],
+        patch: nums[2],
+    })
 }
 
 /// Build a parse error with the shared shape.
@@ -504,5 +565,110 @@ mod tests {
             "the error must quote what was written: {}",
             e.message
         );
+    }
+
+    // -- partial versions ---------------------------------------------------
+
+    /// The form Proposal §5.3 actually writes must parse.
+    ///
+    /// This is a regression test for a defect found by running `qqqai add`
+    /// once: `version = "1.2"` — the exact spelling in the Proposal's own
+    /// `qqq.toml` example — was rejected, because the parser demanded all three
+    /// components. Dozens of unit tests passed while the documented input to
+    /// the documented file format was refused (`§O-034a`).
+    #[test]
+    fn a_two_component_requirement_parses_as_the_proposal_writes_it() {
+        let r = Requirement::parse("1.2").expect("`1.2` is what §5.3 writes and must parse");
+        assert_eq!(r.op, Op::Caret, "a bare version means compatible");
+        let v = r.version().expect("carries a version");
+        assert_eq!((v.major, v.minor, v.patch), (1, 2, 0));
+    }
+
+    #[test]
+    fn a_one_component_requirement_parses() {
+        let r = Requirement::parse("2").expect("`2` must parse");
+        let v = r.version().expect("carries a version");
+        assert_eq!((v.major, v.minor, v.patch), (2, 0, 0));
+    }
+
+    /// The fill rule widens, and `1.2` therefore admits every `1.x` at or above
+    /// `1.2.0` — which is what a caret requirement on `1.2.0` means.
+    #[test]
+    fn a_partial_requirement_matches_the_versions_it_should() {
+        let r = Requirement::parse("1.2").expect("must parse");
+        assert!(r.matches(&"1.2.0".parse().unwrap()), "the floor");
+        assert!(r.matches(&"1.9.9".parse().unwrap()), "later minors");
+        assert!(!r.matches(&"1.1.9".parse().unwrap()), "below the floor");
+        assert!(!r.matches(&"2.0.0".parse().unwrap()), "a breaking change");
+    }
+
+    /// Partial versions work with operators, not just bare.
+    #[test]
+    fn operators_accept_partial_versions() {
+        for (text, major, minor, patch) in [
+            (">=1.2", 1u32, 2u32, 0u32),
+            ("~2.1", 2, 1, 0),
+            ("^3", 3, 0, 0),
+            ("<=4.5", 4, 5, 0),
+            ("=1.2.3", 1, 2, 3),
+        ] {
+            let r = Requirement::parse(text).unwrap_or_else(|e| panic!("`{text}`: {e}"));
+            let v = r.version().expect("carries a version");
+            assert_eq!(
+                (v.major, v.minor, v.patch),
+                (major, minor, patch),
+                "`{text}` filled the wrong components"
+            );
+        }
+    }
+
+    /// Four components is a typo, not a version.
+    ///
+    /// The dangerous alternative is to read the first three and ignore the
+    /// fourth, which accepts `1.2.3.4` and silently resolves something the
+    /// author did not ask for.
+    #[test]
+    fn four_components_is_refused_rather_than_truncated() {
+        let e = Requirement::parse("1.2.3.4").unwrap_err();
+        assert_eq!(e.code, ErrorCode::VersionUnsatisfiable);
+        assert!(
+            e.render().contains("at most three"),
+            "the error should explain the limit: {}",
+            e.render()
+        );
+    }
+
+    /// `1..3` is malformed, and the error must say so rather than reporting an
+    /// empty string as a non-number.
+    #[test]
+    fn an_empty_component_is_refused_with_a_useful_message() {
+        let e = Requirement::parse("1..3").unwrap_err();
+        assert!(
+            e.render().contains("empty component"),
+            "the error should name the real problem: {}",
+            e.render()
+        );
+    }
+
+    /// A non-numeric component is refused.
+    #[test]
+    fn a_non_numeric_component_is_refused() {
+        let e = Requirement::parse("1.x").unwrap_err();
+        assert!(
+            e.render().contains("is not a number"),
+            "the error should name the bad component: {}",
+            e.render()
+        );
+    }
+
+    /// A bare `.` and a trailing dot are both refused rather than read as `0`.
+    #[test]
+    fn degenerate_dotted_forms_are_refused() {
+        for text in ["1.", ".", "..", "1.2."] {
+            assert!(
+                Requirement::parse(text).is_err(),
+                "`{text}` must not be accepted as a version"
+            );
+        }
     }
 }

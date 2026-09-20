@@ -431,6 +431,8 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::New => dispatch_new(name, args, &mut out),
         CommandName::Init => dispatch_init(name, args, &mut out),
         CommandName::Dev => dispatch_dev(name, args, &mut out),
+        CommandName::Add => dispatch_add(name, args, &mut out),
+        CommandName::Remove => dispatch_remove(name, args, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -773,6 +775,202 @@ fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::St
         }
     };
     with_manifest(name, out, args, |loaded| qqq_run::dev::run(loaded, &opts))
+}
+
+/// Dispatch `qqqai add`.
+///
+/// # Why the requirement is parsed before anything is written
+///
+/// `qqqai add foo@1.x.y` is a typo, and the moment to say so is *now* — while
+/// the user is looking at the command they just typed. Writing it and failing
+/// later at `install` moves the diagnosis to a different command, a different
+/// day, and a different mental context (`§O-033a`).
+///
+/// This is also the only place the real grammar can be checked: `qqq-cap`
+/// cannot reach `qqq-pkg::semver::Requirement` because `qqq-pkg` depends on
+/// `qqq-cap`, so the manifest layer only shape-checks (`§O-033c`).
+fn dispatch_add(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
+    let parsed = match add_options(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let table = if parsed.dev {
+        "dev-dependencies"
+    } else {
+        "dependencies"
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        qqq_run::deps::add(&loaded.path, table, &parsed.edit)
+    })
+}
+
+/// Dispatch `qqqai remove`.
+fn dispatch_remove(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let mut dev = false;
+    let mut pkg: Option<String> = None;
+
+    for a in args {
+        match a.as_str() {
+            "--dev" => dev = true,
+            "--manifest" => {}
+            other if other.starts_with('-') => {
+                let e = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `remove`"),
+                )
+                .with_remediation("`remove` accepts --dev and --manifest");
+                let _ = out.emit_error(name, &e);
+                return ExitCode::from(exit::USAGE);
+            }
+            other if pkg.is_none() => pkg = Some(other.to_owned()),
+            _ => {}
+        }
+    }
+
+    let Some(pkg) = pkg else {
+        let e = qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`remove` needs the name of a dependency",
+        )
+        .with_remediation(format!(
+            "for example: {} remove qqqai/json",
+            qqq_core::BINARY_NAME
+        ));
+        let _ = out.emit_error(name, &e);
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let table = if dev {
+        "dev-dependencies"
+    } else {
+        "dependencies"
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        qqq_run::deps::remove(&loaded.path, table, &pkg)
+    })
+}
+
+/// The parsed form of a `qqqai add` invocation.
+struct AddRequest {
+    edit: qqq_run::DependencyEdit,
+    dev: bool,
+}
+
+/// Decode `qqqai add`'s own flags and its `name[@version]` argument.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for a missing argument or an unknown flag, and a
+/// QQQ-5004 error when the requirement is not valid semver.
+fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
+    // `--manifest` takes a value that this function does not otherwise use, so
+    // it is tracked here only to skip the value rather than read it as the
+    // package name.
+    const TAKES_VALUE: [&str; 2] = ["--manifest", "--registry"];
+
+    let mut spec: Option<String> = None;
+    let mut dev = false;
+    let mut exact = false;
+    let mut features: Vec<String> = Vec::new();
+    let mut source: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--dev" => dev = true,
+            "--exact" => exact = true,
+            "--feature" | "-F" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                features.push(v.clone());
+                i += 1;
+            }
+            "--registry" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                source = Some(format!("registry+{v}"));
+                i += 1;
+            }
+            other => {
+                if TAKES_VALUE.contains(&other) {
+                    i += 1;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `add`"),
+                    )
+                    .with_remediation(
+                        "`add` accepts --dev, --exact, --feature, --registry and --manifest",
+                    ));
+                } else if spec.is_none() {
+                    spec = Some(other.to_owned());
+                } else {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("`add` takes one package, but got a second: `{other}`"),
+                    )
+                    .with_remediation("run `add` once per package"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let Some(spec) = spec else {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`add` needs a package to add",
+        )
+        .with_remediation(format!(
+            "for example: {} add qqqai/json@1.2",
+            qqq_core::BINARY_NAME
+        )));
+    };
+
+    let (name, requirement) = split_spec(&spec);
+    // The default when no version is given. A bare `qqqai add foo` means "the
+    // latest compatible release", which is what every other ecosystem does;
+    // choosing anything else would surprise on the first command a user runs.
+    let requirement = requirement.unwrap_or_else(|| "*".to_owned());
+
+    // Parse with the real grammar. This is the check `qqq-cap` cannot make.
+    qqq_pkg::Requirement::parse(&requirement).map_err(|e| {
+        qqq_core::Error::new(
+            qqq_core::ErrorCode::VersionUnsatisfiable,
+            format!("`{requirement}` is not a version requirement: {e}"),
+        )
+        .with_remediation("write a version like `1.2`, `^1.2.3`, `~1.2.3`, `>=1.0, <2.0` or `*`")
+    })?;
+
+    let mut edit = qqq_run::DependencyEdit::new(name.clone(), requirement);
+    edit.features = features;
+    edit.source = source;
+    edit.exact = exact;
+
+    Ok(AddRequest { edit, dev })
+}
+
+/// Split `name@version` into its parts.
+///
+/// `rsplit_once` rather than `split_once`, because a scoped name may contain no
+/// `@` today but a future npm-style scope (`@org/pkg@1.0`) has two — and
+/// splitting on the first would take `org/pkg@1.0` as the version. The last `@`
+/// is unambiguously the separator.
+fn split_spec(spec: &str) -> (String, Option<String>) {
+    match spec.rsplit_once('@') {
+        Some((name, version)) if !name.is_empty() => (name.to_owned(), Some(version.to_owned())),
+        // A leading `@` with no name before it is a scope, not a separator.
+        _ => (spec.to_owned(), None),
+    }
 }
 
 /// Decode `qqqai dev`'s own flags.

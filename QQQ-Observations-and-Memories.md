@@ -2797,6 +2797,128 @@ being changed is what makes the edit unambiguous.
 
 ---
 
+### §O-034 — `qqqai add` exists, and the first run refuted the version model
+
+`CLI-005` is implemented in `qqq-run::deps`: `add` and `remove` edit
+`[dependencies]` and `[dev-dependencies]` in `qqq.toml`. Both are wired into the
+dispatcher with the full documented flag set (`--dev`, `--exact`, `--feature`,
+`--registry`, `name@version`), and both emit the shared JSON envelope.
+
+---
+
+#### §O-034a — Proposal §5.3 writes `version = "1.2"`, and the parser refused it
+
+The first end-to-end run of `qqqai add qqqai/json@1.2` printed:
+
+```text
+error[QQQ-5004]: `1.2` is not a version requirement: `1.2` is not a valid version
+```
+
+`1.2` is not an edge case. It is the exact spelling in **Proposal §5.3's own
+`qqq.toml` example**, and it is what every ecosystem's manifest accepts. The
+requirement parser delegated to `qqq_core::Version::parse`, which requires all
+three components, so a two-component version was rejected by the parser for the
+file format whose documented body contains two-component versions.
+
+This is the same lesson as `§O-028` and `§O-032a`, in its sharpest form yet:
+
+> Both halves were individually correct and individually tested. `Version`
+> correctly requires `major.minor.patch`, and `Requirement` correctly rejects
+> what `Version` rejects. Dozens of unit tests passed. The **composition** was
+> wrong, and no test written from the same mental model as the code could see
+> it. Running the binary once found it.
+
+The fix is a partial-version rule that fills missing components with `0`:
+
+| Written | Means | As a caret requirement |
+|---|---|---|
+| `1` | `1.0.0` | `>=1.0.0, <2.0.0` |
+| `1.2` | `1.2.0` | `>=1.2.0, <2.0.0` |
+
+Zero-fill rather than wildcard (widget-and-fill) because it can only **widen** a
+requirement, never narrow it — and because `>=1.2` already means `>=1.2.0`, so
+having `>=1.2` and `^1.2` read the missing component differently would produce
+resolutions nobody could explain.
+
+Guarded at the same time, because widening a parser widens what it accepts:
+four components (`1.2.3.4`) is refused rather than truncated — reading the first
+three and dropping the fourth silently resolves something the author did not ask
+for — and `1..3`, `1.`, `.`, `..` are each refused with a message naming the real
+problem rather than reporting an empty string as a non-number.
+
+---
+
+#### §O-034b — Why `add` edits text instead of re-serializing the manifest
+
+The obvious implementation parses `qqq.toml` into `Manifest`, mutates the map,
+and serializes it back. That is rejected, and the reason is what `qqq.toml`
+*is*: a human-owned file whose comments record why a capability was granted.
+§5.3's own example annotates `shared_memory = false` with `# see §4.7`. A tool
+that deletes the argument for a security decision has done something worse than
+failing.
+
+Three concrete costs of round-tripping:
+
+1. **Comments are destroyed** — including inline ones and the reasoning in them.
+2. **Every key is reordered** into struct field order, so a one-line addition
+   produces a whole-file diff, and a whole-file diff is where review stops.
+3. **Unmodelled data is lost silently** — which is precisely the `§O-033` defect
+   this release is already fixing, and it would be reintroduced by the tool
+   meant to edit the file.
+
+So the edit is surgical: locate the table, insert or replace one line, leave
+every other byte alone. The result is then **re-parsed before it is published**,
+so the edit is textual but never unverified — a manifest that does not parse can
+never replace one that does. `add_then_remove_restores_the_original_bytes`
+asserts the round trip is byte-exact, not merely equivalent, which is the
+property that makes the textual approach worth its complexity.
+
+Verified on the real binary — note the comment and the untouched `[limits]`:
+
+```toml
+[limits]
+# keep this comment
+fuel = 1000
+
+[dependencies]
+"qqqai/json" = "1.2"
+```
+
+---
+
+#### §O-034c — The write is atomic because `qqq.toml` is the one unrecoverable file
+
+Losing `qqq.toml` makes a project unbuildable and its content cannot be
+regenerated — it is the only file that cannot be reconstructed from anything
+else. A crash or a full disk midway through a naive write leaves a truncated
+manifest.
+
+The edit goes to a temporary file in the same directory and is `rename`d over
+the target, so a reader sees either the old bytes or the new bytes and never a
+prefix of either. On validation failure the temporary file is removed and the
+target is untouched — asserted by a test that also checks no `.qqqtmp` file is
+left behind, because a temp file accumulating next to the manifest is a second,
+quieter defect.
+
+---
+
+#### §O-034d — The error contract, checked against the shell rather than assumed
+
+One run looked like all three error paths exited `0`, which would have been a
+real defect: a script branching on the exit code would treat a failed `remove`
+as success. Checking with the pipeline redirected showed the truth:
+
+| Case | Exit |
+|---|---|
+| success | `0` |
+| dependency not found | `1` |
+| bad requirement, missing argument, unknown flag | `2` |
+
+The `0` was PowerShell reporting the exit of the *pipeline*, not the process.
+Worth recording because the wrong reading would have sent me to fix code that
+was already correct — and the right reading only came from measuring
+differently, not from reasoning harder about the code.
+
 ---
 
 ## 4. MISTAKES AND FIXES
@@ -3067,5 +3189,6 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | Verification round. All four load-bearing architecture claims verified against Wasmtime 48.0.2 (`§O-006`); four WAT/ABI findings recorded (`§O-007`); two Wasmtime API differences recorded (`§O-008`); validator self-test built and **7/7 fault injections detected** (`§M-006`), which exposed and fixed two real defects: Appendix A/Observations correction drift, and Proposal decision citations that were write-only. `check [8]`, `[9]`, `[10]`, `[11]` added to the validator; self-test wired into CI. | Architect |
 | 2026-09-19 | `qqq-pkg` opened (`§O-032`). `semver.rs` (`Requirement`/`Op`, caret-under-1.0 rule), `lock.rs` (`Lockfile`, `LockDiff::compute`, NUL-separated covering hash verified on read), `store.rs` (`Digest`, two-level fan-out `StoreLayout`, verified reads). The pre-release gap in `qqq-core::Version` recorded as `§O-032a` with the test that pins it; four tests written against a non-existent `Version.pre` field deleted. Three clippy findings fixed, two of which were real defects (`§O-032d`). | Architect |
 | 2026-09-19 | `[dependencies]` and `[dev-dependencies]` were **silently ignored** by `Manifest`: the struct did not model them and is not `deny_unknown_fields` at the top level, so a manifest declaring a dependency parsed successfully with the table discarded (`qqqai caps` printed "no capabilities granted" and exited 0). Both tables are now modelled, validated, and named in errors (`§O-033`). Writing the test found the *same* defect again in new code — `[dev-dependencies]` needs an explicit serde `rename`, and the hyphenated key parsed as empty (`§O-033b`). Requirement validation is split by what each crate can honestly decide, because `qqq-pkg` depends on `qqq-cap` and the real parser is therefore unreachable from the manifest layer (`§O-033c`). | Architect |
+| 2026-09-19 | `CLI-005` implemented: `qqqai add` and `qqqai remove` (`qqq-run::deps`), with `--dev`, `--exact`, `--feature`, `--registry`, `name@version` and `--json`. The manifest is edited as **text** so comments and formatting survive, written atomically via temp-file + rename, and re-parsed before publishing (`§O-034b`, §O-034c). The first end-to-end run refuted the version model: `1.2` — the spelling Proposal §5.3 itself writes — was rejected because `Version` requires three components, so a partial-version rule with zero-fill now widens instead of refusing (`§O-034a`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

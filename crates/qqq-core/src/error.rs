@@ -245,6 +245,14 @@ pub enum ErrorCode {
     /// The registry could not be reached.
     /// **Remediation:** retryable. Check connectivity or use `--offline`.
     RegistryUnreachable = 5001,
+    /// A named dependency is not present in the manifest.
+    /// **Remediation:** the error names the table searched; `qqqai inspect`
+    /// lists what the project actually depends on.
+    ///
+    /// Distinct from `VersionUnsatisfiable`: that means a dependency exists and
+    /// no version satisfies it, this means there is no such dependency at all.
+    /// Conflating them would send a user with a typo to search the registry.
+    DependencyNotFound = 5007,
     /// The lockfile and the manifest disagree.
     /// **Remediation:** run `qqqai install` to re-resolve, or `--frozen` to
     /// fail rather than change anything.

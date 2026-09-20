@@ -22,6 +22,7 @@ path = "src/main.rs"
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
+qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
 qqq-host = { path = "../qqq-host", version = "0.0.0" }
 qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
 serde = { workspace = true }

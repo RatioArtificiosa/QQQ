@@ -2476,6 +2476,115 @@ forces a deliberate choice rather than defaulting into "healthy".
 
 ---
 
+### §O-031 — `qqq-io`: the reactor, and a platform divergence refused
+
+**What was built.** `qqq-io` was a 9-line stub; it is now the crate that owns the
+async runtime dependency (`ARCH-006`). That placement is the design: everything
+above it — `qqq-serve`'s routing, parsing and connection state — is synchronous
+and pure, so a future `io_uring` backend is a second module here rather than a
+rewrite above.
+
+**Verified by binding real sockets**, which is the only way to test an accept
+loop: 8 integration tests covering bind, accept one, accept sixteen, data flowing
+over an accepted stream, a pre-signalled shutdown, a shutdown mid-idle,
+an occupied port, and sixteen connections balancing exactly across four shards.
+Every wait is bounded, so a broken loop fails in seconds rather than hanging CI.
+
+---
+
+#### §O-031a — `SO_REUSEPORT` is deliberately not used, and the reason is CI
+
+Proposal §4.2 implies kernel-side sharding, and `SO_REUSEPORT` is the classic way
+to build it: several sockets bind one port and the kernel spreads accepts across
+them. It is the right answer on Linux.
+
+**And it behaves differently elsewhere.** macOS implements it with a different
+distribution strategy; Windows has it in recent versions with different semantics
+again. Setting it and hoping would mean sharding behaves one way in Linux CI and
+another on a developer's Mac — which is precisely the class of platform
+divergence §4.2 exists to prevent, and exactly the divergence the three-platform
+matrix in `§O-022` was built to catch.
+
+So assignment is **userspace round-robin**: one acceptor, connections handed to
+shards in order. Identical behaviour on every platform.
+
+**The honest cost is stated in the crate documentation rather than hidden:** one
+extra hop between the accepting thread and the shard that reads the socket. On a
+connection carrying hundreds of requests that is once per connection, not once
+per request — and it is recorded as *unmeasured* rather than claimed to be
+negligible. `PERF-016` is annotated partial for that reason.
+
+---
+
+#### §O-031b — The accept batch is bounded, and the yield happens whether or not the batch filled
+
+The obvious loop is "accept until there is nothing to accept, then yield". Under
+a connection flood there is *always* something to accept, so that loop never
+yields — and the consequences are specific: health checks, metrics scrapes and
+the shutdown signal are all delayed by exactly the load that makes them matter. A
+server that cannot report its own saturation is a server nobody can operate.
+
+Bounding the batch at 128 and yielding at the boundary makes the yield happen at
+a fixed point regardless of load. The cost is one `yield_now` per 128 accepts,
+which is nothing against the syscall cost of the accepts themselves.
+
+---
+
+#### §O-031c — Round-robin, not a hash of the peer address
+
+Hashing the peer address to pick a shard sounds attractive — it gives affinity,
+and affinity suggests locality. It is wrong twice:
+
+1. **A NAT or proxy makes it meaningless.** Thousands of clients behind one
+   address all hash to one shard, which is the opposite of balancing, and it
+   fails silently because the hash is doing what it was told.
+2. **It leaks information.** A client that observes which shard answers can use
+   the hash to correlate connections it believes are separate. The capability
+   model goes to considerable trouble to close covert channels (`CAP-013`,
+   §O-027c); a client-visible value that varies with the peer address is one.
+
+Round-robin has neither property. The only thing it gives up is affinity that was
+not real.
+
+---
+
+#### §O-031d — Hostnames are refused in a listen address
+
+`--listen example.com:80` is refused, with a remediation that explains why:
+binding to a hostname binds to whatever it resolves to on *this* machine at
+*this* moment. Two deployments of the same manifest would bind different
+addresses, which is a deployment-dependent behaviour rather than a configuration
+one — and NN-5 says nothing important is inferred.
+
+IP literals and `localhost` are accepted. The parsing is hand-written rather than
+delegated to `SocketAddr`, because a listen address is a user-facing string and
+the error for a typo has to name what was wrong: `[::1:8080` gets "opens a
+bracket and never closes it" rather than an opaque parse failure.
+
+One subtle case is covered explicitly: an **unbracketed** IPv6 literal has many
+colons and the port is the last one, so `::1:8080` is split with `rsplit_once`.
+Splitting on the first colon — the obvious implementation — yields an empty host
+and `:1`, and the test that pins this is named for the case.
+
+---
+
+#### §O-031e — Clippy caught a `MutexGuard` held across an `await`
+
+In one of the new integration tests, a lock guard was held while awaiting. That
+is a real deadlock hazard rather than a style nit: the guard is not `Send`-safe
+across a suspension point in the general case, and the failure mode is a hang
+that appears only under contention.
+
+The fix is a scope, and the reason it is worth recording is that this is the
+second time in this round that a lint pointed at a genuine defect rather than a
+formatting preference (`§O-029a` was the first). Silencing such a lint would have
+shipped the hazard.
+
+**Cross-refs:** Checklist `ARCH-006`, `PERF-016`, `PERF-003`, `SRV-001`,
+`ARCH-011`; Proposal §4.2, §4.4, §6.4.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

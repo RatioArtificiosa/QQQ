@@ -796,7 +796,45 @@ Items are grouped below by **phase**, because dependency order matters more than
     one, so no violation existed and the harness reported a checker defect that
     was really a harness defect.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-009** Define and enforce the typed-error rule: every fallible host call returns `result<T, E>`.
+- [x] **CON-009** Define and enforce the typed-error rule: every fallible host call returns `result<T, E>`.
+  → Done: `tools/check_wit_errors.py`, wired into CI with a fault-injection harness.
+    **73 functions checked across 13 interfaces, 19 declared infallible by name.**
+  → **The rule is about *fallible* calls, and that distinction is the whole
+    difficulty.** It cannot be "every function returns `result`": `clock.timezone`
+    returns `"UTC"` and genuinely cannot fail, while `crypto.decrypt` returns
+    `result<list<u8>, aead-error>` because a tag may not verify. The check is
+    therefore *"every fallible function returns `result<T, E>`, AND every
+    infallible one is named in an allowlist with the category that makes it
+    infallible"* — which turns "this cannot fail" from an **omission** into a
+    **claim someone wrote down**, the property NN-5 asks for. A function added
+    without a `result` and without an allowlist entry fails the check, so its
+    author must decide which it is.
+  → The allowlist is not a dumping ground: each entry carries one of five
+    categories (constant, host-fixed measurement, pure computation over a closed
+    enum, capability-gated enumeration, pure predicate), and two entries are
+    themselves security properties. `secrets.exists` returns `bool` **by design**
+    so a guest cannot probe a value, length or type — an error type there would
+    be a disclosure channel. `sql.close` is infallible because a closer that can
+    fail forces every caller into a cleanup path it cannot act on.
+  → **It also enforces the rule's second half.** `result<T, string>` and
+    `result<T, u32>` parse fine and defeat *"not a status code buried in a
+    payload"*, so the error side must be a **named WIT variant** — which is what
+    gives a caller in any of the five languages an exhaustive `match` rather than
+    an integer to compare against constants.
+  → **Three checker defects found by writing it, every one of which reported a
+    *correct* file as broken** (`§O-062`): a line-at-a-time scanner missed
+    multi-line signatures and flagged `crypto.encrypt`/`crypto.decrypt` as having
+    no `result` (they have one, spanning five lines); a bare-name key could not
+    distinguish `wall-clock.now` (fallible) from `monotonic-clock.now`
+    (infallible), so the key is now `file.wit:interface[.resource].function`; and
+    clearing interface and resource scope together mislabelled
+    `database.databases` as `database.statement.databases`. A checker whose
+    output is noise gets weakened rather than fixed, so each was corrected at the
+    root.
+  → `tools/fault_inject_wit_errors.py` proves it fails for the right reasons with
+    three injections — a fallible function with no error type, a primitive error
+    type, and a stale allowlist entry — every one of which leaves the file
+    **parseable**.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-010** Implement the CI check that no host interface reads an environment variable or the working directory implicitly.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior

@@ -5000,6 +5000,88 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-062 — The typed-error rule: three checker defects, each of which called a correct file broken
+
+**What was built.** `tools/check_wit_errors.py` (`CON-009`) and
+`tools/fault_inject_wit_errors.py`. The corpus goes from unenforced to **13/13
+interfaces conforming, 73 functions checked, 19 declared infallible by name**.
+
+#### §O-062a — "Every function returns `result`" is the wrong rule, and the right one needs an allowlist
+
+Proposal §2.5 says *"every **fallible** host call returns a typed error"*. The
+emphasis is not decoration:
+
+* `clock.timezone() -> string` returns `"UTC"`. There is no failure to represent.
+* `crypto.decrypt(...) -> result<list<u8>, aead-error>` fails when a tag does not
+  verify.
+
+A check of "every function returns `result`" would flag the first and be wrong.
+The rule that works is:
+
+> Every fallible function returns `result<T, E>`, **and every infallible one is
+> named in an allowlist with the category that makes it infallible.**
+
+The allowlist is the point rather than a workaround. It converts "this cannot
+fail" from an **omission** — invisible, unargued — into a **claim someone wrote
+down**, which is exactly what NN-5 asks for. A new function with no `result` and
+no entry fails the check, so its author has to decide which category it falls
+into rather than defaulting into one silently.
+
+**Two entries are security properties rather than conveniences.**
+`secrets.exists(name) -> bool` returns a boolean *by design*, so a guest cannot
+probe a secret's value, length or type — only whether a code path is available.
+An error type there would itself be a disclosure channel. And `sql.statement.
+close()` is infallible because a closer that can fail forces every caller into a
+cleanup path it cannot act on; the host owns the connection and releases it on
+instance teardown regardless.
+
+**The rule's second half is also enforced.** `result<T, string>` and
+`result<T, u32>` parse perfectly and defeat *"not a status code buried in a
+payload"*, so the error side must be a **named WIT variant**. That is what gives
+a caller in any of the five target languages an exhaustive `match` rather than an
+integer to compare against constants.
+
+#### §O-062b — Three defects, all in the wrong direction
+
+Every one of the three made the checker report a **correct** file as broken.
+That direction matters more than the opposite: a checker with false positives is
+noisy, the noise makes people distrust it, and the cheap fix is to weaken it —
+whereas a false negative is silent and a missing check.
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| Line-at-a-time scanning | `crypto.encrypt` and `crypto.decrypt` reported as having no `result` — they have one, spanning five lines | The declaration is accumulated until the terminating `;` and examined whole |
+| A bare-name allowlist key | `qqq-clock.wit:now` could not express that `wall-clock.now` is fallible and `monotonic-clock.now` is not, so a correct file was reported as self-contradictory | The key is `file.wit:interface[.resource].function`, unambiguous by construction |
+| Clearing interface and resource scope together | `database.databases` mislabelled as `database.statement.databases` | Separate depths for the interface and the resource, so a closed resource leaves the interface in scope |
+
+The second is the instructive one: **the same function name in two interfaces
+with different failure modes** is not a hypothetical, it is the current state of
+`qqq-clock.wit`, and any key scheme that assumes a name is unique across a file
+is wrong about this repository today.
+
+#### §O-062c — Three injections, all parseable
+
+```
+  DETECTED  fallible function with no result
+  DETECTED  primitive error type
+  DETECTED  stale allowlist entry
+
+ALL 3 TYPED-ERROR FAULT INJECTIONS DETECTED
+```
+
+All three leave the WIT **parseable**, and the harness verifies that with
+`wasm-tools` before counting a detection — an injection that breaks the parser
+proves nothing about this checker, which is the discipline `§O-048c` and
+`§O-058e` established and `§O-061c` applied again.
+
+The third injection targets the *checker's own source*: a stale allowlist entry
+that names a function which no longer exists. Without it the allowlist grows
+without bound, each stale entry silently exempting nothing, and the list stops
+being a record of decisions. The harness edits `tools/check_wit_errors.py`,
+restores it, and verifies the restore by re-reading the file.
+
+---
+
 ### §O-061 — The WIT versioning policy: a parser proves the language, not the contract
 
 **What was built.** `tools/check_wit_since.py` (`CON-007`, `CON-008`),

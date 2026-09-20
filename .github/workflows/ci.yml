@@ -246,6 +246,28 @@ jobs:
       - name: Prove the WIT versioning check detects violations
         run: python tools/fault_inject_wit_since.py
 
+      # `CON-009`: every FALLIBLE host call returns a typed error rather than a
+      # status code buried in a payload (§2.5, NN-5). The rule is about fallible
+      # calls, so the check cannot be "every function returns `result`" --
+      # `clock.timezone` genuinely cannot fail while `crypto.decrypt` can. It is
+      # therefore "every fallible function returns `result<T, E>`, AND every
+      # infallible one is named in an allowlist with the category that makes it
+      # infallible" -- which turns "this cannot fail" from an omission into a
+      # written claim. 73 functions checked, 19 declared infallible by name.
+      #
+      # It also rejects `result<T, string>`: the rule's second half requires a
+      # NAMED variant, so a caller in any language gets an exhaustive match
+      # rather than an integer to compare against constants.
+      - name: Validate the typed-error rule (CON-009)
+        run: python tools/check_wit_errors.py
+
+      # And prove it can fail, with three injections -- a fallible function with
+      # no error type, a primitive error type, and a stale allowlist entry. Every
+      # injection leaves the file PARSEABLE, because one that breaks the parser
+      # proves nothing about this checker.
+      - name: Prove the typed-error check detects violations
+        run: python tools/fault_inject_wit_errors.py
+
   # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.
   # ---------------------------------------------------------------------------

@@ -411,3 +411,70 @@ jobs:
 
       - name: cargo-machete (unused dependencies)
         run: cargo machete
+
+  # ---------------------------------------------------------------------------
+  # Fuzzing targets: they must still COMPILE.
+  #
+  # SEC-012/SEC-013. The nightly `Fuzz` workflow runs them; this job proves they
+  # still build, on every commit and on stable CI infrastructure.
+  #
+  # # Why a compile check is worth a job of its own
+  #
+  # `fuzz/` is a separate workspace, so `cargo build --workspace` at the root does
+  # not touch it -- and nothing else does either. That means a signature change in
+  # `qqq-cap` or `qqq-host` breaks the fuzz targets **silently**: the nightly job
+  # would fail at 03:17, and the distance between the commit that caused it and
+  # the failure would be up to a day with several unrelated commits in between.
+  #
+  # The regression corpus in `crates/*/tests/fuzz_corpus.rs` cannot cover this,
+  # because it is deliberately written against the *public* API on stable Rust and
+  # does not use `libfuzzer-sys`. So the targets need their own check, and this is
+  # it. The cost is a few seconds; the alternative is discovering a broken fuzzing
+  # programme a day later, or never.
+  # ---------------------------------------------------------------------------
+  fuzz-targets:
+    name: Fuzz targets compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # A separate cache key, because this job builds the `fuzz/` workspace
+          # with a different toolchain from every other job.
+          workspaces: fuzz
+
+      - name: Every fuzz target compiles
+        run: |
+          set -euo pipefail
+          cd fuzz
+          cargo +nightly check --all-targets
+
+      - name: The fuzz targets LINK and produce a runnable binary
+        #
+        # `check` proves the targets type-check; it proves nothing about whether
+        # they can be built into something runnable. A linker failure is a
+        # *platform* failure and is exactly the kind that goes unnoticed until the
+        # nightly job fails at 03:17 -- which is how this step came to exist: on
+        # Windows, `crate-type = ["cdylib", "lib"]` made the link fail with
+        # `LNK2001: unresolved external symbol main`, and only an actual build
+        # surfaced it.
+        run: |
+          set -euo pipefail
+          cd fuzz
+          cargo +nightly fuzz build
+
+      - name: The regression corpus also runs
+        # The corpus lives in the main workspace and is already covered by
+        # `cargo test --workspace`, but running it here makes this job's evidence
+        # self-contained: a reviewer reading the fuzzing job's log sees BOTH
+        # halves of the programme, and does not have to trust that the other job
+        # ran.
+        run: |
+          set -euo pipefail
+          cargo test -p qqq-cap --test fuzz_corpus
+          cargo test -p qqq-host --test fuzz_corpus

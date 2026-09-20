@@ -1472,9 +1472,92 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.2 NN-2 — Security and Isolation Are Non-Optional. New file
     `crates/qqq-host/src/boundary.rs` (33 tests); 17 validation calls across 8
     boundaries in 4 interfaces.
-- [ ] **SEC-012** Establish the fuzzing programme covering the host interfaces, manifest parser and component loader.
+- [x] **SEC-012** Establish the fuzzing programme covering the host interfaces, manifest parser and component loader.
+  → Done, and the programme is **two mechanisms** because the item and `SEC-013`
+    ask for different things. Treating them as one produces a programme that runs
+    **when someone remembers**:
+    | Mechanism | Cadence | What it finds |
+    |---|---|---|
+    | Random exploration (`fuzz/`) | nightly, sustained | Unknown shapes; deep bugs |
+    | **Regression corpus** (`crates/*/tests/fuzz_corpus.rs`) | every commit, ms | A bug found once, coming back |
+  → The corpus is the half that must be in **every** build: a crash found by a
+    nightly run is worthless unless the input is re-run on every later commit,
+    because the bug is reintroduced by an unrelated change and found again later,
+    by luck. The **promotion step** — crash artifact → corpus entry → every future
+    build — is stated in the nightly workflow's failure output, where the person
+    who needs it will see it rather than in a document they would have to find.
+  → **Three targets, each asserting a property rather than "does not panic"**:
+    * `manifest_parse` — no panic; **determinism**; grant derivation is a pure
+      function of the manifest; renderings are stable. Determinism matters beyond
+      tidiness: the manifest is the authority root, so a parser whose output varied
+      would make the host's effective authority disagree with `qqqai why`, which is
+      the one disagreement the capability model must never have.
+    * `component_load` — no panic; every rejection carries a real `QQQ-XXXX` code
+      and a non-empty diagnostic; **accept implies usable** (digest present, import
+      listing sorted and deduplicated). The highest-value target: it hands
+      attacker bytes to Cranelift and the component-model validator, the front door
+      to §7.1's first asset.
+    * `host_interfaces` — the boundary checks, total and log-safe on hostile input,
+      with the traversal corpus re-run every iteration so a regression fails on the
+      mutation that causes it.
+  → **Building the corpus found a real defect before any fuzzing ran.** `toml`'s
+    `Span::start` is documented as a **byte index**, and it was assigned straight to
+    a field rendered as `qqq.toml line {n}`:
+    | Input | Reported | Actual | Python `tomllib` |
+    |---|---|---|---|
+    | `[package\nname = "a"\n` | line **8** | line **1** | line 1, col 9 |
+    | `not toml at all\n` | line **4** | line **1** | line 1, col 5 |
+    The error grows with the file — a 40-line manifest reported line numbers in the
+    thousands. **A diagnostic whose whole purpose is to point a developer at a
+    location, off by a factor of the average line length, is worse than none
+    because it is believed.** Fixed by counting `\n` in the prefix, which is
+    correct for `\r\n` files where `str::lines()` would be right on Linux and wrong
+    on Windows for every line after the first. Pinned against `tomllib` for the
+    specific cases plus a general assertion that every syntax error reports a line
+    **inside the file**.
+  → Also: one corpus entry was **mislabelled** (`\x00asm\x0d\x00\x01\x00` is a
+    valid empty component, not malformed) and the positive-control test named it.
+    A corpus entry whose expectation is wrong is worse than a missing one — it
+    either fails for the wrong reason or gets "fixed" by loosening the check.
+  → New: `fuzz/` (3 targets + corpus harness + 7 tests), `fuzz_corpus.rs` in
+    `qqq-cap` and `qqq-host`, `.github/workflows/fuzz.yml`.
   → §2.2 NN-2 — Security and Isolation Are Non-Optional
-- [ ] **SEC-013** Add `cargo-fuzz` targets to CI with a nightly fuzzing schedule.
+- [x] **SEC-013** Add `cargo-fuzz` targets to CI with a nightly fuzzing schedule.
+  → Done: `.github/workflows/fuzz.yml` runs the three targets **nightly at 03:17
+    UTC** (an odd minute on purpose — a round hour is when every other scheduled
+    job starts and runner contention is real) and on `workflow_dispatch` with a
+    configurable duration. AddressSanitizer is stated explicitly rather than left
+    to the default, because a silent fallback to no sanitizer would make every run
+    far less useful while still reporting success. `fail-fast: false`, so one
+    target's crash does not cancel the others' evidence. Crash artifacts upload
+    with `if: always()`, since they are the *interesting* output exactly when the
+    run fails.
+  → **The targets must also be buildable, so `ci.yml` gained a `fuzz-targets`
+    job** that runs `cargo +nightly fuzz build` — not merely `check`. `check`
+    proves type-correctness and says nothing about linkability, and the Windows
+    linker failure below was invisible to it. `fuzz/` is a separate workspace, so
+    nothing at the root touches it, and a signature change in `qqq-cap` or
+    `qqq-host` would otherwise break the targets **silently** until 03:17.
+  → Two build defects found by actually building, not type-checking:
+    * `crate-type = ["cdylib", "lib"]` failed to link on Windows with
+      `LNK2001: unresolved external symbol main` — a `#![no_main]` target defines
+      no `main`, and the `cdylib` is a Linux-only `cargo-fuzz` convenience. `lib`
+      alone is correct, and keeping `cdylib` would have made the fuzzing programme
+      unbuildable on the platform half the contributors use.
+    * The targets needed `wasmtime` as a **direct** dependency: `qqq-host`
+      deliberately does not re-export the engine, and Rust does not let a target
+      name a crate it does not depend on directly.
+  → **A platform limitation, recorded rather than left silent.** On Windows the
+    built target fails to *start* with `0xC0000135 STATUS_DLL_NOT_FOUND` — a
+    missing libFuzzer runtime DLL, a known `libfuzzer-sys` limitation, not a QQQ
+    defect (confirmed by running the built executable directly and reading the exit
+    code). Consequences, both intended: exploration runs on `ubuntu-latest` where
+    the sanitizer runtime exists, and the **corpus harness is the part that runs on
+    every platform** — another reason the two-mechanism split is the right design
+    rather than a convenience.
+  → Also proven in this job: the regression corpus runs, so a reviewer reading the
+    fuzzing log sees both halves of the programme rather than having to trust that
+    another job ran.
   → §2.2 NN-2 — Security and Isolation Are Non-Optional
 - [ ] **SEC-014** Establish the Wasmtime advisory-tracking process with a 72-hour patch target (`R-04`).
   → §15 — Risk Register

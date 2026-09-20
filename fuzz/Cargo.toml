@@ -1,0 +1,126 @@
+# QQQ fuzzing workspace — `SEC-012`, `SEC-013`.
+#
+# # Why this is a SEPARATE workspace and not a member of the root one
+#
+# `cargo-fuzz` targets require a nightly toolchain and pull in `libfuzzer-sys`,
+# which links a C++ sanitizer runtime. Adding that to the root workspace would
+# force every `cargo test`, every `cargo clippy` and every contributor's first
+# build to depend on a nightly-only crate — and would make the *stable* build
+# fail outright for anyone without the fuzzing toolchain installed. A check that
+# breaks the ordinary build is a check that gets removed.
+#
+# An empty `[workspace]` table is what makes this a workspace root rather than a
+# member of the parent: without it, cargo would walk up, find `E:\QQQ\Cargo.toml`
+# and refuse to build these targets outside the parent's feature unification.
+#
+# # Why the targets are still in the repository rather than in a separate one
+#
+# Because a fuzz target is a *test* of this code, and a test that lives in another
+# repository stops being run when the code changes. The fuzzing programme's value
+# is proportional to how hard it is to let it drift, and the only thing harder
+# than one repository is two.
+[workspace]
+members = ["."]
+resolver = "2"
+
+# The workspace's shared dependency versions. `fuzz/` is a SEPARATE workspace so
+# nightly-only crates cannot infect the main build, but `wasmtime = { workspace = true }`
+# below still needs an inherited table. It is declared rather than duplicated so the
+# fuzz targets cannot build a different engine from the runtime.
+[workspace.dependencies]
+wasmtime = "48"
+
+[package]
+name = "qqq-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# `cargo-fuzz` refuses to operate on a manifest that does not declare this table,
+# deliberately: it will otherwise treat an arbitrary `fuzz/` directory as fuzzable
+# and rewrite it. The keys are the defaults `cargo-fuzz init` writes.
+[package.metadata]
+cargo-fuzz = true
+
+# `lib` ONLY — deliberately not `cdylib`.
+#
+# `cargo-fuzz` writes a `cdylib` into its build output and links the standalone
+# harness against it on Linux. On Windows, `cdylib` produces a `.dll` and the
+# linker then requires a `main` symbol that a `#![no_main]` fuzz target does not
+# define:
+#
+#   LINK : error LNK2001: unresolved external symbol main
+#   error LNK1120: 1 unresolved externals
+#
+# The `[[bin]]` targets below are what libFuzzer actually runs on every platform
+# `cargo-fuzz` supports, and they link correctly everywhere. Keeping `cdylib` for
+# a Linux-only convenience would mean the fuzzing programme **cannot be built on
+# the platform half the contributors use** — which is how a fuzzing programme
+# quietly becomes Linux-only and then unused.
+#
+# `lib` is kept because the corpus harness in `src/lib.rs` is exercised by
+# `cargo test` here, independently of any fuzz target.
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]
+# `qqq-core` is deliberately NOT a dependency of this crate.
+#
+# It was declared when the fuzz workspace was created, on the assumption that the
+# targets would need the error model. They do not: every target reaches it through
+# `qqq-cap` or `qqq-host`, which re-export what a caller needs. `cargo machete`
+# found it, and removing it rather than adding an ignore is the right response —
+# an unused dependency in the *fuzzing* workspace is a crate compiled into every
+# sanitizer build for nothing.
+qqq-cap = { path = "../crates/qqq-cap" }
+qqq-host = { path = "../crates/qqq-host" }
+libfuzzer-sys = "0.4"
+
+# `wasmtime` is a DIRECT dependency, not a transitive one.
+#
+# `component_load` and `host_interfaces` build a `wasmtime::Engine` themselves,
+# which means naming the crate. Rust does not let a target `use` a crate it does
+# not depend on directly, even when one of its dependencies re-exports it — and
+# `qqq-host` deliberately does not re-export `wasmtime`, because the engine type
+# is an implementation detail of the host rather than part of QQQ's surface.
+#
+# The version comes from the workspace so the fuzz targets build the **same
+# engine** as the runtime. A fuzzer against a different Wasmtime version explores
+# a different code path, and the difference would never be noticed.
+wasmtime = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# The targets, declared explicitly.
+#
+# `cargo-fuzz` will otherwise auto-discover `.rs` files under `fuzz_targets/`,
+# but the explicit form is better here for a reason worth stating: it makes the
+# programme's **coverage** reviewable in one place. A fuzzing programme's strength
+# is the surfaces it covers, and a reader asking "what is fuzzed?" should be able
+# to answer from the manifest rather than by listing a directory.
+#
+# Each target is `path` + `name` + `test = false`. The last is required: a fuzz
+# target has no `#[test]` functions and its `main` comes from libFuzzer, so
+# building it as a test binary fails.
+# ---------------------------------------------------------------------------
+
+[[bin]]
+name = "manifest_parse"
+path = "fuzz_targets/manifest_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "component_load"
+path = "fuzz_targets/component_load.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "host_interfaces"
+path = "fuzz_targets/host_interfaces.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

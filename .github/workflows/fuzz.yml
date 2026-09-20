@@ -1,0 +1,121 @@
+name: Fuzz
+
+# Implements: SEC-012, SEC-013
+# Proposal:  §2.2 NN-2 — Security and Isolation Are Non-Optional
+#            §7.2 Adversary model
+#
+# # Why this is a separate workflow from CI
+#
+# The two mechanisms of a fuzzing programme have different cadences, and running
+# them in one workflow would force one of them to be wrong:
+#
+#   * The **regression corpus** must run on every commit, in seconds. It lives in
+#     the ordinary test suites (`crates/*/tests/fuzz_corpus.rs`) and is part of
+#     `cargo test --workspace`, so it gates every merge through the CI workflow.
+#   * **Random exploration** needs minutes to hours to be worth anything, and a
+#     fuzzer run for thirty seconds finds almost nothing. Putting it on the merge
+#     path would either make CI unusably slow or make the fuzzing too short to
+#     matter — and a check that is too slow gets disabled, which is how a fuzzing
+#     programme becomes decorative.
+#
+# So exploration runs nightly and on demand, and its failures are treated as real
+# bugs rather than as advisory signal.
+#
+# # The promotion path, which is what makes this more than a nightly job
+#
+# A crash found here is worthless unless the input that caused it is **re-run on
+# every subsequent commit**. libFuzzer writes crashes to `fuzz/artifacts/`; the
+# step below archives them, and the workflow's comment states the required
+# follow-up: the artifact becomes a corpus entry in
+# `crates/*/tests/fuzz_corpus.rs`, and from that moment it is checked in every
+# build. Without that step, the same bug is reintroduced by an unrelated change
+# and found again, later, by luck.
+
+on:
+  schedule:
+    # 03:17 UTC daily. An odd minute on purpose: a round hour is the moment every
+    # other scheduled job on GitHub starts, and runner contention is real.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Seconds to fuzz each target'
+        required: false
+        default: '300'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fuzzing without sanitizers is materially less useful: AddressSanitizer is what
+  # turns a one-byte overread into a reported crash instead of a silent corruption
+  # that surfaces as a nondeterministic test failure weeks later.
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      # `false` so one target's crash does not cancel the others' evidence. When
+      # several targets are broken at once, knowing which ones is the useful
+      # output — and a cancelled run reports nothing about the rest.
+      fail-fast: false
+      matrix:
+        target:
+          - manifest_parse
+          - component_load
+          - host_interfaces
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }}
+        # `--sanitizer address` is the default on Linux, but it is stated rather
+        # than assumed: a silent fallback to no sanitizer would make every run
+        # here a great deal less useful while still reporting success.
+        run: |
+          set -euo pipefail
+          seconds="${{ github.event.inputs.seconds || '300' }}"
+          cd fuzz
+          cargo +nightly fuzz run "${{ matrix.target }}" --sanitizer address -- \
+            -max_total_time="${seconds}" -print_final_stats=1
+
+      - name: Upload crash artifacts
+        # `if: always()` because the artifacts are the *interesting* output when
+        # the run fails, and a step that only runs on success uploads nothing at
+        # exactly the moment it matters.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          # Two weeks: long enough that a crash is still available when someone
+          # triages it, short enough that the storage does not accumulate.
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Explain the follow-up a crash requires
+        if: failure()
+        run: |
+          cat <<'EOF'
+          ============================================================
+          A fuzz target found a crash. The fix is NOT complete when the
+          bug is repaired -- it is complete when the input is promoted:
+
+            1. Download the artifact from this run's "Artifacts" section.
+            2. Add it as a corpus entry in the matching table:
+                 manifest_parse  -> crates/qqq-cap/tests/fuzz_corpus.rs  (MANIFESTS)
+                 component_load  -> crates/qqq-host/tests/fuzz_corpus.rs (COMPONENTS)
+                 host_interfaces -> crates/qqq-host/tests/fuzz_corpus.rs (HOSTILE)
+            3. Fix the bug so that entry, and every existing entry, passes.
+            4. Commit both together.
+
+          Step 2 is what turns this run into a regression test. Without it,
+          the same bug is reintroduced by an unrelated change and found
+          again later, by luck.
+          ============================================================
+          EOF

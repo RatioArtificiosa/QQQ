@@ -5000,6 +5000,140 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-073 — `SEC-012`/`SEC-013`: a fuzzing programme is two mechanisms, and only one belongs on the merge path
+
+**What the two items ask for.** `SEC-012` wants a fuzzing programme covering the
+host interfaces, the manifest parser and the component loader. `SEC-013` wants
+`cargo-fuzz` targets in CI with a nightly schedule. They are not the same request,
+and treating them as one produces a programme that runs **when someone remembers**.
+
+**The distinction that shaped the design.**
+
+| Mechanism | Cadence | What it finds |
+|---|---|---|
+| Random exploration (`fuzz/`) | nightly, sustained | Unknown shapes; deep bugs |
+| **Regression corpus** (`crates/*/tests/fuzz_corpus.rs`) | every commit, milliseconds | A bug found once, coming back |
+
+Both are implemented, for different reasons. Exploration needs minutes to hours to
+be worth anything — a fuzzer run for thirty seconds finds almost nothing — so
+putting it on the merge path would either make CI unusably slow or make the
+fuzzing too short to matter, and a check that is too slow gets disabled. The
+**corpus**, by contrast, must be in every build: a crash found by a nightly run is
+worthless unless the input that caused it is re-run on every subsequent commit,
+because the bug will be reintroduced by an unrelated change and found again later,
+by luck.
+
+That promotion step — crash artifact → corpus entry → every future build — is the
+thing that turns a fuzzing run into a regression suite. It is stated in the
+workflow's failure output, where the person who needs it will see it, rather than
+in a document they would have to find.
+
+**The three targets, and the property each asserts.** None of them is "call it and
+see if it panics", which is a fuzz target's most common shape and its least useful
+one:
+
+* `manifest_parse` — no panic; **determinism**; grant derivation is a pure
+  function of the manifest; renderings are stable. Determinism matters beyond
+  tidiness: the manifest is the authority root, so a parser whose output varied
+  would make the host's effective authority and `qqqai why`'s report disagree, and
+  that is the one disagreement the capability model must never have.
+* `component_load` — no panic; every rejection is classified with a real code and
+  a non-empty diagnostic; **accept implies usable** (a digest, a sorted import
+  listing). This is the highest-value target: it hands attacker bytes to Cranelift
+  and the component-model validator, the front door to §7.1's first asset.
+* `host_interfaces` — build once outside the loop, because the *pair* of
+  "never accept a known-bad shape" and "never refuse a legitimate one" is what
+  makes a boundary check meaningful.
+
+**Two real defects the target design produced before a single fuzz run happened.**
+
+1. **The TOML line number was a byte offset.** `toml::de::Error::span()` returns a
+   [`Span`] whose `start` is documented as *"The start byte index"* — and it was
+   assigned directly to a field rendered as `qqq.toml line {n}`. Measured:
+
+   | Input | Reported | Actual | Python `tomllib` |
+   |---|---|---|---|
+   | `[package\nname = "a"\n` | line **8** | line **1** | line 1, col 9 |
+   | `not toml at all\n` | line **4** | line **1** | line 1, col 5 |
+
+   The error grows with the file: a 40-line manifest reports line numbers in the
+   thousands. **A diagnostic whose entire purpose is to point a developer at a
+   location, and which is off by a factor of the average line length, is worse
+   than no location at all — because it is believed.** The fix counts `\n` in the
+   prefix, which is the definition of a line number and is correct for `\r\n`
+   files; using `str::lines()` would have normalised the `\r\n` away and been
+   right on Linux and wrong on Windows for every line after the first. Expectations
+   are pinned against `tomllib` for the specific cases, and the general assertion —
+   *every syntax error reports a line inside the file* — catches the whole class
+   without needing to know each right answer. This is exactly the defect the
+   corpus harness exists to find, and it was found by **building the corpus**, not
+   by running a fuzzer.
+
+2. **A corpus entry was mislabelled and the test said so.** `\x00asm\x0d\x00\x01\x00`
+   — a component header and nothing else — *compiles*, correctly: a component with
+   zero sections is valid. It sat in the reject table labelled "component header
+   only" as though it were malformed. The positive-control test failed on it and
+   named the mislabelling. The same bytes were already a known-good fixture in
+   `preload.rs` (`TINY`), so the second use is what made the first wrong.
+   **A corpus entry whose expectation is wrong is worse than a missing one**: it
+   either fails for the wrong reason, or — worse — gets "fixed" by loosening the
+   check it was meant to tighten.
+
+**A platform limitation, recorded rather than left silent.** `cargo-fuzz` on
+Windows builds the target but the resulting binary fails to start with
+`0xC0000135 STATUS_DLL_NOT_FOUND` — a missing libFuzzer runtime DLL, a known
+`libfuzzer-sys` limitation, not a QQQ defect. Confirmed by running the built
+executable directly and reading the exit code. Consequences, both intended:
+the nightly `Fuzz` workflow runs on `ubuntu-latest` where the sanitizer runtime
+exists, and the **corpus harness is the part that runs on every platform** — which
+is another reason the two-mechanism split is the right design rather than a
+convenience.
+
+Two build defects were fixed on the way, both found only by actually *building*
+rather than type-checking: `crate-type = ["cdylib", "lib"]` made the link fail on
+Windows with `LNK2001: unresolved external symbol main` (a `#![no_main]` target
+defines no `main`, and the `cdylib` is a Linux-only `cargo-fuzz` convenience, so
+`lib` alone is correct); and the targets needed `wasmtime` as a **direct**
+dependency, since `qqq-host` deliberately does not re-export the engine. The CI
+job now runs `cargo +nightly fuzz build`, not merely `check`, because `check`
+proves type-correctness and says nothing about linkability — and the Windows
+failure was invisible to it.
+
+**What is not covered, stated plainly.** A Wasmtime *validation* bug is not
+something a QQQ fuzz target can find; that is `SEC-014`'s advisory tracking, and
+it is deliberately not attempted here. The target checks the layer around the
+engine — panic containment, error classification, and usability on accept — which
+is what QQQ is responsible for.
+
+→ §2.2 NN-2, §7.2. New: `fuzz/` (three targets, corpus harness, 7 tests),
+`crates/qqq-cap/tests/fuzz_corpus.rs`, `crates/qqq-host/tests/fuzz_corpus.rs`,
+`.github/workflows/fuzz.yml`, and a `fuzz-targets` job in `ci.yml`. New code
+`QQQ-1002` diagnostics corrected (line numbers).
+
+---
+
+### §O-072 — The `write` tool intermittently left a file's contents stale in the incremental cache
+
+**What happened.** Twice, `cargo` reported an error quoting text that `grep` could
+not find in the source, and a `cargo clean -p <crate>` made it disappear. The
+source was correct both times; the incremental artifact was not.
+
+**Why this is recorded next to the fuzzing work rather than as a footnote.**
+Because the second occurrence was inside a test that reads its own source via
+`include_str!` — a test whose whole purpose is to catch drift between code and
+documentation. If such a test can fail because of a stale binary rather than a
+real drift, then its failure is not trustworthy, and an untrustworthy failure
+invites exactly the wrong response: weakening the check.
+
+**The discriminator, which is cheap.** Grep the source for the marker the failure
+quotes. If the marker is absent and the error still mentions it, the binary is
+stale. `cargo clean -p <crate>` and re-run before concluding anything about the
+code. This is the mirror of `§M-009` (verify that an *injection* applied) and of
+`§O-070` (verify that a *restore* applied): a developer's tooling must be
+confirmed before its output is believed, in both directions.
+
+---
+
 ### §O-071 — `SEC-011`: the check existed, ran, and was never reached
 
 **What the item asks for.** Validation at *every* guest-to-host boundary
@@ -6813,5 +6947,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-008` and `SEC-009` implemented (`§O-068`, `§O-069`), and the refusal path was itself the amplification.** `SEC-009`'s obvious implementation — a counter that refuses and lets the guest continue — is a **loop amplification attack**: the guest ignores the error and the host rebuilds a full `Error` (message, context `Vec`, remediation) every iteration. Measured with `cargo run --release --example refusal_probe -p qqq-host`: the advisory policy took **138.3573 ms** for 99,999 refusals against **48.8 µs** for the poisoned policy's 100,000 charges (1 paid, 99,998 free) — a **2835x** ratio, at **1384 ns per refusal** against a guest loop costing nanoseconds. This is structurally the same defect as §O-066: there Wasmtime made a refused `memory.grow` *advisory*, here returning an error and continuing made the refusal advisory in exactly the same way. `SubrequestBudget::charge` now returns `Charge::Refused` **once**, poisons the budget, and every later charge is `Charge::RefusedRepeatedly` — a counter increment with no allocation. **A limit whose refusal path can be driven in a loop has not bounded anything.** New manifest field `limits.max_subrequests` (`SUBREQUESTS_MAX = 10_000`, deliberately below `HANDLES_MAX` because a subrequest is a side effect on a third party), new code `QQQ-3008 SubrequestLimitExceeded` kept distinct from the retryable `4005 CapabilityQuotaExhausted`, and `StoreData::default()` grants **zero** budget so `0 == unlimited` cannot invert the most restrictive manifest into the most permissive. `SEC-008`'s risk was the opposite — a **second** counter beside `HandleTable`'s existing one, two sources of truth that drift, permissively (a vulnerability) or strictly (an outage) — so `quota::HandleQuota` is a **view** over the table that adds only `exhaustion_attempts`, which separates "the table reached its ceiling" from "a guest *tried* to pass it". Six `handles.rs` tests assert the **state** after a failed attempt rather than that it failed, and the load-bearing one is the **negative control**: 10,000 open/close cycles through a table holding 4 must never be refused, because the limit is on *concurrency* not *throughput*. Fault-injected twice: disabling the limit check fails **7 tests**; collapsing `RefusedRepeatedly` into `Refused` — the subtle regression — fails the two amplification tests. Four of my own assertions failed first against *correct* code, all from one misunderstanding now pinned in the tests: at a small limit the **last permitted** charge is `AllowedWithWarning`, since `spent * 100 >= limit * 80` is satisfied by the final charge. Recorded because loosening them to `is_allowed()` would have discarded the behaviour being pinned. | Architect |
 
 | 2026-09-20 | **`SEC-011` implemented (`§O-071`), and the boundary check was written, wired, and unreachable — found by injection.** `qqq-host::boundary` is a table-driven validation layer (Range / Size / Shape / Consistency) whose central control scans every `func_wrap("…")` in the host modules and fails if a boundary is missing from the table, so *every* — the load-bearing word in the item — is checked rather than asserted. Injecting a rename fails **both** that test and its reverse. `list_size` enforces element count **and** byte total because each catches what the other misses: 100 million empty strings is zero payload bytes and ~2.4 GB of `String` headers. **The finding took two injections to reach.** The check was written and wired into `random.get`, then (1) neutering the *helper* left **all 15 tests passing**, because every boundary test exercised a helper directly — proving the helper correct and proving nothing about whether a host call used it; fixed by extracting `random_length_verdict` and testing the pair. Then (2) neutering the **call site** while leaving the helper correct also left **all 16 tests passing** — extracting the helper had closed only half the hole; fixed by `the_call_site_applies_the_boundary_check`, which asserts in source that the registration body calls the helper and propagates with `?`. That fix is **structural**, and the test says so: proving it behaviourally needs a guest importing `qqq:crypto/random`, and hand-written WAT against that interface has failed to instantiate four times here. **The general lesson: a check that is written is not a check that runs, and a check that runs is not a check that is reached** — found three times now (the memory limit was advisory; the refusal path was the amplification; this check was unreachable). Two smaller defects: the table's first version used the *qualified* name while `func_wrap` registers the **bare** one, so the completeness test reported five undeclared clock functions; and the name extractor read **doc comments**, inventing `name` as a boundary because the source writes `` `func_wrap("name"` `` in its own prose. `§O-070` records the mirror of `§M-009`: stale incremental artifacts made a *restored* file look broken twice, and the cheap discriminator is to grep the source for the injected marker before believing the failure. | Architect |
+
+| 2026-09-20 | **`SEC-012`/`SEC-013` implemented (`§O-073`), and building the corpus found a defect before any fuzzing ran.** A fuzzing programme is **two mechanisms with different cadences**, and treating the two items as one request produces a programme that runs when someone remembers: random exploration belongs on a nightly schedule (thirty seconds of fuzzing finds almost nothing, and a check that makes CI slow gets disabled), while the **regression corpus** belongs in every commit — because a crash is worthless unless the input is re-run on every later commit, the bug being reintroduced by an unrelated change and found again later by luck. The promotion step (crash artifact → corpus entry → every future build) is stated in the nightly workflow's failure output where the person who needs it will see it. Three targets assert properties rather than "does not panic": `manifest_parse` (determinism, pure grant derivation, stable renderings), `component_load` (no panic, every rejection classified and explained, accept-implies-usable), `host_interfaces` (boundary totality, log-safety, traversal corpus re-run every iteration). **The defect:** `toml`'s `Span::start` is documented as a *byte index* and was assigned straight to a field rendered as `qqq.toml line {n}` — `[package` + newline + `name = "a"` reported **line 8** instead of line 1, and `not toml at all` reported **line 4** instead of line 1, verified against Python's `tomllib`. The error grew with file size: a 40-line manifest reported line numbers in the thousands. **A diagnostic whose whole purpose is to point a developer at a location, off by a factor of the average line length, is worse than none because it is believed.** Fixed by counting newlines in the prefix — correct for CRLF files, where `str::lines()` would be right on Linux and wrong on Windows after line one — with expectations pinned against `tomllib` plus the general assertion that every syntax error reports a line inside the file. One corpus entry was also **mislabelled**: a bare component header is a valid *empty* component, not malformed, and the positive-control test named it — an entry whose expectation is wrong is worse than a missing one, because it either fails for the wrong reason or gets "fixed" by loosening the check. Two build defects found only by building rather than type-checking: `crate-type = ["cdylib", "lib"]` failed to link on Windows with `LNK2001: unresolved external symbol main` (a `#![no_main]` target defines none, and the `cdylib` is a Linux-only `cargo-fuzz` convenience), and the targets needed `wasmtime` as a **direct** dependency since `qqq-host` deliberately does not re-export the engine. `ci.yml` gained a `fuzz-targets` job running `cargo +nightly fuzz build`, not merely `check` — `check` proves type-correctness and says nothing about linkability, which is how the Windows failure stayed invisible. A platform limitation is recorded rather than left silent: on Windows the built target fails to start with `0xC0000135 STATUS_DLL_NOT_FOUND` (a missing libFuzzer runtime DLL, a known `libfuzzer-sys` limitation), so exploration runs on Linux and the corpus harness covers every platform. `cargo machete` also found an unused `qqq-core` dependency in the fuzz workspace, removed rather than ignored. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

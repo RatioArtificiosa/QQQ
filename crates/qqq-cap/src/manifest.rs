@@ -504,6 +504,52 @@ impl Default for Limits {
 // Parsing errors
 // ---------------------------------------------------------------------------
 
+/// Convert a **byte offset** into a **1-based line number**.
+///
+/// # Why this function exists, and the defect it repairs
+///
+/// `toml::de::Error::span()` returns a [`Span`] whose `start` is documented as
+/// *"The start byte index"*. That value was assigned directly to a field named
+/// `line` and rendered as `qqq.toml line {n}`, so **every syntax error reported a
+/// byte offset while claiming to be a line**:
+///
+/// | Input | Reported | Actual | Python `tomllib` |
+/// |---|---|---|---|
+/// | `[package\nname = "a"\n` | line **8** | line **1** | line 1, col 9 |
+/// | `not toml at all\n` | line **4** | line **1** | line 1, col 5 |
+///
+/// The error grows with the file: a 40-line manifest reports line numbers in the
+/// thousands. A diagnostic whose entire purpose is to point a developer at a
+/// location, and which is off by a factor of the average line length, is worse
+/// than no location at all — because it is *believed*.
+///
+/// # Why the conversion counts `\n` rather than using `str::lines`
+///
+/// Because the offset must be interpreted against the **original bytes**. A
+/// manifest read from disk may contain `\r\n`, and `lines()` normalises that
+/// away — so counting lines over `lines()` while indexing into the raw string
+/// would be correct on Linux and off by one on Windows for every line after the
+/// first. Counting `\n` in the prefix is the definition of a line number and does
+/// not depend on how the file was written.
+///
+/// # Why the offset is clamped rather than trusted
+///
+/// A span from a parser is not guaranteed to be inside the text it was parsed
+/// from — a parser that reports "unexpected end of input" may point one past the
+/// end. `take` clamps by construction, so a caller never sees a panic on a
+/// malformed file, which is exactly when a diagnostic must not panic.
+#[must_use]
+fn line_number_at(text: &str, byte_offset: usize) -> usize {
+    // The count of newlines strictly before the offset, plus one, is the 1-based
+    // line number. `take` rather than slicing, so an out-of-range offset is
+    // clamped instead of panicking.
+    text.bytes()
+        .take(byte_offset)
+        .filter(|b| *b == b'\n')
+        .count()
+        + 1
+}
+
 /// A manifest could not be parsed or is semantically invalid.
 ///
 /// Carries enough structure for `qqqai` to render the mandated error block
@@ -751,7 +797,19 @@ impl Manifest {
         // than serde's for the common mistakes, then validate.
         let value: toml::Value = toml::from_str(text).map_err(|e| ManifestError::Syntax {
             detail: e.message().to_owned(),
-            line: e.span().map(|s| s.start),
+            // **`e.span().start` is a BYTE OFFSET, not a line number.**
+            //
+            // This was assigned directly to `line` and rendered as
+            // `qqq.toml line {n}`, so every syntax error reported a byte offset
+            // while claiming to be a line. For a three-line manifest with an
+            // unclosed table header the message read "line 8" — and the more
+            // content preceded the error, the more wrong it got: a 40-line file
+            // reported line numbers in the thousands.
+            //
+            // A diagnostic whose *whole purpose* is to point a developer at a
+            // location must not be off by a factor of the file's average line
+            // length. The conversion below is what makes the field's name true.
+            line: e.span().map(|s| line_number_at(text, s.start)),
         })?;
 
         // Required-field checks with friendly messages before the strict
@@ -1332,6 +1390,181 @@ max_open_handles = 256
     fn invalid_toml_reports_syntax() {
         let e = Manifest::parse("[package\nname = ").unwrap_err();
         assert!(matches!(e, ManifestError::Syntax { .. }), "got {e:?}");
+    }
+
+    /// **The line number is a line, not a byte offset.**
+    ///
+    /// `toml`'s `Span::start` is documented as a byte index, and it was assigned
+    /// straight to a field rendered as `qqq.toml line {n}` — so this test is the
+    /// one that would have caught the defect, and did not exist until fuzzing the
+    /// parser surfaced it.
+    ///
+    /// The expectation is pinned against **Python's `tomllib`**, whose messages
+    /// were checked by hand for the first two cases, so this is not a test
+    /// asserting whatever the implementation happens to produce.
+    #[test]
+    fn a_syntax_error_reports_a_real_line_number_not_a_byte_offset() {
+        // The unclosed header is on line 1, at byte 8. The old code reported 8.
+        let e = Manifest::parse("[package\nname = \"a\"\n").unwrap_err();
+        match e {
+            ManifestError::Syntax { line, detail } => {
+                assert_eq!(
+                    line,
+                    Some(1),
+                    "an unclosed table header on line 1 was reported as {line:?}; \
+                     byte offset 8 is not a line number. Detail: {detail}"
+                );
+            }
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+
+        // `not toml` fails at byte 4, on line 1. The old code reported 4.
+        let e = Manifest::parse("not toml at all\n").unwrap_err();
+        match e {
+            ManifestError::Syntax { line, .. } => assert_eq!(line, Some(1)),
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+    }
+
+    /// The reported line must **grow with the file**, not with its byte length.
+    ///
+    /// This is the property a byte offset fails most visibly: the same mistake
+    /// made on line 3 of a 10-line file and on line 30 of a 40-line file must
+    /// report 3 and 30, and the byte offset would report two numbers differing by
+    /// hundreds.
+    #[test]
+    fn the_reported_line_scales_with_the_line_not_the_offset() {
+        // Build a manifest whose error is on a known line: N valid package lines
+        // followed by an unclosed table header.
+        for target_line in [1_usize, 3, 7, 20] {
+            let mut text = String::new();
+            for i in 1..target_line {
+                // `write!` into the `String` rather than `push_str(&format!(..))`,
+                // which allocates a temporary per iteration for no reason —
+                // clippy's `format_push_string` says so and is right.
+                use std::fmt::Write as _;
+                let _ = writeln!(text, "# filler line {i}");
+            }
+            text.push_str("[unclosed\n");
+
+            let e = Manifest::parse(&text).unwrap_err();
+            match e {
+                ManifestError::Syntax { line, detail } => {
+                    assert_eq!(
+                        line,
+                        Some(target_line),
+                        "the error is on line {target_line} ({target_line} filler lines \
+                         then an unclosed header) but was reported as {line:?}. \
+                         Detail: {detail}"
+                    );
+                }
+                other => panic!("expected a syntax error, got {other:?}"),
+            }
+        }
+    }
+
+    /// The conversion counts newlines in the **raw** bytes, so `\r\n` is correct.
+    ///
+    /// # Why this is its own test
+    ///
+    /// Because the obvious implementation — `text.lines()` — normalises `\r\n`
+    /// and would report a line number that is right on Linux and wrong on
+    /// Windows for every line after the first. A manifest is a file a developer
+    /// writes on whatever platform they use, and a diagnostic that depends on
+    /// that is a diagnostic that lies to half its users.
+    #[test]
+    fn line_numbers_are_correct_for_crlf_files() {
+        // Two filler lines then an unclosed header, all `\r\n`.
+        let text = "# one\r\n# two\r\n[unclosed\r\n";
+        let e = Manifest::parse(text).unwrap_err();
+        match e {
+            ManifestError::Syntax { line, detail } => assert_eq!(
+                line,
+                Some(3),
+                "the error is on line 3 of a CRLF file but was reported as {line:?}. \
+                 Counting over `str::lines()` would normalise the `\\r\\n` away and \
+                 give the wrong answer. Detail: {detail}"
+            ),
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+    }
+
+    /// The offset conversion must not panic, whatever offset it is handed.
+    ///
+    /// A parser is not obliged to report a span inside the text it parsed, and
+    /// "unexpected end of input" reports an offset **at** the end. A diagnostic
+    /// must not panic on a malformed file — that is precisely the input it exists
+    /// to explain.
+    #[test]
+    fn the_line_conversion_is_total() {
+        let text = "a\nb\nc";
+        assert_eq!(line_number_at(text, 0), 1);
+        assert_eq!(line_number_at(text, 1), 1); // the `\n` itself is still line 1
+        assert_eq!(line_number_at(text, 2), 2);
+        assert_eq!(line_number_at(text, 4), 3);
+        // At and past the end: clamped, not panicking.
+        assert_eq!(line_number_at(text, text.len()), 3);
+        assert_eq!(line_number_at(text, 10_000), 3);
+        // The empty document is line 1, which is what a developer expects for
+        // "the file is empty".
+        assert_eq!(line_number_at("", 0), 1);
+    }
+
+    /// The end-to-end property, across a corpus of malformed manifests.
+    ///
+    /// Every one must report a line that is **within the file**. A byte offset
+    /// exceeds the line count as soon as the file has more bytes than lines,
+    /// which is every real manifest — so this single assertion catches the whole
+    /// defect class without needing to know the exact right answer for each case.
+    ///
+    /// # Only inputs that are *syntactically* invalid belong here
+    ///
+    /// `name = 123` is **valid TOML** that fails *schema* validation, so it
+    /// produces `InvalidField`, not `Syntax`. An earlier version of this corpus
+    /// included it and the test panicked on its own expectation rather than on
+    /// the code. The distinction is real and worth keeping straight: a `Syntax`
+    /// error means the file is not TOML at all, while every other variant means
+    /// the file is TOML that says something QQQ will not accept.
+    #[test]
+    fn every_syntax_error_reports_a_line_within_the_file() {
+        let corpus: &[&str] = &[
+            "[package\nname = \"a\"\n",
+            "not toml at all\n",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[[[\n",
+            "[package]\nname = \"a\"\nname = \"b\"\nversion = \"0.1.0\"\n",
+            "[package]\nname = \"orders\"\nversion = \"1.0.",
+            "# a comment\n# another\n# third\n[broken\n",
+            "= = =\n",
+            "[package]]\n",
+        ];
+
+        for text in corpus {
+            let line_count = text.lines().count().max(1);
+            let e = Manifest::parse(text).unwrap_err();
+            match e {
+                ManifestError::Syntax {
+                    line: Some(line),
+                    detail,
+                } => {
+                    assert!(
+                        (1..=line_count).contains(&line),
+                        "a malformed manifest with {line_count} line(s) reported a syntax \
+                         error at line {line}, which is outside the file. A byte offset \
+                         masquerading as a line number is the defect this asserts against. \
+                         Input: {text:?}. Detail: {detail}"
+                    );
+                }
+                ManifestError::Syntax { line: None, .. } => {
+                    // A parser that gives no span is acceptable; the conversion is
+                    // only required to be correct when there IS a span.
+                }
+                other => panic!(
+                    "expected a SYNTAX error for {text:?} — the input is not valid TOML \
+                     — but got {other:?}. If this input is in fact valid TOML, it does \
+                     not belong in this corpus."
+                ),
+            }
+        }
     }
 
     #[test]

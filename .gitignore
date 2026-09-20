@@ -51,6 +51,29 @@ desktop.ini
 # Scratch / temporary verification crates
 .scratch/
 
+# Fuzzing — `SEC-012`/`SEC-013`.
+#
+# `fuzz/` is a SEPARATE cargo workspace, so the root `/target/` rule above (which
+# is anchored) does not cover it. Without these lines, `git add -A` in the fuzz
+# directory would stage several gigabytes of build output — which is both a
+# repository-size problem and, worse, a source of *stale artifacts committed as
+# truth*, the failure `§O-072` records from the other direction.
+fuzz/target/
+
+# Crash artifacts. These are deliberately NOT committed: libFuzzer names them
+# `crash-<hash>` and their content is the bug, so the correct destination is a
+# **corpus entry** in `crates/*/tests/fuzz_corpus.rs` — which is the promotion
+# step that turns a one-off crash into a test that runs on every commit. An
+# artifact left in the tree is a bug nobody re-runs.
+fuzz/artifacts/
+
+# libFuzzer's evolving corpus. It is machine-generated and grows without bound;
+# the *curated* seed corpus in `fuzz/corpus/` IS committed, because a seed corpus
+# that is not in the repository is a seed corpus every contributor regenerates
+# from nothing.
+fuzz/corpus/*/
+!fuzz/corpus/README.md
+
 # Local tooling
 .tools/
 *.log

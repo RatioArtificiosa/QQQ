@@ -459,6 +459,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Add => dispatch_add(name, args, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
+        CommandName::Update => dispatch_update(name, args, flags, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -1017,6 +1018,167 @@ fn dispatch_install(
             escalation: resolution.diff.has_escalation(),
         })
     })
+}
+
+/// Dispatch `qqqai update`.
+///
+/// # Why the candidate set is empty
+///
+/// There is no registry (`PKG-006`), so there are no newer versions to consider.
+/// Calling [`qqq_run::decide`] with an empty candidate list is not a stub: it is
+/// the honest answer to "what can move?", which today is "nothing, and here is
+/// why for each package". The value is the *explanation* — a user running
+/// `update --dry-run` learns that `^1.2.3` is blocking `2.0.0`, which is a real
+/// answer to a real question even with no registry.
+///
+/// What this must not do is write a lockfile claiming versions it never saw
+/// (`§O-035c`).
+fn dispatch_update(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match update_options(args, flags) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        let path = qqq_run::lockfile_path(&loaded.path);
+        let Some(previous) = qqq_run::read_lockfile(&path)? else {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::LockfileOutOfDate,
+                format!(
+                    "`{}` does not exist, so there is nothing to update",
+                    path.display()
+                ),
+            )
+            .with_remediation(format!(
+                "run `{} install` first to resolve and write the lockfile",
+                qqq_core::BINARY_NAME
+            )));
+        };
+
+        // `--latest` plus an `exact = true` dependency is a contradiction, and
+        // it is refused rather than resolved by precedence: the two state
+        // opposite intents, and letting one silently win is how a user gets a
+        // major upgrade they did not ask for.
+        if opts.latest {
+            for (dep_name, dep) in loaded
+                .manifest
+                .dependencies
+                .iter()
+                .chain(loaded.manifest.dev_dependencies.iter())
+            {
+                if matches!(dep, qqq_cap::manifest::Dependency::Full(d) if d.exact) {
+                    return Err(qqq_run::contradictory_request(dep_name));
+                }
+            }
+        }
+
+        // The manifest's declared requirements, which is what bounds a move.
+        let requirements: std::collections::BTreeMap<String, String> = loaded
+            .manifest
+            .dependencies
+            .iter()
+            .chain(loaded.manifest.dev_dependencies.iter())
+            .map(|(n, d)| (n.clone(), d.requirement().to_owned()))
+            .collect();
+
+        // `NoRegistry` rather than an empty slice: the absence of a registry is
+        // a named state, so this line is greppable when `PKG-006` lands and the
+        // behaviour is a choice rather than an accident.
+        let candidates = qqq_run::plan_update(
+            &previous,
+            &requirements,
+            &qqq_run::NoRegistry,
+            opts.strategy(),
+        );
+
+        let next = qqq_run::apply(&previous, &candidates);
+        let d = qqq_run::diff(&previous, &next);
+
+        let wrote = if opts.may_write() && !d.is_empty() {
+            let mut lock = next.clone();
+            lock.stamp(&format!(
+                "{} {}",
+                qqq_core::BINARY_NAME,
+                qqq_core::SCHEMA_VERSION
+            ));
+            let text = lock.render()?;
+            qqq_run::deps::write_manifest(&path, &text)?;
+            true
+        } else {
+            false
+        };
+
+        let updated = qqq_run::moved_count(&candidates);
+
+        Ok(qqq_run::UpdateOutput {
+            lockfile: qqq_run::deps::display_manifest(&path),
+            strategy: opts.strategy().as_str().to_owned(),
+            dry_run: opts.dry_run,
+            wrote_lockfile: wrote,
+            updated,
+            kept: candidates.len() - updated,
+            capability_changes: d
+                .capability_changes
+                .iter()
+                .map(|c| qqq_run::CapabilityChangeReport {
+                    package: c.package.clone(),
+                    added: c.added.clone(),
+                    removed: c.removed.clone(),
+                })
+                .collect(),
+            escalation: d.has_escalation(),
+            candidates: qqq_run::report(&candidates, &previous),
+        })
+    })
+}
+
+/// Decode `qqqai update`'s flags.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag.
+fn update_options(
+    args: &[String],
+    flags: GlobalFlags,
+) -> Result<qqq_run::UpdateOptions, qqq_core::Error> {
+    let mut opts = qqq_run::UpdateOptions {
+        // The global `--dry-run` applies here too, and it is the flag this
+        // command most needs: an update's whole risk is what it changes, and a
+        // rehearsal answers that without committing.
+        dry_run: flags.dry_run(),
+        ..Default::default()
+    };
+
+    for a in args {
+        match a.as_str() {
+            "--latest" => opts.latest = true,
+            "--dry-run" => opts.dry_run = true,
+            // Consumed by `with_manifest`.
+            "--manifest" => {}
+            other if other.starts_with('-') => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `update`"),
+                )
+                .with_remediation("`update` accepts --latest, --dry-run and --manifest"));
+            }
+            // A bare package name is accepted and ignored for now: selecting a
+            // subset needs the registry to have candidates at all, and silently
+            // updating everything when the user named one package would be
+            // worse than saying so.
+            _ => {}
+        }
+    }
+
+    Ok(opts)
 }
 
 /// Decode `qqqai install`'s flags.

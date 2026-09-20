@@ -3174,6 +3174,118 @@ same module.
 
 ---
 
+### §O-037 — `qqqai update`, and designing the seam before the registry exists
+
+`CLI-007` is implemented in `qqq-run::update`. The command moves dependencies
+forward, reports the capability diff, and is precise about what it cannot do.
+
+---
+
+#### §O-037a — `--latest` is a separate flag because the default is a safety property
+
+The two strategies are not a preference, they are a promise about what QQQ will
+do while the user is not looking:
+
+| Strategy | Bounded by |
+|---|---|
+| *(default)* `WithinRequirement` | the manifest's requirement |
+| `--latest` → `Newest` | nothing |
+
+Defaulting to `--latest` would resolve `^1.2.3` to `2.0.0` — turning a
+conservative constraint into a breaking upgrade, and doing it while the user
+believes they asked for a routine refresh. That is the single most damaging
+thing a package manager can do by default, and the fix is that crossing the
+requirement requires typing a word.
+
+**The decision is a pure function.** `decide(name, pinned, requirement,
+available, strategy)` takes every input as a parameter and touches no
+filesystem, network or clock. That makes every branch reachable from a unit
+test — including the ones a real registry makes hard to produce, such as "a
+newer version exists but the requirement forbids it".
+
+Three defaults inside it are each the safe direction of an asymmetry:
+
+* An **unparsable requirement** keeps the pin. The opposite default — read it as
+  `*` — turns a typo into an unbounded upgrade.
+* An **unparsable pin** keeps the pin, because moving off a version we cannot
+  read is guessing.
+* An **unparsable candidate** is skipped, not fatal, so one malformed registry
+  entry does not break the update of every other package.
+
+---
+
+#### §O-037b — The best version is chosen by semver, not by list position
+
+`decide` compares versions rather than taking the last admissible element of the
+list. A registry is not required to return versions sorted, and a mirror that
+changes its ordering must not change what QQQ installs. Taking `.last()` is a bug
+that appears only when infrastructure changes, in a place nobody would look.
+
+The test feeds the list out of order (`1.9.0, 1.2.0, 1.5.0`) and asserts `1.9.0`.
+
+---
+
+#### §O-037c — `VersionSource`, so the registry is an implementation and not a rewrite
+
+The registry does not exist. The tempting shape is a function that returns an
+empty list today and grows a network call later — which means **every branch
+involving a newer version is untested until the day it ships**.
+
+Instead, the seam is a trait:
+
+```rust
+pub trait VersionSource {
+    fn available(&self, name: &str) -> Vec<String>;
+}
+```
+
+with `NoRegistry` (the real answer today) and `FixedVersions` (for tests). The
+consequence is that `plan`, `decide` and `apply` are *fully* exercised now:
+a move within range, a move blocked by the requirement, `--latest` crossing it,
+an unparsable candidate among valid ones, a package the manifest does not
+declare. When `PKG-006` lands, the registry becomes one more implementation of a
+trait whose behaviour is already pinned.
+
+The trait is deliberately **not** a network abstraction: no error case, no
+async. A source that cannot answer returns an empty list, and the caller reports
+"nothing newer" rather than failing the whole update. A registry outage must not
+stop a user from updating the packages resolvable from the store.
+
+---
+
+#### §O-037d — A "keep" must explain itself
+
+`Decision::Keep` carries a `reason`, and `--dry-run` prints it:
+
+```text
+kept:
+  qqqai/json  1.2.3 — no published version above `1.2.3` satisfies `^1.2.3`
+```
+
+Without it, a no-op update is **indistinguishable from a broken one**. The user
+runs `update`, nothing moves, and they have no way to tell whether the tool
+checked, or whether the requirement is what is holding them back, or whether the
+registry is unreachable. The reason answers the question they actually asked —
+"why is this not updating?" — and it costs one string.
+
+This is `§O-036a` from the other direction: there, output withheld data the user
+needed; here, a decision withholds its justification.
+
+---
+
+#### §O-037e — `--latest` plus `exact = true` is refused, not resolved
+
+An `exact = true` dependency says "this version and no other". `--latest` says
+"take the newest". Silently letting one win is how a user gets a major upgrade
+they did not ask for, so the combination is a hard error naming both ways out:
+remove `exact`, or drop `--latest`.
+
+The general rule this belongs to: **when two inputs state opposite intents,
+refuse rather than pick**. Precedence is a decision the tool makes on the user's
+behalf about their own intent, and it is invisible in the command they typed.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3481,5 +3593,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 
 | 2026-09-19 | **Four defects found by *using* a scaffolded project**, all in the surface and all invisible to 256 passing unit tests (`§O-036`). `qqqai caps` printed a count and not one capability name; `inspect`, `why` and `doctor` likewise withheld their payload — because in human format `summary()` **is** the entire output and the tests asserted on struct fields (`§O-036a`). `qqqai doctor` **exited `0` when a check failed**, so CI treated a broken environment as healthy; now exits 69 (`§O-036b`). The requirement parser **refused `>=1.0, <2.0`** — the syntax its own remediation text recommends — because the design note conflated a comma *conjunction* with a `\|\|` *disjunction*; comma lists are now supported as a `Vec<Clause>` (`§O-036c`). Structural fix: `crates/qqq-run/tests/cli.rs`, 24 tests that spawn the real binary and assert on stdout, stderr and exit codes rather than library internals (`§O-036d`). | Architect |
 | 2026-09-19 | `§M-007` repeated twice in the same session: an `edit` anchored on a section heading deleted the heading, in `§O-035` and again in `§O-036`. The rule is now stated operationally — when appending a section, never anchor on the boundary the new content sits before. | Architect |
+
+| 2026-09-19 | `CLI-007` implemented: `qqqai update` (`qqq-run::update`), with `--latest` and `--dry-run`. The default strategy honours the manifest's requirement and `--latest` crosses it, because defaulting to the newest version would resolve `^1.2.3` to `2.0.0` while the user believes they asked for a routine refresh (`§O-037a`). `VersionSource` is the seam the registry will plug into, so every decision branch — including ones needing a newer version — is exercised today rather than first tested when `PKG-006` lands (`§O-037c`). A kept package always carries a reason, since a no-op update that explains nothing is indistinguishable from a broken one (`§O-037d`). `--latest` with `exact = true` is refused rather than resolved by precedence (`§O-037e`). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

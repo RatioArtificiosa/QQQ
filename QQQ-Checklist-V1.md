@@ -748,7 +748,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Honest about the registry gap: with no registry (`PKG-006`) anything not already pinned fails with `QQQ-5001` naming the package, rather than writing a lockfile that promises bytes nobody fetched. `--locked` on a missing or stale lockfile fails with `QQQ-5003` and the exact next command.
   → §5.2 command surface; §5.4 the lockfile and the capability diff
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **CLI-007** Implement `qqqai update` with `--latest` and `--dry-run`.
+- [x] **CLI-007** Implement `qqqai update` with `--latest` and `--dry-run`.
+  → Done: `qqq-run::update`, dispatched from `main.rs`. The default strategy honours the manifest's requirement; `--latest` crosses it, and crossing requires a word because defaulting to it would resolve `^1.2.3` to `2.0.0` while the user believes they asked for a routine refresh. `--latest` combined with `exact = true` is **refused rather than resolved by precedence** — the two state opposite intents.
+  → `VersionSource` is the seam the registry plugs into (`NoRegistry` today, `FixedVersions` for tests), so the decision logic is fully exercised now rather than first tested when `PKG-006` lands. `decide` is a pure function; the best version is chosen by **semver, not list position**, because a registry is not required to sort. A keep always carries a reason, so `--dry-run` answers "why is this not updating?".
   → §5.2 The command surface
 - [x] **CLI-008** Implement `qqqai build` with `--release`, `--target`, `--aot`, `--reproducible`.
   → §5.2 The command surface

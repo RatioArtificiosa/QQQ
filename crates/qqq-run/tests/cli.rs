@@ -540,6 +540,116 @@ fn install_refuses_a_tampered_lockfile() {
 }
 
 // ---------------------------------------------------------------------------
+// update — the two axes
+// ---------------------------------------------------------------------------
+
+/// A lockfile with one pinned package.
+const PINNED: &str = "version = 1\n\n[[package]]\nname = \"qqqai/json\"\nversion = \"1.2.3\"\n";
+
+/// `update` reports what it considered, and why each package stayed.
+///
+/// With no registry nothing can move — and that is not a stub, it is the honest
+/// answer. The value is the explanation: `--dry-run` tells the user that
+/// `^1.2.3` is what is holding the version, which is a real answer to a real
+/// question.
+#[test]
+fn update_explains_why_a_package_did_not_move() {
+    let s = Sandbox::new("update-kept");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"^1.2.3\"\n",
+    );
+    s.write("qqq.lock", PINNED);
+
+    s.run(&["update", "--dry-run"])
+        .assert_ok()
+        .assert_contains("qqqai/json")
+        .assert_contains("^1.2.3");
+}
+
+/// A package is named in the human output, not merely counted.
+///
+/// This is the `§O-036a` contract applied to a new command: in human format the
+/// summary is the whole output, so "0 updated, 1 kept" alone would leave the
+/// user unable to tell which package was kept.
+#[test]
+fn update_names_the_packages_it_considered() {
+    let s = Sandbox::new("update-names");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"^1.2.3\"\n",
+    );
+    s.write("qqq.lock", PINNED);
+
+    let run = s.run(&["update", "--dry-run"]);
+    run.assert_ok();
+    assert!(
+        run.all().contains("qqqai/json"),
+        "the package must be named:\n{}",
+        run.all()
+    );
+    assert!(
+        run.all().contains("1.2.3"),
+        "the version must be shown:\n{}",
+        run.all()
+    );
+}
+
+/// `--latest` with an exact pin is refused, not resolved by precedence.
+///
+/// The two state opposite intents, and silently letting one win is how a user
+/// ends up with a major upgrade they did not ask for.
+#[test]
+fn update_refuses_latest_with_an_exact_pin() {
+    let s = Sandbox::new("update-exact");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = { version = \"1.2.3\", exact = true }\n",
+    );
+    s.write("qqq.lock", PINNED);
+
+    s.run(&["update", "--latest"])
+        .assert_failed()
+        .assert_contains("exact");
+}
+
+/// Updating with no lockfile fails and says what to run first.
+#[test]
+fn update_without_a_lockfile_says_what_to_run_first() {
+    let s = Sandbox::new("update-nolock");
+    s.write("qqq.toml", MINIMAL);
+
+    s.run(&["update"])
+        .assert_failed()
+        .assert_contains("qqq.lock")
+        .assert_contains("install");
+}
+
+/// `install --dry-run` writes nothing, and a real install does.
+///
+/// The rehearsal is only useful if it is genuinely non-mutating.
+#[test]
+fn install_dry_run_does_not_write_a_lockfile() {
+    let s = Sandbox::new("install-dry");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    s.write("qqq.lock", PINNED);
+
+    s.run(&["install", "--dry-run"]).assert_ok();
+    assert_eq!(
+        s.read("qqq.lock"),
+        PINNED,
+        "a rehearsal must not rewrite the lockfile"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // global contracts
 // ---------------------------------------------------------------------------
 

@@ -458,12 +458,27 @@ fn display_path(path: &Path) -> String {
     shown.to_string_lossy().replace('\\', "/")
 }
 
-/// Write `content` to `path` via a temporary file and a rename.
+/// Write a manifest or lockfile atomically.
 ///
-/// The rename is the point: it is atomic on the same filesystem, so a reader
-/// sees either the old manifest or the new one. A partial write would leave a
-/// truncated `qqq.toml`, which is unbuildable and unrecoverable.
-fn write_atomically(path: &Path, content: &str) -> Result<()> {
+/// Public because `update` writes a lockfile and must use **the same** atomic
+/// write as `add` and `install`. A second implementation would eventually
+/// differ in the one property that matters — that a crash leaves either the old
+/// bytes or the new ones and never a prefix of either.
+///
+/// The validation inside [`write_atomically`] parses the content as a manifest,
+/// which is wrong for a lockfile. This wrapper therefore does not validate;
+/// callers writing a lockfile are expected to have produced it from
+/// [`qqq_pkg::Lockfile::render`], which cannot emit something unparsable.
+///
+/// # Errors
+///
+/// `QQQ-2001` when the temporary file cannot be written or renamed into place.
+pub fn write_manifest(path: &Path, content: &str) -> Result<()> {
+    write_raw_atomically(path, content)
+}
+
+/// Write bytes via a temporary file and a rename, without content validation.
+fn write_raw_atomically(path: &Path, content: &str) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.qqqtmp{}",
@@ -482,10 +497,29 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
         .with_cause(e.to_string())
     })?;
 
-    // Verify before publishing. A manifest that does not parse must never
-    // replace one that does, whatever the cause.
-    if let Err(e) = qqq_cap::manifest::Manifest::parse(content) {
+    std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
+        Error::new(
+            ErrorCode::ManifestSyntaxInvalid,
+            format!("could not replace `{}`", path.display()),
+        )
+        .with_cause(e.to_string())
+    })?;
+    Ok(())
+}
+
+/// Write `content` to `path` via a temporary file and a rename.
+///
+/// The rename is the point: it is atomic on the same filesystem, so a reader
+/// sees either the old manifest or the new one. A partial write would leave a
+/// truncated `qqq.toml`, which is unbuildable and unrecoverable.
+///
+/// Validation happens **before** the write, so a manifest that does not parse
+/// can never replace one that does. The temporary file is only created once the
+/// content is known to be good — which also means a rejected edit leaves no
+/// stray `.qqqtmp` beside the manifest.
+fn write_atomically(path: &Path, content: &str) -> Result<()> {
+    if let Err(e) = qqq_cap::manifest::Manifest::parse(content) {
         return Err(Error::new(
             ErrorCode::ManifestSchemaViolation,
             format!("the edit would produce an invalid manifest: {e}"),
@@ -496,16 +530,7 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
              please report it with the command you ran",
         ));
     }
-
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        Error::new(
-            ErrorCode::ManifestSyntaxInvalid,
-            format!("could not replace `{}`", path.display()),
-        )
-        .with_cause(e.to_string())
-    })?;
-    Ok(())
+    write_raw_atomically(path, content)
 }
 
 #[cfg(test)]

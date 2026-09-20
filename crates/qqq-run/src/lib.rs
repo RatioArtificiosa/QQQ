@@ -41,6 +41,7 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+pub mod update;
 pub mod watch;
 
 pub use build::{
@@ -74,6 +75,11 @@ pub use scaffold::{
     crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,
     Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,
     WrittenFile,
+};
+pub use update::{
+    apply, authority_unknown_for_moved, cannot_update, contradictory_request, decide, diff,
+    moved_count, plan as plan_update, report, CandidateReport, Decision, FixedVersions, NoRegistry,
+    Strategy, UpdateCandidate, UpdateOptions, UpdateOutput, VersionSource,
 };
 pub use watch::{
     Change, Debouncer, FileFingerprint, IgnoreRules, Snapshot, DEFAULT_DEBOUNCE,

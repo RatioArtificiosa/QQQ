@@ -28,6 +28,7 @@
 
 pub mod build;
 pub mod commands;
+pub mod dev;
 pub mod manifest_loader;
 pub mod output;
 pub mod run;
@@ -48,6 +49,10 @@ pub use build::{
 pub use commands::{
     caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,
     InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput, WhyStep,
+};
+pub use dev::{
+    build_once, capability_warning, run as run_dev, select_tier, watch_roots, watch_rules,
+    DevOptions, DevOutput, ReloadRecord, ReloadTier,
 };
 pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{

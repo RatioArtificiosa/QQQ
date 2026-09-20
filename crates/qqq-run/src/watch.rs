@@ -886,7 +886,10 @@ mod tests {
         let mut d = Debouncer::new(Duration::from_millis(100));
         let t0 = Instant::now();
         d.observe(1, t0);
-        assert_eq!(d.should_fire(t0.checked_sub(Duration::from_millis(50)).unwrap()), None);
+        assert_eq!(
+            d.should_fire(t0.checked_sub(Duration::from_millis(50)).unwrap()),
+            None
+        );
         assert_eq!(d.pending(), 1, "the change is still pending");
     }
 

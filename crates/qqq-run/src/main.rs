@@ -430,6 +430,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Run => dispatch_run(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
         CommandName::Init => dispatch_init(name, args, &mut out),
+        CommandName::Dev => dispatch_dev(name, args, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -758,6 +759,114 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
     Ok(opts)
 }
 
+/// Dispatch `qqqai dev`.
+///
+/// `dev` goes through `with_manifest`, because unlike `new` and `init` it needs
+/// a manifest to exist — and its error if one is missing is the one place a user
+/// should meet `qqqai new`.
+fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
+    let opts = match dev_options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    with_manifest(name, out, args, |loaded| qqq_run::dev::run(loaded, &opts))
+}
+
+/// Decode `qqqai dev`'s own flags.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag or an unparsable value.
+fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> {
+    let mut opts = qqq_run::DevOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--port" | "-p" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.port = v
+                    .parse()
+                    .map_err(|_| bad_value(a, v, "a port number 1-65535"))?;
+                i += 1;
+            }
+            "--host" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                v.clone_into(&mut opts.host);
+                i += 1;
+            }
+            "--watch" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.watch.push(v.clone());
+                i += 1;
+            }
+            "--ignore" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.ignore.push(v.clone());
+                i += 1;
+            }
+            "--inspect" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.inspect = Some(
+                    v.parse()
+                        .map_err(|_| bad_value(a, v, "a port number 1-65535"))?,
+                );
+                i += 1;
+            }
+            "--reload-limit" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.reload_limit = Some(
+                    v.parse()
+                        .map_err(|_| bad_value(a, v, "a positive whole number"))?,
+                );
+                i += 1;
+            }
+            "--once" => opts.set(qqq_run::DevOptions::ONCE),
+            "--open" => opts.set(qqq_run::DevOptions::OPEN),
+            "--https" => opts.set(qqq_run::DevOptions::HTTPS),
+            "--deterministic" => opts.set(qqq_run::DevOptions::DETERMINISTIC),
+            other => {
+                if let Some(v) = other.strip_prefix("--port=") {
+                    opts.port = v
+                        .parse()
+                        .map_err(|_| bad_value("--port", v, "a port number"))?;
+                } else if let Some(v) = other.strip_prefix("--reload-limit=") {
+                    opts.reload_limit = Some(
+                        v.parse()
+                            .map_err(|_| bad_value("--reload-limit", v, "a positive number"))?,
+                    );
+                } else if other == "--manifest" {
+                    // Owned by `with_manifest`; skip its value.
+                    i += 1;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `dev`"),
+                    )
+                    .with_remediation(
+                        "`dev` accepts --port, --host, --watch, --ignore, --inspect, \
+                         --open, --https and --once",
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+/// The error for a flag whose value could not be parsed.
+fn bad_value(flag: &str, got: &str, expected: &str) -> qqq_core::Error {
+    qqq_core::Error::new(
+        qqq_core::ErrorCode::McpArgumentInvalid,
+        format!("`{got}` is not valid for `{flag}`"),
+    )
+    .with_remediation(format!("expected {expected}"))
+}
+
 /// The error for an unrecognised choice, listing the valid ones.
 fn unknown_choice(kind: &str, got: &str, valid: &[&str]) -> qqq_core::Error {
     qqq_core::Error::new(
@@ -914,6 +1023,9 @@ fn run_options(
         }
         match a {
             "--" => after_separator = true,
+            // `run`'s own `deterministic` is a plain field, unlike `dev`'s
+            // bitfield: `run` has only one switch, and a bitfield for one flag
+            // would be ceremony.
             "--deterministic" => opts.deterministic = true,
             "--artifact" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value("--artifact"))?;

@@ -137,6 +137,27 @@ def main() -> int:
         lambda t: t.replace("§D-005", "§REMOVED"),
     ))
 
+    print("check [12] Observations keeps its nine-section skeleton")
+    results.append(expect_failure(
+        "delete the `## 4. MISTAKES AND FIXES` heading",
+        OBS,
+        # The exact mistake that happened four times: an `edit` anchored on this
+        # heading, used it as trailing context, and did not reproduce it.
+        #
+        # Anchored on the *line*, not on the bare string. The bare string appears
+        # four times in the document — this entry and several others quote the
+        # heading while explaining the mistake — so replacing the first
+        # occurrence left the check still able to find the text, and the harness
+        # reported the injection as dead. It was the injection that was wrong,
+        # not the check: which is precisely what a self-test is for.
+        lambda t: re.sub(
+            r"(?m)^#+ 4\. MISTAKES AND FIXES[ \t]*$",
+            "## (heading deleted)",
+            t,
+            count=1,
+        ),
+    ))
+
     print("check [6] duplicate checklist ID")
     results.append(expect_failure(
         "duplicate CAP-011",

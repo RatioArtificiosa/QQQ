@@ -383,6 +383,58 @@ def main() -> int:
         errors.append("[11] Observations defines §S- stubs but no inline QQQ-STUB markers exist")
 
     # ----------------------------------------------------------------------
+    # 12. The Observations document keeps its skeleton.
+    #
+    # This exists because the same mistake happened four times: an `edit`
+    # anchored on `## 4. MISTAKES AND FIXES` used that heading as trailing
+    # context and did not reproduce it, so the heading was deleted. Each time it
+    # was caught by a person re-listing the headings afterwards, and each time
+    # the lesson was written down as a note — which did not prevent the next
+    # occurrence (§M-007).
+    #
+    # A note was not enough, so this is a check. The document has a fixed
+    # nine-section skeleton; a missing rib is mechanically visible.
+    # ----------------------------------------------------------------------
+    EXPECTED_SECTIONS = [
+        "## 1. NEEDS YOUR ATTENTION",
+        "## 2. DECISIONS",
+        "## 3. OBSERVATIONS",
+        "## 4. MISTAKES AND FIXES",
+        "## 5. CORRECTIONS TO THE SOURCE CORPUS",
+        "## 6. CODE STUBS AND PENDING ITEMS",
+        "## 7. OPEN QUESTIONS",
+        "## 8. THINGS TO REMEMBER (THE SHORT LIST)",
+        "## 9. CHANGE LOG",
+    ]
+
+    # Matched as a **line**, not as a substring.
+    #
+    # A substring search was the first implementation and it was wrong: this
+    # document *quotes* the heading `## 4. MISTAKES AND FIXES` in several places
+    # while explaining the mistake of deleting it, so `find()` kept succeeding
+    # after the real heading was removed. The check passed on a document that had
+    # lost its section — and the fault injection is what caught that, by
+    # reporting the check as dead rather than the injection as broken.
+    #
+    # Anchoring on the line is what makes the check test the skeleton rather than
+    # the text.
+    positions = []
+    for section in EXPECTED_SECTIONS:
+        match = re.search(r"(?m)^" + re.escape(section) + r"[ \t]*$", observations)
+        if match is None:
+            errors.append(
+                f"[12] Observations is missing the section heading `{section}`"
+            )
+        else:
+            positions.append(match.start())
+
+    # Also checked: the sections are in order. A heading restored in the wrong
+    # place leaves the document readable but its numbering a lie, which is
+    # harder to notice than a missing one.
+    if len(positions) == len(EXPECTED_SECTIONS) and positions != sorted(positions):
+        errors.append("[12] Observations section headings are out of order")
+
+    # ----------------------------------------------------------------------
     # Report
     # ----------------------------------------------------------------------
     # ----------------------------------------------------------------------

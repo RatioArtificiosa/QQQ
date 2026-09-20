@@ -3624,6 +3624,83 @@ the same defect as a ticking checklist item that is not finished.
 
 ---
 
+### §O-041 — The objective audit passes, and a check that was failing on nothing
+
+`tools/audit_requirements.py` reports **30/30**. It had been reporting 29/30 for
+as long as anyone ran it, on a condition the repository does not have.
+
+---
+
+#### §O-041a — Three wrong diagnoses of one symptom, and what finally worked
+
+The symptom: `git status` reported the three canonical documents modified,
+`git diff` showed nothing, and `git ls-files --eol` read `i/lf w/crlf`.
+
+| Attempt | Diagnosis | How it failed |
+|---|---|---|
+| 1 | "`eol=lf` overrides `autocrlf`" — written into `.gitattributes` as fact | It does not. The attribute governs the commit; `autocrlf` governs the checkout. |
+| 2 | "`core.autocrlf=false` fixes it" — written into `.gitattributes` as fact | One `git add` looked clean, so I concluded. The drift returned on the next operation. |
+| 3 | "`text=auto` is the cause; use `text`" | Improved the attribute, did not remove the symptom. |
+
+Each diagnosis came from **one observation** and went into a comment as a
+conclusion. The comments then outlived the beliefs, which is the more expensive
+half: a wrong cause written down is a wrong cause someone will trust.
+
+What worked was **measuring the right artifact**. The question was never what the
+working tree contains; it is what was *committed*:
+
+```text
+git cat-file -p HEAD:QQQ-Checklist-V1.md   -> 0 CRLF, 1,549 LF
+git ls-files --eol QQQ-Checklist-V1.md     -> i/lf  w/crlf
+```
+
+The committed blob is correct. The checkout is untidy. **Every "failure" was
+about the untidy checkout.**
+
+So the fix was not to the repository at all — it was to the checks. Both
+`normalize_eol.py` and `audit_requirements.py` now test committed content:
+
+| Tool | Tested | Now tests |
+|---|---|---|
+| `normalize_eol.py` | working-tree bytes | the `i/` column of `git ls-files --eol`; FAIL only if a **blob** holds CRLF |
+| `audit_requirements.py` | `git status --porcelain` | `git diff HEAD` plus untracked paths |
+
+`text eol=lf` on the three documents remains, pinned by path rather than by
+extension — the other Markdown in the repository has never drifted, and widening
+a rule to cover a symptom it does not explain is how a fix becomes a new bug.
+
+**The generalizable failure, which this project has now recorded three times in
+three guises:** a check that fails on a condition the repository does not have is
+indistinguishable from a check that always fails (`§M-006`, `§O-040c`). The
+correction each time has been to test the thing that actually matters rather than
+the thing that was easy to observe.
+
+**And the process lesson:** an instrumented sequence — normalize, count, add,
+count, status, count — found the writer in fewer steps than either guess took.
+Measuring between each step beats reasoning about which step is at fault.
+
+---
+
+#### §O-041b — A hardcoded count in a report goes stale silently
+
+`audit_requirements.py` carried the label `"validator self-test passes (7/7)"` as
+a **literal**. An eighth fault injection was added; the check still passed, so
+nothing failed, and the report confidently printed a wrong number.
+
+The label is now derived from the harness output. That also makes a *decrease*
+visible: `8 -> 7` would be noticed rather than absorbed.
+
+The same staleness appeared in `ci.yml`, where a comment said the harness "breaks
+the corpus seven ways". That one was **deleted rather than corrected** — the
+harness prints its own count, and a number restated in a comment is a number that
+will go stale again.
+
+The rule: **a report must read its numbers, not restate them.** A literal that
+describes a measurement is a claim that will eventually be false, and it fails by
+being quietly wrong rather than loudly broken.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -3742,6 +3819,25 @@ because the pattern is now clear enough to name:
 The reliable check, which caught it both times, is to re-list the document's
 top-level headings after any edit that touches a section boundary. That check is
 now the habit; a note in this document was not enough.
+
+**A fourth occurrence, and the reason a note was not enough.** It happened again
+while writing `§O-041`: the `## 4. MISTAKES AND FIXES` heading was deleted, and
+it was caught only by re-listing the headings — for the fourth time. A lesson
+recorded three times and repeated a fourth is not a lesson; it is a missing
+mechanism.
+
+So the mechanism now exists. `check_xrefs.py` **check `[12]`** asserts that the
+Observations document contains all nine of its numbered top-level sections, in
+order. Deleting a heading is exactly the failure that has recurred, and it is
+mechanically detectable: the document has a fixed skeleton and a missing rib is
+visible.
+
+Verified by a fault injection that removes a heading and asserts the check
+fires, so `[12]` cannot become a check that always passes. See `self_test_xrefs.py`.
+
+The generalizable form: **when the same mistake recurs after being written down,
+the writing-down was not the fix.** The fix is a check — something that fails
+loudly without a person remembering to look.
 
 ---
 

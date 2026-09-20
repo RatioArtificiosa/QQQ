@@ -96,6 +96,19 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 - [x] **FND-001** Create the Cargo workspace with the crate topology from the proposal.
   → Done: `Cargo.toml` declares the workspace, with per-crate tier and Proposal-section comments.
+  → **The naming invariant `§D-001` is now enforced rather than trusted.** The
+    objective states that *"a build producing a `qqq` binary is a defect"*; that
+    was previously verified once by hand (`cargo build -p qqq-run` yields
+    `qqqai.exe` and no `qqq.exe`), and a verified-once fact decays. Four tests in
+    `crates/qqq-core/tests/naming.rs` enforce it: every declared `[[bin]]` is
+    `qqqai`; a crate with `src/main.rs` and no `[[bin]]` stanza is a violation
+    (Cargo would name that binary after the package); no package is named `qqq`;
+    and no document teaches a bare `qqq <subcommand>`. The last one scans for
+    `qqq` followed by one of 26 known subcommands and excludes matches preceded
+    by `qqqai` or `-`, because the brand appears legitimately everywhere and
+    `qqq-` prefixes crate names — checking the property rather than the string.
+    `tools/fault_inject_naming.py` injects a `qqq` binary, a `qqq new` doc
+    example and a package named `qqq`; **all three are detected** (`§O-060`).
   → §4.3 Crate topology
 - [x] **FND-002** Write `PRINCIPLES.md` at the repository root, containing the eight non-negotiables verbatim plus the operationalization table.
   → Done: `PRINCIPLES.md` at the repository root, with the operationalization table.

@@ -179,6 +179,18 @@ jobs:
       - name: Prove the safety-argument check detects an unwritten exception
         run: python tools/fault_inject_safety_arg.py
 
+      # The naming invariant is the project's PUBLIC INSTALL SURFACE. §D-001
+      # settles it -- brand QQQ, crate/npm/binary/command all `qqqai`, because
+      # `qqq` is taken on crates.io and npm -- and calls it permanent rather than
+      # a workaround awaiting a better option. A rename is otherwise discovered by
+      # users running `cargo install qqq`, not by CI.
+      #
+      # This harness injects three realistic ways the rule breaks: a `[[bin]]`
+      # renamed to `qqq`, a document teaching `qqq new`, and a package renamed to
+      # the taken name. All three must be caught.
+      - name: Prove the naming check detects a `qqq` binary
+        run: python tools/fault_inject_naming.py
+
       # The objective audit: does the deliverable set actually satisfy the
       # brief? It checks that all three documents exist and are English, that
       # the Proposal covers the required sections, that the Checklist is fully

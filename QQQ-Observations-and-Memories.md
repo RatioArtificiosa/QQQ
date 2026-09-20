@@ -4797,6 +4797,83 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-060 — The naming invariant is now enforced, not just settled
+
+**What was built.** `crates/qqq-core/tests/naming.rs` — 4 tests enforcing `§D-001`,
+plus `tools/fault_inject_naming.py`, which injects three realistic ways the rule
+breaks and asserts each is caught.
+
+#### §O-060a — Why "settled" needed a test
+
+`§D-001` states the naming as *"deliberate, permanent — not a workaround awaiting
+a better option"*, and the objective restates the consequence flatly:
+
+> **a build producing a `qqq` binary is a defect.**
+
+Before this, that was verified once, by hand: `cargo build -p qqq-run` produces
+`qqqai.exe` and no `qqq.exe`. A verified-once fact is a fact that decays, and the
+decay is cheap to introduce — a `[[bin]]` stanza added by hand, a package renamed
+to match the brand, or a doc example teaching `qqq new`.
+
+The naming is the project's **public install surface**: `cargo install qqqai` and
+`npm install -g qqqai` either work or they do not. A rename is otherwise
+discovered by users, not by CI.
+
+#### §O-060b — Both halves of the binary rule, and why one is easy to miss
+
+Cargo names the default binary after the **package**, unless a `[[bin]]` stanza
+overrides it. `qqq-run` declares `[[bin]] name = "qqqai"`, which is the only
+reason the default (`qqq-run`) is not produced. So the rule has two halves:
+
+* a declared `[[bin]]` must be named `qqqai`;
+* a crate with `src/main.rs` and **no** `[[bin]]` stanza produces its package name
+  — which for a `qqq-*` package is neither `qqq` nor `qqqai`, and therefore also
+  wrong.
+
+The second half is the one a check would miss by only grepping for
+`name = "qqq"`. The test asserts both, and asserts that **exactly one** binary is
+declared — so adding or removing one is a deliberate edit rather than a silent
+change.
+
+#### §O-060c — The documents are checked, and the scan distinguishes brand from command
+
+The naming is also *instructions to users*. A README saying `qqq new` teaches a
+command that does not exist, and the failure is discovered by someone following
+the documentation exactly as written — worse than a wrong binary name, because the
+documentation is the thing they trusted.
+
+The scan cannot simply search for `qqq`: the brand appears legitimately everywhere
+("QQQ is a runtime") and `qqq-` prefixes crate names. It looks for `qqq` followed
+by one of **26 known subcommands**, and excludes a match preceded by `qqqai` or by
+`-`. That is the difference between checking the property and checking the string.
+
+#### §O-060d — All three injections detected, and the harness left `Cargo.lock` dirty
+
+```
+  DETECTED  binary named qqq
+  DETECTED  document teaches `qqq new`
+  DETECTED  package named qqq
+
+ALL 3 NAMING FAULT INJECTIONS DETECTED
+```
+
+The first run left `Cargo.lock` modified. Cargo rewrites it whenever a manifest
+changes — including an injected package rename — and the injector restored only
+the manifest it had edited. Caught because `git status` was read after the run
+rather than assumed clean, which is the discipline `§O-058f` established.
+
+The fix backs up and verifies `Cargo.lock` alongside the sources. **That is a
+general property of any manifest-editing injector**, and it is worth stating
+because it is invisible: the harness reports success, the tree is dirty, and the
+next commit carries a lock-file diff attributable to nothing.
+
+This is the sixth instance of the instrument-reporting-on-itself family
+(`§M-008`, `§O-048c`, `§O-056e`, `§O-058e`, `§O-058f`), and the second in a row
+where the *harness* rather than the check was at fault. Running `git status` after
+every injection run is now part of the routine.
+
+---
+
 ### §O-059 — Architecture tests: three absences, one real defect, and a control for each
 
 **What was built.** `crates/qqq-core/tests/architecture.rs` — 8 tests covering

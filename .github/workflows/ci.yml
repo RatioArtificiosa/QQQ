@@ -441,6 +441,19 @@ jobs:
       - name: Install nightly
         run: rustup toolchain install nightly --profile minimal
 
+      - name: Install cargo-fuzz
+        #
+        # Required for the LINK step below. `cargo +nightly check` does not need it
+        # — that is plain cargo — which is why the first version of this job could
+        # run `check` and then fail on `cargo fuzz build` with
+        # `error: no such command: fuzz` and exit 101.
+        #
+        # `--locked` so the fuzzing toolchain is reproducible: an unpinned
+        # `cargo-fuzz` would be a component of the programme that changes without a
+        # commit, and a failure caused by a new release would look like a failure
+        # in this repository.
+        run: cargo +nightly install cargo-fuzz --locked
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:

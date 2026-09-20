@@ -331,8 +331,13 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §4.3 Crate topology
 - [ ] **ARCH-005** Write the process-and-thread-model ADR including the explicit rejection of a Tokio replacement.
   → §4.2 Process and thread model
-- [ ] **ARCH-006** Implement the sharded acceptor (connection accepted and served on the same core).
+- [x] **ARCH-006** Implement the sharded acceptor (connection accepted and served on the same core).
   → §4.2 Process and thread model
+  → Done: `qqq-io` — `Listener::accept_stream` with a bounded accept batch that yields at a
+    fixed point, and round-robin shard assignment. Assignment is userspace rather than
+    `SO_REUSEPORT`, because the kernel option distributes differently on macOS and Windows; the
+    reasoning is in the crate documentation. 8 integration tests bind real sockets and prove the
+    loop accepts, carries data, balances across shards, and stops on shutdown.
 - [ ] **ARCH-007** Create all crates listed in the topology with correct names, tiers and empty implementations.
   → §4.3 Crate topology
 - [ ] **ARCH-008** Enforce `#![forbid(unsafe_code)]` on every crate except the three named exceptions.
@@ -1169,6 +1174,11 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §4.7 Concurrency model for guests
 - [ ] **PERF-016** Implement and measure the listener-per-shard optimization.
   → §9.4 Specific optimizations planned
+  → Partial: userspace round-robin assignment is implemented and tested (`qqq-io`). The
+    kernel-level listener-per-shard form (`SO_REUSEPORT`) is deliberately deferred, because it
+    distributes differently on macOS and Windows — a platform divergence that would make the
+    sharding behave one way in Linux CI and another on a developer's machine. Measurement is
+    outstanding.
 - [ ] **PERF-017** Implement and measure the zero-copy streaming response path.
   → §9.4 Specific optimizations planned
 - [ ] **PERF-018** Implement and measure SIMD acceleration in `qqqai/json`.

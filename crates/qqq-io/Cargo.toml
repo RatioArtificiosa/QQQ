@@ -12,4 +12,13 @@ description = "QQQ crate: qqq-io (see QQQ-Proposal-V1.md 4.3)"
 workspace = true
 
 [dependencies]
+qqq-core = { path = "../qqq-core", version = "0.0.0" }
+# The only crate in the workspace that depends on the async runtime. Everything
+# above it is synchronous and pure; see the crate documentation for why.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The integration tests bind real sockets, so they need the runtime's test
+# attribute and `TcpStream` helpers.
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util"] }
 

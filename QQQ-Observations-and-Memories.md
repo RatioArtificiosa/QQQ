@@ -5000,6 +5000,90 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-076 — `SEC-015`: the diff compared a value against itself
+
+**What the item asks for.** The per-dependency capability diff **display** at
+install time, from §5.4:
+
+> `caps` is recorded per dependency. `qqqai install` prints a **capability diff** —
+> *"this update adds `http.client` to `qqqai/telemetry`"*. Supply-chain attacks
+> today hide in code; here the *authority* delta is visible in the diff.
+
+**What already existed, and was correct.** More than expected: `LockPackage.caps`
+was a first-class field participating in `compute_hash`, `LockDiff::compute`
+produced `caps_added`/`caps_removed`, `ChangeKind` classified additions and
+removals, and `grants_new_authority()` existed as the predicate CI should branch
+on. The lockfile and diff layers were done.
+
+**The defect, and why no existing test could see it.** `resolve` carried a
+satisfied pin forward with `pinned.clone()`, so the new lockfile recorded **the
+same caps the old one did** — and `LockDiff::compute(old, &next)` then compared a
+value against itself. `caps_added` was **structurally always empty**, so
+`escalation` could never become `true` through `qqqai install`, and a CI gate
+branching on that boolean would have passed **every supply-chain event in
+silence**.
+
+It was invisible to the suite for a precise reason: every test either exercised
+`LockDiff::compute` directly — which *is* correct, and has nothing to do with
+`resolve` — or asserted merely that install **succeeded**. Nothing tested the seam
+between them, which is exactly where the defect lived. This is the same shape as
+`§O-066`, `§O-071` and `§O-073`: a mechanism that is correct and **not reached**.
+
+**The root cause was a missing source of truth.** A real escalation is "the
+authority this dependency needs **now** differs from the authority recorded in the
+lockfile". Any comparison needs a "now" that is not the lockfile, and the only such
+source is the manifest — which had **no per-dependency `caps` field at all**. So
+the fix could not be confined to the display: §5.4 says *"dependencies declare
+capabilities too"*, and the manifest did not model that sentence.
+
+**What was added, and the one thing it must never mean.** `DependencyDetail::caps`
+with `Dependency::caps()` returning an empty slice for the bare `name = "1.2"`
+form, and `resolve` now records the **declared** set rather than the superseded
+one. Declaring is *not* granting: the effective authority for a runtime is still
+the root manifest's `[capabilities]` plus narrowing overlays, so this field is an
+**audit input**, and giving it any other meaning would be a capability-widening
+path — which `GrantSet::narrow` structurally cannot produce and §D-008 forbids.
+
+**Two boundary behaviours where the naive choice is wrong in the opposite
+direction**, each pinned by a test:
+
+* A dependency that declares **nothing** keeps its recorded caps. Clearing them
+  would report every recorded capability as *removed* — a false de-escalation. The
+  bare form has not said "I need no capabilities"; it has said nothing.
+* A **loss** is reported but is **not** an escalation, matching `CLI-015`'s rule
+  that a gain exits non-zero and a loss does not. A check that cries wolf on the
+  good case is one people learn to bypass.
+
+**Convergence, asserted rather than assumed.** Resolving a second time against the
+lockfile just written must produce **no** further change. A diff that never settles
+is noise, and noise is ignored — which is indistinguishable from having no diff.
+
+**Verified end-to-end, which is the whole point of an item about a display.**
+
+```text
+$ qqqai install
+qqq.lock: 1 package(s) resolved; AUTHORITY ESCALATION — qqqai/telemetry gains http.client
+```
+
+and `--json` reports `"escalation":true` with
+`"capability_changes":[{"added":["http.client"],…}]` on both the dry-run and the
+write path.
+
+**Two of my own test errors, both recorded because they cost a cycle each.**
+First, the CLI test used the **bare** manifest form, which declares nothing and
+therefore correctly preserves the record — the test's expectation was wrong, not
+the code. Second, the human-readable assertion re-used the same sandbox as the
+`--json` assertion, and the JSON run *wrote the lockfile*, so the second run
+correctly found nothing to change. Both failures were about what the test set up
+rather than what the code did, and both are now stated in the test's own comments
+so the next person does not re-derive them.
+
+→ §5.4. Changed: `qqq-cap/src/manifest.rs` (`DependencyDetail::caps`,
+`Dependency::caps()`), `qqq-run/src/install.rs` (`resolve` signature and
+behaviour), `qqq-run/src/main.rs` (call site), plus 3 unit tests and 1 CLI test.
+
+---
+
 ### §O-075 — `SEC-014`: a security process is worth what its checks are worth
 
 **What the item asks for.** A Wasmtime advisory-tracking process with a **72-hour
@@ -7057,5 +7141,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-011` implemented (`§O-071`), and the boundary check was written, wired, and unreachable — found by injection.** `qqq-host::boundary` is a table-driven validation layer (Range / Size / Shape / Consistency) whose central control scans every `func_wrap("…")` in the host modules and fails if a boundary is missing from the table, so *every* — the load-bearing word in the item — is checked rather than asserted. Injecting a rename fails **both** that test and its reverse. `list_size` enforces element count **and** byte total because each catches what the other misses: 100 million empty strings is zero payload bytes and ~2.4 GB of `String` headers. **The finding took two injections to reach.** The check was written and wired into `random.get`, then (1) neutering the *helper* left **all 15 tests passing**, because every boundary test exercised a helper directly — proving the helper correct and proving nothing about whether a host call used it; fixed by extracting `random_length_verdict` and testing the pair. Then (2) neutering the **call site** while leaving the helper correct also left **all 16 tests passing** — extracting the helper had closed only half the hole; fixed by `the_call_site_applies_the_boundary_check`, which asserts in source that the registration body calls the helper and propagates with `?`. That fix is **structural**, and the test says so: proving it behaviourally needs a guest importing `qqq:crypto/random`, and hand-written WAT against that interface has failed to instantiate four times here. **The general lesson: a check that is written is not a check that runs, and a check that runs is not a check that is reached** — found three times now (the memory limit was advisory; the refusal path was the amplification; this check was unreachable). Two smaller defects: the table's first version used the *qualified* name while `func_wrap` registers the **bare** one, so the completeness test reported five undeclared clock functions; and the name extractor read **doc comments**, inventing `name` as a boundary because the source writes `` `func_wrap("name"` `` in its own prose. `§O-070` records the mirror of `§M-009`: stale incremental artifacts made a *restored* file look broken twice, and the cheap discriminator is to grep the source for the injected marker before believing the failure. | Architect |
 
 | 2026-09-20 | **`SEC-012`/`SEC-013` implemented (`§O-073`), and building the corpus found a defect before any fuzzing ran.** A fuzzing programme is **two mechanisms with different cadences**, and treating the two items as one request produces a programme that runs when someone remembers: random exploration belongs on a nightly schedule (thirty seconds of fuzzing finds almost nothing, and a check that makes CI slow gets disabled), while the **regression corpus** belongs in every commit — because a crash is worthless unless the input is re-run on every later commit, the bug being reintroduced by an unrelated change and found again later by luck. The promotion step (crash artifact → corpus entry → every future build) is stated in the nightly workflow's failure output where the person who needs it will see it. Three targets assert properties rather than "does not panic": `manifest_parse` (determinism, pure grant derivation, stable renderings), `component_load` (no panic, every rejection classified and explained, accept-implies-usable), `host_interfaces` (boundary totality, log-safety, traversal corpus re-run every iteration). **The defect:** `toml`'s `Span::start` is documented as a *byte index* and was assigned straight to a field rendered as `qqq.toml line {n}` — `[package` + newline + `name = "a"` reported **line 8** instead of line 1, and `not toml at all` reported **line 4** instead of line 1, verified against Python's `tomllib`. The error grew with file size: a 40-line manifest reported line numbers in the thousands. **A diagnostic whose whole purpose is to point a developer at a location, off by a factor of the average line length, is worse than none because it is believed.** Fixed by counting newlines in the prefix — correct for CRLF files, where `str::lines()` would be right on Linux and wrong on Windows after line one — with expectations pinned against `tomllib` plus the general assertion that every syntax error reports a line inside the file. One corpus entry was also **mislabelled**: a bare component header is a valid *empty* component, not malformed, and the positive-control test named it — an entry whose expectation is wrong is worse than a missing one, because it either fails for the wrong reason or gets "fixed" by loosening the check. Two build defects found only by building rather than type-checking: `crate-type = ["cdylib", "lib"]` failed to link on Windows with `LNK2001: unresolved external symbol main` (a `#![no_main]` target defines none, and the `cdylib` is a Linux-only `cargo-fuzz` convenience), and the targets needed `wasmtime` as a **direct** dependency since `qqq-host` deliberately does not re-export the engine. `ci.yml` gained a `fuzz-targets` job running `cargo +nightly fuzz build`, not merely `check` — `check` proves type-correctness and says nothing about linkability, which is how the Windows failure stayed invisible. A platform limitation is recorded rather than left silent: on Windows the built target fails to start with `0xC0000135 STATUS_DLL_NOT_FOUND` (a missing libFuzzer runtime DLL, a known `libfuzzer-sys` limitation), so exploration runs on Linux and the corpus harness covers every platform. `cargo machete` also found an unused `qqq-core` dependency in the fuzz workspace, removed rather than ignored. | Architect |
+
+| 2026-09-20 | **`SEC-015` implemented (`§O-076`), and the capability diff compared a value against itself.** The lockfile and diff layers were already correct — `caps` a first-class field in `compute_hash`, `LockDiff::compute` producing `caps_added`/`caps_removed`, `grants_new_authority()` as the CI predicate. The defect was one line up: `resolve` carried a satisfied pin forward with `pinned.clone()`, so the new lockfile recorded **the same caps the old one did** and `LockDiff::compute(old, &next)` compared a value to itself. `caps_added` was **structurally always empty**, `escalation` could never become `true` through `qqqai install`, and a CI gate branching on that boolean would have passed **every supply-chain event in silence**. Invisible to the suite because every test either exercised `LockDiff::compute` directly (correct, unrelated to `resolve`) or asserted merely that install succeeded — nothing tested the seam, which is where the defect lived. This is `§O-066`/`§O-071`/`§O-073`'s shape again: correct and **not reached**. The root cause was a missing source of truth — an escalation is "what the dependency needs **now** differs from what the lockfile recorded", and the manifest had **no per-dependency `caps` field**, so §5.4's *"dependencies declare capabilities too"* was unmodelled. Added `DependencyDetail::caps` / `Dependency::caps()` (empty for the bare form) and made `resolve` record the **declared** set. Declaring is not granting — the effective authority is still the root manifest plus narrowing overlays, so this is an audit input and any other meaning would be a capability-widening path. Two boundaries pinned because the naive choice is wrong in the opposite direction: a dependency declaring **nothing** keeps its record (clearing would report every capability as removed — a false de-escalation), and a **loss** is reported but not flagged as escalation (`CLI-015`'s rule). Convergence asserted: a second resolve against the new lockfile must produce no change, because a diff that never settles is ignored, which is the same as having none. Verified end-to-end: `qqq.lock: 1 package(s) resolved; AUTHORITY ESCALATION — qqqai/telemetry gains http.client`, and `--json` reporting `"escalation":true` on both dry-run and write. Two of my own test errors recorded: the CLI test first used the bare manifest form (which correctly declares nothing), then re-used one sandbox for both assertions when the JSON run had already written the lockfile. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

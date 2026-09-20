@@ -229,12 +229,38 @@ pub fn read_lockfile(path: &Path) -> Result<Option<Lockfile>> {
 ///
 /// `previous` being `None` is a first install, and then every manifest
 /// dependency is unresolved.
+///
+/// # `declared_caps`: why this parameter exists, and the defect it repairs
+///
+/// Earlier, the carried-forward pin was pushed with `pinned.clone()`, so the
+/// **recorded** capabilities were copied verbatim into the new lockfile. The
+/// subsequent `LockDiff::compute(old, &next)` then compared a package's recorded
+/// caps against *the same recorded caps*, and `caps_added` was **structurally
+/// always empty** — which means `SEC-015`'s whole purpose was unreachable:
+/// `escalation` could never become `true`, and a CI gate branching on it would
+/// pass every supply-chain event silently.
+///
+/// A real escalation is "the authority this dependency needs **now** differs from
+/// the authority recorded in the lockfile". That comparison needs a source of
+/// truth for "now" which is not the lockfile, and the only such source is the
+/// manifest. So `declared_caps` supplies each dependency's currently declared
+/// capabilities, and the new lockfile records **those** rather than the old ones.
+///
+/// # Why the argument is a slice of triples rather than a map
+///
+/// Because the caller already has the manifest's dependency list in order
+/// (`BTreeMap` iteration), and a map here would be a third representation of the
+/// same data. The slice keeps the function's input shape identical to the
+/// manifest's own iteration and makes the call site a straight pass-through.
 #[must_use]
-pub fn resolve(manifest_deps: &[(String, String)], previous: Option<&Lockfile>) -> Resolution {
+pub fn resolve(
+    manifest_deps: &[(String, String, Vec<String>)],
+    previous: Option<&Lockfile>,
+) -> Resolution {
     let mut next = Lockfile::new();
     let mut unresolved = Vec::new();
 
-    for (name, requirement) in manifest_deps {
+    for (name, requirement, declared_caps) in manifest_deps {
         match previous.and_then(|l| l.get(name)) {
             Some(pinned) => {
                 // Verify the pin still satisfies the manifest. A manifest edited
@@ -242,7 +268,36 @@ pub fn resolve(manifest_deps: &[(String, String)], previous: Option<&Lockfile>) 
                 // that must change, and carrying the pin across would make
                 // `--locked` pass on a state that is wrong.
                 if satisfies(requirement, &pinned.version) {
-                    next.push(pinned.clone());
+                    // **Carry the version, but RE-DERIVE the capabilities.**
+                    //
+                    // A full clone would carry the recorded caps and make the
+                    // diff vacuous (see the doc above). The rest of the pinned
+                    // record — digest, license, source — is genuinely the
+                    // lockfile's business and is carried as-is: those describe
+                    // *the bytes that were fetched*, and a re-resolution that
+                    // changed them would be inventing a different artifact.
+                    //
+                    // When the manifest declares no capabilities for a
+                    // dependency, the recorded set is preserved rather than
+                    // cleared. Clearing it would report every previously-recorded
+                    // capability as "removed", which is a false *de*-escalation —
+                    // alarming in the opposite direction, and just as wrong.
+                    let mut updated = pinned.clone();
+                    if !declared_caps.is_empty() {
+                        // Sorted and deduplicated, because the lockfile is
+                        // compared byte-for-byte by `compute_hash` and read by
+                        // `LockDiff`. An unsorted declaration would make two
+                        // semantically identical lockfiles hash differently, which
+                        // is the property `lockfile-hash` exists to guarantee.
+                        //
+                        // `clone_from` rather than `=` so the existing allocation
+                        // is reused; clippy's `assigning_clones` is right that the
+                        // assignment form allocates for nothing.
+                        updated.caps.clone_from(declared_caps);
+                        updated.caps.sort_unstable();
+                        updated.caps.dedup();
+                    }
+                    next.push(updated);
                 } else {
                     unresolved.push(name.clone());
                 }
@@ -423,10 +478,29 @@ impl crate::output::CommandOutput for InstallOutput {
 mod tests {
     use super::*;
 
-    fn deps(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    fn deps(pairs: &[(&str, &str)]) -> Vec<(String, String, Vec<String>)> {
+        // Most tests care only about name and requirement, so this form declares
+        // **no** capabilities. `deps_with_caps` is the form for the tests that
+        // exercise `SEC-015`, and keeping two helpers means a test that does not
+        // care cannot accidentally assert something about caps it never meant to
+        // set.
         pairs
             .iter()
-            .map(|(n, r)| ((*n).to_owned(), (*r).to_owned()))
+            .map(|(n, r)| ((*n).to_owned(), (*r).to_owned(), Vec::new()))
+            .collect()
+    }
+
+    /// Dependencies with declared capabilities, for the `SEC-015` tests.
+    fn deps_with_caps(pairs: &[(&str, &str, &[&str])]) -> Vec<(String, String, Vec<String>)> {
+        pairs
+            .iter()
+            .map(|(n, r, caps)| {
+                (
+                    (*n).to_owned(),
+                    (*r).to_owned(),
+                    caps.iter().map(|c| (*c).to_owned()).collect(),
+                )
+            })
             .collect()
     }
 
@@ -624,6 +698,164 @@ mod tests {
             .expect("the package appears in the capability diff");
         assert_eq!(delta.added, vec!["http.client"]);
         assert!(delta.is_escalation());
+    }
+
+    /// **`SEC-015`, at the level `install` actually runs — `§O-076`.**
+    ///
+    /// # The defect this test was written to find, and did
+    ///
+    /// `LockDiff::compute` was already correct, and the test above already proved
+    /// it. But `resolve` pushed the carried-forward pin as `pinned.clone()`, so
+    /// the new lockfile recorded **the same caps the old one did** — and
+    /// `LockDiff::compute(old, &next)` then compared a value against itself.
+    ///
+    /// The consequence: `caps_added` was **structurally always empty**, so
+    /// `escalation` could never become `true` through the real `qqqai install`
+    /// path, and a CI gate branching on that boolean would have passed every
+    /// supply-chain event in silence. `SEC-015`'s purpose — *"the authority delta
+    /// is visible in the diff"* — was unreachable.
+    ///
+    /// Nothing in the existing suite could see it: every test either exercised
+    /// `LockDiff::compute` directly (correct, and unrelated to `resolve`) or
+    /// asserted merely that install *succeeded*.
+    ///
+    /// # What the test pins
+    ///
+    /// A dependency whose lockfile record says `none` while the manifest now
+    /// declares `http.client` must produce an escalation through `resolve`. That
+    /// is the real input shape: the lockfile is the *record*, the manifest is the
+    /// *declaration*, and the diff between them is the only observable delta.
+    #[test]
+    fn resolve_observes_an_escalation_from_the_manifest_declaration() {
+        let mut old = Lockfile::new();
+        old.push(package_for("qqqai/telemetry", "1.0.0", &["none"]));
+
+        // The manifest now declares that the dependency needs http.client.
+        let r = resolve(
+            &deps_with_caps(&[("qqqai/telemetry", "1.0", &["http.client"])]),
+            Some(&old),
+        );
+
+        assert!(
+            r.diff.has_escalation(),
+            "the dependency's recorded authority was `none` and the manifest now \
+             declares `http.client`, so `resolve` MUST observe an escalation. An \
+             empty diff here means the recorded caps were carried forward verbatim \
+             and compared against themselves — SEC-015 would then be unreachable \
+             through the real install path, which is the defect this asserts against."
+        );
+        let delta = r
+            .diff
+            .capability_changes
+            .iter()
+            .find(|d| d.package == "qqqai/telemetry")
+            .expect("the package must appear in the diff");
+        assert_eq!(delta.added, vec!["http.client"]);
+        assert!(
+            delta.is_escalation(),
+            "gaining authority must be classified as an escalation, not a mere change"
+        );
+
+        // And the WRITTEN lockfile records the new declaration, so a subsequent
+        // install compares against the new truth rather than re-reporting the same
+        // escalation forever. A diff that never converged is one people learn to
+        // ignore, which is the same as having none.
+        let written = r
+            .lockfile
+            .get("qqqai/telemetry")
+            .expect("the package must be written");
+        assert_eq!(
+            written.caps,
+            vec!["http.client"],
+            "the lockfile must record the DECLARED caps, not the superseded ones"
+        );
+
+        // Convergence, asserted directly: resolving again against the lockfile
+        // just written must produce NO further change.
+        let again = resolve(
+            &deps_with_caps(&[("qqqai/telemetry", "1.0", &["http.client"])]),
+            Some(&r.lockfile),
+        );
+        assert!(
+            again.diff.capability_changes.is_empty(),
+            "the second resolution re-reported a change that had already converged; a \
+             diff that never settles is noise, and noise is ignored. Found: {:?}",
+            again.diff.capability_changes
+        );
+    }
+
+    /// A **de**-escalation is reported, and is not an escalation.
+    ///
+    /// # Why the other direction matters, and is not just symmetry
+    ///
+    /// A dependency losing authority is the *good* case, and a check that flagged
+    /// it as an escalation is one people learn to bypass — the same argument
+    /// `CLI-015` makes for exiting non-zero on a gain but not on a loss. It must
+    /// still be **reported**, because a lockfile that silently dropped a
+    /// capability would hide that a dependency's declared needs had changed.
+    #[test]
+    fn resolve_reports_a_loss_without_calling_it_an_escalation() {
+        let mut old = Lockfile::new();
+        old.push(package_for(
+            "qqqai/telemetry",
+            "1.0.0",
+            &["http.client", "clock.wall"],
+        ));
+
+        let r = resolve(
+            &deps_with_caps(&[("qqqai/telemetry", "1.0", &["clock.wall"])]),
+            Some(&old),
+        );
+
+        assert!(
+            !r.diff.has_escalation(),
+            "losing http.client is a reduction in authority and must NOT be flagged \
+             as an escalation; a check that cries wolf on the good case is one people \
+             learn to bypass"
+        );
+        let delta = r
+            .diff
+            .capability_changes
+            .iter()
+            .find(|d| d.package == "qqqai/telemetry")
+            .expect("the loss must still be reported");
+        assert_eq!(delta.removed, vec!["http.client"]);
+        assert!(delta.added.is_empty());
+    }
+
+    /// A dependency that declares **nothing** keeps its recorded caps.
+    ///
+    /// # Why clearing them would be a defect rather than a simplification
+    ///
+    /// The bare `name = "1.2"` form declares nothing — it has not said "I need no
+    /// capabilities", it has said nothing at all. Treating that as an empty
+    /// declaration would report every previously recorded capability as
+    /// **removed**, a false de-escalation. It is wrong in the opposite direction
+    /// from the defect above and just as misleading: an operator would see
+    /// authority apparently vanishing on an unrelated manifest edit.
+    #[test]
+    fn a_dependency_that_declares_nothing_keeps_its_recorded_caps() {
+        let mut old = Lockfile::new();
+        old.push(package_for("qqqai/validate", "2.0.0", &["clock.monotonic"]));
+
+        // `deps` (not `deps_with_caps`) declares an empty cap set.
+        let r = resolve(&deps(&[("qqqai/validate", "2.0")]), Some(&old));
+
+        assert!(
+            r.diff.capability_changes.is_empty(),
+            "a manifest that declares nothing about a dependency's capabilities must \
+             not appear to change them; found {:?}",
+            r.diff.capability_changes
+        );
+        let written = r
+            .lockfile
+            .get("qqqai/validate")
+            .expect("the package must be written");
+        assert_eq!(
+            written.caps,
+            vec!["clock.monotonic"],
+            "the recorded caps must be preserved when the manifest declares nothing"
+        );
     }
 
     // -- lockfile reading ---------------------------------------------------

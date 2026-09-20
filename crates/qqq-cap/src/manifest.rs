@@ -110,6 +110,33 @@ pub struct DependencyDetail {
     /// Pin to exactly this version, ignoring the usual caret widening.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exact: bool,
+    /// The capabilities this dependency **declares** it needs.
+    ///
+    /// # Why a dependency declares authority at all
+    ///
+    /// §5.4 states it as the feature that matters most about the lockfile:
+    ///
+    /// > **`caps` is recorded per dependency.** `qqqai install` prints a
+    /// > **capability diff** — *"this update adds `http.client` to
+    /// > `qqqai/telemetry`"*. Supply-chain attacks today hide in code; here the
+    /// > *authority* delta is visible in the diff.
+    ///
+    /// The **lockfile's** `caps` field is the *record* — what was true when the
+    /// lockfile was written. This field is the *declaration* — what the
+    /// dependency needs now. A diff between the two is the only way an escalation
+    /// can be observed at all, and until this field existed the comparison was
+    /// between a value and itself, making the diff structurally empty
+    /// (`§O-076`).
+    ///
+    /// # Why declaring is not granting
+    ///
+    /// A package can **ask** and never **take**: the effective grant for a
+    /// runtime is still the root manifest's `[capabilities]` plus narrowing
+    /// overlays. So this field is an *audit* input, not an authority source, and
+    /// giving it any other meaning would be a capability-widening path — which
+    /// `GrantSet::narrow` structurally cannot produce and which §D-008 forbids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 impl Dependency {
@@ -128,6 +155,29 @@ impl Dependency {
         match self {
             Self::Version(_) => None,
             Self::Full(d) => d.source.as_deref(),
+        }
+    }
+
+    /// The capabilities this dependency declares, if it was written in the
+    /// long form.
+    ///
+    /// Returns an empty slice for the bare `name = "1.2"` form, which declares
+    /// nothing — the correct reading, since a shorthanded dependency has said
+    /// nothing about what it needs rather than saying it needs nothing.
+    ///
+    /// # Why this returns `&[String]` rather than `Option<&[String]>`
+    ///
+    /// Because every caller wants "the declared set", and `None` and `&[]` would
+    /// both mean an empty set at every call site while forcing each to handle
+    /// two shapes. The `Option` would be a distinction without a difference —
+    /// the manifest cannot express "declares no capabilities" differently from
+    /// "does not use the long form", so pretending it can would invent a
+    /// semantics the format does not have.
+    #[must_use]
+    pub fn caps(&self) -> &[String] {
+        match self {
+            Self::Version(_) => &[],
+            Self::Full(d) => &d.caps,
         }
     }
 }

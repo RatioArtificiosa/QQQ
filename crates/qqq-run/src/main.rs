@@ -1167,11 +1167,18 @@ fn dispatch_install(
     with_manifest(name, out, args, |loaded| {
         // The manifest's two dependency tables, flattened in a deterministic
         // order so the lockfile and the diff do not depend on map iteration.
-        let mut deps: Vec<(String, String)> = loaded
+        //
+        // Each entry carries the dependency's **declared capabilities** as well
+        // as its requirement. That third element is what makes `SEC-015`'s
+        // capability diff able to observe anything at all: the diff compares the
+        // authority *recorded* in the old lockfile against the authority
+        // *declared* in the manifest now, and without the declaration there is
+        // no second value to compare against (`§O-076`).
+        let mut deps: Vec<(String, String, Vec<String>)> = loaded
             .manifest
             .dependencies
             .iter()
-            .map(|(n, d)| (n.clone(), d.requirement().to_owned()))
+            .map(|(n, d)| (n.clone(), d.requirement().to_owned(), d.caps().to_vec()))
             .collect();
         // Dev-dependencies are installed too — a test suite needs them — but
         // they are recorded with the same shape, and the capability diff will
@@ -1181,7 +1188,7 @@ fn dispatch_install(
                 .manifest
                 .dev_dependencies
                 .iter()
-                .map(|(n, d)| (n.clone(), d.requirement().to_owned())),
+                .map(|(n, d)| (n.clone(), d.requirement().to_owned(), d.caps().to_vec())),
         );
         deps.sort_by(|a, b| a.0.cmp(&b.0));
 

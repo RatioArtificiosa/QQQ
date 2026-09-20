@@ -560,6 +560,107 @@ fn a_pinned_dependency_installs_and_locks() {
     s.run(&["install", "--locked"]).assert_ok();
 }
 
+/// **`SEC-015`: an authority change is DISPLAYED at install time.**
+///
+/// # Why this test exists, and the gap it closes
+///
+/// The library test `an_authority_change_between_lockfiles_is_visible` proves
+/// that `LockDiff::compute` *finds* an escalation. It proves nothing about
+/// whether `qqqai install` ever **prints** it — and `SEC-015` says *"`qqqai
+/// install` prints a capability diff"*, which is a claim about a user-visible
+/// surface. Until this test, that claim was unverified at the level it is made.
+///
+/// This is the same class of gap this project has now hit three times (§O-066,
+/// §O-071, §O-073): a mechanism that exists, is correct, and is not reached. A
+/// supply-chain signal an operator never sees is not a supply-chain signal.
+///
+/// # Why the lockfile is hand-written rather than produced by an install
+///
+/// Because the registry does not exist yet (`PKG-006`), so a second install
+/// cannot fetch a *new* version whose caps differ. Hand-writing both sides is
+/// what makes the diff reachable today. When the registry lands, this test keeps
+/// working — it asserts the display, not how the lockfiles came to be.
+///
+/// The manifest uses the **long form** with an explicit `caps` declaration.
+///
+/// That is not incidental: under the corrected semantics a bare `name = "1.0"`
+/// declares *nothing*, and "declares nothing" preserves whatever the lockfile
+/// recorded. So a bare-form dependency can never produce an escalation, and an
+/// earlier version of this test used the bare form and failed — correctly. The
+/// declaration is what the diff compares the record against.
+#[test]
+fn an_authority_change_is_displayed_at_install_time() {
+    let s = Sandbox::new("install-escalation");
+
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+         \"qqqai/telemetry\" = { version = \"1.0\", caps = [\"http.client\"] }\n",
+    );
+
+    // The previous resolution recorded **no** authority for the dependency. The
+    // manifest now declares `http.client`, which is the exact supply-chain event
+    // §5.4 says must be visible in the diff.
+    s.write(
+        "qqq.lock",
+        "version = 1\n\n[[package]]\nname = \"qqqai/telemetry\"\nversion = \"1.0.0\"\n\
+         caps = [\"none\"]\n",
+    );
+
+    // The `--json` form is asserted first because it is the machine-readable
+    // contract a CI gate branches on, and an `escalation` boolean that never
+    // became true would let every such gate pass silently.
+    let json = s.run(&["install", "--json"]);
+    json.assert_ok();
+    let out = json.stdout.clone();
+    assert!(
+        out.contains("\"escalation\":true") || out.contains("\"escalation\": true"),
+        "`qqqai install --json` must report `escalation: true` when a dependency \
+         gains authority; a CI gate reads this field, so a false negative here is a \
+         supply-chain event that passes unnoticed. Output:\n{out}"
+    );
+
+    // **The human form needs a FRESH sandbox.**
+    //
+    // The `--json` run above *wrote* `qqq.lock` with the new declaration, so a
+    // second run in the same sandbox finds nothing to change and — correctly —
+    // reports no escalation. An earlier version of this test re-used the sandbox
+    // and failed on its own ordering rather than on the code. The two surfaces
+    // must therefore each start from the same pre-change state, which is also
+    // what makes the human assertion mean anything: it proves the *display*,
+    // independent of whether a previous command already applied the change.
+    let s2 = Sandbox::new("install-escalation-human");
+    s2.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+         \"qqqai/telemetry\" = { version = \"1.0\", caps = [\"http.client\"] }\n",
+    );
+    s2.write(
+        "qqq.lock",
+        "version = 1\n\n[[package]]\nname = \"qqqai/telemetry\"\nversion = \"1.0.0\"\n\
+         caps = [\"none\"]\n",
+    );
+
+    let human = s2.run(&["install"]);
+    human.assert_ok();
+    let text = human.all();
+    assert!(
+        text.contains("AUTHORITY ESCALATION"),
+        "the human-readable install output must lead with the escalation; burying \
+         the supply-chain signal is what §5.4's diff exists to prevent. Output:\n{text}"
+    );
+    assert!(
+        text.contains("telemetry"),
+        "the escalation summary must NAME the package that gained authority. \
+         Output:\n{text}"
+    );
+    assert!(
+        text.contains("http.client"),
+        "the escalation must say WHAT was gained, not merely that something was. \
+         Output:\n{text}"
+    );
+}
+
 /// A tampered lockfile is refused, not silently rewritten.
 ///
 /// The covering hash exists so a hand-edited lockfile is *detected*. A command

@@ -1610,7 +1610,67 @@ Items are grouped below by **phase**, because dependency order matters more than
   → `SECURITY.md` now carries the short version and links to the process, so a
     reader of the policy meets the mechanism rather than a promise.
   → §15 — Risk Register
-- [ ] **SEC-015** Implement the per-dependency capability diff display at install time.
+- [x] **SEC-015** Implement the per-dependency capability diff display at install time.
+  → Done, **and the diff was structurally never observable through the real
+    install path** — found by writing the CLI-level test the item actually calls
+    for.
+  → The lockfile and diff layers were already correct: `caps` was a first-class
+    `LockPackage` field participating in `compute_hash`, `LockDiff::compute`
+    produced `caps_added`/`caps_removed`, and `grants_new_authority()` existed as
+    the predicate CI branches on. What was missing was the **display**, and
+    beneath that, the **input that makes a display possible**.
+  → **The defect.** `resolve` carried a satisfied pin forward with
+    `pinned.clone()`, so the new lockfile recorded *the same caps the old one did*
+    — and `LockDiff::compute(old, &next)` then compared a value **against
+    itself**. `caps_added` was therefore structurally always empty, `escalation`
+    could never become `true` through `qqqai install`, and a CI gate branching on
+    that boolean would have passed **every supply-chain event in silence**. §5.4's
+    stated purpose — *"the authority delta is visible in the diff"* — was
+    unreachable, and nothing in the existing suite could see it, because every
+    test either exercised `LockDiff::compute` directly (correct, and unrelated to
+    `resolve`) or asserted merely that install *succeeded*.
+  → **The root cause was a missing source of truth.** A real escalation is "the
+    authority this dependency needs **now** differs from the authority recorded in
+    the lockfile". Comparing requires a "now" that is not the lockfile, and the
+    only such source is the manifest — which had **no per-dependency `caps` field
+    at all**. §5.4 says *"dependencies declare capabilities too"*, so:
+    * `DependencyDetail::caps` added, with `Dependency::caps()` returning an empty
+      slice for the bare `name = "1.2"` form. Declaring is **not** granting: the
+      effective authority for a runtime is still the root manifest's
+      `[capabilities]` plus narrowing overlays, so this is an *audit* input and
+      giving it any other meaning would be a capability-widening path.
+    * `resolve` now takes `(name, requirement, declared_caps)` and records the
+      **declared** set, carrying the version but re-deriving the capabilities. The
+      rest of the pin (digest, license, source) is carried as-is, because those
+      describe *the bytes that were fetched*.
+  → **Two boundary behaviours, each pinned because the naive choice is wrong.**
+    * A dependency that declares **nothing** keeps its recorded caps. Clearing
+      them would report every recorded capability as *removed* — a false
+      de-escalation, wrong in the opposite direction and just as misleading: an
+      operator would see authority apparently vanishing on an unrelated manifest
+      edit.
+    * A **loss** is reported but is **not** an escalation, matching `CLI-015`'s
+      rule that a gain exits non-zero and a loss does not; a check that cries wolf
+      on the good case is one people learn to bypass.
+  → **Convergence is asserted**, not assumed: resolving a second time against the
+    lockfile just written must produce *no* further change. A diff that never
+    settles is noise, and noise is ignored — which is the same as having none.
+  → **Verified end-to-end**, not only in unit tests:
+    ```
+    $ qqqai install
+    qqq.lock: 1 package(s) resolved; AUTHORITY ESCALATION — qqqai/telemetry gains http.client
+    ```
+    and `--json` reports `"escalation":true` with
+    `"capability_changes":[{"added":["http.client"],…}]` on both the dry-run and
+    write paths.
+  → The new CLI test needed a **fresh sandbox** for the human-readable assertion:
+    the `--json` run writes the lockfile, so a second run correctly finds nothing
+    to change. The first version re-used one sandbox and failed on its own
+    ordering rather than on the code — and the two surfaces must each start from
+    the same pre-change state for the human assertion to mean anything.
+  → Tests added: 3 in `qqq-run` (escalation observed through `resolve`; a loss is
+    not an escalation; declaring nothing preserves the record) and 1 CLI-level
+    test proving both the JSON field and the human line.
   → §5.4 The lockfile — `qqq.lock`
 - [ ] **SEC-016** Implement slow-loris, header-bomb and body-bomb mitigations with tests.
   → §6.4 `qqq-serve` — the HTTP and application server

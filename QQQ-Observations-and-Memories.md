@@ -5000,6 +5000,118 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-066 — The memory limit was advisory, and `QQQ-3001` was unreachable
+
+**What was built.** `crates/qqq-host/tests/hostile_guests.rs` — 200 hostile
+guests in a table, each naming the exact `ErrorCode` it must produce
+(`SEC-004`), plus `TrappingLimiter` (`SEC-005`). Writing the suite found a real
+security defect in code that had been reviewed and whose tests were green.
+
+#### §O-066a — A ceiling that made `memory.grow` fail is not a ceiling
+
+The memory limit was installed with Wasmtime's own `StoreLimits`, which is the
+obvious choice and was in place from early in the project. Wasmtime documents
+exactly what that does:
+
+> If `Ok(false)` is returned then this will cause the `memory.grow` instruction in
+> a module to **return -1 (failure)** … If `Err(e)` is returned then the
+> `memory.grow` function will behave **as if a trap has been raised**.
+
+So `Ok(false)` — what `StoreLimits` returns — makes the ceiling **advisory to the
+guest**. The grow fails; the guest keeps running. Measured with a temporary probe
+against a 4 MiB ceiling and a 10-billion-fuel budget:
+
+| Guest behaviour on a refused grow | Before | After |
+|---|---|---|
+| Traps on it (`unreachable`) | `GuestPanic` in 487 µs | **`MemoryLimitExceeded` in 476 µs** |
+| Ignores it and loops | `FuelExhausted` in **97.68 s** | **`MemoryLimitExceeded` in 144 µs** |
+
+Two consequences, both bad, neither visible without measuring.
+
+**`QQQ-3001 MemoryLimitExceeded` was unreachable through this path.** The trap
+taxonomy documents it as *the* memory-limit code, the error catalogue explains it,
+and nothing could produce it. A memory-limited guest therefore reported a
+**panic** or **fuel exhaustion** — sending an operator to inspect control flow or
+raise a fuel budget, when the actual condition was that the guest wanted more
+memory than it was allowed. The fix makes the documented code reachable, which is
+what makes the taxonomy honest.
+
+**A hostile guest was not stopped promptly.** 97.68 seconds at full CPU, for one
+guest, against a 4 MiB ceiling. That is not an enforced limit; it is a suggestion
+with a delay. The fix is **679,000× faster** to stop the same guest.
+
+#### §O-066b — Why no existing test caught it
+
+This is the part worth recording. The crate had tests for limits:
+
+* `fuel_exhaustion_traps_the_guest_and_the_host_survives` — asserts a fuel breach
+  traps, and that the host survives. **Correct, and about fuel.**
+* `trap.rs` classifies `MemoryLimitExceeded` from Wasmtime's message, with a test
+  that the *classification function* maps that message correctly.
+* `admission.rs` (`HOST-023`) decides whether a reservation fits — a
+  **build-time** check with no runtime enforcement in it.
+
+Every one is correct. Together they cover the *classification* of a memory-limit
+trap, the *reservation* arithmetic, and the fuel path — and **none of them makes a
+guest actually exceed its memory limit and observes what happens**. The gap is
+precisely where the defect lived, and it is the same shape as `§O-045a` and
+`§O-051`: two individually correct halves with a missing link between them.
+
+The lesson generalises and is uncomfortable: **a limit's classification being
+tested is not the same as the limit being enforced.** A test asserting that
+`"memory limit exceeded"` maps to `QQQ-3001` passes whether or not any guest can
+ever produce that string.
+
+#### §O-066c — The fixture had to be built three times, and each version taught something
+
+`MEMORY_HOG` went through three shapes, and only the third is a genuine test:
+
+| Version | What it did | Why it was not a test |
+|---|---|---|
+| 1 | `memory.grow`, result dropped, spinning | Trapped on **fuel** — the loop burned the budget without ever holding memory |
+| 2 | Grew *and wrote*, ignoring the result | Still fuel: the write only happens when a grow **succeeds**, and after the ceiling is reached no grow succeeds |
+| 3 | **Ignores the refused grow and keeps looping** | Correct: the guest refuses to stop when told no, which is the hostile behaviour |
+
+The distinction that resolved it: a guest that **checks** the return value and
+stops is behaving correctly, and a guest that merely **spins** never exceeds
+anything. The hostile guest is the one that is told no and continues — and only
+under the trapping limiter is that pointless continuation itself the trap.
+
+Version 2 was also wrong about the mechanism, and the failure message said so: it
+trapped on fuel, and fuel was the *limit that fired*, not the one under test.
+**A limit test that trips a different limit has tested the wrong limit.**
+
+#### §O-066d — Four hand-written WAT fixtures against real interfaces, all misleading
+
+`SEC-002`'s ungranted-import fixture was rewritten five times. Three attempts at
+`qqq:crypto/random` and one at `qqq:clock/wall-clock` each failed with:
+
+> instance export `get` has the wrong type: function implementation is missing
+
+and each failure made the **ungranted** case pass for the wrong reason — a
+component declaring the wrong export set does not instantiate *whether or not* the
+capability is granted. The granted **control** is what exposed every one.
+
+Hand-writing WAT against a real interface means reproducing its **lowered**
+signature by hand: `result<list<u8>, E>` lowers through a return-area pointer, and
+the named error variant must be declared in full. Three correct-looking attempts
+were all wrong.
+
+**The fix was to change the question, not to keep guessing.** The test now imports
+`host:probe/greeter` — an interface *nothing provides* — which tests exactly the
+property `SEC-002` names without reproducing a real signature. And the test
+**states which half it proves and which it does not**, rather than implying both:
+the failure half is proven here; the positive half is covered where fixtures are
+generated (`tests/engine.rs`) and belongs here once Phase P5's toolchains can
+produce a component from WIT.
+
+That last paragraph is the general rule this entry exists to state:
+**when a fixture resists being written correctly, describe what the test actually
+proves rather than asserting it proves what was intended.** A test whose fixture
+is subtly wrong passes and misleads, which is worse than a test that is absent.
+
+---
+
 ### §O-065 — `CAP-016`: the security test caught a defect in the test double
 
 **What was built.** `crates/qqq-host/src/host_secrets.rs` — 22 tests, taking

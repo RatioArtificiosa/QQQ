@@ -638,7 +638,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [x] **DX-002** Implement generated-manifest minimality: a new project grants nothing it does not need.
   → §2.7 NN-7 — Progressive Power, Safe Defaults
-- [ ] **DX-003** Implement the "your app has 0 capabilities" guidance shown at dev-server start.
+- [x] **DX-003** Implement the "your app has 0 capabilities" guidance shown at dev-server start.
   → §12.1 The first ten minutes (a spec, not a wish)
 - [ ] **DX-004** Implement the error-message standard: what, code, why, fix, machine block.
   → §12.2 Error message design standard
@@ -650,7 +650,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-008** Implement TIER-3 full restart triggered only by manifest capability or limit changes.
   → §6.6 `qqq-run` — CLI and dev server
-- [ ] **DX-009** Implement the file watcher with debounce and ignore rules.
+- [x] **DX-009** Implement the file watcher with debounce and ignore rules.
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-010** Implement HTTPS in dev with locally-trusted certificates.
   → §6.6 `qqq-run` — CLI and dev server
@@ -695,7 +695,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [x] **CLI-009** Implement `qqqai run` with explicit capability and limit flags.
   → §5.2 The command surface
-- [ ] **CLI-010** Implement `qqqai dev`.
+- [x] **CLI-010** Implement `qqqai dev`.
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **CLI-011** Implement `qqqai serve` with `--workers`, `--tls`, `--config`.
   → §6.4 `qqq-serve` — the HTTP and application server

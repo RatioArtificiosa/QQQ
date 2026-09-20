@@ -1879,6 +1879,136 @@ plain file, so `--force` is not inert.
 
 ---
 
+### §O-026 — `qqqai dev`: the tier-1 reload loop, and a watcher built on polling
+
+**What was built.** `qqq-run::watch` (`DX-009`) and `qqq-run::dev` (`CLI-010`,
+`DX-003`).
+
+**Verified by driving it with real file edits, not simulated ones:**
+
+```console
+$ qqqai dev --reload-limit 2      # edited src/devapp.rs twice
+devapp: 2 reload(s), listening on http://127.0.0.1:3000
+  reload 1  component-swap  src/devapp.rs   992ms
+  reload 2  component-swap  src/devapp.rs  1066ms
+
+$ qqqai dev --reload-limit 1      # edited qqq.toml
+  reload 1  full-restart    qqq.toml        190ms
+            "the manifest changed; capabilities and limits must be re-resolved"
+```
+
+---
+
+#### §O-026a — The watcher polls, and that is a deliberate choice
+
+The obvious implementation uses OS notifications through a crate. Rejected for
+four reasons, each specific to this runtime:
+
+| Reason | Detail |
+|---|---|
+| Semantics leak across platforms | inotify splits a rename into two events, `ReadDirectoryChangesW` coalesces differently, macOS `FSEvents` has its own latency floor. A debounce tuned on Linux behaves differently on macOS, so "why did my rebuild fire twice" becomes a platform question. |
+| Inode watches miss the commonest save | Editors that write a temp file and rename it over the original — `vim`, `emacs`, many `JetBrains` saves — produce a *different* inode, and a watch on the old one goes silent. This is the classic "hot reload stopped working" bug. |
+| No notification flood to defend against | A build writing into the tree cannot make the watcher thrash, so the debounce stays simple enough to reason about. |
+| Portable by construction | `(path, mtime, size)` is reported by every filesystem. |
+
+The cost is latency bounded by the poll interval. It is **inside** the 50–300 ms
+tier-1 budget rather than beating it inconsistently per platform, which is worth
+more than being 90 ms faster on one OS and erratic on another.
+
+---
+
+#### §O-026b — The ignore defaults are what make the watcher terminate
+
+`target/` is not an optimisation. If it is watched, a build writes into the
+tree, the watcher sees it, and the rebuild triggers another rebuild — forever.
+The dev server then appears to hang because it is compiling in a loop.
+
+The tests pin this in both directions: `the_build_directory_is_ignored` and
+`a_change_inside_an_ignored_directory_is_invisible` on one side, and
+`real_source_is_never_ignored` on the other — because a watcher that ignores too
+much **silently stops working**, which is worse than one that ignores too little.
+A further test (`a_rule_matches_components_not_substrings`) pins that `targets.rs`
+is not `target/`, and `distribution.rs` is not `dist/`.
+
+---
+
+#### §O-026c — Size is compared as well as mtime, because mtime alone misses real edits
+
+A file saved twice within the filesystem's timestamp resolution has the same
+mtime. Editors are fast, and some filesystems have coarse clocks. Comparing only
+mtime means a real edit is reported as "no change", and the dev server silently
+does nothing — the worst failure mode available, because the user sees no error.
+Size as a second signal catches the common case where the two saves differ in
+length.
+
+---
+
+#### §O-026d — The pure half is separated from the impure half, so timing is testable
+
+`IgnoreRules` and `Debouncer` take no filesystem action; only `Snapshot` reads
+the disk. Crucially, `Debouncer::observe` and `should_fire` **take the current
+instant as a parameter** rather than calling `Instant::now()`.
+
+That makes the debounce a pure function of `(events, time)`, so every timing
+behaviour is tested without sleeping: a burst coalescing into one trigger, a slow
+drip still coalescing while it continues, a change arriving exactly on the window
+boundary, observing zero changes not arming the trigger, and a backwards clock
+not panicking. **Tests that sleep are slow and flaky; tests that pass a timestamp
+are neither.**
+
+This is the same split as `plan`/`plan_pure` (§O-023), and it was made for the
+same reason after that lesson: environment-dependent behaviour must be reachable
+through a pure entry point, or its tests are testing the machine.
+
+---
+
+#### §O-026e — Tier selection is security-relevant, not an optimisation
+
+A `qqq.toml` edit must force a **full restart**, never a component swap. The
+linker and the store are built once per instance and hold authority. A swap
+reuses them, so:
+
+* A **granted** capability would not take effect — the new code would be denied
+  something the user just granted, and it would look like a bug in their code.
+* A **revoked** capability would keep working until the process restarted. A
+  developer could remove a grant, run their tests, see them pass, and ship.
+
+The second is the dangerous one: it is exactly the drift the capability model
+exists to prevent. So the strictest tier wins when changes are mixed, and the
+reason string names the cause so a user wondering why their edit cost 1.5 seconds
+can see it was the manifest.
+
+---
+
+#### §O-026f — Two flags added beyond the Proposal's list, to make the loop verifiable
+
+The Proposal lists `--port`, `--open`, `--https`, `--inspect`. Two more were
+added: `--once` compiles and exits, and `--reload-limit N` bounds the watch loop.
+
+**An unbounded loop that cannot be bounded is a loop that cannot be tested.** The
+verified behaviour in §O-026 — two edits producing two reloads with the right
+tier — is only checkable because the loop can be told to stop after N cycles. The
+alternative would have been to report "the loop is implemented" on the strength
+of reading the code.
+
+---
+
+#### §O-026g — The missing listener is stated, not hidden
+
+There is no HTTP listener yet (`CLI-011`, `qqq-serve`). `dev` therefore compiles
+and reloads but serves nothing, and **says so in its human output and in a JSON
+`notes` field** rather than appearing to listen.
+
+A dev server that prints `Listening on http://127.0.0.1:3000` and does not listen
+would be a stub wearing a working command's clothes — the failure mode this
+project's working rules forbid. The port is still reported, because it is the
+address `serve` will use and a user needs to know it before it works.
+
+**Cross-refs:** Checklist `CLI-010`, `DX-003`, `DX-009`, `DX-006`, `DX-007`;
+Proposal §6.6, §12.1.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

@@ -10,9 +10,28 @@
 #   * the reproducibility claim (REL/REP items in the Checklist) is only
 #     meaningful if the bytes on disk are the bytes that were committed.
 #
-# `core.autocrlf=true` is set on this machine, which would otherwise check
-# LF blobs out as CRLF and make the working tree differ from the index on
-# every text file. Pinning `eol=lf` here overrides that per-repository.
+# `core.autocrlf` must be `false` in this repository, and `.gitattributes`
+# alone does NOT achieve that. Measured, not assumed:
+#
+#   With `core.autocrlf=true` and `eol=lf` here, `git ls-files --eol` reported
+#   `i/lf w/crlf` for every Markdown document. The attributes control what is
+#   *committed*; `autocrlf` controls what Git writes to the *working tree* on
+#   checkout and on index refresh. The two are independent, and where they
+#   disagree the working tree drifts every time Git touches a file.
+#
+# The symptom is a tree that reports files modified after a commit that included
+# them, with an empty `git diff` — and a dirty tree hides real changes. A
+# previous version of this comment claimed `eol=lf` "overrides" `autocrlf`; it
+# does not, and the drift recurred until the config was set.
+#
+# The fix is per-repository configuration, which is why it cannot live in this
+# file:
+#
+#     git config core.autocrlf false
+#
+# `tools/normalize_eol.py --check` runs in CI and fails if a tracked text file
+# would check out with the wrong endings, so a regression is caught rather than
+# rediscovered.
 #
 # The default: everything is text and gets LF.
 * text=auto eol=lf

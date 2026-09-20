@@ -17,6 +17,26 @@ Thank you for considering it. This document is short on ceremony and specific ab
 
 ## The workflow
 
+0. **Configure line endings first.** One command, and without it your working
+   tree will drift:
+
+   ```sh
+   git config core.autocrlf false
+   ```
+
+   This is not optional tidiness. `.gitattributes` pins `eol=lf`, which controls
+   what is **committed** — but `core.autocrlf` controls what Git writes to the
+   **working tree**, and it does *not* defer to the attribute. With both
+   enabled, `git status` reports files modified after a commit that included
+   them, with an empty `git diff`, and a dirty tree hides real changes.
+
+   This repository is byte-sensitive — `qqq.lock` carries a covering hash over
+   its own bytes and the content store compares digests — so the bytes on disk
+   must be the bytes that were committed. A per-repository `git config` cannot
+   be committed, which is why it is a setup step rather than a file.
+   `python tools/normalize_eol.py --check` runs in CI and will tell you if it is
+   wrong.
+
 1. **Find or create a checklist item.** Work that is not on the checklist does not get merged. If your change has no item, add one — with a `→ §x.y` citation to the proposal section it implements.
 2. **Open an issue** describing the change, unless it is trivial.
 3. **For interface or principle changes, write an RFC** (see below).

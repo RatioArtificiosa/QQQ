@@ -64,8 +64,38 @@ def git_files() -> list[Path]:
     return [ROOT / p for p in out.stdout.split("\0") if p]
 
 
+def core_autocrlf() -> str:
+    """The repository's `core.autocrlf` setting, or `(unset)`."""
+    out = subprocess.run(
+        ["git", "config", "--get", "core.autocrlf"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    return out.stdout.strip() or "(unset)"
+
+
 def main() -> int:
     check_only = "--check" in sys.argv
+
+    # The root cause, checked first and reported loudly.
+    #
+    # `.gitattributes` controls what is *committed*; `core.autocrlf` controls
+    # what Git writes to the *working tree*. `eol=lf` in the attributes does NOT
+    # override `autocrlf=true`, which was measured rather than assumed — with
+    # both set, `git ls-files --eol` reported `i/lf w/crlf` for every Markdown
+    # document, and the tree drifted on every index refresh.
+    #
+    # A per-repository setting cannot be committed, so a fresh clone will not
+    # have it. Reporting it here is what makes the gap visible instead of leaving
+    # the next person to rediscover the same drift.
+    autocrlf = core_autocrlf()
+    if autocrlf in ("true", "input"):
+        print(
+            f"core.autocrlf is `{autocrlf}` in this repository.\n"
+            "  This causes the working tree to drift to CRLF even with\n"
+            "  `eol=lf` in .gitattributes, because the attribute controls the\n"
+            "  commit and autocrlf controls the checkout.\n"
+            "  Fix: git config core.autocrlf false\n"
+        )
 
     drifted: list[Path] = []
     for path in git_files():
@@ -90,6 +120,12 @@ def main() -> int:
 
     if not drifted:
         print("all tracked text files use LF")
+        if autocrlf in ("true", "input"):
+            print(
+                "note: core.autocrlf is still enabled, so the drift will return "
+                "on the next index refresh"
+            )
+            return 1
         return 0
 
     verb = "would normalize" if check_only else "normalized"

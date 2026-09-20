@@ -142,23 +142,135 @@ Two distinct identifiers must never be conflated:
 
 ### §D-005 — Keep Tokio; do not rewrite the async reactor
 
-**Decision.** Portable default is Tokio's multi-threaded runtime with a **sharded acceptor**. io_uring is an opt-in Linux backend behind a flag, adopted only if it earns its complexity with measured results.
+> **This is the ADR for `ARCH-005`.** It is written to the template in
+> `docs/adr/README.md` — decision, context, alternatives, consequences, revisit
+> trigger — rather than as a bare statement, because the *reason* is what a
+> future maintainer cannot recover from the code.
 
-**Why.** The source conversation explicitly asked whether Tokio or a thread-per-core runtime (monoio/glommio) is better. The answer is that monoio/glommio are **Linux-only** — io_uring does not exist on macOS or Windows — so adopting them as the only backend would make QQQ unable to run on two of its five target platforms. The sharded acceptor recovers most of the thread-per-core benefit (a connection is accepted and served on the same core, so there is no cross-core handoff on the common path) while remaining portable.
+**Decision.** The portable default is **Tokio's multi-threaded runtime with a
+sharded acceptor**: each worker thread owns a set of listener shards, so a
+connection is accepted and served on the same core for its whole life. io_uring
+is an **opt-in Linux backend behind a flag**, adopted only if it earns its
+complexity with measured results.
 
-**Explicitly rejected:** rewriting the reactor. It is a multi-year detour with no differentiation. *The differentiation is the capability layer, not the event loop.*
+**Context.** The source conversation explicitly asked whether Tokio or a
+thread-per-core runtime (monoio/glommio) is better, and the question is a real
+one rather than a stylistic preference: a shared work queue means cross-core
+cache-line bouncing, which is a genuine cost at high core counts, and
+thread-per-core is the standard answer.
 
-**Cross-refs:** Proposal §4.2; Checklist `ARCH-005`, `ARCH-006`, `PERF-014`.
+What made it a decision rather than a default is the platform matrix. QQQ targets
+five platforms (§11.1) and **io_uring does not exist on macOS or Windows**. Two of
+the three candidate runtimes are therefore unavailable on two of the five
+targets.
+
+| Option | Strength | Fatal weakness for QQQ |
+|---|---|---|
+| **Tokio multi-threaded** | Battle-tested; portable to every target including Windows; integrates with Wasmtime's async support and `wasmtime-wasi-http` | Shared work queue → cross-core cache-line bouncing at very high core counts |
+| **monoio / glommio (thread-per-core)** | No cross-core synchronisation; maximum single-core throughput | **Linux-only.** io_uring does not exist on macOS or Windows, so choosing this as the only backend means QQQ cannot run on half its target platforms. It also conflicts with Wasmtime's own executor model, which expects a Tokio-compatible reactor |
+| **Rewrite the reactor** | Perfect fit, no compromise | A multi-year detour with **no differentiation**. The differentiation is the capability layer, not the event loop |
+
+**Consequences — what this makes easy.** One runtime, one set of semantics, and
+WASI integration that already exists and is maintained upstream. `qqq-io` can
+expose a reactor abstraction without owning an event loop, which is what keeps the
+crate small and the `unsafe` count at zero.
+
+**Consequences — what this makes hard, stated rather than glossed.**
+
+1. **We inherit Tokio's cooperative-budget semantics.** A host function that
+   represents guest-visible blocking must not be subject to the host's
+   cooperative budget, or it violates WASI's guarantees. Wasmtime already works
+   around this internally for WASIp2 `poll`. QQQ mirrors that discipline, and it
+   is written down as an invariant in §10.5 and tracked by **`HOST-017`** — which
+   is still open, because no guest-visible-blocking host function exists yet.
+2. **The sharded acceptor is a userspace approximation**, not a kernel guarantee.
+   Assignment is round-robin over shards rather than `SO_REUSEPORT`, because the
+   kernel option distributes differently on macOS and Windows — so the thing that
+   is portable is also the thing that gives a weaker guarantee. `ARCH-006`
+   implements it and 8 socket tests pin the behaviour.
+3. **Two backends is two code paths.** io_uring behind a flag means a feature
+   matrix, and the flag must not become the only path anybody tests.
+
+**Explicitly rejected.** Rewriting the reactor. Recorded as a rejection rather
+than deferred, because "we might rewrite it later" is how a detour gets funded.
+
+**Revisit when.** Any of these, and not before:
+
+* `PERF-014` produces a **measured, reproducible** advantage from io_uring on the
+  reference workload — the flag then becomes a documented recommendation.
+* A measured reactor problem appears that the capability model cannot solve. This
+  is deliberate: the trigger is a *measurement*, not an intuition.
+* Wasmtime's own executor model changes such that a Tokio-compatible reactor is no
+  longer the natural fit.
+
+**Cross-refs:** Proposal §4.2; Checklist `ARCH-005`, `ARCH-006`, `HOST-017`,
+`PERF-014`; Observations `§D-006`.
 
 ---
 
 ### §D-006 — Default guest concurrency is async-single-threaded
 
-**Decision.** The recommended and default guest model is one logical task per request using Component Model `async`/`future`/`stream`. Shared-memory Wasm threads are permitted only behind an explicit manifest opt-in. Cooperative threads are not enabled in V1.
+> **This is the ADR for `ARCH-013`.** Written to the `docs/adr/README.md`
+> template, for the same reason as `§D-005`.
 
-**Why.** One memory per task preserves the strongest isolation guarantee, keeps fuel accounting exact, and matches how request-scoped work actually looks. Density — many instances — replaces threads. Shared linear memory undermines per-instance accounting, which is a core security property.
+**Decision.** Three guest concurrency models exist and QQQ states a policy for
+each. Two are **supported**, one is **not enabled in V1**:
 
-**Cross-refs:** Proposal §4.7; Checklist `ARCH-013`, `ARCH-014`, `DET-012`, `OQ-005`.
+| Model | Wasm feature | V1 policy |
+|---|---|---|
+| **Async single-threaded** | Component Model `async`, `future`, `stream` (WASI 0.3) | **Default and recommended.** One logical task per request; concurrency comes from many instances, not many threads inside one |
+| **Shared-memory threads** | Wasm `threads` proposal (`SharedMemory`) | **Enabled but discouraged**, behind an explicit manifest opt-in (`[limits] shared_memory = true`) |
+| **Cooperative threads** | Component Model cooperative threads (gated 🧵) | **Not enabled in V1.** Requires stack switching, which Wasmtime still lists as work-in-progress; tracked as `FUT-004` |
+
+**Context.** The async default is not a preference in the abstract — it is forced
+by what Wasmtime 48 actually supports, and by the isolation model. This was
+verified against the real toolchain while building `HOST-015`/`HOST-016` rather
+than read from documentation.
+
+**Alternatives considered.**
+
+| Option | Why not |
+|---|---|
+| **Thread-per-request inside one instance** | Requires shared linear memory, which defeats per-instance memory accounting — the accounting that makes a memory limit a *security* control rather than a tuning knob. It also makes fuel accounting inexact, because two threads consume from one budget |
+| **Cooperative threads as the default** | Not available: it needs stack switching, which upstream lists as work-in-progress. Choosing an unavailable default is not a decision |
+| **One instance per request, no async at all** | Loses the reactor; a guest awaiting a host future would block the calling thread, which §4.2 forbids |
+
+**Consequences — what this makes easy.** One memory per task, so the isolation
+guarantee stays the strongest available; exact fuel accounting, because one task
+draws from one budget; and a natural match to how request-scoped work actually
+looks. Density — many instances — replaces threads, which is the same trade §4.4
+step 14 makes for instantiation cost.
+
+**Consequences — what this makes hard, and these are measured rather than
+predicted.**
+
+1. **The epoch yield requires a reactor that can spare a thread.** Measured while
+   implementing `HOST-016`: a yielding guest returns `Pending` on the executor it
+   runs on, so a **current-thread** runtime has no thread left to fire the tick
+   timer — the guest yields forever and the executor never advances. This was
+   observed as a *hang*, twice, in the test suite, and it is a real constraint on
+   `qqq-serve` rather than a test artefact: **a single-threaded reactor cannot use
+   this yield at all** (`§O-056b`).
+2. **CPU-parallel workloads have no good answer inside one instance.** The
+   escape is shared memory behind an opt-in, and the opt-in is discouraged
+   precisely because it weakens accounting. A legitimate CPU-parallel workload is
+   therefore a case where the recommended model is wrong, and the manifest must
+   say so explicitly rather than the host discovering it.
+3. **A guest that blocks in a host call still blocks the calling thread** on the
+   synchronous path. The async path is the answer, which is why `HOST-015` is a
+   prerequisite for `HOST-017`.
+
+**Revisit when.**
+
+* Wasmtime ships cooperative threads as stable — `FUT-004` then becomes a real
+  option rather than a blocked one.
+* A measured workload shows that instance-per-request density is the constraint
+  rather than the answer — i.e. that parallelism *inside* a guest is worth the
+  accounting loss.
+* `OQ-005` (the shared-memory policy question) is resolved by a human decision.
+
+**Cross-refs:** Proposal §4.7, §4.2; Checklist `ARCH-013`, `ARCH-014`, `HOST-015`,
+`HOST-016`, `HOST-017`, `DET-012`, `FUT-004`, `OQ-005`; Observations `§O-056`.
 
 ---
 
@@ -199,6 +311,97 @@ Two distinct identifiers must never be conflated:
 **Constraint:** the README must pass the same claims policy as every other surface (`DOC-014`) — no unqualified performance claim without a benchmark reference.
 
 **Cross-refs:** Checklist `DOC-001`, `POS-001`, `POS-004`, `MKT-013`.
+
+---
+
+### §D-010 — The nine layers are fixed, and authority flows down only
+
+> **This is the ADR for `ARCH-001`.** It fixes the layer cake of Proposal §4.1
+> and the authority-flow invariant that every other security decision depends on.
+
+**Decision.** QQQ is **nine layers**, and two invariants hold across all of them:
+
+1. **Authority only ever narrows as you go down.** L5 (Capability Engine) is the
+   sole authority gate; nothing below it can widen a grant and nothing above it
+   can bypass it.
+2. **Guest code exists only inside L4 (Execution).** Layers L1–L3 run native, in
+   the host process, and are never reachable from a guest except through an
+   L5-mediated call.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ L9  ECOSYSTEM      registry · package manager · templates · conformance      │
+│ L8  AGENT FACE     MCP server · schemas · error codes · capability reports   │
+│ L7  DX             qqqai CLI · dev server + HMR · test runner · debugger     │
+│ L6  PRODUCT APIS   WIT interfaces: http, fs, sql, kv, queue, crypto, ai…     │
+│ L5  CAPABILITY     manifest → grants → linker → limits → audit               │
+│     ENGINE         ★ this layer is why QQQ exists ★                          │
+│ L4  EXECUTION      Wasmtime engine · pooling allocator · fuel · epochs       │
+│ L3  SCHEDULER      thread-per-core shards · work stealing · backpressure     │
+│ L2  I/O            Tokio (portable) │ io_uring (Linux, opt-in) │ IOCP/epoll  │
+│ L1  PLATFORM       OS syscalls · mmap · signals · clocks · entropy           │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Context.** The layering is not decorative and not a documentation convenience:
+it is the answer to *"where is the security boundary enforced, and what stops the
+layer above from bypassing it?"* Two design pressures produced it:
+
+* **The isolation claim requires a single gate.** §1.3's constraint A says no
+  capability may be reachable by a guest except through a grant recorded in a
+  signed manifest, enforced outside the guest's address space. That is only
+  meaningful if there is exactly **one** place grants are evaluated — otherwise a
+  second path is a second policy.
+* **The multi-language claim requires capability parity.** §1.3's constraint B
+  says no language may reach a host feature another cannot. That is only
+  enforceable if host features are declared in one layer (L6) and bound in one
+  place (L5), rather than being scattered across the runtime.
+
+**Alternatives considered.**
+
+| Option | Why not |
+|---|---|
+| **Fewer layers, merged** (e.g. L5 into L4) | The capability engine is the product; merging it into the engine makes "the server has permissions" and "this request has permissions" the same code path. §4.4 steps 7–8 happen **per instance**, and that only works if the binding step is a distinct layer with a distinct owner |
+| **More layers, splitting L1/L2 by platform** | Produces a layer per OS rather than per responsibility, and makes the portability story *(which layers are platform-specific?)* harder to state rather than easier |
+| **No explicit layer model; enforce by crate boundaries alone** | The crate topology (§4.3) is a *different* claim: it fixes compile-time dependencies, not runtime authority flow. `qqq-host` may not depend on `qqq-serve`, but that says nothing about whether an ungranted import can be reached. The two are complementary, and `ARCH-004` checks the other one |
+
+**Consequences — what this makes easy.** One place to audit grants, one place to
+add an interface, and a clean answer to "can a guest reach this?" — walk the
+layers from L6 down and find the gate.
+
+**Consequences — what this makes hard, stated rather than glossed.**
+
+1. **Layer 5 must be correct or nothing is.** There is no defence in depth *below*
+   it, by construction. That is why the link is built per-instance from grants
+   only **and** re-checked at call time (`ARCH-012`, §4.4 step 11) — the second
+   check is not redundant, it is the only compensation for having a single gate.
+2. **A feature that cannot be expressed in WIT cannot ship** (`§D-008`). L6 is
+   WIT interfaces, so this follows directly, and it means a genuinely
+   non-expressible host feature has to be refused rather than added below the
+   line.
+3. **The layer count is a maintenance surface.** Nine stated layers invite a
+   tenth; the invariant is what must not change, and a new layer has to justify
+   itself against the two invariants rather than against convenience.
+
+**Enforcement.** The invariants are checked, not asserted:
+
+| Invariant | Enforced by |
+|---|---|
+| Authority only narrows | `no_widening_constructor_on_grants_exists_anywhere` — no widening primitive on `GrantSet` exists anywhere in the workspace (`ARCH-002`) |
+| Authority only narrows, behaviourally | `qqq-cap`'s `no_overlay_can_ever_widen` — all six (layer × mode) combinations against a hostile overlay (`§O-050`) |
+| Grants are re-checked at call time | `HOST-012`'s sibling in `linker.rs`; the `recheck` path (§4.4 step 11) |
+| No crate depends upward | `no_crate_depends_on_a_crate_above_it` (`ARCH-004`) |
+
+**Revisit when.** A capability cannot be expressed as a grant (which would mean
+the gate is in the wrong place), or a measured performance problem traces to the
+per-instance binding step, or the crate topology needs an edge that violates the
+layer order — the last of which happened once already, when the Proposal's own
+table listed `qqq-host` above `qqq-abi` (`§O-044`), and the *document* was the
+thing out of date.
+
+**Cross-refs:** Proposal §4.1, §4.3, §4.4, §1.3; Checklist `ARCH-001`, `ARCH-002`,
+`ARCH-004`, `ARCH-011`, `ARCH-012`, `SEC-002`; Observations `§D-008`, `§O-044`,
+`§O-050`.
 
 ---
 

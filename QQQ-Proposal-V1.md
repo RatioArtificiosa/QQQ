@@ -453,6 +453,13 @@ Nine relevant comparators. Columns are the axes that actually decide adoption.
 
 QQQ is nine layers. Data flows down on the request path; authority flows down on the trust path and never flows back up.
 
+> **Decision `§D-010`** — the nine layers are **fixed**, and authority flows down
+> only. L5 (Capability Engine) is the sole authority gate; nothing below it can
+> widen a grant and nothing above it can bypass it. Guest code exists only inside
+> L4. The two invariants below are checked by tests (`ARCH-002`, `ARCH-004`), not
+> merely stated — and the reason the layering is load-bearing rather than
+> decorative is that a second path to a capability would be a second policy.
+
 > **Decision `§D-008`** — every host capability is a WIT interface first and a
 > language binding second. If a feature cannot be expressed in WIT, it does not
 > ship. That rule is what makes the multi-language claim structural rather than

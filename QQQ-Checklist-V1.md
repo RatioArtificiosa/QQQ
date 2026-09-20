@@ -363,7 +363,26 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### ARCH — Architecture
 
-- [ ] **ARCH-001** Write the layered-architecture ADR fixing the nine layers and the authority-flow invariant.
+- [x] **ARCH-001** Write the layered-architecture ADR fixing the nine layers and the authority-flow invariant.
+  → Done: **`§D-010`** in Observations §2, written to the `docs/adr/README.md`
+    template — decision, context, alternatives, consequences, revisit trigger —
+    with the nine-layer diagram and the two invariants. It states *why* the
+    layering is load-bearing rather than decorative: a second path to a
+    capability would be a second policy, so the isolation claim requires exactly
+    one gate.
+  → It records the alternatives that were real (merging L5 into L4, splitting by
+    platform, relying on crate boundaries alone) and the costs that are genuinely
+    hard: **L5 must be correct or nothing is**, because there is no defence in
+    depth *below* it by construction — which is why the per-instance linker and
+    the call-time re-check (`ARCH-012`) are compensation rather than redundancy.
+  → It names enforcement per invariant (four checks, not four assertions), which
+    is the register's quality bar: a decision whose consequence is unenforced is
+    a preference.
+  → **The Proposal now cites it.** `check_xrefs.py` check `[10b]` failed the
+    moment `§D-010` was added without a citation — the exact defect
+    `docs/adr/README.md` documents as having once left six of nine decisions
+    write-only. The check caught it before the commit, which is what makes it a
+    check rather than a warning.
   → §4.1 The layer cake
 - [x] **ARCH-002** Implement and test the invariant that authority only narrows downward.
   → Done: the invariant is enforced **structurally** — `GrantSet::narrow` is the
@@ -400,7 +419,26 @@ Items are grouped below by **phase**, because dependency order matters more than
     rule's own strictest case, asserted separately by
     `qqq_core_depends_on_no_other_qqq_crate`.
   → §4.3 Crate topology
-- [ ] **ARCH-005** Write the process-and-thread-model ADR including the explicit rejection of a Tokio replacement.
+- [x] **ARCH-005** Write the process-and-thread-model ADR including the explicit rejection of a Tokio replacement.
+  → Done: **`§D-005`**, upgraded from a two-paragraph note to a full ADR on the
+    `docs/adr/README.md` template. The decision is unchanged — Tokio
+    multi-threaded with a sharded acceptor as the portable default, io_uring
+    behind a Linux opt-in flag — but the *reasoning a future maintainer cannot
+    recover from the code* is now written down: monoio/glommio are Linux-only,
+    io_uring does not exist on macOS or Windows, so choosing them as the only
+    backend makes QQQ unable to run on two of its five target platforms.
+  → The tokio replacement is **rejected explicitly and permanently**, with the
+    alternatives table recording *why*: it is a multi-year detour with no
+    differentiation, because the differentiation is the capability layer rather
+    than the event loop. A rejection recorded as "we might do it later" is how a
+    detour gets funded.
+  → Three costs are stated rather than glossed, and all three are live:
+    Tokio's cooperative-budget semantics must not apply to guest-visible blocking
+    (`HOST-017`, still open); the sharded acceptor is a userspace approximation
+    because `SO_REUSEPORT` distributes differently per platform (`ARCH-006`); and
+    two backends means a feature matrix that must not collapse to one tested path.
+  → The revisit trigger is a **measurement** (`PERF-014` showing a reproducible
+    io_uring advantage), not an intuition.
   → §4.2 Process and thread model
 - [x] **ARCH-006** Implement the sharded acceptor (connection accepted and served on the same core).
   → §4.2 Process and thread model
@@ -471,7 +509,25 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §4.4 Request lifecycle — the detailed path
 - [ ] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
   → §4.4 Request lifecycle — the detailed path
-- [ ] **ARCH-013** Write the guest-concurrency ADR fixing the async-single-threaded default.
+- [x] **ARCH-013** Write the guest-concurrency ADR fixing the async-single-threaded default.
+  → Done: **`§D-006`**, upgraded to a full ADR. It states a policy for all three
+    guest concurrency models rather than only the default: async-single-threaded
+    is **default and recommended**, shared-memory threads are **enabled but
+    discouraged** behind an explicit manifest opt-in, and cooperative threads are
+    **not enabled in V1** because they need stack switching, which Wasmtime still
+    lists as work-in-progress (`FUT-004`).
+  → The alternatives table records why thread-per-request-inside-one-instance is
+    rejected: it requires shared linear memory, which defeats the per-instance
+    memory accounting that makes a memory limit a **security** control rather than
+    a tuning knob, and it makes fuel accounting inexact because two threads draw
+    from one budget.
+  → **The consequences are measured rather than predicted**, which is what makes
+    this ADR worth its length. Implementing `HOST-016` established that the epoch
+    yield needs a reactor able to spare a thread for the ticker — a
+    **current-thread** runtime has none, so a yielding guest yields forever and
+    the executor never advances. Observed as a hang, twice, in the test suite, and
+    recorded as a real constraint on `qqq-serve` rather than a test artefact
+    (`§O-056b`). An ADR written before that work could only have guessed at it.
   → §4.7 Concurrency model for guests
 - [ ] **ARCH-014** Implement the manifest opt-in for shared memory, off by default.
   → §4.7 Concurrency model for guests

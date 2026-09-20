@@ -2256,6 +2256,118 @@ is the smuggling attack itself.
 
 ---
 
+### §O-029 — The status policy, and a lint that pointed at a real problem
+
+**What was built.** `qqq-serve::response` — response serialisation and, more
+importantly, the mapping from a host failure to an HTTP status.
+
+**The mapping is a product decision, not a translation.** A status determines
+what the client does next, so each choice is a claim about the world:
+
+| Failure | Status | The claim |
+|---|---|---|
+| guest trap, QQQ bug | 500 | our side is broken; retrying changes nothing |
+| fuel exhausted, hard limit | 500 | a bug detector fired, not capacity |
+| fuel exhausted, soft limit | 503 + `Retry-After` | the limit is a capacity bound |
+| epoch deadline exceeded | 504 | the request was fine; we were too slow |
+| pool exhausted | 503 + `Retry-After` | shedding load; a retry can succeed |
+| capability denied | **500, not 403** | no credential the client sends can help |
+
+**Fuel is the only row that changes with configuration**, and that is
+deliberate. A hard limit means the guest ran longer than any real request
+should, so infinite-loop protection caught it — telling a client to retry sends
+it back into the same wall. `soft_fuel` is the caller declaring the limit to be
+a capacity bound, and 503 is then honest.
+
+**An epoch timeout is 504, never 500.** §9.3 says it is *"counted as a timeout,
+never as a crash"*. A 500 tells a client its request was malformed-by-us; 504
+tells it the request was fine and we were too slow, which is what happened and
+what a retry can fix.
+
+**A capability denial is 500, not 403**, and this one is counterintuitive enough
+to state twice. A 403 says "you may not", which implies a different credential
+would help. Nothing the client sends changes the outcome — the manifest does not
+grant the capability. 500 is honest, and the remediation lives in the log where
+the operator can see it.
+
+---
+
+#### §O-029a — Clippy flagged duplicate match arms, and it was right for a reason the lint does not know
+
+The first implementation returned `(status, retry, close)` tuples from one big
+`match`. Three separate code groups produced `(500, false, false)`, and clippy
+reported identical arms.
+
+**The lint was correct, and the problem was worse than the lint.** Writing the
+same tuple three times states *"these are the same"* without saying **why** —
+and the why is the entire policy. A reader cannot tell "the guest is broken"
+from "the manifest is wrong" when both are spelled `(500, false, false)`.
+
+**The fix was to name the classes**, which the lint made visible but could not
+have produced:
+
+```rust
+pub enum Failure {
+    GuestFault,        // the guest or QQQ malfunctioned
+    Misconfiguration,  // the deployment is wrong; not 403
+    HardLimit,         // a bug detector fired
+    Timeout,           // 504, never 500
+    OverCapacity,      // shed load; the only class that says retry
+    ListenerFault,
+}
+```
+
+This changed what the tests can assert. `error_response(&err(code)).status ==
+500` cannot distinguish the classes, because they share the number. But
+`classify(code, false) == Failure::Misconfiguration` is a claim about the
+**reason**, and `only_over_capacity_says_retry` becomes expressible at all — a
+property that was previously implied by a tuple nobody could read.
+
+**The generalisable lesson, and it is the third time this pattern has appeared
+(§O-020a, §O-025c):** a compile-time or lint-time signal about *structure* often
+indicates a modelling problem rather than a formatting one. The instinct to
+silence it — `#[allow]`, or merging the arms to match — would have deleted the
+policy. The right response is to ask what the duplication is failing to say.
+
+---
+
+#### §O-029b — The response body never contains an error code
+
+A `QQQ-` identifier names an internal condition. Returning it tells an attacker
+which subsystem failed and gives an integrator a string to depend on that is not
+part of the published contract. So the code goes to the access log and a status
+phrase goes to the client.
+
+Tested across the whole catalogue: `the_response_body_never_leaks_an_error_code`
+walks every `ErrorCode` and asserts none appears in the body, and
+`error_bodies_are_minimal` bounds every body at 64 bytes — a verbose error page
+is an information leak with a nicer font.
+
+---
+
+#### §O-029c — Three framing rules that prevent a desynchronised stream
+
+1. **`Content-Length` is always emitted, even for an empty body.** A response
+   with neither it nor `Transfer-Encoding` leaves the client guessing where it
+   ends, and the only correct guess is "the connection closed" — which defeats
+   keep-alive entirely.
+2. **The measured body length wins over any caller-supplied header.** A caller
+   cannot desynchronise the stream by setting a `Content-Length` that disagrees
+   with what it passes in.
+3. **A status that forbids a body gets none.** 204, 304 and every 1xx. Emitting
+   one is a framing error: the client reads it and the bytes become the next
+   response's status line.
+
+A fourth is subtler: a caller cannot smuggle a `Transfer-Encoding` header into a
+body writer that is not using chunked framing. The header is filtered, because a
+response that declares a framing it is not using is worse than one that declares
+nothing.
+
+**Cross-refs:** Checklist `SRV-001`, `SRV-011`, `HOST-012`, `SEC-016`; Proposal
+§6.4, §9.3.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

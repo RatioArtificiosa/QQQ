@@ -2368,6 +2368,114 @@ nothing.
 
 ---
 
+### §O-030 — The connection lifecycle: keep-alive, the header timeout, and drain
+
+**What was built.** `qqq-serve::conn` (`SRV-011`, `SRV-012`) — a state machine
+that decides what a connection does next. It owns no socket and never reads a
+clock; every timing input is a parameter, the same discipline as the debouncer in
+`qqq-run::watch` (`§O-026d`).
+
+**Verified:** 34 tests, covering keep-alive, the request cap, both timeouts, the
+drain path, the ledger, and the close-reason classification.
+
+---
+
+#### §O-030a — The header timeout and the idle timeout measure different things, and one cannot replace the other
+
+This is the subtlest decision in the module, and getting it wrong makes
+slow-loris **easier** than idle probing.
+
+A client that opens a connection and sends nothing is idle, and the idle timeout
+closes it. But a client that sends one byte per minute is *not idle* — it is
+mid-head — so the idle timeout never fires, and it holds a connection slot
+indefinitely while sending almost nothing. That is precisely the slow-loris
+attack Proposal §6.4 names.
+
+So there are two clocks:
+
+| Timeout | Measures | Default |
+|---|---|---|
+| idle | between requests | 75 s |
+| header | during a request head | 10 s |
+
+**The header timeout must be shorter**, and a test asserts it
+(`the_header_timeout_is_shorter_than_the_idle_timeout`). If it were longer, a
+client mid-head would be treated *more* leniently than one sitting idle, which
+inverts the intent. Ten seconds is generous for a head a real client sends in one
+or two packets.
+
+---
+
+#### §O-030b — Whether a parse error closes the connection is the parser's decision, not this module's
+
+`Connection::on_parse_error` takes a `&ParseError` rather than a bare "it
+failed", and consults `ParseError::closes_connection` (from `§O-028e`).
+
+**Why the indirection is load-bearing.** The rule is: after a framing error, the
+parser's view of where this request ends is untrustworthy, so reading on risks
+interpreting body bytes as the next request — which *is* the smuggling attack.
+That rule already lives in the parser, where the knowledge is. Re-deriving it
+here would create a second copy, and two copies of a security rule eventually
+disagree; the disagreement would be a vulnerability, not a bug report.
+
+A test walks every error that claims to close and asserts the connection
+actually closes, so the two cannot drift apart silently.
+
+---
+
+#### §O-030c — An in-flight request is never interrupted, except by the drain deadline
+
+The order of checks in `poll` is the policy, and two orderings matter:
+
+**In-flight beats idle.** A request being handled is not idle, so no timeout
+applies. The guest's own epoch deadline governs it and produces a **504 rather
+than a reset** — which is what keeps a slow request classifiable by the client
+(`§O-029`).
+
+**Drain deadline beats in-flight.** This is the exception, and it is deliberate:
+a drain that never completes is worse than an abrupt one, because an operator
+cannot distinguish "still draining" from "stuck". A deploy that hangs is an
+incident; a deploy that forces one slow request closed at the deadline is a
+metric. Both boundaries are tested, at 4 999 ms and 5 001 ms.
+
+---
+
+#### §O-030d — The ledger is per tenant, drops entries at zero, and raises a zero ceiling
+
+Three small decisions, each with a reason worth keeping:
+
+**Per tenant, not global.** A global limit lets one tenant starve every other by
+opening connections. `one_tenant_cannot_starve_another` is the test that states
+this directly, and it is the property that makes the runtime multi-tenant rather
+than merely multi-process.
+
+**Entries removed at zero.** A map that keeps a key per tenant ever seen grows
+without bound — in the component whose entire job is to bound something. Tested
+by cycling a thousand tenants and asserting the map is empty.
+
+**A ceiling of zero becomes one.** A tenant allowed no connections is a
+configuration mistake rather than an intent, and silently rejecting every request
+would make it hard to diagnose. One connection at least produces an error the
+operator can see.
+
+---
+
+#### §O-030e — Close reasons are classified, because "closed" is not a metric
+
+A process whose connections all close with `HeaderTimeout` is being scanned. One
+where they close with `DrainDeadline` needs a longer drain timeout. A bare closed
+counter cannot tell them apart, so `CloseReason::is_healthy` splits the eight
+reasons into routine (`ClientRequested`, `ServerRequested`, `RequestLimit`,
+`ShutdownIdle`) and symptomatic (the four timeouts and errors).
+
+A test asserts every variant lands on the right side, so adding a reason later
+forces a deliberate choice rather than defaulting into "healthy".
+
+**Cross-refs:** Checklist `SRV-011`, `SRV-012`, `SRV-001`, `HOST-010`; Proposal
+§6.4, §4.2.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

@@ -295,7 +295,9 @@ impl FromStr for Version {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let mut parts = s.split('.');
         let mut next = |what: &'static str| -> std::result::Result<u32, VersionParseError> {
-            let raw = parts.next().ok_or(VersionParseError::MissingComponent(what))?;
+            let raw = parts
+                .next()
+                .ok_or(VersionParseError::MissingComponent(what))?;
             // Reject empty and non-digit without allocating.
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(VersionParseError::NotANumber(raw.to_owned()));
@@ -409,15 +411,7 @@ mod tests {
     /// control, not a style rule: a package name reaches directory paths.
     #[test]
     fn path_separators_and_traversal_are_rejected() {
-        for hostile in [
-            "../etc/passwd",
-            "..",
-            "a/b",
-            "a\\b",
-            "a\0b",
-            "a b",
-            "a\nb",
-        ] {
+        for hostile in ["../etc/passwd", "..", "a/b", "a\\b", "a\0b", "a b", "a\nb"] {
             assert!(
                 PackageName::new(hostile).is_err(),
                 "must reject path-hostile name {hostile:?}"
@@ -464,7 +458,9 @@ mod tests {
 
     #[test]
     fn version_rejects_malformed_input() {
-        for bad in ["", "1", "1.2", "1.2.3.4", "1.2.x", "a.b.c", "1..3", "-1.2.3"] {
+        for bad in [
+            "", "1", "1.2", "1.2.3.4", "1.2.x", "a.b.c", "1..3", "-1.2.3",
+        ] {
             assert!(bad.parse::<Version>().is_err(), "should reject {bad:?}");
         }
     }
@@ -474,9 +470,15 @@ mod tests {
         let v12 = Version::new(1, 2, 0);
         let v14 = Version::new(1, 4, 0);
         let v20 = Version::new(2, 0, 0);
-        assert!(v14.is_compatible_with(v12), "1.4 satisfies a 1.2 requirement");
+        assert!(
+            v14.is_compatible_with(v12),
+            "1.4 satisfies a 1.2 requirement"
+        );
         assert!(!v12.is_compatible_with(v14), "1.2 does not satisfy 1.4");
-        assert!(!v20.is_compatible_with(v12), "a major bump is not compatible");
+        assert!(
+            !v20.is_compatible_with(v12),
+            "a major bump is not compatible"
+        );
     }
 
     /// Observations §D-001: the binary is `qqqai` and the brand is `QQQ`.

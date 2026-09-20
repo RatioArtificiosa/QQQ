@@ -690,13 +690,21 @@ mod tests {
         let engine = wasmtime::Engine::new(&cfg).unwrap();
 
         for (stanza, cap) in [
-            ("[capabilities.crypto]\nhash = [\"sha256\"]\n", Capability::CryptoHash),
-            ("[capabilities.crypto]\nrandom = true\n", Capability::CryptoRandom),
+            (
+                "[capabilities.crypto]\nhash = [\"sha256\"]\n",
+                Capability::CryptoHash,
+            ),
+            (
+                "[capabilities.crypto]\nrandom = true\n",
+                Capability::CryptoRandom,
+            ),
             ("[capabilities.clock]\nwall = true\n", Capability::ClockWall),
-            ("[capabilities.clock]\nmonotonic = true\n", Capability::ClockMonotonic),
+            (
+                "[capabilities.clock]\nmonotonic = true\n",
+                Capability::ClockMonotonic,
+            ),
         ] {
-            let src =
-                format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\n{stanza}");
+            let src = format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\n{stanza}");
             let built = build_linker(&engine, &grants_from(&src)).unwrap();
             assert!(
                 !built.bound.unimplemented.contains(&cap),
@@ -787,7 +795,9 @@ mod tests {
             .linker
             .instantiate(&mut store, &component)
             .expect("a component with no imports must instantiate");
-        let f = instance.get_typed_func::<(), (u32,)>(&mut store, "f").unwrap();
+        let f = instance
+            .get_typed_func::<(), (u32,)>(&mut store, "f")
+            .unwrap();
         let (v,) = f.call(&mut store, ()).unwrap();
         assert_eq!(v, 42, "the control case must actually work");
     }
@@ -808,8 +818,8 @@ mod tests {
         let data = StoreData::new(grants_from(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
         ));
-        let err = recheck(&data, Capability::SqlQuery)
-            .expect("an ungranted capability must be denied");
+        let err =
+            recheck(&data, Capability::SqlQuery).expect("an ungranted capability must be denied");
         assert_eq!(err.code, qqq_core::ErrorCode::CapabilityDenied);
         assert_eq!(err.id(), "QQQ-4003");
         assert!(err.remediation.is_some());
@@ -840,8 +850,14 @@ mod tests {
     fn gap_diagnostic_names_the_capability_and_interface() {
         let e = describe_gap(Capability::CryptoHash);
         let msg = e.message.clone();
-        assert!(msg.contains("crypto.hash"), "must name the capability: {msg}");
-        assert!(msg.contains("qqq:crypto@1.0.0"), "must name the interface: {msg}");
+        assert!(
+            msg.contains("crypto.hash"),
+            "must name the capability: {msg}"
+        );
+        assert!(
+            msg.contains("qqq:crypto@1.0.0"),
+            "must name the interface: {msg}"
+        );
         assert!(e.remediation.is_some());
         assert!(e.render().contains("QQQ-6004"));
     }

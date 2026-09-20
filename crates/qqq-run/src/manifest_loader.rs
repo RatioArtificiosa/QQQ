@@ -55,9 +55,7 @@ impl LoadedManifest {
 
         let manifest = Manifest::parse(&source).map_err(|e| {
             let code = match e {
-                qqq_cap::manifest::ManifestError::Syntax { .. } => {
-                    ErrorCode::ManifestSyntaxInvalid
-                }
+                qqq_cap::manifest::ManifestError::Syntax { .. } => ErrorCode::ManifestSyntaxInvalid,
                 qqq_cap::manifest::ManifestError::LimitOutOfRange { .. } => {
                     ErrorCode::LimitOutOfRange
                 }
@@ -65,9 +63,7 @@ impl LoadedManifest {
             };
             Error::new(code, e.to_string())
                 .with_context("manifest", path.display().to_string())
-                .with_remediation(
-                    "run `qqqai schema --command manifest` for the expected shape",
-                )
+                .with_remediation("run `qqqai schema --command manifest` for the expected shape")
         })?;
 
         Ok(Self {
@@ -193,7 +189,11 @@ mod tests {
         // search is ambiguous in a monorepo and NN-5 forbids inferring it.
         let e = LoadedManifest::discover(&child, None).unwrap_err();
         assert!(e.message.contains("no `qqq.toml`"), "got: {}", e.message);
-        assert!(e.remediation.as_deref().unwrap_or("").contains("--manifest"));
+        assert!(e
+            .remediation
+            .as_deref()
+            .unwrap_or("")
+            .contains("--manifest"));
 
         let _ = std::fs::remove_dir_all(&parent);
     }

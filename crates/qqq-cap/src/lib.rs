@@ -52,13 +52,11 @@ pub use capability::{
     Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,
 };
 pub use manifest::{
-    group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability,
-    DnsCapability, EnvCapability, FsCapability, FsMode, HttpCapability, Manifest,
-    ManifestError, Package,
+    group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability, DnsCapability,
+    EnvCapability, FsCapability, FsMode, HttpCapability, Manifest, ManifestError, Package,
 };
 pub use normalize::{
-    path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv,
-    SecretRef,
+    path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv, SecretRef,
 };
 pub use resolve::{
     denial, CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode,

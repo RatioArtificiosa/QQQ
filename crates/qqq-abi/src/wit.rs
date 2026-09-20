@@ -137,7 +137,10 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for (name, _) in ALL_WIT {
             assert!(seen.insert(*name), "duplicate interface name `{name}`");
-            assert!(name.starts_with("qqq:"), "`{name}` must be in the qqq: namespace");
+            assert!(
+                name.starts_with("qqq:"),
+                "`{name}` must be in the qqq: namespace"
+            );
             let (_, version) = name.split_once('@').expect("must carry a version");
             let parts: Vec<&str> = version.split('.').collect();
             assert_eq!(
@@ -150,7 +153,10 @@ mod tests {
                 "`{name}` has a non-numeric version component"
             );
             let major: u32 = parts[0].parse().unwrap();
-            assert!(major >= 1, "`{name}`: a published interface must be at major >= 1");
+            assert!(
+                major >= 1,
+                "`{name}`: a published interface must be at major >= 1"
+            );
         }
     }
 
@@ -159,7 +165,10 @@ mod tests {
         assert!(wit_source("qqq:clock@1.0.0").is_some());
         assert!(wit_source("qqq:crypto@1.0.0").is_some());
         assert!(wit_source("qqq:nope@1.0.0").is_none());
-        assert!(wit_source("clock").is_none(), "must match the versioned name");
+        assert!(
+            wit_source("clock").is_none(),
+            "must match the versioned name"
+        );
     }
 
     /// The embedded copy must match the published file exactly. A difference

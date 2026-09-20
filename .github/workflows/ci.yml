@@ -98,17 +98,40 @@ jobs:
         run: |
           set -euo pipefail
           # qqq-sys is the only crate permitted to contain unsafe code.
-          # Anything else containing `unsafe` fails the build.
-          violations=$(grep -rn --include='*.rs' '\bunsafe\b' crates \
+          #
+          # The pattern matches the `unsafe` KEYWORD in code positions:
+          #   `unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe extern`, `unsafe trait`
+          # It deliberately does NOT match the word appearing in prose.
+          #
+          # An earlier version grepped for the bare word `\bunsafe\b` and failed
+          # on a comment reading "which is the unsafe direction". A check that
+          # fires on documentation is a check people learn to work around, and
+          # the workaround (deleting the word) makes the code less clear.
+          violations=$(grep -rnE --include='*.rs' \
+            '\bunsafe[[:space:]]*(\{|fn\b|impl\b|extern\b|trait\b)' crates \
             | grep -v '^crates/qqq-sys/' \
             | grep -v 'forbid(unsafe_code)' \
-            | grep -v '^crates/[^/]*/src/lib.rs:.*#!\[cfg_attr' || true)
+            | grep -v '#!\[cfg_attr' || true)
           if [ -n "$violations" ]; then
             echo "::error::unsafe code found outside crates/qqq-sys:"
             echo "$violations"
             exit 1
           fi
           echo "OK: no unsafe code outside the audited exception crate"
+
+          # And the belt to that braces: every crate except qqq-sys must carry
+          # the attribute, so a new crate cannot silently omit it.
+          missing=$(for d in crates/*/; do
+            name=$(basename "$d")
+            [ "$name" = "qqq-sys" ] && continue
+            grep -q 'forbid(unsafe_code)' "$d/src/lib.rs" 2>/dev/null || echo "$name"
+          done)
+          if [ -n "$missing" ]; then
+            echo "::error::these crates lack #![forbid(unsafe_code)]:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "OK: every crate except qqq-sys forbids unsafe code"
 
   # ---------------------------------------------------------------------------
   # Supply chain: licences, advisories, unused dependencies.

@@ -464,7 +464,11 @@ mod tests {
 
     #[test]
     fn digest_lengths_match_the_algorithms() {
-        for alg in [HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Blake3] {
+        for alg in [
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha512,
+            HashAlgorithm::Blake3,
+        ] {
             assert_eq!(
                 AmbientState::hash(alg, b"x").len(),
                 AmbientState::digest_len(alg),
@@ -487,10 +491,7 @@ mod tests {
     fn an_ungranted_algorithm_is_refused_even_though_the_host_supports_it() {
         let data = crypto_store(); // allows sha256 and blake3, NOT sha512
         let e = hash_data(&data, "sha512", b"x").unwrap_err();
-        assert_eq!(
-            e,
-            HostCallError::AlgorithmNotAllowed("sha512".to_owned())
-        );
+        assert_eq!(e, HostCallError::AlgorithmNotAllowed("sha512".to_owned()));
         assert_eq!(e.to_error().code, qqq_core::ErrorCode::CapabilityOutOfScope);
     }
 
@@ -517,12 +518,32 @@ mod tests {
     #[test]
     fn algorithm_parsing_is_strict() {
         assert_eq!(HashAlgorithm::parse("sha256"), Some(HashAlgorithm::Sha256));
-        assert_eq!(HashAlgorithm::parse("SHA256"), None, "must be case-sensitive");
-        assert_eq!(HashAlgorithm::parse("md5"), None, "md5 is deliberately absent");
-        assert_eq!(HashAlgorithm::parse("sha1"), None, "sha1 is deliberately absent");
+        assert_eq!(
+            HashAlgorithm::parse("SHA256"),
+            None,
+            "must be case-sensitive"
+        );
+        assert_eq!(
+            HashAlgorithm::parse("md5"),
+            None,
+            "md5 is deliberately absent"
+        );
+        assert_eq!(
+            HashAlgorithm::parse("sha1"),
+            None,
+            "sha1 is deliberately absent"
+        );
         assert_eq!(HashAlgorithm::parse(""), None);
-        for alg in [HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Blake3] {
-            assert_eq!(HashAlgorithm::parse(alg.as_str()), Some(alg), "must round-trip");
+        for alg in [
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha512,
+            HashAlgorithm::Blake3,
+        ] {
+            assert_eq!(
+                HashAlgorithm::parse(alg.as_str()),
+                Some(alg),
+                "must round-trip"
+            );
         }
     }
 
@@ -533,7 +554,10 @@ mod tests {
         let s = AmbientState::new(false);
         assert!(!s.is_deterministic());
         let a = s.now_nanos();
-        assert!(a > 1_600_000_000_000_000_000, "should be a plausible modern instant");
+        assert!(
+            a > 1_600_000_000_000_000_000,
+            "should be a plausible modern instant"
+        );
     }
 
     /// **The determinism guarantee.** Two independent states in deterministic
@@ -596,11 +620,11 @@ mod tests {
     fn oversized_random_requests_are_refused() {
         let s = AmbientState::new(true);
         let max = s.max_random_bytes;
-        assert!(s.random_bytes(max).is_ok(), "exactly the maximum must be allowed");
-        assert_eq!(
-            s.random_bytes(max + 1).unwrap_err(),
-            RandomFailure::TooLong
+        assert!(
+            s.random_bytes(max).is_ok(),
+            "exactly the maximum must be allowed"
         );
+        assert_eq!(s.random_bytes(max + 1).unwrap_err(), RandomFailure::TooLong);
     }
 
     /// The deterministic generator must be architecture-independent, so a
@@ -644,10 +668,7 @@ mod tests {
             HostCallError::SourceFailed,
         ] {
             let err = e.to_error();
-            assert!(
-                err.remediation.is_some(),
-                "{e:?} must carry a remediation"
-            );
+            assert!(err.remediation.is_some(), "{e:?} must carry a remediation");
             assert!(err.render().contains("QQQ-"));
         }
     }

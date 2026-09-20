@@ -276,8 +276,14 @@ fn render_help() -> String {
 
     let _ = writeln!(out, "\nOPTIONS:");
     let _ = writeln!(out, "    --json          Emit machine-readable JSON");
-    let _ = writeln!(out, "    --jsonl         Emit JSON Lines (one object per line)");
-    let _ = writeln!(out, "    --dry-run       Show what would happen without doing it");
+    let _ = writeln!(
+        out,
+        "    --jsonl         Emit JSON Lines (one object per line)"
+    );
+    let _ = writeln!(
+        out,
+        "    --dry-run       Show what would happen without doing it"
+    );
     let _ = writeln!(out, "    -q, --quiet     Suppress non-essential output");
     let _ = writeln!(out, "    -v, --verbose   Emit additional detail");
     let _ = writeln!(out, "    -h, --help      Print this help");
@@ -422,6 +428,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         }),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
         CommandName::Run => dispatch_run(name, args, flags, &mut out),
+        CommandName::New => dispatch_new(name, args, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -539,6 +546,132 @@ fn dispatch_run(
         }
         qqq_run::run::execute(loaded, &opts)
     })
+}
+
+/// Dispatch `qqqai new`.
+///
+/// # Why this does not go through `with_manifest`
+///
+/// Because it is the one command whose job is to *create* the manifest. Every
+/// other project command reads one; requiring one here would be circular, and
+/// the error it produced ("no `qqq.toml` in this directory — run `qqqai new`")
+/// would be advice the user is already trying to follow.
+fn dispatch_new(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
+    let opts = match new_options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match qqq_run::scaffold::create(&opts, &cwd) {
+        Ok(value) => report(out, name, &value),
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            // A refused name is a usage mistake; a refused directory is an
+            // environment condition the user must resolve. Distinguishing them
+            // lets a script tell "I called it wrong" from "something is in the
+            // way".
+            let code = if e.message.contains("not a usable") || e.message.contains("plain name") {
+                exit::USAGE
+            } else {
+                exit::FAILURE
+            };
+            ExitCode::from(code)
+        }
+    }
+}
+
+/// Decode `qqqai new`'s own flags.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag, a flag missing its value, or
+/// an unknown language or template.
+fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> {
+    use qqq_run::{Language, Template};
+
+    let mut opts = qqq_run::NewOptions::default();
+    let mut i = 0;
+    let mut saw_name = false;
+
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--lang" | "--language" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.language = Language::parse(v).ok_or_else(|| {
+                    unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                })?;
+                i += 1;
+            }
+            "--template" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.template = Template::parse(v).ok_or_else(|| {
+                    unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                })?;
+                i += 1;
+            }
+            "--no-git" => opts.no_git = true,
+            "--force" => opts.force = true,
+            "--yes" | "-y" => opts.yes = true,
+            other => {
+                if let Some(v) = other.strip_prefix("--lang=") {
+                    opts.language = Language::parse(v).ok_or_else(|| {
+                        unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                    })?;
+                } else if let Some(v) = other.strip_prefix("--template=") {
+                    opts.template = Template::parse(v).ok_or_else(|| {
+                        unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                    })?;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `new`"),
+                    )
+                    .with_remediation(
+                        "`new` accepts --lang, --template, --no-git, --force and --yes",
+                    ));
+                } else if saw_name {
+                    // A second positional is a mistake worth naming: it most
+                    // often means the user typed a flag as a bare word.
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unexpected extra argument `{other}`"),
+                    )
+                    .with_remediation(
+                        "`new` takes exactly one project name, e.g. `qqqai new orders-api`",
+                    ));
+                } else {
+                    a.clone_into(&mut opts.name);
+                    saw_name = true;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if !saw_name {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`new` needs a project name",
+        )
+        .with_remediation(format!(
+            "for example: {} new orders-api --lang rust --template http",
+            qqq_core::BINARY_NAME
+        )));
+    }
+    Ok(opts)
+}
+
+/// The error for an unrecognised choice, listing the valid ones.
+fn unknown_choice(kind: &str, got: &str, valid: &[&str]) -> qqq_core::Error {
+    qqq_core::Error::new(
+        qqq_core::ErrorCode::McpArgumentInvalid,
+        format!("`{got}` is not a known {kind}"),
+    )
+    .with_remediation(format!("choose one of: {}", valid.join(", ")))
 }
 
 /// Load the project manifest, run `f`, and emit the result.
@@ -665,7 +798,10 @@ fn missing_value(flag: &str) -> qqq_core::Error {
 /// # Errors
 ///
 /// A QQQ-7001 usage error for an unrecognised flag or a flag missing its value.
-fn run_options(args: &[String], flags: GlobalFlags) -> Result<qqq_run::RunOptions, qqq_core::Error> {
+fn run_options(
+    args: &[String],
+    flags: GlobalFlags,
+) -> Result<qqq_run::RunOptions, qqq_core::Error> {
     // Flags owned by the global parser or `with_manifest`, which take a value.
     const TAKES_VALUE: [&str; 2] = ["--manifest", "--artifact"];
 
@@ -687,9 +823,7 @@ fn run_options(args: &[String], flags: GlobalFlags) -> Result<qqq_run::RunOption
             "--" => after_separator = true,
             "--deterministic" => opts.deterministic = true,
             "--artifact" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or_else(|| missing_value("--artifact"))?;
+                let v = args.get(i + 1).ok_or_else(|| missing_value("--artifact"))?;
                 opts.artifact = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
@@ -812,8 +946,12 @@ fn run_doctor() -> Vec<Check> {
         } else {
             "no qqq.toml in the current directory".to_owned()
         },
-        fix: (!manifest.exists())
-            .then(|| format!("run `{} new <name>` to create a project", qqq_core::BINARY_NAME)),
+        fix: (!manifest.exists()).then(|| {
+            format!(
+                "run `{} new <name>` to create a project",
+                qqq_core::BINARY_NAME
+            )
+        }),
     });
 
     // The wasm target is required to build anything.
@@ -821,7 +959,7 @@ fn run_doctor() -> Vec<Check> {
     checks.push(Check {
         name: "wasm-target",
         ok: true, // Not probed here: shelling out to rustup would exceed the
-                  // startup budget and is the build command's job to verify.
+        // startup budget and is the build command's job to verify.
         detail: "the wasm32-wasip2 target is verified during `build`".to_owned(),
         fix: (!target).then_some("run `rustup target add wasm32-wasip2`".to_owned()),
     });
@@ -889,7 +1027,8 @@ mod tests {
     fn the_binary_is_named_qqqai_not_qqq() {
         assert_eq!(qqq_core::BINARY_NAME, "qqqai");
         assert_ne!(
-            qqq_core::BINARY_NAME, "qqq",
+            qqq_core::BINARY_NAME,
+            "qqq",
             "`qqq` is taken on crates.io and npm; a `qqq` binary is a defect"
         );
         // The Cargo manifest must agree, or the invariant holds only in prose.
@@ -939,7 +1078,13 @@ mod tests {
         // Before the command.
         let before = action_of(&["--json", "doctor"]);
         assert!(
-            matches!(before, Action::Command { name: CommandName::Doctor, .. }),
+            matches!(
+                before,
+                Action::Command {
+                    name: CommandName::Doctor,
+                    ..
+                }
+            ),
             "--json before the command must still parse: {before:?}"
         );
 
@@ -1104,7 +1249,10 @@ mod tests {
         let help = render_help();
         assert!(help.contains("--json"));
         assert!(help.contains("--jsonl"));
-        assert!(help.contains("schema --all"), "must point at the schema command");
+        assert!(
+            help.contains("schema --all"),
+            "must point at the schema command"
+        );
         assert!(help.contains(qqq_core::BINARY_NAME));
     }
 
@@ -1125,7 +1273,11 @@ mod tests {
             assert!(!c.detail.is_empty(), "{} needs a detail", c.name);
             // A failing check must carry a remedy.
             if !c.ok {
-                assert!(c.fix.is_some(), "failing check `{}` must suggest a fix", c.name);
+                assert!(
+                    c.fix.is_some(),
+                    "failing check `{}` must suggest a fix",
+                    c.name
+                );
             }
         }
     }

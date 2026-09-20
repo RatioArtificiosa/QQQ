@@ -227,7 +227,9 @@ impl Capability {
         // Every name is `<ns>.<op>` and is a static string, so the split
         // cannot fail; but we handle it defensively rather than panicking in
         // a security-critical path.
-        self.name().split_once('.').map_or(self.name(), |(ns, _)| ns)
+        self.name()
+            .split_once('.')
+            .map_or(self.name(), |(ns, _)| ns)
     }
 
     /// The capability's kind.
@@ -398,8 +400,7 @@ impl Namespace {
     /// All namespaces, derived from the capability table so they cannot drift.
     #[must_use]
     pub fn all() -> Vec<Namespace> {
-        let mut ns: Vec<&'static str> =
-            Capability::all().iter().map(|c| c.namespace()).collect();
+        let mut ns: Vec<&'static str> = Capability::all().iter().map(|c| c.namespace()).collect();
         ns.sort_unstable();
         ns.dedup();
         ns.into_iter().map(Namespace).collect()
@@ -508,7 +509,11 @@ mod tests {
     fn names_are_unique() {
         let mut seen = BTreeSet::new();
         for &c in Capability::all() {
-            assert!(seen.insert(c.name()), "duplicate capability name {}", c.name());
+            assert!(
+                seen.insert(c.name()),
+                "duplicate capability name {}",
+                c.name()
+            );
         }
     }
 

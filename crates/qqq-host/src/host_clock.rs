@@ -193,7 +193,10 @@ mod tests {
         for name in ["now", "resolution"] {
             let declared = wit.matches(&format!("\n  {name}: func(")).count();
             let registered = this_file.matches(&format!("\"{name}\"")).count();
-            assert!(declared >= 2, "`{name}` should be in both interfaces: {declared}");
+            assert!(
+                declared >= 2,
+                "`{name}` should be in both interfaces: {declared}"
+            );
             assert!(
                 registered >= declared,
                 "`{name}` is declared {declared} times in the WIT but registered \
@@ -272,7 +275,10 @@ mod tests {
         {
             let mut linker = Linker::<StoreData>::new(&engine);
             register(&mut linker, &grants_with(&[Capability::ClockWall])).expect("register");
-            assert!(has_func(&mut linker, WALL_CLOCK, "now"), "wall grant exposes now");
+            assert!(
+                has_func(&mut linker, WALL_CLOCK, "now"),
+                "wall grant exposes now"
+            );
             assert!(
                 has_func(&mut linker, WALL_CLOCK, "timezone"),
                 "wall grant exposes timezone"
@@ -500,7 +506,10 @@ mod tests {
         assert_eq!(first, second, "a virtual clock must not advance unasked");
 
         a.tick();
-        assert!(a.now_nanos() > first, "an explicit tick must advance the clock");
+        assert!(
+            a.now_nanos() > first,
+            "an explicit tick must advance the clock"
+        );
     }
 
     /// A non-deterministic clock must advance, or it is not a clock.
@@ -535,7 +544,10 @@ mod tests {
         for _ in 0..10 {
             a.tick();
             let now = a.elapsed_nanos();
-            assert!(now >= last, "monotonic time went backwards: {last} -> {now}");
+            assert!(
+                now >= last,
+                "monotonic time went backwards: {last} -> {now}"
+            );
             last = now;
         }
     }

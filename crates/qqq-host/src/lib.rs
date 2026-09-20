@@ -38,9 +38,7 @@ pub mod instance;
 pub mod linker;
 pub mod trap;
 
-pub use ambient::{
-    hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure,
-};
+pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
 pub use config::{
     aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
 };
@@ -49,9 +47,7 @@ pub use instance::{
     Instance, PreparedComponent,
 };
 pub use linker::{
-    build_linker, describe_gap, interface_for, recheck, required_interfaces,
-    BoundInterfaces, BuiltLinker, StoreData,
+    build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,
+    BuiltLinker, StoreData,
 };
-pub use trap::{
-    classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame,
-};
+pub use trap::{classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame};

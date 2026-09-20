@@ -214,7 +214,10 @@ pub fn caps(loaded: &LoadedManifest) -> CapsOutput {
     let mut by_ns: std::collections::BTreeMap<&'static str, Vec<String>> =
         std::collections::BTreeMap::new();
     for &c in &grants {
-        by_ns.entry(c.namespace()).or_default().push(c.name().to_owned());
+        by_ns
+            .entry(c.namespace())
+            .or_default()
+            .push(c.name().to_owned());
     }
 
     CapsOutput {
@@ -465,7 +468,10 @@ mod tests {
         // Assert on the summary *before* moving `fix` out of `out`.
         assert!(out.summary().contains("DENIED"));
         let fix = out.fix.expect("a denial must suggest a fix");
-        assert!(fix.contains("capabilities.sql"), "must name the stanza: {fix}");
+        assert!(
+            fix.contains("capabilities.sql"),
+            "must name the stanza: {fix}"
+        );
         assert!(fix.contains("qqq.toml"));
     }
 
@@ -528,7 +534,11 @@ mod tests {
         assert!(out.grants.is_empty());
         assert!(out.by_namespace.is_empty());
         assert!(out.covert_channels.is_empty());
-        assert_eq!(out.digest.len(), 64, "the audit digest must always be present");
+        assert_eq!(
+            out.digest.len(),
+            64,
+            "the audit digest must always be present"
+        );
         assert!(out.summary().contains("no capabilities granted"));
     }
 
@@ -572,7 +582,10 @@ mod tests {
         let out = inspect(&loaded(DENY_ALL)).unwrap();
         assert_eq!(out.posture, Posture::Minimal);
         assert!(out.capabilities.is_empty());
-        assert!(out.interfaces.is_empty(), "no grants must unlock no interfaces");
+        assert!(
+            out.interfaces.is_empty(),
+            "no grants must unlock no interfaces"
+        );
     }
 
     /// The interface list is what makes `inspect` a security report rather than
@@ -583,7 +596,11 @@ mod tests {
         let names: Vec<&str> = out.interfaces.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"qqq:crypto@1.0.0"), "got {names:?}");
         assert!(!names.contains(&"qqq:sql@1.0.0"), "sql was not granted");
-        assert_eq!(out.posture, Posture::Contained, "hashing alone is contained");
+        assert_eq!(
+            out.posture,
+            Posture::Contained,
+            "hashing alone is contained"
+        );
     }
 
     #[test]

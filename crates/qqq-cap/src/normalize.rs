@@ -103,21 +103,22 @@ pub enum NormalizeError {
 impl fmt::Display for NormalizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PathMissing { declared } => write!(
-                f,
-                "granted path `{declared}` does not exist on this host"
-            ),
+            Self::PathMissing { declared } => {
+                write!(f, "granted path `{declared}` does not exist on this host")
+            }
             Self::PathUnresolvable { declared, reason } => {
-                write!(f, "granted path `{declared}` could not be resolved: {reason}")
+                write!(
+                    f,
+                    "granted path `{declared}` could not be resolved: {reason}"
+                )
             }
             Self::PathNotADirectory { declared, found } => write!(
                 f,
                 "granted path `{declared}` must be a directory, but is a {found}"
             ),
-            Self::SecretMissing { name, source } => write!(
-                f,
-                "secret `{name}` is not available (consulted {source})"
-            ),
+            Self::SecretMissing { name, source } => {
+                write!(f, "secret `{name}` is not available (consulted {source})")
+            }
             Self::InvalidHostPattern { pattern, reason } => {
                 write!(f, "invalid host pattern `{pattern}`: {reason}")
             }
@@ -167,9 +168,7 @@ impl NormalizeError {
                 .with_remediation("check permissions on the path and its parents"),
             Self::PathNotADirectory { declared, .. } => e
                 .with_context("path", declared.clone())
-                .with_remediation(
-                    "grant a directory, or remove the entry if a file was intended",
-                ),
+                .with_remediation("grant a directory, or remove the entry if a file was intended"),
             Self::InvalidHostPattern { pattern, .. } => e
                 .with_context("pattern", pattern.clone())
                 .with_remediation("use `host` or `host:port`; wildcards are `*.example.com`"),
@@ -246,9 +245,7 @@ impl HostPattern {
         } else if let Some((h, p)) = t.rsplit_once(':') {
             // Guard against `a:b:c` which is neither a host:port nor IPv6.
             if h.contains(':') {
-                return Err(
-                    "ambiguous pattern; bracket IPv6 literals as `[::1]:port`".to_owned(),
-                );
+                return Err("ambiguous pattern; bracket IPv6 literals as `[::1]:port`".to_owned());
             }
             (h.to_owned(), Some(parse_port(p)?))
         } else {
@@ -284,8 +281,7 @@ impl HostPattern {
         let chars_ok = if is_ipv6 {
             bare.chars().all(|c| c.is_ascii_hexdigit() || c == ':')
         } else {
-            bare
-                .chars()
+            bare.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
         };
         if !chars_ok {
@@ -408,10 +404,7 @@ impl SecretRef {
         }
         match scheme {
             "env" => {
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     return Err(format!(
                         "environment variable `{name}` must contain only A-Z, 0-9 and _"
                     ));
@@ -523,18 +516,23 @@ impl Normalized {
     /// # Errors
     ///
     /// Returns [`NormalizeError`] naming the offending path, secret or pattern.
-    pub fn from_manifest(
-        manifest: &Manifest,
-        env: &impl HostEnv,
-    ) -> Result<Self, NormalizeError> {
+    pub fn from_manifest(manifest: &Manifest, env: &impl HostEnv) -> Result<Self, NormalizeError> {
         let (http_server, http_client) = normalize_http(manifest)?;
         let fs = normalize_fs(manifest, env)?;
         let dns = normalize_list(
-            manifest.capabilities.dns.as_ref().map(|d| d.resolve.as_slice()),
+            manifest
+                .capabilities
+                .dns
+                .as_ref()
+                .map(|d| d.resolve.as_slice()),
             true,
         );
         let env_vars = normalize_list(
-            manifest.capabilities.env.as_ref().map(|e| e.allow.as_slice()),
+            manifest
+                .capabilities
+                .env
+                .as_ref()
+                .map(|e| e.allow.as_slice()),
             false,
         );
         let secrets = normalize_secrets(manifest, env)?;
@@ -636,12 +634,12 @@ fn normalize_http(manifest: &Manifest) -> Result<(bool, Vec<HostPattern>), Norma
     };
     let mut patterns = Vec::with_capacity(h.client.len());
     for p in &h.client {
-        patterns.push(
-            HostPattern::parse(p).map_err(|reason| NormalizeError::InvalidHostPattern {
+        patterns.push(HostPattern::parse(p).map_err(|reason| {
+            NormalizeError::InvalidHostPattern {
                 pattern: p.clone(),
                 reason,
-            })?,
-        );
+            }
+        })?);
     }
     patterns.sort();
     patterns.dedup();
@@ -655,10 +653,7 @@ fn normalize_http(manifest: &Manifest) -> Result<(bool, Vec<HostPattern>), Norma
 /// so `..` traversal and symlinks are neutralized here rather than at call
 /// time — where any disagreement between the check and the use would be a
 /// vulnerability.
-fn normalize_fs(
-    manifest: &Manifest,
-    env: &impl HostEnv,
-) -> Result<Vec<FsGrant>, NormalizeError> {
+fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>, NormalizeError> {
     let mut fs = Vec::with_capacity(manifest.capabilities.fs.len());
     for entry in &manifest.capabilities.fs {
         let declared_path = entry.path.clone();
@@ -674,12 +669,12 @@ fn normalize_fs(
                 found: "file".to_owned(),
             });
         }
-        let canonical_path =
-            env.canonicalize(&declared_path)
-                .map_err(|reason| NormalizeError::PathUnresolvable {
-                    declared: declared_path.clone(),
-                    reason,
-                })?;
+        let canonical_path = env.canonicalize(&declared_path).map_err(|reason| {
+            NormalizeError::PathUnresolvable {
+                declared: declared_path.clone(),
+                reason,
+            }
+        })?;
 
         let quota_bytes = match &entry.quota {
             Some(q) => Some(
@@ -1023,9 +1018,7 @@ mod tests {
 
     #[test]
     fn normalization_resolves_paths_and_rejects_missing_ones() {
-        let m = manifest_with(
-            "[[capabilities.fs]]\npath = \"/data\"\nmode = \"read-only\"\n",
-        );
+        let m = manifest_with("[[capabilities.fs]]\npath = \"/data\"\nmode = \"read-only\"\n");
         // Missing path -> hard error, not a warning.
         let e = Normalized::from_manifest(&m, &FakeEnv::default()).unwrap_err();
         assert!(matches!(e, NormalizeError::PathMissing { .. }));
@@ -1047,7 +1040,10 @@ mod tests {
         );
         let env = FakeEnv::default().with_file("/etc/config.json");
         let e = Normalized::from_manifest(&m, &env).unwrap_err();
-        assert!(matches!(e, NormalizeError::PathNotADirectory { .. }), "got {e:?}");
+        assert!(
+            matches!(e, NormalizeError::PathNotADirectory { .. }),
+            "got {e:?}"
+        );
     }
 
     /// Canonicalization must defeat `..` traversal before the path reaches the
@@ -1055,9 +1051,8 @@ mod tests {
     /// real `canonicalize` does.
     #[test]
     fn normalization_uses_the_canonical_path_not_the_declared_one() {
-        let m = manifest_with(
-            "[[capabilities.fs]]\npath = \"/data/../etc\"\nmode = \"read-only\"\n",
-        );
+        let m =
+            manifest_with("[[capabilities.fs]]\npath = \"/data/../etc\"\nmode = \"read-only\"\n");
         let env = FakeEnv::default()
             .with_dir("/data/../etc")
             .with_canonical("/data/../etc", "/etc");
@@ -1126,7 +1121,10 @@ mod tests {
         assert_eq!(n.dns, vec!["a.com", "b.com"]);
         assert!(n.env_allows("AAA"));
         assert!(!n.env_allows("BBB"));
-        assert!(n.dns_allows("A.com"), "dns matching must be case-insensitive");
+        assert!(
+            n.dns_allows("A.com"),
+            "dns matching must be case-insensitive"
+        );
         assert!(!n.dns_allows("c.com"));
     }
 

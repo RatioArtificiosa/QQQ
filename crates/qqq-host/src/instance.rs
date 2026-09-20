@@ -764,7 +764,10 @@ mod tests {
             })
             .expect_err("a poisoned instance must refuse");
         assert_eq!(err.code, ErrorCode::InternalInvariantViolated);
-        assert!(err.remediation.is_some(), "even an internal error needs a fix");
+        assert!(
+            err.remediation.is_some(),
+            "even an internal error needs a fix"
+        );
     }
 
     /// The instantiation path must enforce the same capability rule the linker

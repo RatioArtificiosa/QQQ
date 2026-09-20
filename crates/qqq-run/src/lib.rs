@@ -31,14 +31,17 @@ pub mod commands;
 pub mod manifest_loader;
 pub mod output;
 pub mod run;
+/// `qqqai new` — the scaffold generator.
+///
+/// The module is named `scaffold` rather than `new` because `new` is a Rust
+/// keyword and cannot be a module path segment. The file keeps its natural
+/// name via `#[path]` so the directory listing still reads clearly.
+#[path = "new.rs"]
+pub mod scaffold;
 
 pub use build::{
     plan, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact, ArtifactKind,
     BuildOptions, BuildOutput, BuildPlan, ToolRequirement, COMPONENT_EXTENSION, OUTPUT_DIR,
-};
-pub use run::{
-    capability_for_interface, check_imports, locate_artifact, new_engine, parse_cap_flag, prepare,
-    resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput,
 };
 pub use commands::{
     caps, classify_posture, developer_overlay, fix_stanza_for, inspect, why, CapsOutput,
@@ -48,4 +51,12 @@ pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{
     command_schemas, CommandName, CommandOutput, CommandSchema, Envelope, ErrorContextEntry,
     ErrorPayload, Format, Output,
+};
+pub use run::{
+    capability_for_interface, check_imports, locate_artifact, new_engine, parse_cap_flag, prepare,
+    resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput,
+};
+pub use scaffold::{
+    crate_name, create, files_for, manifest_for, readme_for, validate_name, Language, NewOptions,
+    NewOutput, Template, WrittenFile,
 };

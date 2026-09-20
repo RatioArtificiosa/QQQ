@@ -555,40 +555,38 @@ pub struct CommandSchema {
 ///
 /// Defined once and cloned, so the `match` above stays a pure dispatch and the
 /// schema body is readable on its own.
-static SCHEMA_FOR_SCHEMA: std::sync::LazyLock<serde_json::Value> =
-    std::sync::LazyLock::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "schema_version": {"type": "string"},
-                "commands": {"type": "array", "items": {"type": "object"}},
-                "errors": {"type": "array", "items": {"type": "object"}},
-                "capabilities": {"type": "array", "items": {"type": "object"}}
-            },
-            "required": ["schema_version", "commands", "errors", "capabilities"]
-        })
-    });
+static SCHEMA_FOR_SCHEMA: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "schema_version": {"type": "string"},
+            "commands": {"type": "array", "items": {"type": "object"}},
+            "errors": {"type": "array", "items": {"type": "object"}},
+            "capabilities": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["schema_version", "commands", "errors", "capabilities"]
+    })
+});
 
 /// The payload schema for `qqqai doctor`.
-static SCHEMA_FOR_DOCTOR: std::sync::LazyLock<serde_json::Value> =
-    std::sync::LazyLock::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "checks": {"type": "array", "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "ok": {"type": "boolean"},
-                        "detail": {"type": "string"},
-                        "fix": {"type": ["string", "null"]}
-                    },
-                    "required": ["name", "ok", "detail"]
-                }}
-            },
-            "required": ["checks"]
-        })
-    });
+static SCHEMA_FOR_DOCTOR: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "checks": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "ok": {"type": "boolean"},
+                    "detail": {"type": "string"},
+                    "fix": {"type": ["string", "null"]}
+                },
+                "required": ["name", "ok", "detail"]
+            }}
+        },
+        "required": ["checks"]
+    })
+});
 
 /// Build the schema registry.
 ///

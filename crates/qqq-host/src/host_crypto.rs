@@ -165,27 +165,33 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     inst.func_wrap(
         "get",
         |store: StoreContextMut<'_, StoreData>,
-         (length,): (u32,)| -> wasmtime::Result<(Vec<u8>,)> {
+         (length,): (u32,)|
+         -> wasmtime::Result<(Vec<u8>,)> {
             // Defence in depth: the function is only registered when granted,
             // but re-checking at call time means a future change that registers
             // it unconditionally still cannot hand out entropy.
             if !store.data().grants.grants(Capability::CryptoRandom) {
                 return Err(denied(Capability::CryptoRandom));
             }
-            store.data().ambient.random_bytes(length).map(|b| (b,)).map_err(|e| {
-                // A source failure must fail closed. Surfacing it as a host
-                // error rather than fabricating bytes is the whole point:
-                // predictable "randomness" is worse than a failure.
-                wasmtime::Error::msg(match e {
-                    crate::ambient::RandomFailure::TooLong => {
-                        format!("random request of {length} bytes exceeds the per-call maximum")
-                    }
-                    crate::ambient::RandomFailure::SourceFailed => {
-                        "the host entropy source failed; refusing to substitute a weaker source"
-                            .to_owned()
-                    }
+            store
+                .data()
+                .ambient
+                .random_bytes(length)
+                .map(|b| (b,))
+                .map_err(|e| {
+                    // A source failure must fail closed. Surfacing it as a host
+                    // error rather than fabricating bytes is the whole point:
+                    // predictable "randomness" is worse than a failure.
+                    wasmtime::Error::msg(match e {
+                        crate::ambient::RandomFailure::TooLong => {
+                            format!("random request of {length} bytes exceeds the per-call maximum")
+                        }
+                        crate::ambient::RandomFailure::SourceFailed => {
+                            "the host entropy source failed; refusing to substitute a weaker source"
+                                .to_owned()
+                        }
+                    })
                 })
-            })
         },
     )?;
 
@@ -203,7 +209,8 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     inst.func_wrap(
         "digest",
         |store: StoreContextMut<'_, StoreData>,
-         (algorithm, data): (u32, Vec<u8>)| -> wasmtime::Result<(Vec<u8>,)> {
+         (algorithm, data): (u32, Vec<u8>)|
+         -> wasmtime::Result<(Vec<u8>,)> {
             let name = algorithm_name(algorithm)?;
             if data.len() > MAX_HASH_INPUT {
                 return Err(wasmtime::Error::msg(format!(
@@ -224,7 +231,8 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     inst.func_wrap(
         "digest-many",
         |store: StoreContextMut<'_, StoreData>,
-         (algorithm, inputs): (u32, Vec<Vec<u8>>)| -> wasmtime::Result<(Vec<Vec<u8>>,)> {
+         (algorithm, inputs): (u32, Vec<Vec<u8>>)|
+         -> wasmtime::Result<(Vec<Vec<u8>>,)> {
             let name = algorithm_name(algorithm)?;
             let mut out = Vec::with_capacity(inputs.len());
             for input in &inputs {
@@ -486,16 +494,22 @@ mod tests {
         let engine = test_engine();
 
         let mut with = Linker::<StoreData>::new(&engine);
-        register(&mut with, &grants_with("[capabilities.crypto]\nrandom = true\n"))
-            .expect("register");
+        register(
+            &mut with,
+            &grants_with("[capabilities.crypto]\nrandom = true\n"),
+        )
+        .expect("register");
         assert!(
             has_func(&mut with, RANDOM, "get"),
             "a random grant must expose get"
         );
 
         let mut without = Linker::<StoreData>::new(&engine);
-        register(&mut without, &grants_with("[capabilities.crypto]\nhash = [\"sha256\"]\n"))
-            .expect("register");
+        register(
+            &mut without,
+            &grants_with("[capabilities.crypto]\nhash = [\"sha256\"]\n"),
+        )
+        .expect("register");
         assert!(
             !has_func(&mut without, RANDOM, "get"),
             "a hash-only grant must not expose random"
@@ -508,8 +522,11 @@ mod tests {
         let engine = test_engine();
 
         let mut with = Linker::<StoreData>::new(&engine);
-        register(&mut with, &grants_with("[capabilities.crypto]\nhash = [\"sha256\"]\n"))
-            .expect("register");
+        register(
+            &mut with,
+            &grants_with("[capabilities.crypto]\nhash = [\"sha256\"]\n"),
+        )
+        .expect("register");
         assert!(
             has_func(&mut with, HASHING, "digest"),
             "a hash grant must expose digest"
@@ -533,16 +550,22 @@ mod tests {
     fn the_registration_probe_detects_a_bound_function() {
         let engine = test_engine();
         let mut linker = Linker::<StoreData>::new(&engine);
-        register(&mut linker, &grants_with("[capabilities.crypto]\nrandom = true\n"))
-            .expect("register");
+        register(
+            &mut linker,
+            &grants_with("[capabilities.crypto]\nrandom = true\n"),
+        )
+        .expect("register");
         assert!(
             has_func(&mut linker, RANDOM, "get"),
             "the probe failed to detect a certainly-registered function"
         );
 
         let mut fresh = Linker::<StoreData>::new(&engine);
-        register(&mut fresh, &grants_with("[capabilities.crypto]\nrandom = true\n"))
-            .expect("register");
+        register(
+            &mut fresh,
+            &grants_with("[capabilities.crypto]\nrandom = true\n"),
+        )
+        .expect("register");
         assert!(
             !has_func(&mut fresh, RANDOM, "never-registered"),
             "the probe reported a function that does not exist"
@@ -578,9 +601,8 @@ mod tests {
     /// only layer that may grant authority — `GrantSet::empty().narrow(...)`
     /// grants nothing, since `narrow` intersects. See Observations §O-020c.
     fn grants_with(crypto_body: &str) -> GrantSet {
-        let src = format!(
-            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[crypto]\n{crypto_body}"
-        );
+        let src =
+            format!("[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[crypto]\n{crypto_body}");
         let manifest = Manifest::parse(&src).expect("test manifest must parse");
         GrantSet::from_manifest(&manifest)
     }

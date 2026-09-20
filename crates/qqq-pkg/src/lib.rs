@@ -8,4 +8,3 @@
 //! item; see `QQQ-Observations-and-Memories.md` §6.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
-

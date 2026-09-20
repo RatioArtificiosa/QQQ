@@ -39,6 +39,6 @@ pub use registry::{
     interface_for, interfaces, required_interfaces, unimplemented_capabilities, HostInterface,
 };
 pub use wit::{
-    wit_source, AI_WIT, ALL_WIT, CLOCK_WIT, CRYPTO_WIT, DNS_WIT, ENV_WIT, FS_WIT, HTTP_WIT,
-    KV_WIT, LOG_WIT, QUEUE_WIT, SECRETS_WIT, SQL_WIT, TRACE_WIT,
+    wit_source, AI_WIT, ALL_WIT, CLOCK_WIT, CRYPTO_WIT, DNS_WIT, ENV_WIT, FS_WIT, HTTP_WIT, KV_WIT,
+    LOG_WIT, QUEUE_WIT, SECRETS_WIT, SQL_WIT, TRACE_WIT,
 };

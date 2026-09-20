@@ -248,9 +248,7 @@ pub fn required_interfaces(grants: &qqq_cap::resolve::GrantSet) -> Vec<HostInter
 /// naming the capability, rather than at first call with an opaque linker
 /// error.
 #[must_use]
-pub fn unimplemented_capabilities(
-    grants: &qqq_cap::resolve::GrantSet,
-) -> Vec<Capability> {
+pub fn unimplemented_capabilities(grants: &qqq_cap::resolve::GrantSet) -> Vec<Capability> {
     let table = interfaces();
     let mut out: Vec<Capability> = grants
         .capabilities()
@@ -302,7 +300,11 @@ mod tests {
     fn interface_names_are_versioned_and_unique() {
         let mut seen = BTreeSet::new();
         for i in interfaces() {
-            assert!(seen.insert(i.name.clone()), "duplicate interface {}", i.name);
+            assert!(
+                seen.insert(i.name.clone()),
+                "duplicate interface {}",
+                i.name
+            );
             assert!(i.name.starts_with("qqq:"));
             let (_, v) = i.name.split_once('@').expect("must carry a version");
             // Full semver, verified against `wasm-tools`: `@1.0` is a syntax
@@ -364,7 +366,10 @@ mod tests {
         )
         .unwrap();
         let g = qqq_cap::resolve::GrantSet::from_manifest(&m);
-        let names: Vec<String> = required_interfaces(&g).into_iter().map(|i| i.name).collect();
+        let names: Vec<String> = required_interfaces(&g)
+            .into_iter()
+            .map(|i| i.name)
+            .collect();
         assert!(names.contains(&"qqq:crypto@1.0.0".to_owned()));
         assert!(names.contains(&"qqq:clock@1.0.0".to_owned()));
         assert!(!names.contains(&"qqq:sql@1.0.0".to_owned()));

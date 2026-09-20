@@ -435,9 +435,7 @@ impl Serialize for ErrorCode {
 }
 
 impl<'de> Deserialize<'de> for ErrorCode {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         Self::parse(&s)
             .ok_or_else(|| serde::de::Error::custom(format!("unknown QQQ error code: {s}")))
@@ -734,7 +732,7 @@ mod tests {
             "QQQ-",
             "QQQ-abc",
             "4003",
-            "QQQ-40O3",   // letter O, not zero
+            "QQQ-40O3", // letter O, not zero
             "QQQ-4003x",
             "QQQ-4_003",
             "XQQ-4003",
@@ -752,8 +750,14 @@ mod tests {
 
     #[test]
     fn parse_tolerates_whitespace_and_case() {
-        assert_eq!(ErrorCode::parse("  qqq-4003  "), Some(ErrorCode::CapabilityDenied));
-        assert_eq!(ErrorCode::parse("Qqq-4003"), Some(ErrorCode::CapabilityDenied));
+        assert_eq!(
+            ErrorCode::parse("  qqq-4003  "),
+            Some(ErrorCode::CapabilityDenied)
+        );
+        assert_eq!(
+            ErrorCode::parse("Qqq-4003"),
+            Some(ErrorCode::CapabilityDenied)
+        );
     }
 
     #[test]

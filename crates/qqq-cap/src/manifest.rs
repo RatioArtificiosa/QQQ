@@ -654,12 +654,10 @@ impl Manifest {
         // Required-field checks with friendly messages before the strict
         // deserialisation, so a missing `package` reports that rather than a
         // serde type error.
-        let table = value
-            .as_table()
-            .ok_or_else(|| ManifestError::Syntax {
-                detail: "the document root must be a table".to_owned(),
-                line: None,
-            })?;
+        let table = value.as_table().ok_or_else(|| ManifestError::Syntax {
+            detail: "the document root must be a table".to_owned(),
+            line: None,
+        })?;
         let pkg = table
             .get("package")
             .ok_or_else(|| ManifestError::MissingField {
@@ -755,12 +753,11 @@ impl Manifest {
     /// manifest says one thing and the runtime does another, which is exactly
     /// the divergence an auditor cannot detect.
     fn validate_limits(&self) -> Result<(), ManifestError> {
-        let mem = ByteSize::parse(&self.limits.memory).map_err(|reason| {
-            ManifestError::InvalidField {
+        let mem =
+            ByteSize::parse(&self.limits.memory).map_err(|reason| ManifestError::InvalidField {
                 field: "limits.memory".to_owned(),
                 reason,
-            }
-        })?;
+            })?;
         check_range(
             "limits.memory",
             &mem.as_bytes(),
@@ -852,9 +849,7 @@ impl Manifest {
                 if h.contains("://") {
                     return Err(ManifestError::InvalidField {
                         field: format!("capabilities.http.client[{i}]"),
-                        reason: format!(
-                            "must be `host` or `host:port`, not a URL — got `{h}`"
-                        ),
+                        reason: format!("must be `host` or `host:port`, not a URL — got `{h}`"),
                     });
                 }
             }
@@ -1211,9 +1206,15 @@ max_open_handles = 256
     #[test]
     fn boundary_values_are_accepted() {
         let src = format!("{MINIMAL}\n[limits]\nmemory = \"64KiB\"\n");
-        assert!(Manifest::parse(&src).is_ok(), "minimum memory must be accepted");
+        assert!(
+            Manifest::parse(&src).is_ok(),
+            "minimum memory must be accepted"
+        );
         let src = format!("{MINIMAL}\n[limits]\nfuel = 1000\n");
-        assert!(Manifest::parse(&src).is_ok(), "minimum fuel must be accepted");
+        assert!(
+            Manifest::parse(&src).is_ok(),
+            "minimum fuel must be accepted"
+        );
     }
 
     #[test]
@@ -1236,12 +1237,14 @@ max_open_handles = 256
 
     #[test]
     fn url_in_http_client_allowlist_is_rejected_with_guidance() {
-        let src = format!(
-            "{MINIMAL}\n[capabilities.http]\nclient = [\"https://api.example.com\"]\n"
-        );
+        let src =
+            format!("{MINIMAL}\n[capabilities.http]\nclient = [\"https://api.example.com\"]\n");
         let e = Manifest::parse(&src).unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("not a URL"), "should guide the user; got: {msg}");
+        assert!(
+            msg.contains("not a URL"),
+            "should guide the user; got: {msg}"
+        );
     }
 
     /// A wildcard env allowlist would be ambient authority by another name.
@@ -1249,7 +1252,10 @@ max_open_handles = 256
     fn wildcard_env_allowlist_is_rejected() {
         let src = format!("{MINIMAL}\n[capabilities.env]\nallow = [\"*\"]\n");
         let e = Manifest::parse(&src).unwrap_err();
-        assert!(e.to_string().contains("wildcards are not permitted"), "got: {e}");
+        assert!(
+            e.to_string().contains("wildcards are not permitted"),
+            "got: {e}"
+        );
     }
 
     #[test]
@@ -1286,7 +1292,8 @@ max_open_handles = 256
 
     #[test]
     fn read_write_fs_grants_both_read_and_write() {
-        let src = format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-write\"\n");
+        let src =
+            format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-write\"\n");
         let caps = Manifest::parse(&src).unwrap().declared_capabilities();
         assert!(caps.contains(&Capability::FsRead));
         assert!(caps.contains(&Capability::FsWrite));
@@ -1294,7 +1301,8 @@ max_open_handles = 256
 
     #[test]
     fn read_only_fs_does_not_grant_write() {
-        let src = format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-only\"\n");
+        let src =
+            format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-only\"\n");
         let caps = Manifest::parse(&src).unwrap().declared_capabilities();
         assert!(caps.contains(&Capability::FsRead));
         assert!(
@@ -1305,10 +1313,22 @@ max_open_handles = 256
 
     #[test]
     fn byte_size_parsing_is_correct_and_unambiguous() {
-        assert_eq!(ByteSize::parse("128MiB").unwrap().as_bytes(), 128 * 1024 * 1024);
-        assert_eq!(ByteSize::parse("128M").unwrap().as_bytes(), 128 * 1024 * 1024);
-        assert_eq!(ByteSize::parse("128mib").unwrap().as_bytes(), 128 * 1024 * 1024);
-        assert_eq!(ByteSize::parse("1GiB").unwrap().as_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(
+            ByteSize::parse("128MiB").unwrap().as_bytes(),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            ByteSize::parse("128M").unwrap().as_bytes(),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            ByteSize::parse("128mib").unwrap().as_bytes(),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            ByteSize::parse("1GiB").unwrap().as_bytes(),
+            1024 * 1024 * 1024
+        );
         assert_eq!(ByteSize::parse("512").unwrap().as_bytes(), 512);
         assert_eq!(ByteSize::parse("512B").unwrap().as_bytes(), 512);
         assert_eq!(ByteSize::parse("1_024").unwrap().as_bytes(), 1024);
@@ -1376,7 +1396,10 @@ max_open_handles = 256
         assert_eq!(m.build.language, "rust");
         assert_eq!(m.build.target, "wasm32-wasip2");
         assert_eq!(m.build.profile, "release");
-        assert!(!m.build.reproducible, "reproducible opt-in must default off");
+        assert!(
+            !m.build.reproducible,
+            "reproducible opt-in must default off"
+        );
     }
 
     #[test]
@@ -1407,7 +1430,10 @@ reproducible = true
         match &e {
             ManifestError::InvalidField { field, reason } => {
                 assert_eq!(field, "build.language");
-                assert!(reason.contains("cobol"), "must quote the bad value: {reason}");
+                assert!(
+                    reason.contains("cobol"),
+                    "must quote the bad value: {reason}"
+                );
                 // The message must name every option, or a user is left guessing.
                 for lang in Build::LANGUAGES {
                     assert!(reason.contains(lang), "reason omits `{lang}`: {reason}");
@@ -1434,7 +1460,10 @@ reproducible = true
                     reason.contains("anticipated"),
                     "must explain that it is anticipated, not unknown: {reason}"
                 );
-                assert!(reason.contains("wasm32-wasip2"), "must name the usable target");
+                assert!(
+                    reason.contains("wasm32-wasip2"),
+                    "must name the usable target"
+                );
             }
             other => panic!("expected InvalidField, got {other:?}"),
         }

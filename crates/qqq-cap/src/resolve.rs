@@ -302,7 +302,11 @@ impl GrantSet {
         // programming error, not a user error. Refuse it outright rather than
         // applying it — a layer that may not grant simply has no effect.
         if overlay.layer.may_grant() && overlay.layer != Layer::Manifest {
-            debug_assert!(false, "non-manifest layer {} attempted to grant", overlay.layer);
+            debug_assert!(
+                false,
+                "non-manifest layer {} attempted to grant",
+                overlay.layer
+            );
             return self.clone();
         }
 
@@ -552,10 +556,7 @@ impl CapabilityExplanation {
         let _ = writeln!(out, "{}  {verdict}", self.capability.name());
 
         if self.never_mentioned {
-            let _ = writeln!(
-                out,
-                "  └─ no configuration layer mentions this capability"
-            );
+            let _ = writeln!(out, "  └─ no configuration layer mentions this capability");
             let _ = writeln!(
                 out,
                 "\n  → add a [[capabilities.*]] stanza for `{}` to qqq.toml",
@@ -565,7 +566,11 @@ impl CapabilityExplanation {
         }
 
         for (i, step) in self.steps.iter().enumerate() {
-            let branch = if i + 1 == self.steps.len() { "└─" } else { "├─" };
+            let branch = if i + 1 == self.steps.len() {
+                "└─"
+            } else {
+                "├─"
+            };
             let mark = if step.changed() {
                 if step.granted_after {
                     "GRANTED"
@@ -790,14 +795,13 @@ monotonic = true
     #[test]
     fn narrowing_is_idempotent() {
         let g = GrantSet::from_manifest(&manifest());
-        let o = Overlay::allow_only(
-            Layer::Organization,
-            [Capability::HttpServer],
-            "only http",
-        );
+        let o = Overlay::allow_only(Layer::Organization, [Capability::HttpServer], "only http");
         let once = g.narrow(&o);
         let twice = once.narrow(&o);
-        assert_eq!(once, twice, "applying the same overlay twice must not change it");
+        assert_eq!(
+            once, twice,
+            "applying the same overlay twice must not change it"
+        );
     }
 
     /// Commutativity: ordering must not be usable to smuggle authority in.
@@ -871,7 +875,10 @@ monotonic = true
             b.applied_layers(),
             "the histories genuinely differ, or this test proves nothing"
         );
-        assert_eq!(a, b, "but the authority is identical, so they must be equal");
+        assert_eq!(
+            a, b,
+            "but the authority is identical, so they must be equal"
+        );
         assert_eq!(a.digest(), b.digest());
     }
 
@@ -903,15 +910,25 @@ monotonic = true
             .iter()
             .filter(|n| n.capability == Some(Capability::CryptoRandom) && n.changed())
             .collect();
-        assert_eq!(transitions.len(), 2, "expected grant then removal: {transitions:?}");
+        assert_eq!(
+            transitions.len(),
+            2,
+            "expected grant then removal: {transitions:?}"
+        );
 
         let granted = transitions[0];
         assert_eq!(granted.layer, Layer::Manifest);
-        assert_eq!((granted.granted_before, granted.granted_after), (false, true));
+        assert_eq!(
+            (granted.granted_before, granted.granted_after),
+            (false, true)
+        );
 
         let removed = transitions[1];
         assert_eq!(removed.layer, Layer::Organization);
-        assert_eq!((removed.granted_before, removed.granted_after), (true, false));
+        assert_eq!(
+            (removed.granted_before, removed.granted_after),
+            (true, false)
+        );
         assert_eq!(removed.reason, "policy: no randomness");
 
         // The last transition is authoritative: a reader asking "who decided?"
@@ -968,7 +985,10 @@ monotonic = true
         assert!(!e.granted);
         let out = e.render();
         assert!(out.contains("platform"), "must name the layer: {out}");
-        assert!(out.contains("egress disabled"), "must quote the rule: {out}");
+        assert!(
+            out.contains("egress disabled"),
+            "must quote the rule: {out}"
+        );
     }
 
     #[test]
@@ -992,7 +1012,11 @@ monotonic = true
         let m = manifest();
         let a = GrantSet::from_manifest(&m);
         let b = GrantSet::from_manifest(&m);
-        assert_eq!(a.digest(), b.digest(), "same grants must give the same digest");
+        assert_eq!(
+            a.digest(),
+            b.digest(),
+            "same grants must give the same digest"
+        );
         assert_eq!(a.digest().len(), 64, "sha256 hex is 64 chars");
     }
 
@@ -1021,7 +1045,10 @@ monotonic = true
     #[test]
     fn empty_digest_is_still_wellformed() {
         assert_eq!(GrantSet::empty().digest().len(), 64);
-        assert_ne!(GrantSet::empty().digest(), GrantSet::from_manifest(&manifest()).digest());
+        assert_ne!(
+            GrantSet::empty().digest(),
+            GrantSet::from_manifest(&manifest()).digest()
+        );
     }
 
     // -- Denial error ------------------------------------------------------
@@ -1041,7 +1068,10 @@ monotonic = true
             "the cause must name the layer: {:?}",
             e.cause
         );
-        assert!(e.remediation.is_some(), "a denial must always suggest the fix");
+        assert!(
+            e.remediation.is_some(),
+            "a denial must always suggest the fix"
+        );
         // An agent must be able to act on it without parsing prose.
         assert!(!e.is_retryable(), "a capability denial is deterministic");
     }

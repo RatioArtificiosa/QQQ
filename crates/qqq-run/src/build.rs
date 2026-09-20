@@ -437,6 +437,97 @@ pub fn rust_artifact_path(project_dir: &Path, profile: &str, target: &str, name:
         .join(format!("{name}.wasm"))
 }
 
+/// The directory Cargo writes a build's output into.
+#[must_use]
+pub fn artifact_dir(project_dir: &Path, profile: &str, target: &str) -> PathBuf {
+    project_dir.join("target").join(target).join(profile)
+}
+
+/// Find the component a successful build produced.
+///
+/// # Why this cannot simply compute the name
+///
+/// Cargo names the artifact after the **crate** name, which is the package name
+/// with hyphens replaced by underscores: `orders-api` yields `orders_api.wasm`.
+/// It also honours an explicit `[lib] name`, which may differ from both.
+///
+/// This was a real defect — `qqqai new` generates hyphenated project names, so
+/// every scaffolded project compiled successfully and then reported that no
+/// artifact had been produced. Reasoning about the naming convention produced
+/// the wrong answer; looking at the directory produced the right one.
+///
+/// # The preference order, and why
+///
+/// 1. **The underscored package name.** Cargo's default, so it is the answer in
+///    the overwhelming majority of cases and involves no directory scan.
+/// 2. **The literal package name.** Correct when the crate declares an explicit
+///    `[lib] name` matching the package.
+/// 3. **Any single `.wasm`.** Covers a renamed lib target. Ambiguity — more than
+///    one candidate that is not accounted for above — resolves to `None` rather
+///    than a guess, because picking the wrong artifact silently would ship the
+///    wrong code.
+///
+/// `deps/` is deliberately excluded: it holds duplicate copies of every
+/// dependency's artifact, so including it would make "any single `.wasm`"
+/// almost never true.
+#[must_use]
+pub fn find_artifact(
+    project_dir: &Path,
+    profile: &str,
+    target: &str,
+    package: &str,
+) -> Option<PathBuf> {
+    let dir = artifact_dir(project_dir, profile, target);
+
+    // 1. Cargo's default: hyphens become underscores.
+    let underscored = dir.join(format!("{}.wasm", package.replace('-', "_")));
+    if underscored.is_file() {
+        return Some(underscored);
+    }
+
+    // 2. A crate that kept the literal name.
+    let literal = dir.join(format!("{package}.wasm"));
+    if literal.is_file() {
+        return Some(literal);
+    }
+
+    // 3. A renamed lib target, but only when the answer is unambiguous.
+    let candidates = list_wasm_paths(&dir);
+    match candidates.len() {
+        1 => candidates.into_iter().next(),
+        _ => None,
+    }
+}
+
+/// The `.wasm` files directly inside a directory, sorted, by name.
+///
+/// Non-recursive on purpose: `deps/` contains a copy of every dependency's
+/// artifact, so descending would make any "the only artifact" reasoning false.
+#[must_use]
+pub fn list_wasm_files(dir: &Path) -> Vec<String> {
+    list_wasm_paths(dir)
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// The `.wasm` paths directly inside a directory, sorted.
+fn list_wasm_paths(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        // An explicit closure rather than `Result::ok`, because this crate
+        // imports `qqq_core::Result`, which shadows `std::result::Result` — and
+        // `Result::ok` then fails to resolve to the inherent method.
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "wasm"))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// The `wasm-tools` style classification of an artifact's bytes.
 ///
 /// # Why we classify rather than trusting the exit code
@@ -535,7 +626,10 @@ pub fn verify_artifact(path: &Path) -> Result<ArtifactKind> {
     let bytes = std::fs::read(path).map_err(|e| {
         Error::new(
             ErrorCode::CompilationFailed,
-            format!("the build reported success but `{}` is unreadable", path.display()),
+            format!(
+                "the build reported success but `{}` is unreadable",
+                path.display()
+            ),
         )
         .with_cause(e.to_string())
         .with_remediation("check the build output above for a partial or failed link step")
@@ -652,25 +746,43 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
         ));
     }
 
-    // The compiler succeeded; now find what it produced. The name comes from
-    // the manifest's package name, which is the same string that becomes the
-    // crate name — a mismatch here would mean the manifest and Cargo.toml
-    // disagree, so the error says exactly that.
-    let produced = rust_artifact_path(&plan.cwd, profile, target, loaded.name());
-    if !produced.exists() {
+    // The compiler succeeded; now find what it produced.
+    //
+    // # Why this searches rather than computing the name
+    //
+    // The naive approach is `<package name>.wasm`, and it is wrong. Cargo names
+    // the artifact after the **crate** name, which is the package name with
+    // hyphens replaced by underscores — `orders-api` produces `orders_api.wasm`.
+    // It is also wrong when `[lib].path` renames the target, or when the crate
+    // declares a `[lib] name` that differs from the package.
+    //
+    // This was a real defect: `qqqai new` generates a hyphenated project, so
+    // every scaffolded project built successfully and then reported "the build
+    // succeeded but `<name>.wasm` was not produced". The fix is to look at what
+    // is actually there, and to name every candidate in the error when nothing
+    // is.
+    let produced = find_artifact(&plan.cwd, profile, target, loaded.name());
+    let Some(produced) = produced else {
+        let dir = artifact_dir(&plan.cwd, profile, target);
+        let seen = list_wasm_files(&dir);
         return Err(Error::new(
             ErrorCode::CompilationFailed,
             format!(
-                "the build succeeded but `{}` was not produced",
-                produced.display()
+                "the build succeeded but no component was found in `{}`",
+                dir.display()
             ),
         )
+        .with_cause(if seen.is_empty() {
+            "the directory contains no `.wasm` files".to_owned()
+        } else {
+            format!("found: {}", seen.join(", "))
+        })
         .with_remediation(format!(
-            "`[package].name` is `{}`; Cargo.toml must declare the same crate name \
-             and `crate-type = [\"cdylib\"]`",
+            "`[package].name` is `{}`; `Cargo.toml` must declare \
+             `crate-type = [\"cdylib\"]` and produce a `.wasm` library target",
             loaded.name()
         )));
-    }
+    };
 
     // Classify before staging: an artifact that is not a component must never
     // reach `qqqai run`, because the failure there is far from its cause.
@@ -843,13 +955,9 @@ impl CommandOutput for BuildOutput {
             return format!("would run: {}", self.command);
         }
         match (&self.artifact, self.size_bytes) {
-            (Some(a), Some(n)) => format!(
-                "{}: {} ({} bytes) for {}",
-                self.project,
-                a,
-                n,
-                self.target
-            ),
+            (Some(a), Some(n)) => {
+                format!("{}: {} ({} bytes) for {}", self.project, a, n, self.target)
+            }
             (Some(a), None) => format!("{}: {a}", self.project),
             _ => format!("{}: build finished", self.project),
         }
@@ -911,7 +1019,11 @@ mod tests {
     fn shell_metacharacters_stay_inside_one_argument() {
         let plan = BuildPlan {
             program: "cargo".to_owned(),
-            args: vec!["build".to_owned(), "--target".to_owned(), "wasm32-wasip2".to_owned()],
+            args: vec![
+                "build".to_owned(),
+                "--target".to_owned(),
+                "wasm32-wasip2".to_owned(),
+            ],
             cwd: PathBuf::from("app; rm -rf ~"),
         };
         // The cwd is not part of the argument vector at all: `Command::current_dir`
@@ -987,7 +1099,11 @@ mod tests {
         let opts = BuildOptions::from_flags(0, Some("x86_64-unknown-linux-gnu".to_owned()));
         let e = plan(&loaded(RUST), &opts).unwrap_err();
         assert_eq!(e.code, ErrorCode::MissingTarget);
-        assert!(e.remediation.as_deref().unwrap_or("").contains("wasm32-wasip2"));
+        assert!(e
+            .remediation
+            .as_deref()
+            .unwrap_or("")
+            .contains("wasm32-wasip2"));
     }
 
     /// Whatever toolchain this test machine has, `plan` must either succeed or
@@ -1002,7 +1118,10 @@ mod tests {
             }
             Err(e) => {
                 assert_eq!(e.code, ErrorCode::MissingTarget);
-                assert!(e.remediation.is_some(), "a missing tool needs an install line");
+                assert!(
+                    e.remediation.is_some(),
+                    "a missing tool needs an install line"
+                );
             }
         }
     }
@@ -1039,7 +1158,10 @@ mod tests {
         for lang in BuildSpec::LANGUAGES {
             let tc = toolchain_for(lang, "wasm32-wasip2");
             if let Some(reqs) = tc {
-                assert!(!reqs.is_empty(), "{lang} claims a toolchain but names no tools");
+                assert!(
+                    !reqs.is_empty(),
+                    "{lang} claims a toolchain but names no tools"
+                );
                 for r in reqs {
                     assert!(!r.program.is_empty());
                     assert!(!r.install.is_empty(), "{} needs an install line", r.program);
@@ -1060,10 +1182,16 @@ mod tests {
 
     #[test]
     fn a_non_wasm_file_is_not_wasm() {
-        assert_eq!(ArtifactKind::classify(b"hello world"), ArtifactKind::NotWasm);
+        assert_eq!(
+            ArtifactKind::classify(b"hello world"),
+            ArtifactKind::NotWasm
+        );
         assert_eq!(ArtifactKind::classify(b""), ArtifactKind::NotWasm);
         assert_eq!(ArtifactKind::classify(b"\0asm"), ArtifactKind::NotWasm);
-        assert_eq!(ArtifactKind::classify(b"\0asm\x01\0\0"), ArtifactKind::NotWasm);
+        assert_eq!(
+            ArtifactKind::classify(b"\0asm\x01\0\0"),
+            ArtifactKind::NotWasm
+        );
     }
 
     /// The exact header a core module carries.
@@ -1148,8 +1276,14 @@ mod tests {
     #[test]
     fn only_the_magic_and_the_header_are_read() {
         // Exactly eight bytes: enough to classify, nothing to walk.
-        assert_eq!(ArtifactKind::classify(b"\0asm\x0d\0\x01\0"), ArtifactKind::Component);
-        assert_eq!(ArtifactKind::classify(b"\0asm\x01\0\0\0"), ArtifactKind::CoreModule);
+        assert_eq!(
+            ArtifactKind::classify(b"\0asm\x0d\0\x01\0"),
+            ArtifactKind::Component
+        );
+        assert_eq!(
+            ArtifactKind::classify(b"\0asm\x01\0\0\0"),
+            ArtifactKind::CoreModule
+        );
     }
 
     #[test]
@@ -1163,8 +1297,141 @@ mod tests {
     fn artifact_paths_follow_the_cargo_layout() {
         let p = rust_artifact_path(Path::new("/proj"), "release", "wasm32-wasip2", "app");
         let s = p.to_string_lossy().replace('\\', "/");
-        assert!(s.ends_with("target/wasm32-wasip2/release/app.wasm"), "got {s}");
+        assert!(
+            s.ends_with("target/wasm32-wasip2/release/app.wasm"),
+            "got {s}"
+        );
     }
+
+    // -- artifact discovery -------------------------------------------------
+    //
+    // The regression group for a real defect: `qqqai new` generates hyphenated
+    // project names, Cargo emits the underscored crate name, and `build`
+    // reported "the build succeeded but <name>.wasm was not produced" for every
+    // scaffolded project.
+
+    /// Make a directory with the given `.wasm` files in it.
+    fn build_dir(tag: &str, files: &[&str]) -> PathBuf {
+        let dir = temp_dir(tag);
+        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
+        std::fs::create_dir_all(&out).expect("create artifact dir");
+        for f in files {
+            std::fs::write(out.join(f), b"\0asm\x0d\0\x01\0").expect("write artifact");
+        }
+        dir
+    }
+
+    /// **The exact case that was broken**: a hyphenated package name produces an
+    /// underscored artifact.
+    #[test]
+    fn a_hyphenated_package_finds_its_underscored_artifact() {
+        let dir = build_dir("hyphen", &["orders_api.wasm"]);
+        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        assert_eq!(
+            found.map(|p| p.file_name().unwrap().to_string_lossy().into_owned()),
+            Some("orders_api.wasm".to_owned()),
+            "`orders-api` must find `orders_api.wasm`"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_underscored_package_finds_its_artifact() {
+        let dir = build_dir("plain", &["app.wasm"]);
+        assert!(find_artifact(&dir, "release", "wasm32-wasip2", "app").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An explicit `[lib] name` equal to the package name still resolves.
+    #[test]
+    fn a_literal_name_is_found_when_no_underscored_one_exists() {
+        let dir = build_dir("literal", &["orders-api.wasm"]);
+        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        assert!(found.is_some(), "the literal crate name must be tried");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A renamed lib target is found when it is the only candidate.
+    #[test]
+    fn a_single_unexpected_artifact_is_accepted() {
+        let dir = build_dir("renamed", &["something_else.wasm"]);
+        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        assert!(
+            found.is_some(),
+            "an unambiguous single artifact must be used"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Ambiguity must not be guessed at.** With two candidates, neither of
+    /// which matches, picking one silently would ship the wrong code.
+    #[test]
+    fn ambiguity_resolves_to_nothing_rather_than_a_guess() {
+        let dir = build_dir("ambiguous", &["alpha.wasm", "beta.wasm"]);
+        assert_eq!(
+            find_artifact(&dir, "release", "wasm32-wasip2", "orders-api"),
+            None,
+            "two candidates and no match must not produce a guess"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A preference case: when both the underscored and an unrelated artifact
+    /// exist, the underscored one wins — the answer is never ambiguous when the
+    /// expected name is present.
+    #[test]
+    fn the_expected_name_wins_over_other_artifacts() {
+        let dir = build_dir("prefer", &["orders_api.wasm", "unrelated.wasm"]);
+        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api")
+            .expect("the expected name must be found");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "orders_api.wasm"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `deps/` must not be searched: it holds a copy of every dependency's
+    /// artifact, so including it would make "the only artifact" never true.
+    #[test]
+    fn dependency_artifacts_are_not_candidates() {
+        let dir = temp_dir("deps");
+        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
+        std::fs::create_dir_all(out.join("deps")).expect("create deps");
+        std::fs::write(out.join("deps").join("serde.wasm"), b"\0asm\x0d\0\x01\0").unwrap();
+        assert_eq!(
+            find_artifact(&dir, "release", "wasm32-wasip2", "app"),
+            None,
+            "a `.wasm` under deps/ must not be mistaken for the build output"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_directory_lists_no_files_and_does_not_panic() {
+        let dir = temp_dir("absent");
+        let missing = artifact_dir(&dir, "release", "wasm32-wasip2");
+        assert!(list_wasm_files(&missing).is_empty());
+        assert_eq!(find_artifact(&dir, "release", "wasm32-wasip2", "app"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The listing must name only `.wasm` files, so the error message can tell
+    /// the user what it actually found.
+    #[test]
+    fn the_listing_reports_only_wasm_files() {
+        let dir = temp_dir("listing");
+        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("a.wasm"), b"x").unwrap();
+        std::fs::write(out.join("b.txt"), b"x").unwrap();
+        std::fs::write(out.join("c.rlib"), b"x").unwrap();
+        let listed = list_wasm_files(&out);
+        assert_eq!(listed, vec!["a.wasm".to_owned()], "got {listed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- staged path --------------------------------------------------------
 
     /// The staged path must not depend on profile or target, because that is
     /// the whole reason it exists: `run`, `inspect` and deploy scripts need one
@@ -1215,9 +1482,7 @@ mod tests {
     fn the_first_reproducible_build_records_a_baseline() {
         let dir = temp_dir("repro-first");
         check_reproducible(&dir, "app", "aaaa").expect("a first build must pass");
-        let stamp = dir
-            .join(OUTPUT_DIR)
-            .join("app.component.wasm.digest");
+        let stamp = dir.join(OUTPUT_DIR).join("app.component.wasm.digest");
         assert!(stamp.exists(), "the baseline must be recorded");
         let _ = std::fs::remove_dir_all(&dir);
     }

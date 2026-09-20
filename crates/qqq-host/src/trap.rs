@@ -279,9 +279,7 @@ pub const fn remediation_for(code: ErrorCode) -> &'static str {
         ErrorCode::MemoryLimitExceeded => {
             "raise `limits.memory` in qqq.toml, or fix the leak — the peak is reported above"
         }
-        ErrorCode::FuelExhausted => {
-            "raise `limits.fuel` in qqq.toml, or optimise the hot path"
-        }
+        ErrorCode::FuelExhausted => "raise `limits.fuel` in qqq.toml, or optimise the hot path",
         ErrorCode::EpochDeadlineExceeded => {
             "raise `limits.epoch_deadline_ms`; a guest that repeatedly hits this is usually \
              blocked on I/O it was not granted"
@@ -421,7 +419,10 @@ mod tests {
 
     #[test]
     fn unknown_details_fall_back_to_generic_trap() {
-        assert_eq!(classify_trap("something entirely unexpected"), ErrorCode::GuestTrap);
+        assert_eq!(
+            classify_trap("something entirely unexpected"),
+            ErrorCode::GuestTrap
+        );
         assert_eq!(classify_trap(""), ErrorCode::GuestTrap);
     }
 
@@ -463,7 +464,10 @@ mod tests {
                 memory_peak_bytes: None,
                 fuel_consumed: None,
             };
-            assert!(t.must_discard_instance(), "{code} must discard the instance");
+            assert!(
+                t.must_discard_instance(),
+                "{code} must discard the instance"
+            );
             assert!(!t.to_error().is_retryable(), "{code} must not be retryable");
         }
     }
@@ -480,7 +484,10 @@ mod tests {
             ErrorCode::InvalidResourceHandle,
         ] {
             assert!(!human_message(code).is_empty(), "{code} needs a message");
-            assert!(!remediation_for(code).is_empty(), "{code} needs a remediation");
+            assert!(
+                !remediation_for(code).is_empty(),
+                "{code} needs a remediation"
+            );
             let t = Trap {
                 code,
                 message: human_message(code).to_owned(),
@@ -511,7 +518,10 @@ mod tests {
         let e = t.to_error();
         assert_eq!(e.code, ErrorCode::FuelExhausted);
         assert!(e.context.iter().any(|(k, _)| k == "fuel-consumed"));
-        assert!(e.context.iter().any(|(k, v)| k == "memory-peak" && v.contains("MiB")));
+        assert!(e
+            .context
+            .iter()
+            .any(|(k, v)| k == "memory-peak" && v.contains("MiB")));
         assert!(
             e.cause.iter().any(|c| c.contains("handle_request")),
             "the backtrace must reach the error: {:?}",

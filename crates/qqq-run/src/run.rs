@@ -138,7 +138,11 @@ impl CommandOutput for RunOutput {
 
     fn summary(&self) -> String {
         if self.dry_run {
-            return format!("would run: {} ({} imports)", self.artifact, self.imports.len());
+            return format!(
+                "would run: {} ({} imports)",
+                self.artifact,
+                self.imports.len()
+            );
         }
         match self.exit_code {
             Some(0) | None if self.ok => {
@@ -424,10 +428,7 @@ fn plural(items: &[String]) -> String {
 /// # Errors
 ///
 /// As [`locate_artifact`], [`PreparedComponent::compile`] and [`resolve_grants`].
-pub fn prepare(
-    loaded: &LoadedManifest,
-    opts: &RunOptions,
-) -> Result<Prepared> {
+pub fn prepare(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Prepared> {
     let path = locate_artifact(loaded, opts)?;
     let bytes = std::fs::read(&path).map_err(|e| {
         Error::new(
@@ -779,7 +780,10 @@ mod tests {
         assert_eq!(e.code, ErrorCode::InvalidComponentArtifact);
         // `cause` is a chain, outermost first; the paths we tried are one entry.
         let cause = e.cause.join("\n");
-        assert!(cause.contains("target"), "must show the staged path: {cause}");
+        assert!(
+            cause.contains("target"),
+            "must show the staged path: {cause}"
+        );
         assert!(
             cause.contains("release") && cause.contains("debug"),
             "must show both cargo profiles: {cause}"
@@ -1022,7 +1026,10 @@ mod tests {
     /// satisfy an unrelated import — a security-relevant false positive.
     #[test]
     fn distinct_packages_stay_distinct() {
-        assert_ne!(package_of("qqq:clock@1.0.0"), package_of("qqq:crypto@1.0.0"));
+        assert_ne!(
+            package_of("qqq:clock@1.0.0"),
+            package_of("qqq:crypto@1.0.0")
+        );
         assert_ne!(package_of("qqq:http/client"), package_of("qqq:dns/resolve"));
     }
 

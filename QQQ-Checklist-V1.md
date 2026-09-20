@@ -731,7 +731,48 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §9.4 Specific optimizations planned
 - [ ] **HOST-022** Implement resource-handle table pooling and lifetime diagnostics.
   → §4.5 The ABI boundary — what crosses and at what cost
-- [ ] **HOST-023** Implement `ResourcesRequired`-based admission control: refuse to load a component whose declared minimums exceed the host's capacity.
+- [x] **HOST-023** Implement `ResourcesRequired`-based admission control: refuse to load a component whose declared minimums exceed the host's capacity.
+  → Done: `crates/qqq-host/src/admission.rs` — `admit(limits, capacity)` is a
+    **pure function** of a component's declared requirements and a host's
+    capacity, returning the computed reservation or a refusal naming both
+    numbers. 13 unit tests.
+  → **Why this matters more than it looks.** Wasmtime's pooling allocator is a
+    *reservation*: `total_memories(n)` with `max_memory_size(m)` commits address
+    space up front whether or not the instances exist. That makes a
+    misconfiguration fatal in two directions — reserve too little and the pool
+    refuses instances under load (`QQQ-6001`, with the cause three steps from the
+    symptom), reserve too much and the *engine constructor* fails or the process
+    is OOM-killed at startup. Both are decidable **before** the engine exists,
+    from two numbers already known.
+  → **`HostCapacity` is a value, not a query.** It is passed in rather than
+    measured, so admission is testable without a machine of any particular size —
+    a test that asserted "this fits" against the real host would pass or fail
+    depending on the CI runner, which is the environment-dependent-check class
+    `§O-058f` records. `Default` is deliberately **fixed** rather than derived
+    from the host: a default that varied would make a manifest pass on a laptop
+    and fail in a container, which is the bug this module exists to move
+    *earlier*.
+  → The **resident baseline** is subtracted rather than assumed free, because a
+    reservation that ignores the runtime is exactly the one that passes admission
+    and then dies. It saturates at zero rather than underflowing — a wrapped
+    `available_bytes` would report petabytes and admit everything.
+  → **Order is a decision, not an accident.** Degenerate limits (zero fuel,
+    zero deadline, zero memory) are checked **first**, because a fuel budget of
+    zero is not a tight limit — it is a guest that traps before its first
+    instruction, and reporting that as a capacity problem sends an operator to
+    resize a machine that was never too small. Pinned by
+    `a_degenerate_limit_outranks_a_capacity_problem`, which uses a hopelessly
+    over-committed host and asserts the *fuel* is what gets reported.
+  → The reservation is `saturating_mul`, never `*`: a large per-instance size
+    times a large count overflows `u64`, and a **wrapped product is a small
+    number that passes every capacity check**. Pinned by
+    `an_overflowing_reservation_cannot_wrap_into_fitting`.
+  → **Writing that test found a wrong premise in the test, not the code**: the
+    first version used `memory_budget_bytes: u64::MAX` and asserted a refusal,
+    but that budget genuinely does fit a saturated reservation, so the refusal
+    never happened. A test of the safety property has to use a budget where the
+    difference is observable. Recorded in the test's own docs so the next author
+    does not repeat it.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-024** Port the three verification-probe assertions (missing-import failure, instantiation cost, fuel trap) into the permanent test suite and delete the scratch crate.
   → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.

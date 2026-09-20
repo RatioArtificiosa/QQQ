@@ -5000,6 +5000,86 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-065 — `CAP-016`: the security test caught a defect in the test double
+
+**What was built.** `crates/qqq-host/src/host_secrets.rs` — 22 tests, taking
+`qqq-host` from 205 to 227.
+
+#### §O-065a — The guarantee had to be structural, because a convention would be broken by the first convenience
+
+The interface's promise is that a secret's value never reaches the guest. There
+are three ways to implement that, and only one is durable:
+
+| Implementation | Why it fails |
+|---|---|
+| A `pub` field | Any caller can read it; the promise is documentation |
+| A `value()` accessor | The first caller who wants it "just for logging" gets it, and the guarantee is gone everywhere |
+| **A private field with no accessor at all** | Reading it requires editing this module, which is the point |
+
+The third was chosen. The cost is real — `SecretMaterial` cannot be introspected,
+so a test that wanted to assert on the bytes could not — and that cost is
+*correct*: the tests assert on the **operation results** instead, which is what the
+guest sees, and therefore a stronger statement than inspecting the field.
+
+#### §O-065b — The control that makes the leak test non-vacuous
+
+`the_secret_material_never_appears_in_a_result` scans the result for the key
+bytes. That assertion is **vacuous if the key never reaches the crypto at all** —
+a `SecretStore` that did nothing would pass it.
+
+So `the_material_does_reach_the_primitive` is the control: it asserts the
+primitive was called *and received the material*. The pair is what makes the
+claim meaningful, and it is the same discipline `§M-006` establishes for the
+validators — a check must be shown able to fail for the right reason.
+
+#### §O-065c — Order is a security decision, and the test constructs the case that distinguishes it
+
+`apply` checks the grant list **before** looking up material. The test that pins
+this builds the case where the order is observable: a store holding material for
+a secret that is **resolved but not granted**.
+
+* Correct order → `not-granted`, and the guest learns nothing.
+* Reversed order → `unavailable`, which tells an ungranted guest that the host
+  holds a secret under that name.
+
+The second is an information leak, and it is invisible unless a test constructs a
+store where the two conditions *overlap* — which is why the fixture is built that
+way rather than granting a name with no material.
+
+#### §O-065d — The test double modelled a buggy implementation, and the test said so
+
+`FakeCrypto::public_key` returned `PUB` ++ the key. That is a faithful model of a
+**broken** public-key derivation — one that leaks the private half through the
+public half — and `the_secret_material_never_appears_in_a_result` failed on it,
+correctly.
+
+The fix was to make the fake **correct**: derive the public value with a hash
+rather than concatenating the key.
+
+**The general rule, and it is worth stating because it is easy to miss**: a test
+double has to model a *correct* implementation of the interface it stands in for.
+A fake that is wrong in the same direction as a plausible bug makes every test
+using it either fail for the wrong reason or pass for the wrong reason — and
+neither is visible without reading the fake, which nobody does.
+
+Here the fake was wrong in the *conservative* direction (it leaked), so the
+failure was loud. A fake wrong in the permissive direction would have made the
+security test pass while the property was unverified, and nothing would have said
+so.
+
+#### §O-065e — A second `unused_self`, in a helper whose work had moved
+
+`SecretStore::fail` had a `&self` receiver it never used — the same shape as
+`handles.rs`'s `invalid()` (`§O-064d`), and the same cause: the method began life
+needing state, the state moved elsewhere, and the receiver stayed.
+
+Two instances in two modules is a pattern rather than a coincidence, and the
+pattern is: **a helper that builds an error is almost never a method.** It has no
+state to consult. Writing it as a free function from the start would have avoided
+both, and clippy's `unused_self` is what notices when the opportunity is missed.
+
+---
+
 ### §O-064 — Four engine modules, and the pattern of defects in the *test* rather than the code
 
 **What was built.** Four `qqq-host` modules across `HOST-021`, `HOST-022` and

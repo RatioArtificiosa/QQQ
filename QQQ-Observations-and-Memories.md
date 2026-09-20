@@ -1764,6 +1764,121 @@ Proposal §5.2, §5.3, §12.1.
 
 ---
 
+### §O-025 — `qqqai init`, and the two defects that only a real project revealed
+
+**What was built.** `qqqai init` (CLI-004): adopt an existing directory, detect
+its language and crate name, write a manifest that grants nothing, and **never
+overwrite a file the user owns**. Detection is reported with its *source* —
+`existing-manifest`, `inferred-from-files`, `default` or `explicit` — so a guess
+is visibly a guess.
+
+**The command's central decision.** `init` runs on a directory that already
+contains someone's work, which makes it the one command in the CLI that can
+destroy value. Its rule is absolute: `USER_OWNED` files are never replaced, **and
+`--force` does not override that**. A `--force` that clobbered a hand-written
+`qqq.toml` would silently discard the capability decisions that are the entire
+point of the manifest, in the one command a user runs on a directory they already
+care about.
+
+**Verified against a real project, not a fixture:**
+
+```console
+$ cd legacy-app && qqqai init
+initialised legacy-app (rust, 3 files written, 2 existing preserved, 0 capabilities granted)
+
+$ qqqai build
+legacy-app: target/qqq/legacy-app.component.wasm (14340 bytes) for wasm32-wasip2
+
+$ qqqai run
+legacy-app: ran in 88 µs
+```
+
+`src/lib.rs`, `README.md` and `Cargo.toml` all survived byte-for-byte.
+
+---
+
+#### §O-025a — The manifest was named after the directory, and `build` could not find the artifact
+
+**What happened.** `init` took the project name from the directory. In
+`/tmp/qqq-init-test/` containing package `legacy-app`, it wrote
+`name = "qqq-init-test"`. Since `Cargo.toml` is user-owned and therefore not
+rewritten, the manifest and the crate disagreed — and `build` looks for the
+artifact under the manifest's name, so an initialised project could not be built.
+
+**Fix.** Detection now reads `[package] name` from an existing `Cargo.toml`
+before falling back to the directory name, and `name_source` reports
+`existing-manifest` so the user can see where the name came from. The scan is a
+deliberately small line reader rather than a TOML parse: `init` needs one string
+from a file it will not modify, and making it depend on a full parser would mean
+a malformed `Cargo.toml` could stop `init` from adopting the directory at all.
+It reads only the `[package]` table, so a `name` under `[dependencies]` cannot be
+mistaken for the crate.
+
+---
+
+#### §O-025b — `init` wrote an orphan source file into an existing crate
+
+**What happened.** The Rust template writes `src/<crate>.rs` and points
+`[lib].path` at it. In a crate that already existed, `Cargo.toml` was correctly
+left alone — so the generated `src/qqq_init_test.rs` was referenced by nothing
+and compiled by nothing. Not destructive, but misleading: a file appeared in the
+user's `src/` with no explanation and no effect.
+
+**Fix.** `has_existing_rust_library` detects an existing `src/lib.rs` or
+`src/main.rs`, and the source files are then **skipped** — reported in a
+`skipped` field and in a note, because a user who expects a file and does not get
+one needs to know it was a decision rather than a bug.
+
+---
+
+#### §O-025c — A test caught a protection list that protected nothing
+
+`USER_OWNED` listed `package.json`, which the scaffold never generates. The entry
+protected no file while making it look as though that case were handled, and
+`every_user_owned_name_is_a_file_the_scaffold_writes` failed on exactly that.
+
+**The fix was to split one list into two, because they answer different
+questions:**
+
+| List | Question | Constraint |
+|---|---|---|
+| `USER_OWNED` | Which generated files must never be replaced? | Must be exactly the files the scaffold writes |
+| `PRESERVED_INTERESTING` | Which pre-existing files should the report acknowledge? | A superset, including files the scaffold does not touch |
+
+Three tests now pin the relationship in both directions, including that a file
+which is both generated *and* reported must be protected — otherwise the report
+would be a lie.
+
+**Why this is worth recording.** The instinct on seeing that failure is to delete
+`package.json` from the list. That would have removed the *reporting* behaviour,
+which is genuinely useful, to fix a *classification* mistake. The test was right;
+the data structure was wrong.
+
+---
+
+#### §O-025d — The decision order is the safety argument, so it is now reviewable as a unit
+
+`write_scaffold_files` was extracted from `init` (which had grown past the line
+limit, and the extraction was the right fix rather than an allow attribute). The
+order is now one screen:
+
+1. user-owned and present → leave it, unconditionally
+2. source in a crate that already has a library → skip it
+3. present without `--force` → leave it
+4. present with `--force` → replace, and record that we did
+5. absent → write it
+
+Three tests pin the precedence directly: rule 1 beats rule 4 (`--force` cannot
+override the user-owned protection), rule 2 beats rule 3 (a skipped file is
+reported as *skipped*, not as preserved — reporting it otherwise would tell a user
+a file of theirs survived when nothing was ever there), and rule 4 does replace a
+plain file, so `--force` is not inert.
+
+**Cross-refs:** Checklist `CLI-004`, `DX-001`, `DX-002`, `CON-002`; Proposal
+§5.2, §5.3, §12.1.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

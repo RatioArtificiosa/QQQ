@@ -634,9 +634,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### DX — Developer experience
 
-- [ ] **DX-001** Implement `qqqai new` scaffolding for all five languages and five templates.
+- [x] **DX-001** Implement `qqqai new` scaffolding for all five languages and five templates.
   → §5.2 The command surface
-- [ ] **DX-002** Implement generated-manifest minimality: a new project grants nothing it does not need.
+- [x] **DX-002** Implement generated-manifest minimality: a new project grants nothing it does not need.
   → §2.7 NN-7 — Progressive Power, Safe Defaults
 - [ ] **DX-003** Implement the "your app has 0 capabilities" guidance shown at dev-server start.
   → §12.1 The first ten minutes (a spec, not a wish)
@@ -681,7 +681,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [ ] **CLI-002** Implement compile-time exhaustiveness so a new command cannot ship without a JSON shape.
   → §2.1 NN-1 — AI Agents Are First-Class Users
-- [ ] **CLI-003** Implement `qqqai new`.
+- [x] **CLI-003** Implement `qqqai new`.
   → §5.2 The command surface
 - [ ] **CLI-004** Implement `qqqai init`.
   → §5.2 The command surface

@@ -429,6 +429,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
         CommandName::Run => dispatch_run(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
+        CommandName::Init => dispatch_init(name, args, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -661,6 +662,98 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
             "for example: {} new orders-api --lang rust --template http",
             qqq_core::BINARY_NAME
         )));
+    }
+    Ok(opts)
+}
+
+/// Dispatch `qqqai init`.
+///
+/// Like `new`, this does not go through `with_manifest`: the manifest is what it
+/// creates. It differs from `new` in adopting an existing directory, so the
+/// output always reports what was found and what was left alone.
+fn dispatch_init(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match init_options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match qqq_run::scaffold::init(&cwd, &opts) {
+        Ok(value) => report(out, name, &value),
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
+/// Decode `qqqai init`'s own flags: `--lang`, `--template`, `--force`.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag or an unknown language.
+fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error> {
+    use qqq_run::{Language, Template};
+
+    let mut opts = qqq_run::InitOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--lang" | "--language" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.language = Some(Language::parse(v).ok_or_else(|| {
+                    unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                })?);
+                i += 1;
+            }
+            "--template" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.template = Template::parse(v).ok_or_else(|| {
+                    unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                })?;
+                i += 1;
+            }
+            "--force" => opts.force = true,
+            other => {
+                if let Some(v) = other.strip_prefix("--lang=") {
+                    opts.language = Some(Language::parse(v).ok_or_else(|| {
+                        unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                    })?);
+                } else if let Some(v) = other.strip_prefix("--template=") {
+                    opts.template = Template::parse(v).ok_or_else(|| {
+                        unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                    })?;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `init`"),
+                    )
+                    .with_remediation("`init` accepts --lang, --template and --force"));
+                }
+                // `init` takes no positional: it always acts on the current
+                // directory. A positional is most likely `qqqai init <name>`,
+                // which is a `new` habit, so the error says so.
+                else {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("`init` does not take an argument, got `{other}`"),
+                    )
+                    .with_remediation(format!(
+                        "`init` adopts the current directory; to create a new one use \
+                         `{} new {other}`",
+                        qqq_core::BINARY_NAME
+                    )));
+                }
+            }
+        }
+        i += 1;
     }
     Ok(opts)
 }

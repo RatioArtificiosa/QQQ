@@ -58,6 +58,7 @@ pub use run::{
     resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput,
 };
 pub use scaffold::{
-    crate_name, create, files_for, manifest_for, readme_for, validate_name, Language, NewOptions,
-    NewOutput, Template, WrittenFile,
+    crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,
+    Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,
+    WrittenFile,
 };

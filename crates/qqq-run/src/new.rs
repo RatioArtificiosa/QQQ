@@ -48,9 +48,14 @@ use crate::output::{CommandName, CommandOutput};
 /// A closed enum rather than a string, so an unknown template is a parse error
 /// naming the valid options instead of a directory that is created and left
 /// half-populated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Template {
     /// An HTTP server. The most common starting point.
+    ///
+    /// The default, because "I want to serve something" is what most projects
+    /// are, and a template that is wrong is a one-line change while a template
+    /// that is missing is a blocker.
+    #[default]
     Http,
     /// A queue worker with no listener.
     Worker,
@@ -944,6 +949,554 @@ fn init_git(dir: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// init — adopting an existing directory
+// ---------------------------------------------------------------------------
+
+/// What `qqqai init` found in the directory it was asked to adopt.
+///
+/// # Why detection is reported rather than assumed
+///
+/// `init` runs in a directory that already contains the user's work. Guessing
+/// wrong about what is there — picking the wrong language, or worse, deciding
+/// there was nothing to preserve — is the one way this command destroys value.
+/// So every inference is named in the output, and anything ambiguous is a
+/// question rather than a decision.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Detection {
+    /// The language inferred from the files present.
+    pub language: String,
+    /// Whether the language was guessed from evidence or defaulted.
+    pub language_source: DetectionSource,
+    /// The evidence that led to the inference, for the user to check.
+    pub evidence: Vec<String>,
+    /// The project name, taken from the directory or an existing manifest.
+    pub name: String,
+    /// Where the name came from.
+    pub name_source: DetectionSource,
+    /// Existing files that `init` will **not** touch.
+    pub preserved: Vec<String>,
+}
+
+/// How a value was determined.
+///
+/// A closed enum rather than a sentence, so `--json` consumers can branch on it
+/// and a test can assert that a *guess* is reported as a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DetectionSource {
+    /// Read from an existing `qqq.toml`.
+    ExistingManifest,
+    /// Inferred from files in the directory.
+    InferredFromFiles,
+    /// The default, with no evidence either way.
+    Default,
+    /// Supplied on the command line.
+    Explicit,
+}
+
+impl DetectionSource {
+    /// The stable name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExistingManifest => "existing-manifest",
+            Self::InferredFromFiles => "inferred-from-files",
+            Self::Default => "default",
+            Self::Explicit => "explicit",
+        }
+    }
+
+    /// Whether this value rests on evidence rather than an assumption.
+    #[must_use]
+    pub const fn is_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::ExistingManifest | Self::InferredFromFiles | Self::Explicit
+        )
+    }
+}
+
+/// The result of `qqqai init`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InitOutput {
+    /// The directory that was adopted.
+    pub directory: String,
+    /// What was found there.
+    pub detection: Detection,
+    /// The files `init` wrote.
+    pub files: Vec<WrittenFile>,
+    /// Files that already existed and were left alone.
+    pub untouched: Vec<String>,
+    /// Files that were overwritten because `--force` was passed.
+    pub overwritten: Vec<String>,
+    /// Files the scaffold would have written but skipped as redundant.
+    ///
+    /// Reported rather than silently omitted: a user who expects a source file
+    /// and does not get one needs to know it was a decision.
+    pub skipped: Vec<String>,
+    /// The capabilities the created manifest grants — always 0.
+    pub capabilities_granted: usize,
+    /// The command to run next.
+    pub next: String,
+    /// Notes the user should read, e.g. an unbuildable language.
+    pub notes: Vec<String>,
+}
+
+impl CommandOutput for InitOutput {
+    fn command(&self) -> CommandName {
+        CommandName::Init
+    }
+
+    fn summary(&self) -> String {
+        let kept = self.untouched.len();
+        format!(
+            "initialised {} ({}, {} files written, {} existing preserved, {} capabilities granted)",
+            self.directory,
+            self.detection.language,
+            self.files.len(),
+            kept,
+            self.capabilities_granted
+        )
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Files that identify a project's language.
+///
+/// Ordered so the first match wins; a directory containing both a `Cargo.toml`
+/// and a `package.json` (a Rust project with a JS tooling layer, which is
+/// common) resolves to Rust, and the evidence is reported so a user who meant
+/// otherwise can see why.
+const LANGUAGE_MARKERS: &[(&str, Language)] = &[
+    ("Cargo.toml", Language::Rust),
+    ("go.mod", Language::Go),
+    ("pyproject.toml", Language::Python),
+    ("requirements.txt", Language::Python),
+    ("CMakeLists.txt", Language::Cpp),
+    ("package.json", Language::TypeScript),
+    ("tsconfig.json", Language::TypeScript),
+];
+
+/// Files the scaffold generates that **`init` will never overwrite** once they
+/// exist, even with `--force`.
+///
+/// # Why this list is separate from `PRESERVED_INTERESTING`
+///
+/// These two lists answer different questions and an earlier version wrongly
+/// merged them:
+///
+/// * *This* list is the **protection**. It must contain exactly the files the
+///   scaffold writes whose loss would destroy user intent — their manifest,
+///   their build configuration, their README. A name here that the scaffold
+///   never writes makes the protection inert, which is why
+///   `every_user_owned_name_is_a_file_the_scaffold_writes` asserts the two sets
+///   agree.
+/// * [`PRESERVED_INTERESTING`] is the **report**. It names files a user would
+///   want to see acknowledged in the output, whether or not `init` would have
+///   written them.
+///
+/// The merged version listed `package.json` here, where the scaffold never
+/// writes it — so the entry protected nothing while making it look as though the
+/// case were handled. The test caught it.
+const USER_OWNED: &[&str] = &["qqq.toml", "Cargo.toml", "README.md"];
+
+/// Files whose presence `init` reports as preserved, for the user's benefit.
+///
+/// A superset of [`USER_OWNED`]: it also names files that mark a project as
+/// established even though the scaffold would not touch them. Seeing
+/// `package.json` in the preserved list is how a user with a JS tooling layer
+/// confirms `init` noticed their project.
+const PRESERVED_INTERESTING: &[&str] = &[
+    "qqq.toml",
+    "Cargo.toml",
+    "README.md",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+];
+
+/// Inspect a directory and report what `init` would do.
+///
+/// # Errors
+///
+/// `QQQ-6005` when the directory cannot be read.
+pub fn detect(dir: &Path, explicit: Option<Language>) -> Result<Detection> {
+    let mut evidence = Vec::new();
+    let mut language = None;
+
+    if let Some(l) = explicit {
+        language = Some(l);
+    } else {
+        for (marker, lang) in LANGUAGE_MARKERS {
+            if dir.join(marker).is_file() {
+                evidence.push(format!("found {marker}"));
+                if language.is_none() {
+                    language = Some(*lang);
+                }
+            }
+        }
+    }
+
+    let (language, language_source) = match (explicit, language) {
+        (Some(l), _) => (l, DetectionSource::Explicit),
+        (None, Some(l)) => (l, DetectionSource::InferredFromFiles),
+        // No evidence: Rust is the default because it is the only language with
+        // a working build driver today, and the source is reported as `default`
+        // so nobody mistakes it for an inference.
+        (None, None) => (Language::Rust, DetectionSource::Default),
+    };
+
+    // The name: prefer an existing manifest, then an existing Cargo package,
+    // then the directory name.
+    //
+    // # Why the Cargo package name matters
+    //
+    // `init` runs on a directory that already has a project in it, and that
+    // project's crate name is almost never the directory name — `legacy-app/`
+    // contains package `legacy-app` but `/tmp/qqq-init-test/` contains whatever
+    // the user happened to call the folder. Taking the directory name produced a
+    // manifest calling the project `qqq-init-test` while the crate was
+    // `legacy-app`, and `build` then looked for an artifact under a name that
+    // does not exist.
+    let manifest_path = dir.join(crate::manifest_loader::MANIFEST_NAME);
+    let (name, name_source) = if let Some(l) = manifest_path
+        .is_file()
+        .then(|| crate::LoadedManifest::load(&manifest_path).ok())
+        .flatten()
+    {
+        evidence.push(format!(
+            "read the existing {}",
+            crate::manifest_loader::MANIFEST_NAME
+        ));
+        (l.name().to_owned(), DetectionSource::ExistingManifest)
+    } else {
+        if manifest_path.is_file() {
+            // A manifest that does not parse must not be silently replaced.
+            // Reporting the directory name keeps `init` non-destructive and
+            // forces `--force` to be an explicit decision.
+            evidence.push(format!(
+                "{} exists but does not parse; using the directory name",
+                crate::manifest_loader::MANIFEST_NAME
+            ));
+        }
+        if let Some(pkg) = cargo_package_name(dir) {
+            evidence.push(format!("read the crate name `{pkg}` from Cargo.toml"));
+            (pkg, DetectionSource::ExistingManifest)
+        } else {
+            (dir_name(dir), DetectionSource::Default)
+        }
+    };
+
+    let mut preserved = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| {
+        Error::new(
+            ErrorCode::HostResourceExhausted,
+            format!("could not read `{}`", dir.display()),
+        )
+        .with_cause(e.to_string())
+    })? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // Only files, and only ones we would otherwise write. Listing every
+        // file would bury the two that matter.
+        if path.is_file() {
+            if let Some(n) = path.file_name().and_then(|s| s.to_str()) {
+                if PRESERVED_INTERESTING.contains(&n) {
+                    preserved.push(n.to_owned());
+                }
+            }
+        }
+    }
+    preserved.sort_unstable();
+
+    Ok(Detection {
+        language: language.as_str().to_owned(),
+        language_source,
+        evidence,
+        name,
+        name_source,
+        preserved,
+    })
+}
+
+/// The last path component, as a string.
+fn dir_name(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|s| s.to_str())
+        .map_or_else(|| "app".to_owned(), str::to_owned)
+}
+
+/// Read the `[package] name` from an existing `Cargo.toml`.
+///
+/// A deliberately small scan rather than a TOML parse: `init` needs one string
+/// from a file it does not own and will not modify, and pulling in a parser to
+/// read it would mean a malformed `Cargo.toml` could stop `init` from adopting
+/// the directory at all. Finding nothing here is a normal outcome, answered by
+/// the directory name.
+///
+/// It reads only the `[package]` table, so a `name` under `[lib]`, `[[bin]]` or
+/// `[dependencies]` cannot be mistaken for the package name.
+fn cargo_package_name(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // Strip a trailing comment before looking for the value, so
+        // `name = "app" # the crate` yields `app`.
+        let without_comment = trimmed.split('#').next().unwrap_or(trimmed).trim();
+        if let Some(rest) = without_comment.strip_prefix("name") {
+            let rest = rest.trim_start();
+            let Some(value) = rest.strip_prefix('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Whether a directory already contains a Rust source file the scaffold would
+/// collide with.
+///
+/// # Why `init` must not write its own library file into an existing crate
+///
+/// The scaffold's Rust template writes `src/<crate>.rs` and points
+/// `[lib].path` at it. In a directory that already has a crate, `Cargo.toml` is
+/// user-owned and therefore **not** rewritten — so the generated source file
+/// would be an orphan that nothing references and nothing compiles. It is not
+/// destructive, but it is misleading: a user sees a file appear in their `src/`
+/// with no explanation and no effect.
+///
+/// Detecting an existing library entry point is the signal to skip the source
+/// file entirely. The manifest and README are still written, which is what
+/// `init` is actually for.
+fn has_existing_rust_library(dir: &Path) -> bool {
+    dir.join("src/lib.rs").is_file() || dir.join("src/main.rs").is_file()
+}
+
+/// Add QQQ to an existing directory.
+///
+/// # The property that makes this safe
+///
+/// `init` **never overwrites a file the user owns.** Not with `--force`, not
+/// with `--yes`. The files it writes are the ones it generates, and a file that
+/// already exists is reported as untouched rather than replaced. The alternative
+/// — `--force` clobbering a hand-written `qqq.toml` — would silently discard the
+/// capability decisions that are the whole point of the manifest, and it would
+/// do so in the one command a user runs on a directory they already care about.
+///
+/// # Errors
+///
+/// * `QQQ-2002` — the inferred or given project name is not usable.
+/// * `QQQ-6005` — a file could not be written.
+pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitOutput> {
+    if !dir.is_dir() {
+        return Err(Error::new(
+            ErrorCode::HostResourceExhausted,
+            format!("`{}` is not a directory", dir.display()),
+        )
+        .with_remediation(
+            "run `qqqai init` from inside the project you want to adopt, \
+                           or use `qqqai new <name>` to create one",
+        ));
+    }
+
+    let detection = detect(dir, opts.language)?;
+    validate_name(&detection.name)?;
+
+    // Reconstruct the scaffold options from what was detected, so `init` and
+    // `new` generate from the same code. Two generators would drift, and the
+    // drift would show up as a project that behaves differently depending on
+    // which command created it.
+    let scaffold = NewOptions {
+        name: detection.name.clone(),
+        language: Language::parse(&detection.language).unwrap_or(Language::Rust),
+        template: opts.template,
+        no_git: true,
+        yes: true,
+        force: false,
+    };
+    let crate_name = crate_name(&detection.name);
+    let _ = crate_name;
+
+    // A crate that already has a library entry point must not gain a second,
+    // orphaned one. See `has_existing_rust_library`.
+    let skip_sources = scaffold.language == Language::Rust && has_existing_rust_library(dir);
+    let outcome = write_scaffold_files(dir, &scaffold, skip_sources, opts.force)?;
+
+    let capabilities_granted = manifest_path_for(dir)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| qqq_cap::manifest::Manifest::parse(&s).ok())
+        .map_or(0, |m| m.declared_capabilities().len());
+    let skipped = outcome.skipped;
+
+    let mut notes = Vec::new();
+    if !scaffold.language.is_buildable() {
+        notes.push(format!(
+            "`{} build` does not drive `{}` yet; the language matrix \
+             (LANG-001..LANG-040) tracks the driver",
+            qqq_core::BINARY_NAME,
+            scaffold.language.as_str()
+        ));
+    }
+    if detection.language_source == DetectionSource::Default {
+        notes.push(format!(
+            "no build file was found, so `{}` was assumed — pass --lang if that is wrong",
+            detection.language
+        ));
+    }
+    if !detection.preserved.is_empty() {
+        notes.push(format!(
+            "left {} untouched: {}",
+            detection.preserved.len(),
+            detection.preserved.join(", ")
+        ));
+    }
+    if !skipped.is_empty() {
+        notes.push(format!(
+            "skipped {} because this crate already has a library entry point: {}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
+    }
+
+    Ok(InitOutput {
+        directory: dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(".")
+            .to_owned(),
+        detection,
+        files: outcome.written,
+        untouched: outcome.untouched,
+        overwritten: outcome.overwritten,
+        skipped,
+        capabilities_granted,
+        next: format!("{} build", qqq_core::BINARY_NAME),
+        notes,
+    })
+}
+
+/// What writing the scaffold produced, per file.
+#[derive(Debug, Default)]
+struct WriteOutcome {
+    /// Files created or replaced.
+    written: Vec<WrittenFile>,
+    /// Files that existed and were deliberately left alone.
+    untouched: Vec<String>,
+    /// Files replaced because `--force` was passed.
+    overwritten: Vec<String>,
+    /// Files skipped as redundant.
+    skipped: Vec<String>,
+}
+
+/// Write the scaffold's files into an existing directory.
+///
+/// # The decision order, which is the whole safety argument
+///
+/// For each file, in this order:
+///
+/// 1. **User-owned and present** → leave it. This is unconditional: `--force`
+///    does not override it. See [`USER_OWNED`].
+/// 2. **Source in a crate that already has a library** → skip it. Writing it
+///    would create an orphan, because the `Cargo.toml` that would reference it
+///    is user-owned and therefore not rewritten.
+/// 3. **Present without `--force`** → leave it.
+/// 4. **Present with `--force`** → replace it, and record that we did.
+/// 5. **Absent** → write it.
+///
+/// Extracted from [`init`] so the order is reviewable as a unit. It is the part
+/// of `init` that can destroy work, so it is the part that most deserves to be
+/// readable in one screen.
+fn write_scaffold_files(
+    dir: &Path,
+    scaffold: &NewOptions,
+    skip_sources: bool,
+    force: bool,
+) -> Result<WriteOutcome> {
+    let mut out = WriteOutcome::default();
+
+    for (rel, contents) in files_for(scaffold) {
+        let path = dir.join(&rel);
+        let existed = path.exists();
+
+        // 1. Never replace a user-owned file.
+        if existed && USER_OWNED.contains(&rel.as_str()) {
+            out.untouched.push(rel);
+            continue;
+        }
+        // 2. Never add a second library file to an existing crate.
+        if skip_sources && rel.starts_with("src/") {
+            out.skipped.push(rel);
+            continue;
+        }
+        // 3. Leave anything present alone unless asked.
+        if existed && !force {
+            out.untouched.push(rel);
+            continue;
+        }
+        // 4. Replacing means we recorded it.
+        if existed {
+            out.overwritten.push(rel.clone());
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::new(
+                    ErrorCode::HostResourceExhausted,
+                    format!("could not create `{}`", parent.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+        }
+        std::fs::write(&path, &contents).map_err(|e| {
+            Error::new(
+                ErrorCode::HostResourceExhausted,
+                format!("could not write `{}`", path.display()),
+            )
+            .with_cause(e.to_string())
+        })?;
+        out.written.push(WrittenFile {
+            path: rel,
+            bytes: u64::try_from(contents.len()).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(out)
+}
+
+/// The manifest path for a directory.
+fn manifest_path_for(dir: &Path) -> Option<std::path::PathBuf> {
+    let p = dir.join(crate::manifest_loader::MANIFEST_NAME);
+    p.is_file().then_some(p)
+}
+
+/// The options `qqqai init` accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InitOptions {
+    /// The language to use, overriding detection.
+    pub language: Option<Language>,
+    /// The template to generate.
+    pub template: Template,
+    /// Allow overwriting files `init` generated previously.
+    ///
+    /// Never applies to user-owned files — see [`init`].
+    pub force: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1524,6 +2077,674 @@ mod tests {
         let j = out.to_json();
         assert_eq!(j["capabilities_granted"], 0);
         assert!(j["next"].as_str().unwrap().contains("run"));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    // -- init --------------------------------------------------------------
+
+    /// A directory with the given files in it.
+    fn existing_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = temp_dir(tag);
+        for (name, contents) in files {
+            let p = dir.join(name);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir");
+            }
+            std::fs::write(p, contents).expect("write");
+        }
+        dir
+    }
+
+    /// **The safety property, and the reason `init` exists as a separate
+    /// command.** A hand-written `qqq.toml` is where capability decisions live.
+    /// `init` must never replace one — not even with `--force`, because a
+    /// destructive default in the one command you run on a directory you already
+    /// care about is how a tool loses trust permanently.
+    #[test]
+    fn init_never_overwrites_a_user_owned_manifest() {
+        let dir = existing_dir(
+            "init-manifest",
+            &[(
+                "qqq.toml",
+                "[package]\nname = \"mine\"\nversion = \"9.9.9\"\n\
+                            [capabilities.crypto]\nhash = [\"sha256\"]\n",
+            )],
+        );
+        let out = init(
+            &dir,
+            &InitOptions {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .expect("init must succeed");
+
+        assert!(
+            out.untouched.contains(&"qqq.toml".to_owned()),
+            "the existing manifest must be reported untouched: {out:?}"
+        );
+        let after = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+        assert!(after.contains("9.9.9"), "the user's version must survive");
+        assert!(
+            after.contains("[capabilities.crypto]"),
+            "the user's capability declaration must survive -- force does not override it"
+        );
+        // And the count reflects what is actually on disk, not what was generated.
+        assert_eq!(
+            out.capabilities_granted, 1,
+            "the report must describe the manifest that exists, not the one init would have written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name is read from an existing manifest, so `init` does not rename a
+    /// project it was asked to adopt.
+    #[test]
+    fn init_reads_the_name_from_an_existing_manifest() {
+        let dir = existing_dir(
+            "init-name",
+            &[(
+                "qqq.toml",
+                "[package]\nname = \"orders-api\"\nversion = \"0.1.0\"\n",
+            )],
+        );
+        let d = detect(&dir, None).expect("must detect");
+        assert_eq!(d.name, "orders-api");
+        assert_eq!(d.name_source, DetectionSource::ExistingManifest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest that does not parse must not be silently replaced with a
+    /// generated one — that would discard a file the user wrote, possibly
+    /// mid-edit.
+    #[test]
+    fn init_does_not_replace_an_unparseable_manifest() {
+        let dir = existing_dir("init-bad-manifest", &[("qqq.toml", "this is not toml [[[")]);
+        let out = init(&dir, &InitOptions::default()).expect("init must still succeed");
+        assert!(out.untouched.contains(&"qqq.toml".to_owned()));
+        let after = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+        assert_eq!(
+            after, "this is not toml [[[",
+            "the broken file must be left alone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- language detection ------------------------------------------------
+
+    #[test]
+    fn init_infers_rust_from_a_cargo_toml() {
+        let dir = existing_dir(
+            "detect-rust",
+            &[("Cargo.toml", "[package]\nname = \"a\"\n")],
+        );
+        let d = detect(&dir, None).expect("must detect");
+        assert_eq!(d.language, "rust");
+        assert_eq!(d.language_source, DetectionSource::InferredFromFiles);
+        assert!(d.evidence.iter().any(|e| e.contains("Cargo.toml")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_infers_each_language_from_its_marker() {
+        let cases = [
+            ("go.mod", "go"),
+            ("pyproject.toml", "python"),
+            ("requirements.txt", "python"),
+            ("CMakeLists.txt", "cpp"),
+            ("package.json", "typescript"),
+            ("tsconfig.json", "typescript"),
+        ];
+        for (marker, expected) in cases {
+            let dir = existing_dir(&format!("detect-{expected}"), &[(marker, "x")]);
+            let d = detect(&dir, None).expect("must detect");
+            // `Language::TypeScript` has the spelling `ts` in the manifest, so
+            // the assertion compares against the enum's own name rather than
+            // the marker's file name.
+            let want = Language::ALL
+                .into_iter()
+                .find(|l| l.as_str() == d.language)
+                .unwrap_or_else(|| panic!("`{}` is not a known language", d.language));
+            let expected_lang = match expected {
+                "typescript" => Language::TypeScript,
+                "python" => Language::Python,
+                "go" => Language::Go,
+                "cpp" => Language::Cpp,
+                _ => Language::Rust,
+            };
+            assert_eq!(want, expected_lang, "marker {marker} mapped wrongly");
+            assert_eq!(d.language_source, DetectionSource::InferredFromFiles);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An empty directory has no evidence, so the result must be reported as a
+    /// **default**, not as an inference. Claiming evidence we do not have is
+    /// how a user comes to distrust the detection.
+    #[test]
+    fn init_reports_an_unevidenced_language_as_a_default() {
+        let dir = temp_dir("detect-empty");
+        let d = detect(&dir, None).expect("must detect");
+        assert_eq!(d.language, "rust");
+        assert_eq!(
+            d.language_source,
+            DetectionSource::Default,
+            "with no build file present, the language is assumed, not inferred"
+        );
+        assert!(!d.language_source.is_evidence());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_language_overrides_detection() {
+        let dir = existing_dir(
+            "detect-explicit",
+            &[("Cargo.toml", "[package]\nname = \"a\"\n")],
+        );
+        let d = detect(&dir, Some(Language::Go)).expect("must detect");
+        assert_eq!(d.language, "go");
+        assert_eq!(d.language_source, DetectionSource::Explicit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rust wins over TypeScript when both are present, because a Rust project
+    /// with a JS tooling layer is common and the build is what matters. The
+    /// evidence is reported so the choice is checkable rather than mysterious.
+    #[test]
+    fn a_mixed_directory_resolves_deterministically_and_reports_evidence() {
+        let dir = existing_dir(
+            "detect-mixed",
+            &[
+                ("Cargo.toml", "[package]\nname = \"a\"\n"),
+                ("package.json", "{}"),
+            ],
+        );
+        let d = detect(&dir, None).expect("must detect");
+        assert_eq!(d.language, "rust");
+        assert!(
+            d.evidence.iter().any(|e| e.contains("package.json")),
+            "both markers must appear in the evidence: {:?}",
+            d.evidence
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- init output -------------------------------------------------------
+
+    /// `init` on a directory with real work in it must preserve that work and
+    /// say what it preserved.
+    #[test]
+    fn init_preserves_existing_source_and_reports_it() {
+        let dir = existing_dir(
+            "init-preserve",
+            &[
+                ("src/main.rs", "fn main() { println!(\"hi\"); }"),
+                ("README.md", "# my project\n\nHand-written.\n"),
+            ],
+        );
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+
+        let main = std::fs::read_to_string(dir.join("src/main.rs")).unwrap();
+        assert!(main.contains("println!"), "existing source must survive");
+        assert!(
+            out.untouched.contains(&"README.md".to_owned()),
+            "README is user-owned and must be left alone: {:?}",
+            out.untouched
+        );
+        let readme = std::fs::read_to_string(dir.join("README.md")).unwrap();
+        assert!(
+            readme.contains("Hand-written"),
+            "the user's README must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The created manifest must be valid and grant nothing, exactly as `new`'s
+    /// does — both commands generate from the same code, so this is a check
+    /// that the sharing actually happened.
+    #[test]
+    fn init_writes_a_valid_zero_capability_manifest() {
+        let dir = existing_dir(
+            "init-manifest-zero",
+            &[("Cargo.toml", "[package]\nname = \"a\"\n")],
+        );
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+        assert_eq!(out.capabilities_granted, 0);
+
+        let text = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+        let m = qqq_cap::manifest::Manifest::parse(&text).expect("generated manifest must parse");
+        assert_eq!(m.declared_capabilities().len(), 0);
+        assert_eq!(m.build.language, "rust");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `init` on a non-directory is a usage mistake with a clear remedy.
+    #[test]
+    fn init_refuses_a_path_that_is_not_a_directory() {
+        let parent = temp_dir("init-notdir");
+        let file = parent.join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let e = init(&file, &InitOptions::default()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::HostResourceExhausted);
+        assert!(e.remediation.as_deref().unwrap_or("").contains("new"));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    // -- two defects found by running `init` on a real project ---------------
+    //
+    // Both were invisible to the tests above, which used empty directories or
+    // directories containing only a marker file. Running the command on a
+    // directory with a *real* crate in it surfaced them.
+
+    /// **Defect one.** The generated manifest took its name from the directory,
+    /// but an existing project's crate name is almost never the directory name.
+    ///
+    /// Observed: `/tmp/qqq-init-test/` containing package `legacy-app` produced a
+    /// manifest declaring `name = "qqq-init-test"`. `build` then looked for an
+    /// artifact under a name that does not exist, and the project could not be
+    /// built at all.
+    #[test]
+    fn init_takes_the_name_from_cargo_when_the_directory_disagrees() {
+        let dir = existing_dir(
+            "init-crate-name",
+            &[(
+                "Cargo.toml",
+                "[package]\nname = \"legacy-app\"\nversion = \"2.3.1\"\n",
+            )],
+        );
+        // The directory is named after this test, not after the crate.
+        let d = detect(&dir, None).expect("must detect");
+        assert_eq!(
+            d.name, "legacy-app",
+            "the crate name must win over the directory name, or `build` looks \
+             for an artifact that does not exist"
+        );
+        assert_eq!(d.name_source, DetectionSource::ExistingManifest);
+        assert!(
+            d.evidence.iter().any(|e| e.contains("legacy-app")),
+            "the evidence must name the crate it read: {:?}",
+            d.evidence
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `[package]` table is the only place the name may be read from. A
+    /// `name` under `[dependencies]` is a dependency, not this crate.
+    #[test]
+    fn the_cargo_name_scan_reads_only_the_package_table() {
+        let dir = existing_dir(
+            "init-crate-table",
+            &[(
+                "Cargo.toml",
+                "[dependencies]\nname = \"wrong\"\n\n[package]\nname = \"right\"\n",
+            )],
+        );
+        assert_eq!(cargo_package_name(&dir).as_deref(), Some("right"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cargo_name_scan_handles_comments_and_quotes() {
+        let dir = existing_dir(
+            "init-crate-comment",
+            &[(
+                "Cargo.toml",
+                "[package]\nname = \"app\" # the crate name\nversion = \"1.0.0\"\n",
+            )],
+        );
+        assert_eq!(cargo_package_name(&dir).as_deref(), Some("app"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `Cargo.toml` with no `[package]` table yields nothing rather than a
+    /// guess, so the directory name is used instead.
+    #[test]
+    fn the_cargo_name_scan_returns_nothing_when_there_is_no_package_table() {
+        let dir = existing_dir("init-crate-none", &[("Cargo.toml", "[workspace]\n")]);
+        assert_eq!(cargo_package_name(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Defect two.** The scaffold writes `src/<crate>.rs` and points
+    /// `[lib].path` at it. In a crate that already exists, `Cargo.toml` is
+    /// user-owned and therefore not rewritten — so the generated source would be
+    /// an orphan nothing references and nothing compiles.
+    ///
+    /// Observed: `init` on a project with `src/lib.rs` created
+    /// `src/qqq_init_test.rs`, referenced by nothing.
+    #[test]
+    fn init_does_not_add_a_second_library_file_to_an_existing_crate() {
+        let dir = existing_dir(
+            "init-orphan",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"legacy-app\"\nversion = \"2.3.1\"\n",
+                ),
+                ("src/lib.rs", "pub fn important() {}"),
+            ],
+        );
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+
+        // The orphan must not exist...
+        let orphans: Vec<&String> = out
+            .files
+            .iter()
+            .map(|f| &f.path)
+            .filter(|p| p.starts_with("src/"))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "init must not write a source file into a crate that already has one: {orphans:?}"
+        );
+        // ...it must be reported as skipped rather than silently dropped...
+        assert!(
+            out.skipped.iter().any(|p| p.starts_with("src/")),
+            "the skip must be visible in the output: {out:?}"
+        );
+        // ...and the manifest must still be written, which is the point of init.
+        assert!(
+            dir.join("qqq.toml").is_file(),
+            "init must still write the manifest"
+        );
+
+        let still_there = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+        assert!(
+            still_there.contains("important"),
+            "the user's lib.rs must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The converse, and the positive control for the test above: a directory
+    /// with no source file *does* get the template source, so the skip is
+    /// conditional rather than unconditional.
+    #[test]
+    fn init_writes_source_into_a_directory_without_one() {
+        let dir = existing_dir(
+            "init-no-orphan",
+            &[(
+                "Cargo.toml",
+                "[package]\nname = \"fresh\"\nversion = \"0.1.0\"\n",
+            )],
+        );
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+        assert!(
+            out.files.iter().any(|f| f.path.starts_with("src/")),
+            "with no existing source, the template source must be written: {:?}",
+            out.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        assert!(out.skipped.is_empty(), "nothing should have been skipped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The end-to-end form of defect one: after `init`, the manifest's package
+    /// name must equal the crate's, so `qqqai build` can find the artifact.
+    #[test]
+    fn an_initialised_crate_has_a_matching_manifest_name() {
+        let dir = existing_dir(
+            "init-name-match",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"legacy-app\"\nversion = \"2.3.1\"\n",
+                ),
+                ("src/lib.rs", "pub fn important() {}"),
+            ],
+        );
+        init(&dir, &InitOptions::default()).expect("must init");
+
+        let manifest = qqq_cap::manifest::Manifest::parse(
+            &std::fs::read_to_string(dir.join("qqq.toml")).unwrap(),
+        )
+        .expect("generated manifest must parse");
+
+        assert_eq!(
+            manifest.package.name, "legacy-app",
+            "the manifest name must match the crate, or `build` reports that no \
+             artifact was produced after a successful compile"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- the decision order in `write_scaffold_files` -----------------------
+
+    /// The decide order is the safety argument, so it is pinned directly rather
+    /// than only through `init`'s observable behaviour. **Rule 1 must beat
+    /// rule 4**: `--force` does not override the user-owned protection.
+    #[test]
+    fn the_user_owned_rule_beats_force() {
+        let dir = existing_dir(
+            "init-order-force",
+            &[(
+                "qqq.toml",
+                "[package]\nname = \"kept\"\nversion = \"1.0.0\"\n",
+            )],
+        );
+        let scaffold = NewOptions {
+            name: "kept".to_owned(),
+            ..Default::default()
+        };
+        let out = write_scaffold_files(&dir, &scaffold, false, true).expect("must write");
+
+        assert!(
+            out.untouched.contains(&"qqq.toml".to_owned()),
+            "a user-owned file must be untouched even with --force: {out:?}"
+        );
+        assert!(
+            !out.overwritten.contains(&"qqq.toml".to_owned()),
+            "and it must not be recorded as overwritten"
+        );
+        let text = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+        assert!(text.contains("1.0.0"), "the file must be unchanged on disk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Rule 2 must beat rule 3**: a skipped source is reported as skipped, not
+    /// as untouched. Reporting it as untouched would tell a user a file of theirs
+    /// was preserved when nothing was ever there.
+    #[test]
+    fn a_skipped_source_is_not_reported_as_untouched() {
+        let dir = existing_dir(
+            "init-order-skip",
+            &[(
+                "Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            )],
+        );
+        let scaffold = NewOptions {
+            name: "app".to_owned(),
+            ..Default::default()
+        };
+        let out = write_scaffold_files(&dir, &scaffold, true, false).expect("must write");
+
+        assert!(out.skipped.iter().any(|p| p.starts_with("src/")));
+        assert!(
+            !out.untouched.iter().any(|p| p.starts_with("src/")),
+            "a file that never existed cannot be reported as preserved: {out:?}"
+        );
+        assert!(!out.written.iter().any(|f| f.path.starts_with("src/")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Rule 4, the positive control for the test above.** `--force` does
+    /// replace a plain generated file, so the flag is not inert. Without this,
+    /// the protection test could pass for a `--force` that does nothing at all.
+    #[test]
+    fn force_does_replace_a_plain_generated_file() {
+        let dir = existing_dir(
+            "init-order-overwrite",
+            &[(".gitignore", "# something else entirely\n")],
+        );
+        let scaffold = NewOptions {
+            name: "app".to_owned(),
+            ..Default::default()
+        };
+        let out = write_scaffold_files(&dir, &scaffold, false, true).expect("must write");
+
+        assert!(
+            out.overwritten.contains(&".gitignore".to_owned()),
+            "--force must replace a non-user-owned file: {out:?}"
+        );
+        let text = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(
+            text.contains("/target"),
+            "the generated content must be there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unevidenced language must produce a note, so the assumption is
+    /// visible in the output rather than buried in the generated file.
+    #[test]
+    fn init_notes_an_assumed_language() {
+        let dir = temp_dir("init-note");
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+        assert!(
+            out.notes.iter().any(|n| n.contains("--lang")),
+            "an assumed language must be flagged: {:?}",
+            out.notes
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_summary_reports_what_it_preserved() {
+        let dir = existing_dir(
+            "init-summary",
+            &[
+                (
+                    "qqq.toml",
+                    "[package]\nname = \"kept\"\nversion = \"1.0.0\"\n",
+                ),
+                ("Cargo.toml", "[package]\nname = \"kept\"\n"),
+            ],
+        );
+        let out = init(&dir, &InitOptions::default()).expect("must init");
+        let s = out.summary();
+        assert!(s.contains("capabilities granted"), "got: {s}");
+        assert!(
+            s.contains("preserved"),
+            "the summary must mention preservation: {s}"
+        );
+
+        let j = out.to_json();
+        assert_eq!(j["capabilities_granted"], 0);
+        assert!(j["detection"]["name_source"].is_string());
+        assert!(j["detection"]["language_source"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Detection sources must be a closed, stable set — an agent branches on
+    /// them, so a stringly-typed answer would be unusable.
+    #[test]
+    fn detection_sources_are_stable_names() {
+        assert_eq!(
+            DetectionSource::ExistingManifest.as_str(),
+            "existing-manifest"
+        );
+        assert_eq!(
+            DetectionSource::InferredFromFiles.as_str(),
+            "inferred-from-files"
+        );
+        assert_eq!(DetectionSource::Default.as_str(), "default");
+        assert_eq!(DetectionSource::Explicit.as_str(), "explicit");
+        assert!(DetectionSource::Explicit.is_evidence());
+        assert!(!DetectionSource::Default.is_evidence());
+    }
+
+    /// Every protected name must be a file the scaffold actually writes, or the
+    /// protection guards a door that does not exist while the real one stands
+    /// open.
+    ///
+    /// This test caught exactly that: `package.json` was listed as protected but
+    /// is never generated, so the entry protected nothing. The fix split the
+    /// protection list from the *reporting* list rather than deleting the entry,
+    /// because `package.json` is still worth acknowledging in the output.
+    #[test]
+    fn every_user_owned_name_is_a_file_the_scaffold_writes() {
+        let generated: Vec<String> = files_for(&opts("app"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for name in USER_OWNED {
+            assert!(
+                generated.iter().any(|g| g == name),
+                "`{name}` is protected in USER_OWNED but the scaffold never writes it, \
+                 so the protection is inert"
+            );
+        }
+    }
+
+    /// The reporting list must be a superset of the protection list, or `init`
+    /// could protect a file without mentioning it — silently leaving the user
+    /// unaware that a file of theirs survived.
+    #[test]
+    fn the_reporting_list_covers_the_protection_list() {
+        for name in USER_OWNED {
+            assert!(
+                PRESERVED_INTERESTING.contains(name),
+                "`{name}` is protected but would not be reported as preserved"
+            );
+        }
+        assert!(
+            PRESERVED_INTERESTING.len() > USER_OWNED.len(),
+            "the reporting list exists to name files beyond the protected set; \
+             if they are identical, one of the two lists is redundant"
+        );
+    }
+
+    /// And a name in the reporting list that the scaffold does write must also
+    /// be protected — otherwise `init` would overwrite a file it just told the
+    /// user it was preserving.
+    #[test]
+    fn every_generated_file_that_is_reported_is_also_protected() {
+        let generated: Vec<String> = files_for(&opts("app"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for name in PRESERVED_INTERESTING {
+            if generated.iter().any(|g| g == name) {
+                assert!(
+                    USER_OWNED.contains(name),
+                    "`{name}` is both generated and reported as preserved, so it must \
+                     also be protected — otherwise the report is a lie"
+                );
+            }
+        }
+    }
+
+    /// **A fresh `new` project must survive a subsequent `init` untouched.** This
+    /// is the end-to-end version of the safety property: run the two commands in
+    /// sequence, as a user might, and nothing the first wrote may change.
+    #[test]
+    fn init_after_new_changes_nothing() {
+        let parent = temp_dir("new-then-init");
+        create(
+            &NewOptions {
+                name: "app".to_owned(),
+                no_git: true,
+                ..Default::default()
+            },
+            &parent,
+        )
+        .expect("new must create");
+        let dir = parent.join("app");
+
+        let before = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+        let out = init(&dir, &InitOptions::default()).expect("init must succeed");
+        let after = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
+
+        assert_eq!(
+            before, after,
+            "init must not modify a manifest `new` just wrote"
+        );
+        assert!(
+            out.files.is_empty() || out.untouched.contains(&"qqq.toml".to_owned()),
+            "a fresh project must be fully preserved: written={:?} untouched={:?}",
+            out.files.iter().map(|f| &f.path).collect::<Vec<_>>(),
+            out.untouched
+        );
         let _ = std::fs::remove_dir_all(&parent);
     }
 }

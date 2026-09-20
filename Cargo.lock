@@ -9,6 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59317f77929f0e679d39364702289274de2f0f0b22cbf50b2b8cff2169a0b27a"
 dependencies = [
  "gimli",
+ "rustc-demangle",
 ]
 
 [[package]]
@@ -902,6 +903,13 @@ dependencies = [
 [[package]]
 name = "qqq-debug"
 version = "0.0.0"
+dependencies = [
+ "addr2line",
+ "gimli",
+ "qqq-core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "qqq-host"

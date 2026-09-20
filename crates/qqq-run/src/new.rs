@@ -518,6 +518,27 @@ path = "src/{crate_name}.rs"
 [profile.release]
 opt-level = "s"
 lto       = true
+
+# Debug info in the release artifact.
+#
+# Without this, a trap in a release build reports a **Wasm bytecode offset** and
+# no source line, and the developer's first debugging experience is reading
+# `offset 0x1a3`.
+#
+# `debug = true` is necessary and **not sufficient**: measured on this scaffold,
+# the artifact's DWARF names the Rust standard library and not `src/app.rs`,
+# because `lto = true` eliminates a crate whose symbols nothing references. The
+# template is a pure library with no exported entry point, so there is nothing
+# for the linker to keep.
+#
+# Closing that is the guest ABI export — the `qqq:http/incoming-handler`
+# implementation a real project needs anyway — and it is tracked separately.
+# Until then this setting is still right: it costs artifact size and buys source
+# lines for every dependency, which is where a stack overflow most often is.
+#
+# The cost is artifact size: a 14 KB component becomes roughly 265 KB. A project
+# that has measured its deploy sizes can set this to `false`.
+debug     = true
 "#,
                 name = opts.name
             ),

@@ -414,8 +414,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-008** Implement the trap taxonomy: `QQQ-3001` memory, `QQQ-3002` fuel, `QQQ-3003` epoch.
   → Done: `qqq-host::trap` — QQQ-3001/3002/3003 plus the guest-bug codes.
   → §6.1 `qqq-host` — the execution engine
-- [x] **HOST-009** Implement structured trap reporting with guest backtrace and DWARF source mapping when available.
-  → Done: `Trap` carries the Wasmtime frames and a human message.
+- [ ] **HOST-009** Implement structured trap reporting with guest backtrace and DWARF source mapping when available.
+  → Partial: `Trap` carries a human message and the frame types, and `qqq-debug` now **extracts** a real DWARF source map from a built component (24 unit tests plus 4 end-to-end tests that compile a project and map real offsets). What is **not** done is the join: `Instance::run` builds a `Trap` from a formatted error string, so a real trap still produces an **empty backtrace** — `with_backtrace` is called only from tests. This corrects a tick that claimed DWARF mapping which did not exist.
+  → **Remaining:** pass Wasmtime's `WasmBacktrace` into `trap_from` and resolve each frame through `qqq_debug::SourceMap`; then have `qqqai build` extract the map beside the artifact so `run` need not re-read DWARF.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-010** Implement instance discarding on trap — trapped instances are never returned to the pool.
   → Done: `Instance::run` consumes `self`, so a trapped instance cannot be reused; `poison()` is the second mechanism.

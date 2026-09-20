@@ -4037,6 +4037,103 @@ not part of the "is the objective met?" answer.
 
 ---
 
+### §O-045 — `qqq-debug` built, and a tick that claimed DWARF mapping which did not exist
+
+`qqq-debug` is implemented: it extracts a real DWARF source map from a built
+component. Building it exposed a tick that was **wrong**, and a scaffold defect
+that made the feature useless for user code.
+
+---
+
+#### §O-045a — `HOST-009` was ticked for DWARF mapping that did not exist
+
+The item read *"structured trap reporting with guest backtrace and DWARF source
+mapping when available"* and was ticked with the justification *"`Trap` carries
+the Wasmtime frames and a human message"*. That justification does not mention
+DWARF, and it could not: nothing in the workspace resolved a single source line.
+
+Measured:
+
+| Claim | Reality |
+|---|---|
+| `WasmFrame` has `file` and `line` fields | true — and **nothing ever populated them outside tests** |
+| `Trap::with_backtrace` exists | true — and its only callers were in `trap.rs`'s own test module |
+| `Instance::run` reports a backtrace | false — `trap_from(&raw)` takes a **formatted string**, so the `WasmBacktrace` is discarded before anything could read it |
+
+A real trap therefore produced an empty `backtrace` vector, on a tick that said
+the feature was done. The item is now `Partial` with the remaining work named.
+
+**The pattern, in its third form this session.** `§O-038b` was a wrong *answer*,
+`§O-043a` a wrong *instruction*, and this is a **field that exists and is never
+filled** — the same defect with the evidence sitting in a struct definition
+rather than in output. In all three the code compiles, the tests pass, and the
+gap is exactly where the type says there is none.
+
+---
+
+#### §O-045b — The DWARF was one level down, in the nested core module
+
+The first extraction reported `the artifact carries no DWARF sections` for an
+artifact that `wasm-tools objdump` showed to be 265 KB of it.
+
+The cause: `qqqai build` emits a **component** (layer 1), which wraps a **core
+module** (layer 0) in section id `1`. The DWARF lives in the core module's own
+section table. My parser walked the outer table, found a module wrapper and no
+custom sections — **correct about what it read, reading the wrong table**.
+
+That is a distinct failure mode from the ones above, and worth separating: not a
+wrong answer, not a missing field, but a **right answer about the wrong
+artifact**. The fix recurses into nested modules, bounded by `MAX_NESTING`
+because the input is untrusted.
+
+The regression test builds the nesting synthetically, since the structure — not
+the bytes — is what broke it.
+
+---
+
+#### §O-045c — The scaffold's debug info existed and covered only the standard library
+
+With extraction working, the map named `alloc.rs`, `cmp.rs`, `dlmalloc.c`,
+`metadata.rs` — real files, none of them mine. `src/lib.rs` was absent.
+
+The cause is a **scaffold defect**, not a mapper one: the template is a pure
+library with **no exported symbol**, and `lto = true` with nothing referencing a
+crate eliminates it and its debug info together. Verified by adding one
+`#[no_mangle] pub extern "C"` function to a scaffolded project: `app.rs` appeared
+in the DWARF immediately.
+
+Two consequences recorded rather than one:
+
+1. **`debug = true` is now in the generated `Cargo.toml`.** Without it there is
+   no DWARF at all, and a release-mode trap reports an offset.
+2. **The comment beside it says `debug = true` is necessary and not sufficient**,
+   because that is what was measured. Claiming the setting fixes source lines
+   would be the `§O-043a` mistake again — a plausible instruction that does not
+   achieve what it says.
+
+The remaining fix is the **guest ABI export** — the `qqq:http/incoming-handler`
+implementation a real project needs anyway — which is a larger change than this
+round and is tracked separately.
+
+---
+
+#### §O-045d — Three test bugs found by asserting against real output
+
+Each of these would have looked like a product defect:
+
+| Assertion | Reality |
+|---|---|
+| `map` contains `src/lib.rs` | the toolchain records bare **`lib.rs`**; the directory is resolved separately |
+| the failure message's first ten files | the fixture **was** in the map, at position twelve — the assertion was reading its own truncation |
+| `parse_custom_sections` returns `Option` | after the nesting fix it is infallible, and clippy was right |
+
+The second is the instructive one: the diagnostic was informative and the
+assertion consumed the diagnostic's sample instead of the data. A truncated
+`Vec` built for a message is not the thing to assert on, and the two were one
+variable apart.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4397,5 +4494,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 | 2026-09-19 | **The crate topology had two violations of its own stated invariant** — "no crate may depend on a crate above it in this list". The table listed `qqq-host` above `qqq-abi` and `qqq-run` above `qqq-pkg`; both are impossible, because the linker is *built from* the interface registry and the CLI resolves dependencies *via* the package manager. **The document was wrong, not the code** — an invariant stated in bold, false of the table that stated it, so a reader who checked would have concluded the architecture was broken (`§O-044`). `tools/check_topology.py` now enforces it from `cargo metadata`, and asserts `qqq-core` has no I/O **with a control proving the rule is wired** (`§O-044a`). Both rules were fault-injected before being wired into CI (`§O-044b`), and both joined the objective audit, which now reports **32** requirements. `check [12]` caught the section-heading deletion a third time. | Architect |
 
 | 2026-09-19 | **The audit reported a missing tool as a validation failure**, turning CI red on the commit that added the topology check. `check_wit.py` needs `wasm-tools`, which the document-checking job does not install; the audit treated its absence as a failed requirement. The two cases are now distinguished — "the tool ran and the interfaces are broken" is a defect, "the tool is not here" is not — because reporting the second as PASS would hide the first and reporting it as FAIL makes the audit depend on what happens to be installed. `check_wit.py` itself is unchanged and correct: absence is failure *for its own job*, and the audit is a different caller with a different question. | Architect |
+
+| 2026-09-19 | **`qqq-debug` implemented** — real DWARF source-map extraction from a built component, with 24 unit tests and 4 end-to-end tests that compile a project and map real offsets. Building it exposed a **wrong tick**: `HOST-009` claimed DWARF mapping while `WasmFrame.file`/`line` were never populated outside tests and `Instance::run` discarded Wasmtime's backtrace into a formatted string; the item is now `Partial` with the join named (`§O-045a`). The DWARF was **one level down**, inside the core module a component wraps, so the first parser reported "no DWARF" for a 265 KB artifact full of it — a right answer about the wrong table (`§O-045b`). And the **scaffold's own debug info covered only the standard library**, because `lto = true` with no exported symbol eliminates the crate; `debug = true` added, with a comment saying it is necessary and *not* sufficient (`§O-045c`). `check [12]` caught the heading deletion a fourth time. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

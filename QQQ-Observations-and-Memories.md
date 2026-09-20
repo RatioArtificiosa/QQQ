@@ -5000,6 +5000,126 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-064 — Four engine modules, and the pattern of defects in the *test* rather than the code
+
+**What was built.** Four `qqq-host` modules across `HOST-021`, `HOST-022` and
+`HOST-023`: `admission.rs`, `preload.rs`, `handles.rs`, and `build_engine` in
+`config.rs`. The crate goes from 161 tests to 205.
+
+#### §O-064a — `build_pooling` documented a refusal that nothing implemented
+
+`build_pooling`'s doc had said since it was written:
+
+> So the pool is sized to the manifest's declared ceiling, and **the host refuses
+> to start if that reservation is implausible**.
+
+Nothing implemented that refusal. The function builds a Wasmtime config value and
+cannot know the host's memory budget, so it never could — and the claim sat in a
+doc comment where no test could reach it.
+
+This is a distinct failure from the ones previously recorded. It is not a false
+tick in the checklist (`§O-051`), not a check that cannot fail (`§M-006`), and not
+a comment stating a dependency's behaviour wrongly (`§O-053b`). It is **code
+documented as doing something it structurally cannot do**, and the doc is what a
+reader trusts when deciding whether they need to handle the case.
+
+`config::build_engine` closes it: admit, then apply pooling, then construct. The
+two halves could not be joined before because neither had both inputs.
+
+#### §O-064b — Admission is a pure function, and that was the design constraint
+
+`admit(limits, capacity)` takes the host's capacity as a **value** rather than
+measuring it. The reason is testability with a specific failure in mind: a test
+that asserted "this fits" against the real host would pass or fail depending on
+the CI runner — the environment-dependent-check class `§O-058f` records and this
+project has now been bitten by three times.
+
+`HostCapacity::default()` is likewise **fixed** rather than derived. A default
+that varied by machine would let a manifest pass admission on a laptop and fail in
+a container, which is the exact bug the module exists to move *earlier* rather
+than later.
+
+Two arithmetic decisions, both about the unsafe direction:
+
+* The reservation is `saturating_mul`, never `*`. A large per-instance size times
+  a large count overflows `u64`, and **a wrapped product is a small number that
+  passes every capacity check**.
+* The resident baseline is subtracted and **saturates at zero**. A wrapped
+  `available_bytes` would report petabytes and admit everything.
+
+And one ordering decision: **degenerate limits are checked before capacity.** A
+fuel budget of zero is not a tight limit, it is a guest that traps before its
+first instruction — reporting that as a capacity problem sends an operator to
+resize a machine that was never too small. Pinned by a test that uses a hopelessly
+over-committed host and asserts the *fuel* is what gets reported.
+
+#### §O-064c — The test's premise was wrong, and that is worth more than the test
+
+`an_overflowing_reservation_is_refused_rather_than_wrapped` used
+`memory_budget_bytes: u64::MAX` and asserted a refusal. That budget genuinely
+*does* fit a saturated reservation, so no refusal happened and the test failed
+against correct code.
+
+The saturation is what makes the arithmetic safe — it can never wrap *downward* —
+and a test of a safety property has to use a budget where the difference is
+observable. The corrected test uses a realistic 4 GiB budget **and asserts the
+saturated value directly**, so the arithmetic is pinned rather than inferred from
+a refusal.
+
+Recorded in the test's own doc comment, because the next person writing an
+overflow test will reach for `u64::MAX` for the same reason I did.
+
+#### §O-064d — Three defects in `handles.rs`, and every one was in the test
+
+| Defect | What it actually was |
+|---|---|
+| `the_table_never_exceeds_its_limit` panicked in its own assertion helper | The test called `insert` **twice** per iteration — once for `is_ok()` and once to keep the handle — so the second call failed whenever the table was full. **A test that calls a fallible operation twice is testing the second call** |
+| `get_mut` would not compile | It built the error while holding a mutable borrow of `slots`. Liveness is now established *before* the borrow |
+| `invalid()` had a dead `&self` receiver | Clippy's `unused_self`. Left over from a design where it also bumped a counter; once the counter moved to the `&mut self` paths, the receiver was dead weight |
+
+The first is the instructive one. The assertion helper
+(`unwrap_or_else(|| unreachable!("just inserted"))`) was **correct about the
+invariant it named** — the insert *had* just succeeded — but the invariant was
+about a different call than the one that failed. That is the `§O-046b` shape
+again: an assertion that cannot fail for the reason it was written.
+
+#### §O-064e — A signature assumed rather than read, twice
+
+`cache_key_for` took three attempts, all about the same line:
+
+1. `&target_triple()` — clippy: the borrow is immediately dereferenced.
+2. `target_triple().as_str()` — does not compile; `as_str` on `String` is unstable.
+3. Bound to a local — clippy: still an unnecessary borrow.
+
+`target_triple()` returns **`&'static str`**. Reading the signature once would
+have produced the correct single line immediately. The pattern — guessing a
+dependency's API and iterating on compiler errors — is the same one `§O-056a`
+records for Wasmtime's epoch API, and it costs more than the reading would have.
+
+Two members of the same family showed up in `preload.rs`: `Engine` has no
+`is_pooling_allocator` in Wasmtime 48, so two assertions were replaced — not
+weakened — by making the engine do **real work** (`precompile_component`), which
+is strictly stronger than reading a flag back, because a flag can be set without
+the engine honouring it.
+
+#### §O-064f — Failure policy is a design decision, and it belongs in the module
+
+`preload` returns `Err` only when the **whole set** cannot be admitted. A
+component that fails to compile is reported in the `PreloadReport` instead.
+
+The reasoning: a preloader that returned `Err` on the first bad artifact would
+leave an operator with *nothing* preloaded and one error, which is strictly worse
+than ninety-nine preloaded and one error. The decision about what to do with a
+failure belongs to the deploy tool, which knows whether the failed component
+mattered.
+
+`PreloadReport::failures()` is **derived rather than stored** for the same reason
+`§O-063a` records about counters: a stored count is a second source of truth for
+a fact the iterator already knows, and the two drifting is how `is_complete()`
+starts lying.
+
+---
+
 ### §O-063 — Two more contract checks, and the one where the first implementation certified the bug
 
 **What was built.** `tools/check_no_ambient.py` (`CON-010`, `CON-018`) and

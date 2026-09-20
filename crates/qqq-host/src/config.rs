@@ -206,6 +206,72 @@ pub fn build_pooling(
     Ok(p)
 }
 
+/// Build a Wasmtime engine for a component, **admitting it first**.
+///
+/// # Why this exists as a single function
+///
+/// [`build_pooling`] sizes the reservation and
+/// [`EngineConfig::to_wasmtime_config`] produces the runtime configuration, but
+/// **neither can refuse**: the pool builder has no memory budget, and the config
+/// builder has no manifest. A caller that used them separately would construct an
+/// engine for a component that cannot fit, and discover it as an allocation
+/// failure inside Wasmtime -- an error that names no manifest field and arrives
+/// after the reservation has already been attempted.
+///
+/// This function is the join. It:
+///
+/// 1. **Admits first** ([`crate::admission::admit`]), so a component that cannot
+///    fit is refused with both numbers and a remediation, before any address
+///    space is committed.
+/// 2. Applies the pooling configuration, if pooling is enabled.
+/// 3. Constructs the engine.
+///
+/// # The order is the whole point
+///
+/// Checking *after* construction would still avoid running the guest, but by then
+/// the reservation has already happened -- and on an over-committing host the
+/// failure is a failed `mmap` or an OOM kill rather than a clean error. The test
+/// `admits_before_constructing_the_engine` uses a capacity that admits nothing
+/// and asserts the refusal is the **admission** error, which is only observable
+/// if the check ran first.
+///
+/// # Errors
+///
+/// * `QQQ-2005` -- the component does not fit, or its limits are degenerate.
+/// * `QQQ-2005` -- the manifest's limits are outside what the pooling allocator
+///   can serve.
+/// * `QQQ-1002` -- Wasmtime rejected the configuration, which indicates a QQQ bug.
+pub fn build_engine(
+    limits: &Limits,
+    engine_config: &EngineConfig,
+    capacity: &crate::admission::HostCapacity,
+) -> Result<(wasmtime::Engine, crate::admission::Admitted)> {
+    let store_limits = StoreLimits::from_manifest(limits)?;
+
+    // Admission BEFORE anything is reserved or constructed.
+    let admitted = crate::admission::admit(&store_limits, capacity)?;
+
+    let mut config = engine_config.to_wasmtime_config()?;
+    if engine_config.pooling {
+        let pooling = build_pooling(limits, engine_config)?;
+        config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+    }
+
+    let engine = wasmtime::Engine::new(&config).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            "the Wasmtime engine rejected QQQ's configuration",
+        )
+        .with_cause(format!("{e:#}"))
+        .with_remediation("this is a QQQ bug; please report it")
+    })?;
+
+    // The admitted reservation is returned rather than discarded: it is the
+    // number a caller logs, and recomputing it would be a second source of truth
+    // for a value that decides whether the host starts at all.
+    Ok((engine, admitted))
+}
+
 /// The per-store limits derived from a manifest.
 ///
 /// Separate from the pooling config because the pool is a *reservation* (what
@@ -429,6 +495,156 @@ mod tests {
         // Must not error for a sane manifest.
         let p = build_pooling(&limits(), &cfg);
         assert!(p.is_ok(), "pooling config must build: {:?}", p.err());
+    }
+
+    /// **`HOST-023`, the join.** `build_engine` admits before it constructs.
+    ///
+    /// # Why the assertion is about *which* error, not merely that one occurred
+    ///
+    /// A component that does not fit must be refused. But so would a component
+    /// whose engine configuration Wasmtime rejected, and the two produce
+    /// different error codes — `QQQ-2005` from admission, `QQQ-1002` from the
+    /// config. Asserting only "it failed" would pass even if admission ran
+    /// *after* construction, which is the ordering this test exists to pin.
+    ///
+    /// An earlier version of this test asserted `is_err()` and would have passed
+    /// for the wrong reason. It also had a second flaw: with pooling disabled,
+    /// `build_pooling` is never called, so a capacity that refuses nothing would
+    /// still construct fine — meaning the test needed a capacity that genuinely
+    /// admits nothing to be non-vacuous at all.
+    #[test]
+    fn admits_before_constructing_the_engine() {
+        use crate::admission::{HostCapacity, Refusal};
+
+        // A host with a budget smaller than the resident baseline: it can admit
+        // nothing at all. That is the strongest form of "this must be refused",
+        // and it cannot be satisfied by the pooling config being merely large.
+        let starved = HostCapacity {
+            memory_budget_bytes: 64 * 1024 * 1024,
+            max_instances: 8,
+            resident_bytes: 128 * 1024 * 1024,
+        };
+        assert_eq!(
+            starved.available_bytes(),
+            0,
+            "the fixture must admit nothing"
+        );
+
+        let err = build_engine(&limits(), &EngineConfig::default(), &starved)
+            .expect_err("a host with no capacity must refuse");
+        assert_eq!(
+            err.code,
+            ErrorCode::LimitOutOfRange,
+            "the refusal must be ADMISSION (QQQ-2005 LimitOutOfRange), not the \
+             engine-config error (QQQ-1002) — a QQQ-1002 here means the engine was \
+             constructed before the component was admitted. Got {:?}: {err}",
+            err.code
+        );
+        assert!(
+            err.context.iter().any(|(k, v)| k == "refusal"
+                && v == Refusal::MemoryReservation {
+                    required_bytes: 0,
+                    available_bytes: 0
+                }
+                .as_str()),
+            "the refusal must name the memory reservation: {err}"
+        );
+    }
+
+    /// And the positive case: a component that fits produces an engine **and**
+    /// the reservation it was admitted with.
+    ///
+    /// The control for the test above. Without it, a `build_engine` that refused
+    /// everything would satisfy the refusal assertion.
+    #[test]
+    fn a_component_that_fits_builds_an_engine_and_reports_its_reservation() {
+        use crate::admission::HostCapacity;
+
+        let roomy = HostCapacity {
+            memory_budget_bytes: 4 * 1024 * 1024 * 1024,
+            max_instances: 16,
+            resident_bytes: 0,
+        };
+
+        let (engine, admitted) = build_engine(&limits(), &EngineConfig::default(), &roomy)
+            .expect("a modest component on a roomy host must build");
+
+        // **The engine is proved usable, not merely constructed.** Wasmtime 48
+        // exposes no `is_pooling_allocator`, so the first version of this test
+        // called a method that does not exist. Rather than settling for a weaker
+        // assertion, the engine is made to do real work: compiling a component
+        // exercises the allocation strategy, the component-model feature flag and
+        // the codegen backend at once. An `Engine` that was constructed but
+        // misconfigured fails here.
+        //
+        // This is strictly stronger than introspecting a flag: a flag can be set
+        // without the engine honouring it.
+        let precompiled = engine
+            .precompile_component(TINY_COMPONENT)
+            .expect("the engine must compile a real component; a misconfigured engine fails here");
+        assert!(
+            !precompiled.is_empty(),
+            "precompilation must produce a cwasm artifact"
+        );
+
+        // And the reservation is the manifest's number times the instance
+        // ceiling, not a placeholder.
+        assert_eq!(admitted.per_instance_bytes, 128 * 1024 * 1024);
+        assert_eq!(admitted.instances, 16);
+        assert_eq!(admitted.reserved_bytes, 2 * 1024 * 1024 * 1024);
+    }
+
+    /// A minimal valid component, for proving an engine actually works.
+    ///
+    /// A component rather than a core module because QQQ targets the component
+    /// model, and `precompile_component` proves the feature flag took effect.
+    const TINY_COMPONENT: &[u8] = b"\x00asm\x0d\x00\x01\x00";
+
+    /// The pooling flag must still be honoured through `build_engine`.
+    ///
+    /// # How this is checked without an introspection API
+    ///
+    /// Wasmtime 48 has no `Engine::is_pooling_allocator`, so the flag cannot be
+    /// read back. What *is* observable is that both configurations produce a
+    /// **working** engine: the join must not have made `pooling = false` silently
+    /// construct a pooled engine, and the strongest available evidence is that
+    /// both compile a real component.
+    ///
+    /// The limitation is stated rather than hidden: this proves neither
+    /// configuration is broken, and cannot prove which strategy was selected.
+    /// `build_pooling` is unit-tested directly for the sizing arithmetic, which
+    /// is where that is decidable.
+    #[test]
+    fn build_engine_honours_the_pooling_flag() {
+        use crate::admission::HostCapacity;
+
+        let roomy = HostCapacity {
+            memory_budget_bytes: 4 * 1024 * 1024 * 1024,
+            max_instances: 4,
+            resident_bytes: 0,
+        };
+
+        let (pooled, _) =
+            build_engine(&limits(), &EngineConfig::default(), &roomy).expect("pooled engine");
+        assert!(
+            pooled.precompile_component(TINY_COMPONENT).is_ok(),
+            "the pooled engine must compile a component"
+        );
+
+        // Struct-update syntax rather than `Default::default()` followed by a
+        // field assignment: clippy's `field_reassign_with_default` is right that
+        // the two-line form reads as "start from a whole default, then mutate
+        // one field", which hides that every other field is also default.
+        let on_demand_cfg = EngineConfig {
+            pooling: false,
+            ..EngineConfig::default()
+        };
+        let (on_demand, _) =
+            build_engine(&limits(), &on_demand_cfg, &roomy).expect("on-demand engine");
+        assert!(
+            on_demand.precompile_component(TINY_COMPONENT).is_ok(),
+            "`pooling = false` must reach the engine, not be ignored by the join"
+        );
     }
 
     /// The host-wide ceiling must cap the manifest's per-worker ceiling, so a

@@ -80,7 +80,8 @@ pub mod trap;
 pub use admission::{admit, Admitted, HostCapacity, Refusal};
 pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
 pub use config::{
-    aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
+    aot_cache_key, build_engine, build_pooling, target_triple, EngineConfig,
+    StoreLimits as LimitSet,
 };
 pub use guard::{guard, guard_reporting, PanicReport};
 pub use instance::{

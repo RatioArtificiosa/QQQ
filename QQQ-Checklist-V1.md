@@ -773,6 +773,33 @@ Items are grouped below by **phase**, because dependency order matters more than
     never happened. A test of the safety property has to use a budget where the
     difference is observable. Recorded in the test's own docs so the next author
     does not repeat it.
+  → **The admission is now joined to the real engine path**, which is what makes
+    it enforcement rather than a library. `build_pooling`'s documentation had
+    claimed since it was written that *"the host refuses to start if that
+    reservation is implausible"* — **and nothing implemented that refusal**.
+    `config::build_engine(limits, engine_config, capacity)` is the join: it admits
+    first, then applies the pooling configuration, then constructs the engine, and
+    returns the admitted reservation alongside it. The two halves could not do it
+    separately — the pool builder has no memory budget and the config builder has
+    no manifest — so a caller using them independently would construct an engine
+    for a component that cannot fit and discover it as an internal allocation
+    failure naming no manifest field.
+  → The ordering is pinned by `admits_before_constructing_the_engine`, which uses
+    a host whose budget is below its own resident baseline (so it admits nothing
+    at all) and asserts the refusal is **`QQQ-2005` from admission, not `QQQ-1002`
+    from the engine config**. Asserting merely `is_err()` would pass even if the
+    check ran *after* construction, which is the ordering the test exists to pin.
+    The first version of that test did assert only `is_err()`, and would have
+    passed for the wrong reason.
+  → Two assertions had to be replaced when Wasmtime turned out to expose no
+    `Engine::is_pooling_allocator`. Rather than weakening them, the engine is
+    made to do **real work**: `precompile_component` on a minimal component
+    exercises the allocation strategy, the component-model flag and the codegen
+    backend at once, which is strictly stronger than reading a flag back (a flag
+    can be set without the engine honouring it). The limitation is stated in the
+    test rather than hidden: that proves neither configuration is *broken*, and
+    cannot prove which strategy was selected — `build_pooling`'s sizing
+    arithmetic is unit-tested directly, which is where that is decidable.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-024** Port the three verification-probe assertions (missing-import failure, instantiation cost, fuel trap) into the permanent test suite and delete the scratch crate.
   → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.

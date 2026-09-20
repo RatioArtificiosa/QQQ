@@ -3701,6 +3701,106 @@ being quietly wrong rather than loudly broken.
 
 ---
 
+### §O-042 — `qqqai test`, and a determinism check that cried wolf
+
+`CLI-012` is implemented in `qqq-run::test_runner`. Discovery, filtering,
+`--dry-run` and `--json` work, and `--trials N` — the first of §6.7's
+architecture-enabled features — is implemented and honest about its limits.
+
+---
+
+#### §O-042a — Attribution took three attempts, and each wrong one was confidently wrong
+
+A test's source file has to be right: a report that says a failure is in
+`src/the_crate_builds.rs` sends the reader to a path that does not exist.
+
+| Attempt | Method | What went wrong |
+|---|---|---|
+| 1 | first `::` segment of the test name | `the_crate_builds` has no `::`; a test at the crate root got a fabricated path |
+| 2 | join `Running` headers to cargo's JSON | correct mapping, but cargo **buffers**: every header precedes every test, so the flat list still had to be split across binaries by count |
+| 3 | **run each test binary directly** | nothing — attribution is exact by construction |
+
+Attempt 2 was the interesting failure, because it *looked* solved. The join was
+built from real cargo JSON, the test passed, and the output showed source paths
+for the first time. It was still wrong: `tests::the_root_route_greets`, a unit
+test in `src/app.rs`, was attributed to `tests/smoke.rs`, because the even split
+across two binaries guessed.
+
+The lesson is the one this project keeps meeting in new clothes: **a plausible
+answer that is right most of the time is more dangerous than an obviously wrong
+one**, because it is believed. The fix was not to tune the heuristic but to
+remove it, at the cost of one process per test target.
+
+---
+
+#### §O-042b — The determinism check reported a stable suite as nondeterministic
+
+The serious finding, and the reason it matters is that `--trials N` is the
+feature that justifies a QQQ test runner existing at all.
+
+Measured on a scaffolded project whose tests are perfectly deterministic:
+
+```text
+$ qqqai test --trials 3
+NONDETERMINISTIC: 1 of 2 test(s) produced different output across 3 trials
+```
+
+The cause: the trial runner compared **raw stdout and stderr**, which include
+libtest's own bookkeeping:
+
+```text
+test result: ok. 1 passed; 0 failed; ... finished in 0.01s
+                                          ^^^^^^^^^^^^^^^^^ differs every run
+```
+
+So the check fired on every test that printed a summary line — that is, on every
+test. Output is now normalised: per-test status, panic messages and the test's
+own printed output are kept; durations, cargo's progress lines and the
+`filtered out` count are dropped. The exit status carries pass/fail, so nothing
+about the outcome is lost.
+
+**A determinism check that fires on a stable suite is worse than no check.** It
+teaches the reader to disregard the one signal the feature exists to produce,
+and the next real flake is ignored. The same argument as `§O-040c`'s
+unconditionally-failing check, from the other direction: both carry zero
+information, and both train people to stop looking.
+
+Two tests pin it — one asserting that runs differing only in timing compare
+equal, and a **positive control** asserting that a real output difference is
+still detected. Without the control, a normaliser that stripped everything would
+pass the first test and detect nothing.
+
+---
+
+#### §O-042c — I diagnosed the symptom as a flaky test, twice, before measuring
+
+The failure appeared as `test_trials_runs_each_test_repeatedly ... FAILED`
+roughly every other full-suite run, and passed in isolation. That signature says
+"test interference", so I did the two things that signature suggests: gave each
+sandbox its own `CARGO_TARGET_DIR`, then re-ran with `--test-threads=1`.
+
+Neither helped, and the second result was the informative one: single-threaded
+passed, parallel failed — which is *also* consistent with a flaky test, so it did
+not discriminate. What settled it was reading the failure's **stdout** rather
+than its assertion:
+
+```text
+NONDETERMINISTIC: 1 of 2 test(s) produced different output across 3 trials
+```
+
+That is not an infrastructure error at all. The "flakiness" was the real bug
+(`§O-042b`) surfacing intermittently: the timing lines differ between runs, and
+under load they differ more often. Four consecutive clean full-suite runs after
+the fix.
+
+The cost of the wrong reading is specific: I spent two fixes on test
+infrastructure for a defect in the product, and both changes were plausible
+enough to keep. **The failure output was available the whole time.** Reading what
+a test printed before theorising about why it printed it is the same lesson as
+`§O-041a`, one round later.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
@@ -4051,5 +4151,7 @@ If someone reads nothing else in this file, these are the items that cost the mo
 
 | 2026-09-19 | **P0 (Foundation) was understating the work by 26 items**: it reported 0 of 101 done while the workspace held 910 tests, a three-OS CI matrix and all three canonical documents (`§O-040a`). `tools/audit_p0.py` now maps each P0 item to a concrete artefact and reports what exists — a report, not a gate, because failing CI on a low count pressures ticking over building. **`check [10b]` added** to `check_xrefs.py`, catching a decision defined but never cited; it immediately found three dangling decisions (`§D-002`, `§D-008`, `§D-009`), each now cited. **`cargo deny check` had been failing on every run** because no `deny.toml` existed, and `continue-on-error` hid it; `deny.toml` is now derived from the real dependency graph and both escape hatches are removed, which also surfaced three genuinely unused dependencies (`§O-040c`). Six crates declared a README that did not exist; all five missing READMEs written, with every API claim verified against source after four fluent-but-wrong ones were caught (`§O-040d`). `.scratch/witprobe` deleted and its four assertions ported to `crates/qqq-host/tests/engine.rs` with controls. | Architect |
 | 2026-09-19 | **The objective audit passes: 30/30**, after three wrong diagnoses of one symptom. `git status` listed three documents modified while `git diff` showed nothing; each diagnosis was written into a comment as fact and each was wrong. What settled it was measuring the **committed blob** (`git cat-file -p HEAD:…` → 0 CRLF, 1,549 LF) rather than the working tree: the checkout drifts, the content is correct. Both `normalize_eol.py` and `audit_requirements.py` now test committed content, removing a check that failed on a condition the repository does not have (`§O-041a`). The audit label `"passes (7/7)"` was a hardcoded literal that went stale when an eighth injection was added; labels are now read from the run (`§O-041b`). `check [12]` added after the Observations heading was deleted for the **fourth** time — and building it caught a real defect in the check itself, which used a substring search and would have passed on a document that lost its section (`§M-007`). | Architect |
+
+| 2026-09-19 | **`CLI-012` implemented: `qqqai test`** (`qqq-run::test_runner`). Discovery runs **each test binary directly**, which makes a test's source file exact rather than inferred — after two wrong attempts, the second of which produced plausible paths that were wrong (`§O-042a`). `--trials N`, the first architecture-enabled feature from §6.7, **reported a perfectly deterministic suite as nondeterministic** because it compared raw output including libtest's `finished in 0.01s`; output is now normalised, with a positive control asserting a real difference is still detected (`§O-042b`). I diagnosed that as test flakiness twice before reading the failure's stdout, which had the answer in it (`§O-042c`). `check [12]` caught the section-heading deletion this round, which is what it was built for. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

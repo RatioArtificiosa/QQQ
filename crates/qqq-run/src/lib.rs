@@ -41,6 +41,13 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+/// `qqqai test` — the built-in test runner.
+///
+/// The module is named `test_runner` rather than `test` because `test` is a Rust
+/// keyword and cannot be a module path segment. The file keeps its natural name
+/// via `#[path]`, the same arrangement `scaffold` uses.
+#[path = "test.rs"]
+pub mod test_runner;
 pub mod update;
 pub mod watch;
 
@@ -78,6 +85,10 @@ pub use scaffold::{
     crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,
     Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,
     WrittenFile,
+};
+pub use test_runner::{
+    by_file, discover, execute as run_tests, filter_tests, tests_dir, DiscoveredTest,
+    OutcomeReport, TestOptions, TestOutcome, TestOutput,
 };
 pub use update::{
     apply, authority_unknown_for_moved, cannot_update, contradictory_request, decide, diff,

@@ -29,7 +29,7 @@
 //! machine and fails on another. `HOME`/`USERPROFILE` are pointed at the temp
 //! directory so any future cache or config lookup is isolated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// The binary under test, located through Cargo's own variable.
@@ -44,6 +44,27 @@ fn qqqai() -> Command {
     cmd.env("HOME", &home);
     cmd.env("USERPROFILE", &home);
     cmd
+}
+
+/// A per-sandbox cargo target directory.
+///
+/// # Why every sandbox needs its own
+///
+/// The sandboxes that run `qqqai test` each invoke `cargo`, and cargo takes an
+/// exclusive lock on its target directory. Sharing one — the repository's by
+/// default — makes concurrent tests contend, and the loser reports a failure
+/// that has nothing to do with the code under test.
+///
+/// Measured: `test_trials_runs_each_test_repeatedly` passed in isolation and
+/// failed roughly every other full-suite run. A test that fails one time in two
+/// on identical input is worse than a failing test — it is indistinguishable
+/// from a real intermittent bug until someone spends an hour on it, and the
+/// usual response is to mark it ignored.
+///
+/// A per-sandbox directory also keeps the tests from polluting the repository's
+/// own build cache with four extra copies of a scaffolded project.
+fn target_dir_for(sandbox: &Path) -> PathBuf {
+    sandbox.join(".cargo-target")
 }
 
 /// A scratch directory that is removed on drop.
@@ -82,6 +103,7 @@ impl Sandbox {
         let out = qqqai()
             .args(args)
             .current_dir(&self.path)
+            .env("CARGO_TARGET_DIR", target_dir_for(&self.path))
             .output()
             .expect("the binary must be runnable");
         Run::from(out)
@@ -1060,6 +1082,169 @@ fn a_diff_without_an_artifact_is_refused() {
     s.run(&["inspect", "--diff", "other.wasm"])
         .assert_failed()
         .assert_contains("--diff");
+}
+
+// ---------------------------------------------------------------------------
+// test — the runner must be able to fail
+// ---------------------------------------------------------------------------
+
+/// A Rust project with a passing and a failing test.
+///
+/// Built by hand rather than by `qqqai new`, because the runner's behaviour
+/// under a failure is the thing under test and a scaffold has no failing test to
+/// offer.
+fn project_with_tests(dir: &Sandbox) {
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    dir.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[workspace]\n",
+    );
+    dir.write(
+        "src/lib.rs",
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\
+         \n#[cfg(test)]\nmod tests {\n\
+         \x20   #[test]\n    fn adding_works() { assert_eq!(super::add(1, 2), 3); }\n\
+         }\n",
+    );
+    dir.write("tests/smoke.rs", "#[test]\nfn smoke() { assert!(true); }\n");
+}
+
+/// A passing project exits zero and reports the tests.
+///
+/// File attribution is asserted through `--dry-run`, which lists what would run
+/// and where each test lives. A passing run names only the counts — printing
+/// every test that succeeded would bury the failures, which is the reason
+/// someone runs the command.
+#[test]
+fn test_runs_a_passing_project_and_exits_zero() {
+    let s = Sandbox::new("test-pass");
+    project_with_tests(&s);
+
+    s.run(&["test"]).assert_ok().assert_contains("2 passed");
+
+    let listed = s.run(&["test", "--dry-run"]);
+    listed
+        .assert_ok()
+        .assert_contains("src/lib.rs")
+        .assert_contains("tests/smoke.rs");
+}
+
+/// **A failing test exits non-zero.**
+///
+/// This is the contract a CI job branches on. A runner that reports a failure
+/// and exits `0` is unusable in the one place it matters — the same defect
+/// `qqqai doctor` had (`§O-036b`).
+#[test]
+fn a_failing_test_exits_non_zero() {
+    let s = Sandbox::new("test-fail");
+    project_with_tests(&s);
+    // Append a failing test to the library.
+    let mut lib = s.read("src/lib.rs");
+    lib.push_str(
+        "\n#[cfg(test)]\nmod failing {\n    #[test]\n    fn nope() { assert_eq!(1, 2); }\n}\n",
+    );
+    s.write("src/lib.rs", &lib);
+
+    let run = s.run(&["test"]);
+    run.assert_failed()
+        .assert_contains("Failures")
+        .assert_contains("nope");
+}
+
+/// `--filter` selects by test name.
+#[test]
+fn test_filters_by_name() {
+    let s = Sandbox::new("test-filter");
+    project_with_tests(&s);
+
+    let run = s.run(&["test", "--filter", "adding"]);
+    run.assert_ok().assert_contains("1 passed");
+    assert!(
+        !run.all().contains("smoke"),
+        "the unselected test must not run: {}",
+        run.all()
+    );
+}
+
+/// A filter matching nothing runs nothing, and succeeds.
+///
+/// Not a failure: the user asked for a selection that is empty, which is a
+/// different situation from asking for tests that then failed.
+#[test]
+fn a_filter_matching_nothing_runs_nothing() {
+    let s = Sandbox::new("test-nomatch");
+    project_with_tests(&s);
+
+    let run = s.run(&["test", "--filter", "no_such_test_name"]);
+    run.assert_ok().assert_contains("0 passed");
+}
+
+/// `--dry-run` runs nothing and says what it would run.
+///
+/// The regression test for a real defect: a rehearsal left every outcome
+/// un-run, and the summary rendered that as a "Failures" section listing every
+/// test — the opposite of what happened, under the flag a cautious user runs
+/// first.
+#[test]
+fn test_dry_run_runs_nothing_and_reports_no_failures() {
+    let s = Sandbox::new("test-dry");
+    project_with_tests(&s);
+
+    let run = s.run(&["test", "--dry-run"]);
+    run.assert_ok()
+        .assert_contains("would run")
+        .assert_contains("Would run");
+    assert!(
+        !run.all().contains("Failures"),
+        "a rehearsal ran nothing, so nothing failed: {}",
+        run.all()
+    );
+}
+
+/// `--trials N` runs each test N times and reports the count.
+#[test]
+fn test_trials_runs_each_test_repeatedly() {
+    let s = Sandbox::new("test-trials");
+    project_with_tests(&s);
+
+    s.run(&["test", "--trials", "3"])
+        .assert_ok()
+        .assert_contains("3 trials each");
+}
+
+/// A project whose language has no runner is refused by name.
+///
+/// The error must name the language and the tracking item, not fail with an
+/// opaque "command not found" — the user needs to know this is a known gap
+/// rather than a broken install.
+#[test]
+fn test_refuses_a_language_with_no_runner() {
+    let s = Sandbox::new("test-nolang");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"python\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+
+    s.run(&["test"])
+        .assert_failed()
+        .assert_contains("python")
+        .assert_contains("TEST-001");
+}
+
+/// `--trials` with a non-number is a usage error.
+#[test]
+fn a_non_numeric_trial_count_is_a_usage_error() {
+    let s = Sandbox::new("test-badtrials");
+    project_with_tests(&s);
+
+    s.run(&["test", "--trials", "many"])
+        .assert_failed()
+        .assert_contains("--trials");
 }
 
 // ---------------------------------------------------------------------------

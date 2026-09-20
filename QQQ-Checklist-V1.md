@@ -797,7 +797,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **CLI-011** Implement `qqqai serve` with `--workers`, `--tls`, `--config`.
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **CLI-012** Implement `qqqai test`.
+- [x] **CLI-012** Implement `qqqai test`.
+  → Done: `qqq-run::test_runner` (the module is named `test_runner` because `test` is a Rust keyword, so the file uses `#[path]` like `scaffold`), dispatched from `main.rs`. Discovery asks cargo for its test targets and runs **each binary directly**, which makes a test's source file exact rather than inferred. `--filter`, `--fail-fast`, `--trials N`, `--dry-run` and `--json` work; a failing test **exits 1** so CI can gate on it. 51 CLI integration tests.
+  → `--trials N` is the first architecture-enabled feature from §6.7 and the one that needs no unbuilt dependency: it runs each test N times and flags output that differs. A determinism failure counts as a failure for the exit code, because a test passing 4 of 5 trials is not a passing test.
   → §6.7 `qqqai test` — test runner
 - [ ] **CLI-013** Implement `qqqai bench`.
   → §9.1 The honest benchmark position

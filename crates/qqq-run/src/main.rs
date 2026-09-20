@@ -458,6 +458,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
         CommandName::Update => dispatch_update(name, args, flags, &mut out),
+        CommandName::Test => dispatch_test(name, args, flags, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -899,6 +900,148 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
 /// `dev` goes through `with_manifest`, because unlike `new` and `init` it needs
 /// a manifest to exist — and its error if one is missing is the one place a user
 /// should meet `qqqai new`.
+/// Dispatch `qqqai test`.
+///
+/// # Why this needs a manifest but not a built artifact
+///
+/// Discovery asks the language toolchain what tests exist, which compiles the
+/// test harness. It does **not** need the component to have been built: a test
+/// that exercises pure logic runs on the host, and requiring `qqqai build` first
+/// would make the fast path slow for no reason.
+///
+/// # Why this does not use `with_manifest`
+///
+/// Every other command returns a report and exits `0`. `test` has to exit
+/// **non-zero** when the report says tests failed — a test command that reports
+/// failures and exits `0` is unusable in the one place it matters, which is the
+/// defect `qqqai doctor` had (`§O-036b`).
+///
+/// That does not fit `with_manifest`'s shape, and bending it to fit would mean
+/// either a thread-local carrying the outcome out of the closure, or re-running
+/// the suite to learn what it said. Both are worse than loading the manifest
+/// directly here, which is three lines.
+fn dispatch_test(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match test_options(args, flags) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let project_dir = loaded
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    let language = loaded.manifest.build.language.clone();
+
+    let result = match qqq_run::run_tests(&project_dir, &language, &opts) {
+        Ok(mut r) => {
+            loaded.name().clone_into(&mut r.project);
+            r
+        }
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    // A determinism failure counts as a failure for the exit code. A test that
+    // passed 4 of 5 trials is not a passing test, and exiting `0` would let CI
+    // accept it — which is the one outcome `--trials` exists to prevent.
+    let failed = result.failed + result.nondeterministic;
+    let code = report(out, name, &result);
+
+    if failed > 0 && code == ExitCode::from(exit::OK) {
+        ExitCode::from(exit::FAILURE)
+    } else {
+        code
+    }
+}
+
+/// Decode `qqqai test`'s flags.
+///
+/// # Why the global flags are taken as a parameter
+///
+/// `--dry-run` and `--json` are parsed by the **top-level** parser and consumed
+/// there, so they never reach this function's argument list. An earlier version
+/// looked for them here, found nothing, and silently ran the tests anyway — a
+/// rehearsal that rehearses by doing the thing is worse than no rehearsal, and
+/// the symptom (a normal summary under `--dry-run`) looked like a formatting bug
+/// rather than a wiring one.
+///
+/// # Errors
+///
+/// A QQQ-7001 usage error for an unrecognised flag or a non-numeric `--trials`.
+fn test_options(
+    args: &[String],
+    flags: GlobalFlags,
+) -> Result<qqq_run::TestOptions, qqq_core::Error> {
+    let mut opts = qqq_run::TestOptions {
+        dry_run: flags.dry_run(),
+        json: flags.format() != Format::Human,
+        ..Default::default()
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--filter" | "-f" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.filter = Some(v.clone());
+                i += 1;
+            }
+            "--fail-fast" => opts.fail_fast = true,
+            "--dry-run" => opts.dry_run = true,
+            "--json" => opts.json = true,
+            "--trials" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.trials = Some(
+                    v.parse()
+                        .map_err(|_| bad_value(a, v, "a whole number of trials"))?,
+                );
+                i += 1;
+            }
+            "--manifest" => i += 1,
+            other if other.starts_with('-') => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `test`"),
+                )
+                .with_remediation(
+                    "`test` accepts --filter, --fail-fast, --trials, --dry-run \
+                     and --manifest",
+                ));
+            }
+            // A bare argument is treated as a filter, which is what every other
+            // test runner does and what a user typing `qqqai test smoke` means.
+            other => {
+                if opts.filter.is_none() {
+                    opts.filter = Some(other.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
 fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
     let opts = match dev_options(args) {
         Ok(o) => o,

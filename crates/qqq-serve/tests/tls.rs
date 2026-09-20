@@ -43,6 +43,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::AsyncWriteExt;
@@ -131,13 +132,12 @@ impl CertFiles {
 
     /// The DER of the certificate, for building a client's root store.
     fn cert_der(&self) -> CertificateDer<'static> {
-        let pem = std::fs::read_to_string(&self.cert).expect("read cert");
-        let mut reader = std::io::BufReader::new(std::io::Cursor::new(pem.into_bytes()));
-        // Collected inside the reader's scope: `certs` returns an iterator that
-        // borrows the reader, so returning `next()`'s item straight out of this
-        // function does not outlive it. The items themselves are `'static`
-        // (`CertificateDer<'static>`), which is why collecting first works.
-        let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        let pem = std::fs::read(&self.cert).expect("read cert");
+        // `PemObject`, not `rustls-pemfile` — see `src/tls.rs` for why that
+        // crate was removed (`RUSTSEC-2025-0134`, unmaintained). The `'static`
+        // items come straight out of the iterator, so no reader-lifetime
+        // dance is needed any more.
+        let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("valid PEM");
         chain.into_iter().next().expect("one certificate")
@@ -370,18 +370,14 @@ fn client_config_with_identity(
     provider.cipher_suites = CIPHER_SUITES.to_vec();
 
     let chain: Vec<CertificateDer<'static>> = {
-        let pem = std::fs::read_to_string(&client_cert.cert).expect("read client cert");
-        let mut r = std::io::BufReader::new(pem.as_bytes());
-        rustls_pemfile::certs(&mut r)
+        let pem = std::fs::read(&client_cert.cert).expect("read client cert");
+        CertificateDer::pem_slice_iter(&pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("client cert PEM")
     };
     let key: PrivateKeyDer<'static> = {
-        let pem = std::fs::read_to_string(&client_cert.key).expect("read client key");
-        let mut r = std::io::BufReader::new(pem.as_bytes());
-        rustls_pemfile::private_key(&mut r)
-            .expect("valid PEM")
-            .expect("a key")
+        let pem = std::fs::read(&client_cert.key).expect("read client key");
+        PrivateKeyDer::from_pem_slice(&pem).expect("a key")
     };
 
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))

@@ -80,6 +80,7 @@ use rustls::crypto::aws_lc_rs::cipher_suite::{
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
 };
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, SupportedCipherSuite};
@@ -435,9 +436,29 @@ pub struct ResolvedCertificate {
 /// configuration with no certificates, and this and
 /// [`TlsConfig::build`]'s explicit check are the two places that happens.
 fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(path).map_err(|e| {
+    // `rustls_pki_types::pem::PemObject`, **not** `rustls-pemfile`.
+    //
+    // `rustls-pemfile` is unmaintained (`RUSTSEC-2025-0134`): its repository was
+    // archived in August 2025 and the advisory directs users to the PEM parsing
+    // now inside `rustls-pki-types`, of which the old crate was already a thin
+    // wrapper. `cargo deny check advisories` failed the build on the direct
+    // dependency, and the right answer was to remove the crate rather than add an
+    // ignore — an ignored advisory on a direct dependency is a decision to keep
+    // something nobody maintains, and it would have to be re-made silently
+    // forever.
+    //
+    // `CertificateDer` implements `PemObject`, so this is the same parse via the
+    // maintained path; `pem_slice_iter` replaces the old `certs(&mut reader)`
+    // iterator. Reading the file into memory first is required either way — a
+    // `BufReader` was only ever there to satisfy `rustls_pemfile`'s `Read`
+    // bound, and dropping it removes a buffering layer this path never used.
+    // The bytes are read once and the same error message shape is used for the
+    // open and the read, because `fs::read` performs both and a caller cannot act
+    // differently on the two: in both cases the file is missing, or is not
+    // readable by this process.
+    let bytes = std::fs::read(path).map_err(|e| {
         tls_error(format!(
-            "could not open the certificate file `{}`",
+            "could not read the certificate file `{}`",
             path.display()
         ))
         .with_cause(e.to_string())
@@ -447,9 +468,7 @@ fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
         )
         .with_context("file", path.display().to_string())
     })?;
-
-    let mut reader = std::io::BufReader::new(file);
-    let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&bytes)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
             tls_error(format!(
@@ -479,8 +498,9 @@ fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 
     // **A PEM block is not a certificate.**
     //
-    // `rustls_pemfile::certs` validates the *base64* and the `CERTIFICATE` label,
-    // and nothing else. Measured while writing this module: a file containing
+    // `PemObject::pem_slice_iter` validates the *base64* and the `CERTIFICATE`
+    // label, and nothing else. Measured while writing this module: a file
+    // containing
     // `-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----` parses
     // successfully into a three-byte `CertificateDer`, because `AAAA` is valid
     // base64. That value then reaches `with_single_cert` and produces a
@@ -559,7 +579,7 @@ fn looks_like_a_der_certificate(der: &[u8]) -> bool {
 /// | SEC1 (EC) | `EC PRIVATE KEY` | yes |
 /// | PKCS#8 encrypted | `ENCRYPTED PRIVATE KEY` | **no** |
 ///
-/// The first three are all accepted, and `rustls_pemfile::private_key` is what
+/// The first three are all accepted, and `PrivateKeyDer::from_pem_slice` is what
 /// accepts them. §`SRV-007` asks for PKCS#8 and PKCS#1 in particular: PKCS#8 is
 /// what `openssl genpkey` and every modern toolchain emit and is the only one of
 /// the three that is algorithm-agnostic, while PKCS#1 is what older RSA tooling
@@ -574,9 +594,21 @@ fn looks_like_a_der_certificate(der: &[u8]) -> bool {
 /// same as for the empty chain: a key that cannot be used should be discovered
 /// at startup, by name, not by the first client.
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(path).map_err(|e| {
+    // `PrivateKeyDer::from_pem_slice` is the `PemObject` path — see
+    // `load_cert_chain` for why `rustls-pemfile` was removed.
+    //
+    // The error is distinguished from "no key" rather than reported as one
+    // message. `from_pem_slice` returns a single error for both a malformed
+    // block and a well-formed block whose label is not a key, and those need
+    // different fixes: the first is a corrupt file, the second is a file that
+    // contains something else. The remediation names both possibilities.
+    //
+    // The open and the read error are one message for the same reason as in
+    // `load_cert_chain`, but the remediation differs: this file holds a secret,
+    // so "loosen the permissions" is the wrong advice and the message says why.
+    let bytes = std::fs::read(path).map_err(|e| {
         tls_error(format!(
-            "could not open the private key file `{}`",
+            "could not read the private key file `{}`",
             path.display()
         ))
         .with_cause(e.to_string())
@@ -588,28 +620,18 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
         .with_context("file", path.display().to_string())
     })?;
 
-    let mut reader = std::io::BufReader::new(file);
-    match rustls_pemfile::private_key(&mut reader) {
-        Ok(Some(key)) => Ok(key),
-        Ok(None) => Err(tls_error(format!(
+    match PrivateKeyDer::from_pem_slice(&bytes) {
+        Ok(key) => Ok(key),
+        Err(e) => Err(tls_error(format!(
             "the private key file `{}` contains no key this server can use",
             path.display()
         ))
+        .with_cause(e.to_string())
         .with_remediation(
             "supported PEM labels are `PRIVATE KEY` (PKCS#8), `RSA PRIVATE KEY` (PKCS#1) \
              and `EC PRIVATE KEY` (SEC1). `ENCRYPTED PRIVATE KEY` is not supported because \
              rustls has no passphrase interface; decrypt it first, for example \
              `openssl pkcs8 -topk8 -nocrypt -in enc.key -out plain.key`",
-        )
-        .with_context("file", path.display().to_string())),
-        Err(e) => Err(tls_error(format!(
-            "the private key file `{}` is not valid PEM",
-            path.display()
-        ))
-        .with_cause(e.to_string())
-        .with_remediation(
-            "the file must contain one PEM private key block; if it also contains the \
-             certificate, point `key` at just the key",
         )
         .with_context("file", path.display().to_string())),
     }

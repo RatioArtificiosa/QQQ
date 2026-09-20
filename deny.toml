@@ -82,6 +82,20 @@ allow = [
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # ISC is the licence of `untrusted` (via `ring` -> `rcgen`, and via
+    # `rustls-webpki`). It is a permissive, OSI-approved, FSF-Free/Libre
+    # licence and is function-for-function equivalent to the MIT text minus
+    # the patent clause, which BSD-3-Clause above already supplies elsewhere in
+    # this graph.
+    #
+    # It was **missing** from this list while the comment above named it, so
+    # `cargo deny check licenses` failed on four crates and had done so since
+    # the TLS work pulled `ring` in. Two things follow, and both matter:
+    # the prose and the list had drifted apart, and the drift was invisible
+    # because `licenses` is only reached after `advisories` — which was itself
+    # failing on `rustls-pemfile`, masking this one behind it. A check that
+    # cannot run is indistinguishable from a check that passes.
+    "ISC",
     "Zlib",
     "Unlicense",
     "Unicode-3.0",

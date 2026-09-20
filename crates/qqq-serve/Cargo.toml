@@ -19,7 +19,11 @@ workspace = true
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-io = { path = "../qqq-io", version = "0.0.0" }
 rustls.workspace = true
-rustls-pemfile = "2.2.0"
+# **Not** `rustls-pemfile`. That crate is unmaintained (`RUSTSEC-2025-0134`,
+# archived August 2025) and `cargo deny check advisories` fails on it; PEM
+# parsing now lives in `rustls-pki-types` behind the `PemObject` trait, which is
+# the same code the old crate wrapped. Nothing else in the workspace used it, so
+# the dependency was removed rather than ignored.
 # Already a workspace dependency (used for content addressing) and already in
 # `Cargo.lock`, so this adds no resolution. Used for the peer-certificate
 # SHA-256 fingerprint in `tls::PeerIdentity`, which is the only stable

@@ -4797,6 +4797,101 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-054 — `cargo deny` was failing two ways at once, and one was hiding the other
+
+**What was found.** The workspace was green on `cargo check`, `cargo clippy -D
+warnings` and every test, and CI's supply-chain job was nevertheless **red** —
+for two independent reasons, stacked so that only the first was visible.
+
+**Failure one: `rustls-pemfile` is unmaintained (`RUSTSEC-2025-0134`).** It was a
+*direct* dependency of `qqq-serve`, pulled in by the TLS work. `deny.toml` sets
+`unmaintained = "workspace"` precisely so that an unmaintained crate we depend on
+*directly* fails while an unmaintained *transitive* one does not, so the advisory
+was correct and not a false positive. The repository was archived in August 2025
+and the advisory directs users to the PEM parsing that now lives in
+`rustls-pki-types`, of which the old crate was already a thin wrapper.
+
+**The fix was to remove the dependency, not to ignore the advisory.** An ignored
+advisory on a direct dependency is a decision to keep something nobody
+maintains, and an `ignore = [...]` entry has to be re-affirmed silently forever;
+`deny.toml` states that policy and this is the first case that tested it.
+`CertificateDer` and `PrivateKeyDer` both implement
+`rustls_pki_types::pem::PemObject`, so `CertificateDer::pem_slice_iter` replaces
+`rustls_pemfile::certs` and `PrivateKeyDer::from_pem_slice` replaces
+`rustls_pemfile::private_key`. Nothing else in the workspace used the crate, and
+`cargo machete` confirms it.
+
+**Failure two: `ISC` was missing from the licence allowlist.** It is the licence
+of `untrusted`, reached via `ring` → `rcgen` and via `rustls-webpki`, and it is
+permissive, OSI-approved and FSF-Free/Libre. It was **not** in `[licenses].allow`
+— while the comment block twenty lines above the list *named it as present*:
+
+> `#   Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unlicense,`
+
+So the prose and the list had drifted, and the drift was invisible for the
+structural reason below.
+
+**Why the second failure was hidden, which is the actual finding.** `cargo deny
+check` evaluates `advisories` first and the run exits non-zero on the errors it
+finds there; with `advisories` failing, the licence failure was masked behind it.
+A reader sees "advisories FAILED", fixes the advisory, and stops. The licence
+failure surfaced only when the advisory was repaired and the command was re-run.
+
+This is the same shape as `§M-006` and `§O-051`: **a check that cannot run
+carries exactly as much information as a check that passes.** A red check that
+fails for reason 1 tells you nothing about reason 2, and there was no signal
+distinguishing "one problem" from "two problems stacked".
+
+**Removal side-effects, all improvements.** Deleting the crate also deleted two
+`BufReader` layers that existed only to satisfy `rustls_pemfile`'s `Read` bound,
+and with them the reader-lifetime dance in `tests/tls.rs` whose comment explained
+that `certs` borrows the reader. The `PemObject` API is slice-based, so the items
+are `'static` and come straight out of the iterator. The stale doc comments that
+still named `rustls_pemfile` were corrected in the same pass.
+
+**Verified, not assumed.** `cargo deny check` now reports
+`advisories ok, bans ok, licenses ok, sources ok`. The TLS tests were re-run
+after the swap: 21 end-to-end handshake tests and 35 unit tests pass, so the
+`PemObject` path parses the same certificates, the empty-chain refusal still
+fires, and the "a PEM block is not a certificate" check — which rejects `AAAA` as
+a three-byte certificate — is unchanged in behaviour and now cites
+`pem_slice_iter` rather than the removed crate.
+
+**Recorded so it is not relearned.** When a CI check goes red, fix it and run it
+again before believing it is green, and treat "the first failing section" as a
+statement about report order rather than about how many things are wrong.
+
+---
+
+### §O-055 — The tree was green locally and red in CI, and nothing local said so
+
+**What was found.** Every local gate passed — `cargo check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+`tools/check_xrefs.py`, `tools/self_test_xrefs.py` (9/9), `tools/check_topology.py`
+— while `cargo deny check` was failing on two counts (`§O-054`) and the last
+edit to `tls.rs` had left three `unused` warnings behind.
+
+**The gap that made this possible.** `cargo deny` and `cargo machete` are CI
+steps and were not part of any local script. The working rule "verify every claim
+with real commands" was being satisfied against the commands that were
+*remembered*, and the supply-chain commands were not among them. A check that is
+only ever run by CI is a check the author never sees fail.
+
+**Fix, and the standing rule.** `tools/audit_requirements.py` is the single
+command that runs the whole gate set, and its last requirement is "no uncommitted
+changes". It reported **31/32**, failing only on the dirty tree — which is what
+made the state visible at all. The rule that follows: **before every commit, run
+`python tools/audit_requirements.py`, not a subset of it.** The audit exists to
+answer "is this actually done", and running a hand-picked subset of it answers a
+different, easier question.
+
+**Correction to a claim in this document.** `§O-053` describes the TLS work as
+complete and says nothing about the dependency it left behind. The TLS *feature*
+was complete; the *tree* was not healthy, and the two are different claims. This
+entry is the correction.
+
+---
+
 ## 9. CHANGE LOG
 
 | Date | Change | Author |
@@ -4847,5 +4942,7 @@ This is the one claim in the corpus that a reader should not have to take on fai
 | 2026-09-19 | **Three agents in one working tree deleted each other's files (`§M-009`).** HTTP/2 and TLS were delegated in parallel while the main session kept working. Both wrote *new* files, so there was no merge conflict — but both had to edit `lib.rs` to register their module, and that is a single shared file. The h2 agent, blocked by the TLS file failing to compile, moved `tls.rs` to `.scratch/` and commented out `pub mod tls;`, twice; the TLS agent found its 73 KB source deleted mid-verification. Both agents did something reasonable given what each could see; the coordination bug was mine, because I assumed new-file work is inherently conflict-free. The h2 agent was interrupted (`flow.rs` and `stream.rs` written, `h2/conn.rs` not, and a stray brace left by the interruption); its work is preserved. **Rule:** a shared working tree is a mutually exclusive resource for any task that edits a *registration* file — module roots, `Cargo.toml`, `lib.rs`, the checklist. One long-running delegation at a time. | Architect |
 
 | 2026-09-19 | **`SRV-007` and `SRV-008` implemented: `qqq-serve::tls` (`§O-053`).** An explicit cipher policy — an unspecified algorithm is *refused*, not defaulted — TLS 1.3 preferred with 1.2 permitted, ALPN for `h2`/`http/1.1`, certificate sources (`Files`, `Platform`, and `Acme` refused by name), `ClientAuth` in `None`/`Required`/`Optional`, and `PeerIdentity` from a verified client certificate; 35 unit tests and 21 real-handshake tests. **A real defect was found by the end-to-end mTLS test and by nothing else**: `common_name_of` searched the `Certificate`'s children for tag `[3]`, believing `[3]` wrapped `TBSCertificate` — but `[3]` is the *extensions* field inside TBS, and a real certificate's children are `0x30, 0x30, 0x03`. The search returned `None` for **every** certificate, so an mTLS access log read `(subject has no common name)` for every peer. **The unit tests could not catch it because they encoded the same misunderstanding**: the fixtures wrapped their `Name` in a `[3]` no real certificate produces, and two artifacts sharing a wrong assumption cannot correct each other (`§O-053a`). Three further fixture comments asserted third-party behaviour wrongly — `generate_simple_self_signed` does not derive the subject CN from the SAN; the handshake dialled `localhost` while the certificate was for `qqq-test-server`, turning nine failures into one uninformative `left: None`; and disjoint ALPN lists *refuse* the handshake rather than completing without a protocol (`§O-053b`). Every claim about `rcgen` and `rustls` was a prose comment nobody could check — the project verified its own code and its Proposal, but not its dependencies or its fixtures. Verified by injection: reinstating the `0xA3` search fails the new real-certificate test. | Architect |
+
+| 2026-09-19 | **`cargo deny` was red two ways at once and one hid the other (`§O-054`, `§O-055`).** `cargo check`, `clippy -D warnings` and every test were green while the supply-chain job failed: `rustls-pemfile` is unmaintained (`RUSTSEC-2025-0134`) and was a **direct** dependency of `qqq-serve`, which `deny.toml`'s `unmaintained = "workspace"` policy is precisely shaped to catch. The fix was to **remove the dependency rather than ignore the advisory** — `PemObject` in `rustls-pki-types` is the same code the old crate wrapped, so `pem_slice_iter`/`from_pem_slice` replaced it, and with it went two `BufReader` layers that existed only for `rustls_pemfile`'s `Read` bound. Repairing that exposed a **second, masked failure**: `ISC` was absent from `[licenses].allow` while the comment twenty lines above the list *named it as present*, so prose and list had drifted; `cargo deny` evaluates `advisories` first and exits non-zero on it, so the licence failure never printed. **A red check that fails for reason 1 tells you nothing about reason 2** — the same shape as `§M-006` and `§O-051`. `cargo deny check` now reports `advisories ok, bans ok, licenses ok, sources ok`; the 21 handshake and 35 unit TLS tests pass unchanged. The deeper lesson is `§O-055`: `cargo deny` and `cargo machete` are CI-only steps with no local script, so the rule "verify with real commands" was being satisfied against the commands that were *remembered*. `tools/audit_requirements.py` is the full gate, its last requirement is a clean tree, and it reported **31/32** — which is what made the state visible. **Before every commit, run the audit, not a subset of it.** | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

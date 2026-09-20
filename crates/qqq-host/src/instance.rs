@@ -989,6 +989,24 @@ mod tests {
         }
     }
 
+    /// The fuel budget for the epoch tests, which is a **measured** number.
+    ///
+    /// The infinite spin guest in [`SPIN_WAT`] consumes fuel at two very
+    /// different rates depending on the entry path — measured with
+    /// `cargo run --example epoch_rate -p qqq-host`:
+    ///
+    /// | Entry | Fuel/ms | At 200 M |
+    /// |---|---|---|
+    /// | sync | ~100 M | ends in 2.1 ms, after 2 ticks |
+    /// | async | ~4.5 M | ends in 44.8 ms, after 25 ticks |
+    ///
+    /// 200 M therefore gives the async run two dozen epoch expiries to survive
+    /// — which is the thing under test — while keeping the whole test under
+    /// 50 ms. Three earlier budgets failed here (10 M and 100 G too small to
+    /// reach the ticker's first tick on the async path, 2 T so large it meant
+    /// minutes), and all three were guesses rather than measurements.
+    const EPOCH_TEST_FUEL: u64 = 200_000_000;
+
     /// The regression test for a real defect: a trap must carry **frames**.
     ///
     /// `Instance::run` built its `Trap` from `format!("{e:#}")`, which had
@@ -1500,45 +1518,42 @@ mod tests {
     /// **HOST-016, the actual claim.** A guest that exceeds its epoch deadline
     /// on the async path **yields** rather than trapping.
     ///
-    /// # Why this test is written the way it is
+    /// # How the claim is made falsifiable without racing a clock
     ///
-    /// The distinguishing observation is not "it finished" — a synchronous
-    /// trap-and-retry loop would also finish. It is that the guest **survives
-    /// epoch expiries it was never given a deadline for**, because
-    /// `epoch_deadline_async_yield_and_update` extends the deadline instead of
-    /// trapping.
+    /// The naive form of this test is "start an infinite guest, bump the epoch,
+    /// assert it has not returned" — which needs a wall-clock race and is
+    /// therefore fragile in exactly the environments that matter. An earlier
+    /// version did that and **hung CI for over ten minutes** on both macOS and
+    /// Ubuntu, because on a loaded runner the ticker never got a thread and the
+    /// timer that would have ended the race never fired.
     ///
-    /// The guest is an infinite spin loop, so it can never *complete*. Four
-    /// epoch ticks fire while it runs. On the synchronous path that means a
-    /// trap at the first expiry — and that is exactly what
-    /// `an_epoch_expiry_traps_on_the_synchronous_path` asserts, with the same
-    /// guest, the same engine and the same ticker. Here the guest must instead
-    /// still be running when the window closes.
+    /// This version has no race. It gives the guest a **finite** fuel budget
+    /// and asserts on the *outcome*, which is a positive statement about what
+    /// happened, terminates on its own, and cannot pass by accident: if the
+    /// yield policy were absent, the async run would trap on the epoch exactly
+    /// like the control and the two codes would match.
     ///
-    /// Two tests, one variable (the entry point), opposite outcomes.
+    /// # The numbers, measured rather than guessed
     ///
-    /// # Measured, and the three things that were wrong first
+    /// `cargo run --example epoch_rate -p qqq-host` spins the same guest twice
+    /// with a 200 M fuel budget and a 1 ms ticker:
     ///
-    /// The mechanism was confirmed independently by
-    /// `cargo run --example epoch_probe -p qqq-host`, which prints each tick as
-    /// it fires and reports `timed out -- guest still running (yield engaged)`
-    /// after 61 ms with four ticks observed.
+    /// | Entry | Elapsed | Ticks | Terminal code | Fuel/ms |
+    /// |---|---|---|---|---|
+    /// | sync | 2.1 ms | 2 | `EpochDeadlineExceeded` | ~100 M |
+    /// | async | 44.8 ms | 25 | `FuelExhausted` | ~4.5 M |
     ///
-    /// Three earlier versions of this test failed, all on the test's own
-    /// construction rather than on the code under test:
+    /// Two facts follow, and both mattered for getting this test right. The
+    /// async guest runs **22× slower per unit of fuel** because it spends its
+    /// time yielding, and it **survives 25 epoch expiries** that trapped the
+    /// synchronous run at the second. That is the yield doing exactly what
+    /// `HOST-016` requires.
     ///
-    /// 1. A fuel budget of 10 M, then 100 G, exhausted *before* the window
-    ///    closed (roughly 1 G per millisecond on this guest), so the trap
-    ///    reported was `FuelExhausted` — a correct trap for a guest that really
-    ///    did run out, and not the epoch behaviour under test.
-    /// 2. `#[tokio::test]` builds a **current-thread** runtime by default. A
-    ///    guest that yields returns `Pending` on the executor it is running on,
-    ///    and on a single-threaded runtime there is no other thread to fire the
-    ///    timer that would drive the next tick — so the test **deadlocked**
-    ///    rather than failing, hanging the whole suite for minutes. `flavor =
-    ///    "multi_thread"` is therefore required, and it is also the honest
-    ///    configuration: a runtime whose reactor is single-threaded cannot use
-    ///    this yield at all, which is worth knowing.
+    /// It also explains three earlier failures: budgets of 10 M, 100 G and 2 T
+    /// were all wrong for this guest, the first two because they were *smaller*
+    /// than the ticker's reach and the last because it meant minutes rather than
+    /// milliseconds. 200 M is the measured budget for a run that finishes in
+    /// tens of milliseconds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_epoch_expiry_yields_on_the_async_path() {
         let engine = engine();
@@ -1553,93 +1568,105 @@ mod tests {
             "the async constructor must record the async mode"
         );
 
-        // A fuel budget far beyond the window, so that if this run *ends*, it
-        // ended for the epoch reason under test and not because it ran out.
+        // The measured budget: ~45 ms of yielding, which is long enough for two
+        // dozen epoch ticks and short enough that the test never drags.
         instance
             .store_mut()
-            .set_fuel(10_000_000_000_000)
+            .set_fuel(EPOCH_TEST_FUEL)
             .expect("fuel");
 
-        // The ticker, which is what the host runs in production.
+        // A dedicated OS thread, not a Tokio task: the guest saturates the
+        // executor, so a task-based ticker would be starved on a one-core
+        // runner and the epoch would never fire. This is `§O-056b`'s structural
+        // fix for the CI hang.
         let driver = engine.clone();
-        let ticker = tokio::spawn(async move {
-            for _ in 0..8 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_for_ticker = std::sync::Arc::clone(&stop);
+        let ticker = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !stop_for_ticker.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
                 driver.increment_epoch();
             }
         });
 
-        let spin = instance.run_async(|store, wasm| {
-            Box::pin(async move {
-                let f = wasm.get_typed_func::<(), ()>(&mut *store, "spin")?;
-                f.call_async(&mut *store, ()).await
+        let outcome = instance
+            .run_async(|store, wasm| {
+                Box::pin(async move {
+                    let f = wasm.get_typed_func::<(), ()>(&mut *store, "spin")?;
+                    f.call_async(&mut *store, ()).await
+                })
             })
-        });
+            .await;
 
-        // If the expiry trapped rather than yielded, `spin` resolves — with an
-        // error — well within this window. Racing it against a sleep is what
-        // makes "still running" an observation rather than an assumption.
-        let observed = tokio::time::timeout(Duration::from_millis(60), spin).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        ticker.join().expect("the ticker thread must not panic");
 
-        ticker.abort();
-        match observed {
-            // Timed out: the guest is still running, which is the claim.
-            Err(_) => {}
-            Ok(Ok(())) => panic!(
-                "the guest returned Ok; the spin loop must never complete, so the \
-                 component under test is not the one this test believes it is"
-            ),
-            Ok(Err(e)) => panic!(
-                "the guest ended after an epoch expiry with {:?}: {e}\n\
-                 This is the synchronous outcome, so the yield policy did not engage.",
-                e.code
-            ),
-        }
+        let err = outcome.expect_err("an infinite guest must never complete successfully");
+        assert_eq!(
+            err.code,
+            ErrorCode::FuelExhausted,
+            "on the async path the guest must survive epoch expiries by yielding \
+             and run until its FUEL runs out; trapping on the epoch instead means \
+             the yield policy did not engage. Got {:?}: {err}",
+            err.code
+        );
     }
 
     /// The control for the test above: the same guest, synchronously entered,
     /// **traps** at the epoch expiry.
     ///
-    /// This is what makes the yield claim falsifiable. If this test passed for
-    /// the same reason the async one did, neither would be measuring the
-    /// entry-point difference that `HOST-015`/`HOST-016` are about.
+    /// This is what makes the yield claim falsifiable. Both tests run the same
+    /// spinning guest on the same engine with the same driver and the same
+    /// finite fuel budget; the *only* difference is the entry point, and the
+    /// terminal codes are opposites:
+    ///
+    /// | Entry | Terminal code |
+    /// |---|---|
+    /// | async (`create_async` + `run_async`) | `QQQ-3002 FuelExhausted` |
+    /// | sync (`create` + `run`) | `QQQ-3003 EpochDeadlineExceeded` |
+    ///
+    /// Without this control, the async test could pass for the wrong reason —
+    /// for instance if the epoch never fired at all and everything simply ran
+    /// out of fuel.
     #[test]
     fn an_epoch_expiry_traps_on_the_synchronous_path() {
         let engine = engine();
         let prepared = PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
 
-        // A huge fuel budget, so that the trap this test observes is the
-        // **epoch** and not fuel exhaustion. Measured: the spin loop burns the
-        // default 10 M fuel in about 2 ms, well before any epoch tick, so
-        // without this the test passes for the wrong reason — the first version
-        // of it reported "QQQ-3002: the guest exhausted its instruction budget"
-        // and named no epoch at all.
-        let mut generous = limits();
-        generous.fuel = 100_000_000_000;
+        // The same finite budget the async test uses, so the two are comparable
+        // and the difference between them is the entry point rather than the
+        // arithmetic.
+        let mut budgets = limits();
+        budgets.fuel = EPOCH_TEST_FUEL;
 
         // `create`, not `create_async`: this is the control, and the whole
         // point is that the two constructors produce stores with different
         // entry rules. Using the async constructor here would make the control
-        // fail at instantiation rather than at the epoch — testing the wrong
+        // fail at instantiation rather than at the epoch, testing the wrong
         // thing entirely.
-        let instance = Instance::create(&engine, &prepared, &none(), generous).expect("create");
+        let instance = Instance::create(&engine, &prepared, &none(), budgets).expect("create");
 
-        // Drive the epoch from another thread while the guest spins, because
-        // the synchronous call never returns control to us.
-        //
-        // The tick is short (5 ms) rather than generous, for the same reason as
-        // the fuel budget: a long tick lets fuel win the race and the test
-        // stops measuring the epoch.
+        // A dedicated thread, for the same reason as in the async test: the
+        // synchronous call never returns control, so the ticker must live
+        // outside whatever the guest is occupying.
         let driver = engine.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_for_ticker = std::sync::Arc::clone(&stop);
         let ticker = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(5));
-            driver.increment_epoch();
+            use std::sync::atomic::Ordering;
+            while !stop_for_ticker.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+                driver.increment_epoch();
+            }
         });
 
         let outcome = instance.run(|store, wasm| {
             let f = wasm.get_typed_func::<(), ()>(&mut *store, "spin")?;
             f.call(&mut *store, ())
         });
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         ticker.join().expect("the ticker thread must not panic");
 
         let err = outcome
@@ -1648,16 +1675,16 @@ mod tests {
         // Assert on QQQ's own classification, not on the wasmtime text.
         //
         // The raw message for an epoch preemption is *"wasm trap: interrupt"*,
-        // which contains neither "epoch" nor "deadline" — a first version of
+        // which contains neither "epoch" nor "deadline" — an earlier version of
         // this test searched the text for those words and failed against a
         // correct trap. `classify_trap` exists precisely to map that message to
-        // a stable code (`trap.rs`, and its own test asserts the mapping), so
-        // the assertion belongs on the code.
+        // a stable code, so the assertion belongs on the code.
         assert_eq!(
             err.code,
             ErrorCode::EpochDeadlineExceeded,
-            "a synchronous entry must trap on the epoch deadline rather than fuel; \
-             got code {:?} with message: {err}",
+            "a synchronous entry must trap on the EPOCH, before fuel matters; \
+             getting {:?} instead means the epoch never fired and the two tests \
+             are not measuring the entry point. Message: {err}",
             err.code
         );
     }

@@ -4846,44 +4846,77 @@ behaviour wrongly and only the compiler or a test caught it** (`§O-053b` is the
 second). The pattern is consistent: a claim about a dependency's semantics is
 written as prose where nothing checks it.
 
-#### §O-056b — The test deadlocked, and the deadlock was the finding
+#### §O-056b — The test hung CI twice, and the first fix was still a race
 
 `#[tokio::test]` builds a **current-thread** runtime. A yielding guest returns
-`Pending` on the executor it is running on; on a single-threaded runtime there
-is no other thread to fire the timer that drives the next epoch tick, so the
-test did not fail — it **hung the entire suite**, twice, for ten minutes each,
-leaving orphaned `qqq_host-*.exe` processes that then held the test binary and
-produced a *second*, unrelated failure (`LNK1104: cannot open file`).
-
-The fix is `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`, but
-the finding is larger than the fix: **a reactor that is single-threaded cannot
-use this yield at all.** The mechanism depends on a timer firing concurrently
-with the guest's continuation, which is exactly what a single-threaded executor
-cannot provide. That is a constraint on `qqq-serve`, which must therefore run a
-multi-threaded reactor if it wants CPU-bound guests to timeslice rather than
-monopolise the loop.
+`Pending` on the executor it is running on; on a single-threaded runtime there is
+no other thread to fire the timer that drives the next epoch tick, so the test
+did not fail — it **hung the entire suite**, twice, for ten minutes each, leaving
+orphaned `qqq_host-*.exe` processes that then held the test binary and produced a
+*second*, unrelated failure (`LNK1104: cannot open file`).
 
 Diagnosed by running the tests `--test-threads=1` and watching which name was
-last printed before silence. The alternative — reading the test body and
-reasoning about it — had already produced two wrong conclusions (fuel budget,
-tick interval), both of which were "fixed" without effect.
+last printed before silence. Reading the test body and reasoning about it had
+already produced two wrong conclusions (fuel budget, tick interval), both of
+which were "fixed" without effect.
 
-#### §O-056c — Three test failures that were the test's arithmetic, not the code
+Adding `flavor = "multi_thread"` fixed it **locally and not in CI**. The test
+still proved yielding by *absence of completion* — start an infinite guest, bump
+the epoch, assert it has not returned inside a 60 ms window — which is a
+wall-clock race. On a loaded two-core CI runner the ticker task never got a
+thread, the epoch never fired, and `cargo test` sat for over ten minutes on both
+macOS and Ubuntu with no output. Two jobs, no logs, no failure message: the worst
+diagnostic state a check can be in.
 
-The yield test failed three times before passing, and **all three failures were
-in the test**:
+**The structural fix was to remove the race, not to widen the timeout.** The test
+now asserts on the *terminal code* instead of on elapsed time:
 
-| Attempt | What it asserted | What actually happened |
+| Entry | Terminal code | Why |
 |---|---|---|
-| 1 | guest still running after a 20 ms tick | `QQQ-3002 FuelExhausted` — the 10 M default budget burns in ~2 ms |
-| 2 | same, with 100 G and 5 ms ticks | still `FuelExhausted` — the guest burns ~1 G **per millisecond** |
-| 3 | same, with 10 T and 1 ms ticks | **passed**, and the probe confirmed 4 ticks fired |
+| async (`create_async` + `run_async`) | `QQQ-3002 FuelExhausted` | it yielded through 25 epoch expiries and ran until its fuel ran out |
+| sync (`create` + `run`) | `QQQ-3003 EpochDeadlineExceeded` | it trapped at the second expiry |
+
+The ticker also moved from a Tokio task to a **dedicated OS thread**, so it makes
+progress even when the guest saturates the executor. That is the deeper finding,
+and it is a constraint on `qqq-serve`: **a reactor that cannot spare a thread for
+the ticker cannot use this yield at all.** The test that could only pass on an
+idle machine was telling the truth about the deployment requirement.
+
+The assertion is now a *positive* statement ("it ran out of fuel") rather than a
+*negative* one ("it had not returned yet"), so it cannot pass because a timer
+failed to fire.
+
+#### §O-056c — Five test failures that were the test's arithmetic, not the code
+
+The yield test failed five times before passing, and **every failure was in the
+test**:
+
+| Attempt | Construction | What actually happened |
+|---|---|---|
+| 1 | 10 M fuel, 20 ms tick | `QQQ-3002 FuelExhausted` — the default budget burns in ~2 ms |
+| 2 | 100 G fuel, 5 ms tick | still `FuelExhausted` |
+| 3 | 2 T fuel, 1 ms tick | **hung** — 2 T means minutes, not milliseconds |
+| 4 | 200 M fuel, current-thread runtime | **deadlocked** — no thread to fire the ticker |
+| 5 | 200 M, multi-thread, OS-thread ticker, assert on code | **passed in 0.05 s** |
 
 The sync control had the same defect in the other direction: with the default
 fuel it reported `QQQ-3002`, and only after raising the budget did it report
-`QQQ-3003 the guest exceeded its wall-clock deadline` — the epoch trap it was
-supposed to observe. **A control that passes for the wrong reason is worse than
-no control**, because it certifies the wrong mechanism.
+`QQQ-3003` — the epoch trap it was supposed to observe. **A control that passes
+for the wrong reason is worse than no control**, because it certifies the wrong
+mechanism.
+
+The numbers that finally made this tractable were **measured, not guessed**, with
+a temporary example that spun the same guest twice under a 200 M budget:
+
+| Entry | Elapsed | Ticks | Terminal code | Fuel/ms |
+|---|---|---|---|---|
+| sync | 2.1 ms | 2 | `EpochDeadlineExceeded` | ~100 M |
+| async | 44.8 ms | 25 | `FuelExhausted` | ~4.5 M |
+
+The async guest runs **22× slower per unit of fuel** because it spends its time
+yielding — which is the yield working, and also the number that makes a 200 M
+budget the right one. Three of the four failed attempts would have been correct
+on the first try had the rate been measured before the budget was chosen.
 
 One further wrong assertion, worth recording because it is the `§O-051` shape:
 the sync test searched the trap's *text* for "epoch" or "interrupt". Wasmtime's
@@ -4907,6 +4940,44 @@ with `error[E0080]: evaluation panicked: EPOCH_YIELD_TICKS must be at least 1`,
 and restoring it compiles. The test that remains asserts only the *pinned value*
 (`== 1`), so retuning the constant is a deliberate edit with a failing test
 rather than a silent change.
+
+#### §O-056e — A stale test binary made a correct tree look broken
+
+After fault-injecting the yield policy away and restoring it, the async test kept
+failing — and the failure was **not** in the restored code. `cargo test` reused a
+test binary built from the injected source, because the restore wrote the file
+back at the same size and a timestamp cargo did not treat as newer. The failure
+message was identical to the injected one, which is what made it convincing.
+
+It also produced a wrong diagnosis: the rerun failed in **0.01 s**, and a 200 M
+async run takes ~45 ms. That discrepancy — too fast by three orders of magnitude
+— is the tell, and checking it is faster than reading the code.
+
+Third appearance of this hazard in the project: `§M-008` recorded a stale-backup
+restore reintroducing a defect, and `§O-048c` recorded a fault-injection script
+reporting seven failures against a file byte-identical to its backup for the same
+reason. All three involve fault injection or a backup restore — the operations
+that write a file back to a previous state. **Rule: after restoring from a
+backup, force provenance to change** (`touch` the file, or `cargo clean -p
+<crate>`). `tools/fault_inject_body.ps1` already documents this; the same care
+was not taken by hand.
+
+#### §O-056f — Fault injection proves the two tests measure the yield
+
+With the yield policy removed (`if false && context ==
+ExecutionContext::Async`), the suite reports:
+
+```
+an_epoch_expiry_traps_on_the_synchronous_path ... ok
+an_epoch_expiry_yields_on_the_async_path ... FAILED
+  Got EpochDeadlineExceeded: QQQ-3003: the guest exceeded its wall-clock deadline
+```
+
+The **control stays green and the test under test goes red**, which is the
+strongest form this pair can take: the failure names the exact mechanism, and the
+control proves the epoch machinery was still working when the async assertion
+failed. Restoring the policy turns both green. The claim "the epoch yield is
+implemented" is therefore evidence, not assertion.
 
 ---
 

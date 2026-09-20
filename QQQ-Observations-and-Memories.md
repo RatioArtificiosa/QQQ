@@ -5000,6 +5000,117 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-067 — Path traversal passed the containment check, and the doc was the only defence
+
+**What was found.** `SEC-010` asks for traversal defences *"with a test corpus"*.
+Writing the corpus first — before touching the code — found that
+`qqq_cap::normalize::path_is_within` returned **`true`** for every traversal
+attempt:
+
+| Input (root `/var/lib/orders`) | `path_is_within` |
+|---|---|
+| `/var/lib/orders/../../../etc/passwd` | **`true`** |
+| `/var/lib/orders/../secrets` | **`true`** |
+| `/var/lib/orders/..` | **`true`** |
+| `/var/lib/orders/a/../../b` | **`true`** |
+
+#### §O-067a — The implementation was correct about the bug it was written for
+
+This is not careless code. `path_is_within` was *deliberately* written to avoid
+the classic prefix bug — the comment says so, and there is a test:
+
+```rust
+assert!(!path_is_within("/var/lib/orders-evil", "/var/lib/orders"));
+// and the character after the root must be a separator
+c.as_bytes().get(r_trimmed.len()) == Some(&b'/')
+```
+
+That check is right, and it is the check most implementations get wrong. The
+function was built to stop `/var/lib/orders-evil` and it stops it. It simply never
+considered `..`, because the question "can a path escape its root" has **two**
+answers — a *sibling* with a shared prefix, and a *traversal* — and only one was
+asked.
+
+**The general shape**, and it is the third instance this session: a check that is
+correct about one attack and silent about another reads as complete, because the
+code and its test both discuss *the* case.
+
+#### §O-067b — The doc comment was the entire defence, which is not a defence
+
+The function's documentation said:
+
+> Operates on already-canonicalized absolute paths.
+
+That is a **precondition stated only in prose**. Nothing enforced it, nothing
+tested it, and `Deny`/`expect` could not see it — and the caller's parameter is
+even named `canonical_path`, which reinforces the assumption without checking it.
+
+Two realistic callers break it:
+
+1. **A caller that forgets.** The doc is three lines above a function whose name
+   suggests it does containment; "canonicalize first" is easy to miss.
+2. **A caller that canonicalizes a path that does not exist yet.**
+   `std::fs::canonicalize` **fails** on a non-existent path, which is exactly the
+   case for a request to *create* a file. The natural handling — fall back to the
+   un-canonicalized path, or skip canonicalization when it errors — produces
+   exactly the input this function admitted.
+
+A safety precondition that no type, test or lint enforces is a **convention**, and
+conventions are what `§O-050`'s structural narrowing argument exists to avoid. The
+fix follows that precedent: the function now enforces its own precondition rather
+than trusting the caller's.
+
+#### §O-067c — It refuses `..` rather than resolving it, and the reason is that resolving is wrong
+
+The obvious repair is to normalise the path — resolve `..` lexically and compare
+the result. That is subtly incorrect, and it is worth writing down because it is
+the fix most people reach for:
+
+> `/a/b/..` is `/a` **only if `b` is a directory and not a symlink.**
+
+Lexical resolution cannot know, because the function has no filesystem to ask. So
+a lexical resolver would be *right most of the time*, which in a security check is
+the worst property available: it passes the tests that were written from the same
+mental model and fails the cases nobody imagined.
+
+Refusing is correct **because** the caller is required to pass a canonical path,
+and a canonical path has no `..` component by construction. A non-canonical input
+is therefore a caller bug, and surfacing it is better than guessing at it.
+
+#### §O-067d — Two controls, and why one-sided tests could not have them
+
+The corpus is a table, so adding a case is one line and the count is visible. Two
+assertions exist specifically because a test that only asserts *rejection* is
+satisfiable by a function that rejects everything:
+
+**`legitimate_paths_are_still_admitted_after_the_traversal_fix`** — without it, a
+`path_is_within` returning `false` unconditionally would pass every attack
+assertion while making **every filesystem grant useless**. That is the failure mode
+of a security fix made in a hurry.
+
+**`the_prefix_implementation_would_have_admitted_these`** — the four inputs that
+the old code accepted, asserted in a second place. Reverting to a prefix match now
+breaks **two** tests, and the second one's message explains *why* the prefix
+approach was wrong rather than merely that it fails.
+
+#### §O-067e — What the fix still does not defend against, said out loud
+
+**Symlinks.** `/data/link` may point outside `/data`, and a non-canonical path gives
+no way to tell. The doc now says this, and says where the real defence lives: the
+**preopen handle**. The guest holds a handle to a directory and WASI resolves
+within it, so a symlink that escapes is resolved by the *host's* filesystem view
+of the handle rather than by string comparison. This function remains the
+defence-in-depth re-check for a mis-built preopen table — which is what §4.4 step
+11 calls for, and it is now true rather than approximately true.
+
+**The lesson, and it is the same one `§O-066` reaches from a different angle.**
+Both defects were in code whose *tests passed* and whose *documentation described*
+the protection. A defence-in-depth check that admits the attack it names is worse
+than no check at all, because its presence is the reason nobody looks for the real
+one.
+
+---
+
 ### §O-066 — The memory limit was advisory, and `QQQ-3001` was unreachable
 
 **What was built.** `crates/qqq-host/tests/hostile_guests.rs` — 200 hostile

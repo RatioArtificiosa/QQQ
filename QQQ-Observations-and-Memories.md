@@ -1577,6 +1577,193 @@ Proposal §4.5, §6.3, §7.4, §10.5.
 
 ---
 
+### §O-022 — CI was red from the first commit, and nobody noticed
+
+**The discovery.** The GitHub commit list showed a red ✗ on every commit since
+the repository was created. Not one commit had ever passed. The cause was the
+**first step of the Rust job**: `cargo fmt --all -- --check` failed, which
+short-circuits every later step on all three platforms. So `clippy`, `build`,
+`test` and the unsafe check had **never once run in CI**.
+
+**What this means for every prior claim in this document.** Each round reported
+"clippy clean, tests pass" — and every one of those reports was **local only**.
+The numbers were real, but they were verified on one machine, in one
+configuration, by the same person who wrote the code. That is exactly the
+evidence the three-platform matrix exists to replace, and the guarantee I
+thought I had was not in force.
+
+**Three separate defects, all fixed:**
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | Formatting drift in every crate, from the first commit | `cargo fmt --all` |
+| 2 | The unsafe check grepped `\bunsafe\b`, so it failed on a comment reading *"which is the unsafe direction"* | Match the `unsafe` **keyword** in code positions: `unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe extern`, `unsafe trait`. Added a second check that every crate except `qqq-sys` carries `#![forbid(unsafe_code)]` |
+| 3 | Three `build` tests asserted *arguments* through `plan`, which also probes for `wasm-tools` — absent on a bare runner | Split into `plan_pure` (no host access) and `plan` (probes). See §O-023 |
+
+**A fourth, found only because the matrix now ran**: `the_unregistered_check_can_find_a_registered_name`
+passed on macOS and Ubuntu and failed on Windows, because it matched the literal
+string `func_wrap(\n        "digest"` — one newline and eight spaces. `rustfmt`
+lays the call out differently on that runner. **A test whose result depends on
+where a line breaks is not testing the property it names.** The detection now
+strips whitespace first, and a dedicated test feeds the same call in three
+layouts to pin it. See §O-024.
+
+**The lesson, and it is the sharpest one in this document.** The cross-reference
+validator, `check_wit.py`, `self_test_xrefs.py` and `audit_requirements.py` all
+ran *locally* and all passed, and their passing was reported as evidence. But the
+audit's "working tree clean" check and the xref validator prove things about the
+**corpus**; neither of them ever looked at what CI does. A green local run and a
+green pipeline are different claims, and only one of them is about the code
+anyone else will get.
+
+**What made the difference.** Not more tests — the tests were already right. It
+was **looking at the actual commit list** rather than trusting the summary. The
+red ✗ marks had been visible in the repository UI the whole time.
+
+**Now verified:** run `35479329970` — `"conclusion":"success"`, all six jobs
+green across `ubuntu-latest`, `macos-latest` and `windows-latest`.
+
+---
+
+#### §O-022a — The 415 → 418 test count is a different measurement
+
+Worth stating because the number changed while the code barely did. Local totals
+were reported as 363, then 378, then 415. The 415 figure comes from
+`--all-features` on Windows; the earlier ones did not pass that flag. The counts
+are not directly comparable, and the increase is not 52 new tests — it is partly
+a different measurement of the same suite.
+
+The lesson is smaller but the same shape as §O-022: **a number is only meaningful
+with the command that produced it.** Every count in this document now names its
+invocation.
+
+**Cross-refs:** Checklist `FND-004`, `FND-005`, `CON-016`, `DOC-007`, `ARCH-008`;
+Proposal §11.1, §2.2 NN-2.
+
+---
+
+### §O-023 — A test can be right about what it checks and wrong about how it reaches it
+
+Three tests in `qqq-run::build` asserted that a manifest with a given profile
+produces the right `cargo` arguments. They called `plan` to get those arguments.
+`plan` also probes the host for the toolchain — including `wasm-tools`, which is
+installed here and is not on a GitHub runner. So on CI the probe failed before
+the assertion could run:
+
+```text
+thread 'build::tests::a_rust_project_plans_a_cargo_build' panicked:
+must plan: Error { code: MissingTarget,
+  cause: ["missing:\n  wasm-tools (...)"] }
+```
+
+**The tests were not wrong.** The behaviour they named is real and they asserted
+it correctly. They were checking it *through a door that is locked on that
+machine*.
+
+**The fix separates two questions that were sharing a function:**
+
+```text
+plan_pure(manifest, options) -> BuildPlan   pure; no host access
+plan(manifest, options)      -> BuildPlan   plan_pure, then probe the toolchain
+```
+
+Argument construction is a function of committed inputs, so it is now testable
+anywhere. Toolchain availability is a property of the machine, tested where it
+can be controlled. A further test asserts the two agree on the arguments when
+the toolchain *is* present — the probe must add a check, not a second
+interpretation of the manifest.
+
+**Verified by reproducing the CI condition exactly:** a PATH shim containing
+`cargo`, `rustc` and `rustup` but deliberately not `wasm-tools`.
+
+```text
+with wasm-tools absent:  cargo test -p qqq-run --lib  -> 137 pass, 0 fail
+with wasm-tools absent:  qqqai build --dry-run        -> QQQ-1003 naming
+                                                          wasm-tools and
+                                                          `cargo install wasm-tools`
+```
+
+So the missing-tool diagnosis survives — only the test's route to the assertion
+changed. **Building the CI environment by hand was what turned a guess into a
+verification.**
+
+**Cross-refs:** Checklist `CLI-008`, `FND-004`; Proposal §5.2, §4.6.
+
+---
+
+### §O-024 — Two scaffold bugs that only running the generated project could find
+
+`qqqai new` was implemented with 22 tests, all passing, covering name validation,
+template dispatch, generated manifest contents and zero-capability guarantees.
+Then the generated project was actually built, and it did not compile. Twice.
+
+**Bug one.** The scaffold wrote `src/<crate>.rs` and declared
+`crate-type = ["cdylib"]` without a `path`. Cargo refuses to parse the manifest:
+
+```text
+error: failed to parse manifest
+  can't find library `orders_api`, rename file to `src/lib.rs` or specify lib.path
+```
+
+Every string assertion in the suite passed throughout, because they asserted on
+*text in generated files* rather than on whether Cargo would accept that text.
+
+**Bug two.** With that fixed, the build still failed:
+
+```text
+error: failed searching for potential workspace
+invalid potential workspace manifest: /home/user/Cargo.toml
+```
+
+Cargo walks **up** the directory tree looking for a workspace. A project created
+in a directory containing a stray `Cargo.toml` — which is a normal thing to have
+in a home directory — fails to build. The generated `Cargo.toml` now declares an
+empty `[workspace]`, making it its own root and independent of everything above.
+
+**Bug three, in `build` itself.** Artifact discovery looked for
+`<package>.wasm`. Cargo emits the **crate** name, which is the package name with
+hyphens replaced by underscores, so `orders-api` produces `orders_api.wasm`.
+Every hyphenated project — including every scaffolded one — compiled
+successfully and was then reported as *"the build succeeded but no component was
+produced"*. Discovery now tries the underscored name, then the literal name, then
+any single `.wasm`, and reports every candidate it saw when all three fail.
+Ambiguity resolves to an error rather than a guess, because picking the wrong
+artifact silently would ship the wrong code.
+
+**The pattern, and it is the same one as §O-016b, §O-017a and §O-020a:** the tests
+encoded my model of the tooling, not the tooling. Twenty-two assertions about
+strings could not tell me that Cargo would reject the file those strings were
+written into. **Running the generator's output found three defects in one
+command.**
+
+**The regression tests added for each** are anchored on the real constraint
+rather than on my description of it: `the_declared_lib_path_is_a_file_that_is_written`
+parses the generated `Cargo.toml` and checks the path exists among the files the
+scaffold wrote; `a_generated_crate_is_its_own_workspace_root` asserts the
+`[workspace]` table is present; and artifact discovery has eight tests including
+the hyphenated case taken from the real failure.
+
+**The loop, verified end to end:**
+
+```console
+$ qqqai new orders-api --lang rust --template http
+created orders-api (http, 6 files, 0 capabilities granted)
+
+$ qqqai caps
+orders-api: no capabilities granted
+
+$ qqqai build
+orders-api: target/qqq/orders-api.component.wasm (14231 bytes) for wasm32-wasip2
+
+$ qqqai run
+orders-api: ran in 145 µs
+```
+
+**Cross-refs:** Checklist `CLI-003`, `CLI-008`, `CLI-009`, `DX-001`, `DX-002`;
+Proposal §5.2, §5.3, §12.1.
+
+---
+
 ## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended

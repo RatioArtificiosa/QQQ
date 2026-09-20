@@ -80,9 +80,33 @@ for what, pat in (
     check(f"observations contain {what}", n > 0, f"{n} found")
 
 # --- Machine verification actually passes ------------------------------------
+#
+# The label is **derived from the run**, not hardcoded.
+#
+# It read "validator self-test passes (7/7)" as a literal, and went stale the
+# moment an eighth fault injection was added: the check still passed, so nothing
+# failed, and the report confidently stated a number that was wrong. A label
+# asserting a count it does not measure is the same defect as an unconditionally
+# passing check -- it carries the appearance of verification without the
+# substance (§M-006).
+#
+# Extracting the real count also means a *decrease* in injections is visible: the
+# number is printed every run, so 8 -> 7 would be noticed rather than absorbed.
+_self_test = subprocess.run(
+    [sys.executable, "tools/self_test_xrefs.py"],
+    capture_output=True, text=True, cwd=ROOT,
+)
+_injections = re.search(r"(\d+)/(\d+) fault injections detected", _self_test.stdout)
+if _injections:
+    _label = f"validator self-test passes ({_injections.group(0).split(' fault')[0]})"
+else:
+    # No count in the output means the harness did not get as far as reporting,
+    # which is itself a failure worth seeing plainly.
+    _label = "validator self-test passes (count not reported)"
+
 for script, label in (
     ("tools/check_xrefs.py", "cross-reference validator passes"),
-    ("tools/self_test_xrefs.py", "validator self-test passes (7/7)"),
+    ("tools/self_test_xrefs.py", _label),
 ):
     p = subprocess.run([sys.executable, script], capture_output=True,
                        text=True, cwd=ROOT)

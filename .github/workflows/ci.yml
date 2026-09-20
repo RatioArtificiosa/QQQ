@@ -75,6 +75,34 @@ jobs:
           echo "All commits are signed off."
 
   # ---------------------------------------------------------------------------
+  # Line endings: every tracked text file must be LF in the working tree.
+  #
+  # `.gitattributes` pins `eol=lf` and `core.autocrlf=true` is set on Windows,
+  # so the two can disagree: Git *commits* LF while the working tree holds CRLF
+  # from an editor that writes it. `git status` then reports files modified
+  # after a commit that included them, with an empty `git diff` — and a dirty
+  # tree hides real changes.
+  #
+  # The repository is byte-sensitive (`qqq.lock` carries a covering hash over
+  # its own bytes; the content store compares digests), which is why this is a
+  # required check rather than a formatting preference.
+  #
+  # It runs on ubuntu, where checkout honours `.gitattributes` — so a failure
+  # here means a committed file's `text`/`binary` attribute is wrong, not that
+  # a developer's editor disagreed.
+  # ---------------------------------------------------------------------------
+  eol:
+    name: Line endings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Every tracked text file is LF
+        run: python tools/normalize_eol.py --check
+
+  # ---------------------------------------------------------------------------
   # The cross-reference graph is the thing that keeps three documents honest.
   # If it breaks, nothing else matters. Run it first and cheaply.
   # ---------------------------------------------------------------------------
@@ -90,10 +118,23 @@ jobs:
         run: python tools/check_xrefs.py
 
       # A validator that cannot fail manufactures false confidence. This harness
-      # deliberately breaks the corpus seven ways and asserts each is caught.
-      # See Observations §M-006.
+      # deliberately breaks the corpus and asserts each injection is caught; it
+      # prints the count it achieved, so the number is never restated here where
+      # it could go stale. See Observations §M-006.
       - name: Prove the validator actually detects breakage
         run: python tools/self_test_xrefs.py
+
+      # The objective audit: does the deliverable set actually satisfy the
+      # brief? It checks that all three documents exist and are English, that
+      # the Proposal covers the required sections, that the Checklist is fully
+      # anchored, and that every machine check passes.
+      #
+      # It also runs the two validators above, so this is partly redundant with
+      # them -- deliberately. This is the check a reader runs to answer "is the
+      # objective met?", and it must be answerable from the repository alone
+      # rather than by assembling a sequence of commands from a document.
+      - name: Objective requirement audit
+        run: python tools/audit_requirements.py
 
   # ---------------------------------------------------------------------------
   # WIT: the interface definitions must actually parse.

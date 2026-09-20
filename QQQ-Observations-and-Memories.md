@@ -4797,6 +4797,107 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-058 — `HOST-011`: a guard that compiles away, and the check that had to be a source check
+
+**What was built.** `crates/qqq-host/src/guard.rs`, wired into all six registered
+host functions. 11 unit tests plus one enforcement test; the crate goes from 153
+tests to 161.
+
+#### §O-058a — A wrapper, not a `panic::set_hook`, and the difference is the design
+
+The obvious implementation of "convert host panics into traps" is a global panic
+hook. It does not work, and the reason is worth stating because it looks like it
+should: **a hook intercepts reporting, not unwinding.** It cannot stop a panic,
+and it is process-wide — so installing one in `qqq-host` would also swallow
+panics in `qqq-serve`, `qqq-run` and `qqq-debug`, converting genuine host bugs
+into silence everywhere rather than containing them at one boundary.
+
+`catch_unwind` at the host/guest boundary is the only mechanism that both stops
+the unwind and applies exactly where the requirement does. The wrapper is
+therefore the design, not an implementation detail.
+
+#### §O-058b — Why this is a security boundary rather than robustness
+
+Every host function is a closure called from *inside* Wasmtime's execution of
+guest code. A panic there unwinds through the engine's frames and out into
+whatever the host was doing — a request task, in `qqq-serve`. `Cargo.toml` sets
+`panic = "abort"` for the release profile, so the third consequence is not a
+dropped connection but a **dead process**: one guest finding one panicking host
+function takes down every tenant on the host. §7.2's adversary model explicitly
+includes hostile guests, which is what makes this a vulnerability rather than a
+robustness gap.
+
+A defensive detail that follows: the panic payload must **not** reach the guest,
+because it can contain host paths, internals and guest-supplied data. The guest
+gets the interface name and nothing else; the message goes to `PanicReport` for
+the host log. `the_panic_payload_is_not_forwarded_to_the_guest` pins it with a
+path-shaped secret.
+
+#### §O-058c — A new error code, in the `6xxx` host class and deliberately not `3xxx`
+
+`QQQ-6007 HostPanicContained`. The guest did nothing wrong, and the class
+carries that judgement: reporting a host defect as a guest trap would send an
+operator to inspect the wrong artifact, and would make an attacker's successful
+panic read as misbehaving guest code rather than the host bug it is. The same
+reasoning produced a separate `TrapLabel::HostPanic` metric label, so a
+dashboard can alert on contained panics without conflating them with guest
+misbehaviour.
+
+#### §O-058d — The enforcement had to be a source check, because no runtime test can reach the failure
+
+This is the interesting part. The guard is a wrapper, so:
+
+* a host function added **without** it compiles perfectly;
+* it passes every test anyone would write, because tests exercise inputs that do
+  not panic;
+* its defect appears only when a guest finds the panicking path — and then it
+  appears as a **dead process**, not a failing test.
+
+So there is no runtime test that can enforce this, and the rule exists precisely
+to prevent a failure no test can reach. `every_host_function_is_panic_guarded`
+counts `func_wrap(` against `guard::guard(` across the registration files.
+
+**Counting rather than listing names** is the property that matters: a list of
+six known functions would go stale the moment somebody registered the seventh
+interface — which is exactly when the check is most needed, since new host code
+is where new panics live.
+
+**And it reads production code only** — everything before `#[cfg(test)]`. The
+first version counted the whole file and failed with *"host_clock.rs registers 6
+host functions but only 5 are wrapped"*. The sixth is a `func_wrap` inside the
+test module, registering a fake function in a test's own linker to probe how
+Wasmtime reports a registration. That is not a host function a guest can reach,
+and wrapping it would test the guard rather than the thing under test. Truncating
+at the test module keeps the check honest — a new unguarded registration in
+*production* code still fails it — while not forcing a wrong change to test code.
+
+#### §O-058e — Proving the check can fail, and getting the injection right the second time
+
+`tools/fault_inject_guard.py` removes one guard, asserts the check goes red with
+the right message, and restores the file.
+
+**The first version of the injection proved nothing.** It replaced the guard call
+with `let _unguarded = move || {`, which produced a **syntax error** — the runner
+reported `INJECTION NOT DETECTED` only because the harness checks for a *compile*
+failure separately, and the crate had not compiled at all. It was the harness's
+refusal to accept a non-compiling injection that exposed this, and the script now
+says so in its own docstring: the injection must produce **valid Rust that is
+merely unguarded**, or the check cannot run and nothing is learned.
+
+This is the fourth appearance of the same family of mistake — an instrument that
+reports on itself rather than on the system under test: `§M-008` (stale backup),
+`§O-048c` (fault-injection script reporting 7 failures on an unchanged file), and
+`§O-056e` (stale test binary). All four involve a tool that writes a file back to
+a previous state. The lesson is not "be careful with injections" but **assert
+that the injected artifact compiled and changed**, which is what this script and
+`tools/fault_inject_body.ps1` now both do.
+
+Verified after the fix: the injection is detected with *"registers 5 host
+functions but only 4 are wrapped"*, and the file is restored to 5 guards with no
+`INJECTED` marker. The injector is wired into CI.
+
+---
+
 ### §O-057 — Metrics and the pool: the cardinality rule made structural, and a double-count in my own test
 
 **What was built.** `crates/qqq-host/src/metrics.rs` and

@@ -104,13 +104,24 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // registers this function unconditionally, the guest still cannot read the
     // clock without the grant. `recheck` in the linker module documents the
     // same reasoning for capabilities generally.
+    //
+    // **Every body is wrapped in `guard` (`HOST-011`).** A host function is
+    // called from inside Wasmtime's execution of guest code, so a panic here
+    // unwinds through the engine's frames and out into whatever the host was
+    // doing — and with `panic = "abort"` in the release profile, one guest
+    // finding one panicking host function kills the whole process. The guard
+    // contains it and the trap taxonomy reports it. The name passed to `guard`
+    // is the fully-qualified interface path, so a log line identifies the exact
+    // function without further context.
     inst.func_wrap(
         "now",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
-            if !store.data().grants.grants(Capability::ClockWall) {
-                return Err(denied(Capability::ClockWall));
-            }
-            Ok((store.data().ambient.now_nanos(),))
+            crate::guard::guard("qqq:clock@1.0.0/wall-clock.now", || {
+                if !store.data().grants.grants(Capability::ClockWall) {
+                    return Err(denied(Capability::ClockWall));
+                }
+                Ok((store.data().ambient.now_nanos(),))
+            })
         },
     )?;
 
@@ -118,7 +129,9 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     inst.func_wrap(
         "resolution",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
-            Ok((store.data().ambient.tick_interval_nanos(),))
+            crate::guard::guard("qqq:clock@1.0.0/wall-clock.resolution", || {
+                Ok((store.data().ambient.tick_interval_nanos(),))
+            })
         },
     )?;
 
@@ -126,10 +139,12 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     inst.func_wrap(
         "timezone",
         |_store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(String,)> {
-            // Always UTC. A host that applied its local timezone would make
-            // guest output depend on deployment configuration, which the WIT
-            // documentation explicitly forbids.
-            Ok(("UTC".to_owned(),))
+            crate::guard::guard("qqq:clock@1.0.0/wall-clock.timezone", || {
+                // Always UTC. A host that applied its local timezone would make
+                // guest output depend on deployment configuration, which the WIT
+                // documentation explicitly forbids.
+                Ok(("UTC".to_owned(),))
+            })
         },
     )?;
 
@@ -143,17 +158,21 @@ fn register_monotonic_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<
     inst.func_wrap(
         "now",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
-            if !store.data().grants.grants(Capability::ClockMonotonic) {
-                return Err(denied(Capability::ClockMonotonic));
-            }
-            Ok((store.data().ambient.elapsed_nanos(),))
+            crate::guard::guard("qqq:clock@1.0.0/monotonic-clock.now", || {
+                if !store.data().grants.grants(Capability::ClockMonotonic) {
+                    return Err(denied(Capability::ClockMonotonic));
+                }
+                Ok((store.data().ambient.elapsed_nanos(),))
+            })
         },
     )?;
 
     inst.func_wrap(
         "resolution",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
-            Ok((store.data().ambient.tick_interval_nanos(),))
+            crate::guard::guard("qqq:clock@1.0.0/monotonic-clock.resolution", || {
+                Ok((store.data().ambient.tick_interval_nanos(),))
+            })
         },
     )?;
 

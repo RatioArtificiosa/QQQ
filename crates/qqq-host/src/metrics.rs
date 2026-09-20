@@ -105,6 +105,14 @@ pub enum TrapLabel {
     /// wasm trap because it names a guest-side abort rather than a host-imposed
     /// limit.
     GuestPanic,
+    /// A **host** function panicked and the host contained it — `QQQ-6007`
+    /// (`HOST-011`).
+    ///
+    /// Always a QQQ defect rather than the guest's fault: no host function
+    /// should panic on any input, and its inputs are attacker-controlled. A
+    /// separate label exists so a dashboard can alert on it — a contained panic
+    /// reported as a guest trap sends an operator to inspect the wrong artifact.
+    HostPanic,
     /// The guest called a host function that is not granted. This is a
     /// *security* event and is counted separately so it can be alerted on.
     Ungranted,
@@ -128,6 +136,7 @@ impl TrapLabel {
             ErrorCode::InvalidResourceHandle => Some(Self::Handles),
             ErrorCode::GuestTrap | ErrorCode::GuestOutOfBounds => Some(Self::Wasm),
             ErrorCode::GuestPanic => Some(Self::GuestPanic),
+            ErrorCode::HostPanicContained => Some(Self::HostPanic),
             // A denied capability is not the same as an ungranted *import*: the
             // first is a grant that exists but does not cover this call, the
             // second is an import the linker never bound. Both are security
@@ -147,6 +156,7 @@ impl TrapLabel {
             Self::Handles => "handles",
             Self::Wasm => "wasm",
             Self::GuestPanic => "guest_panic",
+            Self::HostPanic => "host_panic",
             Self::Ungranted => "ungranted",
             Self::Other => "other",
         }
@@ -166,6 +176,7 @@ impl TrapLabel {
             Self::Handles,
             Self::Wasm,
             Self::GuestPanic,
+            Self::HostPanic,
             Self::Ungranted,
             Self::Other,
         ]
@@ -180,8 +191,9 @@ impl TrapLabel {
             Self::Handles => 3,
             Self::Wasm => 4,
             Self::GuestPanic => 5,
-            Self::Ungranted => 6,
-            Self::Other => 7,
+            Self::HostPanic => 6,
+            Self::Ungranted => 7,
+            Self::Other => 8,
         }
     }
 }

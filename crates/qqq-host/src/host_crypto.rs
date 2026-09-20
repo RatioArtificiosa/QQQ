@@ -167,31 +167,37 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         |store: StoreContextMut<'_, StoreData>,
          (length,): (u32,)|
          -> wasmtime::Result<(Vec<u8>,)> {
-            // Defence in depth: the function is only registered when granted,
-            // but re-checking at call time means a future change that registers
-            // it unconditionally still cannot hand out entropy.
-            if !store.data().grants.grants(Capability::CryptoRandom) {
-                return Err(denied(Capability::CryptoRandom));
-            }
-            store
-                .data()
-                .ambient
-                .random_bytes(length)
-                .map(|b| (b,))
-                .map_err(|e| {
-                    // A source failure must fail closed. Surfacing it as a host
-                    // error rather than fabricating bytes is the whole point:
-                    // predictable "randomness" is worse than a failure.
-                    wasmtime::Error::msg(match e {
-                        crate::ambient::RandomFailure::TooLong => {
-                            format!("random request of {length} bytes exceeds the per-call maximum")
-                        }
-                        crate::ambient::RandomFailure::SourceFailed => {
-                            "the host entropy source failed; refusing to substitute a weaker source"
-                                .to_owned()
-                        }
+            // `HOST-011`: contained, like every host body — see `host_clock.rs`
+            // for why a panic here would otherwise unwind through the engine.
+            crate::guard::guard("qqq:crypto@1.0.0/random.get", || {
+                // Defence in depth: the function is only registered when granted,
+                // but re-checking at call time means a future change that registers
+                // it unconditionally still cannot hand out entropy.
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied(Capability::CryptoRandom));
+                }
+                store
+                    .data()
+                    .ambient
+                    .random_bytes(length)
+                    .map(|b| (b,))
+                    .map_err(|e| {
+                        // A source failure must fail closed. Surfacing it as a host
+                        // error rather than fabricating bytes is the whole point:
+                        // predictable "randomness" is worse than a failure.
+                        wasmtime::Error::msg(match e {
+                            crate::ambient::RandomFailure::TooLong => {
+                                format!(
+                                    "random request of {length} bytes exceeds the per-call maximum"
+                                )
+                            }
+                            crate::ambient::RandomFailure::SourceFailed => {
+                                "the host entropy source failed; refusing to substitute a weaker source"
+                                    .to_owned()
+                            }
+                        })
                     })
-                })
+            })
         },
     )?;
 
@@ -211,16 +217,18 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         |store: StoreContextMut<'_, StoreData>,
          (algorithm, data): (u32, Vec<u8>)|
          -> wasmtime::Result<(Vec<u8>,)> {
-            let name = algorithm_name(algorithm)?;
-            if data.len() > MAX_HASH_INPUT {
-                return Err(wasmtime::Error::msg(format!(
-                    "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
-                    data.len()
-                )));
-            }
-            hash_data(store.data(), name, &data)
-                .map(|d| (d,))
-                .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
+            crate::guard::guard("qqq:crypto@1.0.0/hashing.digest", || {
+                let name = algorithm_name(algorithm)?;
+                if data.len() > MAX_HASH_INPUT {
+                    return Err(wasmtime::Error::msg(format!(
+                        "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
+                        data.len()
+                    )));
+                }
+                hash_data(store.data(), name, &data)
+                    .map(|d| (d,))
+                    .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
+            })
         },
     )?;
 
@@ -233,21 +241,23 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         |store: StoreContextMut<'_, StoreData>,
          (algorithm, inputs): (u32, Vec<Vec<u8>>)|
          -> wasmtime::Result<(Vec<Vec<u8>>,)> {
-            let name = algorithm_name(algorithm)?;
-            let mut out = Vec::with_capacity(inputs.len());
-            for input in &inputs {
-                if input.len() > MAX_HASH_INPUT {
-                    return Err(wasmtime::Error::msg(format!(
-                        "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
-                        input.len()
-                    )));
+            crate::guard::guard("qqq:crypto@1.0.0/hashing.digest-many", || {
+                let name = algorithm_name(algorithm)?;
+                let mut out = Vec::with_capacity(inputs.len());
+                for input in &inputs {
+                    if input.len() > MAX_HASH_INPUT {
+                        return Err(wasmtime::Error::msg(format!(
+                            "hash input of {} bytes exceeds the {MAX_HASH_INPUT}-byte limit",
+                            input.len()
+                        )));
+                    }
+                    out.push(
+                        hash_data(store.data(), name, input)
+                            .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?,
+                    );
                 }
-                out.push(
-                    hash_data(store.data(), name, input)
-                        .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?,
-                );
-            }
-            Ok((out,))
+                Ok((out,))
+            })
         },
     )?;
 

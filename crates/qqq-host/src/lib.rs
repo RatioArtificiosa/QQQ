@@ -67,6 +67,7 @@ const _: () = assert!(
 
 pub mod ambient;
 pub mod config;
+pub mod guard;
 pub mod host_clock;
 pub mod host_crypto;
 pub mod instance;
@@ -79,6 +80,7 @@ pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError
 pub use config::{
     aot_cache_key, build_pooling, target_triple, EngineConfig, StoreLimits as LimitSet,
 };
+pub use guard::{guard, guard_reporting, PanicReport};
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
     ExecutionOutcome, Instance, PreparedComponent,

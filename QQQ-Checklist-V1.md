@@ -422,9 +422,43 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-010** Implement instance discarding on trap — trapped instances are never returned to the pool.
   → Done: `Instance::run` consumes `self`, so a trapped instance cannot be reused; `poison()` is the second mechanism.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-011** Implement the panic hook converting host-function panics into traps, with severity-1 alerting.
-  → Partial: the panic hook exists in the trap taxonomy; severity-1 alerting is not built.
+- [x] **HOST-011** Implement the panic hook converting host-function panics into traps, with severity-1 alerting.
+  → Done: `crates/qqq-host/src/guard.rs` — `guard`/`guard_reporting` wrap a host
+    function body in `catch_unwind`, converting a panic into a Wasmtime trap that
+    names the interface. Wired into **all six** registered host functions
+    (`qqq:clock` wall + monotonic, `qqq:crypto` random + hashing).
+  → **A wrapper, not a `panic::set_hook`, and the distinction is the design.**
+    A hook intercepts *reporting*, not unwinding: it cannot stop the panic, and
+    it is process-wide, so it would also swallow panics in `qqq-serve` and
+    `qqq-run` — turning genuine host bugs into silence everywhere. `catch_unwind`
+    at the host/guest boundary is the only place the requirement applies.
+  → **Why this is a security boundary and not robustness.** Every host function
+    is a closure called from *inside* Wasmtime's execution of guest code, so a
+    panic unwinds through the engine's frames and out into the host. `Cargo.toml`
+    sets `panic = "abort"` for the release profile, so one guest finding one
+    panicking host function kills the process — a denial of service against every
+    tenant on the host. §7.2's adversary model explicitly includes hostile guests.
+  → **The new code is `QQQ-6007 HostPanicContained`, a `6xxx` host fault and not
+    a `3xxx` guest trap.** The guest did nothing wrong, and reporting a host bug
+    as a guest trap would send an operator to inspect the wrong artifact — and
+    would make an attacker's successful panic read as misbehaving guest code.
+    The panic payload is **not** forwarded to the guest (it can contain host
+    paths and guest-controlled data) but **is** kept for the log via
+    `PanicReport`, with `is_severity_one()` unconditionally true.
+  → **Enforcement, because a wrapper can be forgotten.** The guard compiles away
+    to nothing when a host function does not panic, and no runtime test can
+    manufacture a panic in production code — so
+    `every_host_function_is_panic_guarded` counts `func_wrap(` against
+    `guard::guard(` across every registration file, reading production code only
+    (before `#[cfg(test)]`). It catches a **newly added** host function, not a
+    known list. `tools/fault_inject_guard.py` proves the check is live: it
+    removes one guard, asserts the test fails with
+    *"registers 5 host functions but only 4 are wrapped"*, and restores the file
+    — and it deliberately **refuses to report success when the injected source
+    fails to compile**, since an injection that does not build proves nothing
+    (`§O-048c`). Wired into CI.
   → §6.1 `qqq-host` — the execution engine
+  → §2.2 NN-2 — Security and Isolation Are Non-Optional
 - [x] **HOST-012** Implement pool-exhaustion backpressure with 503 and `Retry-After`, plus a saturation metric.
   → Done: `crates/qqq-host/src/pool.rs` — `Pool::acquire` returns `QQQ-6001`
     carrying `reason`, `capacity` and `retry-after` in its context, which

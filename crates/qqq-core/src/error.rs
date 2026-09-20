@@ -299,6 +299,22 @@ pub enum ErrorCode {
     /// **Remediation:** send a smaller body, or raise `max_request_bytes` in
     /// `qqq.toml`.
     RequestBodyTooLarge = 6006,
+    /// A **host** function panicked and the host contained it.
+    ///
+    /// Deliberately a `6xxx` host fault rather than a `3xxx` guest trap, and the
+    /// distinction is the point: **the guest did nothing wrong.** No host
+    /// function should panic on any input, and its inputs are guest-controlled
+    /// and therefore attacker-controlled — so a contained panic is always a QQQ
+    /// defect, and reporting it as a guest trap would send an operator to
+    /// inspect the wrong artifact. It would also make an attacker's successful
+    /// panic read as misbehaving guest code rather than the host bug it is.
+    ///
+    /// The guest sees an ordinary trap; the panic message stays in the host log
+    /// and is never echoed back, because it can contain host paths and internals.
+    ///
+    /// **Remediation:** **please report this.** The trap names the interface;
+    /// the log line `SEV1 host-panic-contained` carries the message.
+    HostPanicContained = 6007,
 
     // -- 7xxx: agent / protocol ----------------------------------------------
     /// An MCP tool call had arguments that failed schema validation.

@@ -642,6 +642,85 @@ mod tests {
         assert!(built.bound.unimplemented.is_empty());
     }
 
+    // -- HOST-011: every host function is panic-guarded ----------------------
+
+    /// **`HOST-011`, enforced structurally.** Every `func_wrap` registration in
+    /// this crate must route its body through [`crate::guard`].
+    ///
+    /// # Why this is a source-level test
+    ///
+    /// The guard is a *wrapper*, so a host function added without it compiles
+    /// perfectly and behaves correctly on every input that does not panic —
+    /// which is every input in every test anyone would write. The defect only
+    /// appears when a guest finds the panicking path, and then it appears as a
+    /// dead process rather than a failing test, because the release profile sets
+    /// `panic = "abort"`.
+    ///
+    /// There is therefore no runtime test that can enforce this, and the rule
+    /// exists precisely to prevent a failure that no test can reach. A source
+    /// check is the only mechanism available, and it is honest about being one.
+    ///
+    /// # Why it counts rather than listing names
+    ///
+    /// Counting `func_wrap(` against `guard::guard(` means a *newly added* host
+    /// function is caught, not just a known set. A list of names would go stale
+    /// the moment somebody registered the next interface — which is exactly when
+    /// this matters most, because new host code is where new panics live.
+    ///
+    /// # The one exclusion, and why it is safe
+    ///
+    /// The check reads only the **production** half of each file — everything
+    /// before its `#[cfg(test)]` module. Registration in a test's own linker is
+    /// not a host function the guest can reach; it exists to probe how Wasmtime
+    /// reports a registration, and wrapping it would test the guard rather than
+    /// the thing under test.
+    ///
+    /// Truncating at the test module rather than subtracting a hardcoded number
+    /// is what keeps the check honest: a new unguarded registration in
+    /// *production* code still fails it, and the first version of this test —
+    /// which counted the whole file — reported a mismatch that was really the
+    /// probe.
+    #[test]
+    fn every_host_function_is_panic_guarded() {
+        // Each file that registers host functions. `include_str!` reads the
+        // repository's own source, so the check runs against what is committed.
+        let sources: [(&str, &str); 2] = [
+            ("host_clock.rs", include_str!("host_clock.rs")),
+            ("host_crypto.rs", include_str!("host_crypto.rs")),
+        ];
+
+        for (file, source) in sources {
+            // Production code only: everything before the test module. The
+            // marker is the same `#[cfg(test)]` every module in this crate uses.
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("split always yields at least one element");
+
+            // Whitespace is stripped for the same reason as in
+            // `host_crypto::tests::registers`: a match that depends on how
+            // `rustfmt` breaks a line is testing formatting, not behaviour.
+            let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+
+            let registrations = squeezed.matches("func_wrap(").count();
+            let guards = squeezed.matches("guard::guard(").count();
+
+            assert!(
+                registrations > 0,
+                "{file} registers no host functions in production code; if that is \
+                 true this check should stop including it, and if it is not, the \
+                 check is broken"
+            );
+            assert_eq!(
+                registrations, guards,
+                "{file} registers {registrations} host functions but only {guards} \
+                 are wrapped in `guard`; an unguarded function unwinds through the \
+                 engine on panic, and the release profile sets `panic = \"abort\"`, \
+                 so one guest finding it kills the host process (HOST-011)"
+            );
+        }
+    }
+
     /// A granted capability binds its interface, and one whose interface the
     /// host does not implement is reported as *unimplemented* — a loud,
     /// inspectable gap rather than a silent one.

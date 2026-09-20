@@ -75,12 +75,14 @@ interface http {
   /// cannot be used to escape the allowlist.
   /// A function and a record cannot share a name in one interface, so
   /// the verb is `send` and the noun is `request`.
+  @since(version = 1.0.0)
   send: func(req: request) -> result<response, http-error>;
 
   /// The hostname and port an incoming request arrived on.
   ///
   /// Provided so a guest can adapt to virtual hosts without parsing headers it
   /// has already been given in a trusted form.
+  @since(version = 1.0.0)
   incoming-authority: func() -> tuple<string, u16>;
 }
 
@@ -96,5 +98,6 @@ interface incoming-handler {
   /// bodies that can exceed memory. This interface is the simple case, and
   /// keeping it separate means a guest that does not need streaming does not
   /// have to reason about it.
+  @since(version = 1.0.0)
   handle: func(req: request) -> result<response, http-error>;
 }

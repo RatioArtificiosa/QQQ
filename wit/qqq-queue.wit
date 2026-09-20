@@ -53,12 +53,14 @@ interface messaging {
   ///
   /// `not-granted`, `queue-not-configured`, `message-too-large`, or
   /// `quota-exceeded`.
+  @since(version = 1.0.0)
   publish: func(queue: string, body: list<u8>) -> result<_, queue-error>;
 
   /// Publish many messages in one call.
   ///
   /// Batch-first: a guest flushing a buffer of events should pay one ABI
   /// crossing, and the host can then make one backend round trip.
+  @since(version = 1.0.0)
   publish-many: func(queue: string, bodies: list<list<u8>>) -> result<_, queue-error>;
 
   /// Receive the next delivery, waiting up to `timeout-ms`.
@@ -72,6 +74,7 @@ interface messaging {
   /// Waiting for a message must not block the host's reactor. In WASI 0.3 the
   /// `future`/`stream` types express this natively; a synchronous signature
   /// would force every consumer onto its own thread.
+  @since(version = 1.0.0)
   receive: func(queue: string, timeout-ms: u64) -> result<option<delivery>, queue-error>;
 
   /// Acknowledge a delivery, removing it from the queue.
@@ -79,6 +82,7 @@ interface messaging {
   /// # Errors
   ///
   /// `lease-expired` when the message was already redelivered.
+  @since(version = 1.0.0)
   acknowledge: func(queue: string, id: string) -> result<_, queue-error>;
 
   /// Return a delivery to the queue without acknowledging it.
@@ -86,8 +90,10 @@ interface messaging {
   /// The correct response to "I cannot process this right now" — it makes the
   /// message available to another consumer immediately rather than after a lease
   /// timeout.
+  @since(version = 1.0.0)
   reject: func(queue: string, id: string) -> result<_, queue-error>;
 
   /// The queues and directions the manifest configures.
+  @since(version = 1.0.0)
   queues: func() -> list<tuple<string, string>>;
 }

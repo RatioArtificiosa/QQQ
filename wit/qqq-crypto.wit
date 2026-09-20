@@ -33,6 +33,7 @@ interface random {
   /// `not-granted`, `too-long`, or `source-failed`. A guest that receives
   /// `source-failed` must fail closed: generating predictable "randomness" is
   /// worse than failing.
+  @since(version = 1.0.0)
   get: func(length: u32) -> result<list<u8>, random-error>;
 }
 
@@ -60,6 +61,7 @@ interface hashing {
   }
 
   /// Hash a byte string.
+  @since(version = 1.0.0)
   digest: func(algorithm: algorithm, data: list<u8>) -> result<list<u8>, hash-error>;
 
   /// Hash many byte strings in one call.
@@ -70,6 +72,7 @@ interface hashing {
   /// values in a loop pays that cost once per value; this shape pays it once.
   /// The batch-first rule is a WIT style requirement (Proposal §4.5, `CON-012`)
   /// precisely because chatty interfaces erase the near-native advantage.
+  @since(version = 1.0.0)
   digest-many: func(algorithm: algorithm, inputs: list<list<u8>>) -> result<list<list<u8>>, hash-error>;
 }
 
@@ -90,6 +93,7 @@ interface hmac {
   /// The key is supplied by the guest as bytes here. For a key the guest must
   /// never *see*, use `qqq:secrets` instead — that interface signs without
   /// disclosing the key, which is the correct tool for a long-lived secret.
+  @since(version = 1.0.0)
   compute: func(algorithm: algorithm, key: list<u8>, data: list<u8>) -> result<list<u8>, hmac-error>;
 
   /// Verify a MAC in constant time.
@@ -100,6 +104,7 @@ interface hmac {
   /// mismatch, enabling a timing attack that recovers a valid MAC one byte at a
   /// time. Providing `verify` means the guest does not have to know to write a
   /// constant-time comparison — the platform does it correctly by default.
+  @since(version = 1.0.0)
   verify: func(algorithm: algorithm, key: list<u8>, data: list<u8>, tag: list<u8>) -> result<bool, hmac-error>;
 }
 
@@ -129,15 +134,18 @@ interface aead {
   }
 
   /// The nonce length the construction requires, so a guest does not hardcode it.
+  @since(version = 1.0.0)
   nonce-length: func(construction: construction) -> u32;
 
   /// The key length the construction requires.
+  @since(version = 1.0.0)
   key-length: func(construction: construction) -> u32;
 
   /// Encrypt, optionally binding `associated-data` into the tag.
   ///
   /// `associated-data` is authenticated but not encrypted — the right place for
   /// a message header that must be readable but must not be forgeable.
+  @since(version = 1.0.0)
   encrypt: func(
     construction: construction,
     key: list<u8>,
@@ -152,6 +160,7 @@ interface aead {
   ///
   /// `authentication-failed` when the tag does not verify. No plaintext is
   /// returned in that case.
+  @since(version = 1.0.0)
   decrypt: func(
     construction: construction,
     key: list<u8>,
@@ -183,11 +192,14 @@ interface signing {
   /// Sign a message with a guest-supplied key.
   ///
   /// For a key the guest must never see, use `qqq:secrets` instead.
+  @since(version = 1.0.0)
   sign: func(algorithm: algorithm, key: list<u8>, message: list<u8>) -> result<list<u8>, signature-error>;
 
   /// Verify a signature.
+  @since(version = 1.0.0)
   verify: func(algorithm: algorithm, public-key: list<u8>, message: list<u8>, signature: list<u8>) -> result<bool, signature-error>;
 
   /// Derive the public key corresponding to a private key.
+  @since(version = 1.0.0)
   public-key: func(algorithm: algorithm, key: list<u8>) -> result<list<u8>, signature-error>;
 }

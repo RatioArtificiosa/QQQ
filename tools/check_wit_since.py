@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Enforce the WIT interface-versioning policy — Checklist `CON-007` and `CON-008`.
+
+# The policy
+
+Proposal §2.5 (NN-5, explicit contracts over implicit behaviour) states:
+
+> | Interfaces are versioned | Every WIT package is versioned; `@since` /
+>   `@unstable` annotations are **mandatory**. |
+
+`CON-007` defines the policy; `CON-008` is this check.
+
+# Why a separate check is needed
+
+`tools/check_wit.py` proves each file **parses**. It cannot prove the annotation
+policy is followed, and that was verified rather than assumed: a WIT file with no
+`@since` at all is accepted by `wasm-tools` without complaint —
+
+    $ wasm-tools component wit test2.wit
+    package test:anno2@1.0.0;
+    interface foo { now: func() -> u64; }
+    $ echo $?
+    0
+
+So a parser proves the language, and this proves the *contract*. They are
+different questions and both are required; the same distinction `check_wit.py`
+itself documents about structural tests versus parsers.
+
+# What is checked, and why each rule exists
+
+| Rule | Why |
+|---|---|
+| The file has a `package ... @x.y.z;` line | An unversioned package cannot be depended on precisely; `CON-007` requires SemVer per package |
+| Every **exported function** carries `@since(version = ...)` | This is the machine-checkable half of "contracts are explicit". A caller reading the interface learns which version introduced a function without reading a changelog |
+| Every `@since` version is `<=` the package version | A function introduced in 2.0.0 inside a package claiming 1.0.0 is a contradiction, and it is the kind of copy-paste error that survives review |
+| `@since` appears **before** the item it annotates | WIT gate syntax attaches to the next item. A misplaced annotation silently annotates the wrong thing, which is worse than a missing one because the file still parses |
+
+# What is deliberately NOT required
+
+* **Types and variants.** `CON-007` says "every published WIT function". Types
+  inherit their introducer's version within a package, and annotating all of them
+  would triple the file size for no information a caller needs.
+* **`@unstable`.** The policy admits it as an alternative, but nothing in V1 is
+  marked unstable — everything shipped here is claimed stable, so requiring the
+  choice would be inventing work. If an unstable interface is added, this tool
+  should be extended to accept `@unstable` as satisfying the rule.
+
+Usage:  python tools/check_wit_since.py
+Exit:   0 = policy satisfied, 1 = at least one violation
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+WIT_DIR = ROOT / "wit"
+
+# `package qqq:clock@1.0.0;`
+PACKAGE_RE = re.compile(r"^\s*package\s+([a-z0-9-]+):([a-z0-9-]+)@(\d+)\.(\d+)\.(\d+)\s*;")
+
+# `now: func(...) -> ...;` at any indentation, first token the function name.
+FUNC_RE = re.compile(r"^\s*([a-z][a-z0-9-]*)\s*:\s*(?:async\s+)?func\b")
+
+# `@since(version = 1.0.0)`
+SINCE_RE = re.compile(r"^\s*@since\s*\(\s*version\s*=\s*(\d+)\.(\d+)\.(\d+)\s*\)")
+
+
+def parse_version(text: str) -> tuple[int, int, int]:
+    parts = text.split(".")
+    return (int(parts[0]), int(parts[1]), int(parts[2]))
+
+
+def check_file(path: Path) -> list[str]:
+    """Return a list of human-readable violations for one `.wit` file."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    problems: list[str] = []
+
+    package_version: tuple[int, int, int] | None = None
+    for i, line in enumerate(lines, start=1):
+        m = PACKAGE_RE.match(line)
+        if m:
+            package_version = (int(m.group(3)), int(m.group(4)), int(m.group(5)))
+            break
+
+    if package_version is None:
+        problems.append(
+            "no `package <ns>:<name>@x.y.z;` line found; CON-007 requires every "
+            "WIT package to be versioned"
+        )
+        # Without a package version the per-function check cannot run, because
+        # "since <= package" is unanswerable.
+        return problems
+
+    # The most recent `@since` seen, if it is still "pending" for the next item.
+    pending_since: tuple[tuple[int, int, int], int] | None = None
+    seen_functions = 0
+
+    for i, line in enumerate(lines, start=1):
+        stripped = line.strip()
+
+        # A blank line does not detach an annotation; WIT permits it. A comment
+        # does not either — doc comments sit between `@since` and the item.
+        if not stripped or stripped.startswith("//") or stripped.startswith("///"):
+            continue
+
+        m = SINCE_RE.match(line)
+        if m:
+            pending_since = (parse_version(f"{m.group(1)}.{m.group(2)}.{m.group(3)}"), i)
+            continue
+
+        # Any other gate annotation (`@unstable`, `@deprecated`) also attaches to
+        # the next item, so it must not clear a pending `@since`.
+        if stripped.startswith("@"):
+            continue
+
+        m = FUNC_RE.match(line)
+        if m:
+            seen_functions += 1
+            name = m.group(1)
+            if pending_since is None:
+                problems.append(
+                    f"line {i}: function `{name}` has no `@since(version = ...)`; "
+                    "CON-007 makes the annotation mandatory"
+                )
+            else:
+                since, since_line = pending_since
+                if since > package_version:
+                    problems.append(
+                        f"line {since_line}: `@since` {'.'.join(map(str, since))} is "
+                        f"greater than the package version "
+                        f"{'.'.join(map(str, package_version))}; a function cannot "
+                        "predate its package"
+                    )
+                if since < (1, 0, 0):
+                    problems.append(
+                        f"line {since_line}: `@since` {'.'.join(map(str, since))} is "
+                        "below 1.0.0; nothing shipped before the first release"
+                    )
+            pending_since = None
+            continue
+
+        # Any other structural line ends the "pending" window, so an annotation
+        # separated from its target by a `use` or an `interface` declaration is
+        # reported rather than silently applied to something later. This is the
+        # rule that catches a misplaced annotation, which parses fine.
+        if stripped.startswith(("interface ", "world ", "use ", "type ", "record ",
+                                "variant ", "enum ", "resource ", "flags ", "}",
+                                "package ")):
+            pending_since = None
+
+    if seen_functions == 0:
+        problems.append(
+            "no exported functions found; if that is true this interface should "
+            "not be checked, and if it is not, this checker is broken"
+        )
+
+    return problems
+
+
+def main() -> int:
+    files = sorted(WIT_DIR.glob("*.wit"))
+    if not files:
+        print(f"no .wit files found under {WIT_DIR}")
+        return 1
+
+    total_functions = 0
+    all_problems: list[tuple[str, list[str]]] = []
+
+    for f in files:
+        problems = check_file(f)
+        # Count functions regardless, for an honest summary.
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if FUNC_RE.match(line):
+                total_functions += 1
+        if problems:
+            print(f"  FAIL  {f.name}")
+            for p in problems:
+                print(f"        {p}")
+            all_problems.append((f.name, problems))
+        else:
+            print(f"  OK    {f.name}")
+
+    print(
+        f"\n{len(files) - len(all_problems)}/{len(files)} interface(s) satisfy the "
+        f"versioning policy ({total_functions} exported function(s) checked)"
+    )
+
+    if all_problems:
+        print("\nWIT VERSIONING POLICY FAILED")
+        return 1
+    print("WIT VERSIONING POLICY PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

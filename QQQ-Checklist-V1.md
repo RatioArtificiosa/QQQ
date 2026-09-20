@@ -756,11 +756,45 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.4 The lockfile — `qqq.lock`
 - [ ] **CON-006** Implement reproducible-build verification that fails when output digests are unstable.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **CON-007** Define the interface-versioning policy: SemVer per WIT package, `@since` mandatory.
-  → Partial: WIT packages are semver'd `@1.0.0`; the `@since` policy is not enforced.
-  → Partial: WIT packages are semver'd `@1.0.0`; the `@since` policy is not enforced.
+- [x] **CON-007** Define the interface-versioning policy: SemVer per WIT package, `@since` mandatory.
+  → Done: the policy is stated in `tools/check_wit_since.py`'s header as four
+    rules with the reason for each, and **enforced** rather than described. Every
+    WIT package is SemVer'd in its `package` line, and every exported function
+    carries `@since(version = 1.0.0)` — 73 annotations across 13 interfaces,
+    added by `tools/add_wit_since.py`.
+  → The policy also states what is deliberately **not** required, which is what
+    makes it a policy rather than an aspiration: types and variants inherit their
+    introducer's version within a package, so annotating all of them would triple
+    the file size for no information a caller needs; and `@unstable` is admitted
+    as an alternative but nothing in V1 claims it, so requiring the choice would
+    be inventing work.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-008** Implement the CI check that every published WIT function carries `@since`.
+- [x] **CON-008** Implement the CI check that every published WIT function carries `@since`.
+  → Done: `tools/check_wit_since.py`, wired into CI beside `check_wit.py`.
+  → **A parser is not enough, and that was verified rather than assumed.** A WIT
+    file with no `@since` at all is accepted by `wasm-tools` and exits 0 — so
+    `check_wit.py` proves each file parses while saying nothing about the
+    contract. The two answer different questions and both are required; this is
+    the same distinction `check_wit.py` itself documents about structural tests
+    versus parsers.
+  → The check verifies four things: the package is versioned; every exported
+    function has `@since`; the version is not greater than the package's; and the
+    version is not below 1.0.0.
+  → `tools/fault_inject_wit_since.py` proves it fails for the right reasons with
+    three injections, **all of which leave the file parseable** — including the
+    one that matters most: a `@since` **moved** onto a `use` line, where the
+    annotation silently attaches to the wrong item, so the file is valid WIT with
+    a wrong contract. That case is the whole argument for a policy check existing
+    alongside a parser.
+  → Two findings from writing it, both recorded (`§O-061c`): the "`@since` above
+    the package version" case is **deliberately not injected** because
+    `wasm-tools` already rejects it (`error: feature gate cannot reference
+    unreleased version`), so no parseable file triggers our rule and the harness
+    would report BROKEN rather than DETECTED — the rule stays as defence in depth
+    and the harness says so rather than implying it is exercised. And the first
+    injection of the misplaced case **added** an annotation instead of moving
+    one, so no violation existed and the harness reported a checker defect that
+    was really a harness defect.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-009** Define and enforce the typed-error rule: every fallible host call returns `result<T, E>`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior

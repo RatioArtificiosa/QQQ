@@ -81,17 +81,20 @@ interface inference {
   /// requires the Component Model's `stream` type to be exercised through the
   /// whole host stack first. Shipping the simple form now and the streaming form
   /// once the plumbing is proven is the smaller risk.
+  @since(version = 1.0.0)
   complete: func(messages: list<message>) -> result<completion, inference-error>;
 
   /// The models the manifest permits, in a stable order.
   ///
   /// Discoverable without attempting a call: what a module may do must be
   /// knowable from its contracts (Proposal §2.5).
+  @since(version = 1.0.0)
   allowed-models: func() -> list<string>;
 
   /// The remaining token budget for this instance.
   ///
   /// A guest that knows its budget can choose a shorter response rather than
   /// failing when it runs out mid-request.
+  @since(version = 1.0.0)
   remaining-tokens: func() -> u64;
 }

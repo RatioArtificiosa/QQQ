@@ -49,6 +49,7 @@ interface environment {
   ///
   /// See [`env-error`]. A guest should treat `not-allowed` as a configuration
   /// error and `unset` as a deliberate state to handle.
+  @since(version = 1.0.0)
   get: func(name: string) -> result<string, env-error>;
 
   /// Read a named variable with a caller-supplied fallback.
@@ -57,6 +58,7 @@ interface environment {
   /// to pattern-match on `unset`. Returns the fallback for `unset` only;
   /// `not-allowed` remains an error, because silently substituting a default for
   /// a denied capability would hide a misconfiguration.
+  @since(version = 1.0.0)
   get-or: func(name: string, default: string) -> result<string, env-error>;
 
   /// The names the manifest permits reading.
@@ -67,5 +69,6 @@ interface environment {
   /// developer publishes. What must stay secret is the *values* — and this
   /// function returns only names, so a guest can discover what it may read
   /// without learning anything it was not already entitled to know.
+  @since(version = 1.0.0)
   allowed-names: func() -> list<string>;
 }

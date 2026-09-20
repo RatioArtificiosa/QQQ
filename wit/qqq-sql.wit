@@ -72,12 +72,15 @@ interface database {
   /// efficient path the obvious one.
   resource statement {
     /// Execute and return all rows.
+    @since(version = 1.0.0)
     query: func(args: list<value>) -> result<list<row>, sql-error>;
 
     /// Execute for its effect, returning rows affected.
+    @since(version = 1.0.0)
     execute: func(args: list<value>) -> result<u64, sql-error>;
 
     /// Release the statement.
+    @since(version = 1.0.0)
     close: func();
   }
 
@@ -86,17 +89,20 @@ interface database {
   /// # Errors
   ///
   /// `not-granted`, `database-not-configured`, or `prepare-failed`.
+  @since(version = 1.0.0)
   prepare: func(database: string, sql: string) -> result<statement, sql-error>;
 
   /// Run a one-shot query, preparing implicitly.
   ///
   /// For the common case where a statement is used once; a guest that will reuse
   /// one should call `prepare` instead.
+  @since(version = 1.0.0)
   query-once: func(database: string, sql: string, args: list<value>) -> result<list<row>, sql-error>;
 
   /// The names of databases the manifest configures.
   ///
   /// Discoverable without attempting a query, per Proposal §2.5.
+  @since(version = 1.0.0)
   databases: func() -> list<string>;
 }
 
@@ -111,20 +117,25 @@ interface transaction {
   /// write committed.
   resource txn {
     /// Prepare a statement inside this transaction.
+    @since(version = 1.0.0)
     prepare: func(sql: string) -> result<txn-statement, sql-error>;
 
     /// Commit.
+    @since(version = 1.0.0)
     commit: func() -> result<_, sql-error>;
 
     /// Roll back explicitly.
+    @since(version = 1.0.0)
     rollback: func() -> result<_, sql-error>;
   }
 
   /// A statement bound to a transaction.
   resource txn-statement {
     /// Execute and return rows.
+    @since(version = 1.0.0)
     query: func(args: list<value>) -> result<list<row>, sql-error>;
     /// Execute for its effect.
+    @since(version = 1.0.0)
     execute: func(args: list<value>) -> result<u64, sql-error>;
   }
 
@@ -133,5 +144,6 @@ interface transaction {
   /// # Errors
   ///
   /// `not-granted`, `database-not-configured`, or `pool-exhausted`.
+  @since(version = 1.0.0)
   begin: func(database: string) -> result<txn, sql-error>;
 }

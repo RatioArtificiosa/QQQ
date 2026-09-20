@@ -50,17 +50,20 @@ interface logging {
   }
 
   /// Emit one log record.
+  @since(version = 1.0.0)
   emit: func(level: level, message: string, attributes: list<attribute>) -> result<_, log-error>;
 
   /// Emit many log records in one call.
   ///
   /// Batch-first, per the WIT style guide: a guest logging a batch of parsed
   /// records should not pay one ABI crossing per record.
+  @since(version = 1.0.0)
   emit-many: func(records: list<tuple<level, string, list<attribute>>>) -> result<_, log-error>;
 
   /// Whether records at this level will actually be recorded.
   ///
   /// Lets a guest skip building an expensive message it knows will be dropped.
   /// Without this, "debug logging is off" still costs the guest the formatting.
+  @since(version = 1.0.0)
   enabled: func(level: level) -> bool;
 }

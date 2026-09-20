@@ -5000,6 +5000,103 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-061 — The WIT versioning policy: a parser proves the language, not the contract
+
+**What was built.** `tools/check_wit_since.py` (`CON-007`, `CON-008`),
+`tools/add_wit_since.py` (the one-time migration), and
+`tools/fault_inject_wit_since.py`. **73 `@since` annotations added across 13
+interfaces**, taking the corpus from 0 to 13 conforming.
+
+#### §O-061a — `wasm-tools` accepts a WIT file with no annotations at all
+
+This was verified before writing the checker rather than assumed, and it is the
+entire justification for the checker existing:
+
+```
+$ wasm-tools component wit test2.wit
+package test:anno2@1.0.0;
+interface foo { now: func() -> u64; }
+$ echo $?
+0
+```
+
+So `tools/check_wit.py` — which runs `wasm-tools component wit` on every file —
+proves each file **parses** while saying nothing about whether the annotation
+policy is followed. The measured state before this work was **0 of 13 interfaces
+conforming, 0 annotations across 73 exported functions**.
+
+The distinction is the same one `check_wit.py`'s own docstring makes about
+structural tests versus parsers: *"a structural test checks the shape of your
+model; a parser checks the language."* This adds the third question — **is the
+contract complete?** — which neither of the other two answers.
+
+#### §O-061b — The case that justifies the whole checker: a misplaced annotation still parses
+
+A `@since` gate attaches to the **next item**. Put it on a `use` line instead of
+on the function below, and:
+
+* the file **still parses** — `wasm-tools` accepts it and exits 0;
+* the function is left with **no** annotation;
+* and the annotation now claims something about a `use` declaration.
+
+That is valid WIT with a wrong contract. A parser cannot see it, a structural
+test cannot see it, and a reviewer reading a 78-line file will miss it more often
+than they will catch it. It is exactly the failure mode NN-5 exists to prevent —
+*"nothing important is inferred"* — and it is why the policy check earns its
+place beside the parser rather than duplicating it.
+
+`tools/fault_inject_wit_since.py` injects it by **moving** an annotation off its
+function and onto the `use` line above, and the check catches it.
+
+#### §O-061c — Two harness defects, both of which looked like checker defects
+
+Both were caught by the harness's own honesty checks rather than by reading the
+code, which is the point of building them in.
+
+**First: an injection that added rather than moved.** The misplaced-annotation
+injection inserted a `@since` onto the `use` line while leaving the function's
+own annotation in place. So no violation existed, the checker correctly passed,
+and the harness reported **MISSED** — a *harness* defect presented as a *checker*
+defect. Fixed by moving instead of adding.
+
+**Second: a rule the parser already enforces.** The "`@since` above the package
+version" injection produced:
+
+```
+error: feature gate cannot reference unreleased version 9.9.9 of
+       package [qqq:clock@1.0.0] (current version 1.0.0)
+```
+
+`wasm-tools` rejects it outright, so **no parseable WIT file can trigger that
+checker rule**. The harness reported `BROKEN` — correctly, since the injector's
+contract is that an injection must parse — and the rule is now documented as
+**deliberately not injected**, with the reason, rather than deleted. It costs one
+comparison and its message names the contradiction rather than the parser's, so
+it stays as defence in depth; what must not happen is a future reader believing
+this harness exercises it.
+
+This is the seventh instance of the instrument-reporting-on-itself family
+(`§M-008`, `§O-048c`, `§O-056e`, `§O-058e`, `§O-058f`, `§O-060d`). The pattern
+that keeps working is mechanical: **check that the injected artifact changed,
+parses, and fails for the stated reason** — three cheap assertions that between
+them caught every one of the seven.
+
+#### §O-061d — Why the migration is a script and not 73 hand edits
+
+`tools/add_wit_since.py` inserts each annotation immediately before its function,
+after any doc comment, and is idempotent — it skips a function whose preceding
+line is already `@since`. Hand-editing 73 sites across 13 files would have
+introduced at least one misplacement, and a misplacement is precisely the defect
+`§O-061b` describes as invisible.
+
+The annotations are `1.0.0` for every function because every interface here ships
+in the V1 line and none was released earlier, so "since 1.0.0" is a statement of
+fact rather than a placeholder. A function added in the 1.1 line must say
+`@since(version = 1.1.0)`, and the checker rejects anything above the package
+version or below 1.0.0.
+
+---
+
 ### §O-060 — The naming invariant is now enforced, not just settled
 
 **What was built.** `crates/qqq-core/tests/naming.rs` — 4 tests enforcing `§D-001`,

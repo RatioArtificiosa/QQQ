@@ -29,6 +29,7 @@ interface store {
   /// Returns `none` for a key that does not exist. Absence is not an error:
   /// treating it as one forces every caller to unwrap a "not found" error,
   /// which is how genuinely exceptional failures get swallowed.
+  @since(version = 1.0.0)
   get: func(store: string, key: string) -> result<option<list<u8>>, kv-error>;
 
   /// Write a value, optionally expiring.
@@ -36,15 +37,18 @@ interface store {
   /// `ttl-seconds` of `none` means no expiry. An explicit `none` rather than
   /// `0`-means-forever, because a zero TTL read as "expire immediately" is a
   /// classic and silent bug.
+  @since(version = 1.0.0)
   set: func(store: string, key: string, value: list<u8>, ttl-seconds: option<u64>) -> result<_, kv-error>;
 
   /// Delete a key. Deleting an absent key succeeds.
+  @since(version = 1.0.0)
   delete: func(store: string, key: string) -> result<_, kv-error>;
 
   /// Test for a key's presence without transferring its value.
   ///
   /// Cheaper than `get` for the common "does this exist?" check, and it does not
   /// pull a potentially large value across the ABI.
+  @since(version = 1.0.0)
   exists: func(store: string, key: string) -> result<bool, kv-error>;
 
   /// List keys under a prefix, **sorted**.
@@ -52,14 +56,17 @@ interface store {
   /// Sorted for the same reason directory listing is: unordered iteration is a
   /// source of nondeterminism that would break bit-identical replay
   /// (Proposal §10.5).
+  @since(version = 1.0.0)
   keys: func(store: string, prefix: string, limit: u32) -> result<list<string>, kv-error>;
 
   /// Read several values in one call.
   ///
   /// Batch-first per the WIT style guide: a guest fetching ten keys should pay
   /// one ABI crossing, not ten.
+  @since(version = 1.0.0)
   get-many: func(store: string, keys: list<string>) -> result<list<option<list<u8>>>, kv-error>;
 
   /// The names of stores the manifest configures.
+  @since(version = 1.0.0)
   stores: func() -> list<string>;
 }

@@ -41,12 +41,14 @@ interface wall-clock {
   ///
   /// Returns `not-granted` when `clock.wall` is absent from the effective
   /// grants. A guest should treat that as a configuration error, not retry.
+  @since(version = 1.0.0)
   now: func() -> result<instant-ns, clock-error>;
 
   /// The smallest difference the clock can report.
   ///
   /// A guest that polls faster than this is spinning, not measuring. Provided
   /// so a well-written guest can pace itself without guessing.
+  @since(version = 1.0.0)
   resolution: func() -> duration-ns;
 
   /// The host's configured timezone name, e.g. `UTC`.
@@ -54,6 +56,7 @@ interface wall-clock {
   /// For **formatting only**. A guest computing what a timestamp *means* for a
   /// user must do so explicitly; a host that silently applied a timezone would
   /// make output depend on deployment configuration.
+  @since(version = 1.0.0)
   timezone: func() -> string;
 }
 
@@ -66,8 +69,10 @@ interface monotonic-clock {
   /// Guaranteed non-decreasing across the lifetime of one instance. It has no
   /// defined epoch: only *differences* between two readings are meaningful, and
   /// a guest that treats it as a wall clock is making a mistake.
+  @since(version = 1.0.0)
   now: func() -> duration-ns;
 
   /// The smallest difference the clock can report.
+  @since(version = 1.0.0)
   resolution: func() -> duration-ns;
 }

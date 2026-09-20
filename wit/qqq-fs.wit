@@ -54,6 +54,7 @@ interface filesystem {
     /// `outside-preopen` if `name` contains a `..` component or is absolute.
     /// The host rejects both rather than resolving them, because a guest that
     /// sends either is either buggy or probing.
+    @since(version = 1.0.0)
     open-subdirectory: func(name: string) -> result<directory, fs-error>;
 
     /// Read a file's whole contents.
@@ -62,6 +63,7 @@ interface filesystem {
     ///
     /// `read-only` is not possible here; `not-found`, `wrong-type`,
     /// `quota-exceeded`, or `io-error`.
+    @since(version = 1.0.0)
     read-file: func(name: string) -> result<list<u8>, fs-error>;
 
     /// Write a file's whole contents, creating or truncating it.
@@ -70,6 +72,7 @@ interface filesystem {
     ///
     /// `read-only` when the manifest grants this path read-only, or
     /// `quota-exceeded`.
+    @since(version = 1.0.0)
     write-file: func(name: string, contents: list<u8>) -> result<_, fs-error>;
 
     /// Append to a file, creating it if absent.
@@ -77,6 +80,7 @@ interface filesystem {
     /// The operation an `append-only` grant permits: a guest can add records
     /// but cannot rewrite or delete existing ones, which is the right shape for
     /// an audit log a guest is trusted to write but not to revise.
+    @since(version = 1.0.0)
     append-file: func(name: string, contents: list<u8>) -> result<_, fs-error>;
 
     /// List entries, sorted by name.
@@ -89,12 +93,15 @@ interface filesystem {
     /// guest cannot accidentally depend on filesystem order.
     /// `list` is a WIT keyword, so the operation is named after what
     /// it returns.
+    @since(version = 1.0.0)
     entries: func() -> result<list<string>, fs-error>;
 
     /// Metadata for one entry.
+    @since(version = 1.0.0)
     metadata: func(name: string) -> result<metadata, fs-error>;
 
     /// Delete a file.
+    @since(version = 1.0.0)
     delete-file: func(name: string) -> result<_, fs-error>;
   }
 

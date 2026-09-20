@@ -41,6 +41,7 @@ interface resolver {
   ///
   /// `not-granted`, `name-not-allowed`, `not-found`, `timeout`, or
   /// `resolver-failed`.
+  @since(version = 1.0.0)
   resolve: func(name: string) -> result<list<address>, dns-error>;
 
   /// Resolve several names in one call, returning them in the **same order** as
@@ -49,10 +50,12 @@ interface resolver {
   /// Order preservation is part of the contract, not an implementation detail:
   /// a caller mapping results back to requests by position is relying on it, and
   /// a host that reordered would silently corrupt that mapping.
+  @since(version = 1.0.0)
   resolve-many: func(names: list<string>) -> result<list<result<list<address>, dns-error>>, dns-error>;
 
   /// The names the manifest permits resolving.
   ///
   /// Discoverable without attempting a lookup, per Proposal §2.5.
+  @since(version = 1.0.0)
   allowed-names: func() -> list<string>;
 }

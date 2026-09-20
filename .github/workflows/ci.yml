@@ -224,6 +224,28 @@ jobs:
       - name: Validate every interface with wasm-tools
         run: python tools/check_wit.py
 
+      # `check_wit.py` above proves each file PARSES. It cannot prove the
+      # annotation policy is followed, and that was verified rather than
+      # assumed: `wasm-tools` accepts a WIT file with no `@since` at all and
+      # exits 0. NN-5 in the Proposal makes the annotation mandatory, so the
+      # contract needs its own check -- a parser proves the language, this
+      # proves the contract.
+      - name: Validate the WIT versioning policy (CON-007 / CON-008)
+        run: python tools/check_wit_since.py
+
+      # And prove that check can fail. Three injections, all of which leave the
+      # file PARSEABLE -- including one where a `@since` is moved onto a `use`
+      # line and silently annotates the wrong item. That case is why a parser is
+      # not sufficient, and the harness refuses to count a detection whose input
+      # did not parse.
+      #
+      # Note the deliberate omission: "`@since` above the package version" is
+      # NOT injected, because `wasm-tools` already rejects it and no parseable
+      # file triggers our rule. The checker keeps the rule as defence in depth,
+      # and the harness says so rather than implying it is exercised.
+      - name: Prove the WIT versioning check detects violations
+        run: python tools/fault_inject_wit_since.py
+
   # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.
   # ---------------------------------------------------------------------------

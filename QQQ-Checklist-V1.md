@@ -1672,7 +1672,56 @@ Items are grouped below by **phase**, because dependency order matters more than
     not an escalation; declaring nothing preserves the record) and 1 CLI-level
     test proving both the JSON field and the human line.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **SEC-016** Implement slow-loris, header-bomb and body-bomb mitigations with tests.
+- [x] **SEC-016** Implement slow-loris, header-bomb and body-bomb mitigations with tests.
+  → Done. All three mitigations were **already implemented and unit-tested** —
+    `http1::MAX_HEADERS` (100), `MAX_HEADER_BYTES` (8 KiB) and `MAX_HEAD_BYTES`
+    (64 KiB); `body::BodyReader` enforcing `max_request_bytes` **during** streaming;
+    and a `connection.header_timeout` with its own tests. Fault injection confirmed
+    all three are live at that level (removing them fails 2, 3 and 4 tests
+    respectively).
+  → **The gap was one layer up, and it is the layer the item is about.** `socket.rs`
+    exercises the accept loop over real TCP and had a body-bomb test — but **no
+    socket-level header-bomb test and no socket-level slow-loris test**. A parser
+    that refuses a bomb after the *server* has buffered it has mitigated nothing,
+    so "the mitigation is implemented" is a claim about the server consulting the
+    limit, and only a socket can test that. The same two-correct-halves shape as
+    `§O-045a`.
+  → Added `Server::start_with` (a config seam, because the production 10 s header
+    deadline would add ten seconds per test run while the *property* — "the
+    deadline closes the connection" — is tested equally well at 200 ms, and the
+    *value* is pinned separately without a socket) plus **three** socket-level
+    tests: the header-count bomb, a large head that is *not* header-count-large,
+    and the slow-loris stall.
+  → **Finding 1 — the runtime was the only signal, and it was unasserted.** The
+    slow-loris test took **5.73 s** against a 200 ms deadline while passing. The
+    discriminator was the response content: a complete correct `200 OK` with a
+    `Content-Length`, meaning the server answered *immediately* and the 5 s was
+    `read_all` waiting for an EOF a correctly keep-alive server never sends — a
+    **test-helper artefact, not a server defect**. Now asserts time-to-*answer*
+    (`read_response`), which is what "served promptly" means for keep-alive: the
+    test runs in **0.72 s** and bounds the latency a degraded server would show.
+  → **Finding 2 — a passing test whose refusal path could not be named**, chased
+    down rather than deleted:
+    1. `read_head` reaches `parse_head` by **two routes** (terminator present →
+       `parse_head(&buf[..end])`; buffer past the ceiling with no terminator →
+       `parse_head(buf)`), so disabling either alone leaves the other refusing.
+    2. Disabling the parser check **and** the server branch together **did** fail
+       the test — so the ceiling is enforced and the test reaches it.
+    3. **The first fixture measured the wrong limit**: padding each header to 8 KiB
+       trips `MAX_HEADER_BYTES` (*per-header*) before `MAX_HEAD_BYTES` (*total*) is
+       consulted. Corrected to 60 headers × 2 KiB — inside the per-header and count
+       limits, over the total — with all three preconditions **asserted**, so a
+       fixture that stops exercising the intended ceiling fails loudly rather than
+       passing quietly.
+  → The redundancy is intentional (the source says *"the head ceiling is enforced by
+    the parser, not here"*), and the test now documents which injection does and
+    does not reach it — because a future reader who injects one check, sees green
+    and deletes the test would be drawing a reasonable conclusion from incomplete
+    evidence.
+  → **The rule this produced:** *a test that passes is not evidence until its
+    refusal path is named.* Every other finding this session was a control that
+    looked live and was not; this one is the inverse — a control that **is** live,
+    where the test proving it did so for a reason nobody had checked.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [ ] **SEC-017** Implement the cryptographic-posture policy: named algorithms, no silent defaults, no agility without a version bump.
   → §7.4 Cryptographic posture

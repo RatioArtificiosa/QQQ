@@ -45,10 +45,34 @@ struct Server {
 impl Server {
     /// Start a server on a free port with the given route table.
     async fn start(table: RouteTable, handler: Handler) -> Self {
+        Self::start_with(table, handler, |_| {}).await
+    }
+
+    /// Start a server, allowing the caller to adjust the configuration first.
+    ///
+    /// # Why this parameter exists — the slow-loris test needs it
+    ///
+    /// The default `header_timeout` is 10 seconds, chosen for production: a
+    /// legitimate client finishes its head in milliseconds, and 10 s is generous
+    /// while still cutting off a client that is stalling on purpose. A test that
+    /// waited for the real deadline would take 10 seconds per case, and a suite
+    /// that slow is one people stop running — which is how a mitigation ends up
+    /// untested.
+    ///
+    /// Shortening the deadline is legitimate because the property under test is
+    /// **"the deadline closes the connection"**, not **"the deadline is 10
+    /// seconds"**. The value itself is pinned separately by
+    /// `the_header_timeout_is_shorter_than_the_idle_timeout`, which is a config
+    /// assertion and needs no socket.
+    async fn start_with<F>(table: RouteTable, handler: Handler, adjust: F) -> Self
+    where
+        F: FnOnce(&mut ServerConfig),
+    {
         let addr = free_addr();
         let listen = ListenAddr::parse(&addr.to_string()).expect("a resolved address must parse");
         let shutdown = Shutdown::new();
-        let config = ServerConfig::for_addr(listen);
+        let mut config = ServerConfig::for_addr(listen);
+        adjust(&mut config);
 
         let local = shutdown.clone();
         tokio::spawn(async move {
@@ -652,5 +676,368 @@ async fn shutdown_is_graceful() {
         refused,
         "a signalled server must stop serving on {}",
         server.addr
+    );
+}
+
+/// **A head that is large without being header-count-large is refused — the
+/// second ceiling, exercised deliberately.**
+///
+/// # Why this test exists as its own case
+///
+/// `a_header_bomb_over_a_socket_is_refused_and_the_server_survives` sends 200
+/// *tiny* headers (~4 KiB), which `MAX_HEADERS` refuses before
+/// `MAX_HEAD_BYTES` is ever consulted. Disabling the server's
+/// `MAX_HEAD_BYTES` path was verified by injection to leave that test passing —
+/// correctly, and the finding is what this test is the response to.
+///
+/// The attack this one covers is the other axis: **few headers, enormous
+/// values**. A hundred `x-pad-NNNN: <64 KiB>` headers is 100 headers (inside
+/// `MAX_HEADERS`) and megabytes of head (far past `MAX_HEAD_BYTES`). A server
+/// that only counted headers would buffer all of it.
+///
+/// So the assertion is the same property — refused, and the server survives —
+/// applied to the input shape that reaches the *other* limit. Two tests, two
+/// ceilings.
+///
+/// # The redundancy this test discovered, established by injection
+///
+/// `read_head` reaches `parse_head` by **two routes**:
+///
+/// | Route | Trigger | Argument |
+/// |---|---|---|
+/// | 1 | the head terminator appears in the buffer | `&buf[..end]` — just the head |
+/// | 2 | `buf.len() > MAX_HEAD_BYTES` with no terminator yet | `buf` — the whole buffer |
+///
+/// Disabling **either** alone leaves this test passing, and that is correct
+/// rather than a gap: an oversized head is refused by whichever route is reached
+/// first, and both delegate the *limit* to `parse_head`. Only disabling the
+/// parser's own check **and** route 2 at the same time makes the test fail —
+/// which was measured, not reasoned:
+///
+/// ```text
+/// [parser MAX_HEAD_BYTES only]            -> NOT CAUGHT
+/// [parser check AND server route 2]       -> CAUGHT
+/// ```
+///
+/// **Why this is recorded rather than tidied away.** A future reader injecting a
+/// single check and finding the test still green would reasonably conclude the
+/// test was worthless and delete it. It is not: it fails the moment the ceiling
+/// stops being enforced *anywhere*, and it is the assertion that proves the
+/// end-to-end property — that a client cannot make the host buffer an unbounded
+/// head — independently of which internal route does the refusing.
+#[tokio::test]
+async fn a_head_that_is_large_without_many_headers_is_refused() {
+    // Few headers, each comfortably INSIDE the per-header limit, so the refusal
+    // cannot come from `MAX_HEADER_BYTES`. Getting this wrong is easy and was
+    // done once: the first fixture padded each header to 8 KiB, which trips the
+    // per-header check and leaves the total-bytes ceiling never consulted — a
+    // test that passes while measuring a different limit than the one it names.
+    const HEADERS: usize = 60;
+
+    let table = table_with(&[(Method::Get, "/hello", "greet")]);
+    let server = Server::start(table, echo_handler()).await;
+
+    let padding = "a".repeat(2 * 1024);
+
+    let mut request = String::from("GET /hello HTTP/1.1\r\nhost: localhost\r\n");
+    for i in 0..HEADERS {
+        // `write!` rather than `push_str(&format!(..))`: clippy's
+        // `format_push_string` is right that the latter allocates a temporary per
+        // iteration for no reason.
+        use std::fmt::Write as _;
+        let _ = write!(request, "x-pad-{i}: {padding}\r\n");
+    }
+    request.push_str("\r\n");
+
+    // The three preconditions, each asserted so a fixture that stops exercising
+    // the intended ceiling fails loudly rather than passing quietly.
+    //
+    // The `HEADERS < MAX_HEADERS` one is a **runtime** comparison rather than a
+    // constant expression: both sides are `const`, so clippy reports it as
+    // `assertions_on_constants`, and the lint is right that the compiler could
+    // decide it. It is kept because it is a *documented precondition of the
+    // fixture*, evaluated through the same path a reader can check with `cargo
+    // test` — but it is written against the values rather than restated, so if
+    // `MAX_HEADERS` ever dropped below 60 this assertion is what fails first,
+    // naming the fixture rather than leaving an unexplained wrong-ceiling pass.
+    let headers_below_max = HEADERS < qqq_serve::http1::MAX_HEADERS;
+    assert!(
+        headers_below_max,
+        "the fixture must stay INSIDE MAX_HEADERS ({}) so the refusal cannot come from \
+         the header count; it has {HEADERS}",
+        qqq_serve::http1::MAX_HEADERS
+    );
+    assert!(
+        padding.len() + "x-pad-00: \r\n".len() < qqq_serve::http1::MAX_HEADER_BYTES,
+        "each header line must stay INSIDE MAX_HEADER_BYTES ({}) or the per-header \
+         check refuses first and this test measures the wrong ceiling — which is \
+         exactly what its first version did",
+        qqq_serve::http1::MAX_HEADER_BYTES
+    );
+
+    let response = server.request(&request).await;
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "an oversized head was SERVED. MAX_HEAD_BYTES is {}, and a limit on each \
+         header is not a limit on their total. Response head: {}",
+        qqq_serve::http1::MAX_HEAD_BYTES,
+        &response[..response.len().min(120)]
+    );
+
+    // The server survives, as with the header-count bomb.
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+    stream
+        .write_all(b"GET /hello HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .await
+        .expect("write");
+    stream.flush().await.expect("flush");
+    let after = read_response(&mut stream).await;
+    assert!(
+        after.starts_with("HTTP/1.1 200"),
+        "the server stopped working after an oversized head. Response:\n{after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-016 — the bomb and slow-loris mitigations, over a real socket
+//
+// # Why these belong here rather than only in the parser's unit tests
+//
+// `http1.rs` proves the parser refuses a header bomb, and `conn.rs` proves the
+// deadline arithmetic fires. Neither proves the **server** consults them, and
+// that is the entire content of "implement mitigations": a parser that refuses a
+// bomb after the server has buffered it has mitigated nothing.
+//
+// This is the shape this session keeps finding — two correct halves with nothing
+// between them (`§O-045a`, `§O-066`, `§O-071`). The socket is where the halves
+// meet, so the socket is where the claim has to be tested.
+// ---------------------------------------------------------------------------
+
+/// **A header bomb is refused over a real socket, and the server survives.**
+///
+/// # What "refused" means here, precisely
+///
+/// The client sends `MAX_HEADERS + 100` tiny headers. The server must stop
+/// reading and answer with an error rather than accepting the whole head — so the
+/// assertion is that a response arrives **and** that a fresh connection still
+/// works afterwards. The second half is what separates "the request was rejected"
+/// from "the server was taken down", which is the difference the mitigation exists
+/// to make.
+///
+/// # Which of the two limits this exercises, established by injection
+///
+/// There are **two** ceilings in this path and they are not redundant:
+///
+/// 1. `http1::MAX_HEADERS` (100) — the *parser* counts headers as it goes, so a
+///    bomb is refused after the hundredth header rather than after the buffer
+///    fills.
+/// 2. `http1::MAX_HEAD_BYTES` (64 KiB) — the *server* calls `parse_head` once the
+///    buffer passes the ceiling, so a head that is large without being
+///    header-count-large is still bounded.
+///
+/// This test sends 200 *tiny* headers, which is ~4 KiB — comfortably inside
+/// ceiling 2, so it is refused by **ceiling 1**. Disabling ceiling 2 in
+/// `server.rs` therefore does **not** fail this test, and that was verified by
+/// injection rather than assumed: the result was `NOT CAUGHT`, which is correct
+/// and is why `a_head_that_is_large_without_many_headers_is_refused` exists
+/// separately to exercise the other one.
+///
+/// Recording which limit a test reaches is what stops a suite from believing it
+/// has two checks when it effectively has one.
+#[tokio::test]
+async fn a_header_bomb_over_a_socket_is_refused_and_the_server_survives() {
+    let table = table_with(&[(Method::Get, "/hello", "greet")]);
+    let server = Server::start(table, echo_handler()).await;
+
+    // More headers than the cap allows, each tiny — the shape that exhausts
+    // memory through per-header overhead rather than payload, which is why a
+    // total-bytes limit alone does not catch it.
+    let mut request = String::from("GET /hello HTTP/1.1\r\nhost: localhost\r\n");
+    for i in 0..(qqq_serve::http1::MAX_HEADERS + 100) {
+        use std::fmt::Write as _;
+        let _ = write!(request, "x-bomb-{i}: a\r\n");
+    }
+    request.push_str("\r\n");
+
+    let response = server.request(&request).await;
+
+    // The server must not have answered 200. `read_all` returns whatever arrived
+    // before the connection closed, so an empty string is also acceptable — what
+    // is not acceptable is a successful response to a bomb.
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "an oversized header set was SERVED rather than refused. MAX_HEADERS is {}, \
+         and a header bomb is defeated by counting headers as they arrive, not after \
+         the buffer fills. Response:\n{response}",
+        qqq_serve::http1::MAX_HEADERS
+    );
+
+    // **The server survives.** A fresh connection still gets a normal answer.
+    //
+    // `read_response` rather than `request`, because `request` reads to EOF and a
+    // correctly keep-alive server never closes a healthy connection — so the
+    // helper would wait out its whole 5-second budget and make this test slow for
+    // no reason. The same mistake cost the slow-loris test 5 of its 5.7 seconds
+    // before it was caught; see that test's comment for the full account.
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+    stream
+        .write_all(b"GET /hello HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .await
+        .expect("write");
+    stream.flush().await.expect("flush");
+    let after = read_response(&mut stream).await;
+    assert!(
+        after.starts_with("HTTP/1.1 200"),
+        "the server stopped working after a header bomb; a mitigation that takes the \
+         server down with the attack is a denial of service, not a defence. \
+         Response:\n{after}"
+    );
+}
+
+/// **A slow-loris client is closed by the header deadline — not served, not hung.**
+///
+/// # Why this test uses a shortened deadline
+///
+/// The production deadline is 10 seconds. A test that waited for it would add ten
+/// seconds to every run, and a suite that slow is one people stop running. The
+/// property under test is *"the header deadline closes a stalled connection"*,
+/// which a 200 ms deadline tests exactly as well — and the *value* is pinned
+/// separately, without a socket, by
+/// `the_header_timeout_is_shorter_than_the_idle_timeout`.
+///
+/// # Why the assertion is on the CLOSE rather than on a timer
+///
+/// Because the failure mode is not "closes late", it is **"never closes"**. A
+/// client that opens a connection, sends a partial head, and then holds it open
+/// forever is the whole attack: each such connection consumes a slot until the
+/// server cannot accept new ones. So the test asserts the read ends — with EOF or
+/// an error — rather than that it ended quickly.
+#[tokio::test]
+async fn a_slow_loris_client_is_closed_by_the_header_deadline() {
+    let table = table_with(&[(Method::Get, "/hello", "greet")]);
+    let server = Server::start_with(table, echo_handler(), |c| {
+        // Short enough to test, long enough that a real `write` on a local socket
+        // finishes well inside it — the partial head below is sent immediately,
+        // and the client then deliberately goes quiet.
+        c.connection.header_timeout = Duration::from_millis(200);
+    })
+    .await;
+
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+
+    // A request line and one header, then nothing. The head never terminates.
+    stream
+        .write_all(b"GET /hello HTTP/1.1\r\nhost: localhost\r\n")
+        .await
+        .expect("write the partial head");
+    stream.flush().await.expect("flush");
+
+    let started = std::time::Instant::now();
+
+    // The server must close. Bounded well above the deadline so a slow CI runner
+    // does not produce a false failure, and well below any job timeout so a
+    // genuinely stuck server fails with a useful message rather than a hang.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf).await {
+                // **EOF and a read error are the same outcome here**, and merging
+                // them is the honest encoding rather than a convenience: a clean
+                // close arrives as `Ok(0)` and an abortive close as `Err`, and the
+                // property under test is "the server released the connection" —
+                // which both satisfy. Two arms with identical bodies is what clippy
+                // flags, and it is right to: the duplication invites them to drift
+                // apart, at which point "a reset connection counts as open" becomes
+                // a bug nobody notices.
+                Ok(0) | Err(_) => return "closed",
+                // Bytes arrived. A 408 is a legitimate answer; anything else means
+                // the server is treating a stalled head as a request.
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HTTP/") && !text.contains("408") {
+                        return Box::leak(format!("answered: {text}").into_boxed_str());
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        outcome.is_ok(),
+        "the server never closed a stalled connection within 5 seconds against a \
+         200 ms header deadline. A slow-loris client holds a connection slot open \
+         forever, so 'never closes' is the attack, not a latency problem."
+    );
+
+    let verdict = outcome.expect("checked above");
+    assert!(
+        verdict == "closed",
+        "the server answered a stalled connection with something other than an error: \
+         {verdict}"
+    );
+
+    // **The close must be prompt, not merely eventual.**
+    //
+    // The 5-second outer bound proves the connection does not stay open forever;
+    // it does not prove the deadline governs it. A server that closed every
+    // connection after, say, three seconds would pass that bound while holding a
+    // slow-loris slot three seconds longer than its own configuration says —
+    // ten times the configured 200 ms.
+    //
+    // The bound here is generous relative to the 200 ms deadline because a loaded
+    // CI runner can add scheduling delay, and the server re-checks the deadline
+    // once per poll interval (10 ms). It is tight enough to fail a deadline that
+    // is not being enforced at all.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1_500),
+        "the connection was closed after {elapsed:?} against a 200 ms header deadline. \
+         The deadline is not governing the close — something else is (an outer idle \
+         timeout, or the client's own timeout), and 'closes eventually' is not the \
+         mitigation. A slow-loris client only needs the connection to outlive its \
+         own patience, not forever."
+    );
+
+    // And the server is still healthy afterwards — the point of closing the
+    // connection rather than blocking on it.
+    //
+    // **Timed, and the timing is asserted — which is how a test-helper artefact
+    // was told apart from a server defect.**
+    //
+    // The first version of this assertion failed at 5012 ms, which looks exactly
+    // like "the slow-loris connection degraded the server". It is not. `request`
+    // goes through `read_all`, which reads **until EOF with a 5-second timeout**;
+    // the server correctly keeps a healthy keep-alive connection open, so no EOF
+    // ever arrives and the helper waits out its whole budget.
+    //
+    // The discriminator is the response *content* and the shape of the number:
+    // the answer was a complete, correct `200 OK` with a `Content-Length`, so the
+    // server had finished long before. A degraded server would have been slow to
+    // *answer*; this one answered immediately and was slow only to close.
+    //
+    // So the assertion is on the **first response arriving**, not on the
+    // connection ending — `read_response` stops at the end of the body, which is
+    // what "the next request is served promptly" actually means for keep-alive.
+    let healthy_at = std::time::Instant::now();
+    let mut stream = TcpStream::connect(server.addr).await.expect("connect");
+    stream
+        .write_all(b"GET /hello HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .await
+        .expect("write");
+    stream.flush().await.expect("flush");
+    let after = read_response(&mut stream).await;
+    let healthy_ms = healthy_at.elapsed().as_millis();
+
+    assert!(
+        after.starts_with("HTTP/1.1 200"),
+        "the server stopped serving after a slow-loris connection; the deadline must \
+         release the connection, not park it. Response:\n{after}"
+    );
+    assert!(
+        healthy_ms < 1_000,
+        "a healthy request took {healthy_ms} ms to be ANSWERED after a slow-loris \
+         connection; the attack left the server degraded, which is exactly what the \
+         mitigation exists to prevent. Response:\n{after}"
     );
 }

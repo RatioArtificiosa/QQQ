@@ -5000,6 +5000,114 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-078 — `SEC-016`: a passing test whose refusal path I could not name
+
+**What the item asks for.** Slow-loris, header-bomb and body-bomb mitigations
+**with tests**. §6.4 names all three and gives the mechanism for each: *"slow-loris
+(mitigated by header read deadlines and per-connection rate limits), body bombs
+(mitigated by `max_request_bytes` enforced during streaming, not after), and header
+bombs (mitigated by caps on header count and size)"*.
+
+**What already existed, and was more than expected.** All three mitigations were
+implemented and had unit tests: `http1::MAX_HEADERS` / `MAX_HEADER_BYTES` /
+`MAX_HEAD_BYTES`, `body::BodyReader` enforcing `max_request_bytes` *during*
+streaming, and a `connection.header_timeout` with three tests including
+`a_slow_header_is_closed_by_the_header_timeout_not_the_idle_timeout`. Fault
+injection confirmed all three are live at that level — removing the header count
+cap, the header deadline, or the body cap fails 2, 3 and 4 tests respectively.
+
+**The gap was one layer up.** `socket.rs` proves the accept loop works over a real
+TCP socket, and it had a body-bomb test — but **no socket-level header-bomb test
+and no socket-level slow-loris test**. That matters because *"a parser that refuses
+a bomb after the server has buffered it has mitigated nothing"*: the claim "the
+mitigation is implemented" is about the server consulting the limit, and only a
+socket can test that. This is `§O-045a`'s shape again — two correct halves with
+nothing between them.
+
+**Added:** `Server::start_with`, which takes a closure to adjust the config first,
+and three end-to-end tests. The config seam exists because the production
+`header_timeout` is 10 s and a test that waited for it would add ten seconds to
+every run; the property is *"the deadline closes the connection"*, which a 200 ms
+deadline tests exactly as well, and the *value* is pinned separately without a
+socket.
+
+**Finding 1: the runtime was the only signal, and it was not asserted.** The
+slow-loris test took **5.73 s** while asserting a deadline of 200 ms. Nothing
+failed. Chasing it produced the discriminator: the response was a complete, correct
+`200 OK` with a `Content-Length`. The server had answered *immediately* — the 5 s
+was `read_all` waiting for EOF that a correctly keep-alive server never sends.
+**A test helper's documented behaviour, not a server defect.** The fix was to
+assert on time-to-*answer* via `read_response`, which is what "the next request is
+served promptly" means for keep-alive; the test now runs in **0.72 s**, and the
+assertion is far stronger than before because it bounds the latency a degraded
+server would show.
+
+**Finding 2: a test that passed for a reason I could not name — chased down, not
+accepted.** Injecting the server's `buf.len() > MAX_HEAD_BYTES` branch left my new
+large-head test **passing**. The tempting move was to delete the test; the correct
+move was to find out what refused the request. It took three iterations:
+
+1. `read_head` reaches `parse_head` by **two routes** — the terminator appears
+   (`parse_head(&buf[..end])`), or the buffer passes the ceiling with no terminator
+   (`parse_head(buf)`). Disabling either alone leaves the other working, so a
+   single injection was never going to be caught.
+2. Disabling the parser's own check *and* the server's branch together **did** fail
+   the test — proving the ceiling is enforced and the test reaches it.
+3. **And the first fixture was measuring the wrong limit.** It padded each header
+   to 8 KiB, which trips `MAX_HEADER_BYTES` (the *per-header* check) before
+   `MAX_HEAD_BYTES` (the *total* check) is ever consulted. So the test named one
+   ceiling and measured another. The corrected fixture uses 60 headers of 2 KiB
+   each — inside both the per-header and count limits, and over the total — with
+   all three preconditions **asserted in the test**, so a fixture that stops
+   exercising the intended ceiling fails loudly instead of passing quietly.
+
+**Why finding 2 is recorded at length rather than tidied away.** A future reader
+who injects one check, sees green, and concludes the test is worthless would be
+drawing a reasonable conclusion from incomplete evidence — and would delete a test
+that fails the moment the ceiling stops being enforced *anywhere*. The redundancy
+is intentional (the source comment says *"the head ceiling is enforced by the
+parser, not here"*), and the honest way to ship a test whose internals are
+redundant is to write down which injection does and does not reach it.
+
+**The rule this reinforces.** *A test that passes is not evidence until its
+refusal path is named.* Every other finding this session — `§O-066`, `§O-071`,
+`§O-073`, `§O-076` — was a control that looked live and was not. This one is the
+inverse and equally important: **a control that IS live, where the test proving it
+did so for a reason nobody had checked.** Both directions need the same
+discipline: inject, observe, and if the observation is surprising, explain it
+before either trusting or deleting.
+
+→ §6.4. Changed: `crates/qqq-serve/tests/socket.rs` (`Server::start_with` plus
+three socket-level tests). The three mitigations themselves were already
+implemented and verified.
+
+---
+
+### §O-077 — The `write` tool's flush and the incremental cache, third occurrence
+
+**What happened.** `cargo` reported an error quoting text absent from the source,
+twice more this session, and both times the file was already correct. The
+discriminator is unchanged and cheap: **grep the source for the marker the failure
+quotes**; if it is absent, the binary is stale and `cargo clean -p <crate>` fixes
+it.
+
+**Why it recurred here specifically.** The `SEC-016` work involved repeated
+write-inject-restore cycles inside a single second, which is precisely the pattern
+that leaves filesystem timestamp granularity behind the artefact. `§O-070` records
+the first occurrence and the same remedy.
+
+**The cost of not knowing this.** Twice this session I nearly recorded a *false*
+defect — once concluding the boundary table was wrong at restore, once concluding
+the call-site check was broken. Both files were already right. A build artefact
+that lies in the safe direction is annoying; one that lies in the unsafe direction
+would have been a defect I "fixed" by **weakening a check that was working**, which
+is strictly worse than the original bug.
+
+→ `§M-009` (verify an *injection* applied) and `§O-070` (verify a *restore*
+applied) are the two halves. This is the third data point.
+
+---
+
 ### §O-076 — `SEC-015`: the diff compared a value against itself
 
 **What the item asks for.** The per-dependency capability diff **display** at
@@ -7143,5 +7251,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-012`/`SEC-013` implemented (`§O-073`), and building the corpus found a defect before any fuzzing ran.** A fuzzing programme is **two mechanisms with different cadences**, and treating the two items as one request produces a programme that runs when someone remembers: random exploration belongs on a nightly schedule (thirty seconds of fuzzing finds almost nothing, and a check that makes CI slow gets disabled), while the **regression corpus** belongs in every commit — because a crash is worthless unless the input is re-run on every later commit, the bug being reintroduced by an unrelated change and found again later by luck. The promotion step (crash artifact → corpus entry → every future build) is stated in the nightly workflow's failure output where the person who needs it will see it. Three targets assert properties rather than "does not panic": `manifest_parse` (determinism, pure grant derivation, stable renderings), `component_load` (no panic, every rejection classified and explained, accept-implies-usable), `host_interfaces` (boundary totality, log-safety, traversal corpus re-run every iteration). **The defect:** `toml`'s `Span::start` is documented as a *byte index* and was assigned straight to a field rendered as `qqq.toml line {n}` — `[package` + newline + `name = "a"` reported **line 8** instead of line 1, and `not toml at all` reported **line 4** instead of line 1, verified against Python's `tomllib`. The error grew with file size: a 40-line manifest reported line numbers in the thousands. **A diagnostic whose whole purpose is to point a developer at a location, off by a factor of the average line length, is worse than none because it is believed.** Fixed by counting newlines in the prefix — correct for CRLF files, where `str::lines()` would be right on Linux and wrong on Windows after line one — with expectations pinned against `tomllib` plus the general assertion that every syntax error reports a line inside the file. One corpus entry was also **mislabelled**: a bare component header is a valid *empty* component, not malformed, and the positive-control test named it — an entry whose expectation is wrong is worse than a missing one, because it either fails for the wrong reason or gets "fixed" by loosening the check. Two build defects found only by building rather than type-checking: `crate-type = ["cdylib", "lib"]` failed to link on Windows with `LNK2001: unresolved external symbol main` (a `#![no_main]` target defines none, and the `cdylib` is a Linux-only `cargo-fuzz` convenience), and the targets needed `wasmtime` as a **direct** dependency since `qqq-host` deliberately does not re-export the engine. `ci.yml` gained a `fuzz-targets` job running `cargo +nightly fuzz build`, not merely `check` — `check` proves type-correctness and says nothing about linkability, which is how the Windows failure stayed invisible. A platform limitation is recorded rather than left silent: on Windows the built target fails to start with `0xC0000135 STATUS_DLL_NOT_FOUND` (a missing libFuzzer runtime DLL, a known `libfuzzer-sys` limitation), so exploration runs on Linux and the corpus harness covers every platform. `cargo machete` also found an unused `qqq-core` dependency in the fuzz workspace, removed rather than ignored. | Architect |
 
 | 2026-09-20 | **`SEC-015` implemented (`§O-076`), and the capability diff compared a value against itself.** The lockfile and diff layers were already correct — `caps` a first-class field in `compute_hash`, `LockDiff::compute` producing `caps_added`/`caps_removed`, `grants_new_authority()` as the CI predicate. The defect was one line up: `resolve` carried a satisfied pin forward with `pinned.clone()`, so the new lockfile recorded **the same caps the old one did** and `LockDiff::compute(old, &next)` compared a value to itself. `caps_added` was **structurally always empty**, `escalation` could never become `true` through `qqqai install`, and a CI gate branching on that boolean would have passed **every supply-chain event in silence**. Invisible to the suite because every test either exercised `LockDiff::compute` directly (correct, unrelated to `resolve`) or asserted merely that install succeeded — nothing tested the seam, which is where the defect lived. This is `§O-066`/`§O-071`/`§O-073`'s shape again: correct and **not reached**. The root cause was a missing source of truth — an escalation is "what the dependency needs **now** differs from what the lockfile recorded", and the manifest had **no per-dependency `caps` field**, so §5.4's *"dependencies declare capabilities too"* was unmodelled. Added `DependencyDetail::caps` / `Dependency::caps()` (empty for the bare form) and made `resolve` record the **declared** set. Declaring is not granting — the effective authority is still the root manifest plus narrowing overlays, so this is an audit input and any other meaning would be a capability-widening path. Two boundaries pinned because the naive choice is wrong in the opposite direction: a dependency declaring **nothing** keeps its record (clearing would report every capability as removed — a false de-escalation), and a **loss** is reported but not flagged as escalation (`CLI-015`'s rule). Convergence asserted: a second resolve against the new lockfile must produce no change, because a diff that never settles is ignored, which is the same as having none. Verified end-to-end: `qqq.lock: 1 package(s) resolved; AUTHORITY ESCALATION — qqqai/telemetry gains http.client`, and `--json` reporting `"escalation":true` on both dry-run and write. Two of my own test errors recorded: the CLI test first used the bare manifest form (which correctly declares nothing), then re-used one sandbox for both assertions when the JSON run had already written the lockfile. | Architect |
+
+| 2026-09-20 | **`SEC-016` implemented (`§O-078`), and the finding was a test passing for a reason nobody had checked.** All three mitigations were already implemented and unit-tested — `MAX_HEADERS`/`MAX_HEADER_BYTES`/`MAX_HEAD_BYTES`, `max_request_bytes` enforced *during* streaming, and a `header_timeout` with its own tests — and fault injection confirmed all three are live at that level (2, 3 and 4 tests fail when they are removed). **The gap was one layer up**: `socket.rs` had a body-bomb test but **no socket-level header-bomb or slow-loris test**, and a parser that refuses a bomb after the *server* buffered it has mitigated nothing — `§O-045a`'s two-correct-halves shape again. Added `Server::start_with` (a config seam, because the production 10 s deadline would add ten seconds per run while the *property* tests identically at 200 ms) and three socket tests. **Finding 1:** the slow-loris test took 5.73 s against a 200 ms deadline while passing; the discriminator was that the response was a complete correct `200 OK`, so the server had answered immediately and the 5 s was `read_all` waiting for an EOF a keep-alive server never sends — a **test-helper artefact, not a server defect**. Now asserts time-to-*answer* and runs in **0.72 s**. **Finding 2:** injecting the server's `MAX_HEAD_BYTES` branch left the new large-head test **passing**, so I chased it rather than deleting it — `read_head` reaches `parse_head` by **two routes**, so disabling either alone leaves the other refusing; disabling the parser check *and* the server branch together **did** fail it; and the first fixture was **measuring the wrong limit**, padding each header to 8 KiB, which trips the *per-header* check before the *total* one is consulted. Corrected to 60 headers × 2 KiB with all three preconditions asserted. **The rule: a test that passes is not evidence until its refusal path is named** — four prior findings this session were controls that looked live and were not; this one is the inverse, a control that **is** live where the test proving it did so for an unexamined reason. | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

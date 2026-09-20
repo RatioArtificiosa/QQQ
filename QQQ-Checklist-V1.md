@@ -1559,7 +1559,56 @@ Items are grouped below by **phase**, because dependency order matters more than
     fuzzing log sees both halves of the programme rather than having to trust that
     another job ran.
   → §2.2 NN-2 — Security and Isolation Are Non-Optional
-- [ ] **SEC-014** Establish the Wasmtime advisory-tracking process with a 72-hour patch target (`R-04`).
+- [x] **SEC-014** Establish the Wasmtime advisory-tracking process with a 72-hour patch target (`R-04`).
+  → Done: the process is `docs/wasmtime-advisory-process.md` (7 sections) plus two
+    real mechanisms, because **a process document is worth what its checks are
+    worth**.
+  → **The 72-hour clock is defined exactly**, because ambiguity is how a target
+    becomes unfalsifiable: it starts when a patched upstream release exists (a
+    GitHub Security Advisory **or** a changelog entry, whichever is first) and
+    stops when a QQQ release tag pins it. Time spent waiting for upstream to
+    *write* a patch is **excluded** — not a loophole, but what makes the target
+    meaningful, since QQQ cannot ship a patch nobody has written. What the clock
+    measures is everything between "the patch exists" and "users have it".
+    **Escalation when no patch exists yet:** within 24 h either a mitigation ships
+    or an accept-risk decision is recorded publicly. An advisory with no patch is
+    not a reason to wait quietly.
+  → **Four detection channels, two of them automated**, because a human is asleep a
+    third of the time: `cargo deny` on every commit (required CI step, so an
+    advisory turns the build red on the next push), a **daily unattended scan**
+    (`.github/workflows/advisories.yml`, which opens a labelled issue and reuses it
+    rather than filing a daily duplicate that would bury the signal within a week),
+    the upstream release/SA watch, and direct reports.
+  → **The gap in the automated channel is named rather than implied:** RustSec is a
+    third party, an advisory may take days to reach it, and a CVE in Wasmtime's C++
+    components may not be a Rust advisory at all. A process claiming the automated
+    scan was sufficient would be quietly wrong for exactly the class that matters
+    most. CVE tracking for the transitive C dependencies is recorded as a **known
+    gap**.
+  → **Seven response steps, each with a deadline inside the 72 hours**, so the
+    target is composed rather than asserted. Steps 5 and 6 exist as named steps
+    because they are the two places a Wasmtime upgrade breaks QQQ **without
+    breaking the build**: `ENGINE_VERSION` is pinned alongside the dependency and
+    asserted by a test, and the trap taxonomy maps Wasmtime's error kinds to stable
+    `QQQ-XXXX` codes — an engine that reclassified a trap would leave every
+    downstream dashboard quietly mislabelled, and no compiler notices that.
+  → **A verification table, and completing it found a real gap.** The document's
+    claim that "the engine version cannot drift silently" was **half true**: the
+    existing anti-drift test compares `ENGINE_VERSION` against the workspace
+    manifest's requirement (`"48"`), so it caught a major-line change and permitted
+    any patch. But the AOT cache key is built from `ENGINE_VERSION` and Cranelift's
+    codegen changes between **patch** releases, so a lockfile at `48.0.3` with the
+    constant at `48.0.2` would compute a wrong cache key — yielding native code
+    that is subtly wrong rather than obviously broken. Added
+    `engine_version_matches_the_resolved_lockfile`, which reads the resolved
+    version from `Cargo.lock` (exact package-name match, since many crates begin
+    with `wasmtime`). **Fault-injected at patch level: the old test still passed
+    while the new one failed** — which is the precise measure of the gap it closes.
+    The check was completed rather than the claim softened, because a security
+    process whose stated verification does not exist is the failure mode `§O-066`
+    and `§O-071` both record.
+  → `SECURITY.md` now carries the short version and links to the process, so a
+    reader of the policy meets the mechanism rather than a promise.
   → §15 — Risk Register
 - [ ] **SEC-015** Implement the per-dependency capability diff display at install time.
   → §5.4 The lockfile — `qqq.lock`

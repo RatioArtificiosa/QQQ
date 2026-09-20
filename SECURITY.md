@@ -37,6 +37,36 @@ Stated openly so nobody wastes effort (see `QQQ-Proposal-V1.md` §7.2):
 - **Volumetric denial of service** beyond what rate limiting and autoscaling can absorb.
 - **Bugs in Wasmtime itself.** Report those upstream: <https://github.com/bytecodealliance/wasmtime/security/policy>. Tell us too, and we will ship the patched engine within our 72-hour target.
 
+## Wasmtime advisories: the 72-hour target, and how it is kept
+
+QQQ's sandbox **is** Wasmtime's, so a Wasmtime vulnerability is the one class of
+issue that no amount of QQQ-side correctness can mitigate — a guest that escapes
+the sandbox is out of it regardless of what its manifest granted.
+
+`R-04` in `QQQ-Proposal-V1.md` §15 commits us to shipping the patched engine
+within **72 hours** of a patched upstream release existing. The full process —
+what the clock measures, the four detection channels, the per-step deadlines, and
+exactly which checks verify each claim — is in
+[`docs/wasmtime-advisory-process.md`](docs/wasmtime-advisory-process.md).
+
+The short version:
+
+| | |
+|---|---|
+| **Detected by** | `cargo deny check advisories` on **every commit** (required CI step) **and** a daily unattended scan that opens an issue |
+| **Clock measures** | published patched release → a QQQ release pinning it. Waiting for upstream to *write* a patch is excluded |
+| **No patch yet?** | Within 24 h, either a mitigation ships or an accept-risk decision is recorded publicly. An advisory with no patch is not a reason to wait quietly |
+| **Verified by** | The engine version is pinned in three places that a test forbids from drifting: `[workspace.dependencies]`, `Cargo.lock`, and `qqq-host::config::ENGINE_VERSION` — including patch-level drift, because the AOT cache key depends on it |
+
+### Known gap, stated rather than implied
+
+`cargo deny` consults the **RustSec** database, which is a third party. An advisory
+may take days to reach it, and a CVE in Wasmtime's C++ components (Cranelift, the
+sanitizer runtimes) may not be a Rust advisory at all. The daily scan is therefore
+the fast *automatic* channel and the upstream watch is a *human* channel, and both
+are needed. A process that claimed the automated scan was sufficient would be
+quietly wrong for exactly the class of advisory that matters most.
+
 ## Our commitments
 
 | Severity | Acknowledgement | Assessment | Patch target |

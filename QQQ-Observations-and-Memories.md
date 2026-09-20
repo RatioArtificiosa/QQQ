@@ -5000,6 +5000,114 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-075 — `SEC-014`: a security process is worth what its checks are worth
+
+**What the item asks for.** A Wasmtime advisory-tracking process with a **72-hour
+patch target** (`R-04`). §15 lists the risk as *Medium likelihood, High impact*, and
+it is the one risk in the register with an **external trigger**: every other risk is
+one QQQ chooses how to address, whereas this one arrives as a CVE on somebody else's
+schedule, and the only variable QQQ controls is how fast it ships the fix.
+
+**Why a document is not the deliverable.** `SECURITY.md` already contained the
+sentence *"we will ship the patched engine within our 72-hour target"*. That is a
+promise with no mechanism, and it is unfalsifiable in the ordinary way: nothing in
+the repository would fail if the target were missed. So the work was to make the
+clock, the detection and the response **concrete and checked**.
+
+**Making the clock falsifiable.** Ambiguity is how a target like this stops meaning
+anything, so the process defines three instants: start (the patched upstream release
+appears — GitHub Security Advisory or changelog entry, whichever is first), stop (a
+QQQ release tag pins it), and an explicit **exclusion** for time spent waiting for
+upstream to write the patch at all. The exclusion is not a loophole: QQQ cannot ship
+a patch nobody has written, and what the clock measures is precisely everything
+between "the patch exists" and "users have it" — the part QQQ controls. The
+companion rule closes the obvious abuse: **an advisory with no patch is not a reason
+to wait quietly**; within 24 hours either a mitigation ships or an accept-risk
+decision is recorded publicly.
+
+**Why two of the four detection channels are automated.** Because a human is asleep
+a third of the time, and a target measured in hours cannot rest on attention
+measured in days. `cargo deny` already runs on every commit as a required step, so
+an advisory turns the build red on the next push; the **daily scheduled scan** is
+what covers an idle repository — a weekend, a quiet week — and it **opens a labelled
+issue** rather than merely going red, because a red nightly workflow notifies
+whoever watches the Actions tab, which for a nightly job is nobody, while an issue
+is addressed to a person and stays open until closed. It reuses an existing issue
+instead of filing a daily duplicate, since a duplicate a day buries the signal
+within a week.
+
+**The gap in the automated channel, named rather than implied.** RustSec is a third
+party: an advisory may take days to reach it, and a CVE in Wasmtime's C++
+components (Cranelift, the sanitizer runtimes) may not be a Rust advisory at all. So
+`cargo deny` is the fast automatic channel and the upstream watch is a human one,
+and **both are needed**. A process claiming the automated scan was sufficient would
+be quietly wrong for exactly the class of advisory that matters most. CVE tracking
+for the transitive C dependencies is recorded as a **known gap** rather than left as
+an oversight.
+
+**Completing the verification table found a real gap in the code.** The process
+document claims "the engine version cannot drift silently", and that claim was
+**half true**. The existing anti-drift test compares `ENGINE_VERSION` (48.0.2)
+against the workspace manifest's *requirement* (`"48"`), so it catches a major-line
+change and permits **any patch**. But `aot_cache_key` is built from
+`ENGINE_VERSION`, and Cranelift's codegen changes between patch releases — so a
+lockfile resolving `48.0.3` with the constant at `48.0.2` would compute a cache key
+carrying the wrong engine version, and a `.cwasm` compiled by one patch release
+could be loaded by another. The failure mode is the one the existing test's own doc
+comment names: **native code that is subtly wrong rather than obviously broken**.
+
+`engine_version_matches_the_resolved_lockfile` now reads the resolved version from
+`Cargo.lock` with an **exact** package-name match — many crates begin with
+`wasmtime` (`wasmtime-internal-*`, `-environ`), so a prefix match would read an
+internal crate's version and pass while the engine drifted. Fault-injected at patch
+level: **the old test still passed while the new one failed**, which is the precise
+measure of the gap.
+
+**The rule this produced.** *A security process whose stated verification does not
+exist is the failure mode `§O-066` and `§O-071` both record.* Both were cases where
+a control was believed live and was not — a limit that was installed but advisory,
+and a boundary check that was wired but unreachable. Writing the verification table
+first, then **completing each row until it was true**, is the response: the check
+was fixed rather than the claim softened.
+
+→ §15 Risk Register (`R-04`). New: `docs/wasmtime-advisory-process.md`,
+`.github/workflows/advisories.yml`, `engine_version_matches_the_resolved_lockfile`,
+and a section in `SECURITY.md`.
+
+---
+
+### §O-074 — A CI job that runs `cargo check` and never `cargo build` cannot see a linker failure
+
+**What happened.** The new `fuzz-targets` job in `ci.yml` failed on its **first
+run** with `error: no such command: fuzz` and exit 101 — `cargo-fuzz` was never
+installed in that job. The `cargo +nightly check --all-targets` step above it
+passed, because that is plain cargo.
+
+**Why the gap survived a local build.** Because locally `cargo-fuzz` is on `PATH`
+from an earlier install, so the command worked for the person who wrote it and for
+nobody else. This is the shape `§O-055` records — a check that is only ever run by
+CI, or only ever run by the author — restated because it recurred in a job written
+*specifically* to catch this class of problem.
+
+**Two lessons, one of which the job was built for.**
+1. `check` proves type-correctness and says nothing about **linkability**. The
+   Windows `LNK2001: unresolved external symbol main` failure was invisible to
+   `cargo check` and visible only to `cargo build` — which is why the CI step runs
+   `cargo +nightly fuzz build` rather than `check` alone. A step that stops at
+   `check` while claiming to verify "the targets build" claims more than it measures.
+2. **A new CI job should be expected to fail on its first run**, and that is the
+   cheapest moment to find out. The failure here cost one push; the alternative was
+   finding it at 03:17 in the nightly workflow with an unknown number of unrelated
+   commits in between.
+
+**The tool is pinned with `--locked`.** An unpinned `cargo-fuzz` would be a
+component of the fuzzing programme that changes without a commit, and a failure
+caused by a new upstream release would look like a failure in this repository —
+which is the failure mode a security process can least afford, because it trains
+people to distrust the check rather than the tool.
+
+---
+
 ### §O-073 — `SEC-012`/`SEC-013`: a fuzzing programme is two mechanisms, and only one belongs on the merge path
 
 **What the two items ask for.** `SEC-012` wants a fuzzing programme covering the

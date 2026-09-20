@@ -787,4 +787,76 @@ mod tests {
             "ENGINE_VERSION must be a full major.minor.patch"
         );
     }
+
+    /// **`ENGINE_VERSION` agrees with the version `Cargo.lock` actually resolves.**
+    ///
+    /// # Why the test above is not enough
+    ///
+    /// It compares against the workspace manifest's **requirement** — `"48"` — so
+    /// it catches a major-line change and permits any patch. But the AOT cache key
+    /// is built from `ENGINE_VERSION` (see [`aot_cache_key`]), and Cranelift's
+    /// codegen changes between *patch* releases. So if `Cargo.lock` resolved
+    /// `wasmtime 48.0.3` while the constant still said `48.0.2`, the cache key
+    /// would be computed with the wrong engine version and a `.cwasm` compiled by
+    /// one patch release could be loaded by another — producing **native code that
+    /// is subtly wrong rather than obviously broken**.
+    ///
+    /// # Why this matters specifically to `SEC-014`
+    ///
+    /// `docs/wasmtime-advisory-process.md` names step 5 of an advisory response as
+    /// "regenerate the AOT cache expectations", and its verification table claims
+    /// that "the engine version cannot drift silently". Before this test, that
+    /// claim was **only half true**: a major-line drift failed loudly and a
+    /// patch-level drift was invisible. The process document is written against
+    /// what the checks actually do, so the check had to be completed rather than
+    /// the claim softened — a security process whose stated verification does not
+    /// exist is the failure mode `§O-066` and `§O-071` both record.
+    ///
+    /// # Why it reads `Cargo.lock` rather than asking the crate
+    ///
+    /// Because `wasmtime` does not re-export its own version, and the resolved
+    /// version in the lockfile is precisely the value that determines which
+    /// compiled artifact a deployment gets. Reading the source of truth beats
+    /// asking a proxy for it.
+    #[test]
+    fn engine_version_matches_the_resolved_lockfile() {
+        let lock = include_str!("../../../Cargo.lock");
+
+        // Find the `[[package]] name = "wasmtime"` block and read its `version`.
+        // The lockfile lists crates in name order, and there are many packages
+        // whose names *begin* with `wasmtime` (`wasmtime-internal-*`, `-environ`,
+        // …), so the match is on the exact quoted name rather than a prefix —
+        // unlike the anti-drift test above, a prefix match here would read the
+        // version of an internal crate and pass while the engine drifted.
+        let mut lines = lock.lines();
+        let mut resolved: Option<&str> = None;
+        while let Some(line) = lines.next() {
+            if line.trim() == "name = \"wasmtime\"" {
+                // The `version` key follows within the same `[[package]]` block.
+                for _ in 0..6 {
+                    let Some(next) = lines.next() else { break };
+                    if next.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = next.trim().strip_prefix("version = ") {
+                        resolved = Some(v.trim_matches('"'));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        let resolved =
+            resolved.expect("Cargo.lock must contain a resolved `wasmtime` package version");
+
+        assert_eq!(
+            resolved, ENGINE_VERSION,
+            "ENGINE_VERSION ({ENGINE_VERSION}) disagrees with the version Cargo.lock \
+             resolves ({resolved}). The AOT cache key is built from ENGINE_VERSION, so a \
+             patch-level drift means a `.cwasm` compiled by one release can be loaded by \
+             another and produce native code that is subtly wrong rather than obviously \
+             broken. Update the constant and the lockfile together."
+        );
+    }
 }

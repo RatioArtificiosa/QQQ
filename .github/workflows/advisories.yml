@@ -1,0 +1,166 @@
+name: Advisories
+
+# Implements: SEC-014, R-04
+# Proposal:  §15 — Risk Register
+#            §2.2 NN-2 — Security and Isolation Are Non-Optional
+#
+# # Why this is a separate workflow, and why it must be scheduled
+#
+# `ci.yml` already runs `cargo deny check advisories` on every push and pull
+# request. That catches an advisory the moment somebody commits -- which is not
+# the moment the advisory is *published*. A dependency advisory arrives while the
+# repository is idle, and on a weekend it could sit unnoticed until the next
+# working commit.
+#
+# `docs/wasmtime-advisory-process.md` commits QQQ to a **72-hour** patch target
+# for Wasmtime advisories (`R-04`). A target measured in hours cannot depend on a
+# human noticing on a schedule measured in days, so the detection half must run
+# unattended. This workflow is that half.
+#
+# The process document names four channels and states that the first two are
+# automated "because a human is asleep a third of the time". This is one of them;
+# the other is the push-triggered check in `ci.yml`.
+
+on:
+  schedule:
+    # 06:41 UTC daily. An odd minute: round hours are when every other scheduled
+    # job on GitHub starts, and runner contention turns a fast job into a slow one
+    # for no reason. The time is otherwise arbitrary -- what matters is that it is
+    # daily and unattended.
+    - cron: '41 6 * * *'
+  # Also on demand, so a maintainer who has just seen an upstream advisory can
+  # check the repository's exposure without waiting for the next run.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisories:
+    name: Advisory scan
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to open an issue when the scan fails. Without this the job fails
+      # with a permissions error and reports nothing -- which is worse than not
+      # running, because it looks like it ran.
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Scan for advisories
+        # Two separate invocations with different consequences, so a failure can
+        # be attributed. `advisories` is the security signal; `licenses` and
+        # `bans` are policy and cannot change overnight, so running them here
+        # would only add noise to a security job's failure.
+        id: scan
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # `--deny` on the advisory check is explicit rather than inherited: the
+          # policy belongs in the workflow that reports it, so a change to
+          # `deny.toml`'s severity settings cannot silently disable this job.
+          cargo deny check advisories 2>&1 | tee scan.txt
+          exit "${PIPESTATUS[0]}"
+
+      - name: Report a clean scan
+        if: steps.scan.outcome == 'success'
+        run: |
+          echo "No advisories. Nothing to do."
+          echo "The 72-hour clock (R-04) is not running."
+
+      - name: Open an issue when the scan finds an advisory
+        # The issue is the deliverable, not the failure. A red scheduled workflow
+        # notifies whoever watches the repository's Actions tab -- which, for a
+        # nightly job, is nobody. An issue is addressed to a person and stays
+        # open until it is closed, which is what a 72-hour clock needs.
+        if: steps.scan.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = 'The scan produced no output.';
+            try {
+              report = fs.readFileSync('scan.txt', 'utf8').slice(0, 60000);
+            } catch (e) {
+              report = `Could not read the scan output: ${e}`;
+            }
+
+            const title = 'Advisory detected by the daily scan (R-04, 72-hour target)';
+
+            // Reuse an open issue rather than filing a duplicate every day. A
+            // daily duplicate would bury the signal within a week, and the point
+            // of this job is that the signal stays visible.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security',
+              per_page: 100,
+            });
+            const already = existing.data.find(i => i.title === title);
+            if (already) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: already.number,
+                body: `The daily scan still reports an advisory.\n\n\`\`\`\n${report}\n\`\`\``,
+              });
+              core.notice(`Commented on the existing issue #${already.number}.`);
+              return;
+            }
+
+            const body = [
+              'The scheduled advisory scan failed. This is the automated half of',
+              '`SEC-014` / `R-04`, whose process is `docs/wasmtime-advisory-process.md`.',
+              '',
+              '**What to do, in order:**',
+              '',
+              '1. **Triage within 4 h.** Is QQQ affected? Which `wasmtime` versions, and',
+              '   which of the features QQQ enables (`wasm_component_model`, `consume_fuel`,',
+              '   `epoch_interruption`, `wasm_multi_memory`, the pooling allocator)?',
+              '2. **Assess exploitability under QQQ\'s configuration within 8 h.** An',
+              '   advisory requiring a feature QQQ does not enable is not exploitable here,',
+              '   and saying so precisely is more useful than an alarm.',
+              '3. If **not affected**: publish the analysis and close this issue. The clock',
+              '   stops with a documented negative, which is a real outcome.',
+              '4. If **affected**: bump `wasmtime` in `[workspace.dependencies]`, then run',
+              '   the full gate set. Steps 5 and 6 of the process document are the two that',
+              '   break the build *without* breaking it -- `ENGINE_VERSION` in',
+              '   `crates/qqq-host/src/config.rs` is pinned and asserted, and the trap',
+              '   taxonomy may have shifted -- so do not skip them.',
+              '5. **Release within 72 h** of the patched upstream release existing.',
+              '',
+              '**If no patched release exists yet**, the clock excludes the wait -- but',
+              'within 24 h either a mitigation must ship or an accepted-risk decision must',
+              'be recorded. An advisory with no patch is not a reason to wait quietly.',
+              '',
+              '---',
+              '',
+              '```',
+              report,
+              '```',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security'],
+            });
+            core.notice('Opened an advisory issue.');
+
+      - name: Fail the job when an advisory was found
+        # After the issue is filed, so the notification and the record both exist.
+        # A job that only opened an issue would report success, and success is the
+        # wrong summary for an advisory.
+        if: steps.scan.outcome == 'failure'
+        run: |
+          echo "::error::The advisory scan found something. See the issue filed above."
+          exit 1

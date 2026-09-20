@@ -1249,15 +1249,77 @@ Items are grouped below by **phase**, because dependency order matters more than
     guest that merely *spins* would trap on fuel and let an absent limiter pass —
     which is exactly what the first version of this fixture did.
   → §7.2 Adversary model
-- [ ] **SEC-006** Implement fuel-limit enforcement and prove the host survives fuel exhaustion.
+- [x] **SEC-006** Implement fuel-limit enforcement and prove the host survives fuel exhaustion.
+  → Done: `store.set_fuel(limits.fuel)`, set **before instantiation** so a
+    component whose `start` function runs long cannot escape metering. The proof
+    is `fuel_exhaustion_traps_the_guest_and_the_host_survives` (trap classified
+    `FuelExhausted`, `QQQ-3002`, not retryable, context carries fuel consumed, and
+    a fresh instance on the same engine still runs) plus **40 fuel cases** in the
+    hostile-guest suite across twenty budgets.
+  → Twenty budgets rather than one, because the property is that **the
+    classification does not depend on how much fuel was missing** — a table with a
+    single budget would test one number and call it enforcement.
   → §7.2 Adversary model
-- [ ] **SEC-007** Implement epoch-deadline enforcement and prove the host survives a non-terminating guest.
+- [x] **SEC-007** Implement epoch-deadline enforcement and prove the host survives a non-terminating guest.
+  → Done: enforcement is `store.set_epoch_deadline(1)` with a host ticker, already
+    implemented and proven by `an_epoch_expiry_traps_on_the_synchronous_path` —
+    which drives a real ticker thread and asserts the trap is
+    `EpochDeadlineExceeded` rather than fuel.
+  → **The second half was missing and is what this item adds.** That test asserted
+    the *code* but not that the host survived, so "the guest was stopped" was
+    proven and "the host still works" was assumed. It now builds a fresh instance
+    on the **same engine** and runs a benign component to completion afterwards.
+    This is the case where a host is most likely to be left broken, because the
+    interruption comes from **outside** the guest's control flow — it did not trap
+    itself, it was cut off mid-instruction-sequence.
+  → The hostile-guest suite covers non-termination separately with a huge fuel
+    budget, and accepts either `FuelExhausted` or `EpochDeadlineExceeded` there
+    deliberately: fuel is precise accounting and the epoch is a wall-clock
+    backstop, and which fires first depends on the measured burn rate rather than
+    on a property under test. Asserting one *there* would make the test depend on
+    a timing measurement.
   → §7.2 Adversary model
 - [ ] **SEC-008** Implement handle-count limits and prove the host survives handle exhaustion attempts.
   → §7.2 Adversary model
 - [ ] **SEC-009** Implement subrequest limits to prevent guest-driven request amplification.
   → §7.2 Adversary model
-- [ ] **SEC-010** Implement path-traversal defences at the capability boundary, with a test corpus.
+- [x] **SEC-010** Implement path-traversal defences at the capability boundary, with a test corpus.
+  → Done: **and building the corpus found a real vulnerability.** `path_is_within`
+    — the containment check `fs_allows` uses as its defence-in-depth re-check —
+    was a pure string-prefix test whose doc said *"Operates on already-canonicalized
+    absolute paths"*. Measured, it returned **`true`** for every traversal:
+    | Input (root `/var/lib/orders`) | Before |
+    |---|---|
+    | `/var/lib/orders/../../../etc/passwd` | **`true`** |
+    | `/var/lib/orders/../secrets` | **`true`** |
+    | `/var/lib/orders/..` | **`true`** |
+    | `/var/lib/orders/a/../../b` | **`true`** |
+  → It is a string-prefix check, so it sees `/var/lib/orders/…` and stops. Any
+    caller that forgot to canonicalize — or canonicalized a path that **does not
+    exist yet**, where `std::fs::canonicalize` fails — would have a traversal pass
+    a defence-in-depth check. **A defence that passes the attack it exists to stop
+    is worse than none**: it looks like protection, so nobody adds the real one.
+  → The check is now self-contained: it splits into components, **refuses any path
+    containing `..`**, and compares component-by-component with `.` skipped. It
+    refuses rather than resolving because resolving `..` lexically is subtly wrong
+    — `/a/b/..` is `/a` only if `b` is a directory and not a symlink, and the
+    function has no filesystem to ask. A non-canonical input is a caller bug worth
+    surfacing, not something to guess at.
+  → **What it still does not defend against, stated in the doc rather than
+    implied: symlinks.** `/data/link` may point outside `/data`, and a
+    non-canonical path gives no way to tell. Symlink safety comes from the
+    *preopen handle* — the guest holds a handle to a directory and WASI resolves
+    within it — which is the primary enforcement; this remains the re-check for a
+    mis-built preopen table.
+  → The corpus is a **table**, so adding a case is one line and the count is
+    visible: a traversal corpus of two examples is an anecdote. It includes
+    `..` escapes, traversals that land *back inside* (still refused, and the test
+    says why), and backslash-separated variants on a POSIX path. Plus two controls
+    the one-sided version could not have: `legitimate_paths_are_still_admitted_after_the_traversal_fix`,
+    without which a check returning `false` for everything would satisfy every
+    attack assertion while making every filesystem grant useless; and
+    `the_prefix_implementation_would_have_admitted_these`, so reverting to a prefix
+    match breaks **two** tests rather than one.
   → §7.2 Adversary model
 - [ ] **SEC-011** Implement input validation at every guest-to-host boundary crossing.
   → §2.2 NN-2 — Security and Isolation Are Non-Optional

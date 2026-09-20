@@ -770,9 +770,50 @@ fn normalize_secrets(
 }
 
 /// Whether `candidate` is `root` or lies beneath it.
-/// Operates on already-canonicalized absolute paths. Comparison is
-/// component-wise rather than a raw prefix match, so `/var/lib/orders-evil` is
-/// **not** considered inside `/var/lib/orders` — the classic prefix bug.
+///
+/// Comparison is component-wise rather than a raw prefix match, so
+/// `/var/lib/orders-evil` is **not** considered inside `/var/lib/orders` — the
+/// classic prefix bug.
+///
+/// # Traversal is rejected here, not assumed away
+///
+/// This function used to document *"Operates on already-canonicalized absolute
+/// paths"* and rely on the caller. **That was a security defect, and the test
+/// corpus in `SEC-010` is what found it.** Measured, before the fix:
+///
+/// | Input | `path_is_within` |
+/// |---|---|
+/// | `/var/lib/orders/../../../etc/passwd` | **`true`** |
+/// | `/var/lib/orders/../secrets` | **`true`** |
+/// | `/var/lib/orders/..` | **`true`** |
+/// | `/var/lib/orders/a/../../b` | **`true`** |
+///
+/// A pure string-prefix check sees `/var/lib/orders/…` and stops. So a caller
+/// that forgot to canonicalize — or canonicalized a path that does not exist yet,
+/// where `std::fs::canonicalize` fails — would have a traversal **pass a
+/// defence-in-depth check**. A defence that passes the attack it exists to stop is
+/// worse than none: it looks like protection, so nobody adds the real one.
+///
+/// The check is now self-contained. It splits both paths into components and
+/// refuses any candidate containing a `..` component, then compares
+/// component-by-component with `.` skipped.
+///
+/// # Why refusing `..` rather than resolving it
+///
+/// Resolving `..` lexically is subtly wrong — `/a/b/..` is `/a` only if `b` is a
+/// directory and not a symlink, and the function has no filesystem to ask. Since
+/// the caller is *required* to pass a canonical path (which has no `..` at all by
+/// construction), refusing is both correct and the stricter direction: a
+/// non-canonical input is a caller bug worth surfacing, not something to guess at.
+///
+/// # What this does NOT defend against
+///
+/// **Symlinks.** A canonicalized path has them resolved already, but a
+/// non-canonical one does not, and this function cannot tell:
+/// `/data/link` may point outside `/data`. Symlink safety comes from the
+/// *preopen handle* — the guest holds a handle to a directory, and WASI resolves
+/// within it — which is the primary enforcement; this remains the
+/// defence-in-depth re-check for a mis-built preopen table.
 #[must_use]
 pub fn path_is_within(candidate: &str, root: &str) -> bool {
     if candidate == root {
@@ -781,16 +822,36 @@ pub fn path_is_within(candidate: &str, root: &str) -> bool {
     // Normalize separators so Windows `\` and POSIX `/` both work.
     let c = candidate.replace('\\', "/");
     let r = root.replace('\\', "/");
-    let r_trimmed = r.trim_end_matches('/');
-    if r_trimmed.is_empty() {
+
+    // Split into components, dropping empty segments (so `//a` and `/a` agree)
+    // and `.` (which is not a traversal but is also not a component).
+    let components = |s: &str| -> Vec<String> {
+        s.split('/')
+            .filter(|seg| !seg.is_empty() && *seg != ".")
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let cand = components(&c);
+    let root_parts = components(&r);
+
+    // **Refuse any traversal outright.** See the doc comment: the caller is
+    // required to pass a canonical path, and one containing `..` is not one.
+    if cand.iter().any(|seg| seg == "..") || root_parts.iter().any(|seg| seg == "..") {
         return false;
     }
-    if !c.starts_with(r_trimmed) {
+
+    if root_parts.is_empty() {
         return false;
     }
-    // The character immediately after the root must be a separator, otherwise
-    // this is a sibling with a shared prefix.
-    c.as_bytes().get(r_trimmed.len()) == Some(&b'/')
+    // A candidate shorter than the root cannot be beneath it.
+    if cand.len() < root_parts.len() {
+        return false;
+    }
+
+    // Component-wise prefix: every root component must match, in order. This is
+    // what makes `/var/lib/orders-evil` fail — `orders-evil` != `orders`.
+    cand[..root_parts.len()] == root_parts[..]
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +1038,110 @@ mod tests {
         assert!(!path_is_within("/etc", "/var/lib"));
         // Trailing slash on the root must not double-count.
         assert!(path_is_within("/var/lib/orders/x", "/var/lib/orders/"));
+    }
+
+    /// **`SEC-010`: the traversal corpus.** Every entry is an attack, and every
+    /// one of them was **accepted** before the fix.
+    ///
+    /// # Why this test is the one that matters
+    ///
+    /// The old implementation was a string-prefix check whose doc said it
+    /// "operates on already-canonicalized absolute paths" — a precondition
+    /// asserted only in prose. Measured, it returned `true` for all four of the
+    /// first entries below. A defence-in-depth check that passes the attack it
+    /// exists to stop is worse than no check, because it *looks* like protection
+    /// and nobody adds the real one.
+    ///
+    /// The corpus is a **table** so that adding a case is one line, and so the
+    /// count is visible: a traversal corpus of two examples is an anecdote.
+    #[test]
+    fn path_traversal_is_rejected() {
+        // Every one of these must be refused when the root is `/var/lib/orders`.
+        let attacks = [
+            // -- classic `..` escapes ----------------------------------------
+            "/var/lib/orders/../../../etc/passwd",
+            "/var/lib/orders/../secrets",
+            "/var/lib/orders/..",
+            "/var/lib/orders/a/../../b",
+            "/var/lib/orders/./../../etc/shadow",
+            "/var/lib/orders/a/b/../../../..",
+            // -- traversal that lands back inside (still refused) ------------
+            //
+            // `/var/lib/orders/a/../b` is *lexically* inside the root, so a
+            // resolver would admit it. This check refuses it anyway, and that is
+            // deliberate: the caller is required to pass a canonical path, and a
+            // path containing `..` is not one. Accepting it would mean resolving
+            // symlinks lexically, which cannot be done correctly without a
+            // filesystem.
+            "/var/lib/orders/a/../b",
+            "/var/lib/orders/../orders/x",
+            // -- separator variants ------------------------------------------
+            //
+            // A backslash-separated traversal on a POSIX path. The separator
+            // normalization at the top turns `\` into `/`, so this becomes a
+            // `..` component and is refused by the same rule.
+            "/var/lib/orders/..\\..\\etc\\passwd",
+        ];
+        for attack in attacks {
+            assert!(
+                !path_is_within(attack, "/var/lib/orders"),
+                "`{attack}` must NOT be considered inside `/var/lib/orders`; a \
+                 containment check that admits a traversal is a security defect, \
+                 not a convenience (SEC-010)"
+            );
+        }
+
+        // A root that is itself relative or traversing is refused as well, since
+        // a grant whose root contains `..` is a manifest bug.
+        assert!(!path_is_within("/var/lib/orders/x", "/var/lib/../../../"));
+        assert!(!path_is_within("/var/lib/orders/x", "../orders"));
+    }
+
+    /// The control for the corpus above: legitimate paths must still be admitted.
+    ///
+    /// Without it, a `path_is_within` that returned `false` for everything would
+    /// satisfy every traversal assertion while making every filesystem grant
+    /// useless — the failure mode a one-sided test cannot see.
+    #[test]
+    fn legitimate_paths_are_still_admitted_after_the_traversal_fix() {
+        for good in [
+            "/var/lib/orders",
+            "/var/lib/orders/",
+            "/var/lib/orders/a",
+            "/var/lib/orders/a/b/c.txt",
+            "/var/lib/orders//double//slash",
+            "/var/lib/orders/./a",
+        ] {
+            assert!(
+                path_is_within(good, "/var/lib/orders"),
+                "`{good}` IS inside `/var/lib/orders` and must be admitted"
+            );
+        }
+    }
+
+    /// **The regression, without the fix.** The four input classes that the old
+    /// prefix check accepted, asserted individually so a future simplification
+    /// back to a prefix match fails *here* with a message that names the cause.
+    #[test]
+    fn the_prefix_implementation_would_have_admitted_these() {
+        // The property that distinguishes the two implementations: a prefix
+        // check is satisfied by a string that *starts with* the root and then
+        // diverges through `..`. Any implementation must look at components.
+        let must_fail = [
+            "/var/lib/orders/../../../etc/passwd",
+            "/var/lib/orders/../secrets",
+            "/var/lib/orders/..",
+            "/var/lib/orders/a/../../b",
+        ];
+        for p in must_fail {
+            assert!(
+                !path_is_within(p, "/var/lib/orders"),
+                "`{p}` starts with the root as a STRING, which is exactly what the \
+                 old prefix implementation tested. It must fail here as well as in \
+                 `path_traversal_is_rejected`, so that reverting to a prefix check \
+                 breaks two tests rather than one."
+            );
+        }
     }
 
     #[test]

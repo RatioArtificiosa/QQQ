@@ -1708,6 +1708,30 @@ mod tests {
              are not measuring the entry point. Message: {err}",
             err.code
         );
+
+        // **`SEC-007`'s second half: the host survives.**
+        //
+        // A guest stopped by wall-clock preemption is the case where a host is
+        // most likely to be left in a bad state, because the interruption came
+        // from *outside* the guest's control flow — it did not trap itself, it was
+        // cut off mid-instruction-sequence. Asserting only the code would leave
+        // "the guest was stopped" proven and "the host still works" assumed.
+        //
+        // The same engine, a fresh instance, a benign component run to
+        // completion. This is the assertion `SEC-007` actually asks for.
+        let ok = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let after = Instance::create(&engine, &ok, &none(), limits())
+            .expect("the host must still instantiate after a preempted guest");
+        let value = after
+            .run(|store, instance| {
+                let f = instance.get_typed_func::<(), (u32,)>(&mut *store, "f")?;
+                f.call(&mut *store, ())
+            })
+            .expect("the host must still run components after a preempted guest");
+        assert_eq!(
+            value.0, 7,
+            "the host survived a guest cut off by wall-clock preemption"
+        );
     }
 
     /// A poisoned instance refuses to run on the async path too.

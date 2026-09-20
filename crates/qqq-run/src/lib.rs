@@ -38,6 +38,7 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+pub mod watch;
 
 pub use build::{
     plan, plan_pure, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact,
@@ -61,4 +62,8 @@ pub use scaffold::{
     crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,
     Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,
     WrittenFile,
+};
+pub use watch::{
+    Change, Debouncer, FileFingerprint, IgnoreRules, Snapshot, DEFAULT_DEBOUNCE,
+    DEFAULT_POLL_INTERVAL,
 };

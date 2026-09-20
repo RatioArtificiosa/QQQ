@@ -683,7 +683,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.1 NN-1 — AI Agents Are First-Class Users
 - [x] **CLI-003** Implement `qqqai new`.
   → §5.2 The command surface
-- [ ] **CLI-004** Implement `qqqai init`.
+- [x] **CLI-004** Implement `qqqai init`.
   → §5.2 The command surface
 - [ ] **CLI-005** Implement `qqqai add` and `qqqai remove`.
   → §5.2 The command surface

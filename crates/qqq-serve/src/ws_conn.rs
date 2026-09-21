@@ -38,6 +38,8 @@ use tokio::net::TcpStream;
 
 use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::http1::{RequestHead, Version};
+use qqq_io::listener::Shutdown;
+
 use crate::ws::{self, Handshake};
 use crate::ws_frame::{self, Frame, Opcode};
 use crate::ws_message::{Assembler, Message, Progress};
@@ -190,6 +192,18 @@ pub struct WsContext<'a> {
     pub trace: u64,
     /// The per-connection span.
     pub span: u64,
+    /// The accept loop's shutdown signal.
+    ///
+    /// An upgraded connection must still observe this. A WebSocket that ignored it would
+    /// keep the process alive past `Shutdown::signal()` -- and since a WebSocket has no
+    /// natural end, a single idle client would make a graceful restart **hang forever**,
+    /// which in production is a deploy that never completes.
+    pub shutdown: &'a Shutdown,
+    /// How long the connection may be idle before the server closes it.
+    ///
+    /// `None` means no idle limit, which is what a WebSocket expecting heartbeats wants:
+    /// the peer sends a ping on its own schedule and the server answers it.
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 /// Perform the handshake and, if it succeeds, run the connection until either side closes.
@@ -204,6 +218,7 @@ pub async fn serve_websocket(
     head: &RequestHead,
     handler: &dyn WebSocketHandler,
     protocol: Option<&str>,
+    prefix: Vec<u8>,
     ctx: &WsContext<'_>,
 ) -> WsOutcome {
     // --- The handshake ---------------------------------------------------
@@ -231,7 +246,12 @@ pub async fn serve_websocket(
     }
 
     // --- The frame loop --------------------------------------------------
-    let outcome = run_frames(stream, handler).await;
+    //
+    // `prefix` is what the connection buffer held **past the request head**. A client may
+    // coalesce its first frame with the handshake -- §4.1 makes the connection a WebSocket
+    // as soon as the server's `101` is *sent*, not when the client has read it -- and
+    // starting the loop from an empty buffer would silently discard that frame.
+    let outcome = run_frames(stream, handler, prefix, ctx).await;
 
     // --- One record, with the outcome ------------------------------------
     emit_ws_record(ctx, head, outcome);
@@ -242,9 +262,15 @@ pub async fn serve_websocket(
 }
 
 /// The read/assemble/dispatch loop.
-async fn run_frames(stream: &mut TcpStream, handler: &dyn WebSocketHandler) -> WsOutcome {
+async fn run_frames(
+    stream: &mut TcpStream,
+    handler: &dyn WebSocketHandler,
+    prefix: Vec<u8>,
+    ctx: &WsContext<'_>,
+) -> WsOutcome {
     let mut assembler = Assembler::new();
-    let mut buf: Vec<u8> = Vec::with_capacity(READ_BUFFER);
+    // Seeded with the leftover bytes rather than empty: see `serve_websocket`.
+    let mut buf: Vec<u8> = prefix;
 
     loop {
         // Decode as many whole frames as the buffer holds. A single read can carry
@@ -280,17 +306,66 @@ async fn run_frames(stream: &mut TcpStream, handler: &dyn WebSocketHandler) -> W
             buf.shrink_to(READ_BUFFER);
         }
 
+        // --- Wait for bytes, a shutdown, or the idle deadline ---------------
+        //
+        // A WebSocket has no natural end, so every lifecycle bound the HTTP connection
+        // state machine enforces has to be re-established here. Without this:
+        //
+        //   - `Shutdown::signal()` never reaches an upgraded connection, and because the
+        //     read blocks forever, **one idle client makes a graceful restart hang** --
+        //     a deploy that never completes;
+        //   - the configured idle deadline silently stops applying the moment a connection
+        //     upgrades, so a half-open socket is held for the process's life.
+        //
+        // `select!` rather than a timeout wrapper on the read: shutdown must be observed
+        // *while* a read is in flight, and a timeout around the read would only be
+        // evaluated between reads.
         let mut chunk = [0u8; 4096];
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => {
-                // A client that vanishes without a close frame. This is not an error:
-                // a browser closing a tab sends nothing.
-                let _ = assembler.buffered();
-                return WsOutcome::ClientGone;
+        let read = stream.read(&mut chunk);
+        tokio::pin!(read);
+
+        let n = if let Some(idle) = ctx.idle_timeout {
+            tokio::select! {
+                r = &mut read => r.unwrap_or(0),
+                () = ctx.shutdown.wait() => {
+                    close_with(stream, 1001, "server shutting down").await;
+                    return WsOutcome::Closed;
+                }
+                () = tokio::time::sleep(idle) => {
+                    // 1001 as well: the *server* is ending the connection, and a code that
+                    // blamed the client would make it retry with the same idle behaviour
+                    // and be closed again.
+                    close_with(stream, 1001, "idle timeout").await;
+                    return WsOutcome::Closed;
+                }
             }
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        } else {
+            tokio::select! {
+                r = &mut read => r.unwrap_or(0),
+                () = ctx.shutdown.wait() => {
+                    close_with(stream, 1001, "server shutting down").await;
+                    return WsOutcome::Closed;
+                }
+            }
+        };
+
+        if n == 0 {
+            // A client that vanishes without a close frame. This is not an error: a
+            // browser closing a tab sends nothing.
+            return WsOutcome::ClientGone;
         }
+        buf.extend_from_slice(&chunk[..n]);
     }
+}
+
+/// Send a close frame with a code and reason, ignoring a write failure.
+///
+/// A close is the last thing written on a connection that is already ending, so a failure
+/// to send it is not actionable -- the peer is gone or the socket is closed, and both mean
+/// the same thing to the caller.
+async fn close_with(stream: &mut TcpStream, code: u16, reason: &str) {
+    let mut sender = WsSender { stream };
+    sender.send_frame(&Frame::close(code, reason)).await;
 }
 
 /// Handle one decoded frame, returning an outcome when the connection should end.

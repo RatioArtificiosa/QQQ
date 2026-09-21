@@ -467,6 +467,132 @@ async fn a_websocket_route_without_an_upgrade_is_not_hijacked() {
     );
 }
 
+/// **A frame sent in the SAME write as the handshake is not lost.**
+///
+/// The client's TCP stack may coalesce the upgrade request and the first frame, and a
+/// client is entitled to send them together — §4.1 says the connection becomes a WebSocket
+/// as soon as the server's `101` is *sent*, not when the client has read it.
+///
+/// The server reads a head into a buffer that may contain **more than the head**, and
+/// passing that buffer on is the whole point: a `run_frames` starting from an empty buffer
+/// silently discards the first frame. The symptom is a client whose first message is
+/// ignored — and only when the two are coalesced, which depends on timing and is therefore
+/// invisible in the usual test where they are sent separately.
+#[tokio::test]
+async fn a_frame_coalesced_with_the_handshake_is_not_lost() {
+    let server = Server::start(Arc::new(Echo)).await;
+
+    let mut client = TcpStream::connect(server.addr).await.expect("connect");
+    let mut request = format!(
+        "GET /ws HTTP/1.1\r\nHost: x\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: {KEY}\r\n\r\n"
+    )
+    .into_bytes();
+
+    // Append a masked text frame to the SAME write: one syscall, one read on the server.
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let payload = b"coalesced";
+    request.push(0x80 | 0x1);
+    // `payload` is 9 bytes; the comparison guard is what makes the cast safe.
+    let len = u8::try_from(payload.len()).expect("a short test payload");
+    request.push(0x80 | len);
+    request.extend_from_slice(&mask);
+    for (i, b) in payload.iter().enumerate() {
+        request.push(b ^ mask[i % 4]);
+    }
+
+    client.write_all(&request).await.expect("write");
+    client.flush().await.expect("flush");
+
+    // Read the 101 first.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match tokio::time::timeout(Duration::from_secs(5), client.read(&mut byte)).await {
+            Ok(Ok(1)) => head.push(byte[0]),
+            // A close, an error, or a timeout all end the read: the head is whatever
+            // arrived before it.
+            _ => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    assert!(head.contains("101"), "{head}");
+
+    let (opcode, echoed) = read_server_frame(&mut client)
+        .await
+        .expect("the coalesced frame must be answered");
+    assert_eq!(opcode, 0x1);
+    assert_eq!(
+        echoed, b"coalesced",
+        "a frame coalesced with the handshake must not be discarded"
+    );
+}
+
+/// **A graceful shutdown reaches an upgraded connection.**
+///
+/// The lifecycle gap `CodeRabbit` found, and the reason it is severe: a `WebSocket` has no
+/// natural end, so a `run_frames` that simply blocks on `read` **never returns**. One idle
+/// client would then keep `serve` from ever finishing — a graceful restart that hangs
+/// forever, which in production is a deploy that never completes.
+///
+/// The connection must close with `1001` ("going away"), which is what §7.4.1 defines for
+/// exactly this: the *server* is ending the connection, so the client knows it is over
+/// rather than broken, and does not retry against a server that is going down.
+#[tokio::test]
+async fn a_shutdown_reaches_an_upgraded_connection() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let mut client = server.connect_ws(KEY).await;
+    let head = read_head(&mut client).await;
+    assert!(head.contains("101"), "{head}");
+
+    // No traffic at all: the socket is idle and the server is parked on its read.
+    server.shutdown.signal();
+
+    let (opcode, payload) =
+        tokio::time::timeout(Duration::from_secs(5), read_server_frame(&mut client))
+            .await
+            .expect("the shutdown must reach an idle upgraded connection, not hang")
+            .expect("a close frame");
+
+    assert_eq!(opcode, 0x8, "the server closes with a close frame");
+    assert!(payload.len() >= 2, "{payload:?}");
+    assert_eq!(
+        u16::from_be_bytes([payload[0], payload[1]]),
+        1001,
+        "§7.4.1: the server is going away, so 1001 -- a code blaming the client would \
+         make it retry against a server that is shutting down"
+    );
+}
+
+/// **A coalesced frame does not stop the shutdown working.**
+///
+/// The control for the test above: a connection that has *already* received a frame must
+/// still observe the shutdown. A loop that only checked the signal on the first iteration
+/// would pass the previous test and fail this one.
+#[tokio::test]
+async fn a_shutdown_reaches_a_connection_after_traffic() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let mut client = server.connect_ws(KEY).await;
+    read_head(&mut client).await;
+
+    write_client_frame(&mut client, 0x1, b"before").await;
+    let (opcode, payload) = read_server_frame(&mut client).await.expect("echo");
+    assert_eq!(opcode, 0x1);
+    assert_eq!(payload, b"before");
+
+    server.shutdown.signal();
+    let (opcode, payload) =
+        tokio::time::timeout(Duration::from_secs(5), read_server_frame(&mut client))
+            .await
+            .expect("the shutdown must still reach it")
+            .expect("a close frame");
+    assert_eq!(opcode, 0x8, "{payload:?}");
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+}
+
 /// A route with no WebSocket handler still uses the flat one.
 ///
 /// The control: `Dispatch` must not change routing for routes that registered nothing.

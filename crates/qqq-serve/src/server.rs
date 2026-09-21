@@ -345,6 +345,12 @@ pub async fn serve(
                     shutdown: &local_shutdown,
                     logger: &logger,
                     cors: cors.as_deref(),
+                    // `ConnectionConfig` holds a plain `Duration` (a connection always has
+                    // one); the context holds an `Option` because a WebSocket may
+                    // legitimately want none — a long-lived socket with its own heartbeat
+                    // should not be closed by a deadline the server invented. The HTTP
+                    // default is what applies here.
+                    idle_timeout: Some(connection_config.idle_timeout),
                 };
                 let served = serve_connection(
                     stream,
@@ -683,6 +689,7 @@ async fn serve_ws_route(
     ctx: &ConnectionContext<'_>,
     tenant: &str,
     span: u64,
+    leftover: Vec<u8>,
 ) -> Served {
     if !crate::ws_conn::is_upgrade_request(head) {
         let refusal = crate::ws_conn::not_an_upgrade();
@@ -699,8 +706,14 @@ async fn serve_ws_route(
         logger: ctx.logger,
         trace: ctx.id.trace,
         span,
+        // An upgraded connection must still observe both. See `WsContext` for what
+        // happens when it does not: a graceful restart hangs on one idle client, because a
+        // WebSocket read blocks forever and nothing else can end it.
+        shutdown: ctx.shutdown,
+        idle_timeout: ctx.idle_timeout,
     };
-    let outcome = crate::ws_conn::serve_websocket(stream, head, handler, None, &ws_ctx).await;
+    let outcome =
+        crate::ws_conn::serve_websocket(stream, head, handler, None, leftover, &ws_ctx).await;
     match outcome {
         crate::ws_conn::WsOutcome::ProtocolError => Served::ClientClosed,
         _ => Served::HandlerClosed,
@@ -1005,6 +1018,12 @@ pub struct ConnectionContext<'a> {
     pub logger: &'a Logger,
     /// The cross-origin policy, or `None` when the manifest declared none.
     pub cors: Option<&'a crate::cors::Cors>,
+    /// How long the connection may be idle before the server closes it.
+    ///
+    /// Carried into an upgraded connection too: a WebSocket has no natural end, so the
+    /// idle deadline is the only thing that reclaims a half-open one. Without it a
+    /// client that vanishes without a FIN holds a connection for the process's life.
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 /// Allocates a trace id per accepted connection.
@@ -1216,6 +1235,11 @@ async fn serve_connection(
         if let Some(m) = table.match_route(head.method, path) {
             if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
                 span_seq += 1;
+                // The buffer may hold **more than the head**: a client is entitled to
+                // coalesce its first frame with the handshake, and discarding the
+                // remainder would silently drop that frame. Taken by value because the
+                // WebSocket loop owns the connection's read buffer from here on.
+                let leftover = std::mem::take(&mut buf);
                 return serve_ws_route(
                     &mut stream,
                     &head,
@@ -1223,6 +1247,7 @@ async fn serve_connection(
                     ctx,
                     &tenant,
                     span_seq,
+                    leftover,
                 )
                 .await;
             }

@@ -11175,4 +11175,88 @@ better fix than an allow, which is the usual ratio.
 
 ---
 
+### §O-135 — CodeRabbit on the WebSocket work: two real defects, three stale findings, one honest non-fix
+
+**Run:** `coderabbit review --agent --light --committed --base-commit 0e5b6e5` over the four
+WebSocket commits. Six findings.
+
+**The one that would have shipped a broken deploy (critical, real).**
+
+> *"Preserve bytes remaining in the connection buffer after the handshake and pass them
+> into the WebSocket frame decoder."*
+
+`serve_connection` reads the request head into `buf`, which may hold **more than the head**.
+Every other path consumes what it needs from `buf` and leaves the rest; the WebSocket path
+handed the socket to `run_frames`, which allocated its own **empty** buffer. So a client
+that coalesced its first frame with the handshake — one `write_all`, entirely legal, since
+§4.1 makes the connection a WebSocket as soon as the server's `101` is *sent* — had that
+frame silently discarded.
+
+Reproduced with a test that appends a masked frame to the request in the same `write`:
+**it hung for five seconds and timed out.** Fault-injected after the fix by reverting
+`std::mem::take(&mut buf)` to `Vec::new()` — same timeout, exactly.
+
+*The generalisable rule:* **a buffer handed between two readers must carry its remainder.**
+Any handoff that re-allocates is discarding bytes, and the discard is invisible whenever
+the boundary happens to fall on a packet edge — which is why a test that sends the two
+parts separately passes.
+
+**The one that would have hung a graceful restart (major, real).**
+
+> *"Ensure upgraded connections no longer bypass the configured timeout, max_requests
+> lifecycle, or graceful drain behavior."*
+
+A WebSocket has no natural end, so `run_frames` blocking on `stream.read` **never returns**.
+Consequences: `Shutdown::signal()` never reached an upgraded connection, so **one idle client
+made `serve` hang forever** — a deploy that never completes; and the idle deadline stopped
+applying the moment a connection upgraded, so a half-open socket was held for the process's
+life.
+
+Fixed with a `select!` over the read, the shutdown signal and the idle deadline. The close
+code is **1001** ("going away") on both paths: §7.4.1 defines it for exactly this, and a code
+blaming the client would make it retry against a server that is shutting down. Two tests
+cover it, and one is the control — a connection that has *already* carried traffic must
+still observe the shutdown, which a loop checking the signal only on its first iteration
+would fail.
+
+*The generalisable rule:* **an upgraded connection is still a connection.** Every lifecycle
+bound the HTTP state machine enforces has to be re-established by hand at a protocol
+upgrade, and the compiler will not say so — the code is correct-looking and the failure is
+an operational hang, not a crash.
+
+**Three stale findings (verified, not assumed).**
+
+1. *"`next_trace` returns 0 first"* — already fixed. `TraceCounter::new()` starts at `1`
+   with a hand-written `Default` so `0` is unreachable. CodeRabbit reviewed the older range.
+2. *"`dedup` does not remove duplicates after a length sort"* — already fixed, in the form
+   it suggested (`sort_unstable` → `dedup` → `sort_by_key(Reverse(len))`), with the
+   measurement in the doc comment.
+3. *"`tests/access.rs` defines 17 test functions, not 11"* — the line now says **18**, and
+   the grep is 18. The `518` total in the same line is likewise stale; the current figure is
+   recorded at `527`.
+
+*The rule:* **verify a review finding against the code before acting on it.** Three of six
+here were already addressed, and a reviewer with a fixed base commit sees the diff, not the
+current file. Acting on all six would have meant three no-op edits and a false sense that
+something was wrong.
+
+**Two findings declined, with reasons.**
+
+- *"Remove the unreachable `WsOutcome::HandlerDone` variant."* Declined for now: the variant
+  is produced by no current path **only because `on_message` cannot request termination**.
+  That is a real limitation of the trait rather than a reason to delete the outcome — a
+  handler that wants to close the connection is the obvious next requirement, and the
+  variant is what it will return. Deleting it then re-adding it is churn. The honest fix is
+  to give the handler a way to close, which is a feature and not a cleanup.
+- *"Replace the vacuous uniqueness check in `outcome_names_are_distinct`."* **Accepted in
+  substance** — the check compares four names against a `BTreeSet` built *from those same
+  four names*, so it can only fail if `as_str` returns the same value twice, and it does not
+  assert the values. Asserting the literal names is strictly better. Recorded as a
+  correction rather than silently dropped.
+
+→ `crates/qqq-serve/src/ws_conn.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-serve/tests/websocket.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

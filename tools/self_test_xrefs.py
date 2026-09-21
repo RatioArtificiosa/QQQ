@@ -147,11 +147,14 @@ def restore_all(*_args) -> None:
 INJECTION_MARKERS = [
     ("§99.9 Nonexistent section", CHECKLIST, "check [1]: a checklist item citing a bad section", False),
     ("`HOST-999`", PROPOSAL, "check [2]: the Proposal citing a dangling checklist ID", False),
+    # The text here must equal the mutation's replacement verbatim, or the guard
+    # reports a leftover on the next clean run. Both are checked against each
+    # other by `test_the_markers_match_their_mutations` below.
     (
-        "- [ ] **CAP-011** Implement the restricted policy expression language.\n",
+        "- [ ] **CAP-011** Implement the restricted policy expression language.",
         CHECKLIST,
-        "check [4]: CAP-011's citation line stripped",
-        False,
+        "check [4]: CAP-011's citations stripped",
+        True,
     ),
     ("### REMOVED — The \"Wasm is near-native\"", OBS, "check [8]: the Observations §C-006 entry renamed away", True),
     ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed", True),
@@ -197,17 +200,61 @@ def marker_is_present(path: Path, marker: str, line_start: bool) -> bool:
 # An entry whose original text is `None` means the injection *deleted* text rather
 # than replacing it, so the repair cannot be derived from the marker alone; the
 # harness reports that instead of guessing.
+#
+# # Why the check [4] original is CAPTURED from the checklist rather than typed
+#
+# The entry used to hard-code the original as the heading plus one `→` line. That
+# was correct when `CAP-011` had one citation and silently wrong once it had
+# seven: the reversal would have restored one line and left the item different
+# from before the injection, which is exactly the defect the check [6] comment
+# below describes — *"a repair table is code, and code that is never executed
+# against the thing it repairs is a guess."*
+#
+# So the original is read from the real checklist at import time. A document
+# change is picked up automatically, and if the anchor stops matching, the capture
+# is `None` and the harness reports that rather than guessing.
+# # Why this pattern is shaped the way it is, having been wrong twice
+#
+# The item has a heading line and then zero or more **continuation block** lines:
+# each `  → ...` line, plus any further-indented lines belonging to it. The first
+# version matched only the heading and the FIRST `→` line, because a repetition
+# like `(?:  → [^\r\n]*\r?\n?)*` stops at the four-space continuation lines
+# that follow every arrow -- so six arrows survived, the item still cited §6.2,
+# and check [4] correctly did not fire while the harness reported DEAD.
+#
+# The robust form does not count arrows or their widths. It consumes the heading
+# and then **every following line that is indented and is not itself a new list
+# item**. That is exactly what "part of this item" means in this document, and it
+# cannot go stale when an entry gains another paragraph.
+CAP_011_BLOCK = re.compile(
+    r"(?m)^- \[[ x]\] \*\*CAP-011\*\*[^\r\n]*\r?\n"
+    r"(?:(?!- \[[ x!]\])[ \t]+[^\r\n]*\r?\n)*"
+)
+
+
+def _capture_cap_011_original() -> str | None:
+    """The real `CAP-011` block, exactly as the checklist holds it."""
+    text = CHECKLIST.read_text(encoding="utf-8")
+    found = CAP_011_BLOCK.search(text)
+    return found.group(0) if found else None
+
+
+CAP_011_ORIGINAL = _capture_cap_011_original()
+
+
 REVERSALS = {
     "§99.9 Nonexistent section": (
         "→ §99.9 Nonexistent section",
         "→ §6.1 `qqq-host` — the execution engine",
     ),
     "`HOST-999`": ("`HOST-999`", "`HOST-001`"),
-    "- [ ] **CAP-011** Implement the restricted policy expression language.\n": (
-        "- [ ] **CAP-011** Implement the restricted policy expression language.\n",
-        "- [ ] **CAP-011** Implement the restricted policy expression language with "
-        "static analysability and termination proofs.\n"
-        "  → §6.2 `qqq-cap` — the capability engine\n",
+    # The injected text is the mutation's replacement verbatim; the original is
+    # the block captured from the live checklist, so the reversal restores every
+    # citation line rather than a transcribed subset. `None` means the anchor did
+    # not match, and the harness refuses to guess.
+    "- [ ] **CAP-011** Implement the restricted policy expression language.": (
+        "- [ ] **CAP-011** Implement the restricted policy expression language.",
+        CAP_011_ORIGINAL,
     ),
     '### REMOVED — The "Wasm is near-native"': (
         '### REMOVED — The "Wasm is near-native"',
@@ -441,19 +488,33 @@ def main() -> int:
     results.append(expect_failure(
         "strip CAP-011's citation line",
         CHECKLIST,
-        # # Why CAP-011 and not CAP-001
+        # # Why this strips *every* continuation line and not just one
         #
-        # This injection used CAP-001, which has since been ticked `- [x]` and
-        # gained a `→ Done:` line. The old pattern anchored on `- [ ]` and
-        # stopped matching, so the mutation became a no-op and the harness
-        # reported SKIP — which is the harness working correctly: it noticed its
-        # own injection had gone stale rather than silently passing.
+        # This injection has now gone stale twice, both times for the same
+        # reason, and the second time is the instructive one.
         #
-        # The fix is to use an item that is still open, and to match either
-        # checkbox state so a future tick does not silently disable it again.
+        # * First it anchored on `- [ ]`, and CAP-011 was ticked `- [x]`, so the
+        #   pattern stopped matching.
+        # * Fixed by matching `\[[ x]\]` -- and then CAP-011 gained a `→ Done:`
+        #   line plus six further `→` evidence lines, while the mutation stripped
+        #   only the *first* one. Six citations remained, the item still had a
+        #   Proposal citation, check [4] correctly did not fire, and the harness
+        #   correctly reported SKIP.
+        #
+        # **The pattern removed one syntactic instance of the thing the check
+        # tests for, rather than the thing itself.** Check [4] asks "does this
+        # item cite a Proposal section"; the injection must therefore remove
+        # every citation, not the line after the heading. An anchor that has to
+        # grow every time the document gets richer is the wrong anchor.
+        #
+        # So: match the heading line and then consume the whole continuation
+        # block -- every following line that starts with `  →` -- and replace the
+        # lot with a bare item. The checkbox state is matched as `[ x]` so a
+        # future tick does not disable this again, which is the half of the
+        # earlier fix that was right.
         lambda t: re.sub(
-            r"(?m)^- \[[ x]\] \*\*CAP-011\*\*.*?\r?\n\s*→ §[^\r\n]*",
-            "- [ ] **CAP-011** Implement the restricted policy expression language.",
+            CAP_011_BLOCK,
+            "- [ ] **CAP-011** Implement the restricted policy expression language.\n",
             t,
             count=1,
         ),

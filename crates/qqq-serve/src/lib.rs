@@ -98,6 +98,8 @@ pub mod stream;
 pub mod tls;
 /// The WebSocket opening handshake, per RFC 6455 §4.
 pub mod ws;
+/// The WebSocket frame layer, per RFC 6455 §5.
+pub mod ws_frame;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use cors::{Cors, CorsError, Decision, Origin, Reason};

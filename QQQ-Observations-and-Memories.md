@@ -11004,4 +11004,55 @@ it, and in every case the workaround would have been silent.
 
 ---
 
+### §O-132 — A protocol bug that only a version-switched test could find
+
+**The bug.** `StreamWriter::write` called `response::write_chunk` **unconditionally**.
+The *terminator* was correctly gated on the version -- `finish` writes `0\r\n\r\n` for
+HTTP/1.1 and nothing for HTTP/1.0 -- but the per-piece framing was not. So an HTTP/1.0
+client received:
+
+```
+13\r\nraw-body-for-http10\r\n
+```
+
+The chunk length, as **body data**. That is the request-smuggling shape `response.rs`'s
+own docs already warn about, and my implementation had it while the docs next to it said
+not to.
+
+**Why only a version-switched test could find it.** Every HTTP/1.1 test passed. The
+framing is *correct* for HTTP/1.1 -- that is the whole point of chunked encoding -- so a
+suite that exercised one version would report the writer as perfect. The defect lives
+exclusively in the **transition** between two versions, and a test that does not cross
+that transition cannot see it.
+
+This is `§O-127`'s lesson in a different costume. There, SSE's four framing rules were
+invisible in the example that introduces the format. Here, the rule is visible in the
+code -- it is *written down* in `finish` -- and still not applied one function away.
+**Knowing a rule and applying it in every place it belongs are different acts**, and the
+gap between them is exactly one test wide.
+
+**The generalisable rule.** *When a type is parameterised by a mode, every operation
+must be tested in every mode.* My first draft of `stream.rs` had three version-sensitive
+behaviours: the `Transfer-Encoding` header, the terminator, and the per-piece framing. I
+gated two and tested one. The fix is not more care -- it is a test per behaviour per mode,
+and the six integration tests now include an HTTP/1.0 case that exercises the framing
+specifically.
+
+**Fault injection reproduced it exactly.** Reverting the gate produced the same
+`13\r\nraw-body-for-http10\r\n` in the assertion output, which is the evidence that the
+test is aimed at the real defect and not at a neighbouring property.
+
+**A second finding in the same hour, about my own tooling.** The backup I took before
+injecting the fault did not exist when I went to restore it: `Copy-Item .scratch/stream.bak`
+reported success in one invocation and `Cannot find path` in the next. I had to restore the
+code by writing it back from the description. That is the file-write unreliability the
+handbook documents, striking in the one step where getting it wrong silently leaves a
+**defect in the tree** -- an injection that is never reverted looks exactly like working
+code. The lesson: after restoring, assert the injection is *gone*
+(`Select-String -Pattern "INJECTED"` returning nothing), do not assume the restore worked.
+
+→ `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/tests/stream.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

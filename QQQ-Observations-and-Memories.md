@@ -9289,4 +9289,101 @@ shared pattern used by the mutation, the marker guard and `REVERSALS`.
 
 ---
 
+### §O-109 — Four measurements of one item, and the first three were each wrong in a different way
+
+**What `ARCH-012` asks.** *Implement the defence-in-depth re-check of grants at
+host-call time.* §4.4 step 11 is explicit about why:
+
+> **Step 11 re-checks.** The grant set is consulted twice — at bind time and at
+> call time. The second check is defence in depth against a host bug that
+> mis-builds a linker. It is cheap (a set lookup on a `u32` capability ID) and it
+> is **non-negotiable**.
+
+**Measurement 1: "8 of 11 host functions have no call-time check."** That is what
+a grep for `grants.grants(` inside each `func_wrap` body reported, and it looked
+like a serious hole.
+
+**It was wrong, and it was wrong in the way `§O-071` already records:** the check
+*is* reached for those functions, one layer down. `hashing.digest` delegates to
+`ambient::hash_data`, which opens with `ambient::require`. A grep for the check in
+the registration body measures **where the text lives**, not whether the authority
+is consulted. This is the fourth time this session a control was judged by its
+prose rather than its reachability.
+
+**Measurement 2, the generous one: "the item is complete."** Having found the
+delegation, it is tempting to stop. But the property §4.4 states is not *"a check
+exists somewhere on each path"* — it is *"the grant set is consulted twice,
+independently"*, and the second consultation must not be something a later edit
+can drop without anything noticing. Nothing in the workspace re-established that
+tomorrow.
+
+**Measurement 3: the scanner invented nine registrations.** Building the audit
+table meant scanning the source for `func_wrap(`, and the first scan found **20**
+where the source has 8:
+
+```text
+("host_clock.rs", "engine", 409)          a test helper, inside #[cfg(test)]
+("host_crypto.rs", "{name}\\", 439)        an escaped quote in a doc comment
+("host_crypto.rs", "digest\\", 497..499)   doc-comment prose
+("host_crypto.rs", "get\\", 817)           doc-comment prose
+```
+
+**This is `§O-071`'s name-extractor bug verbatim, in new code written an hour
+after recording it.** *"The name extractor read doc comments, inventing `name` as
+a boundary because the source writes ``func_wrap("name"`` in its own prose."* The
+fix therefore has two independent halves rather than one careful stripper: strip
+comment lines and stop at `#[cfg(test)]`, **and** reject a candidate name that is
+not a WIT kebab-case identifier — so prose that survives the stripper is refused
+rather than admitted.
+
+**Measurement 4: the table was wrong, and the table caught it.** With the scanner
+fixed it found **8** registrations while my table listed **11**. The three extras
+were mine, invented from the WIT's `hmac` interface without checking whether the
+host implements it:
+
+```text
+host_crypto.rs "name"  qqq:crypto@1.0.0/hmac-algorithm   -- not registered
+host_crypto.rs "get"   qqq:crypto@1.0.0/hmac             -- not registered
+```
+
+`host_crypto.rs` registers exactly three functions, and it has a test asserting
+the unimplemented interfaces are **not** registered — registering a stub would
+replace a clear instantiation failure with a runtime mystery. So three rows
+described code that does not exist, and `audit` reported them `Stale`.
+
+**That is the whole argument for the table existing.** A table that can never
+disagree with the code is documentation; this one disagreed with its author on
+first run and was right.
+
+**And a fifth thing, found by a test refusing to pass.** Two `(file, function)`
+pairs repeat in the table — `wall-clock.now` and `monotonic-clock.now`, likewise
+the two `resolution`s — because two capabilities name the same function in the
+same file. With a two-part key the audit could **pass a row because its namesake
+was backed**: `monotonic-clock.now` could lose its grant check while
+`wall-clock.now` kept one. The key became `(file, interface, function)`, and
+`the_audited_identity_is_unique` pins that it is unique *and* pins that the
+two-part key collides, so the reasoning is revisited if that ever stops being
+true.
+
+**The shape of this observation, stated once.** Four measurements, three wrong,
+and the errors were not random — each was a *fallback to the nearest available
+proxy* for a property that needed a different instrument:
+
+| Measured | Proxied by | The property actually needed |
+|---|---|---|
+| Does a host call consult the grant? | Where `grants.grants(` appears | Whether the authority is reached |
+| Is the item complete? | Whether a check exists | Whether the check survives the next edit |
+| Which `func_wrap`s exist? | Text matching | Parsing, or a shape that cannot be faked |
+| Does this row describe reality? | The WIT it was derived from | The source that implements it |
+
+Every one of those was resolved by asking *what would make this measurement
+wrong*, and then measuring that instead. That question is now the single most
+productive one in this session, and it is the same question `§O-082` asks of
+blocked items — *"is this blocked on the item, or on one way of doing it?"* — and
+the same one `expect_failure`'s SKIP reports.
+
+→ `crates/qqq-host/src/arch012.rs` (14 tests), `crates/qqq-host/src/lib.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

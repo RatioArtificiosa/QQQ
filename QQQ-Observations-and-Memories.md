@@ -10722,4 +10722,70 @@ file exists to catch, and the temptation to tick the box and move on was real.
 
 ---
 
+### §O-128 — "Safe defaults" means the default must deny, and the three shapes that look like one
+
+**Context.** `SRV-019` says *"Implement CORS configuration with safe defaults."* The
+item is two words longer than "implement CORS", and those two words are the whole
+difficulty: what a default CORS policy *is* determines whether every QQQ application is
+same-origin or world-readable, and the wrong answer looks like a reasonable one.
+
+**The three tempting defaults, and why each is a defect.**
+
+| Default | What it does | Why it looks right |
+|---|---|---|
+| `Access-Control-Allow-Origin: *` | every response readable by every site | "convenient for development", and it is the shape in most tutorials |
+| reflecting the request's `Origin` | identical to `*` for simple requests, and **worse** than `*` with credentials — a wildcard wearing the costume of a decision | "it echoes exactly what was asked for, so it must be scoped" |
+| allowing `null` | grants the origins an attacker can most easily obtain: sandboxed iframes, `file://` pages, some redirects | `null` reads as "no origin", i.e. nothing to worry about |
+
+The third is the one I had not thought about before reading the specification, and it
+is worth stating plainly: **`null` is a valid `Origin` value**, it is trivially
+obtainable, and an allow-list that included it would grant exactly the callers least
+able to be trusted. `Origin::parse` refuses it outright and the policy denies it as
+`NullOrigin` — deliberately *not* by falling through to "not in the list", because the
+reason should say what happened.
+
+**The decision the item actually forced.** The default is `Cors::none()`, which emits
+no `Access-Control-Allow-Origin` for any request, and **an empty `allow_origins` is
+*none*, not a wildcard.** That second clause is the vacuity rule this project applies
+to every checker — `check_toolchain.py`'s "found no pin" fails, `check_scope_table.py`
+refuses an empty table — and here it is not a checker but a security control. A
+configuration that lists nothing allows nothing; reading the empty list as "allow
+everything" is the single most dangerous possible interpretation of that field.
+
+**What the tests are shaped like, and why.** Every one of them names an *attack* rather
+than describing a property:
+
+```
+for attacker in ["https://evil-example.com", "https://example.com.evil.net",
+                 "https://notexample.com", "https://example.com.evil"]:
+    assert!(!cors.simple(Some(attacker)).is_granted());
+```
+
+An implementation that checked `ends_with("example.com")` passes a test that says
+"matching works" and fails this one. The bypasses are *the specification of the
+matcher*, in the same way the specification's parsing algorithm was the specification
+of the SSE encoder (`§O-127`) — and in both cases my first instinct was to test the
+happy path and call it done.
+
+**The generalisable rule.** *When a requirement says "safe defaults", the test must
+assert the absence of the permissive behaviour, not the presence of the restrictive
+one.* `assert!(decision.headers().is_empty())` for every origin is what proves the
+default is safe; a test that only checked a configured origin is granted would pass
+just as well against a policy that also granted everything else.
+
+**And the honest boundary, again.** The policy is built from the manifest and returns
+the headers to apply, but `serve_connection` does not call it, because **`qqq-cap`
+does not parse the `[server]` section at all** — `routes`, `default_auth` and `cors`
+are all unmodelled. So CORS is complete at the policy layer and not yet reachable
+through the server either. That is the third feature this round blocked on the same
+unbuilt piece, which is itself the useful finding: `SRV-004` (streaming), `SRV-009`
+(WebSockets), `SRV-010` (SSE) and `SRV-019` (CORS) all need the `[server]` section
+modelled and `Handler` to gain a non-buffered shape. **The next item should be that
+interface, not another leaf feature** — recorded here so the next round starts from
+that conclusion instead of rediscovering it.
+
+→ `crates/qqq-serve/src/cors.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

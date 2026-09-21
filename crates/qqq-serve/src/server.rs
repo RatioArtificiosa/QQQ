@@ -77,6 +77,20 @@ pub struct ServerConfig {
     /// explicit value is for testing and for deployments that have measured a
     /// different number.
     pub shards: Option<usize>,
+    /// The cross-origin policy, or `None` for no CORS at all.
+    ///
+    /// # Why the default is `None` and not a permissive policy
+    ///
+    /// `SRV-019`'s item is *"implement CORS configuration with safe defaults"*, and the
+    /// safe default for a relaxation of the same-origin policy is not to relax it. A
+    /// server that emitted `Access-Control-Allow-Origin: *` unless told otherwise would
+    /// make every QQQ application cross-origin-readable without its author asking.
+    ///
+    /// `None` and `Some(Cors::none())` behave identically — both emit nothing — and the
+    /// distinction is only that the second says the author configured CORS and allowed
+    /// no origins. Keeping the field optional means a manifest with no `[server.cors]`
+    /// table produces a server that has never heard of CORS.
+    pub cors: Option<crate::cors::Cors>,
 }
 
 impl ServerConfig {
@@ -88,6 +102,7 @@ impl ServerConfig {
             connection: ConnectionConfig::default(),
             connections_per_tenant: 10_000,
             shards: None,
+            cors: None,
         }
     }
 }
@@ -212,6 +227,12 @@ pub async fn serve(
     logger: Logger,
 ) -> Result<()> {
     let listener_config = ListenerConfig::for_addr(config.addr.clone());
+    // Shared with every connection task. `Arc` rather than a clone per connection: the
+    // policy is one immutable configuration, and a copy per connection would be a value
+    // that could drift from the others — the argument the logger's own comment makes.
+    // `None` when the manifest declared no `[server.cors]`, which is the common case and
+    // costs nothing to carry.
+    let cors: Option<Arc<crate::cors::Cors>> = config.cors.clone().map(Arc::new);
     // Shared into each connection task. An `Arc` rather than a per-connection
     // clone: the logger is one configuration every connection reads, and a copy
     // per connection would be a value that could drift from the others.
@@ -269,6 +290,7 @@ pub async fn serve(
             let local_shutdown = task_shutdown.clone();
             let logger = Arc::clone(&logger);
             let trace_counter = Arc::clone(&trace_counter);
+            let cors = cors.clone();
 
             // Allocated here, on the acceptor, so the id is fixed before the task
             // starts and two connections can never share one — not even if the
@@ -289,6 +311,12 @@ pub async fn serve(
                     }
                 }
 
+                let ctx = ConnectionContext {
+                    id: &id,
+                    shutdown: &local_shutdown,
+                    logger: &logger,
+                    cors: cors.as_deref(),
+                };
                 let served = serve_connection(
                     stream,
                     &table,
@@ -297,9 +325,7 @@ pub async fn serve(
                     // config, and passing the `Arc` would force it to know about
                     // how the caller shares it.
                     connection_config.as_ref(),
-                    &local_shutdown,
-                    &logger,
-                    &id,
+                    &ctx,
                 )
                 .await;
 
@@ -522,6 +548,32 @@ async fn write_flat_response(
     Some(Served::HandlerClosed)
 }
 
+/// Ask the state machine what to do, returning an outcome when it says to close.
+///
+/// # The rule this function holds
+///
+/// **This is the only authority on the deadlines.** `poll` decides whether the connection
+/// is idle, past its header deadline, at its request ceiling or draining — and it is
+/// re-evaluated every iteration and on every read timeout inside `read_head`.
+///
+/// An earlier draft threaded a `last_activity` instant into `read_head` as well, which
+/// made the read loop a *second* authority on the idle deadline. The compiler reported
+/// the duplication as an unused assignment, which is the correct diagnosis: two places
+/// deciding the same thing is how a connection ends up held past its deadline by one and
+/// closed early by the other.
+///
+/// Returning `Option<Served>` keeps "close now" distinguishable from "carry on", which a
+/// `bool` or a sentinel outcome would not.
+fn act_on_poll(conn: &mut Connection, now: Instant) -> Option<Served> {
+    match conn.poll(now) {
+        Action::Close(reason) => Some(outcome_of(reason)),
+        // `WriteResponse` means the previous iteration wrote and the machine is ready
+        // for the next read; both it and `ReadRequest` lead to reading, and the
+        // distinction matters only to a caller that interleaves other work between them.
+        Action::ReadRequest | Action::WriteResponse => None,
+    }
+}
+
 /// Start a graceful drain when shutdown is signalled, returning an outcome if the
 /// connection is already finished.
 ///
@@ -580,6 +632,183 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
     Served::BodyRejected
 }
 
+/// Answer a request whose head could not be parsed, and close.
+///
+/// # The rule
+///
+/// **A malformed request is the client's fault, and a 500 says otherwise.** A first
+/// version routed the parse error through `ParseError::to_error`, which produced
+/// `ManifestSchemaViolation` and a **500** for a client's bad request line -- the error
+/// taxonomy had no client-error class at all until a test found that.
+///
+/// `parse_error_response` rather than `error_response` for the same reason: a malformed
+/// request has no truthful `ErrorCode`, and inventing one would put a code in the log
+/// naming a defect in QQQ rather than in the request.
+///
+/// The connection closes because the framing offset is no longer knowable -- the parser
+/// stopped mid-head, so where the next request would begin is unknown.
+async fn reject_parse_error(
+    stream: &mut TcpStream,
+    conn: &mut Connection,
+    err: &ParseError,
+) -> Served {
+    conn.on_parse_error(err);
+    let body = response::write_response(
+        &response::from_error(&response::parse_error_response(&err.to_string())),
+        Version::Http11,
+        false,
+    );
+    let _ = stream.write_all(&body).await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+    Served::BadRequest
+}
+
+/// Convert a router match into the `RouteMatch` a handler receives.
+///
+/// # Why this is a function rather than two inline conversions
+///
+/// The same conversion appeared in the flat path and the streaming path, which is two
+/// places to keep right for a value the handler's signature depends on. `crate::route::Match`
+/// and `RouteMatch` are deliberately different types — the router's carries the trie's own
+/// view, and the handler's is the minimal thing a handler needs — so the conversion has to
+/// exist; it does not have to exist twice.
+///
+/// `params` is copied rather than borrowed because `RouteMatch` is owned: a handler may
+/// hold it for the length of an `await`, and a borrow into the router would tie the
+/// handler's lifetime to the table.
+fn route_match_of(m: &crate::route::Match) -> RouteMatch {
+    RouteMatch {
+        handler: m.handler.clone(),
+        pattern: m.pattern.clone(),
+        params: m
+            .params
+            .iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    }
+}
+
+/// Answer a request through the flat handler, or refuse it.
+///
+/// # The rule
+///
+/// **A path with no route but a known method set gets a 405 with the allowance; a
+/// genuinely unknown path gets 404.** The distinction is what lets a client recover: a
+/// 404 says "try another path", a 405 says "this path exists and you used the wrong
+/// method" and names the ones that work.
+///
+/// `table.allows` is asked rather than the route table being guessed at, so the allowance
+/// is the router's own answer and cannot drift from what it actually matches.
+///
+/// Extracted because `serve_connection` is the connection's life cycle — reading heads,
+/// tracking deadlines, deciding keep-alive — and *choosing a response* is a different job
+/// that happens to occur in the middle of it.
+fn dispatch_flat(
+    table: &RouteTable,
+    dispatch: &Dispatch,
+    head: &RequestHead,
+    path: &str,
+) -> Response {
+    if let Some(m) = table.match_route(head.method, path) {
+        return (dispatch.flat)(head, &route_match_of(&m));
+    }
+    let allowed = table.allows(path);
+    if allowed.is_empty() {
+        response::not_found()
+    } else {
+        response::method_not_allowed(&allowed)
+    }
+}
+
+/// Apply the cross-origin policy to a buffered response.
+///
+/// # Why this is applied to *every* response, not only to successes
+///
+/// CORS is enforced by the **browser**, not the server: the headers tell the browser
+/// whether script on another origin may read the response. A 404 or a 405 is exactly
+/// the kind of answer a client most needs to be able to read — without the grant, the
+/// browser reports an opaque network failure and the developer sees nothing about the
+/// status the server actually chose.
+///
+/// The one exception is a request with no `Origin` header at all: a same-origin browser
+/// request never sends one, so there is nothing to decide and nothing to add. That is
+/// reported as `NotACorsRequest` and carries no `Vary`, because a response that does not
+/// depend on the origin must not be cached per-origin.
+///
+/// # A denied origin
+///
+/// The response is still sent, unchanged, with only `Vary: Origin`. There is no status a
+/// server can return that means "CORS refused" — a 403 would be read by the browser as
+/// the *application* refusing, which is a different fact — so the refusal is expressed
+/// by the **absence** of `Access-Control-Allow-Origin`, which is what the browser
+/// checks.
+fn apply_cors(
+    mut response: Response,
+    head: &RequestHead,
+    cors: Option<&crate::cors::Cors>,
+) -> Response {
+    let Some(cors) = cors else {
+        return response;
+    };
+    let decision = cors.simple(head.header("origin"));
+    for (name, value) in decision.headers() {
+        response.set_header(name, value);
+    }
+    response
+}
+
+/// Answer a CORS preflight.
+///
+/// # What a preflight is, and why the answer is not the real response
+///
+/// An `OPTIONS` carrying `Access-Control-Request-Method` is the browser asking whether
+/// it may send a request with that method and those headers. The reply carries **no
+/// body** and a different header set from the real response: answering it with the
+/// route's own headers would advertise methods the route will not accept.
+///
+/// The decision is [`crate::cors::Cors::preflight`], which *checks* the requested method
+/// and headers against the configuration rather than echoing them. A preflight that
+/// echoes is not a policy — it grants every method on demand.
+///
+/// The status is `204 No Content` on a grant and `403 Forbidden` on a refusal. The
+/// refusal status is safe to use here, unlike on a simple request, because a preflight
+/// has no application semantics: the browser is not calling the route, so there is no
+/// handler decision to misreport.
+async fn serve_preflight(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    policy: PreflightRequest<'_>,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    span: u64,
+) -> Served {
+    let decision = policy.cors.preflight(
+        head.header("origin"),
+        Some(policy.requested_method),
+        policy.requested_headers,
+    );
+
+    let mut response = Response::status(if decision.is_granted() { 204 } else { 403 });
+    for (name, value) in decision.headers() {
+        response.set_header(name, value);
+    }
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let keep_alive = false;
+    let bytes = response::write_response(&response, head.version, keep_alive);
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    let _ = stream.shutdown().await;
+    Served::HandlerClosed
+}
+
 /// Serve one request through a streaming handler.
 ///
 /// # Why this is separate from `serve_connection`
@@ -599,17 +828,14 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
 #[allow(clippy::too_many_arguments)]
 async fn serve_streaming(
     stream: &mut TcpStream,
-    dispatch: &Dispatch,
     stream_handler: &crate::stream::StreamingHandler,
     head: &RequestHead,
     path: &str,
     matched: &RouteMatch,
-    id: &ConnectionId,
+    ctx: &ConnectionContext<'_>,
     tenant: &str,
-    logger: &Logger,
     span: u64,
 ) -> Served {
-    let _ = dispatch;
     // The status is not on the wire until the handler writes a head, so a handler that
     // fails before `begin` could still produce an error response. `begin` is the commit.
     let streaming_response = Response::status(200);
@@ -636,7 +862,7 @@ async fn serve_streaming(
     let written = writer.written();
 
     crate::stream::emit_stream_record(
-        logger,
+        ctx.logger,
         &crate::stream::StreamRecord {
             head,
             path,
@@ -644,8 +870,8 @@ async fn serve_streaming(
             outcome,
             written,
             tenant,
-            peer: id.peer,
-            trace: id.trace,
+            peer: ctx.id.peer,
+            trace: ctx.id.trace,
             span,
         },
     );
@@ -661,6 +887,49 @@ async fn serve_streaming(
         }
         crate::stream::StreamOutcome::HandlerFailed => Served::ClientClosed,
     }
+}
+
+/// What a preflight is asking for.
+///
+/// Three values that are meaningless apart: the policy decides, and the two
+/// `Access-Control-Request-*` headers are what it decides *about*. Passing them
+/// positionally invited transposing the method and the headers -- both `&str`-shaped, and
+/// the resulting grant would name the wrong method.
+pub struct PreflightRequest<'a> {
+    /// The policy to evaluate against.
+    pub cors: &'a crate::cors::Cors,
+    /// The value of `Access-Control-Request-Method`.
+    pub requested_method: &'a str,
+    /// The value of `Access-Control-Request-Headers`, when present.
+    pub requested_headers: Option<&'a str>,
+}
+
+/// Everything one connection's handler needs to log, run and answer.
+///
+/// # Why this exists, and why it is the third type of its kind
+///
+/// `serve_connection`, `serve_streaming` and `serve_preflight` were each at eight to ten
+/// positional parameters, and every one of them was there for the same reason: the
+/// shutdown handle, the logger and the connection's identity are *connection-scoped*
+/// values, threaded individually because there was nowhere else to put them.
+///
+/// The same grouping has now been needed three times — [`ConnectionId`] for identity,
+/// [`crate::stream::StreamRecord`] for a streaming request's record, and this — which is
+/// the point at which a convention should become a type. It also makes the signatures
+/// readable: a reader can see at a glance which arguments vary per *request* and which
+/// are fixed for the life of the connection.
+///
+/// Borrowed rather than cloned: the context lives for one connection and is passed down
+/// by reference.
+pub struct ConnectionContext<'a> {
+    /// The connection's identity: peer, tenant and trace id.
+    pub id: &'a ConnectionId,
+    /// The accept loop's shutdown signal.
+    pub shutdown: &'a Shutdown,
+    /// Where records go.
+    pub logger: &'a Logger,
+    /// The cross-origin policy, or `None` when the manifest declared none.
+    pub cors: Option<&'a crate::cors::Cors>,
 }
 
 /// Allocates a trace id per accepted connection.
@@ -776,9 +1045,7 @@ async fn serve_connection(
     table: &RouteTable,
     dispatch: &Dispatch,
     config: &ConnectionConfig,
-    shutdown: &Shutdown,
-    logger: &Logger,
-    id: &ConnectionId,
+    ctx: &ConnectionContext<'_>,
 ) -> Served {
     let mut conn = Connection::new(config.clone());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -790,60 +1057,40 @@ async fn serve_connection(
     // id. `id.trace` is the process-wide counter and is what correlates records across
     // connections; see `access_record`.
     let mut span_seq: u64 = 0;
-    let tenant = id.tenant.clone();
+    let tenant = ctx.id.tenant.clone();
 
     loop {
-        // --- Which action does the state machine want? ---------------------
-        //
-        // **This is the only authority on the deadlines.** `poll` decides
-        // whether the connection is idle, past its header deadline, at its
-        // request ceiling or draining — and it is re-evaluated every iteration
-        // and on every read timeout inside `read_head`.
-        //
-        // An earlier draft threaded a `last_activity` instant into `read_head`
-        // as well, which made the read loop a *second* authority on the idle
-        // deadline. The compiler reported the duplication as an unused
-        // assignment, which is the correct diagnosis: two places deciding the
-        // same thing is how a connection ends up held past its deadline by one
-        // and closed early by the other.
+        // Which action does the state machine want? `act_on_poll` holds the rule that
+        // it is the **only** authority on the deadlines, and why a second one existed
+        // once.
         let now = Instant::now();
-        match conn.poll(now) {
-            Action::Close(reason) => return outcome_of(reason),
-            // `WriteResponse` here means the previous iteration wrote and the
-            // machine is ready for the next read; both it and `ReadRequest` lead
-            // to reading, and the distinction matters only to a caller that
-            // interleaves other work between them.
-            Action::ReadRequest | Action::WriteResponse => {}
+        if let Some(served) = act_on_poll(&mut conn, now) {
+            return served;
         }
 
-        if let Some(served) = begin_drain_if_signalled(&mut conn, shutdown) {
+        if let Some(served) = begin_drain_if_signalled(&mut conn, ctx.shutdown) {
             return served;
         }
 
         conn.begin_request(now);
 
         // --- Read a complete head -----------------------------------------
+        //
+        // Extracted so the failure taxonomy has a name: `reject_parse_error` states which
+        // outcomes are the *client's* fault and which are the server's, and why a
+        // malformed request line must not become a 500.
         let head = match read_head(&mut stream, &mut buf, config).await {
             Ok(h) => h,
             Err(ReadOutcome::ClientClosed) => return Served::ClientClosed,
             Err(ReadOutcome::HeaderTimeout) => return Served::HeaderTimeout,
             Err(ReadOutcome::BadRequest(err)) => {
-                conn.on_parse_error(&err);
-                // `parse_error_response`, not `error_response`: a malformed
-                // request has no truthful `ErrorCode`, and routing it through
-                // `ParseError::to_error` produced `ManifestSchemaViolation` and
-                // a **500** for a client's bad request line. The taxonomy had no
-                // client-error class at all until this test found that.
-                let body = response::write_response(
-                    &response::from_error(&response::parse_error_response(&err.to_string())),
-                    Version::Http11,
-                    false,
-                );
-                let _ = stream.write_all(&body).await;
-                let _ = stream.flush().await;
-                return Served::BadRequest;
+                return reject_parse_error(&mut stream, &mut conn, &err).await;
             }
         };
+
+        let (path, _query) = split_target(&head.target);
+        let client_wants_keep_alive = wants_keep_alive(&head);
+        conn.on_request_parsed(client_wants_keep_alive);
 
         // --- Route and respond --------------------------------------------
         //
@@ -852,81 +1099,64 @@ async fn serve_connection(
         // deadline measures, and the time spent parsing and answering is not.
         // Starting it earlier would cut off a slow-but-progressing client for
         // the server's own think time.
-        let (path, _query) = split_target(&head.target);
-        let client_wants_keep_alive = wants_keep_alive(&head);
-        conn.on_request_parsed(client_wants_keep_alive);
 
-        // **Consume the body before dispatching**, so `max_request_bytes` is enforced
-        // while the bytes arrive rather than after the guest has been asked to serve
-        // them. `reject_body` states what happens on a breach and why the ordering is
-        // the rule rather than a preference — including the 200 OK that a
-        // dispatch-first version returned for an over-cap body.
-        //
-        // The body is drained, not delivered: handing a stream to the guest is the
-        // capability path, and what exists today is the enforcement that must happen
-        // regardless of whether anyone reads it.
+        // **Consume the body before dispatching.** `reject_body` states why the ordering
+        // is the rule rather than a preference.
         if !drain_body(&mut stream, &mut buf, &head).await {
             return reject_body(&mut stream, &head).await;
         }
 
+        // --- A CORS preflight is answered here, not by a handler ------------
+        //
+        // `serve_preflight` holds the reasoning: why the dispatcher answers rather than a
+        // handler, and why this runs **before** routing.
+        if head.method == crate::route::Method::Options {
+            if let Some(requested) = head.header("access-control-request-method") {
+                if let Some(cors) = ctx.cors {
+                    span_seq += 1;
+                    return serve_preflight(
+                        &mut stream,
+                        &head,
+                        path,
+                        PreflightRequest {
+                            cors,
+                            requested_method: requested,
+                            requested_headers: head.header("access-control-request-headers"),
+                        },
+                        ctx,
+                        &tenant,
+                        span_seq,
+                    )
+                    .await;
+                }
+            }
+        }
+
         // --- A streaming route takes a different path entirely --------------
         //
-        // Extracted rather than inlined: the block is a self-contained exchange with its
-        // own record and its own return, and inlining it pushed `serve_connection` past
-        // the line limit — which is the extraction the lint was asking for, not a
-        // suppression.
+        // `serve_streaming` owns the whole exchange, including why the connection closes
+        // afterwards rather than returning to this loop.
         if let Some(m) = table.match_route(head.method, path) {
             if let Some(stream_handler) = dispatch.streaming_for(&m.handler) {
-                let matched = RouteMatch {
-                    handler: m.handler.clone(),
-                    pattern: m.pattern.clone(),
-                    params: m
-                        .params
-                        .iter()
-                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                        .collect(),
-                };
+                let matched = route_match_of(&m);
                 span_seq += 1;
                 return serve_streaming(
                     &mut stream,
-                    dispatch,
                     stream_handler,
                     &head,
                     path,
                     &matched,
-                    id,
+                    ctx,
                     &tenant,
-                    logger,
                     span_seq,
                 )
                 .await;
             }
         }
 
-        let response = if let Some(m) = table.match_route(head.method, path) {
-            (dispatch.flat)(
-                &head,
-                &RouteMatch {
-                    handler: m.handler.clone(),
-                    pattern: m.pattern.clone(),
-                    params: m
-                        .params
-                        .iter()
-                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                        .collect(),
-                },
-            )
-        } else {
-            // A path with no route but a known method set gets a 405 with the
-            // allowance, which is what a client needs to recover; a genuinely
-            // unknown path gets 404.
-            let allowed = table.allows(path);
-            if allowed.is_empty() {
-                response::not_found()
-            } else {
-                response::method_not_allowed(&allowed)
-            }
-        };
+        let response = dispatch_flat(table, dispatch, &head, path);
+
+        let response = apply_cors(response, &head, ctx.cors);
 
         // --- One record per request, `SRV-013` -----------------------------
         //
@@ -936,8 +1166,8 @@ async fn serve_connection(
         // a record for a request whose response never left the server.
         span_seq += 1;
         emit_record(
-            logger,
-            access_record(&head, path, &response, &tenant, id.trace, span_seq),
+            ctx.logger,
+            access_record(&head, path, &response, &tenant, ctx.id.trace, span_seq),
         );
 
         // `None` means the connection may be reused, so the loop reads the next

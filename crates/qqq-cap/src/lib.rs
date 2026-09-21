@@ -51,6 +51,7 @@ pub mod manifest;
 pub mod normalize;
 pub mod policy;
 pub mod resolve;
+pub mod server;
 
 pub use capability::{
     Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,

@@ -97,7 +97,33 @@ SERDE_RENAME = re.compile(r'#\[serde\([^)]*rename\s*=\s*"([^"]+)"')
 SERDE_DEFAULT = re.compile(r"#\[serde\([^)]*default")
 SERDE_SKIP = re.compile(r"#\[serde\([^)]*skip_serializing_if")
 DOC_LINE = re.compile(r"^\s*///\s?(.*)$")
-FIELD = re.compile(r"^\s*pub\s+([a-z_][a-z0-9_]*)\s*:\s*([^,]+),\s*$")
+# A public field declaration: the name, then a type that may contain commas inside
+# angle brackets.
+#
+# # The bug this fixes
+#
+# `[^,]+` stops at the first comma, including one inside a generic. So
+#
+#     pub dev_dependencies: BTreeMap<String, Dependency>,
+#
+# captured `BTreeMap<String` and then failed to match `, Dependency>,` against the
+# trailing `,\s*$`. The field was **silently dropped**, and
+# `schema/qqq-toml.schema.json` has documented only `package`, `build`,
+# `capabilities` and `limits` -- `dependencies` and `dev-dependencies` were never in
+# it, while `--check` reported the schema current.
+#
+# # Why this shape and not `(.+),\s*$`
+#
+# `(.+),\s*$` is correct and hangs: `\s*` and `.` both match a space and `$` can be
+# retried at every position, so a non-matching line costs quadratic time. The
+# generator consumed all available memory rather than reporting a defect in itself.
+#
+# This pattern consumes each character through exactly one alternative -- a run of
+# non-comma, non-angle characters, or a balanced one-level `<...>` group -- so there is
+# nothing to backtrack into.
+FIELD = re.compile(
+    r"^\s*pub\s+([a-z_][a-z0-9_]*)\s*:\s*([^,<]*(?:<[^<>]*>[^,<]*)*),\s*$"
+)
 
 
 def read_structs(source: str) -> dict[str, Struct]:

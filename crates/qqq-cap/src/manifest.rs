@@ -77,6 +77,24 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub dev_dependencies: BTreeMap<String, Dependency>,
+    /// `[server]` — the network surface: routes, default auth, CORS.
+    ///
+    /// # Why this field had to exist before four other items could be finished
+    ///
+    /// Four other checklist items were each complete in `qqq-serve` and none was
+    /// reachable,
+    /// because this struct did not model `[server]` at all: a manifest declaring
+    /// `routes` parsed successfully and the table was **inert**. The server then started,
+    /// accepted connections, and 404'd everything.
+    ///
+    /// It is the defect the `[dependencies]` field's own doc comment records, one table
+    /// over — *a [thing] that silently does not exist is worse than one that fails to
+    /// resolve, because the first is discovered at runtime by the person least able to
+    /// explain it.*
+    ///
+    /// Absent means no network surface, per the capability model's first rule.
+    #[serde(default, skip_serializing_if = "Server::is_empty_unconfigured")]
+    pub server: Server,
 }
 
 /// One entry in `[dependencies]`.
@@ -740,7 +758,12 @@ fn check_range<T: PartialOrd + fmt::Display>(
 /// Used so every "expected one of" message in this module has the same shape.
 /// A user who sees two differently-formatted lists of valid values reasonably
 /// wonders whether they mean different things.
-fn quoted(values: &[&str]) -> String {
+///
+/// `pub(crate)` rather than private: `crate::server` validates the `[server]`
+/// section and must produce messages of the same shape. Two renderings of "expected
+/// one of" in one manifest's diagnostics is the kind of difference that makes a reader
+/// look for a distinction that is not there.
+pub(crate) fn quoted(values: &[&str]) -> String {
     match values {
         [] => "nothing".to_owned(),
         [one] => format!("`{one}`"),
@@ -1105,6 +1128,15 @@ impl Manifest {
         // -- build -------------------------------------------------------
         self.validate_build()?;
 
+        // -- server ------------------------------------------------------
+        //
+        // Wired here, not in `qqq-serve`, so `qqqai inspect`, `qqqai caps` and
+        // `qqqai check` all reject a bad `[server]` without a server running — the
+        // same argument `validate_build`'s doc makes for validating at parse time.
+        // A route table that can only be proven wrong by starting a listener is one
+        // whose errors surface late, in CI, far from the edit that caused them.
+        self.server.validate()?;
+
         // -- limits ------------------------------------------------------
         self.validate_limits()?;
 
@@ -1285,6 +1317,145 @@ pub fn group_by_namespace(caps: &[Capability]) -> BTreeMap<&'static str, Vec<Cap
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The `[server]` section
+// ---------------------------------------------------------------------------
+//
+// These type declarations live here rather than in `crate::server` because
+// `tools/gen_schemas.py` reads this file to build `qqq.toml`'s JSON Schema, and it
+// resolves a named type by its **bare name** into a flat `$defs` namespace. A
+// declaration in another module is written `crate::server::Server`, which the
+// generator refuses -- correctly, rather than publishing a schema with a field it
+// cannot describe. `crate::server` keeps the *behaviour*: validation,
+// `unauthenticated_routes`, and the CORS table check.
+/// `[server]` — the routes and the default authentication mode.
+///
+/// Absent means no network surface at all; see the module docs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Server {
+    /// The route table. Empty means the project serves nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<Route>,
+    /// The authentication mode applied to a route that does not name one.
+    ///
+    /// Defaults to [`AuthMode::Deny`], **not** to a real mode. A manifest that lists
+    /// routes and forgets `default_auth` must fail closed: defaulting to `none` would
+    /// publish every route unauthenticated because the author omitted a line, and
+    /// defaulting to `bearer-jwt` would be a guess about a mechanism the author may
+    /// not have implemented. `deny` is the only default that cannot be wrong.
+    #[serde(default)]
+    pub default_auth: AuthMode,
+    /// `[server.cors]` — the cross-origin policy, absent meaning no CORS at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<Cors>,
+}
+
+/// One entry in `[server] routes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Route {
+    /// The path pattern, e.g. `/orders/:id`.
+    pub path: String,
+    /// The methods this route accepts. Empty is an error, not "all".
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// The handler name in the guest.
+    pub handler: String,
+    /// This route's authentication mode, overriding `default_auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthMode>,
+}
+
+/// How a request is authenticated before it reaches a handler.
+///
+/// A closed set, and `deny` is a member of it rather than represented by an absence.
+/// An `Option<AuthMode>` where `None` meant "no authentication" would make "the author
+/// forgot" and "the author asked for no authentication" the same value — and the
+/// difference matters more here than anywhere else in the manifest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    /// Refuse every request to this route. The default.
+    #[default]
+    Deny,
+    /// No authentication. Explicit, never inferred.
+    None,
+    /// A bearer JWT, validated against the configured issuer and audience.
+    BearerJwt,
+    /// A client certificate, verified against the configured trust anchors.
+    Mtls,
+    /// A signed request (signature over method, path, body digest and timestamp).
+    SignedRequest,
+}
+
+impl AuthMode {
+    /// The name as it appears in `qqq.toml`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::None => "none",
+            Self::BearerJwt => "bearer-jwt",
+            Self::Mtls => "mtls",
+            Self::SignedRequest => "signed-request",
+        }
+    }
+
+    /// Whether this mode actually authenticates anything.
+    ///
+    /// `deny` and `none` both stop no attacker; they differ in whether the request is
+    /// served. Named as a question a caller asks rather than a `matches!` at each call
+    /// site, because "is this route protected?" is the question every audit of a
+    /// manifest asks first.
+    #[must_use]
+    pub const fn validates_a_credential(self) -> bool {
+        matches!(self, Self::BearerJwt | Self::Mtls | Self::SignedRequest)
+    }
+}
+
+/// `[server.cors]` — the cross-origin policy.
+///
+/// Modelled here as the **file format** it is; `qqq-serve::cors` builds the policy
+/// from these values and owns the matching. The two are separate deliberately: whether
+/// a manifest *says* `allow_origins = ["*"]` is a parse-time question, and whether a
+/// given `Origin` header matches is a request-time one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cors {
+    /// The origins allowed to read responses. Empty allows nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_origins: Vec<String>,
+    /// Send `Access-Control-Allow-Credentials: true`.
+    #[serde(default)]
+    pub allow_credentials: bool,
+    /// Methods advertised on a preflight. Empty advertises nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_methods: Vec<String>,
+    /// Request headers the client may send.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_headers: Vec<String>,
+    /// Response headers the browser may expose to script.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<String>,
+    /// How long a preflight may be cached, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/// The HTTP methods a route may declare, in the spelling `qqq.toml` uses.
+///
+/// A closed set rather than "any token", because `methods = ["GTE"]` is a typo that
+/// would otherwise produce a route no request can reach — the silent-non-existence
+/// failure this module exists to prevent, arriving through the front door.
+pub const METHODS: [&str; 9] = [
+    "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1340,6 +1511,17 @@ fuel = 50000000
 epoch_deadline_ms = 5000
 max_instances = 200
 max_open_handles = 256
+
+[server]
+routes = [
+  { path = "/orders",     methods = ["POST"],          handler = "create-order" },
+  { path = "/orders/:id", methods = ["GET", "DELETE"], handler = "order-by-id" },
+  { path = "/healthz",    methods = ["GET"],           handler = "health", auth = "none" },
+]
+default_auth = "bearer-jwt"
+
+[server.cors]
+allow_origins = ["https://app.example.com"]
 "#;
 
     #[test]
@@ -1379,6 +1561,116 @@ max_open_handles = 256
             assert!(
                 caps.contains(&expected),
                 "the proposal's example should grant {expected}, but it did not"
+            );
+        }
+    }
+
+    /// **The `[server]` section is parsed, not silently dropped.**
+    ///
+    /// # Why this is the test that matters most for the section
+    ///
+    /// Before `Manifest` had a `server` field, a manifest containing `[server]` with
+    /// routes parsed **successfully** and every route was discarded: the server would
+    /// start, accept connections and 404 everything, with nothing saying why. That is
+    /// the same silent-drop defect the `[dependencies]` field's doc comment records,
+    /// and it is why this asserts the *values* rather than merely that parsing
+    /// succeeded — a parse that succeeds while dropping the table is exactly the bug.
+    #[test]
+    fn the_server_section_is_parsed_and_not_dropped() {
+        let m = Manifest::parse(FULL).expect("the proposal's example must parse");
+
+        assert_eq!(
+            m.server.routes.len(),
+            3,
+            "all three routes must survive parsing"
+        );
+        assert_eq!(m.server.default_auth, AuthMode::BearerJwt);
+        assert_eq!(m.server.routes[0].path, "/orders");
+        assert_eq!(m.server.routes[0].handler, "create-order");
+        assert_eq!(m.server.routes[1].methods, vec!["GET", "DELETE"]);
+        assert_eq!(
+            m.server.routes[2].auth,
+            Some(AuthMode::None),
+            "the per-route override must survive too"
+        );
+        assert_eq!(
+            m.server
+                .cors
+                .as_ref()
+                .expect("cors must be parsed")
+                .allow_origins,
+            vec!["https://app.example.com"]
+        );
+    }
+
+    /// A manifest with no `[server]` serves nothing, and is not an error.
+    ///
+    /// A library has no network surface, and requiring an empty section would be
+    /// noise. What must not happen is the *absence* being read as "serve everything".
+    #[test]
+    fn an_absent_server_section_serves_nothing() {
+        let m = Manifest::parse(MINIMAL).expect("must parse");
+        assert!(m.server.is_empty());
+        assert_eq!(m.server.len(), 0);
+        assert_eq!(m.server.default_auth, AuthMode::Deny);
+        assert!(m.server.cors.is_none());
+    }
+
+    /// **A bad `[server]` section is rejected by `Manifest::parse` itself.**
+    ///
+    /// The wiring claim: validation is reachable from the entry point a user actually
+    /// calls, not merely from `Server::validate`. A check that exists but is not called
+    /// is the defect this project keeps finding, so this asserts through `parse`.
+    #[test]
+    fn a_bad_server_section_is_rejected_at_parse_time() {
+        // Each case is a **complete** route literal with exactly one thing wrong, so
+        // the only reason for the failure is the field being tested. A first version
+        // omitted `path` from some cases and the test failed on that instead —
+        // a fixture that cannot isolate the defect proves nothing about it.
+        let cases: [(&str, &str); 4] = [
+            (r#"{ path = "/a", methods = [], handler = "h" }"#, "methods"),
+            (
+                r#"{ path = "/a", methods = ["GTE"], handler = "h" }"#,
+                "GTE",
+            ),
+            (r#"{ path = "a", methods = ["GET"], handler = "h" }"#, "/a"),
+            (
+                r#"{ path = "/a", methods = ["GET"], handler = "" }"#,
+                "handler",
+            ),
+        ];
+        for (route, needle) in cases {
+            let src = format!("{MINIMAL}\n[server]\nroutes = [{route}]\n");
+            let err = Manifest::parse(&src)
+                .expect_err(&format!("`{route}` must be refused, got a valid manifest"));
+            let text = err.to_string();
+            assert!(
+                text.contains(needle),
+                "for `{route}` expected `{needle}`: {text}"
+            );
+            assert!(
+                text.contains("server.routes[0]"),
+                "the error must name the offending route: {text}"
+            );
+        }
+    }
+
+    /// A wildcard origin in `[server.cors]` is rejected by `Manifest::parse`.
+    ///
+    /// The security-relevant half of the wiring: a manifest is the file an auditor
+    /// reads, so `qqqai inspect` must be able to report a wildcard CORS policy without
+    /// starting a server.
+    #[test]
+    fn a_wildcard_cors_policy_is_rejected_at_parse_time() {
+        for origins in [
+            "allow_origins = [\"*\"]",
+            "allow_origins = [\"https://*.example.com\"]",
+        ] {
+            let src = format!("{MINIMAL}\n[server.cors]\n{origins}\n");
+            let err = Manifest::parse(&src).expect_err(&format!("`{origins}` must be refused"));
+            assert!(
+                err.to_string().contains("allow_origins"),
+                "{origins}: {err}"
             );
         }
     }

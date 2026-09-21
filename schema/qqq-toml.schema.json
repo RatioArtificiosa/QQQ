@@ -132,6 +132,59 @@
       "title": "qqq-toml#ClockCapability",
       "type": "object"
     },
+    "Cors": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Cors",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Cors` table.",
+      "properties": {
+        "allow_credentials": {
+          "description": "Send `Access-Control-Allow-Credentials: true`.",
+          "type": "boolean"
+        },
+        "allow_headers": {
+          "description": "Request headers the client may send.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_methods": {
+          "description": "Methods advertised on a preflight. Empty advertises nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_origins": {
+          "description": "The origins allowed to read responses. Empty allows nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expose_headers": {
+          "description": "Response headers the browser may expose to script.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_age": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How long a preflight may be cached, in seconds."
+        }
+      },
+      "title": "qqq-toml#Cors",
+      "type": "object"
+    },
     "CryptoCapability": {
       "$id": "https://qqq.codes/schema/qqq-toml#CryptoCapability",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -399,6 +452,90 @@
       ],
       "title": "qqq-toml#Package",
       "type": "object"
+    },
+    "Route": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Route",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Route` table.",
+      "properties": {
+        "auth": {
+          "anyOf": [
+            {
+              "enum": [
+                "deny",
+                "none",
+                "bearer-jwt",
+                "mtls",
+                "signed-request"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This route's authentication mode, overriding `default_auth`."
+        },
+        "handler": {
+          "description": "The handler name in the guest.",
+          "type": "string"
+        },
+        "methods": {
+          "description": "The methods this route accepts. Empty is an error, not \"all\".",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "The path pattern, e.g. `/orders/:id`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "handler",
+        "path"
+      ],
+      "title": "qqq-toml#Route",
+      "type": "object"
+    },
+    "Server": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Server",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Server` table.",
+      "properties": {
+        "cors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[server.cors]` — the cross-origin policy, absent meaning no CORS at all."
+        },
+        "default_auth": {
+          "description": "The authentication mode applied to a route that does not name one. Defaults to [`AuthMode::Deny`], **not** to a real mode. A manifest that lists routes and forgets `default_auth` must fail closed: defaulting to `none` would publish every route unauthenticated because the author omitted a line, and d",
+          "enum": [
+            "deny",
+            "none",
+            "bearer-jwt",
+            "mtls",
+            "signed-request"
+          ],
+          "type": "string"
+        },
+        "routes": {
+          "description": "The route table. Empty means the project serves nothing.",
+          "items": {
+            "$ref": "#/$defs/Route"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#Server",
+      "type": "object"
     }
   },
   "$id": "https://qqq.codes/schema/qqq-toml",
@@ -413,6 +550,16 @@
       "$ref": "#/$defs/Capabilities",
       "description": "`[capabilities]` — the authority declaration. Absent means deny-all."
     },
+    "dependencies": {
+      "additionalProperties": true,
+      "description": "`[dependencies]` — packages this project links against. Modelled explicitly rather than left to be ignored. Before this field existed, a manifest containing `[dependencies]` parsed **successfully** and the dependencies were silently dropped: `qqqai` reported no capabilities from a dependency it had ",
+      "type": "object"
+    },
+    "dev_dependencies": {
+      "additionalProperties": true,
+      "description": "`[dev-dependencies]` — packages needed only for tests and benchmarks. Kept separate because a dev-dependency's capabilities must **not** be granted to the shipped component. Merging the two tables would let a test-only package widen the production authority surface, which is precisely the supply-cha",
+      "type": "object"
+    },
     "limits": {
       "$ref": "#/$defs/Limits",
       "description": "`[limits]` — enforceable resource bounds."
@@ -420,9 +567,14 @@
     "package": {
       "$ref": "#/$defs/Package",
       "description": "`[package]` — identity."
+    },
+    "server": {
+      "$ref": "#/$defs/Server",
+      "description": "`[server]` — the network surface: routes, default auth, CORS. # Why this field had to exist before four other items could be finished Four other checklist items were each complete in `qqq-serve` and none was reachable, because this struct did not model `[server]` at all: a manifest declaring `routes"
     }
   },
   "required": [
+    "dev_dependencies",
     "package"
   ],
   "title": "qqq-toml",

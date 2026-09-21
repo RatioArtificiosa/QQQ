@@ -677,13 +677,14 @@ fn dispatch_inspect(
 /// would learn to append `|| true`, which turns the gate off for everybody. The
 /// threshold is opt-in, which is what the flag is for.
 ///
-/// # Why the SARIF branch prints and returns a placeholder payload
+/// # Why the SARIF branch writes the document itself
 ///
 /// Because `with_manifest` owns the emit, and for SARIF the correct behaviour is
 /// **not** to emit an envelope at all: a consumer parsing the output as SARIF must
-/// not have to unwrap `data` first. So the SARIF text goes to stdout directly and
-/// the returned payload is never printed -- `with_manifest` is used here for its
-/// manifest *loading*, and its output path is bypassed.
+/// not have to unwrap `data` first — nor skip a trailing human summary line.
+/// `Output::write_document` puts the SARIF text on the command's own sink (so a
+/// broken pipe is still a `QQQ-6005` rather than a panic, and so a test can
+/// capture it) and the returned payload is never printed.
 fn dispatch_audit(
     name: CommandName,
     args: &[String],
@@ -728,29 +729,59 @@ fn dispatch_audit(
     // around.
     let mut meets_threshold = false;
 
-    let code = with_manifest(name, out, args, |loaded| {
-        let lock = qqq_run::sibling_lockfile(loaded);
-        let report = qqq_run::audit::audit(loaded, lock.as_ref());
-
-        if sarif {
-            // Raw, not enveloped: see the doc comment.
-            println!("{}", report.to_sarif());
-            return Ok(qqq_run::AuditOutput::from(&report));
+    // `with_manifest` is deliberately **not** used here.
+    //
+    // It always emits the payload's `summary()` line, which is right for a
+    // command whose whole output is that line plus its detail — and wrong for
+    // `--sarif`, whose stdout must be the SARIF document and nothing else. The
+    // first version used `with_manifest` and wrote the document from inside the
+    // closure for exactly this reason, and stdout still began with the human
+    // sentence: measured, 1438 bytes whose first line was
+    // `1 finding(s) over caps, ...` and whose remainder was valid SARIF, so
+    // `qqqai audit --sarif | jq` failed. Discovery is three lines; owning the
+    // emit is worth them.
+    let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
         }
+    };
 
+    let lock = qqq_run::sibling_lockfile(&loaded);
+    let report = qqq_run::audit::audit(&loaded, lock.as_ref());
+
+    if sarif {
+        // The document *is* the output: no envelope, no summary line.
+        if let Err(e) = out.write_document(&report.to_sarif()) {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::INTERNAL);
+        }
+    } else {
         if let Some(threshold) = fail_on {
             meets_threshold = report.fails_at(threshold);
         }
-        print!("{}", report.render());
-        Ok(qqq_run::AuditOutput::from(&report))
-    });
+        // Detail, then the one-line conclusion. `render` deliberately omits the
+        // conclusion so it is printed here once.
+        if let Err(e) = out.write_document(&report.render()) {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::INTERNAL);
+        }
+        let payload = qqq_run::AuditOutput::from(&report);
+        if let Err(e) = out.emit(&payload) {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::INTERNAL);
+        }
+    }
 
     // A manifest that could not be loaded has already reported its own failure,
     // so the threshold is only consulted on a successful audit.
-    if code == ExitCode::from(exit::OK) && meets_threshold {
+    if meets_threshold {
         return ExitCode::from(exit::FAILURE);
     }
-    code
+    ExitCode::from(exit::OK)
 }
 
 /// Dispatch `qqqai build`.

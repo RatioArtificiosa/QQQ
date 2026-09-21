@@ -460,6 +460,25 @@ impl<W: Write> Output<W> {
         self.sink.flush().map_err(|e| write_failure(&e))
     }
 
+    /// Write a whole document, bypassing the envelope, and end it with a newline.
+    ///
+    /// [`Self::write_line`] is for commands whose every line is independent. This
+    /// is for a command that emits **one machine-readable document** in a format
+    /// of its own — `qqqai audit --sarif` is the case that exists today. Such a
+    /// document must be the *entire* stdout stream: appending the human
+    /// `summary()` line after the closing brace produced 1440 bytes of which the
+    /// first 1356 parsed as SARIF and the rest did not, so
+    /// `qqqai audit --sarif | jq` failed with `Extra data: line 2 column 1`.
+    /// A `--sarif` flag whose output cannot be piped to a SARIF consumer is not
+    /// an interchange format, it is a rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QQQ-6005` if the sink rejects the write.
+    pub fn write_document(&mut self, text: &str) -> Result<()> {
+        self.write_line(text)
+    }
+
     /// Consume the writer and return the sink, for tests.
     pub fn into_inner(self) -> W {
         self.sink

@@ -226,22 +226,12 @@ impl AuditReport {
         use std::fmt::Write as _;
         let mut out = format!("audit of `{}`\n", self.project);
         if self.findings.is_empty() {
-            out.push_str(
-                "  no findings: the posture, limits, supply chain and \
-                          provenance all check out\n",
-            );
             return out;
         }
         for f in &self.findings {
             let _ = writeln!(out, "  [{:<7}] {}  {}", f.severity, f.rule, f.message);
             let _ = writeln!(out, "            fix: {}", f.remediation);
         }
-        let _ = writeln!(
-            out,
-            "\n{} finding(s); worst severity: {}",
-            self.findings.len(),
-            self.worst().map_or("none", Severity::as_str)
-        );
         out
     }
 }
@@ -611,10 +601,11 @@ impl crate::output::CommandOutput for AuditOutput {
     /// which four.
     fn summary(&self) -> String {
         match (self.findings.len(), self.worst) {
-            (0, _) => "no findings: caps, limits, supply chain and provenance all                        check out"
-                .to_owned(),
+            (0, _) => {
+                "no findings: caps, limits, supply chain and provenance all check out".to_owned()
+            }
             (n, Some(worst)) => format!(
-                "{n} finding(s) over caps, limits, supply chain and provenance;                  worst severity: {worst}"
+                "{n} finding(s) over caps, limits, supply chain and provenance; worst severity: {worst}"
             ),
             (n, None) => format!("{n} finding(s)"),
         }
@@ -1106,6 +1097,38 @@ mod tests {
         assert!(results[0]["message"]["text"].is_string());
     }
 
+    /// **The SARIF document must travel alone.**
+    ///
+    /// A `--sarif` flag exists so a SARIF consumer — GitHub code scanning, a
+    /// `jq` pipeline, an editor plugin — can read stdout. If anything else
+    /// shares the stream the consumer sees `Extra data: line 2 column 1` and the
+    /// flag is a rendering rather than an interchange format. This was measured
+    /// broken twice: the old `render()` footer, then the envelope `summary()`
+    /// line. The check is that the *first* non-whitespace character is `{` and
+    /// the *last* is `}`, which is the property a consumer actually needs.
+    #[test]
+    fn the_sarif_document_has_nothing_before_or_after_it() {
+        let src = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
+                   [[capabilities.fs]]\npath = \".\"\nmode = \"read-write\"\n";
+        for lock in [None, Some(lock_with("a", None, &["http.client"]))] {
+            let text = audit(&loaded(src), lock.as_ref()).to_sarif();
+            let trimmed = text.trim();
+            assert!(
+                trimmed.starts_with('{'),
+                "leading prose before SARIF: {trimmed}"
+            );
+            assert!(
+                trimmed.ends_with('}'),
+                "trailing prose after SARIF: {trimmed}"
+            );
+            assert_eq!(
+                trimmed.matches("\"version\":\"2.1.0\"").count(),
+                1,
+                "exactly one document"
+            );
+        }
+    }
+
     /// Every rule the module can emit must be declared in the SARIF `rules`
     /// array, or a consumer sees a `ruleId` it cannot look up.
     #[test]
@@ -1154,16 +1177,29 @@ mod tests {
 
     // -- Rendering ---------------------------------------------------------
 
+    /// A clean report renders **nothing** to the terminal body.
+    ///
+    /// The conclusion is the `summary()` line, printed by the output layer; the
+    /// render is detail only. Emitting a conclusion here as well printed it
+    /// twice, and the two copies disagreed on wording.
     #[test]
     fn the_terminal_render_says_so_when_there_is_nothing_to_report() {
         let report = audit(&loaded(CHOSEN), None);
         let text = report.render();
-        assert!(text.contains("no findings"), "{text}");
-        assert!(
-            text.contains("supply chain"),
-            "must name what was checked: {text}"
+        assert_eq!(
+            text,
+            format!("audit of `{}`\n", report.project),
+            "a clean report has no detail to render"
         );
-        assert!(text.contains("provenance"), "{text}");
+        // ... and the surface list lives in the summary, which still names all four.
+        let out = AuditOutput::from(&report);
+        let summary = crate::output::CommandOutput::summary(&out);
+        for surface in ["caps", "limits", "supply chain", "provenance"] {
+            assert!(
+                summary.contains(surface),
+                "the summary must name what was checked ({surface}): {summary}"
+            );
+        }
     }
 
     #[test]
@@ -1180,7 +1216,11 @@ mod tests {
                 f.rule
             );
         }
-        assert!(text.contains("worst severity"), "{text}");
+        // The conclusion belongs to `summary()`, and only there.
+        assert!(
+            !text.contains("worst severity"),
+            "the render must not repeat the conclusion: {text}"
+        );
     }
 
     #[test]

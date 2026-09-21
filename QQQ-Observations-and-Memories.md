@@ -9867,4 +9867,91 @@ injection).
 
 ---
 
+### §O-115 — I categorized by what a file is *for* when the property that mattered was where it *lives*, and made the same mistake twice
+
+**The sequence.** `DOC-020`'s generator publishes `llms.txt`, and the document has
+a list of files that must never appear in it. CI failed on that list **twice in a
+row, for the same reason**, and I diagnosed it wrong the first time.
+
+**Failure 1.**
+
+```text
+FAIL  no exclusion names a file that no longer exists
+      stale exclusions: ['docs/env-example.md']
+```
+
+Two things, and I fixed one correctly and one incorrectly. The correct fix: the
+path was simply wrong — `/tmp` was the real file, named `docs/.env`. The incorrect
+one: I then split the list in two and asserted the *non-documentation* entries must
+exist, on the reasoning that such a file belongs in the repository.
+
+**Failure 2.**
+
+```text
+FAIL  every tracked exclusion still exists
+      stale exclusions: ['docs/Windows-Linux-Docker.md']
+```
+
+`docs/Windows-Linux-Docker.md` is **gitignored**. It is absent from a CI checkout,
+exactly like `docs/.env` — which is what I had just fixed for the other file, in
+the other list.
+
+**Both mistakes were one mistake: I classified by what a file is *for*, when the
+property every check depends on is where it *lives*.** "Is this documentation?" and
+"is this in Git?" are independent questions, and so are "is this gitignored?" and
+"does this carry a secret?":
+
+| List | In Git? | Absence means | Presence in Git means |
+|---|---|---|---|
+| `EXCLUDED` | yes | staleness — remove the entry | normal |
+| `EXCLUDED_LOCAL` | no | normal | odd but harmless |
+| `EXCLUDED_SECRETS` | no | normal | **a credential leak** |
+
+**Ground truth came from running the commands, not from reading `.gitignore`.**
+
+```
+docs/Windows-Linux-Docker.md    tracked=no   exists=yes  ignored=yes
+docs/QQQAI-Conversation-Full.md tracked=yes  exists=yes  ignored=no
+docs/Notes.txt                  tracked=yes  exists=yes  ignored=no
+docs/.env                       tracked=no   exists=yes  ignored=yes
+```
+
+Three lists, each checked for what its membership *actually implies*, and two new
+self-test cases that make the list **names true rather than aspirational**: every
+entry in `EXCLUDED` must genuinely be tracked, and no entry in the gitignored lists
+may be. Either case would have caught this before CI did.
+
+**And the verification method was wrong too, which is the part worth keeping.** I
+had been reproducing CI with `--check` in a clean clone, and it passed there while
+CI failed — because **CI runs `--check` *and* `--self-test`, and only the self-test
+reads the tracked-ness of the excluded paths.** The reproduction was of a command
+that seemed equivalent rather than of the command CI runs.
+
+> **When CI fails and a local reproduction passes, reproduce the exact command CI
+> runs — not the one that appears to cover it.**
+
+`§O-080` records the same shape from the other direction (an injection that
+reached the wrong code); this is a reproduction that reached the wrong code path.
+Both are the same question — *did my check actually exercise what failed?* — which
+this session has now asked as `§O-079`'s injection harnesses, `§O-108`'s dead
+fault injection, and here.
+
+**The chain of four defects in one generator, and what each was found by:**
+
+| # | Defect | Found by |
+|---|---|---|
+| 1 | Four documents unindexed; `docs/env-example.md` did not exist; `((missing))` doubled brackets | the self-test's first run |
+| 2 | `llms.txt` not reproducible across platforms (sizes from `stat().st_size`) | the drift check failing on the generator that produced it |
+| 3 | The index churned on every commit, self-referentially | reproducing CI in a clean clone |
+| 4 | Exclusions categorized by purpose rather than by location | CI, twice |
+
+**Not one of the four was visible by reading the code.** All four came from running
+it — and the last two came from running it *in the environment CI uses*, which is a
+different thing from running it locally.
+
+→ `tools/gen_llms_txt.py` (11 self-test cases), `llms.txt`, `llms-full.txt`,
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

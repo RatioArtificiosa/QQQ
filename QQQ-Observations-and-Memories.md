@@ -5267,6 +5267,59 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-092 — `SEC-023`: the self-test found two dead checks, and one was unreachable rather than wrong
+
+**What the item asked.** "Establish the responsible-disclosure process and a public
+security-advisory feed." Half of it already existed: `SECURITY.md` had the contact
+policy, the in-scope and out-of-scope classes, the severity table and the response
+targets, and `docs/wasmtime-advisory-process.md` had the upstream-advisory clock.
+What was missing was the **feed** — the durable, machine-readable record a user
+consults during an incident rather than after one.
+
+**What was built.** `docs/advisories/` with `INDEX.md` as the front door, a
+`.well-known/security.txt` (RFC 9116) so a researcher's tooling can find the
+contact without guessing, and `tools/check_advisories.py` to keep the two halves of
+the register from drifting apart.
+
+The checker is the substantive part. An index maintained by hand drifts, and a
+drifted security index is *worse than none*: it tells a reader they are unaffected
+while the advisory file sitting next to it says otherwise. So the CI step fails when
+an advisory has no row, a row has no advisory, an identifier is duplicated or
+malformed, a required section is missing or empty, a severity disagrees, or "Found"
+postdates "Published".
+
+**The self-test found two dead checks, and they were dead in different ways.**
+
+* **A test that tested nothing.** The case for "the declared identifier does not
+  match the filename" used `replace(..., 1)`, which hit the H1 title rather than the
+  `## Identifier` section. The file still declared the correct identifier, the
+  checker was right to pass it, and the harness reported `DEAD`. **The test was the
+  broken thing**, and it looked exactly like a broken check.
+* **A check that could not be reached.** The case for "the identifier is not
+  `QQQ-YYYY-NNN`" wrote its fixture to a malformed filename — and the checker's glob
+  was `QQQ-*.md`, so a malformed name was *invisible*. The index row pointing at it
+  was reported as "does not exist", and the real problem was never named. The check
+  was written correctly and could never fire. **An unreachable check and a dead
+  check produce the same green build.**
+
+The second is the more interesting failure, and it is a new shape for this session.
+`§O-085` and `§O-088` were controls that ran and measured nothing. This one never
+ran at all, because the set it searched was defined by the property it was meant to
+verify — a filter that excludes the thing you are looking for.
+
+**Why this is being recorded at all.** The advisory register is the one artifact a
+user reads *during* an incident, when they cannot afford to discover that the check
+behind it was decorative. Both gaps were found by running the checker against
+deliberately broken fixtures rather than by reading it, and neither was visible in
+review: the code was correct in both cases. The lesson generalises to any checker —
+**a validation rule is only as live as the reachability of its input set.**
+
+→ `docs/advisories/README.md`, `docs/advisories/INDEX.md`,
+`tools/check_advisories.py`, `.well-known/security.txt`, `.github/workflows/ci.yml`,
+`SECURITY.md`.
+
+---
+
 ### §O-091 — A commit shipped the harness's leftovers, and the self-repair contained the same class of bug
 
 Three failures, all discovered by refusing to accept an intermittent result.

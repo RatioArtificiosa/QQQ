@@ -1910,7 +1910,17 @@ Items are grouped below by **phase**, because dependency order matters more than
     fails 2 tests.
   → 20 tests; `Denial::label` is bounded for §10.2 metric cardinality.
   → §7.5 Hardening beyond Wasm
-- [ ] **SEC-023** Establish the responsible-disclosure process and a public security-advisory feed.
+- [x] **SEC-023** Establish the responsible-disclosure process and a public security-advisory feed.
+  → Done: `SECURITY.md` (contact, scope, severities, response targets), plus the
+    machine-readable path: `.well-known/security.txt` (RFC 9116) and
+    `docs/advisories/` — a public register with `INDEX.md` as its front door.
+  → `tools/check_advisories.py` enforces the register in CI: every advisory needs an
+    index row and vice versa, identifiers must be unique and `QQQ-YYYY-NNN`,
+    required sections must be present and non-empty, severities must agree, and
+    "Found" must not postdate "Published".
+  → Its 9-case self-test found two real gaps while being written: a dead identifier
+    check and an unreachable filename check (the glob only matched well-formed
+    names, so a malformed one was invisible).
   → §7.2 Adversary model
 - [ ] **SEC-024** Commission external security audit #1 before the private alpha (M7).
   → §16 — Definition of Done for V1

@@ -135,6 +135,16 @@ jobs:
       - name: Refuse a corpus carrying a left-over fault injection
         run: python tools/self_test_xrefs.py --check-clean
 
+      # `SEC-023`. The advisory register is the artifact a user consults *during an
+      # incident*, so an index that has drifted from the files beside it is worse
+      # than no index: it says "not affected" while the file next to it says
+      # otherwise. The self-test runs too, because a register checker that has never
+      # rejected anything has never been shown to work.
+      - name: Validate the security-advisory register
+        run: python tools/check_advisories.py
+      - name: Prove the advisory checker actually rejects breakage
+        run: python tools/check_advisories.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

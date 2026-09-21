@@ -1568,3 +1568,197 @@ fn an_unknown_capability_is_an_error_not_a_crash() {
     let run = s.run(&["why", "not.a.capability"]);
     run.assert_failed().assert_contains("QQQ-");
 }
+
+// ---------------------------------------------------------------------------
+// audit — the output must be the *whole* contract, in every mode
+// ---------------------------------------------------------------------------
+//
+// These four tests exist because 25 unit tests over `audit.rs` passed while
+// `qqqai audit` printed its conclusion twice and `qqqai audit --sarif` could not
+// be piped into a SARIF consumer. Every unit test asserted on `render()`,
+// `summary()` or `to_sarif()` in isolation; none asserted on what the process
+// put on stdout. The defects lived in the seam between two components that were
+// each individually correct, so the regression tests have to run the binary.
+
+/// A project that trips at least one rule, so the audit has something to say.
+const AUDITING: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                        [[capabilities.fs]]\npath = \".\"\nmode = \"read-write\"\n";
+
+/// The conclusion is printed **once**.
+///
+/// `AuditReport::render` ended with its own `N finding(s); worst severity: X`
+/// footer *and* the output layer independently emitted `summary()`, in slightly
+/// different words. A human reading two different conclusions has to decide
+/// which to believe.
+#[test]
+fn audit_prints_its_conclusion_exactly_once() {
+    let s = Sandbox::new("audit-once");
+    s.write("qqq.toml", AUDITING);
+
+    let run = s.run(&["audit"]);
+    run.assert_ok();
+
+    for phrase in ["worst severity", "finding(s)"] {
+        let n = run.stdout.matches(phrase).count();
+        assert_eq!(
+            n, 1,
+            "`{phrase}` must appear once, found {n}\nstdout:\n{}",
+            run.stdout
+        );
+    }
+}
+
+/// `--sarif` must be the entire stdout stream.
+///
+/// The consumer this flag exists for — GitHub code scanning, a `jq` pipeline —
+/// reads stdout as one document. Measured broken twice: once with the render
+/// footer after the document, once with the envelope summary before it. Both
+/// produced `Extra data` from a JSON parser, which is exactly what the check
+/// below looks for without needing a JSON library in the test.
+#[test]
+fn audit_sarif_is_the_only_thing_on_stdout() {
+    let s = Sandbox::new("audit-sarif-pure");
+    s.write("qqq.toml", AUDITING);
+
+    let run = s.run(&["audit", "--sarif"]);
+    run.assert_ok();
+
+    let trimmed = run.stdout.trim();
+    assert!(
+        trimmed.starts_with('{'),
+        "stdout must begin with the SARIF document, not prose:\n{}",
+        run.stdout
+    );
+    assert!(
+        trimmed.ends_with('}'),
+        "stdout must end with the SARIF document, not a summary line:\n{}",
+        run.stdout
+    );
+    assert!(
+        trimmed.contains("\"version\":\"2.1.0\""),
+        "must be a SARIF 2.1.0 document:\n{}",
+        run.stdout
+    );
+    // A second JSON object on the stream is the failure mode.
+    assert_eq!(
+        run.stdout.matches("\"$schema\"").count(),
+        1,
+        "exactly one SARIF document:\n{}",
+        run.stdout
+    );
+}
+
+/// `--json` must be parseable, and the parseable thing must be the envelope.
+///
+/// `render()` was written unconditionally, so `--json audit` emitted five lines
+/// of human prose and *then* the envelope. Every `qqqai` command promises
+/// "one envelope per invocation" — this one broke it, and the same
+/// `some_command_emits_the_json_envelope` helper could not catch it because the
+/// prose came first and the envelope still existed somewhere in the output.
+#[test]
+fn audit_json_is_parseable_and_only_the_envelope() {
+    let s = Sandbox::new("audit-json");
+    s.write("qqq.toml", AUDITING);
+
+    let run = s.run(&["audit", "--json"]);
+    run.assert_ok();
+
+    let lines: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "`--json` must be a single line, got {}:\n{}",
+        lines.len(),
+        run.stdout
+    );
+    let line = lines[0];
+    assert!(
+        line.starts_with('{') && line.ends_with('}'),
+        "the line must be a JSON object:\n{line}"
+    );
+    for field in [
+        "\"producer\":\"qqqai\"",
+        "\"command\":\"audit\"",
+        "\"ok\":true",
+    ] {
+        assert!(line.contains(field), "missing {field}:\n{line}");
+    }
+    assert!(
+        !run.stdout.contains("worst severity:\n"),
+        "the human rendering must not share the stream with `--json`:\n{}",
+        run.stdout
+    );
+}
+
+/// A threshold must gate **every** output mode.
+///
+/// `meets_threshold` was computed inside the non-SARIF branch, so
+/// `audit --sarif --fail-on note` exited `0` while `audit --fail-on note`
+/// exited `1`. A CI job gating on SARIF — the reason the format is offered —
+/// would have been green forever. This is the highest-value test in the group:
+/// the failure mode is a **silent pass**, which no amount of reading the SARIF
+/// output would reveal.
+#[test]
+fn audit_fail_on_gates_every_output_mode() {
+    let s = Sandbox::new("audit-fail-on-modes");
+    s.write("qqq.toml", AUDITING);
+
+    for args in [
+        vec!["audit", "--fail-on", "note"],
+        vec!["audit", "--sarif", "--fail-on", "note"],
+        vec!["audit", "--json", "--fail-on", "note"],
+    ] {
+        let run = s.run(&args);
+        assert_eq!(
+            run.code,
+            1,
+            "`{}` must exit 1 on a note-level finding\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            run.stdout,
+            run.stderr
+        );
+    }
+
+    // ...and a threshold above the worst finding must not gate.
+    for args in [
+        vec!["audit", "--fail-on", "error"],
+        vec!["audit", "--sarif", "--fail-on", "error"],
+    ] {
+        let run = s.run(&args);
+        run.assert_ok();
+    }
+}
+
+/// The envelope reports the threshold decision, so an agent reading `--json`
+/// sees *why* the process failed without consulting the exit code.
+#[test]
+fn audit_json_reports_the_threshold_decision() {
+    let s = Sandbox::new("audit-json-failed");
+    s.write("qqq.toml", AUDITING);
+
+    let run = s.run(&["audit", "--json", "--fail-on", "note"]);
+    assert_eq!(
+        run.code, 1,
+        "expected the threshold to gate:\n{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("\"failed\":true"),
+        "the envelope must say the threshold gated:\n{}",
+        run.stdout
+    );
+
+    // With no threshold given the field is absent rather than `false`: "not
+    // asked" and "asked and satisfied" are different answers.
+    let clean = s.run(&["audit", "--json"]);
+    clean.assert_ok();
+    assert!(
+        !clean.stdout.contains("\"failed\""),
+        "an ungated audit must omit `failed`:\n{}",
+        clean.stdout
+    );
+}

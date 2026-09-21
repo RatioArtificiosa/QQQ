@@ -753,27 +753,51 @@ fn dispatch_audit(
     let lock = qqq_run::sibling_lockfile(&loaded);
     let report = qqq_run::audit::audit(&loaded, lock.as_ref());
 
+    // The threshold is computed **before** the output branch, so `--sarif
+    // --fail-on note` gates like every other mode.
+    //
+    // Computing it only in the human branch meant the SARIF mode was the one
+    // way to run the audit with a threshold and have it silently ignored:
+    // measured, `audit --sarif --fail-on note` exited 0 while
+    // `audit --fail-on note` exited 1. A CI job that gates on SARIF output —
+    // the reason `--sarif` exists — would have been green forever. Found by
+    // CodeRabbit reviewing this commit.
+    if let Some(threshold) = fail_on {
+        meets_threshold = report.fails_at(threshold);
+    }
+    let mut payload = qqq_run::AuditOutput::from(&report);
+    payload.failed = fail_on.map(|_| meets_threshold);
+
     if sarif {
         // The document *is* the output: no envelope, no summary line.
         if let Err(e) = out.write_document(&report.to_sarif()) {
             let _ = out.emit_error(name, &e);
             return ExitCode::from(exit::INTERNAL);
         }
-    } else {
-        if let Some(threshold) = fail_on {
-            meets_threshold = report.fails_at(threshold);
-        }
-        // Detail, then the one-line conclusion. `render` deliberately omits the
-        // conclusion so it is printed here once.
+        return if meets_threshold {
+            ExitCode::from(exit::FAILURE)
+        } else {
+            ExitCode::from(exit::OK)
+        };
+    }
+
+    // Detail, then the conclusion — and only in `--human`.
+    //
+    // `render()` is a terminal rendering. Writing it in every format put the
+    // human block *in front of* the JSON envelope, so `qqqai --json audit | jq`
+    // got six lines of prose with the JSON buried at the end. That is the same
+    // defect this commit fixed for `--sarif`, and it survived one round because
+    // the exit-code bug above was the one I was looking for. Found by CodeRabbit
+    // reviewing this commit, and reproduced before fixing.
+    if out.format() == Format::Human {
         if let Err(e) = out.write_document(&report.render()) {
             let _ = out.emit_error(name, &e);
             return ExitCode::from(exit::INTERNAL);
         }
-        let payload = qqq_run::AuditOutput::from(&report);
-        if let Err(e) = out.emit(&payload) {
-            let _ = out.emit_error(name, &e);
-            return ExitCode::from(exit::INTERNAL);
-        }
+    }
+    if let Err(e) = out.emit(&payload) {
+        let _ = out.emit_error(name, &e);
+        return ExitCode::from(exit::INTERNAL);
     }
 
     // A manifest that could not be loaded has already reported its own failure,

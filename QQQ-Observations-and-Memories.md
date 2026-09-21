@@ -10051,4 +10051,83 @@ habit rather than the exception.
 
 ---
 
+### §O-118 — 25 tests passed over a command whose stdout was wrong, twice, because they never looked at stdout
+
+**The trigger.** `qqqai audit` had just been implemented with 25 tests, all green,
+covering severity ordering, rule declarations, SARIF shape, threshold semantics and
+determinism. Running it once in a scratch project showed:
+
+```
+audit of `orders-api`
+  [note] qqq/limits-at-default  3 limit(s) are at the manifest default ...
+1 finding(s); worst severity: note
+1 finding(s) over caps, limits, supply chain and provenance;                  worst severity: note
+```
+
+**Two defects, one cause.** The conclusion printed **twice**, in two different
+wordings, because `AuditReport::render` ended with its own footer *and*
+`with_manifest` independently emitted `AuditOutput::summary()`. Neither was wrong
+in isolation — which is exactly why no unit test found it. **The defect lived in
+the seam between two components that were each individually correct**, and the
+test suite was organized along the same seam: every test asserted on `render()` or
+on `summary()` or on `to_sarif()`, and not one asserted on *what the command put
+on stdout*.
+
+That is a new shape for this document, and worth stating plainly: the previous
+nine instances of *a control believed live that is not* were checks that could not
+fire. **This one is a suite that was live and firing, aimed at the wrong
+artifact.** Coverage of every part is not coverage of the whole.
+
+**The second defect was worse, and the first one hid it.** Chasing the duplicated
+line led to `--sarif`, which printed the SARIF document and *then* the human
+summary:
+
+```
+$ qqqai audit --sarif | jq
+jq: Extra data: line 2 column 1
+```
+
+Measured: **1440 bytes, of which 1356 parsed as SARIF and 84 did not.** A `--sarif`
+flag whose output cannot be piped into a SARIF consumer is not an interchange
+format — it is a rendering that happens to contain JSON. GitHub code scanning, the
+consumer the command's own doc comment names as the reason it exists, would have
+rejected it.
+
+The root cause is a helper doing two jobs. `with_manifest` loads the manifest *and*
+emits the payload's summary, which is right for a command whose entire output is
+that shape and wrong for one that emits a foreign format. The first fix kept
+`with_manifest` and wrote the document from inside its closure — and the summary
+*still* appeared first, because the closure's return value is what gets emitted and
+the call site owned that. Owning the emit at the `audit` call site (three lines of
+discovery instead of the helper) removed the whole class rather than the instance.
+
+**A lesson about the first fix attempt.** I fixed the duplication by making
+`render()` detail-only and `summary()` the single conclusion, ran the human path,
+saw it correct, and *then* looked at `--sarif` — where the summary had simply moved
+to the front instead of the back. Had I checked only the path I was fixing, I would
+have shipped the fix and the bug together.
+
+**Tests added, aimed at the artifact rather than the parts:**
+
+* `the_sarif_document_has_nothing_before_or_after_it` — the trimmed document must
+  start with `{` and end with `}`, for a clean **and** a dirty project, and contain
+  exactly one `"version":"2.1.0"`. This is the property a consumer needs, and it
+  fails on both defects.
+* `the_terminal_render_says_so_when_there_is_nothing_to_report` — a clean report now
+  asserts `render()` equals exactly its one-line header, and that the four checked
+  surfaces are named by the **summary**, where the conclusion now lives.
+* `the_terminal_render_lists_every_finding_with_its_fix` — asserts the render
+  contains **no** `worst severity`, so the second copy cannot return.
+
+**The `summary()` string was also carrying hand-wrapped whitespace.** It had been
+written across two source lines with a continuation, and the continuation's leading
+spaces survived into the output as `provenance;                  worst severity`.
+A wrapped string literal looks like formatting and is data. It is now one line built
+by `format!`.
+
+→ `crates/qqq-run/src/{audit.rs,main.rs,output.rs}` (`Output::write_document`),
+7 tests, 3 of them new.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

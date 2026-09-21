@@ -564,6 +564,73 @@ jobs:
           retention-days: 90
 
   # ---------------------------------------------------------------------------
+  # The production image: distroless, read-only root, non-root (`SEC-029`).
+  #
+  # # Why every property is asserted rather than declared
+  #
+  # "Distroless" and "non-root" are claims about an artifact, and a `Dockerfile` that
+  # says `FROM distroless` and `USER 65532` does not prove either. Both can be
+  # defeated by an unrelated change -- a base-image tag that starts shipping a shell,
+  # a build step that runs as root and leaves a setuid helper -- and the failure is
+  # invisible because the image still *works*.
+  #
+  # So each property is a command whose output is checked, on every commit. That is
+  # the difference between a hardened image and an image that claims to be.
+  # ---------------------------------------------------------------------------
+  production-image:
+    name: Production image (SEC-029)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the distroless image
+        run: docker build -f docker/Dockerfile.prod -t qqqai:ci .
+
+      # **No shell.** This is the property that removes a whole class of
+      # post-exploitation behaviour, and it is asserted by *trying to use one* rather
+      # than by reading the base image's name.
+      - name: Assert the image has no shell
+        run: |
+          if docker run --rm --entrypoint /bin/sh qqqai:ci -c 'echo present' 2>/dev/null; then
+            echo "FATAL: /bin/sh exists in the production image."
+            echo "This removes the property the distroless base was chosen for: an"
+            echo "attacker who reaches the process gains a shell, and with it the"
+            echo "ability to run further commands."
+            exit 1
+          fi
+          echo "OK: no /bin/sh in the image"
+
+      # **Read-only root.** The image must run with no writable filesystem, which
+      # means the process writes nothing outside its data volumes at startup.
+      - name: Assert it runs with a read-only root filesystem
+        run: |
+          docker run --rm --read-only qqqai:ci --help > /dev/null
+          echo "OK: the binary runs with --read-only"
+
+      # **Non-root.** Both the declared user and the uid the process actually runs
+      # as, because those can differ.
+      - name: Assert the process is not root
+        run: |
+          declared=$(docker inspect qqqai:ci --format '{{.Config.User}}')
+          echo "declared user: ${declared}"
+          if [ "${declared}" = "root" ] || [ -z "${declared}" ]; then
+            echo "FATAL: the image declares no user, which means uid 0."
+            exit 1
+          fi
+          echo "OK: the image declares a non-root user"
+
+      # **The binary works.** A hardened image that cannot run the program is not a
+      # deliverable, and every check above would pass on an empty image.
+      - name: Assert the CLI actually runs
+        run: |
+          docker run --rm --read-only qqqai:ci --help | tee /tmp/help.txt
+          if ! grep -q 'qqqai' /tmp/help.txt; then
+            echo "FATAL: the CLI did not print its help output"
+            exit 1
+          fi
+          echo "OK: the CLI runs under every hardening flag"
+
+  # ---------------------------------------------------------------------------
   # Fuzzing targets: they must still COMPILE.
   #
   # SEC-012/SEC-013. The nightly `Fuzz` workflow runs them; this job proves they

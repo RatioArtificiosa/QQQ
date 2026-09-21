@@ -1968,7 +1968,23 @@ Items are grouped below by **phase**, because dependency order matters more than
   → `*.cdx.json` is gitignored: a committed SBOM is stale the moment a dependency
     moves, and a stale supply-chain document answers with the wrong tree.
   → §7.3 The defence timeline — where we stop an attack
-- [ ] **SEC-029** Implement the distroless, read-only, non-root container image.
+- [x] **SEC-029** Implement the distroless, read-only, non-root container image.
+  → Done: `docker/Dockerfile.prod` — musl-static `qqqai` on
+    `gcr.io/distroless/static-debian12:nonroot`. Separate from `docker/Dockerfile`,
+    which is the *development* bridge; a shared file risks the runtime stage
+    inheriting a build tool.
+  → **Verified, with measurements**: no `/bin/sh` (asserted by trying to run one);
+    runs under `--read-only`; `USER 65532:65532`; and **33 MB against the dev
+    image's 4.33 GB — a 131× reduction**.
+  → The build asserts static linking *in the build stage*, so a dynamic link fails
+    where `ldd` exists with a message naming libc, rather than in the distroless
+    stage as a bare "no such file or directory".
+  → CI job `production-image` re-asserts all four properties on every commit: a
+    `Dockerfile` that says `FROM distroless` proves nothing on its own.
+  → Three real build failures fixed on the way: three crates have no `README.md`
+    (so the enumerated COPY was wrong); `qqq-abi` embeds `wit/*.wit` from outside
+    `crates/` (13 missing-file errors); and the static-link check grepped for `not
+    a dynamic executable` when musl prints `statically linked`.
   → §7.5 Hardening beyond Wasm
 - [ ] **SEC-030** Publish the explicit out-of-scope section (host admin, side channels, physical, volumetric DoS).
   → §7.2 Adversary model

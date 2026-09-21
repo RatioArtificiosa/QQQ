@@ -1,0 +1,171 @@
+# QQQ production image — distroless, read-only root, non-root (`SEC-029`).
+#
+# # What this file is, and what it is not
+#
+# `docker/Dockerfile` is the *development bridge*: a heavy image with nightly,
+# cargo-fuzz, clang and a build toolchain, whose job is to run tests and the fuzzer.
+# This is the opposite artifact — the one that would ship. It contains one static
+# binary and nothing else a shell could reach for.
+#
+# Keeping them as two files rather than one multi-target image is deliberate. A
+# development image and a production image share a *base* and share nothing else;
+# a single file with both would make it easy for the production stage to inherit a
+# build tool, which is the exact failure this image exists to avoid.
+#
+# # Why distroless and not Alpine
+#
+# There is no shell, no package manager and no libc in the runtime stage. That
+# removes an entire class of post-exploitation behaviour: an attacker who reaches
+# the process has no `sh`, no `curl` to fetch a second stage, no `apk` to install
+# one, and no `/bin` to look in. A minimal Alpine image still has all four.
+#
+# The binary is **musl**-linked for the same reason: a glibc build needs a dynamic
+# loader and a libc in the image, and both are files an attacker can use.
+
+# ---------------------------------------------------------------------------
+# Stage 1 — build a static `qqqai`
+# ---------------------------------------------------------------------------
+FROM rust:1.97-slim-bookworm AS build
+
+# musl tooling: `cargo build --target x86_64-unknown-linux-musl` produces a binary
+# with no dynamic loader, which is what makes the distroless runtime stage possible.
+#
+# `file` is included for the static-link assertion below. `rust:1.97-slim-bookworm`
+# does not ship it, and the check failed with exit 127 (`file: not found`) rather
+# than with its own message — a missing tool reported as a broken claim.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools file \
+    && rm -rf /var/lib/apt/lists/*
+
+# The target is installed here rather than left to the caller so the image is
+# reproducible from this file alone.
+RUN rustup target add x86_64-unknown-linux-musl
+
+WORKDIR /src
+
+# # Why the manifests are copied before the sources
+#
+# So a source-only change does not invalidate the dependency build. Copying
+# everything first would rebuild the whole Wasmtime graph on every edit, which on
+# this project is minutes rather than seconds.
+#
+# # Why the READMEs come too, and why this is an allowlist failure waiting to happen
+#
+# A crate manifest may name `readme = "README.md"`, and cargo fails the *parse* when
+# it is missing — presenting as `failed to read` rather than "your COPY list is
+# incomplete". The first version of this stage listed all ten crate directories
+# explicitly and the build failed on three of them:
+#
+#     "/crates/qqq-sys/README.md": not found
+#
+# Not every crate has one, and which do is a fact that changes as crates are added.
+# So the whole `crates/` directory is copied rather than an enumerated list: an
+# allowlist of files that must exist is a list that goes stale silently, and this is
+# the second time in this file's short life that enumerating was the mistake.
+#
+# The root `.dockerignore` has already excluded `target/` and `fuzz/target/`, so
+# this does not drag the 17 GB of build output into the context.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# # Why the top-level `wit/` directory is copied too
+#
+# `qqq-abi` embeds the WIT definitions with `include_str!("../../../wit/*.wit")`, so
+# they are a **compile-time input** even though they live outside `crates/`. Omitting
+# them failed the build with:
+#
+#     error: couldn't read `crates/qqq-abi/src/../../../wit/qqq-ai.wit`
+#
+# — thirteen errors, each naming a different file, which reads like a broken WIT
+# setup rather than a missing COPY. They are the published interface artifact, not
+# build scaffolding, so they must be present wherever the crate is compiled.
+COPY wit/ wit/
+
+# Strip everything except the manifests, so `src/` changing does not invalidate the
+# dependency layer. This is the effect the earlier per-file COPY was reaching for,
+# derived from what is actually present rather than from a list someone maintains.
+RUN find crates -mindepth 2 -maxdepth 2 -not -name Cargo.toml -not -name README.md -exec rm -rf {} + \
+    && echo "manifests retained: $(find crates -maxdepth 2 -name Cargo.toml | wc -l)"
+
+# A stub `main.rs` for every crate, so the dependency graph compiles and caches
+# before the real sources arrive. `touch` then invalidates only the real ones.
+RUN for c in qqq-core qqq-cap qqq-abi qqq-host qqq-io qqq-serve qqq-pkg qqq-debug qqq-sys; do \
+        mkdir -p "crates/$c/src" && echo "" > "crates/$c/src/lib.rs"; \
+    done \
+    && mkdir -p crates/qqq-run/src && echo 'fn main() {}' > crates/qqq-run/src/main.rs \
+    && cargo build --release --locked --target x86_64-unknown-linux-musl -p qqq-run \
+    && rm -rf crates/*/src
+
+COPY crates/ crates/
+
+# `--locked` so the image cannot resolve a different dependency set from the one
+# the repository pins. Without it, the shipped binary and the audited lockfile
+# could disagree, which is the one thing a supply-chain story cannot survive.
+RUN touch crates/*/src/lib.rs crates/qqq-run/src/main.rs 2>/dev/null || true \
+    && cargo build --release --locked --target x86_64-unknown-linux-musl -p qqq-run
+
+# # Why the binary is verified as static *here*, in the build stage
+#
+# A musl build that silently linked dynamically would still run on this stage (which
+# has a libc) and fail only in the distroless stage, where the error is a bare
+# "no such file or directory" from the kernel rather than anything mentioning libc.
+# Checking it where the tooling exists means the failure names its cause.
+#
+# # Why this matches `statically linked` AND `not a dynamic executable`
+#
+# The first version of this check grepped only for `not a dynamic executable`, which
+# is what *non-musl* `ldd` prints. On a musl target it prints `statically linked`,
+# so a correctly static binary was reported FATAL:
+#
+#     0.342 FATAL: qqqai is dynamically linked, so it cannot run ...
+#
+# and the build failed on a claim that was false. Both spellings are now accepted,
+# and the `file` output is echoed either way so the evidence is in the log rather
+# than inferred from the verdict.
+RUN file /src/target/x86_64-unknown-linux-musl/release/qqqai \
+    && if ldd /src/target/x86_64-unknown-linux-musl/release/qqqai 2>&1 \
+         | grep -qE 'statically linked|not a dynamic executable'; then \
+         echo "OK: qqqai is statically linked"; \
+       else \
+         echo "FATAL: qqqai is dynamically linked, so it cannot run in the distroless stage"; \
+         ldd /src/target/x86_64-unknown-linux-musl/release/qqqai; exit 1; \
+       fi
+
+# The defect this project names explicitly: the binary must be `qqqai`, because
+# `qqq` is taken on crates.io and npm, and a build producing a `qqq` binary is a
+# defect rather than a variation. Asserted here rather than assumed.
+RUN test -x /src/target/x86_64-unknown-linux-musl/release/qqqai \
+    && echo "OK: the binary is named qqqai, as the naming rule requires"
+
+# ---------------------------------------------------------------------------
+# Stage 2 — the runtime: distroless, no shell, no libc
+# ---------------------------------------------------------------------------
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+# The build stage's image is large and its provenance is the whole point of this
+# one; the label records where the binary came from without dragging the toolchain.
+LABEL org.opencontainers.image.title="qqqai" \
+      org.opencontainers.image.description="The QQQ runtime CLI" \
+      org.opencontainers.image.source="https://github.com/RatioArtificiosa/QQQ" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
+# `nonroot` in the base tag is uid 65532, and it is named rather than repeated so a
+# reader does not have to know the number.
+COPY --from=build --chown=65532:65532 \
+    /src/target/x86_64-unknown-linux-musl/release/qqqai /usr/local/bin/qqqai
+
+# # Why the root filesystem is declared read-only here and enforced at run time
+#
+# `Dockerfile` has no syntax for "mount the root read-only" — it is a `docker run`
+# flag (`--read-only`) or a Compose `read_only: true`. Stating it in a comment would
+# be decoration, so it is stated as the run command a deployment must use, and a CI
+# job executes exactly that command to prove the image works under it.
+#
+# What is *not* left to the operator: the process needs no writable path to start,
+# which is the property that makes `--read-only` viable. A binary that wrote a cache
+# file at startup would make the flag fail, and this image would be the thing that
+# was wrong.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/qqqai"]
+CMD ["--help"]

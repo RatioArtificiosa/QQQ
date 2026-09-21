@@ -9782,4 +9782,89 @@ generator here ships with a self-test.
 
 ---
 
+### §O-114 — A check that a leak would have satisfied, and a document that was not reproducible
+
+Two defects in `DOC-020`'s generator, both found by running it rather than
+reading it, and both of the same shape as findings already recorded here — which
+is the part worth noting.
+
+**Defect 1: `llms.txt` was not reproducible across platforms, and its own drift
+check is what found it.** The index lists each document with its size, and the
+generator used `Path.stat().st_size`. The drift check then failed on the generator
+that produced it, with a byte-level diagnosis that took a script to reach:
+
+```text
+expected: - [QQQ-Proposal-V1.md](…) … (133 KB)
+actual  : - [QQQ-Proposal-V1.md](…) … (131 KB)
+```
+
+`core.autocrlf` expands every LF to CRLF on Windows, so the Proposal measures
+136,513 bytes in this checkout and 134,544 committed. Two consequences, both real:
+
+* **CI on Linux computes one value and a Windows contributor another**, so every
+  push from Windows fails the drift check with a message that is true and
+  completely unhelpful.
+* **Two people regenerating the same commit produce different files** — which is
+  non-reproducible by definition, and it was inside the very document whose
+  purpose is to tell a model what the repository contains.
+
+Fixed by measuring **LF-normalised content size**, so the number is a property of
+the repository rather than of the machine. Verified: the index now reports
+`131 KB`, matching the committed LF byte count exactly. The convention is stated
+in the published index, because a reader comparing it against their file manager
+on Windows would otherwise be surprised; omitting sizes was the alternative and was
+rejected, since a model deciding whether to fetch a 567 KB document benefits from
+knowing it is large. A seventh self-test case pins the property directly.
+
+**Defect 2, the important one: the exclusion check would have been satisfied by a
+leak.** CI failed the `DOC-020` commit with:
+
+```text
+FAIL  no exclusion names a file that no longer exists
+```
+
+`docs/.env` — which holds the Context7 credentials — is **gitignored**, so it is
+absent from a CI checkout, and the check asserted every exclusion path existed on
+disk.
+
+**An exclusion has two legitimate reasons to exist, and they want opposite
+checks:**
+
+| Reason | Example | Absence means | Presence in Git means |
+|---|---|---|---|
+| Not documentation | `docs/Notes.txt`, the conversation transcripts | staleness — the entry should be removed | normal |
+| Must not be published | `docs/.env` | normal — it is gitignored | **a credential leak** |
+
+Asking only *"does it exist?"* is satisfied by both, so the check was written
+against the wrong property for the security case — and **a repository that had
+committed its credentials would have passed it.** That is the sixth instance this
+session of *a control believed live that is not*, and the first where the control
+was checking the **inverse** of what mattered rather than nothing at all.
+
+The lists are now split and the secret one is checked backwards:
+`EXCLUDED_SECRETS` must contain no path that `git ls-files` reports, and a tracked
+one fails with *"TRACKED SECRET-BEARING FILE(S) — this is a leak, not a missing
+file."*
+
+**The mechanism is proved rather than assumed**, because a check that cannot fail
+is not a check (`§M-006`, now found five times here). An untracked path yields
+empty `git ls-files` output — the pass condition; a *staged* probe **is** reported
+— the fail condition; cleanup restores it; and `docs/.env` is confirmed gitignored,
+which is the root cause of the CI failure. The probe used a separate filename
+because `docs/.env` genuinely exists on this machine, and overwriting a real
+credential file to run a test would be its own defect.
+
+**The pattern, stated once more because it keeps paying.** Both defects were found
+by *using* the thing: the drift check found the non-reproducibility, and CI found
+the inverted exclusion. Neither was visible by reading the generator, and the
+second was only visible on a machine where the secret file is absent — which is
+precisely the machine CI runs on. **A check written and run only on the author's
+machine tests the author's machine**, and this session now has three examples where
+the difference mattered (`§O-111`'s vacuous scan, this, and `§O-108`'s dead
+injection).
+
+→ `tools/gen_llms_txt.py` (9 self-test cases), `llms.txt`, `llms-full.txt`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

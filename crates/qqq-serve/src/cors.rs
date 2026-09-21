@@ -906,10 +906,7 @@ mod tests {
             decided(h, "Access-Control-Allow-Headers").as_deref(),
             Some("content-type, x-trace")
         );
-        assert_eq!(
-            decided(h, "Access-Control-Max-Age").as_deref(),
-            Some("600")
-        );
+        assert_eq!(decided(h, "Access-Control-Max-Age").as_deref(), Some("600"));
     }
 
     /// **A preflight for a method the policy does not allow is denied.**

@@ -672,7 +672,45 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §4.3 Crate topology
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
-- [ ] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
+- [x] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
+  → Done: `crates/qqq-host/src/arch012.rs` — `AUDITED` (8 measured rows),
+    `Enforcement`, `AuditFinding`, `scan`, `audit`. **14 tests**, all green.
+    `ambient::require` and `linker::recheck` are the per-call mechanisms.
+  → **§4.4 step 11 says the grant set is "consulted twice … and it is
+    non-negotiable"; the first two mechanisms were already there, and the third
+    is what this item adds.** *Conditional registration*: an interface whose
+    capability is absent is never bound, so its functions are **absent** rather
+    than denied. *Per-call re-check*: `wall-clock.now`, `monotonic-clock.now`,
+    `random.get` check directly; `hashing.digest`/`digest-many` reach
+    `ambient::require` through `hash_data`. *Source-level totality*: `AUDITED` is
+    cross-checked against the source in both directions, so a `func_wrap` added
+    outside a gated registration path is a **test failure** rather than an
+    unexamined call path — without it, "every host function re-checks" is a
+    claim about today's source that nothing re-establishes tomorrow.
+  → **Measuring whether this item held took four attempts and three were wrong
+    (`§O-109`).** A grep for `grants.grants(` in each registration body reported
+    **8 of 11 unchecked** — wrong, because the check is reached one layer down,
+    which is `§O-071`'s lesson a fourth time: *a control judged by its prose
+    rather than its reachability.* The scanner then invented **9** registrations
+    from doc comments and test code (20 where the source has 8) — `§O-071`'s
+    name-extractor bug verbatim, in code written an hour after recording it. And
+    the table listed **11** rows where the source has **8**, because three were
+    derived from the WIT's `hmac` interface without checking implementation;
+    `audit` reported them `Stale`.
+  → **The table disagreeing with its author on first run is the argument for the
+    table.** A table that can never disagree with the code is documentation.
+  → **A fifth finding came from a test refusing to pass:** two `(file, function)`
+    pairs repeat (`wall-clock.now`/`monotonic-clock.now`, likewise the two
+    `resolution`s), so a two-part key could **pass a row because its namesake was
+    backed** — `monotonic-clock.now` losing its check while `wall-clock.now` kept
+    one. The key is `(file, interface, function)`,
+    `the_audited_identity_is_unique` pins that it is unique **and** pins that the
+    two-part key collides.
+  → Fault injection: an unlisted `func_wrap`, a row claiming an unbacked
+    per-function re-check, and a stale row are each driven and each reported;
+    `audit` takes the sources as an argument precisely so it can be driven with
+    **fabricated** input — a checker that can only read the real tree can be
+    observed to pass and never proven to detect (`§M-006`).
   → §4.4 Request lifecycle — the detailed path
 - [x] **ARCH-013** Write the guest-concurrency ADR fixing the async-single-threaded default.
   → Done: **`§D-006`**, upgraded to a full ADR. It states a policy for all three
@@ -1217,7 +1255,18 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §8.3 The machine contract layer
 - [ ] **CON-017** Publish the contract-stability promise for each surface (WIT, manifest, lockfile, CLI JSON).
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-018** Implement the "no hidden global state" architecture test across all host interfaces.
+- [x] **CON-018** Implement the "no hidden global state" architecture test across all host interfaces.
+  → Done: `tools/check_no_ambient.py` enforces §2.5's rule across the runtime
+    crates — no environment-variable reads, no CWD dependencies, no process-wide
+    mutable statics. `tools/fault_inject_no_ambient.py` proves the checker
+    detects what it claims to (four injections), wired into
+    `.github/workflows/ci.yml` beside the checker itself.
+  → **The pairing is the point**: a checker and its `--self-test` land together,
+    so a green result means "checked and clean" rather than "checked nothing"
+    (`§M-006`). The four injections are chosen so each targets a distinct way the
+    rule could be bypassed, not four spellings of one.
+  → Verified live: `python tools/check_no_ambient.py` →
+    `NO-HIDDEN-GLOBAL-STATE RULE PASSED`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 
 ---

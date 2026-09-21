@@ -10130,4 +10130,88 @@ by `format!`.
 
 ---
 
+### §O-119 — CodeRabbit found two more defects in the commit that fixed the first two, and both were silent passes
+
+**Setup.** CodeRabbit CLI **0.7.8** (`coderabbit`/`cr`) installed and authenticated
+as `RatioArtificiosa`. A review is one command:
+
+```sh
+coderabbit review --agent --light --committed
+```
+
+`--agent` emits JSONL — `review_context`, `status`, `heartbeat`, `finding`,
+`complete` — which is the form an agent should consume. **`--light` matters here:**
+the first attempt without it died with `TRPCWebSocketClosedError` / `WebSocket
+closed` after reaching `summarizing`, and the `--light` run completed. A transport
+failure that reports itself as `recoverable: true` is worth one retry with a
+different mode before concluding anything about the network.
+
+**It reviewed all five files and returned two findings, both `major`, both real.**
+I reproduced each before touching the code.
+
+**Finding 3 — the threshold did not gate `--sarif`.** `meets_threshold` was
+computed inside the non-SARIF branch:
+
+| Command | Exited | Should |
+|---|---|---|
+| `audit --fail-on note` | 1 | 1 ✓ |
+| `audit --sarif --fail-on note` | **0** | 1 ✗ |
+| `audit --sarif --fail-on error` | 0 | 0 ✓ |
+
+This is the same class as the defect the commit was written to fix — *a control
+believed live that is not* — one level up. A CI job gating on SARIF, which is the
+**only reason the format is offered**, would have been green forever, and nothing
+in the SARIF output would ever have said so. **A silent pass is worse than a
+failure**: a failure gets read.
+
+**Finding 4 — the human rendering leaked into `--json`.** `render()` was written
+unconditionally, so `--json audit` produced **six lines**: five of prose and then
+the envelope. Measured: a JSON parser fails on it (`Expecting value: line 1 column
+1`). Every command in this CLI promises one envelope per invocation; this one broke
+that, and **the existing envelope test passed anyway** because the envelope was
+still present — just buried. A test that greps for a substring in the output cannot
+detect output that has *more* in it than it should.
+
+Finding 4 is finding 2 (`--sarif` output not pipeable) with the modes swapped. I
+fixed `--sarif` in the previous commit, ran the human path, confirmed it correct,
+and did not re-run `--json`. **I fixed one instance of a class and checked only
+that instance.** The generalization — *"which other modes share this path?"* — is
+what would have caught it, and it is now the habit this document records: after
+fixing an output-shape defect, enumerate every mode that flows through the same
+code.
+
+**What was added.** `AuditOutput::failed` is populated from the threshold
+(`fail_on.map(|_| meets_threshold)`), so an agent reading `--json` learns the
+decision without consulting the exit code; the field stays **absent** when no
+threshold was given, because *"not asked"* and *"asked and satisfied"* are
+different answers and a `bool` cannot hold both.
+
+**Five binary-level tests in `crates/qqq-run/tests/cli.rs`.** They belong there and
+not in `audit.rs`: all four defects lived in the **seam** between `audit.rs` and
+`main.rs`, and 25 unit tests asserting on `render()`, `summary()` and `to_sarif()`
+in isolation could not see any of them. Each was **fault-injected** to prove it can
+actually fail — a test that has never failed is not evidence:
+
+| Test | Defect injected | Result |
+|---|---|---|
+| `audit_fail_on_gates_every_output_mode` | threshold moved back into the human branch | **FAILED** ✓ |
+| `audit_json_reports_the_threshold_decision` | same | **FAILED** ✓ |
+| `audit_json_is_parseable_and_only_the_envelope` | `render()` written in every format | **FAILED** ✓ |
+
+**An external reviewer earns its place precisely here.** An in-house test suite
+written by the same mind that wrote the code shares its blind spots — the tests
+asked the questions I already knew to ask. CodeRabbit asked about the **mode
+matrix**, which is a question about the product surface rather than about the code
+I had just written, and it found two silent passes in a commit I had already
+declared green with 1566 passing tests and every checker satisfied. The cost is
+~1 review of 10/hour; the value is the category of defect that internal review
+cannot reach.
+
+→ `crates/qqq-run/src/main.rs`, `crates/qqq-run/tests/cli.rs` (5 tests).
+→ **Working practice**: run `coderabbit review --agent --light --committed` after
+each non-trivial commit, and reproduce every finding before acting on it — a
+reviewer is an input, not an authority.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

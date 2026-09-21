@@ -25,6 +25,15 @@ qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
 qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
 qqq-host = { path = "../qqq-host", version = "0.0.0" }
 qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
+# The edge that makes `[server]` reachable.
+#
+# `qqq-cap` models the manifest's route table and `qqq-serve` owns the router, and
+# neither may depend on the other: in §4.3's topological order `qqq-cap` sits above
+# `qqq-serve`, so an edge in either direction points upward and
+# `tools/check_topology.py` rejects it. `qqq-run` is above both, which makes it the
+# only place in this workspace where a manifest can be turned into a router -- and the
+# right place, because converting intent into a running server is orchestration.
+qqq-serve = { path = "../qqq-serve", version = "0.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasmtime = { workspace = true }

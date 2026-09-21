@@ -59,7 +59,18 @@
 //!
 //! See Proposal §5.3, §6.4 and Checklist `SRV-001`, `SRV-002`, `SRV-019`.
 
-use crate::manifest::{quoted, AuthMode, Cors, ManifestError, Route, Server, METHODS};
+use crate::manifest::{quoted, AuthMode, Cors, ManifestError, Route, Server};
+
+/// The HTTP methods a route may declare, in the spelling `qqq.toml` uses.
+///
+/// Re-exported rather than imported privately: a caller that converts a manifest's
+/// route table into an HTTP router must compare against **the same** closed set, and a
+/// caller that cannot see this one would keep its own copy. Two lists that look
+/// identical and drift is the defect `§O-130` is about, arriving through a lookup
+/// table.
+///
+/// The list itself is declared in `crate::manifest` beside the types it validates.
+pub use crate::manifest::METHODS;
 
 // ---------------------------------------------------------------------------
 // The section

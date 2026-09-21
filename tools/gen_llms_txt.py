@@ -570,14 +570,57 @@ def render_full() -> str:
 
 
 def docs_to_index() -> list[str]:
-    """Every `.md` under `docs/` that should appear in the index."""
+    """Every `.md` under `docs/` that should appear in the index.
+
+    # Why a gitignored file is neither indexed nor excluded
+
+    `EXCLUDED_ALL` is a **curated** list: documents that are tracked but deliberately
+    kept out of the index, each with a recorded reason. A gitignored document is a
+    third category, and until this change the function had no way to express it -- so
+    `docs/AGENT-HANDBOOK.md`, which is ignored because it describes the development
+    process rather than the product, was reported as "neither indexed nor excluded".
+
+    The checker was right to complain: the rule as written had no correct answer for
+    that file. Adding it to `EXCLUDED_ALL` would have been the wrong fix -- that list
+    means "tracked, deliberately omitted", and a subsequent
+    `every entry in EXCLUDED is actually tracked by Git` assertion would then fail,
+    correctly. So the rule learns the category instead.
+
+    Consulted through `git check-ignore` rather than by re-parsing `.gitignore`: the
+    ignore rules already exist in one place, and a second implementation here would be
+    a second thing to keep right -- the shape `§O-130` is about.
+
+    Outside a Git checkout (a source tarball, a vendored copy) nothing is ignored, so
+    the list is exactly what the curated exclusion leaves.
+    """
     found = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
         rel = str(path.relative_to(ROOT)).replace("\\", "/")
         if rel in EXCLUDED_ALL:
             continue
+        if is_gitignored(rel):
+            continue
         found.append(rel)
     return found
+
+
+def is_gitignored(rel: str) -> bool:
+    """Whether Git ignores `rel`.
+
+    `git check-ignore` exits 0 when the path is ignored and 1 when it is not, so the
+    exit code *is* the answer. A missing `.git` (or a missing `git`) means no ignore
+    rules apply, which returns `False` rather than raising: an absent repository is a
+    legitimate state for a source archive, not an error.
+    """
+    if not (ROOT / ".git").exists():
+        return False
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", rel],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def generate(check: bool) -> int:

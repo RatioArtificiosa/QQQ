@@ -45,6 +45,8 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+/// Building a router from a manifest: the join between `qqq-cap` and `qqq-serve`.
+pub mod serve_routes;
 /// `qqqai test` — the built-in test runner.
 ///
 /// The module is named `test_runner` rather than `test` because `test` is a Rust

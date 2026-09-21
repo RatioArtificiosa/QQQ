@@ -1224,6 +1224,7 @@ dependencies = [
  "qqq-core",
  "qqq-host",
  "qqq-pkg",
+ "qqq-serve",
  "serde",
  "serde_json",
  "wasmtime",

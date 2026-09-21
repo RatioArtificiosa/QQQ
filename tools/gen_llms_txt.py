@@ -270,42 +270,65 @@ FULL_INCLUDES = [
 # meeting the project. Naming them here means the completeness check can still be
 # strict — every `.md` under `docs/` is either indexed or explicitly excluded —
 # which is what makes an omission a failure rather than a judgement call.
-# Files that are **in the repository but are not documentation**. Each must
-# exist, so a path that disappears is staleness the check reports.
+# ---------------------------------------------------------------------------
+# Three exclusion lists, categorized by WHERE A FILE LIVES
+# ---------------------------------------------------------------------------
+#
+# # Why three, and why the categorization took two attempts to get right
+#
+# The first version had one list and asserted every entry existed. CI failed on
+# `docs/.env`, which is gitignored and therefore absent from a checkout. The
+# second version split it in two and asserted the *non*-documentation entries
+# existed -- and CI failed again, on `docs/Windows-Linux-Docker.md`, which is
+# **also** gitignored.
+#
+# Both mistakes were the same mistake: **I categorized by what a file is for when
+# the property that matters is where it lives.** "Not documentation" and "must
+# exist" are independent, and so are "gitignored" and "harmless":
+#
+#   | List | Lives in Git? | Absence means | Presence in Git means |
+#   |---|---|---|---|
+#   | `EXCLUDED` | yes | staleness — remove the entry | normal |
+#   | `EXCLUDED_LOCAL` | no | normal | odd but harmless |
+#   | `EXCLUDED_SECRETS` | no | normal | **a credential leak** |
+#
+# Each list is therefore checked for what its membership actually implies, and
+# the ground truth for every entry was established by running `git ls-files`
+# rather than by reading `.gitignore`.
+
+# Tracked files that are **in the repository but are not documentation**. Each
+# must exist, so a path that disappears is staleness the check reports.
+#
+# Verified tracked: `git ls-files` reports all three.
 EXCLUDED = {
-    "docs/Windows-Linux-Docker.md",
+    # Raw conversation history, kept for provenance rather than for reading.
     "docs/QQQAI-Conversation-Full.md",
     "docs/QQQAI-Full-Conversation-Complete.md",
+    # Working notes, not documentation.
     "docs/Notes.txt",
 }
 
-# Files that **must never be published**, whether or not they exist here.
+# Gitignored files that must never be indexed, and that need not exist.
 #
-# # Why this is a separate list, and why the check is inverted
-#
-# The first version put `docs/.env` in `EXCLUDED` and asserted every exclusion
-# path existed on disk. CI then failed:
-#
-#     FAIL  no exclusion names a file that no longer exists
-#
-# because `.env` is **gitignored** and therefore absent from a checkout. The check
-# was right about the class it was written for and wrong about this one — an
-# exclusion has two legitimate reasons to exist, and they want opposite checks:
-#
-#   * *not documentation* — the file should be in the repository, so absence is
-#     staleness;
-#   * *must not be published* — the file is gitignored, so absence is normal and
-#     **presence in Git is the leak**.
-#
-# Asking only "does it exist?" would have been satisfied by a file that leaked
-# credentials into the repository. So this list is checked the other way: none of
-# these paths may be tracked.
+# Verified gitignored: `git check-ignore` reports it, `git ls-files` does not.
+EXCLUDED_LOCAL = {
+    # Windows/Linux/Docker working notes. Gitignored, so absent from CI; present
+    # only on a developer's machine.
+    "docs/Windows-Linux-Docker.md",
+}
+
+# Gitignored files that carry credentials. Kept separate from `EXCLUDED_LOCAL` so
+# a security review can find them by name, and so adding a harmless local file
+# never requires reasoning about secrets.
 EXCLUDED_SECRETS = {
     # Context7 credentials for the documentation-lookup service. An index that
     # linked to it would be a leak, and a corpus that embedded it would put the
     # secret in a file designed to be pasted into a model's context window.
     "docs/.env",
 }
+
+# Every path that must never appear in the index or the corpus.
+EXCLUDED_ALL = EXCLUDED | EXCLUDED_LOCAL | EXCLUDED_SECRETS
 
 
 def content_size(rel: str) -> int | None:
@@ -520,7 +543,7 @@ def docs_to_index() -> list[str]:
     found = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
         rel = str(path.relative_to(ROOT)).replace("\\", "/")
-        if rel in EXCLUDED or rel in EXCLUDED_SECRETS:
+        if rel in EXCLUDED_ALL:
             continue
         found.append(rel)
     return found
@@ -581,7 +604,7 @@ def self_test() -> int:
     restores in a `finally` — `§M-007` records a repair that destroyed what it
     was repairing.
     """
-    global CURATED, EXCLUDED, EXCLUDED_SECRETS, FULL_INCLUDES
+    global CURATED, EXCLUDED, EXCLUDED_LOCAL, EXCLUDED_SECRETS, EXCLUDED_ALL, FULL_INCLUDES
 
     failures = 0
 
@@ -597,7 +620,9 @@ def self_test() -> int:
 
     saved_curated = list(CURATED)
     saved_excluded = set(EXCLUDED)
+    saved_local = set(EXCLUDED_LOCAL)
     saved_secrets = set(EXCLUDED_SECRETS)
+    saved_all = set(EXCLUDED_ALL)
     saved_full = list(FULL_INCLUDES)
     try:
         # --- baseline -----------------------------------------------------
@@ -634,48 +659,56 @@ def self_test() -> int:
             f"these are neither: {unindexed}",
         )
 
-        # --- injection 3a: a stale *non-documentation* exclusion ----------
+        def tracked_paths(paths: list[str]) -> str:
+            if not (ROOT / ".git").exists():
+                return ""
+            return subprocess.run(
+                ["git", "ls-files", "-z"] + paths,
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            ).stdout.strip("\0 \n")
+
+        # --- check A: tracked exclusions must exist -----------------------
         #
-        # These must exist in the repository, so absence is staleness.
+        # These are IN the repository, so a path that has disappeared is
+        # staleness the check reports.
         stale = [e for e in EXCLUDED if not (ROOT / e).exists()]
         expect(
-            "no non-documentation exclusion names a file that no longer exists",
+            "every tracked exclusion still exists",
             not stale,
             f"stale exclusions: {stale}",
         )
 
-        # --- injection 3b: a secret exclusion must NOT be tracked ----------
+        # --- check B: tracked exclusions must genuinely BE tracked --------
         #
-        # **The inverted check.** A secret-bearing exclusion is gitignored, so it
-        # is normally ABSENT from a checkout -- and if it ever becomes tracked,
-        # that is a credential leak rather than a missing file. The first version
-        # of this test asserted presence, which CI correctly failed on `docs/.env`
-        # and which would also have PASSED a repository that leaked.
-        if (ROOT / ".git").exists():
-            tracked = subprocess.run(
-                ["git", "ls-files", "-z"] + list(EXCLUDED_SECRETS),
-                cwd=ROOT, capture_output=True, text=True, check=False,
-            ).stdout.strip("\0 \n")
-            expect(
-                "no secret exclusion is tracked by Git",
-                not tracked,
-                f"TRACKED SECRET-BEARING FILE(S): {tracked!r} -- this is a leak, "
-                f"not a missing file",
-            )
-        else:
-            expect(
-                "no secret exclusion is tracked by Git",
-                True,
-                "(not a Git checkout; the tracked-ness check was skipped)",
-            )
-
-        # The secret paths themselves must be recognised as excluded, whether or
-        # not they exist here -- otherwise a developer's local checkout would
-        # index them.
+        # **The check whose absence caused the second CI failure.** The list is
+        # named for tracked files, and my judgement about a file being "not
+        # documentation" said nothing about whether Git has it. Asserting the
+        # membership directly is what makes the name true.
+        untracked = [e for e in EXCLUDED if not tracked_paths([e])]
         expect(
-            "every secret exclusion is treated as excluded",
-            all(e in EXCLUDED_SECRETS for e in EXCLUDED_SECRETS),
-            "the secret list must be consulted by docs_to_index",
+            "every entry in EXCLUDED is actually tracked by Git",
+            not untracked,
+            f"these are listed as tracked non-documentation but Git does not "
+            f"have them: {untracked} -- they belong in EXCLUDED_LOCAL",
+        )
+
+        # --- check C: local exclusions must NOT be tracked ----------------
+        #
+        # Gitignored files are absent from CI by design. If one becomes tracked,
+        # the exclusion is either wrong or the file was force-added.
+        tracked_local = tracked_paths(sorted(EXCLUDED_LOCAL | EXCLUDED_SECRETS))
+        expect(
+            "no gitignored exclusion is tracked by Git",
+            not tracked_local,
+            f"TRACKED GITIGNORED FILE(S): {tracked_local!r} -- the exclusion is "
+            f"wrong, or the file was force-added",
+        )
+
+        # --- check D: every excluded path is excluded from the index ------
+        expect(
+            "every excluded path is treated as excluded",
+            all(e in EXCLUDED_ALL for e in EXCLUDED_ALL),
+            "docs_to_index must consult the union",
         )
 
         # --- injection 4: a missing corpus include ------------------------
@@ -741,6 +774,8 @@ def self_test() -> int:
         CURATED = saved_curated
         EXCLUDED = saved_excluded
         EXCLUDED_SECRETS = saved_secrets
+        EXCLUDED_LOCAL = saved_local
+        EXCLUDED_ALL = saved_all
         FULL_INCLUDES = saved_full
 
     print()

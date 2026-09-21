@@ -877,6 +877,8 @@ cmd_checks() {
     python3 tools/check_advisories.py
     python3 tools/check_advisories.py --self-test
     python3 tools/check_sbom.py --self-test
+    python3 tools/check_security_scope.py
+    python3 tools/check_security_scope.py --self-test
 
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py

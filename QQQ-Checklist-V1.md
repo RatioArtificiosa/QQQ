@@ -1986,7 +1986,17 @@ Items are grouped below by **phase**, because dependency order matters more than
     `crates/` (13 missing-file errors); and the static-link check grepped for `not
     a dynamic executable` when musl prints `statically linked`.
   → §7.5 Hardening beyond Wasm
-- [ ] **SEC-030** Publish the explicit out-of-scope section (host admin, side channels, physical, volumetric DoS).
+- [x] **SEC-030** Publish the explicit out-of-scope section (host admin, side channels, physical, volumetric DoS).
+  → Done: `docs/out-of-scope.md` — the published expansion of §7.2's four classes plus
+    Wasmtime bugs and unbounded-capability requests. Each entry states a limit **and**
+    what to do about it, because a bare "not defended" is accurate and useless.
+  → `tools/check_security_scope.py` keeps the four documents from disagreeing, which
+    prose alone cannot do: every canonical class must appear in the Proposal §7.2,
+    `SECURITY.md` and the published page, the two must link to each other, and a
+    section too short to state a consequence is rejected. 7/7 self-test cases.
+  → **A removal fails the check**, deliberately: dropping an out-of-scope class is a
+    security decision rather than an editorial one, so it must be a loud change.
+  → Building it found a real gap: `SECURITY.md` had no link to the new document.
   → §7.2 Adversary model
 
 ---

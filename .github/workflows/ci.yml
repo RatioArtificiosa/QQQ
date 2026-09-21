@@ -145,6 +145,15 @@ jobs:
       - name: Prove the advisory checker actually rejects breakage
         run: python tools/check_advisories.py --self-test
 
+      # `SEC-030`. Four documents state what QQQ does and does not defend against,
+      # and when they disagree a reader is misled by whichever they happened to
+      # open — with nothing saying which is authoritative. Prose does not fail a
+      # build, so this does it instead.
+      - name: Validate the published security scope
+        run: python tools/check_security_scope.py
+      - name: Prove the scope checker rejects disagreement
+        run: python tools/check_security_scope.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

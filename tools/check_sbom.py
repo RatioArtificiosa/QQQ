@@ -335,6 +335,24 @@ def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--self-test"]
     if "--self-test" in sys.argv:
         return self_test()
+
+    # # Why a missing directory with no argument is not a failure
+    #
+    # `sbom/` is produced by the CI supply-chain job. Running this checker locally
+    # without that step having run is the normal case, not a defect, and failing on it
+    # would make `python tools/check_sbom.py` -- the obvious thing to type -- report an
+    # error about the environment rather than about the SBOM.
+    #
+    # An explicitly named directory that does not exist *is* a failure, because the
+    # caller asserted it should be there.
+    if not args and not Path("sbom").is_dir():
+        print(
+            "no sbom/ directory here, so there is nothing to check. Generate one with "
+            "`cargo cyclonedx --format json --spec-version 1.5 --describe crate --all`, "
+            "or run `python tools/check_sbom.py --self-test` to prove the checks work."
+        )
+        return 0
+
     directory = Path(args[0]) if args else Path("sbom")
     return validate(directory)
 

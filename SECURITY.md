@@ -29,7 +29,10 @@ QQQ's core promise is that **a guest has no authority the manifest did not grant
 
 ## What is explicitly out of scope
 
-Stated openly so nobody wastes effort (see `QQQ-Proposal-V1.md` §7.2):
+Stated openly so nobody wastes effort (see `QQQ-Proposal-V1.md` §7.2). Each of these
+is expanded, with what to do instead, in
+[`docs/out-of-scope.md`](docs/out-of-scope.md) — read that before deciding QQQ fits
+your threat model.
 
 - **A malicious host administrator.** If you control the host process, you control everything. True of every runtime.
 - **Side-channel attacks between tenants** (cache timing, Spectre-class). Wasmtime has mitigations and research continues; QQQ does not currently claim side-channel isolation. If you find a *practical, cross-tenant* side channel we will still want to hear about it.

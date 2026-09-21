@@ -1,0 +1,430 @@
+{
+  "$defs": {
+    "Build": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Build",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Build` table.",
+      "properties": {
+        "language": {
+          "description": "Source language: `rust`, `ts`, `go`, `python` or `cpp`.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "`debug` or `release`.",
+          "type": "string"
+        },
+        "reproducible": {
+          "description": "Fail the build if a second compilation of the same inputs produces a different digest (Proposal §11, `QQQ-1005`).",
+          "type": "boolean"
+        },
+        "target": {
+          "description": "Compilation target. `wasm32-wasip2` is the V1 default.",
+          "type": "string"
+        }
+      },
+      "title": "qqq-toml#Build",
+      "type": "object"
+    },
+    "ByteSize": {
+      "$id": "https://qqq.codes/schema/qqq-toml#ByteSize",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `ByteSize` table.",
+      "properties": {},
+      "title": "qqq-toml#ByteSize",
+      "type": "object"
+    },
+    "Capabilities": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Capabilities",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Capabilities` table.",
+      "properties": {
+        "clock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClockCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.clock]`."
+        },
+        "crypto": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CryptoCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.crypto]`."
+        },
+        "dns": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DnsCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.dns]`."
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.env]`."
+        },
+        "fs": {
+          "description": "`[[capabilities.fs]]` — one entry per preopened path.",
+          "items": {
+            "$ref": "#/$defs/FsCapability"
+          },
+          "type": "array"
+        },
+        "http": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.http]` — server and/or client HTTP."
+        }
+      },
+      "title": "qqq-toml#Capabilities",
+      "type": "object"
+    },
+    "ClockCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#ClockCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `ClockCapability` table.",
+      "properties": {
+        "monotonic": {
+          "description": "Whether the guest may read the monotonic clock. Defaults to **false**.",
+          "type": "boolean"
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Timezone name, for formatting only."
+        },
+        "wall": {
+          "description": "Whether the guest may read the wall clock. Defaults to **false**.",
+          "type": "boolean"
+        }
+      },
+      "title": "qqq-toml#ClockCapability",
+      "type": "object"
+    },
+    "CryptoCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#CryptoCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `CryptoCapability` table.",
+      "properties": {
+        "aead": {
+          "description": "Allowlisted AEAD constructions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hash": {
+          "description": "Allowlisted hash algorithms.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hmac": {
+          "description": "Allowlisted HMAC algorithms.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "random": {
+          "description": "Whether the guest may draw randomness. Defaults to **false**: an unrequested CSPRNG is a covert channel.",
+          "type": "boolean"
+        },
+        "secrets": {
+          "description": "Named secrets the guest may **use** without reading.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sign": {
+          "description": "Allowlisted signature algorithms.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#CryptoCapability",
+      "type": "object"
+    },
+    "DependencyDetail": {
+      "$id": "https://qqq.codes/schema/qqq-toml#DependencyDetail",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `DependencyDetail` table.",
+      "properties": {
+        "caps": {
+          "description": "The capabilities this dependency **declares** it needs. # Why a dependency declares authority at all §5.4 states it as the feature that matters most about the lockfile: > **`caps` is recorded per dependency.** `qqqai install` prints a > **capability diff** — *\"this update adds `http.client` to > `qq",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exact": {
+          "description": "Pin to exactly this version, ignoring the usual caret widening.",
+          "type": "boolean"
+        },
+        "features": {
+          "description": "Optional features to enable.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An alternative source: `path+…`, `git+…`, `registry+…`. Recorded because two packages with the same name and version from different sources are different packages."
+        },
+        "version": {
+          "description": "The semver requirement, e.g. `1.2`, `^1.2.3`, `>=1.0, <2.0`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "qqq-toml#DependencyDetail",
+      "type": "object"
+    },
+    "DnsCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#DnsCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `DnsCapability` table.",
+      "properties": {
+        "resolve": {
+          "description": "Names the guest may resolve.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#DnsCapability",
+      "type": "object"
+    },
+    "EnvCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#EnvCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `EnvCapability` table.",
+      "properties": {
+        "allow": {
+          "description": "Individually named variables. Never a blanket inherit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#EnvCapability",
+      "type": "object"
+    },
+    "FsCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#FsCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `FsCapability` table.",
+      "properties": {
+        "mode": {
+          "description": "`read-only`, `read-write` or `append-only`.",
+          "enum": [
+            "read-only",
+            "append-only",
+            "read-write"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "description": "The host path to preopen.",
+          "type": "string"
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional quota, e.g. `5GiB`."
+        }
+      },
+      "required": [
+        "mode",
+        "path"
+      ],
+      "title": "qqq-toml#FsCapability",
+      "type": "object"
+    },
+    "HttpCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#HttpCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `HttpCapability` table.",
+      "properties": {
+        "client": {
+          "description": "Outbound hosts the component may reach, as `host:port` patterns.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "server": {
+          "description": "Whether the component may receive inbound requests.",
+          "type": "boolean"
+        }
+      },
+      "title": "qqq-toml#HttpCapability",
+      "type": "object"
+    },
+    "Limits": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Limits",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Limits` table.",
+      "properties": {
+        "epoch_deadline_ms": {
+          "description": "Wall-clock preemption backstop in milliseconds.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fuel": {
+          "description": "Deterministic instruction budget per request.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_instances": {
+          "description": "Concurrency ceiling per worker.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_open_handles": {
+          "description": "Maximum simultaneously open resource handles.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_poll_per_tick": {
+          "description": "Impose a single scheduler tick after this many instances are polled.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_subrequests": {
+          "description": "Maximum outbound subrequests one instance may drive. # Why this is a limit about *caused* work rather than *performed* work Fuel bounds what the guest computes. It does not bound what the guest **causes**: a loop that calls `http.get` and ignores the result costs a handful of fuel units per iteratio",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory": {
+          "description": "Memory cap, e.g. `128MiB`.",
+          "type": "string"
+        }
+      },
+      "title": "qqq-toml#Limits",
+      "type": "object"
+    },
+    "Package": {
+      "$id": "https://qqq.codes/schema/qqq-toml#Package",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `Package` table.",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One-line description, surfaced on the registry page."
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SPDX licence identifier."
+        },
+        "name": {
+          "description": "Project name. Validated by `qqq-core`'s identifier rules.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Semantic version of the project itself.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "qqq-toml#Package",
+      "type": "object"
+    }
+  },
+  "$id": "https://qqq.codes/schema/qqq-toml",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The QQQ manifest, `qqq.toml`. Every field is validated on parse; `deny_unknown_fields` means an unrecognised key is an error rather than a silent no-op.",
+  "properties": {
+    "build": {
+      "$ref": "#/$defs/Build",
+      "description": "`[build]` — how the project is compiled to a component."
+    },
+    "capabilities": {
+      "$ref": "#/$defs/Capabilities",
+      "description": "`[capabilities]` — the authority declaration. Absent means deny-all."
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "description": "`[limits]` — enforceable resource bounds."
+    },
+    "package": {
+      "$ref": "#/$defs/Package",
+      "description": "`[package]` — identity."
+    }
+  },
+  "required": [
+    "package"
+  ],
+  "title": "qqq-toml",
+  "type": "object"
+}

@@ -1,0 +1,58 @@
+{
+  "$id": "https://qqq.codes/schema/cli-envelope",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The stable JSON envelope every `qqqai` command emits under `--json`. `schema_version` is bumped only for a breaking change within a major version.",
+  "properties": {
+    "command": {
+      "type": "string"
+    },
+    "data": {
+      "type": [
+        "object",
+        "array",
+        "null"
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "remediation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "ok"
+  ],
+  "title": "qqqai-cli-envelope",
+  "type": "object"
+}

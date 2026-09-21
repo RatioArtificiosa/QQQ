@@ -870,6 +870,7 @@ cmd_checks() {
 
     python3 tools/check_topology.py
     python3 tools/check_no_ambient.py
+    python3 tools/gen_schemas.py --check
     python3 tools/check_wit_errors.py
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py
@@ -901,6 +902,7 @@ cmd_checks() {
     python3 tools/check_license_boundary.py --self-test
     python3 tools/check_tombstones.py
     python3 tools/check_tombstones.py --self-test
+    python3 tools/self_test_schemas.py
 
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py

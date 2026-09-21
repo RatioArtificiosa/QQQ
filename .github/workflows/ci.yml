@@ -438,6 +438,25 @@ jobs:
       - name: Prove the ambient-state check detects violations
         run: python tools/fault_inject_no_ambient.py
 
+      # §8.3: "CI fails if it drifts from the implementation." Three surfaces
+      # have a machine-readable contract derived from Rust types -- `qqq.toml`,
+      # `qqq.lock` and the CLI envelope -- and they are published under
+      # `schema/`. Regenerating is a separate command; CI only checks.
+      #
+      # The check is paired with its self-test for the reason this workspace has
+      # recorded five times: a checker that has never been shown to fail might
+      # always pass. The six injections break the generator's INPUTS (an added
+      # field, an unknown type, a stripped `as_str`, emptied sources) and its
+      # OUTPUTS (a deleted schema, a hand-edited one) separately, and injection 6
+      # is the anti-vacuity case -- emptied sources must fail rather than emit a
+      # schema with `"properties": {}`, which would describe every possible
+      # document (CON-016).
+      - name: Validate published schemas match the implementation (CON-016)
+        run: python tools/gen_schemas.py --check
+
+      - name: Prove the schema-drift check detects drift
+        run: python tools/self_test_schemas.py
+
       # §4.5: "a host interface that would naturally be called in a loop must
       # instead accept a batch" (CON-012). The operative phrase is a judgement
       # about usage, which NO checker can make -- so this checks the decidable

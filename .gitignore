@@ -58,6 +58,18 @@ desktop.ini
 # stays on disk and out of the repository -- the same treatment .scratch/ gets.
 docs/Windows-Linux-Docker.md
 
+# The agent handbook: the working memory of the AI agents who built this
+# repository -- the process, the tooling, the traps, the lessons.
+#
+# It is ignored rather than committed for the same reason .scratch/ is: it
+# describes how the work is done, not what the product is. Committing it would
+# put a document about the *process* into the product's public surface, where a
+# reader looking for the specification would find a guide to CI instead. The
+# project's specification (QQQ-Proposal-V1.md), ledger (QQQ-Checklist-V1.md) and
+# decision record (QQQ-Observations-and-Memories.md) are tracked and are the
+# public account of the work; this file is the private one.
+docs/AGENT-HANDBOOK.md
+
 # Fuzzing — `SEC-012`/`SEC-013`.
 #
 # `fuzz/` is a SEPARATE cargo workspace, so the root `/target/` rule above (which

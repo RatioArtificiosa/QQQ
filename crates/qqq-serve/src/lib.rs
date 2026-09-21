@@ -100,6 +100,8 @@ pub mod tls;
 pub mod ws;
 /// The WebSocket frame layer, per RFC 6455 §5.
 pub mod ws_frame;
+/// Message assembly: turning a sequence of frames into whole messages.
+pub mod ws_message;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use cors::{Cors, CorsError, Decision, Origin, Reason};

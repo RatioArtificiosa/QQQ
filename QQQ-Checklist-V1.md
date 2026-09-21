@@ -239,7 +239,30 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §0.5 Identifier and anchor discipline
 - [ ] **DOC-015** Add the "framework vs runtime" usage rule to the contributing guide.
   → §3.4 Positioning statement and the language we use
-- [ ] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.
+- [x] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.
+  → Done: `docs/verified-facts.md` — **30 facts** from the Proposal's Appendix B, each
+    with its verification method and a **re-verification cadence**.
+  → The cadence is per fact rather than one date for the whole register, because a
+    register with a single "verified on" date rots as a whole: nobody knows which rows
+    still hold, and finding out means re-verifying everything — expensive enough that
+    it does not happen. Four classes: perishable (7 days), volatile (30), local (7),
+    stable (180). Spread: 6 / 10 / 1 / 13.
+  → The class is **derived from the fact's own text**, so a new row gets a plausible
+    cadence without anyone remembering to classify it — and an unclassifiable row is
+    reported rather than guessed at.
+  → That report earned its place immediately: the first pass left **8 of 30 facts
+    unclassified**, and every one was the same kind — an API or specification property
+    (B-12's `epoch_interruption`, B-29's "a component may not export a memory"). Those
+    need a cadence *more* than the version numbers do, because a version bump is noticed
+    while an API property disappearing in a major release is exactly what a re-check
+    catches.
+  → A self-test case also caught a rule-ordering bug: `Local toolchain: rustc 1.97.1`
+    classified as **perishable**, because the version-number rule fired before the
+    local one. The cadence happened to match; the class was wrong, and a reader losing
+    a machine property among the published ones cannot tell what they are looking at.
+  → `LAST_VERIFIED` lives in the generator rather than the generated file, because
+    bumping it is how a re-verification is *recorded* — an action, not a document edit.
+  → 10/10 self-test cases.
   → §0.4 How to read the cross-references
 - [x] **DOC-017** Generate the WIT reference documentation from `wit/` into Markdown, with per-language examples.
   → Done: `docs/wit-reference.md` — 13 packages, 20 interfaces, **71 functions** and

@@ -206,6 +206,15 @@ jobs:
       - name: Prove the glossary-usage check fires on each confusable term
         run: python tools/check_glossary_usage.py --self-test
 
+      # `DOC-016`. Appendix B states the values; this register adds the cadence each
+      # fact carries, so a reader can tell which are still likely to hold. A register
+      # with one "verified on" date rots as a whole -- nobody knows which rows still
+      # apply, and finding out means re-verifying everything.
+      - name: Validate the verified-facts register
+        run: python tools/check_verified_facts.py
+      - name: Prove every fact has a re-verification cadence
+        run: python tools/check_verified_facts.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

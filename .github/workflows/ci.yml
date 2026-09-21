@@ -465,6 +465,22 @@ jobs:
       - name: Prove the schema-drift check detects drift
         run: python tools/self_test_schemas.py
 
+      # §8.5: "llms.txt at repo root and docs site — curated index of what to
+      # read, in what order" and "llms-full.txt — full documentation concatenated
+      # for context loading". Generated rather than hand-written, so the index
+      # cannot describe a file that is not there and a new document cannot go
+      # unlisted.
+      #
+      # One exclusion in that generator is a SECURITY control rather than a
+      # judgement: `docs/.env` holds credentials, and an index linking to it, or a
+      # corpus embedding it, would be a leak into a file designed to be pasted
+      # into a model's context window.
+      - name: Validate the llms.txt index and corpus (DOC-020)
+        run: python tools/gen_llms_txt.py --check
+
+      - name: Prove the llms.txt check detects drift and a stale exclusion
+        run: python tools/gen_llms_txt.py --self-test
+
       # §4.5: "a host interface that would naturally be called in a loop must
       # instead accept a batch" (CON-012). The operative phrase is a judgement
       # about usage, which NO checker can make -- so this checks the decidable

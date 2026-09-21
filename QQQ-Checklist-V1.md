@@ -2762,8 +2762,15 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [ ] **SRV-018** Implement the reference application used by all benchmarks (orders API).
   → §9.1 The honest benchmark position
-- [ ] **SRV-019** Implement CORS configuration with safe defaults.
+- [x] **SRV-019** Implement CORS configuration with safe defaults.
   → §5.3 The manifest — `qqq.toml`
+  → Done: `crates/qqq-serve/src/cors.rs` — `Origin` (parsed and canonically serialized: scheme and host lowercased, port kept, path/query/fragment refused because an `Origin` is not a URL), `Cors` (built from the manifest's `[server.cors] allow_origins`), `Decision` (`Granted` / `Denied` with a `Reason`, because "denied" and "no policy" are different facts an access log must be able to tell apart), `Cors::simple` and `Cors::preflight`.
+  → **"Safe defaults" is the item, so it is asserted first**: `Cors::none()` is the default and emits **no** `Access-Control-Allow-Origin` for any request. CORS is a *relaxation* of the same-origin policy, and a runtime that relaxes it by default has made every QQQ application cross-origin-readable without its author asking. An **empty** `allow_origins` is also `none`, not a wildcard — the vacuity failure this project refuses everywhere else.
+  → **The three dangerous configurations are refused rather than accepted**: a bare `*` (which, combined with credentials, browsers reject outright — so accepting it would produce a policy that silently does nothing), a wildcard host `https://*.example.com` (a substring matcher with extra steps unless written against the URL standard's label rules), and the literal `null` (sent by sandboxed iframes and `file://` pages, so it is the origin an attacker can most easily obtain).
+  → **Matching is exact on the canonical form**, and the tests pin the classic CORS bypass by name: `evil-example.com`, `example.com.evil.net`, `notexample.com`, `https://example.com.evil` are all refused for an allow-list of `https://example.com`. The scheme and the port are significant; the host is matched case-insensitively because the URL standard says so — normalized **in the type**, not at the comparison site, so `HTTPS://` cannot bypass a scheme check.
+  → **`Vary: Origin` is emitted on a denial too** — a denial is origin-dependent, so a shared cache that stored one would serve a refusal to an origin that should have been granted. The one exception is a request with no `Origin` at all, which is not origin-dependent and is reported as `NotACorsRequest` rather than as a denial.
+  → **A preflight is a policy, not an echo**: the requested method and headers are *checked* against the configuration, so the browser learns the refusal before sending the real request. An unconfigured method set advertises nothing rather than guessing, because a guess is how a `GET`-only route comes back advertising `DELETE`.
+  → **Measured**: 29 unit tests; workspace **1916 passed, 0 failed**; `clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --check` clean; SPDX, checklist-citation and scope-table checkers green.
 - [ ] **SRV-020** Implement request-body size and count limits enforced per tenant, with metrics.
   → §10.2 Metrics that ship by default
   → Partial: header-count and header-size caps, and a declared-body cap, are enforced

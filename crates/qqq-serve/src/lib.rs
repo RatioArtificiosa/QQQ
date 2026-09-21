@@ -86,6 +86,7 @@
 pub mod access_log;
 pub mod body;
 pub mod conn;
+pub mod cors;
 pub mod h2;
 pub mod http1;
 pub mod response;
@@ -95,6 +96,7 @@ pub mod sse;
 pub mod tls;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
+pub use cors::{Cors, CorsError, Decision, Origin, Reason};
 pub use http1::{
     head_end, is_valid_header_name, parse_head, ParseError, RequestHead, Version, MAX_HEADERS,
     MAX_HEADER_BYTES, MAX_HEAD_BYTES, MAX_REQUEST_BYTES, MAX_TARGET_BYTES,

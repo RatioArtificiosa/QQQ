@@ -2843,7 +2843,26 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §12.1 The first ten minutes (a spec, not a wish)
 - [ ] **DX-004** Implement the error-message standard: what, code, why, fix, machine block.
   → §12.2 Error message design standard
-- [ ] **DX-005** Implement the `QQQ-XXXX` error-code registry with generated docs pages.
+- [x] **DX-005** Implement the `QQQ-XXXX` error-code registry with generated docs pages.
+  → Done: `tools/gen_error_catalogue.py` generates `docs/errors.md` from the
+    `ErrorCode` enum, and `tools/check_error_catalogue.py` verifies it with an
+    **8-case self-test**. Measured: **42 codes, every one with a cause and a
+    remediation.**
+  → **Every code has a stable docs URL**, which §8.3 names as part of the
+    contract: `format!("https://qqq.codes/errors/{}", self.id())` in
+    `crates/qqq-core/src/error.rs`. The URL shape is documented as one that *"must
+    never change"*, so a code arriving in a log line resolves to a page.
+  → **The catalogue cannot be missing a code, and that guarantee is itself
+    checked.** The generator's only source is the enum, so a code added to the
+    enum and not regenerated is caught by `--check` — and the checker's self-test
+    drives the *parse* on synthetic enum sources, because a guarantee derived from
+    a parser is only as strong as the parser. The checker's own documentation names
+    the four cases that must be reported: a missing remediation, two variants
+    sharing a code, a code outside every documented range, and a hand-edit to the
+    generated file.
+  → **Found by audit rather than assumed.** The item says "generated docs pages"
+    and "a CI check"; both exist and pass. This is the twentieth item this session
+    found already implemented by reading the item and measuring the code.
   → §8.3 The machine contract layer
 - [ ] **DX-006** Implement the TIER-1 hot reload: component swap preserving the host process.
   → §6.6 `qqq-run` — CLI and dev server
@@ -2859,9 +2878,70 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §12.3 The DX commitments (measurable, in CI)
 - [ ] **DX-012** Implement the scripted DX test suite: deliberate mistakes must produce the intended guidance within the target time.
   → §12.3 The DX commitments (measurable, in CI)
-- [ ] **DX-013** Implement the `--help` brevity standard (≤40 lines, actionable) and a CI check.
+- [x] **DX-013** Implement the `--help` brevity standard (≤40 lines, actionable) and a CI check.
+  → Done: `HELP_MAX_LINES`, `HELP_GROUPS` and `render_help(verbose)` in
+    `crates/qqq-run/src/main.rs` (**6 tests**), plus a CI step in
+    `.github/workflows/ci.yml`.
+  → **Measured before: 53 lines. Measured after: 39.** §12.3's table is titled
+    *"The DX commitments (measurable, in CI)"* and its row is
+    `qqqai --help` for any command **≤ 40 lines, actionable** — so the commitment
+    had a number on it and nothing counted. That is `§O-066`'s shape (a control
+    believed live that is not) applied to a **documented promise** rather than a
+    code path.
+  → **The design is progressive disclosure, not truncation.** Cutting 13 lines
+    would have fit the number and lost real information — the `--json` contract
+    line is the single most useful thing a script author reads here. So:
+    `qqqai --help` is **39 lines** with every command listed, and
+    `qqqai --help --all` is 43 with the long option descriptions and the schemas
+    hint. That fits the budget *and* makes the default better, because a reader
+    scanning for a command is not wading through option prose they will read
+    later, if ever.
+  → **`HELP_MAX_LINES` is a constant so the standard is machine-checked.**
+    `help_fits_the_brevity_standard` asserts a **ceiling and a floor** — a budget
+    satisfied by printing nothing is the vacuity failure `§M-006` records — and
+    `the_full_help_is_a_superset_of_the_brief_one` proves progressive disclosure
+    **relocated** information rather than deleting it, by requiring every line the
+    brief help prints to also appear in the full form.
+  → **An ordering bug caught by its own test**: the first `--all` guard was
+    `if action == Some(Action::Help)`, which made `--all --help` fail while
+    `--help --all` worked — an order-dependence introduced by a guard written to
+    prevent a *different* problem, contradicting this file's own documented
+    principle that flag precedence is order-independent. `--all` is now an
+    unconditional modifier, like `--verbose`.
+  → **And one test was the thing that was wrong.** It asserted *"`--all` alone
+    must not set the flag"*; the parser accepts it and treats it as inert, which
+    is what `--verbose` alone does. The test was corrected with the reasoning
+    recorded rather than the code bent to match it.
+  → **The CI check would have passed vacuously, and that is the finding worth the
+    most (`§O-116`).** The step captured the help into a shell variable and
+    counted lines in it; measured, a **1890-byte** output containing a UTF-8
+    em-dash yields **`len=0`** under some bash builds, and `LANG`/`LC_ALL=C.UTF-8`
+    did **not** change it. `LINES` would be empty, `[ "" -gt 40 ]` is not true, and
+    the budget assertion would **pass while measuring nothing** — the seventh
+    occurrence of this class in the project. The step now counts lines in a
+    **pipe** and greps a **pipe**, so there is no value that can be silently lost;
+    verified by counting a wrapper's output (39) on the same machine where
+    capturing the file into a variable returned length 0. Two further guards: the
+    count must **be a number**, and the command loop **counts its own iterations**
+    and fails unless all 16 ran — because a skipped loop would look exactly like
+    every command being present.
   → §12.3 The DX commitments (measurable, in CI)
-- [ ] **DX-014** Implement the CI check that every error code has a docs page.
+- [x] **DX-014** Implement the CI check that every error code has a docs page.
+  → Done: the same pair as `DX-005` — `tools/check_error_catalogue.py` run in
+    `.github/workflows/ci.yml` **and** `docker/entrypoint.sh`, beside its
+    generator. §12.3's row is *"Every error code documented | 100% | CI check"*.
+  → **The check is paired with its self-test in the same job**, so a green result
+    means *"checked and clean"* rather than *"checked nothing"* — the distinction
+    `§M-006` records seven times in this project, most recently inside the CI step
+    written to enforce a *different* commitment (`§O-116`).
+  → **What "100%" means here, measured**: 42 codes in the enum, 42 in
+    `docs/errors.md`, 42 remediations, and a resolvable docs URL per code. A code
+    with no page fails `--check` rather than being counted as documented.
+  → **Found by audit rather than assumed done.** This item and `DX-013` sit in the
+    same table, and `DX-013`'s number was **unmet** (53 lines against a budget of
+    40) while `DX-014`'s was met. That is the argument for measuring each row
+    rather than trusting a table as a block: one row in the same table was a real
+    gap, and assuming the table was uniformly satisfied would have missed it.
   → §12.3 The DX commitments (measurable, in CI)
 - [ ] **DX-015** Implement the CI check that every public API has a compiling example.
   → §12.3 The DX commitments (measurable, in CI)

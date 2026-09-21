@@ -2467,11 +2467,21 @@ mod tests {
         // with nothing to modify is a mistake. That is a defensible opinion and
         // not the one this parser implements -- `--verbose` alone behaves the
         // same way -- so the test was the thing that was wrong, not the code.
+        //
+        // **And the assertion that replaced it was wrong too, in the other
+        // direction.** This test asserted `--all` alone does *not* resolve to
+        // Help. It does: the parser's default when no command is given is
+        // `Action::Help`, so `qqqai --all` prints help exactly as bare `qqqai`
+        // does. Two attempts, two wrong expectations, and the code was right both
+        // times -- recorded because the pattern is the point: **an assertion about
+        // a default is worth checking against the default**, not against an
+        // assumption about what the default should be.
         let alone = parsed(&["--all"]);
         assert!(alone.flags.all(), "the flag itself is set");
-        assert!(
-            !matches!(alone.action, Action::Help),
-            "but it does not cause help to be printed"
+        assert_eq!(
+            alone.action,
+            Action::Help,
+            "no command defaults to Help, so `--all` alone prints the full help"
         );
     }
 

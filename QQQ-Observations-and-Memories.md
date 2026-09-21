@@ -9954,4 +9954,101 @@ different thing from running it locally.
 
 ---
 
+### §O-116 — A commitment with a number on it that nothing counted, and a check that would have passed vacuously
+
+**The item.** `DX-013`: *"Implement the `--help` brevity standard (≤40 lines,
+actionable) and a CI check."* It comes from §12.3's table, in a section titled
+**"The DX commitments (measurable, in CI)"**:
+
+> | `qqqai --help` for any command | **≤ 40 lines, actionable** | Review standard |
+
+**Measured before doing anything: 53 lines.** The commitment had a number on it,
+the table called itself measurable, and nothing measured it. This is `§O-066`'s
+shape — *a control believed live that is not* — applied to a **documented
+promise** rather than a code path.
+
+**The design is progressive disclosure, not truncation.** Cutting 13 lines would
+have fit the number and lost real information: the `--json` contract line is the
+single most useful thing a script author reads here. So:
+
+| Invocation | Lines | Contents |
+|---|---|---|
+| `qqqai --help` | **39** | every command, one line each |
+| `qqqai --help --all` | 43 | long option descriptions, schemas hint |
+
+That fits the budget *and* makes the default better, because a reader scanning for
+a command is not wading through option prose they will read later, if ever. The
+workspace already uses progressive disclosure for documentation tiers, so the
+pattern is not new here.
+
+**An ordering bug my own test caught.** The first `--all` guard was
+`if action == Some(Action::Help)`, which made `--all --help` fail while
+`--help --all` worked — an order-dependence introduced by a guard written to
+prevent a *different* problem, and one that contradicts this file's own documented
+principle that flag precedence is order-independent. `--all` is now an
+unconditional modifier, like `--verbose`.
+
+**And my test was the thing that was wrong.** It asserted *"`--all` alone must not
+set the flag"*, on the reasoning that a modifier with nothing to modify is a
+mistake. That is a defensible opinion and not the one the parser implements, so the
+test was corrected with the reasoning recorded rather than the code bent to match
+it. **A test and its code disagreeing means one of them is wrong, and which one is
+not decided by which was written first.**
+
+**The finding worth the most: the CI check would have passed vacuously.** The step
+captured the help into a shell variable and counted lines in it:
+
+```sh
+HELP="$(./target/debug/qqqai --help)"
+LINES="$(printf '%s\n' "$HELP" | wc -l ...)"
+```
+
+Measured: a **1890-byte** help output containing a UTF-8 em-dash yields **`len=0`**
+under some bash builds. Command substitution silently drops the value, and setting
+`LANG`/`LC_ALL` to `C.UTF-8` did **not** change it.
+
+The consequence would have been the worst kind available to this project:
+
+* `LINES` empty,
+* `[ "" -gt 40 ]` is not true, and therefore
+* **the budget assertion passes while measuring nothing.**
+
+That is the seventh occurrence of the class (`§M-006`, `§O-092`, `§O-103`,
+`§O-108`, `§O-111`, `§O-115`, and here) — and it arrived this time inside the CI
+step written to enforce a *different* promise, which is where the pattern keeps
+turning up.
+
+**The fix is to never hold the text.** The step counts lines in a **pipe** and
+greps a **pipe**:
+
+```sh
+LINES="$("$BIN" --help | wc -l | tr -d ' ')"
+"$BIN" --help | grep -q "^    $cmd "
+```
+
+There is no value that can be silently lost. Verified: counting a wrapper's output
+returns **39** on the same machine where capturing the file into a variable
+returned length 0.
+
+**Two further guards, each closing a way the check could pass without checking:**
+
+* the line count must **be a number** (`case` on `''|*[!0-9]*`), because comparing
+  a non-number *is* the silence being guarded against;
+* the command loop **counts its own iterations** and fails if it did not run all
+  16, because a bug that skipped the loop would look exactly like every command
+  being present. That is the same idea as `arch003::EXPECTED_REGISTRATIONS`, which
+  exists because a scanner returning an empty list made its rule vacuously true.
+
+**A note on process, since it cost a retry.** The first attempt at this commit
+message was written inline in PowerShell and was mangled — the rule *"always write
+the message to a file"* is recorded in this document and in the working practice,
+and it still cost a retry. **A recorded rule that is not followed is not a
+control**; what makes this one stick is that `git commit -F <file>` is now the
+habit rather than the exception.
+
+→ `crates/qqq-run/src/main.rs` (`HELP_MAX_LINES`, `HELP_GROUPS`, `render_help`,
+6 tests), `.github/workflows/ci.yml`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

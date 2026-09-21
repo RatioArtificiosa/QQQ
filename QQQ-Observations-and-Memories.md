@@ -5267,6 +5267,67 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-102 — Proving both directions of a wall that only has one side
+
+**What was built.** `LIC-012`: `tools/check_license_boundary.py` enforces §13.2's licensing
+wall — Apache-2.0 runtime, commercial Fabric, and "Fabric is not required to run QQQ".
+
+**Why the two directions get separate messages.** They fail differently, and the remedies
+differ with them:
+
+| Direction | Failure |
+|---|---|
+| runtime → Fabric | the Apache-2.0 runtime would require commercially-licensed code, which breaks the licence grant itself |
+| Fabric → runtime | permitted by the licence, but it breaks §13.2's promise that Fabric is *optional* — a runtime crate importing Fabric would make the open-source edition incomplete |
+
+A single "dependency crosses the boundary" message would be accurate and would send a
+reader to the wrong remedy half the time.
+
+**The classification is derived, not listed.** Each crate is classified by the licence its
+own manifest *declares*. A hand-maintained list of Fabric crates goes stale the moment a
+crate is added, and — the worse failure — a new crate defaulting to "not Fabric" is
+exempted silently. So an **unclassifiable licence is reported** rather than assumed to be
+the safe kind.
+
+**Then the interesting part: a green result that proved one thing and looked like two.**
+
+The repository has no Fabric crate. So the check passes, and the passing result means "no
+runtime crate depends on something commercial" — which is half the wall. It says nothing
+about the other half, because there is nothing on the other side to cross it.
+
+That is the *check* being honest (`§O-095`'s problem in a different place: a green result
+that is really a statement about the environment), and it is reported in the output rather
+than left for a reader to work out.
+
+**So both directions were exercised deliberately.** A synthetic `qqq-fabric` crate was
+created with `license = "LicenseRef-Fabric"`, wired in each direction in turn, and the
+check was run:
+
+```text
+direction A (Fabric -> runtime) detected: True
+  FAIL  qqq-fabric (Fabric) depends on qqq-core (runtime). ... breaks §13.2's promise
+        that Fabric is optional ...
+direction B (runtime -> Fabric) detected: True
+  FAIL  qqq-core (runtime) depends on qqq-fabric (Fabric). ... breaks the licence itself.
+BOTH DIRECTIONS CAUGHT
+restored
+```
+
+The crate was then removed and the workspace re-verified clean. **A boundary check whose
+second direction has never fired is a boundary check that has been tested on one side**,
+and the synthetic-crate method is how that is closed without waiting for a milestone.
+
+**And the checks now guard each other.** `check_spdx.py` — written in the previous round —
+failed the suite naming `tools/check_license_boundary.py`, the file written *after* it,
+because the new file had no SPDX header. That is the property worth having: the tooling
+written last round caught an oversight in the tooling written this round, without anyone
+asking it to.
+
+→ `tools/check_license_boundary.py`, `.github/workflows/ci.yml`,
+`docker/entrypoint.sh`.
+
+---
+
 ### §O-101 — A licence header that contradicts `Cargo.toml` is worse than none
 
 **What was built.** `LIC-006`: `SPDX-License-Identifier: Apache-2.0` on **145 files** —

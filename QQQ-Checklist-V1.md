@@ -1139,7 +1139,22 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CON-003** Implement `qqq.toml` normalization: host patterns, secret references, path canonicalization.
   → Done: `qqq-cap::normalize` — host patterns, secret references, path canonicalisation.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CON-004** Finalize and publish the `qqq.lock` schema including per-package `caps`.
+- [x] **CON-004** Finalize and publish the `qqq.lock` schema including per-package `caps`.
+  → Done: `schema/qqq-lock.schema.json`, generated from
+    `qqq_pkg::lock::Lockfile` by `tools/gen_schemas.py` and checked for drift in
+    CI. Six `$defs` entries, five resolved `$ref`s, one string enum.
+  → **`caps` is present and typed**, verified by reading the generated document
+    rather than assuming: `LockPackage`'s properties are `caps`, `digest`,
+    `name`, `source`, `version`, `wit`, and `caps` is `{"type": "array", "items":
+    {"type": "string"}}`. The per-package capability record §5.4 describes is
+    therefore part of the published contract, not only of the Rust type.
+  → **Why this landed with `CON-016` rather than as its own piece of work**: the
+    item asks for a schema *finalized and published*, and the moment the
+    generator exists the schema is derived, published and kept in sync by CI.
+    Writing it by hand would have created a second source of truth — which is
+    precisely the drift `CON-016` exists to prevent — so the two items are one
+    mechanism, and the checklist records that rather than counting the same work
+    twice.
   → §5.4 The lockfile — `qqq.lock`
 - [x] **CON-005** Implement `lockfile-hash` covering all resolved artifacts and config.
   → Done: `crates/qqq-pkg/src/lock.rs` — `compute_hash`, `stamp`, the
@@ -1331,7 +1346,54 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [ ] **CON-015** Define the deprecation mechanics in WIT: `@deprecated` with a removal version.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
-- [ ] **CON-016** Implement the schema-drift CI check for the manifest, lockfile, CLI output and error catalogue.
+- [x] **CON-016** Implement the schema-drift CI check for the manifest, lockfile, CLI output and error catalogue.
+  → Done: `tools/gen_schemas.py` + `tools/self_test_schemas.py`, with
+    `schema/qqq-toml.schema.json`, `schema/qqq-lock.schema.json` and
+    `schema/cli-envelope.schema.json` published and wired into
+    `.github/workflows/ci.yml` **and** `docker/entrypoint.sh`. **7/7 fault
+    injections detected.**
+  → **§8.3's sentence had no implementation**: *"CI fails if it drifts from the
+    implementation"* — and no drift check existed anywhere. Measured, the
+    surface was worse than unchecked: **three of §8.3's machine-readable
+    surfaces had no published schema at all**, so there was nothing for a check
+    to check. The deliverable is therefore a generator *and* a checker.
+  → **The schemas are derived from the Rust types, not from the binary.**
+    `Manifest`, `Lockfile` and the CLI envelope are read from source, so a field
+    added and not regenerated is caught by the **same commit** that introduced
+    it, and the check runs in CI on a tree that has not been built. Running
+    `qqqai schema` would check *the binary*, which is a different claim.
+  → **The generator refuses rather than emitting a partial document.** Its first
+    run failed with ``unrecognised Rust type: 'Package'`` — correct behaviour,
+    because a schema missing a field is worse than no schema: it is believed.
+    Named types then resolved to `$ref`s into `$defs`, and `FsMode`/`ChangeKind`
+    to string enums read from each enum's own `as_str`. The published lockfile
+    schema therefore contains `"modified-in-place"`, the spelling a document
+    actually holds, rather than `ModifiedInPlace`, which no document ever holds.
+  → **The self-test found a real generator defect within minutes of it being
+    written (`§O-112`).** Injection 4 replaced a field's type with `NoSuchType`
+    and observed `GENERATION FAILED … exit 0`: `generate()` incremented its
+    failure counter and **returned 0 on the write path**, so a CI job would have
+    **passed while one of the three schemas was never published**. A partial
+    publication is worse than a failed one — the tree holds a mix of current and
+    stale contracts with nothing marking which is which. Fixed, and the two
+    failure kinds (*could not be generated* vs *drifted*) are now reported
+    separately because they need different fixes.
+  → **Injection 6 is the anti-vacuity case**: with every source emptied, a
+    generator emitting `{"properties": {}}` would "succeed", and that schema
+    describes **every possible document** — the schema equivalent of a check
+    that finds nothing. It must fail, and it must name which struct was missing.
+  → The six injections break the generator's **inputs** (an added field, an
+    unknown type, a changed enum spelling, emptied sources) and its **outputs**
+    (a deleted schema, a hand-edited schema) separately, and each is applied to a
+    **copy** of the tree in a temporary directory so the repository is never
+    touched (`§M-007`).
+  → **One measurement produced no change, and is recorded so it is not "fixed"
+    later**: the schema document uses `schema_version` where §8.3's illustrative
+    JSON writes `schemaVersion`. The snake form is used at **all four** call
+    sites, so it is a settled choice rather than a slip, and the proposal's block
+    is illustration rather than a normative field name. Changing it would break
+    the machine contract for no stated reason — **a measurement that produces no
+    change is still a measurement.**
   → §8.3 The machine contract layer
 - [ ] **CON-017** Publish the contract-stability promise for each surface (WIT, manifest, lockfile, CLI JSON).
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior

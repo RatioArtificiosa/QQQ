@@ -9582,4 +9582,101 @@ scanner*:
 
 ---
 
+### §O-112 — A generator that reported failure and exited zero, found by its own self-test
+
+**What `CON-016` asks.** §8.3:
+
+> This single document is what makes QQQ teachable to a model that has never seen
+> it. It is versioned, it is stable within a major version, and **CI fails if it
+> drifts from the implementation.**
+
+**What was measured first.** Three things, and only the third was the item:
+
+* **No drift check existed anywhere.** The sentence with no implementation.
+* **Three of §8.3's machine-readable surfaces had no published schema at all** —
+  `qqq.toml`, `qqq.lock` and the CLI envelope. So there was nothing for a drift
+  check to check, which is why the deliverable is a **generator and a checker**
+  rather than a checker alone.
+* One thing that *looked* like a finding and is not, and is recorded here so it is
+  not "fixed" later: the schema document uses `schema_version` where §8.3's
+  illustrative JSON writes `schemaVersion`. The snake form is used at **all four**
+  call sites, so it is a settled choice rather than a slip, and the proposal's
+  block is illustration rather than a normative field name. Changing it would
+  break the machine contract for no stated reason. **A measurement that produces
+  no change is still a measurement.**
+
+**The design decision that mattered: derive from source, not from the binary.**
+The generator reads the Rust types (`qqq_cap::manifest::Manifest`,
+`qqq_pkg::lock::Lockfile`) rather than running `qqqai schema`. Two reasons:
+a check that runs the binary checks *the binary*, and it cannot run in CI on a
+tree that has not been built. Reading source means a field added to `Manifest`
+and not regenerated is caught by the *same commit* that introduced it.
+
+**And the refusal, which is the same policy as everywhere else in this
+workspace.** The generator raises on anything it cannot describe rather than
+falling back to `{}` or omitting the field. Its first run:
+
+```
+GENERATION FAILED for qqq-toml.schema.json: unrecognised Rust type: 'Package'
+GENERATION FAILED for qqq-lock.schema.json: unrecognised Rust type: 'LockPackage'
+```
+
+which is correct behaviour: a schema missing a field is worse than no schema,
+because it is believed. `Package` and `LockPackage` were then resolved to `$ref`s
+into `$defs`, and `FsMode`/`ChangeKind` to string enums read from each enum's own
+`as_str` — so `ModifiedInPlace` appears in the schema as `"modified-in-place"`,
+the spelling a document actually contains, rather than the variant name, which is
+a spelling no document ever contains.
+
+**The defect the self-test found, in the generator, within minutes of writing
+it.** Injection 4 replaced a field's type with `NoSuchType` and observed:
+
+```
+GENERATION FAILED for qqq-lock.schema.json: unrecognised Rust type: 'NoSuchType'
+exit 0
+```
+
+`generate()` incremented its `failures` counter and then **returned `0` on the
+write path** — the non-zero return lived inside the `if check:` branch. So a CI
+job running the generator would have **passed while one of the three schemas was
+never published**: the other two were written, the failure went to stderr, and the
+exit code said everything was fine.
+
+**A partial publication is worse than a failed one**, because the tree then holds
+a mix of current and stale contracts with nothing marking which is which. The
+person reading `schema/` cannot tell that `qqq-lock.schema.json` predates a change
+to `Lockfile`.
+
+Two fixes:
+
+1. **A generation failure is always a non-zero exit**, on both paths. The modes
+   differ in what they *do*, not in whether they tolerate a schema they could not
+   build.
+2. **The two failure kinds are reported separately.** *"Could not be generated"*
+   and *"drifted from the implementation"* need different fixes — a parser gap or
+   a renamed type versus a forgotten regeneration — and collapsing them into one
+   *"N schema(s) drifted"* line sends the reader to the wrong fix.
+
+**The six injections, and why injection 6 is the important one.** They break the
+generator's *inputs* and *outputs* separately: an added field, an unknown type, a
+changed enum spelling, emptied sources; a deleted schema, a hand-edited schema.
+**Injection 6 is the anti-vacuity case**: with every source emptied, a generator
+that emitted `{"properties": {}}` would "succeed", and that schema describes
+*every possible document* — the schema equivalent of a check that finds nothing.
+It must fail, and it must name which struct was missing.
+
+**The pattern that keeps repeating, now stated as a rule.** Six times this
+session, the valuable finding came from **a test that would not go red, or a
+check that WOULD**. The generator's exit-code bug was invisible to every reading
+of the code and obvious to one injection. `CON-016` is itself the mechanism for
+catching this class one level up: a published contract that silently stops
+matching its implementation is exactly *a control believed live that is not*, and
+the answer is the same as it has been all along — make the disagreement
+mechanical, and make it loud.
+
+→ `tools/gen_schemas.py`, `tools/self_test_schemas.py`, `schema/` (3 documents),
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

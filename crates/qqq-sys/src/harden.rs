@@ -772,6 +772,48 @@ mod imp {
         }
     }
 
+    /// The action taken for a syscall the profile does **not** list.
+    ///
+    /// # The defect this function exists to make testable — found by the Linux bridge
+    ///
+    /// The first version of this code passed `SeccompAction::Errno(EPERM)` inline as
+    /// the filter's default action, and `seccomp_applies_in_a_child` asserted only
+    /// that the filter was **installed**. Those two facts together meant the
+    /// following patch passed every test in the workspace:
+    ///
+    /// ```diff
+    /// -            SeccompAction::Errno(libc::EPERM as u32),
+    /// +            SeccompAction::Allow,
+    /// ```
+    ///
+    /// That turns the filter into a **default-allow** program: every syscall not on
+    /// the allowlist is permitted, which is exactly the seccomp bypass the profile
+    /// was written to prevent. A default-allow filter is *still installed*, so
+    /// "installation succeeded" was true — and the guard's whole purpose was
+    /// unverified.
+    ///
+    /// **Nothing on Windows could have found this.** The code is
+    /// `#[cfg(target_os = "linux")]`, so the test was compiled out, and the
+    /// injection was unexercised. It took a Linux environment to make the
+    /// injection fire at all — `§O-085`.
+    ///
+    /// # Why a named function rather than an inline constant
+    ///
+    /// So a test has a **seam**. Asserting on this function's return value is what
+    /// makes the guard reachable: a test can now fail if the default action ever
+    /// stops being a refusal, without needing to trap a signal in a child process.
+    /// The two mechanisms are complementary — this proves the *policy*, and
+    /// [`install_and_probe`] proves the kernel enforces it.
+    #[must_use]
+    fn deny_action() -> seccompiler::SeccompAction {
+        // `EPERM` rather than `KillProcess`. Both refuse, and the difference is
+        // what the guest sees: a killed process is indistinguishable from a crash
+        // (and would surface as an unexplained `SIGSYS` in a log), whereas `EPERM`
+        // reaches the guest as a normal error it can handle and report. A
+        // backstop should degrade a request, not terminate the host.
+        seccompiler::SeccompAction::Errno(libc::EPERM as u32)
+    }
+
     /// Compile the profile and install it.
     ///
     /// # Why the filter is a *default-deny* program
@@ -782,9 +824,9 @@ mod imp {
     /// explicit allowlist, so a syscall added to Linux tomorrow is refused without
     /// anyone updating this file.
     fn build_and_install(profile: SeccompProfile) -> Result<(), String> {
-        use seccompiler::{SeccompAction, SeccompFilter, TargetArch};
+        use seccompiler::{SeccompAction, SeccompFilter};
 
-        let arch = TargetArch::try_from(std::env::consts::ARCH)
+        let arch = seccompiler::TargetArch::try_from(std::env::consts::ARCH)
             .map_err(|e| format!("no seccomp target arch for this platform: {e}"))?;
 
         // A `BTreeMap<i64, Vec<SeccompRule>>` of syscall number to rules. An empty
@@ -809,8 +851,11 @@ mod imp {
 
         let filter = SeccompFilter::new(
             rules,
-            // Default-deny: anything not listed is refused.
-            SeccompAction::Errno(libc::EPERM as u32),
+            // Default-deny: anything not listed is refused, with `EPERM` so a guest
+            // sees "operation not permitted" rather than a signal. See
+            // [`SeccompProfile::denied`] for why this direction is the one that
+            // matters.
+            deny_action(),
             // Matched syscalls are permitted.
             SeccompAction::Allow,
             arch,

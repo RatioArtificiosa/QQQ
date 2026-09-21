@@ -137,6 +137,26 @@ jobs:
       - name: Prove the validator actually detects breakage
         run: python tools/self_test_xrefs.py
 
+      # **Run the validator again, after the mutating harness.**
+      #
+      # This harness rewrites three documents and restores them. A kill it cannot
+      # catch (`SIGKILL` -- a CI timeout, a cancelled job) leaves an injection
+      # applied, and the corpus then contains text no human wrote. The step above
+      # would still report its own success, because the injections it applied *were*
+      # detected; the damage only shows up later, as a confusing validator failure
+      # that reads like real document drift.
+      #
+      # That is not hypothetical: a leftover `§99.9` marker in the checklist once
+      # produced a "the documents have drifted" diagnosis that pointed at three
+      # correct documents.
+      #
+      # The harness now also self-heals -- it detects its own leftovers, reverses
+      # the exact substitution, and verifies the repair -- and this step is the
+      # independent confirmation that the corpus is internally consistent *after*
+      # everything that touches it has run.
+      - name: Confirm the corpus survived the harness
+        run: python tools/check_xrefs.py
+
       # `HOST-011` requires every host function to be panic-guarded, and the
       # guard is a *wrapper*: a host function added without it compiles, passes
       # every test that does not panic, and kills the process (the release

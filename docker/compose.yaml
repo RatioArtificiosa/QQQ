@@ -1,0 +1,147 @@
+# QQQ Linux verification environment.
+#
+# # Why this file exists rather than a `docker run` one-liner
+#
+# Because the *volume topology* is the security property, and it should be
+# reviewable in one place. The arrangement below is what prevents Linux build
+# artifacts from contaminating 17 GB of Windows build output, and what keeps a
+# container command from silently editing the host's source tree.
+#
+# # The three rules this file encodes
+#
+# 1. **Source flows one way.** `/workspace` is a bind mount of the host tree. The
+#    entrypoint's source guard fails a command that modifies a tracked file, and
+#    the guard exists because this rule is the whole design (`docs/development-bridge.md`).
+#
+# 2. **Build output never crosses.** Linux `target/` directories are **named
+#    volumes**, not bind-mounted paths. Cargo writes to `/linux-target` and
+#    `/linux-fuzz-target`; the host's `target/` and `fuzz/target/` are never
+#    touched. Without this, cargo would overwrite Windows `.rlib` files it cannot
+#    read and every subsequent Windows build would fail with a linker error that
+#    looks nothing like its cause.
+#
+# 3. **Results flow back, and only results.** `/results` is a named volume the host
+#    reads *through* `qqqdev status` rather than a directory the container writes
+#    into the working tree. A crash artifact lands there, not in `fuzz/artifacts/`
+#    on the host — which is also what the fuzzing workflow's promotion step needs.
+#
+# # Why `docker compose run --rm` rather than `up`
+#
+# Every command is a short-lived batch job. `up` with a long-running service would
+# need `exec` to run anything, and would leave a container alive holding a bind
+# mount — so a developer who forgot to stop it would have a process silently
+# watching their source tree. `run --rm` starts, executes, and disappears.
+
+name: qqq-dev
+
+services:
+  linux:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      # The host uid/gid are passed so files the container *does* create (in
+      # volumes only) are owned by the developer rather than by uid 1000
+      # unexpectedly. On Windows with Docker Desktop this is a no-op, which is
+      # fine — the volumes are not bind mounts.
+      args:
+        USER_ID: ${QQQ_UID:-1000}
+        GROUP_ID: ${QQQ_GID:-1000}
+
+    image: qqq-dev-linux:1.97
+
+    # # Why the source is mounted read-only, and then the guard exists anyway
+    #
+    # `:ro` would be the strongest possible enforcement of the one-way rule — but
+    # `cargo` needs to write `Cargo.lock` when a dependency changes, and the
+    # *injection* command deliberately mutates source before restoring it. So the
+    # mount is writable and the **guard** is the enforcement: a command that
+    # modifies a tracked file fails with exit 3 and names the files.
+    #
+    # This is a deliberate trade, and it is recorded because `:ro` is the obvious
+    # choice someone would "fix" this back to.
+    volumes:
+      - type: bind
+        source: ..
+        target: /workspace
+
+      # # Why the entrypoint is bind-mounted over the image's copy
+      #
+      # Found the hard way, twice. Adding the `guard-prove` command made the wrapper
+      # fail with exit 2 ("unknown command") because the image had been built before
+      # the command existed -- the entrypoint is COPYed in at build time, so the
+      # running container was executing a *stale copy of the bridge's own control
+      # logic*.
+      #
+      # That is precisely the failure this project keeps rediscovering: a control
+      # believed live that is not. Verifying the source guard by running an old
+      # guard would have proven nothing about the code in the repository.
+      #
+      # The FIRST fix mounted over `/usr/local/bin/entrypoint.sh`, which looked right
+      # and was inert: the Dockerfile COPYs to `/usr/local/bin/qqq-entrypoint` and the
+      # `ENTRYPOINT` names that path. A mount on a path nothing executes is decoration.
+      # The target below must match the Dockerfile's `ENTRYPOINT` exactly; if those two
+      # ever drift, this mount silently stops working and the stale copy runs again.
+      #
+      # Bind-mounting makes the host file authoritative, so the image and the repo
+      # cannot disagree about how verification works. Rebuilds are still needed for
+      # toolchains (Dockerfile changes); they are no longer needed for *logic*.
+      - type: bind
+        source: ./entrypoint.sh
+        target: /usr/local/bin/qqq-entrypoint
+        read_only: true
+
+      # Linux build trees. Named volumes mean the host never sees them.
+      - type: volume
+        source: linux-target
+        target: /linux-target
+      - type: volume
+        source: linux-fuzz-target
+        target: /linux-fuzz-target
+
+      # The cargo registry cache, so a container run does not re-download every
+      # dependency of a Wasmtime-scale graph on each invocation.
+      - type: volume
+        source: cargo-registry
+        target: /home/qqq/.cargo/registry
+
+      # Fuzz corpora: persisted so coverage accumulates across runs.
+      - type: volume
+        source: fuzz-corpus
+        target: /linux-corpus
+
+      # Results and provenance, read back by `qqqdev status`.
+      - type: volume
+        source: results
+        target: /results
+
+    # # Why the container gets no network by default beyond what cargo needs
+    #
+    # Not hardened (this is a build tool that must reach crates.io), but the
+    # *default* bridge network is enough. No ports are published: nothing in this
+    # environment is a server.
+    #
+    # The fuzz targets run `wasmtime` against attacker-shaped input, and while
+    # they are the *pure* parts of the codebase (the manifest parser and the
+    # component loader), running them in a container with no published ports and
+    # no host filesystem access beyond the source mount is the right containment
+    # for anything that consumes untrusted bytes.
+    network_mode: bridge
+
+    # A resource bound, because a fuzz target with a memory-limit bug could
+    # otherwise take the developer's machine with it. Generous — the pooling
+    # allocator's own tests need headroom — but finite.
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 8G
+
+    init: true
+    tty: false
+
+volumes:
+  linux-target:
+  linux-fuzz-target:
+  cargo-registry:
+  fuzz-corpus:
+  results:

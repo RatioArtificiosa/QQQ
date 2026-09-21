@@ -1,0 +1,75 @@
+# Docker build-context exclusions.
+#
+# # Why this file matters more here than in a typical project
+#
+# The build context is the repository root, and that tree contains **17 GB** of
+# Windows build output:
+#
+#   target/        12,500 MB
+#   fuzz/target/    4,544 MB
+#
+# Without this file every `docker build` would send all of it to the daemon. On
+# Docker Desktop that is a multi-minute stall before the build even starts, and
+# the `COPY` of a Linux-incompatible artifact set into an image is worse than slow
+# — it is exactly the cross-platform contamination the bridge exists to prevent.
+#
+# The exclusions are grouped by *reason*, because a list of paths with no reasons
+# is a list where nobody can tell whether an entry is still needed.
+
+# -- Build output, which is platform-specific ---------------------------------
+#
+# Windows `.rlib`/`.exe`/`.pdb` files are not usable by a Linux target, and copying
+# them into the image would make `cargo` skip rebuilds it must perform.
+target/
+fuzz/target/
+
+# -- VCS metadata --------------------------------------------------------------
+#
+# `.git` is the largest single directory in many repositories, and the container
+# reads provenance through the **bind mount**, not through the image. Excluding it
+# from the build context costs nothing and saves the transfer.
+.git/
+.gitignore
+.gitattributes
+
+# -- Fuzzing artifacts ---------------------------------------------------------
+#
+# Crash artifacts are the *output* of a run and belong in the results volume
+# (`/results`), never baked into an image. A corpus that shipped inside an image
+# would be frozen at build time and stop accumulating coverage.
+fuzz/artifacts/
+fuzz/corpus/
+
+# -- Local scratch and tooling -------------------------------------------------
+#
+# `.scratch/` holds verification backups and injection scripts — dozens of files
+# created and deleted within a session, none of which belong in an image.
+.scratch/
+.tools/
+
+# -- Editor and OS noise -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+
+# -- Node, which QQQ does not use today but will for the npm surface ------------
+#
+# `node_modules/` is the canonical example of a directory that must never enter a
+# build context — it is large, platform-specific, and regenerable.
+node_modules/
+
+# -- The review document that prompted this bridge -----------------------------
+#
+# It is a conversation export kept locally and deliberately untracked (see
+# `.gitignore`). Excluding it here is belt-and-braces so a stray `docker build`
+# cannot bake it into a published image.
+docs/Windows-Linux-Docker.md
+
+# -- Existing Docker configuration ---------------------------------------------
+#
+# Not needed inside the image it is building.
+docker/Dockerfile
+docker/compose.yaml

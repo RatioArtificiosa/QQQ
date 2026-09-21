@@ -36,7 +36,28 @@ serde = { workspace = true }
 # Safe `*nix` bindings: `setuid`, `setgid`, `setgroups`, `set_no_new_privs`.
 # Features are explicit rather than `full`, so the dependency surface is the set
 # of modules this crate calls — and that surface is what a reviewer reads.
-nix = { version = "0.31", default-features = false, features = ["user", "process"] }
+# # Why `uio` is among the features, which is the one that is not obvious
+#
+# `nix::sys::uio::process_vm_readv` is the **seccomp probe**: `tests/harden.rs`
+# proves the filter refuses something, by calling `process_vm_readv` on the
+# *calling* process after installing the filter.
+#
+# The probe exists because a Linux run found a real defect (`§O-085`): a filter
+# whose default action is `Allow` is still "installed", so every test passed while
+# the guard refused nothing. Three probe designs failed before this one -- an
+# `unsafe` block the workspace lint correctly forbids, `PTRACE_TRACEME` in the
+# child (it stops the process awaiting a tracer), and `TRACEME` in a grandchild
+# (the stop happens at `execve`, before the child's code runs).
+#
+# `process_vm_readv` works because both required properties were measured rather
+# than assumed: it **succeeds unfiltered** as uid 1000, and the `Runtime` profile
+# **denies** it. The alternatives do not -- `chroot` and `setuid` are denied *and*
+# already fail with `EPERM` unfiltered, so a refusal would prove nothing.
+#
+# The `Runtime` profile is written for a host that must `mmap`, `futex`, `epoll`
+# and `accept`; `uio` adds no runtime dependency, only the safe wrapper this probe
+# calls. Nothing in the library's non-test code uses it.
+nix = { version = "0.31", default-features = false, features = ["user", "process", "uio"] }
 # Compiles a BPF seccomp program from a typed filter description and installs it.
 # `apply_filter` is the only entry point, and it is safe.
 seccompiler = "0.5"

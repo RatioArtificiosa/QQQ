@@ -5000,6 +5000,386 @@ This is the one claim in the corpus that a reader should not have to take on fai
 
 ---
 
+### §O-085 — The Linux bridge found a real security defect in its first hour
+
+**What happened.** The bridge (`§O-084`) was built to verify Linux-only code because
+Windows compiles it out. It did, immediately, and the finding is the strongest
+evidence yet that the gap it closes was real.
+
+**The defect.** `SEC-019`'s seccomp filter was installed with
+`SeccompAction::Errno(EPERM)` as its default action. The test asserted only that the
+filter was **installed**. So this patch passed **every test in the workspace**:
+
+```diff
+-            SeccompAction::Errno(libc::EPERM as u32),   // default-deny
++            SeccompAction::Allow,                        // default-ALLOW
+```
+
+A default-allow filter permits every syscall the allowlist does not name — the exact
+bypass the profile exists to prevent — and it is *still installed*, so
+"installation succeeded" remained true. **The guard's entire purpose was
+unverified**, and the code was `#[cfg(target_os = "linux")]`, so nothing on Windows
+could have observed it: the test was compiled out and the injection unexercised.
+
+**The conclusion drawn from it is the general rule.** *"Installed" is not
+"enforcing"* — the fourth variant of a shape this project has now recorded five
+times:
+
+| # | Believed | Actually | Found by |
+|---|---|---|---|
+| 1 | The memory limit is enforced | Was **advisory** (§O-066) | Measuring a hostile guest |
+| 2 | The refusal path bounds the guest | The refusal **was** the amplification (§O-069) | Measuring both policies |
+| 3 | The boundary check runs | Was written, wired, **unreachable** (§O-071) | Injecting into the helper, then the call site |
+| 4 | The capability diff is displayed | It compared **a value against itself** (§O-076) | Writing the CLI-level test |
+| 5 | The seccomp filter filters | It was **installed and inert** | **A Linux environment** |
+
+**Four failed probe designs before the fifth worked**, each wrong for a different
+reason, all recorded because the fifth only looks obvious in hindsight:
+
+1. **`libc::ptrace` in an `unsafe` block.** The workspace lint
+   `unsafe_code = "forbid"` applies to every target, tests included:
+   `requested on the command line with -F unsafe-code`. The tempting fix — an
+   `#![allow(unsafe_code)]` in the test file — would have punched a hole in the
+   exact invariant `SEC-020`'s audit verifies. **A test is not a licence to write
+   `unsafe`**, and the architecture caught it working as designed.
+2. **`nix::sys::ptrace::traceme()` in the child.** Hung for 60 s:
+   `TRACEME` makes the caller traceable and it then stops awaiting a tracer. The
+   probe *was* detecting the defect — in the worst way, since a hang reads as
+   infrastructure trouble rather than as a named assertion.
+3. **`TRACEME` in a grandchild with a timeout.** Still hung, and **without any
+   filter installed** — which is what exposed the real cause: the `TRACEME` stop
+   happens at **`execve`**, before the grandchild's own code runs. No
+   `process::exit` in the child can avoid it, because the child never executes.
+4. **`nix::sys::uio::process_vm_readv` on the calling process.** Works, and both
+   required properties were *measured* before adopting it: it **succeeds
+   unfiltered** as uid 1000 (`rc=1`, 6 bytes copied), and the `Runtime` profile
+   **denies** it. The alternatives fail for the opposite reason — `chroot` and
+   `setuid` are denied *and* already return `EPERM` unfiltered, so a refusal would
+   be indistinguishable from the kernel's ordinary permission check.
+
+**And then the test still passed with the defect, for a fifth reason worth
+recording.** The assertion had an early return for an inconclusive environment:
+
+```rust
+if report.get(STEP_SECCOMP) == Some(Step::Failed) { return; }   // "the kernel refused"
+```
+
+With a default-allow action, `seccompiler` refuses to *construct* the filter —
+`match_action and mismatch_action are equal`, because a filter permitting
+everything on both branches is a no-op. The step reported `Failed`, the early return
+fired, and the test passed with a disabled filter. **A detection reported as
+"inconclusive" is a detection lost.** The fix distinguishes a *construction* failure
+(a QQQ bug, fails the test) from a *kernel* refusal (an environment limitation,
+genuinely inconclusive).
+
+Final state: the injection is **CAUGHT**, with 2 tests failing on the defect. The
+injection is now a permanent `qqqdev inject` case rather than a one-off script.
+
+**The rule.** *A control's test must assert what the control does, not that it
+exists.* Every one of the five findings above is the same sentence with a different
+subject, and the only reason Windows could not find this one is that the code does
+not exist there — which is precisely what the bridge was built to fix.
+
+→ `docs/development-bridge.md`, `crates/qqq-sys/tests/harden.rs`,
+`docker/entrypoint.sh`.
+
+---
+
+### §O-084 — The development bridge: source flows one way, and the guard is code
+
+**What prompted it.** A review conversation (`docs/Windows-Linux-Docker.md`, kept
+locally and deliberately untracked) proposing a Docker-based Windows↔Linux
+workflow. The valuable reframing in it is *"build a verification bridge, not a
+backup"* — and applied to **this** repository it closes four gaps that are
+specific and were each hit during development:
+
+| Gap | Evidence | What changed |
+|---|---|---|
+| Linux-only code unverifiable | `SEC-019`'s seccomp/uid guards are `#[cfg(target_os = "linux")]`; injecting into them reported `NOT CAUGHT` and the harness had to say `PLATFORM: not exercised here` | They execute on every `qqqdev inject` — and immediately found a real defect (`§O-085`) |
+| The fuzzer cannot run on Windows | `cargo-fuzz` builds but the binary dies with `0xC0000135 STATUS_DLL_NOT_FOUND` | `qqqdev fuzz` runs them with ASan |
+| Injections are platform-gated | 3 of 4 cases reported `PLATFORM` | All run where they can fire |
+| A stale build looks like a defect | `§O-070`, `§O-072`, `§O-077` — three occurrences | A clean-room container has no cache to go stale |
+
+**The one-way rule, enforced in code rather than documented.** The review is right
+that bidirectional sync is dangerous, and the numbers make it concrete: this tree
+holds **17 GB** of Windows build output (`target/` 12.5 GB, `fuzz/target/` 4.5 GB),
+and there are **two lockfiles** a two-way sync would thrash. Three mechanisms:
+
+1. **Build output goes to named volumes** (`/linux-target`, `/linux-fuzz-target`),
+   never a bind-mounted path. A named volume is not visible to the host at all, so
+   contamination is impossible rather than discouraged.
+2. **A source guard** hashes every tracked file before and after a command and
+   **fails with exit 3, naming the files**, if one changed.
+3. **No published ports, non-root user, resource limits.**
+
+**The mount is read-write, deliberately.** `:ro` is the obvious fix and it breaks
+two things: `cargo` must write `Cargo.lock` when a dependency changes, and `inject`
+mutates source on purpose before restoring it. So the *guard* is the enforcement.
+Recorded in `compose.yaml` so a future reader does not undo it.
+
+**Where the review's advice was followed, and where it was not.**
+
+* **Followed:** Git as the boundary and provenance source; a thin QQQ-specific
+  wrapper so nobody types raw Docker; the command set; keeping all of this out of
+  the runtime crates.
+* **Not followed: Compose Watch.** It is the right tool for a long-running dev
+  container whose source changes propagate continuously. Every need here is the
+  opposite — a **one-shot batch job** whose synchronous exit code is the answer.
+  Compose Watch would add a daemon, an ignore-file to maintain, and an asynchronous
+  model where "the test ran before the sync finished" is possible. A bind mount plus
+  `run --rm` has no daemon and returns an exit code.
+* **Beyond the review:** the review does not mention that `fuzz/` is a separate
+  cargo workspace needing its own `CARGO_TARGET_DIR`, nor the **line-ending
+  hazard** — which bit immediately (`§O-086`).
+
+**Five defects found by running it, none of which review would have caught.** An
+image is a thing you execute, and every one of these was invisible until it ran:
+
+1. **`/results` was root-owned** — `Permission denied` writing `provenance.env`.
+   Docker creates a named volume's mount point as **root** when the directory does
+   not exist in the image.
+2. **`$LASTEXITCODE` was replaced by the container's output.** PowerShell returns
+   everything on the success stream plus any explicit `return`, so `Invoke-Linux`
+   returned an **array** and the "exit code" printed the whole report. The code now
+   travels in a global.
+3. **`/home/qqq/.cargo/registry` was root-owned** — the same root-ownership cause,
+   missed the first time because `CARGO_HOME` already exists in the base image; the
+   volume's mount point is still re-owned when materialised.
+4. **`${CARGO_HOME}` interpolated before its `ENV`.** The `RUN mkdir` sits above the
+   `ENV CARGO_HOME=` line, so it would have created a literal `/.cargo` at the root.
+   Docker reads `ENV`s in file order and no linter checks this.
+5. **The entrypoint had CRLF line endings** (see `§O-086`).
+
+**Recorded because it is the pattern of this whole session:** every one of the five
+was a *build or environment* defect that no amount of reading would reveal, found
+within minutes of first execution. The bridge's value is not only that it verifies
+Linux code — it is that **executing the thing found five bugs in the thing itself**,
+which is the same lesson as `§O-079` one level up.
+
+→ `docker/`, `tools/qqqdev.ps1`, `docs/development-bridge.md`, `.dockerignore`.
+
+---
+
+### §O-086 — The entrypoint could not run, because a Windows checkout gives it CRLF
+
+**What happened.**
+
+```text
+/usr/bin/env: 'bash\r': No such file or directory
+```
+
+The `entrypoint.sh` I wrote on Windows had **404 CRLF pairs**. Linux read the
+shebang as `/usr/bin/env bash\r` and could not find an interpreter named `bash\r`.
+
+**Why the existing safeguards did not catch it.** The repository already has the
+right policy — `.gitattributes` pins `* text=auto eol=lf`, and there is a
+`tools/normalize_eol.py` with a CI check. But:
+
+* `.gitattributes` normalises **on commit**, and Docker builds from the **working
+  tree**. A file that is about to be committed as LF can still be CRLF on disk.
+* `normalize_eol.py` walks `git ls-files` — **tracked** files. A file created moments
+  ago and not yet staged is invisible to it, which is exactly the state a new
+  script is in when someone first tries to run it.
+
+So this is a real gap, and it is the same class the repository already cares about:
+`qqq-pkg::store` compares content digests, so line endings are not cosmetic here.
+
+**The response, in three parts.**
+
+1. `entrypoint.sh` is LF, and `tools/normalize_eol.py --check` now passes with it
+   staged.
+2. **The rule is stated where it will be read**: a shell script destined for a
+   container must be LF *in the working tree*, not merely on commit.
+3. `qqqdev.ps1` stays **CRLF** — `.gitattributes` pins `*.ps1 text eol=crlf` and
+   `normalize_eol.py` has `KEEP_CRLF = {".ps1", ".cmd", ".bat"}`. Both conventions
+   are correct and deliberate, which is worth stating so nobody "fixes" one.
+
+**The general lesson.** *A policy enforced at commit time does not protect a build
+that reads the working tree.* Docker, and any tool that operates on files rather
+than on Git objects, sees what is on disk — so the disk is where the invariant has
+to hold.
+
+→ `docker/entrypoint.sh`, `docs/development-bridge.md` §5.
+
+---
+
+### §O-087 — The source guard was verified by running a *stale* guard, and the fix was a mount on a path nothing executes
+
+**What happened, in two acts.**
+
+I added a `guard-prove` command whose whole purpose is to make the bridge's source
+guard fire on purpose and assert exit 3. The wrapper immediately failed:
+
+```text
+unknown command: guard-prove
+known: status test test-linux checks inject fuzz shell
+[exit code: 2]
+```
+
+Act one: the entrypoint is `COPY`ed into the image at **build** time, so the
+container was executing a *stale copy of the bridge's own control logic*. Adding a
+verification command and then verifying with the old verifier is the exact failure
+this session keeps rediscovering — a control believed live that is not. The sixth
+instance, after `§O-066` (advisory memory limit), `§O-069` (amplifiable refusal
+path), `§O-071` (unreachable boundary check), `§O-076` (self-comparing capability
+diff) and `§O-085` (installed-but-inert seccomp filter).
+
+The fix is to bind-mount the script over the image's copy, so the host file is
+authoritative and image and repo cannot disagree about *logic*. Rebuilds remain
+necessary for toolchains, not for control flow.
+
+Act two, and the more interesting one: **the first version of that fix was
+inert.** I mounted onto
+
+```yaml
+target: /usr/local/bin/entrypoint.sh
+```
+
+which is a path the container never executes. The Dockerfile does
+
+```dockerfile
+COPY --chown=qqq:qqq docker/entrypoint.sh /usr/local/bin/qqq-entrypoint
+...
+ENTRYPOINT ["/usr/local/bin/qqq-entrypoint"]
+```
+
+so the mount succeeded, `grep` inside the container found the new command, and the
+*shielded stale copy still ran*. The symptom was identical to act one — the same
+exit 2 — because both causes produce the same observable. A mount on a path nothing
+executes is decoration.
+
+**How it was caught.** Not by reading the compose file, which looked right. By
+running the command and refusing to accept an exit code that did not match the
+claim. The decisive evidence was comparing the file the container *saw* (current)
+against the message it *printed* (old) — a contradiction that localises the bug to
+"the executed path differs from the mounted path."
+
+**The general lesson.** *Verifying a control requires executing the path that is
+actually wired up, not the path you believe is wired up.* And when a fix produces
+the same symptom as the bug, that is not confirmation — it is a signal that the fix
+did not take effect, and the two must never be confused.
+
+The guard is now genuinely proven: `qqqdev guard-prove` → `GUARD TRIPPED (exit 3)`,
+tree restored byte-for-byte, verified by re-hashing every tracked file.
+
+→ `docker/compose.yaml`, `docker/entrypoint.sh` (`cmd_guard_prove`),
+`tools/qqqdev.ps1` (`guard-prove`), `docs/development-bridge.md` §2.
+
+---
+
+### §O-088 — The source guard never worked: it hashed empty input, and the harness that proved it "worked" was itself poisoned
+
+**What happened.** Having written `cmd_guard_prove` to prove the bridge's source
+guard actually fires, I ran it and got a clean pass:
+
+```text
+   GUARD TRIPPED (exit 3) -- a write to /workspace was refused
+   tree restored byte-for-byte
+The source guard is live.
+```
+
+That was a false pass. The guard had **never worked at all**, and the proof was
+measuring an artifact of `set -e` rather than the guard.
+
+**The defect.** `source_guard_snapshot()` piped `git ls-files` through `sha1sum`.
+`git` refuses a bind-mounted `$WORKSPACE` whose uid it does not own:
+
+```text
+fatal: detected dubious ownership in repository at '/workspace'
+```
+
+`2>/dev/null` swallowed that, `xargs` got no input, and the pipeline hashed
+nothing -- returning the SHA-1 of the empty string,
+`da39a3ee5e6b4b0d3255bfef95601890afd80709`, *before and after every command*. The
+two snapshots were therefore always identical, so the guard **could not trip**,
+whatever a command wrote to the host tree. It was installed, silent, and believed.
+
+That is `§O-085` -- the seccomp filter `SEC-019` found installed-but-inert --
+reproduced inside the bridge that was built to catch it. The seventh instance of
+this session's recurring shape.
+
+**Why `guard-prove` passed anyway.** The probe ran the guard pair inside a subshell
+with `set -eu`. `source_guard_begin` assigns from a command substitution; the
+substitution failed (git's exit status), and `set -e` aborted the subshell. The
+subshell's status happened to reach the caller as `3`, which is exactly the code
+the guard uses to signal a trip. So a **broken git** produced the same observable
+as a **working guard**: a false positive that agreed with the desired answer and
+was therefore believed without question. The lesson from `§O-087` applies in
+reverse -- *a fix that produces the expected signal is not confirmation unless the
+mechanism is the expected one.*
+
+**The second, subtler half.** Fixing the git invocation to `-c safe.directory=` was
+not enough. `git ls-files` prints paths relative to the shell's current directory
+when it is inside the repository, and `cmd_fuzz` `cd`s into `/workspace/fuzz`. The
+snapshot then listed paths like `../crates/qqq-core/src/lib.rs`, `sha1sum` could
+not open them from that directory, every read failed, and the pipeline hashed
+nothing **again** -- this time with a correct 181-file count, so a "did we see
+files?" sanity check would have passed it. An observed run showed
+`SOURCE_GUARD_BEFORE=ea857633...` and `after=033cc057...` for an *unchanged* tree:
+two different hashes, which would have made the guard report a write that never
+happened. Pinning the cwd inside a subshell is the fix.
+
+**The third defect, found by asking why the exit code was 123.** Three separate
+places in `cmd_fuzz` used `[ cond ] && action`. Under `set -e` the `&&` list has
+status 1 when the test is *false*, so the shell aborted on the success path -- and
+`cargo fuzz run` returning 123 on a normal `-max_total_time` completion meant the
+exit code was an artifact of spelling rather than the fuzz result. Success and
+failure were indistinguishable at the container boundary. All three are now `if`
+blocks, and 123 is normalised explicitly with the reason recorded.
+
+**The fourth: the harness poisoned the tree, and the proof of that was a real
+security defect.** `test-linux` began failing. Chasing it rather than dismissing it
+found `qqq-sys::harden::deny_action()` returning
+
+```rust
+seccompiler::SeccompAction::Allow
+```
+
+instead of `Errno(libc::EPERM as u32)` -- the exact mutation `inject`'s **injection
+2** applies. A killed `inject` run had left it applied, so the seccomp filter
+permitted everything while the doc comment directly above still described the
+correct behaviour. `HEAD` had the right value; the working tree did not.
+
+The same class had also left a `§99.9 Nonexistent section` marker in the checklist
+and had renamed `### §C-006 —` to `### REMOVED —` in this document. That last one
+was the **unresolved `check [8]` failure** carried into this session: a validator
+error reading "Appendix A row A-6 has no matching §C-006 entry", which looks
+exactly like document drift and pointed at three correct documents.
+
+**What was changed, structurally rather than pointwise.**
+
+1. A snapshot that measures nothing is now a **fatal** error (`exit 4`), not a
+   silent no-op: `source_guard_assert_live` cross-checks both the hash *and* the
+   file count, because either one alone misses one of the two failure modes. *A
+   control that cannot measure must say so; "no violations found" and "I could not
+   look" are not the same result.*
+2. `guard-prove` was rewritten to verify by **hash movement** -- proving the
+   snapshot is live, that a real write moves it, and that the guard then refuses --
+   rather than by trusting an exit code.
+3. `self_test_xrefs.py` now **covers all nine injections** (it covered three), and
+   **self-heals** by reversing the exact substitution. It does *not* repair with
+   `git checkout HEAD --`, which discards every uncommitted change to the file; that
+   version was tested and nearly destroyed a 269-line entry written but not yet
+   committed. Reversing the substitution leaves unrelated work untouched, which was
+   verified by byte count.
+4. `cmd_inject` and `cmd_test_linux` refuse to run on a tree that still carries an
+   injection, naming which one.
+5. The validator runs **after** the mutating harness, in both the entrypoint and
+   CI, so the last check is always a statement about the restored corpus.
+
+**The general lesson.** *Verification is only as strong as the thing it measures,
+and a proof that passes on the first try deserves more scrutiny than one that
+fails.* Four of the defects above were in the verification machinery itself, and
+each was found by refusing to accept a result whose mechanism had not been
+confirmed -- not by reading the code, which looked correct in all four cases.
+
+→ `docker/entrypoint.sh` (`source_guard_assert_live`, `cmd_guard_prove`,
+`injections_are_clean`), `tools/self_test_xrefs.py` (`INJECTION_MARKERS`,
+`REVERSALS`), `crates/qqq-sys/src/harden.rs` (`deny_action`),
+`.github/workflows/ci.yml`, `docs/development-bridge.md`.
+
+---
+
 ### §O-083 — `SEC-020`: making a zero mean something, and the self-test that found a bug in the audit
 
 **What the item asks for.** *Audit every `unsafe` block in the three exception
@@ -7554,5 +7934,7 @@ entry is the correction.
 | 2026-09-20 | **`SEC-017`/`SEC-018` verified (`§O-080`, `§O-079`), and the policy turned out to be enforced by the type system.** A clause-by-clause audit of §7.4 found every row implemented or owned by another item — `CIPHER_SUITES` (8 suites each justified against a row), `PROTOCOL_VERSIONS` (1.3, 1.2), `TlsConfig::build` refusing an unspecified field, `ClientAuth::default()` = `None`, the manifest `crypto.hash` allowlist enforced in `hash_data`, `getrandom::fill` for OS entropy with splitmix64 confined to deterministic mode, and `random.get(length)` taking **no seed** so `SEC-018`'s prohibition holds in the WIT signature. Negative properties were already tested (no RSA key transport, no CBC, forward secrecy at 1.2, no TLS 1.1). **The clause worth testing was the third** — §7.4 says *"no algorithm agility without a version bump"* and the module doc claims *"the lists are fixed"*, but that claim is about code review, not a check. Two widening attacks were attempted and **neither compiles**: rustls 0.23 exports no `TLS_*_CBC_*` suite at all, and `rustls::version` exposes only `TLS12`/`TLS13` (verified in the installed rustls 0.23.43 source). So the agility clause is enforced by the **type system** — stronger than any test. **And that is the finding:** `no_suite_uses_cbc` **cannot fail**, which is belt-and-braces rather than a defect, but means the real enforcement lives where the test's name does not point. Added `the_agility_guarantee_rests_on_these_dependency_exports` to pin the borrowed precondition — a future rustls reintroducing CBC restores the ability to widen, and at that moment the old test becomes load-bearing with nobody noticing. Verified live: widening to three versions fails 3 tests, naming what just became possible. **`§O-079`** records three of my own injection harnesses being wrong before the code was — a filter that ran zero tests, a fixture measuring the wrong ceiling, and an injection that failed to compile — all instances of *verify that the injection reaches the code the test exercises*, one level up from `§M-009`. | Architect |
 
 | 2026-09-20 | **`SEC-019` and `SEC-020` implemented (`§O-081`, `§O-083`), and both looked blocked before they were.** `SEC-019` (Linux hardening) appeared to require triggering the §4.3 `unsafe` exception — a safety argument plus a **second maintainer**, which `SAFETY.md`'s ledger records as unavailable (`GOV-008`, bus factor 1). **The block was on one implementation, not on the item**: `nix` provides `setuid`/`setgid`/`setgroups`/`set_no_new_privs` safely and `seccompiler` compiles a BPF filter from a typed description, so the item was **sidestepped rather than deferred** — `qqq-sys` still contains no `unsafe` and the architecture tests still pass. The module is shaped by §7.5's design rule (*"none of these are required for QQQ's security claim"*): hardening **never fails the process** (returns a report, not a `Result`, since a `?` would turn "no seccomp on this kernel" into a startup failure), the outcome has **four** variants (a `bool` would collapse `Skipped` and `Failed`, making a deployment that quietly did not harden look identical to one that did), and `Unsupported` is not a failure (or QQQ becomes undeployable off Linux). Two invisible-else guards: `setuid(0)` refused because dropping to root is a no-op `setuid` reports as **success**, and the filter is **default-deny** because a deny-list permits every syscall newer than the list. Step order is a security property with a test: `no_new_privs` → groups → uid → seccomp, since reversing any produces a process that keeps running and is merely *less hardened*. Tests **re-execute the binary** because the steps are irreversible and process-wide — a filter installed in-process would kill every later test with `SIGSYS`. `SEC-020`'s finding is **zero `unsafe` across 85 files**, and the work was making that zero mean something: proven not-blind by injecting a block, and explained by the primitives not being built plus `SEC-019` avoiding `unsafe` via safe wrappers. The audit tool's **self-test found a real bug in the tool** — a string literal containing `unsafe {` was flagged as code — which is the over-reporting direction, the one whose absence would have made the audit noisy rather than silent. `§O-082` records the question the blocked-item pass must ask: *is this blocked on the item, or on one way of doing it?* | Architect |
+
+| 2026-09-20 | **The Linux development bridge built (`§O-084`), and it found a real security defect in its first hour (`§O-085`).** `docker/` + `tools/qqqdev.ps1` run the Linux half of verification from Windows: a pinned Rust 1.97 image with nightly, `cargo-fuzz` and ASan; a one-shot `run --rm` service; and a `status`/`test`/`test-linux`/`checks`/`inject`/`fuzz`/`matrix`/`build`/`shell`/`clean` command set. **The one-way rule is enforced in code, not documented**: build output goes to named volumes (never a bind-mounted path), so the host's **17 GB** of Windows artifacts (`target/` 12.5 GB, `fuzz/` 4.5 GB) cannot be contaminated — and a source guard hashes every tracked file before and after each command, failing with exit 3 if one changed. **The finding:** `SEC-019`'s seccomp filter is installed with `Errno(EPERM)` as its default action, and the test asserted only that it was **installed** — so changing the action to `Allow` (a default-ALLOW filter, i.e. the exact bypass the profile prevents) **passed every test in the workspace**. It was invisible to Windows because the code is `#[cfg(target_os = "linux")]` and the test was compiled out. Four probe designs failed before the fifth worked — an `unsafe` block the workspace lint correctly forbids even in tests; `TRACEME` in the child (stops awaiting a tracer, hanging 60 s); `TRACEME` in a grandchild (the stop happens at **`execve`**, so the child never executes); and finally `process_vm_readv` on self, whose two required properties were **measured** first (succeeds unfiltered as uid 1000; denied by the profile). Then the test *still* passed, for a fifth reason: `seccompiler` refuses to **construct** a filter whose actions are both `Allow`, so the step reported `Failed` and the "environment inconclusive" early-return swallowed it. **A detection reported as "inconclusive" is a detection lost.** Now CAUGHT, with 2 tests failing, and the injection is a permanent `qqqdev inject` case. **This is the fifth instance of one shape** — believed vs actual: the memory limit was advisory; the refusal path *was* the amplification; the boundary check was unreachable; the capability diff compared a value to itself; the seccomp filter was installed and inert. Five build defects were also found in the bridge itself by running it (`/results` and `~/.cargo/registry` root-owned; `$LASTEXITCODE` replaced by container output; `${CARGO_HOME}` interpolated before its `ENV`; and CRLF in the entrypoint — `§O-086`, where a Windows checkout gave Linux an interpreter named `bash\r`, because `.gitattributes` normalises on **commit** while Docker builds from the **working tree**). | Architect |
 
 *End of `QQQ-Observations-and-Memories.md`.*

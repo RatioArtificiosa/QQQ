@@ -51,6 +51,13 @@ desktop.ini
 # Scratch / temporary verification crates
 .scratch/
 
+# Local review/feedback documents kept in the working tree but not tracked.
+#
+# docs/Windows-Linux-Docker.md is a review conversation captured from a chat
+# session. It is useful locally and it is not a specification document, so it
+# stays on disk and out of the repository -- the same treatment .scratch/ gets.
+docs/Windows-Linux-Docker.md
+
 # Fuzzing — `SEC-012`/`SEC-013`.
 #
 # `fuzz/` is a SEPARATE cargo workspace, so the root `/target/` rule above (which

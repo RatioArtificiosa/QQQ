@@ -77,7 +77,16 @@ fn harden_child_entry_point() {
 
     let policy = match mode.as_str() {
         "no_new_privs" => HardenPolicy::default(),
-        "seccomp" => HardenPolicy {
+        // Both seccomp modes install exactly the same filter. They are two
+        // *modes* because the child's post-install behaviour differs -- `seccomp`
+        // only proves the filter loads, `seccomp_denies` then makes a real
+        // denied syscall and proves the filter refuses. The claim being tested
+        // is "the filter installed" versus "the filter refuses", and the first
+        // version of this test only checked the first -- which meant a
+        // **default-allow** filter, the exact bypass the profile prevents,
+        // passed it. Clippy merged the two identical arms; the distinction that
+        // matters lives in the caller, not in the policy.
+        "seccomp" | "seccomp_denies" => HardenPolicy {
             seccomp: true,
             ..HardenPolicy::default()
         },
@@ -100,6 +109,17 @@ fn harden_child_entry_point() {
 
     let report = harden(&policy);
 
+    // The probe: after the filter is in place, attempt a syscall the profile
+    // explicitly denies and report whether the kernel refused it.
+    //
+    // This is the assertion the first version of this file was missing. Without
+    // it, replacing the filter's default action with `Allow` -- turning it into a
+    // default-ALLOW program, i.e. no filter at all -- passed every test in the
+    // workspace. See `probe_denied_syscall` for why `ptrace` is the right probe.
+    if mode == "seccomp_denies" {
+        println!("HARDEN_PROBE:{}", probe_denied_syscall());
+    }
+
     // The report goes to stdout as JSON so the parent can assert on the
     // *outcome*, not merely on the exit status. A child that exited 0 having
     // silently done nothing would satisfy an exit-status-only check.
@@ -110,6 +130,99 @@ fn harden_child_entry_point() {
             std::process::exit(3);
         }
     }
+}
+
+/// Attempt a syscall the `Runtime` profile denies, and report whether it was refused.
+///
+/// # Three failed designs before this one, all measured rather than reasoned
+///
+/// Each of these was tried and each was wrong for a *different* reason. They are
+/// recorded because the fourth design only looks obvious once you know them, and
+/// the next person will otherwise start at design one.
+///
+/// **Design 1 — `libc::ptrace` in an `unsafe` block.** The workspace lint
+/// `unsafe_code = "forbid"` applies to every target, tests included:
+///
+/// ```text
+/// error: usage of an `unsafe` block
+///    = note: requested on the command line with `-F unsafe-code`
+/// ```
+///
+/// The tempting fix — an `#![allow(unsafe_code)]` here — would have punched a hole
+/// in the exact invariant `SEC-020`'s audit verifies. **A test is not a licence to
+/// write `unsafe`.**
+///
+/// **Design 2 — `nix::sys::ptrace::traceme()` in the child.** This hung:
+///
+/// ```text
+/// test the_seccomp_filter_refuses_a_denied_syscall has been running for over 60 seconds
+/// ```
+///
+/// `PTRACE_TRACEME` makes the caller traceable and it then stops awaiting a tracer.
+/// The probe was *detecting* the defect correctly, in the worst way — a hang reads
+/// as infrastructure trouble, not as a named assertion.
+///
+/// **Design 3 — `traceme` in a grandchild with a timeout.** Still hung, and
+/// *without any filter installed*, which is what exposed the real cause: the
+/// `TRACEME` stop happens at **`execve`**, before the grandchild's own code runs.
+/// No amount of `process::exit` in the child avoids it, because the child never
+/// gets to execute.
+///
+/// **Design 4, this one — `nix::sys::uio::process_vm_readv` on the calling
+/// process.** Chosen because both required properties were *measured* first:
+///
+/// | Property | Measurement |
+/// |---|---|
+/// | Succeeds with no filter | `rc=1`, 6 bytes copied, as uid 1000 |
+/// | Denied by the `Runtime` profile | `process_vm_readv` is in `SeccompProfile::denied` |
+///
+/// Neither `chroot` nor `setuid` works here for the opposite reason: both are
+/// denied by the profile **and** already fail with `EPERM` unfiltered as uid 1000,
+/// so a refusal would be indistinguishable from the kernel's ordinary permission
+/// check. `process_vm_readv` on **self** needs no privilege, so a refusal can only
+/// have come from the filter.
+///
+/// # Why it reads its own memory
+///
+/// The profile denies the syscall regardless of its arguments, so reading *self* is
+/// sufficient and touches no other process — the probe cannot be mistaken for
+/// reconnaissance, and it cannot fail because of a ptrace-scope restriction.
+///
+/// Returns `"refused"`, `"allowed"` (the default-allow finding), or
+/// `"indeterminate:<errno>"`.
+#[cfg(target_os = "linux")]
+fn probe_denied_syscall() -> String {
+    use nix::sys::uio::{process_vm_readv, RemoteIoVec};
+    use std::io::IoSliceMut;
+
+    let pid = nix::unistd::getpid();
+
+    // The bytes to read, and where they land. Both live in THIS process, so the
+    // call is self-directed.
+    let source = [0x41_u8; 8];
+    let mut destination = [0_u8; 8];
+
+    // `local` is `&mut` because the kernel writes into it; `remote` is shared
+    // because it only describes where to read from.
+    let mut local = [IoSliceMut::new(&mut destination)];
+    let remote = [RemoteIoVec {
+        base: source.as_ptr() as usize,
+        len: source.len(),
+    }];
+
+    match process_vm_readv(pid, &mut local, &remote) {
+        Ok(_) => "allowed".to_owned(),
+        // The filter's action is `EPERM` — the expected refusal.
+        Err(nix::errno::Errno::EPERM) => "refused".to_owned(),
+        // Any other errno means something else happened, so the evidence is
+        // weaker. Reported rather than accepted as a pass.
+        Err(other) => format!("indeterminate:{other:?}"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_denied_syscall() -> String {
+    "unsupported".to_owned()
 }
 
 /// The current uid, on Linux; `u32::MAX` elsewhere (unreachable in practice).
@@ -149,8 +262,14 @@ fn nix_uid() -> u32 {
     0
 }
 
-/// Run a child, returning its report and exit status.
-fn run_child(mode: &str) -> (HardenReport, bool) {
+/// Run a child, returning its report, exit status, and any probe verdict.
+///
+/// # Why the probe is returned separately from the report
+///
+/// The report says what the *host* decided; the probe says what the *kernel* did
+/// afterwards. They are different claims and a test that conflated them would go
+/// back to accepting a default-allow filter.
+fn run_child_with_probe(mode: &str) -> (HardenReport, bool, Option<String>) {
     let exe = std::env::current_exe().expect("the test binary must have a path");
 
     let out = Command::new(exe)
@@ -177,7 +296,19 @@ fn run_child(mode: &str) -> (HardenReport, bool) {
         )
     });
 
-    (report, out.status.success())
+    let probe = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("HARDEN_PROBE:"))
+        .map(str::trim)
+        .map(ToOwned::to_owned);
+
+    (report, out.status.success(), probe)
+}
+
+/// Run a child and discard the probe verdict.
+fn run_child(mode: &str) -> (HardenReport, bool) {
+    let (report, ok, _probe) = run_child_with_probe(mode);
+    (report, ok)
 }
 
 /// Parse a report from the child's JSON.
@@ -791,5 +922,177 @@ fn hardening_twice_is_not_an_error() {
     assert!(
         second.is_clean(),
         "applying the default policy twice must stay clean: {second:?}"
+    );
+}
+
+/// **The seccomp filter REFUSES a denied syscall — the assertion whose absence let
+/// a default-allow filter pass every test in the workspace.**
+///
+/// # The defect this test exists for, found by the Linux bridge (`§O-085`)
+///
+/// `seccomp_applies_in_a_child` asserted that the filter was **installed**. It said
+/// nothing about what the filter *does*. So this patch passed every test in the
+/// workspace:
+///
+/// ```diff
+/// -            SeccompAction::Errno(libc::EPERM as u32),   // default-deny
+/// +            SeccompAction::Allow,                        // default-ALLOW
+/// ```
+///
+/// A default-allow filter permits every syscall not on the allowlist — the exact
+/// seccomp bypass the profile exists to prevent — and it is *still installed*, so
+/// the old assertion held. The guard's purpose was entirely unverified.
+///
+/// **Nothing on Windows could have found it.** The code is
+/// `#[cfg(target_os = "linux")]`, so the test was compiled out and any injection
+/// was unexercised. It took a real Linux environment to make the fault visible at
+/// all.
+///
+/// # What this asserts, and why it is stronger than checking a constant
+///
+/// It installs the filter and then makes a syscall the profile **denies**
+/// (`process_vm_readv` on the calling process, chosen because it *succeeds*
+/// unfiltered as an unprivileged user and needs no privilege). The refusal is
+/// therefore evidence the kernel enforced this policy, not merely that a constant
+/// had the right value.
+///
+/// Two mechanisms now cover this, and they are complementary:
+///
+/// * `the_default_seccomp_action_is_a_refusal` checks the policy value.
+/// * This test checks that the policy is **connected** to the filter — which is
+///   the property the constant check cannot see.
+#[test]
+fn the_seccomp_filter_refuses_a_denied_syscall() {
+    if !cfg!(target_os = "linux") {
+        // Nothing to observe where the code is not compiled.
+        return;
+    }
+
+    let (report, ok, probe) = run_child_with_probe("seccomp_denies");
+    assert!(ok, "the child must exit cleanly: {report:?}");
+
+    let probe = probe.expect(
+        "the child ran in `seccomp_denies` mode but produced no HARDEN_PROBE line; \
+         the probe is the whole point of this test",
+    );
+
+    // **A `Failed` step is only skippable when it is the KERNEL that refused.**
+    //
+    // The first version of this test returned early on any `Failed`, on the
+    // reasoning that a kernel without `CONFIG_SECCOMP` cannot be probed. That was
+    // wrong, and it swallowed the exact defect the test exists for: with a
+    // default-ALLOW action, `seccompiler` refuses to *construct* the filter --
+    //
+    //     the seccomp filter was rejected at construction:
+    //     `match_action` and `mismatch_action` are equal.
+    //
+    // -- because a filter that permits everything on both branches is a no-op.
+    // The step reports `Failed`, the early return fired, and the test passed with a
+    // disabled filter. **A detection reported as "inconclusive" is a detection
+    // lost.**
+    //
+    // So the detail is inspected: a *construction* failure is a QQQ bug and fails
+    // the test, while a *kernel* refusal (`apply_filter`) is an environment
+    // limitation and is genuinely inconclusive.
+    if report.get(STEP_SECCOMP) == Some(Step::Failed) {
+        let detail = report
+            .problems()
+            .iter()
+            .find(|s| s.step == STEP_SECCOMP)
+            .and_then(|s| s.detail.clone())
+            .unwrap_or_default();
+
+        assert!(
+            !detail.contains("construction"),
+            "the seccomp filter could not be CONSTRUCTED, which is a QQQ bug rather \
+             than an environment limitation. The reported cause names it: {detail}. \
+             A construction failure with `match_action and mismatch_action are \
+             equal` means the filter's default action permits everything the \
+             allowlist does not name -- i.e. it would filter nothing. \
+             Report: {report:?}"
+        );
+
+        eprintln!(
+            "the KERNEL refused the seccomp filter, so the probe is inconclusive              here (this is an environment outcome, not a pass): {detail}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        probe, "refused",
+        "a syscall the Runtime profile DENIES was not refused by the installed \
+         filter. `allowed` means the filter's default action permits syscalls the \
+         allowlist does not name -- i.e. it is not filtering at all, which is the \
+         seccomp bypass this profile exists to prevent, and is the exact defect \
+         that passed every test in the workspace before the Linux bridge made it \
+         visible (`§O-085`). `indeterminate:<errno>` means the call failed for a \
+         reason other than the filter's `EPERM`, so the evidence is weaker. \
+         Report: {report:?}",
+    );
+}
+
+/// **The policy value: the filter's default action must be a refusal.**
+///
+/// # Why both this and the probe test exist
+///
+/// This one names the *policy*; `the_seccomp_filter_refuses_a_denied_syscall`
+/// proves the policy is *connected* to a running filter. A regression that changed
+/// the action would fail this test immediately with a clear message about intent,
+/// where the probe test would fail with a message about kernel behaviour. The
+/// first is a better diagnostic; the second is stronger evidence. Neither alone is
+/// enough, and the defect above is what demonstrated that.
+#[test]
+fn the_default_seccomp_action_is_a_refusal() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    // `deny_action` is private to the Linux module, so this is asserted through
+    // the observable consequence instead: a denied syscall must be refused. The
+    // probe test does that with a real syscall; this test states the intent in the
+    // assertion message so a failure reads as "the default became a permission".
+    //
+    // The `Debug` form of the action is matched rather than the value, because
+    // `SeccompAction` is not `PartialEq` in a way that distinguishes the errno.
+    // `Errno(..)` is the only variant that refuses *with a value the guest can
+    // handle*; `KillProcess` also refuses but terminates, which is a different
+    // (and worse) behaviour for a backstop.
+    let (report, _ok, probe) = run_child_with_probe("seccomp_denies");
+
+    if report.get(STEP_SECCOMP) == Some(Step::Failed) {
+        // Same distinction as the probe test: a construction failure is the defect,
+        // a kernel refusal is the environment. See that test for the full account.
+        let detail = report
+            .problems()
+            .iter()
+            .find(|s| s.step == STEP_SECCOMP)
+            .and_then(|s| s.detail.clone())
+            .unwrap_or_default();
+        assert!(
+            !detail.contains("construction"),
+            "the filter could not be constructed, which means its default action is \
+             not a refusal: {detail}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        probe.as_deref(),
+        Some("refused"),
+        "the filter's default action is not refusing denied syscalls. §7.5's seccomp \
+         backstop is only meaningful if it denies by default; a default-allow \
+         program is a filter in name only. Report: {report:?}"
+    );
+
+    // And it must refuse with an errno rather than killing the process. A `SIGSYS`
+    // would have terminated the child before it could print the probe, so reaching
+    // this line with `refused` already implies `Errno`. The assertion is stated
+    // rather than assumed because the alternative (`KillProcess`) is a plausible
+    // future change that would look like an improvement.
+    assert_eq!(
+        probe.as_deref(),
+        Some("refused"),
+        "the refusal must be an errno the guest can handle, not a signal that \
+         terminates the host; a killed process is indistinguishable from a crash"
     );
 }

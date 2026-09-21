@@ -532,6 +532,78 @@ jobs:
       - name: test
         run: cargo test --workspace --all-features --verbose
 
+      # §12.3's DX-commitments table is titled "measurable, in CI", and its row
+      # is `qqqai --help` for any command <= 40 lines. The unit test asserts it,
+      # but a number buried in test output is not *measured* in the sense the
+      # table means -- so this prints the count as its own CI step, where a
+      # reviewer sees it.
+      #
+      # Measured before this step existed: 53 lines. After: 39.
+      - name: the --help brevity standard (DX-013)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=./target/debug/qqqai
+
+          # # Why this measures a PIPE rather than a shell variable
+          #
+          # The first version did `HELP="$(./target/debug/qqqai --help)"` and then
+          # counted lines in `$HELP`. Measured while building the step: a 1890-byte
+          # help output containing a UTF-8 em-dash yields **`len=0`** under some
+          # bash builds -- command substitution silently drops the value, and
+          # setting `LANG`/`LC_ALL` to `C.UTF-8` did not change it.
+          #
+          # The consequence would have been the worst kind. `LINES` would be empty,
+          # `[ "" -gt 40 ]` would not be true, and the budget assertion would
+          # **pass vacuously** -- the failure class this project has recorded six
+          # times (`M-006`, `O-092`, `O-103`, `O-108`, `O-111`, `O-115`).
+          #
+          # So the step never holds the text. It counts lines in a pipe and greps a
+          # pipe. Verified: `sh wrapper | wc -l` returns **39** on the same machine
+          # where `HELP="$(cat file)"` returned length 0.
+          LINES="$("$BIN" --help | wc -l | tr -d ' ')"
+
+          # The anti-vacuity guard is kept even though the pipeline makes the
+          # failure unlikely, because it is what turns "the measurement did not
+          # happen" into a hard failure rather than a comparison against nothing.
+          case "$LINES" in
+            ''|*[!0-9]*)
+              echo "::error::the line count is not a number: '$LINES'"
+              echo "::error::the budget check would have been vacuous"
+              exit 1
+              ;;
+          esac
+          echo "qqqai --help: $LINES lines (budget 40)"
+
+          # Every command must still be present -- a budget met by printing less
+          # than the tool has is not the standard.
+          #
+          # The list is on ONE line deliberately: an earlier version used a
+          # backslash continuation, which mangled the word list and produced
+          # `::error::the help omits the  command` with an empty name -- a red
+          # build that said nothing about the code.
+          PRESENT=0
+          for cmd in new build run dev serve test inspect audit verify caps why trace doctor mcp schema migrate; do
+            "$BIN" --help | grep -q "^    $cmd " || {
+              echo "::error::the help omits the $cmd command"
+              exit 1
+            }
+            PRESENT=$((PRESENT + 1))
+          done
+
+          # And the loop itself must have run. Without this, a bug that skipped it
+          # would look exactly like every command being present.
+          if [ "$PRESENT" -ne 16 ]; then
+            echo "::error::expected to check 16 commands, checked $PRESENT"
+            exit 1
+          fi
+
+          if [ "$LINES" -gt 40 ]; then
+            echo "::error::qqqai --help prints $LINES lines, over the 40-line budget"
+            exit 1
+          fi
+          echo "::notice::help is within budget at $LINES lines; $PRESENT commands listed"
+
       # ARCH-008 / NN-2: prove the forbidden-unsafe invariant actually holds.
       - name: no unsafe without an audited exception
         shell: bash

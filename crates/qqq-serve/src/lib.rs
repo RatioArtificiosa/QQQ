@@ -93,6 +93,8 @@ pub mod response;
 pub mod route;
 pub mod server;
 pub mod sse;
+/// Streaming responses: writing a body in pieces, after the head.
+pub mod stream;
 pub mod tls;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
@@ -110,3 +112,6 @@ pub use route::{
     Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,
 };
 pub use server::{serve, Handler, RouteMatch, Served, ServerConfig};
+pub use stream::{
+    emit_stream_record, StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler,
+};

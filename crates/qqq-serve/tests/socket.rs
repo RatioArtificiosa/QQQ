@@ -34,6 +34,7 @@ use tokio::net::TcpStream;
 
 use qqq_io::listener::{ListenAddr, Shutdown};
 
+use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::server::{serve, Handler, ServerConfig};
 use qqq_serve::{Response, RouteMatch};
@@ -78,7 +79,12 @@ impl Server {
 
         let local = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve(config, table, handler, local).await {
+            // `Level::Error` and an empty redactor: these tests assert on the
+            // *response*, and a logger at `Info` would interleave access lines with
+            // the test harness output. Errors still surface, because a test that
+            // hides a server-side 500 is a test that passes for the wrong reason.
+            let logger = Logger::new(Format::Json, Level::Error);
+            if let Err(e) = serve(config, table, handler, local, logger).await {
                 // Printed rather than swallowed: a bind failure would otherwise
                 // surface as "connection refused" in every assertion below,
                 // with nothing saying why.

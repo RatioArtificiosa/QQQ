@@ -1238,6 +1238,7 @@ dependencies = [
  "qqq-io",
  "rcgen",
  "rustls",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-rustls",

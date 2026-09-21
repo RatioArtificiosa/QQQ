@@ -47,3 +47,9 @@ tokio = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 rcgen = { version = "0.14.10", features = ["pem"] }
 tokio-rustls = "0.26.5"
+# **Dev only, deliberately.** `access_log` hand-writes its JSON encoder so the
+# crate has no serialization dependency on a path that runs per request, and so the
+# control-character escaping is explicit rather than inherited. The tests parse the
+# output with a real parser, because asserting on substrings cannot prove a document
+# is well-formed -- and `render_json`'s whole promise is that it is.
+serde_json.workspace = true

@@ -56,6 +56,7 @@ use tokio::net::TcpStream;
 use qqq_core::{Error, ErrorCode, Result};
 use qqq_io::listener::{AcceptError, ListenAddr, Listener, ListenerConfig, Shutdown};
 
+use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 use crate::http1::{self, ParseError, RequestHead, Version};
 use crate::response::{self, Response};
@@ -155,8 +156,13 @@ pub async fn serve(
     table: RouteTable,
     handler: Handler,
     shutdown: Shutdown,
+    logger: Logger,
 ) -> Result<()> {
     let listener_config = ListenerConfig::for_addr(config.addr.clone());
+    // Shared into each connection task. An `Arc` rather than a per-connection
+    // clone: the logger is one configuration every connection reads, and a copy
+    // per connection would be a value that could drift from the others.
+    let logger = Arc::new(logger);
     let listener = Listener::bind(listener_config).await.map_err(|e| {
         Error::new(
             ErrorCode::ListenerBindFailed,
@@ -196,6 +202,7 @@ pub async fn serve(
             let ledger = Arc::clone(&ledger);
             let connection_config = Arc::clone(&connection_config);
             let local_shutdown = task_shutdown.clone();
+            let logger = Arc::clone(&logger);
 
             tokio::spawn(async move {
                 let tenant = tenant_of(peer);
@@ -220,6 +227,8 @@ pub async fn serve(
                     // how the caller shares it.
                     connection_config.as_ref(),
                     &local_shutdown,
+                    &logger,
+                    peer,
                 )
                 .await;
 
@@ -239,6 +248,14 @@ pub async fn serve(
     })
 }
 
+/// The `manifest_rev` this layer reports, because it has no manifest.
+///
+/// §10.3 requires the field on every line; `qqq-serve` does not load manifests, so
+/// the honest value is the word `unknown` rather than a revision it cannot know.
+/// Exported so the host can compare against it and substitute the real revision when
+/// it has one, instead of both layers writing the literal and drifting.
+pub const MANIFEST_REV_UNKNOWN: &str = "unknown";
+
 /// The tenant a peer address belongs to.
 ///
 /// The peer's IP, because there is no authentication at this layer. Named as a
@@ -246,6 +263,121 @@ pub async fn serve(
 /// the change is here and every caller inherits it.
 fn tenant_of(peer: SocketAddr) -> String {
     peer.ip().to_string()
+}
+
+/// The `QQQ-XXXX` code carried in a response's body, if it has one.
+///
+/// Read out of the rendered error rather than threaded through `Response` as a
+/// field: a code on the response would be a second authority on what the body
+/// says, and the two would eventually disagree — the same objection the
+/// keep-alive comment below makes about a `keep_alive` flag.
+///
+/// Scans for the first `QQQ-` followed by four digits. Deliberately simple: the
+/// only producer is `Error::render`, whose format is fixed by the error model, and
+/// a parser that tried to understand more would need updating whenever that format
+/// changed.
+fn error_code_of(response: &response::Response) -> Option<String> {
+    let body = std::str::from_utf8(&response.body).ok()?;
+    let start = body.find("QQQ-")?;
+    let digits: String = body[start + 4..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.len() == 4 {
+        Some(format!("QQQ-{digits}"))
+    } else {
+        None
+    }
+}
+
+/// The level a status code is recorded at.
+///
+/// # Why this is a named function and not an `if` at the call site
+///
+/// The rule is the whole operational value of the level field: an operator setting
+/// `warn` sees failures and not traffic, and `grep '"level":"error"'` is only useful
+/// if 5xx is the only thing that produces it. Inline, the rule had no name, so no test
+/// could state it; named, `the_record_level_follows_the_status_the_client_saw` pins it
+/// and a change to the boundaries has to be deliberate.
+///
+/// Public because the boundary is a contract with operators, not an implementation
+/// detail — an integration test asserting the rule should call this rather than
+/// restate it, so the two cannot disagree.
+#[must_use]
+pub fn level_of(status: u16) -> Level {
+    if status >= 500 {
+        Level::Error
+    } else if status >= 400 {
+        Level::Warn
+    } else {
+        Level::Info
+    }
+}
+
+/// Build the access record for a completed request.
+///
+/// # Why this is separate from `emit_record`
+///
+/// The record's *content* and its *sink* are independently wrong things. Extracted,
+/// the content is testable without a socket or a captured stdout, and the sink stays
+/// the one `println!` it should be. It also keeps `serve_connection` under the line
+/// limit honestly, rather than by suppressing the lint — the body was 113 lines and
+/// the extraction is what the lint was asking for.
+///
+/// # `manifest_rev` is `"unknown"` here, deliberately
+///
+/// The manifest revision belongs to the host, which is the layer that loaded the
+/// manifest. `qqq-serve` never sees one, and §10.3 permits a placeholder. Writing a
+/// plausible-looking value would be worse than writing the truth: a log line claiming
+/// a revision that did not serve the request is a false lead during an incident.
+///
+/// Public so an integration test asserts on the record the server actually builds —
+/// the addressable half of `SRV-013` — instead of a hand-written copy that would go
+/// stale the first time a field changed.
+#[must_use]
+pub fn access_record(
+    head: &RequestHead,
+    path: &str,
+    response: &response::Response,
+    tenant: &str,
+    seq: u64,
+) -> Record {
+    let status = response.status;
+    let rec = Record::new(
+        level_of(status),
+        TraceId::from_counter(seq),
+        // The span is the request within the connection. Derived from the trace
+        // counter so the two stay correlated without a second source of ordering.
+        TraceId::span(&format!("{seq:016x}"))
+            // Unreachable: the format is exactly 16 hex digits. The fallback exists
+            // because a logger must not be able to take the server down, and
+            // `unwrap` here would make a logging bug a denial of service.
+            .unwrap_or_else(|_| TraceId::from_counter(seq)),
+        tenant,
+        "qqq-serve",
+        MANIFEST_REV_UNKNOWN,
+        format!("{} {} {}", head.method.as_str(), head.target, status),
+    )
+    .with_field("method", head.method.as_str())
+    .with_field("path", path)
+    .with_field("status", status.to_string());
+
+    match error_code_of(response) {
+        Some(c) => rec.with_code(c),
+        None => rec,
+    }
+}
+
+/// Write one record to stdout, ignoring a write failure.
+///
+/// A logger must never fail a request: a full disk or a closed pipe is a
+/// deployment problem, not a reason to return a 500 for a request that succeeded.
+/// The failure is silent here by necessity — there is nowhere left to report it
+/// that would not be the same broken sink.
+fn emit_record(logger: &Logger, record: Record) {
+    if let Some(line) = logger.emit(record) {
+        println!("{line}");
+    }
 }
 
 /// Serve one connection until it closes, for any reason.
@@ -260,9 +392,16 @@ async fn serve_connection(
     handler: &Handler,
     config: &ConnectionConfig,
     shutdown: &Shutdown,
+    logger: &Logger,
+    peer: SocketAddr,
 ) -> Served {
     let mut conn = Connection::new(config.clone());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    // One counter per connection, so the trace ids in a keep-alive conversation
+    // are distinct and ordered. `from_counter` rather than a random id because
+    // `§10.5` requires a deterministic run to produce identical logs.
+    let mut trace_seq: u64 = 0;
+    let tenant = tenant_of(peer);
 
     loop {
         // --- Which action does the state machine want? ---------------------
@@ -397,6 +536,18 @@ async fn serve_connection(
                 response::method_not_allowed(&allowed)
             }
         };
+
+        // --- One record per request, `SRV-013` -----------------------------
+        //
+        // Emitted **after** the handler and **before** the response is written:
+        // the status is known by then, and a write failure is reported by the
+        // return code rather than by a missing log line. Logging first would mean
+        // a record for a request whose response never left the server.
+        trace_seq += 1;
+        emit_record(
+            logger,
+            access_record(&head, path, &response, &tenant, trace_seq),
+        );
 
         // Whether the connection may be reused is the **state machine's**
         // decision, and the question to ask it is `will_keep_alive`, not

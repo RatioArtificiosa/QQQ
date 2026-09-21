@@ -83,6 +83,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod access_log;
 pub mod body;
 pub mod conn;
 pub mod h2;

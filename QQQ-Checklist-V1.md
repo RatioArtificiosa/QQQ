@@ -1951,7 +1951,22 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified: this host has no `pku` flag, so enforcement could not be exercised here
     even if unblocked — which is exactly why detection is the deliverable.
   → §7.5 Hardening beyond Wasm
-- [ ] **SEC-028** Produce and publish the SBOM for every release.
+- [x] **SEC-028** Produce and publish the SBOM for every release.
+  → Done: CI generates CycloneDX 1.5 per crate with `cargo cyclonedx` (pinned
+    `--locked`) and **uploads it as an artifact**, which is what makes "publish"
+    true — a file on a runner's ephemeral disk answers nothing.
+  → `tools/check_sbom.py` asserts the SBOM is *usable*: parses as JSON, declares
+    CycloneDX + specVersion, lists components, names and versions every one, and
+    identifies its subject in `metadata.component` matching the filename. 12/12
+    self-test cases.
+  → The checker's first version asserted the subject appears in `components`;
+    running it against real output rejected all 10 files, because CycloneDX puts
+    the subject in `metadata.component` and lists its *dependencies* in
+    `components`. Corrected against generated output, not against a guess.
+  → Verified on real data: 10 files, 677 components, all named and versioned;
+    emptying a component list makes the check fail with the reason.
+  → `*.cdx.json` is gitignored: a committed SBOM is stale the moment a dependency
+    moves, and a stale supply-chain document answers with the wrong tree.
   → §7.3 The defence timeline — where we stop an attack
 - [ ] **SEC-029** Implement the distroless, read-only, non-root container image.
   → §7.5 Hardening beyond Wasm

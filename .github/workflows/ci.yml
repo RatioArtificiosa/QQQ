@@ -492,6 +492,77 @@ jobs:
       - name: cargo-machete (unused dependencies)
         run: cargo machete
 
+      # `SEC-028`. The SBOM is produced and **published as a build artifact**, not
+      # merely generated and discarded.
+      #
+      # # Why the distinction is the whole item
+      #
+      # "Produce an SBOM" is satisfied by a command that writes a file to a runner's
+      # ephemeral disk, and that satisfies nothing a consumer needs. An SBOM is only
+      # useful to the person asking "am I affected by CVE-X?" if they can *obtain*
+      # it — so the job uploads it, and the upload is what makes the step real.
+      #
+      # # Why CycloneDX
+      #
+      # It is the format downstream tooling (Dependency-Track, Grype, Trivy, GitHub's
+      # dependency graph) already consumes, and it is machine-readable without a
+      # licence negotiation. SPDX would be equally defensible; CycloneDX is chosen
+      # for the ecosystem fit and recorded here so the choice is a decision rather
+      # than a default.
+      #
+      # # Why the `--spec-version` is pinned
+      #
+      # An SBOM whose schema version changes between two runs of the same commit is
+      # not reproducible, and reproducibility is the property a consumer audits. The
+      # version is stated so a bump is a visible change to this file.
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@cargo-cyclonedx
+
+      - name: Generate the SBOM (CycloneDX)
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --spec-version 1.5 \
+            --describe crate \
+            --all
+
+      # The files land beside each crate's manifest; gather them so one artifact
+      # carries the whole graph rather than N files nobody finds.
+      #
+      # # Why the exclusion list is explicit
+      #
+      # `cargo cyclonedx` writes `<crate>.cdx.json` next to each `Cargo.toml`, and
+      # the first version of this step used `find crates fuzz` — which also walked
+      # `crates/*/target/` on a runner that had built in place, collecting stale
+      # files from an earlier target directory. The paths are pruned rather than
+      # filtered afterwards so the intent is visible.
+      - name: Collect the SBOM files
+        run: |
+          mkdir -p sbom
+          find crates fuzz \
+            -name '*.cdx.json' \
+            -not -path '*/target/*' \
+            -exec cp {} sbom/ \;
+          echo "Generated $(ls -1 sbom | wc -l) SBOM file(s):"
+          ls -1 sbom
+
+      # **The check that the SBOM is not empty or malformed.**
+      #
+      # A generation step that emitted a syntactically valid but empty document
+      # would pass `cargo cyclonedx` and be worthless — the `§O-085` shape in a
+      # supply-chain artifact. This asserts each file parses as JSON and names at
+      # least one component, so "the SBOM exists" is a statement about its contents.
+      - name: Assert the SBOM is well formed and non-empty
+        run: python tools/check_sbom.py sbom
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 90
+
   # ---------------------------------------------------------------------------
   # Fuzzing targets: they must still COMPILE.
   #

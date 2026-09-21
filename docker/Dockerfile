@@ -104,6 +104,21 @@ ENV QQQ_CI_TOOLCHAIN=${CI_CLIPPY_TOOLCHAIN}
 # commit.
 RUN cargo install cargo-fuzz --locked
 
+# `SEC-028`'s SBOM generator, installed here rather than at run time.
+#
+# # Why it must be in the image and not installed on demand
+#
+# The first attempt installed it inside a `docker compose run` invocation and it
+# vanished with the container — the next run reported `no such command: cyclonedx`
+# while the install had *succeeded*. An ephemeral install is invisible to every
+# subsequent command, so a check that depends on it would fail for a reason that
+# looks like a missing tool rather than a missing step.
+#
+# Pinned with `--locked` for the same reason as `cargo-fuzz`: an unpinned generator
+# is a supply-chain artifact whose *format* can change between two runs of the same
+# commit, which is exactly what an SBOM consumer audits.
+RUN cargo install cargo-cyclonedx --locked
+
 # ---------------------------------------------------------------------------
 # Stage 2 — the environment the commands actually run in
 # ---------------------------------------------------------------------------

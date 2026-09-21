@@ -84,3 +84,12 @@ fuzz/corpus/*/
 # Local tooling
 .tools/
 *.log
+
+# SBOMs are generated per-crate by `cargo cyclonedx` and uploaded as a CI artifact
+# (`SEC-028`), not committed. A committed SBOM is wrong the moment a dependency
+# moves, and a stale supply-chain document is worse than none: it answers the
+# question "am I affected?" with the state of the tree at some earlier commit.
+# The *artifacts* from a release build are the published SBOM, and they carry that
+# release's commit.
+*.cdx.json
+/sbom/

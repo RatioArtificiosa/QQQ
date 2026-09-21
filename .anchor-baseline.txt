@@ -1,0 +1,108 @@
+# Known Proposal anchors (`DOC-010`).
+#
+# Every anchor that has ever existed in QQQ-Proposal-V1.md. The list only GROWS: an
+# anchor that disappears without a tombstone fails `tools/check_tombstones.py`,
+# because deleting one turns every inbound citation into a dead link in a different
+# file from the one that caused it.
+#
+# Regenerate with: python tools/check_tombstones.py --update
+#
+# HISTORY: rebuilt once. The first version was written by a derivation that dropped
+# the section number -- `capability-engine` where the anchor is
+# `64-capability-engine` -- and because this file is append-only by design, `--update`
+# could not remove those entries: it unions. The check correctly reported all 93 as
+# disappeared, which is the behaviour working. Rebuilt from the corrected derivation.
+
+0--orientation
+01-executive-summary
+02-the-thesis
+03-document-map
+04-how-to-read-the-cross-references
+05-identifier-and-anchor-discipline
+06-glossary
+1--why-qqq-exists
+10--telemetry-observability-and-determinism
+101-the-three-signals-plus-one-unique-to-qqq
+102-metrics-that-ship-by-default
+103-logging
+104-distributed-tracing
+105-determinism--the-feature-nobody-else-has
+11--distribution-packaging-and-ecosystem
+11-the-problem-stated-precisely
+111-install-channels-in-priority-order
+112-the-registry-and-ecosystem
+113-documentation-as-a-product-surface
+12--developer-and-agent-experience
+12-what-we-are-deliberately-not-solving
+121-the-first-ten-minutes-a-spec-not-a-wish
+122-error-message-design-standard
+123-the-dx-commitments-measurable-in-ci
+13--business-model-licensing-and-governance
+13-the-three-structural-advantages-restated-as-engineering-constraints
+131-the-commercial-problem-stated-plainly
+132-the-licence-model-and-why-nn-8-still-holds
+133-pricing-sketch-for-planning-not-commitment
+134-go-to-market-sequence
+14--delivery-plan-milestones-and-budget
+141-milestones
+142-team-composition
+143-budget
+144-what-we-would-cut-first-in-order
+15--risk-register
+16--definition-of-done-for-v1
+17--beyond-v1
+2--the-eight-non-negotiables-operationalized
+21-nn-1--ai-agents-are-first-class-users
+22-nn-2--security-and-isolation-are-non-optional
+23-nn-3--performance-and-predictability-over-micro-benchmarks
+24-nn-4--multi-language-by-design
+25-nn-5--explicit-contracts-over-implicit-behavior
+26-nn-6--human--machine-documentation-parity
+27-nn-7--progressive-power-safe-defaults
+28-nn-8--ecosystem-integrity-and-long-term-stewardship
+3--market-positioning-and-honest-competitive-analysis
+31-who-this-is-for
+32-the-competitive-set-honestly
+33-where-we-win-where-we-lose-and-where-we-might-be-lying-to-ourselves
+34-positioning-statement-and-the-language-we-use
+4--architecture-overview
+41-the-layer-cake
+42-process-and-thread-model
+43-crate-topology
+44-request-lifecycle--the-detailed-path
+45-the-abi-boundary--what-crosses-and-at-what-cost
+46-where-the-artifacts-live-and-how-they-move
+47-concurrency-model-for-guests
+5--product-surface
+51-what-a-user-actually-installs
+52-the-command-surface
+53-the-manifest--qqqtoml
+54-the-lockfile--qqqlock
+6--subsystem-specifications
+61-qqq-host--the-execution-engine
+610-language-toolchains--one-per-target-language
+62-qqq-cap--the-capability-engine
+63-qqq-abi--wit-interfaces-as-the-single-source-of-truth
+64-qqq-serve--the-http-and-application-server
+65-qqq-pkg--package-manager-and-registry
+66-qqq-run--cli-and-dev-server
+67-qqqai-test--test-runner
+68-qqqai-migrate--the-adoption-ramp
+69-qqqai--local-inference-as-a-capability
+7--security-and-trust-model
+71-what-we-are-defending-precisely
+72-adversary-model
+73-the-defence-timeline--where-we-stop-an-attack
+74-cryptographic-posture
+75-hardening-beyond-wasm
+8--ai-agent-native-design
+81-the-four-agent-relationships
+82-qqqai-mcp--the-model-context-protocol-server
+83-the-machine-contract-layer
+84-the-agent-sandbox-reference-architecture
+85-making-the-codebase-legible-to-machines
+9--performance-engineering
+91-the-honest-benchmark-position
+92-the-performance-budget
+93-the-abi-cost-quantified-honestly
+94-specific-optimizations-planned

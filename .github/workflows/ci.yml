@@ -241,6 +241,14 @@ jobs:
       - name: Prove the boundary check classifies every crate
         run: python tools/check_license_boundary.py --self-test
 
+      # `DOC-010`. §0.5 says a retired section's anchor is tombstoned, not deleted, so
+      # old links resolve. An anchor is a link target OTHER documents point at, so
+      # deleting one breaks citations in a file the change never touched.
+      - name: Validate that no Proposal anchor was silently deleted
+        run: python tools/check_tombstones.py
+      - name: Prove the anchor-stability check catches a deletion
+        run: python tools/check_tombstones.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

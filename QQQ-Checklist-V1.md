@@ -187,7 +187,32 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **DOC-009** Implement the stub-marker convention (`// QQQ-STUB(<ID>): …`) and a CI check that every stub marker has a matching Observations entry.
   → Done: `QQQ-STUB(<ID>)` markers are validated against checklist items by `check_xrefs.py` checks [7] and [11], including the bidirectional case, as a required CI step.
   → §0.5 Identifier and anchor discipline
-- [ ] **DOC-010** Implement the tombstone convention for retired anchors and add a CI check that no anchor is silently deleted.
+- [x] **DOC-010** Implement the tombstone convention for retired anchors and add a CI check that no anchor is silently deleted.
+  → Done: `tools/check_tombstones.py` + a committed baseline of **93 Proposal anchors** in
+    `.anchor-baseline.txt`. An anchor in the baseline that disappears without a tombstone
+    fails the build, which is what makes "never deleted" enforceable rather than a rule
+    people remember.
+  → **Compared against a baseline, not against git.** A `git` diff detects *change*, so it
+    fires on every legitimate in-progress edit and says nothing about deletion
+    specifically. The baseline answers the actual question, and it only ever grows.
+  → Also enforced: a tombstone must use the documented `(retired — see §X.Y)` form, must
+    point at a section that **exists**, and no two live headings may derive one anchor.
+  → **Three real bugs, all found by the self-test rather than by reading the code**, and
+    all three were the same shape — a check whose input set excluded its target:
+    1. The anchor derivation **dropped the section number**, producing `capability-engine`
+       where the correct anchor is `64-capability-engine`. Every anchor it computed was
+       wrong, and it was *internally consistent and consistently incorrect*, so only the
+       synthetic cases caught it.
+    2. The fixtures then disagreed with the code for the same reason, so two cases reported
+       DEAD while the code was right. Fixtures now derive their anchors through the same
+       helper as the parser, so they cannot encode a different rule.
+    3. A heading marked `(retired)` with **no successor** was not recognised as retired at
+       all, so the rule requiring a successor never fired on exactly the case it exists for.
+  → The baseline had to be **rebuilt** rather than updated: `--update` unions, so the 93
+    wrong entries written by the buggy derivation could not be removed by the check that
+    owns them. The check correctly reported all 93 as disappeared, and the header records
+    the history.
+  → 7/7 self-test cases.
   → §0.5 Identifier and anchor discipline
 - [x] **DOC-011** Publish `docs/glossary.md` generated from the Proposal glossary, with anchors.
   → Done: `tools/gen_glossary.py` generates it from the Proposal's §0.6 table;

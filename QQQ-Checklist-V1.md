@@ -2753,6 +2753,14 @@ Items are grouped below by **phase**, because dependency order matters more than
     pins it, verified by injection. `§O-053a`.
 - [ ] **SRV-009** Implement WebSockets over HTTP/1.1 and HTTP/2.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → **Partial — the handshake is done, the frame layer is not.** `crates/qqq-serve/src/ws.rs` implements RFC 6455 §4: `Handshake::parse` (method, `Upgrade`, the `Connection` **token list**, version, and a key that decodes to exactly 16 bytes), `accept()`, `select_protocol`, `write_upgrade` and `write_refusal`.
+  → **The specification's own worked example is a test**: RFC 6455 §1.3's key `dGhlIHNhbXBsZSBub25jZQ==` must yield `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`. A control asserts that hashing the key *without* the GUID gives something different — a version that forgot it would still be deterministic and still look plausible.
+  → **`Connection` is a token list, not a value.** `keep-alive, Upgrade` is what a browser sends; an equality test against `"upgrade"` rejects correct clients and the failure appears as "WebSockets do not work in Firefox". Five spellings are covered, including the list form and mixed case.
+  → **A version refusal must name what is supported** (§4.4), so `write_refusal` sends `426 Upgrade Required` with `Sec-WebSocket-Version: 13`; a malformed request gets `400` without it, because only a 426 means "retry with another version".
+  → **Neither response goes through `write_response`.** A `101` must not carry `Content-Length` — after it the connection is not HTTP, and a client reading a length would count frame bytes as content.
+  → **SHA-1 is correct here and the reason is recorded at the dependency** (workspace `Cargo.toml`): the accept value is a proof the server read the handshake, not a security control, and the input is a key the client itself chose.
+  → **Measured**: 24 unit tests; workspace **1999 passed, 0 failed**.
+  → **Still to build**: the frame layer (opcodes, masking, fragmentation) and wiring the handshake into `serve_connection`. `SRV-009` stays unticked until both exist — the split follows the specification's own structure (§4 versus §5) and keeps the handshake testable without a frame codec.
 - [x] **SRV-010** Implement Server-Sent Events.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Done: `crates/qqq-serve/src/sse.rs` — `Event` (event/id/retry/data/comment, each optional and *omitted* when absent, because the parser's `event:` with an empty value sets the type to `""`, so absence and emptiness differ), `Event::encode` (the framing), `headers()` (the three headers a working stream needs), `last_event_id()` (resume). Written to the WHATWG specification's parsing algorithm rather than to the `data: hello\n\n` example, because every rule that matters is invisible in that example.

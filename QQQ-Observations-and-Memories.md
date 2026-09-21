@@ -5267,6 +5267,75 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-098 — Two checkers that had to be narrowed, and the difference between a rule that fires and a rule that is right
+
+**Two vocabulary checks (`DOC-012`, `DOC-016`), and both had to be corrected by their own
+self-tests.** The corrections are more instructive than the checks.
+
+**`check_glossary_usage.py`: two rules were removed after their first run.**
+
+The initial confusable list had eight entries. Two fired on ordinary English:
+
+```text
+qqq-queue.wit:76: uses 'thread'
+  /// would force every consumer onto its own thread.
+qqq-http.wit: uses 'container'
+  /// the container image is read-only
+```
+
+Neither is a vocabulary mistake. `thread` there means an OS thread — a real thing this
+project discusses when explaining why a signature is async — and `container` refers to a
+deployment artefact, which the glossary does not contest.
+
+So the rule was **narrowed from "a word the industry uses" to "a concept QQQ defines
+differently from the industry"**, which is the only case where a WIT doc using the
+industry word is actually wrong. Six rules remain, all of the second kind.
+
+**Why removal was the right answer rather than an allowlist.** The tempting fix is to
+add an exception for each false positive. That works until it doesn't: the allowlist
+grows, the rule becomes unreadable, and the next person disables the check. And an
+allowlist entry is invisible to a reader asking "what does this check actually enforce?" —
+whereas a shorter list of rules states its own scope.
+
+**The general principle.** A check that fires on prose gets disabled, and a disabled
+check is worth nothing. So **a rule must earn its place by catching a mistake rather than
+a word**, and the negative cases in the self-test are the false positives that would have
+got it turned off. Both removed rules are recorded in the source with their offending
+sentences, because the next person will reach for `thread` too.
+
+**`gen_verified_facts.py`: the classifier was wrong twice, in two different ways.**
+
+1. **Eight of thirty facts came out unclassified** — every one an API or specification
+   property (`B-12`'s `epoch_interruption`, `B-29`'s "a component may not export a
+   memory"). The `unclassified` report is what surfaced them; a classifier that silently
+   guessed would have filed eight load-bearing facts under a wrong cadence. Those facts
+   need a cadence *more* than the version numbers do: a version bump is noticed, while
+   an API property disappearing in a major release is exactly what a re-check catches.
+2. **A rule-ordering bug.** `Local toolchain: rustc 1.97.1` was classified
+   **perishable**, because the version-number rule matched first. The cadence happened
+   to be identical (7 days either way) and the *class* was wrong — which is the worse
+   outcome, since a reader cannot tell they are looking at a machine property rather than
+   a published one. Narrow rules now come before broad ones, and the reason is recorded
+   next to the ordering: **a broad rule placed first silently wins every overlap.**
+
+A third failure was in the checker itself: the `Same document` referral rule was written
+with `^`/`$` anchors, but `classify` searches the fact and method joined by a space, so
+it could never match. It was added to fix two unclassified rows and fixed nothing —
+**a rule that cannot match is worse than a missing rule, because the `unclassified`
+report stops mentioning it.**
+
+**The pattern across both.** Four corrections, and every one was to the *checker* rather
+than the content it checks. That is now a familiar shape in this project (`§O-092`,
+`§O-094`, `§O-096`, `§O-097`), and it has a consistent cause: a checker is written from a
+belief about what the corpus contains, and the belief is tested only when the checker
+runs against real content. Reading it does not help, because a plausible rule looks
+exactly like a correct one.
+
+→ `tools/check_glossary_usage.py`, `tools/gen_verified_facts.py`,
+`tools/check_verified_facts.py`, `wit/`.
+
+---
+
 ### §O-097 — Two generated references, and why counting is the only way to see that a parser has stopped working
 
 **What was built.** Two more generated artifacts, completing the documentation set:

@@ -69,6 +69,7 @@ const _: () = assert!(
 
 pub mod admission;
 pub mod ambient;
+pub mod audit;
 pub mod boundary;
 pub mod config;
 pub mod guard;
@@ -87,6 +88,10 @@ pub mod trap;
 
 pub use admission::{admit, Admitted, HostCapacity, Refusal};
 pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
+pub use audit::{
+    genesis_digest, Append, AppendCounters, AuditRecord, AuditStream, Ledger, LedgerError, Outcome,
+    DEFAULT_CAPACITY,
+};
 pub use boundary::{
     all, boundaries_checking, consistent_length, discriminant, interfaces, list_size, one_of,
     path_component, path_shape, range_within, render_for_diagnostic, size, text, Boundary,

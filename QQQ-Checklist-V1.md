@@ -1926,7 +1926,18 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §16 — Definition of Done for V1
 - [ ] **SEC-025** Commission external security audit #2 before the public beta (M10).
   → §16 — Definition of Done for V1
-- [ ] **SEC-026** Implement Landlock LSM integration as defence in depth on Linux ≥ 5.13.
+- [x] **SEC-026** Implement Landlock LSM integration as defence in depth on Linux ≥ 5.13.
+  → Done: `STEP_LANDLOCK` in `qqq-sys::harden`, using the `landlock` crate (safe, so
+    no `unsafe` exemption is needed). Ordered after the uid drop and before seccomp.
+  → `HardRequirement` compatibility, so an older kernel errors instead of silently
+    installing a weaker ruleset. `RulesetStatus` decides Applied vs Unsupported, so
+    `NotEnforced` can never be reported as success.
+  → 3 tests, including a **behavioural** one: a ruleset granting only `/proc/self`
+    must refuse `/etc/hostname`. Fault-injected by granting `/` instead — the step
+    still reported `Applied`/`FullyEnforced` while the path was `allowed`, which is
+    `§O-085` reproduced and caught.
+  → Verified live: `HARDEN_PROBE:refused`, Landlock **ABI V7**, `no_new_privs=true`.
+  → The earlier "blocked" note was a fact about `nix`, not about the item (`§O-082`).
   → §7.5 Hardening beyond Wasm
 - [ ] **SEC-027** Implement memory-protection-key support as an optional hardening feature.
   → §7.5 Hardening beyond Wasm

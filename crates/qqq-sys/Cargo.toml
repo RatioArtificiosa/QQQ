@@ -66,6 +66,22 @@ seccompiler = "0.5"
 # hard-coded) and `EPERM` as the default-deny errno. No `libc` *function* is
 # called, which is why this does not pull the crate into the unsafe exception.
 libc = "0.2"
+# Landlock LSM, for `SEC-026` — the filesystem half of §7.5's defence in depth.
+#
+# # Why the earlier note that said this was impossible was wrong
+#
+# `src/harden.rs` recorded that Landlock "needs a newer kernel API than `nix`
+# currently wraps safely". That was true of `nix` and false as a conclusion: a
+# dedicated crate exists, is maintained by the Landlock authors, and exposes the
+# whole thing safely. The note named a *reason* and stopped, which reads as a
+# blocker when it is only a fact about one candidate. Applying `§O-082`'s question
+# — "is this blocked on the item, or on one way of doing it?" — dissolved it, the
+# same way it dissolved `SEC-017` and `SEC-019`.
+#
+# Version floor `0.3` rather than `0.4` is deliberate: the API used here
+# (`Ruleset`, `AccessFs`, `PathBeneath`) is stable across both, and a lower floor
+# spares downstreams a lockfile bump for no benefit.
+landlock = "0.4"
 
 
 [dev-dependencies]

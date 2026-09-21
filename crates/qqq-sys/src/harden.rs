@@ -174,6 +174,24 @@ impl StepOutcome {
         }
     }
 
+    /// A step that took effect, with a note about *how far* it went.
+    ///
+    /// # Why "applied" sometimes needs detail
+    ///
+    /// Landlock's ABI is negotiated: a kernel may enforce fewer access rights than
+    /// the source requested, and the ruleset still installs. Reporting a bare
+    /// `Applied` would hide which ABI was actually in force, and the difference
+    /// matters — a ruleset enforced at ABI v1 does not cover `REFER` or `TRUNCATE`,
+    /// so an operator reading "applied" would believe more is restricted than is.
+    #[must_use]
+    pub fn applied_with(step: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            step,
+            outcome: Step::Applied,
+            detail: Some(detail.into()),
+        }
+    }
+
     /// A step this platform cannot do.
     #[must_use]
     pub fn unsupported(step: &'static str, why: impl Into<String>) -> Self {
@@ -327,16 +345,42 @@ pub struct HardenPolicy {
     pub drop_to_uid: Option<u32>,
     /// Drop to this gid, when set.
     pub drop_to_gid: Option<u32>,
+    /// Install a Landlock filesystem ruleset (`SEC-026`).
+    ///
+    /// **Off by default**, for the same reason as `seccomp` and a stronger version
+    /// of it: Landlock is *irreversible* for the process that installs it. A
+    /// ruleset that omits a path the host later needs cannot be widened, so the
+    /// process must be restarted — which means a wrong ruleset is an outage, not a
+    /// degraded mode.
+    pub landlock: bool,
+    /// Which paths to keep accessible, when `landlock` is set.
+    ///
+    /// # Why this is empty by default, and why empty means "nothing"
+    ///
+    /// A Landlock ruleset with no rules denies **every** filesystem access the
+    /// handled rights cover. That is the correct secure default and an almost
+    /// certainly fatal one, which is why `landlock` is off unless a caller has
+    /// thought about which paths to grant.
+    ///
+    /// The field holds directories, and a rule on a directory applies to the whole
+    /// subtree beneath it. A path that does not exist is reported as `Failed`
+    /// rather than skipped: silently ignoring a typo'd path produces a process that
+    /// runs with fewer filesystem rights than its operator intended, and the
+    /// symptom would be a permission error somewhere unrelated.
+    pub landlock_read_paths: Vec<std::path::PathBuf>,
 }
 
 impl Default for HardenPolicy {
-    /// The safe defaults: `no_new_privs` on, seccomp off, no identity change.
+    /// The safe defaults: `no_new_privs` on, seccomp and Landlock off, no identity
+    /// change.
     fn default() -> Self {
         Self {
             seccomp: false,
             seccomp_profile: SeccompProfile::Runtime,
             drop_to_uid: None,
             drop_to_gid: None,
+            landlock: false,
+            landlock_read_paths: Vec::new(),
         }
     }
 }
@@ -610,6 +654,8 @@ pub const STEP_NO_NEW_PRIVS: &str = "no_new_privs";
 pub const STEP_DROP_GID: &str = "drop_privileges_gid";
 /// Step name: drop the user identity.
 pub const STEP_DROP_UID: &str = "drop_privileges_uid";
+/// Step name: install the Landlock filesystem ruleset.
+pub const STEP_LANDLOCK: &str = "landlock";
 /// Step name: install the seccomp-BPF filter.
 pub const STEP_SECCOMP: &str = "seccomp";
 
@@ -624,17 +670,33 @@ pub const STEP_SECCOMP: &str = "seccomp";
 /// | 1 | `no_new_privs` | must precede seccomp: a filter can only be installed under `no_new_privs` without `CAP_SYS_ADMIN` |
 /// | 2 | `drop_privileges_gid` | groups must be dropped before the uid, because dropping the uid removes the authority to call `setgroups` |
 /// | 3 | `drop_privileges_uid` | after the gid, and irreversible |
-/// | 4 | `seccomp` | last: the filter refuses `setuid`/`setgid`, so it must come after any identity change |
+/// | 4 | `landlock` | after the identity change, before seccomp — see below |
+/// | 5 | `seccomp` | last: the filter refuses `setuid`/`setgid` and the `landlock_*` syscalls, so it must come after both |
 ///
 /// The order is a **security** property, not a style: reversing steps 2 and 3
 /// makes the gid drop fail, and putting seccomp first makes the uid drop die with
 /// `SIGSYS`. Both are silent-looking failures — the process keeps running, merely
 /// less hardened — which is why this table exists in the code rather than only in
 /// a commit message.
+///
+/// # Why Landlock sits between the uid drop and seccomp
+///
+/// * **After the uid drop**, because Landlock is designed for unprivileged
+///   processes and becomes *more* meaningful once the process no longer holds
+///   `CAP_SYS_ADMIN`: a Landlock ruleset is not enforced against a process with
+///   that capability, so restricting before dropping would produce a sandbox that
+///   silently does not bind. This is the ordering mistake that would look correct
+///   and be inert.
+/// * **Before seccomp**, because the `landlock_create_ruleset`,
+///   `landlock_add_rule` and `landlock_restrict_self` syscalls must still be
+///   permitted when the filter installs. Installing seccomp first would make the
+///   Landlock step fail with a `SIGSYS` kill or an `EPERM`, and the failure would
+///   be reported as "the kernel refused Landlock" — pointing at the wrong thing.
 pub const STEP_ORDER: &[&str] = &[
     STEP_NO_NEW_PRIVS,
     STEP_DROP_GID,
     STEP_DROP_UID,
+    STEP_LANDLOCK,
     STEP_SECCOMP,
 ];
 
@@ -664,6 +726,7 @@ pub fn harden(policy: &HardenPolicy) -> HardenReport {
     report.push(apply_no_new_privs());
     report.push(apply_drop_gid(policy));
     report.push(apply_drop_uid(policy));
+    report.push(apply_landlock(policy));
     report.push(apply_seccomp(policy));
 
     report
@@ -676,8 +739,8 @@ pub fn harden(policy: &HardenPolicy) -> HardenReport {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        HardenPolicy, SeccompProfile, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_NO_NEW_PRIVS,
-        STEP_SECCOMP,
+        HardenPolicy, SeccompProfile, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK,
+        STEP_NO_NEW_PRIVS, STEP_SECCOMP,
     };
     use nix::unistd::{Gid, Uid};
 
@@ -756,6 +819,208 @@ mod imp {
     }
 
     /// Install the seccomp-BPF filter.
+    /// Apply a Landlock filesystem ruleset (`SEC-026`).
+    ///
+    /// # What Landlock adds that the capability engine does not
+    ///
+    /// The capability engine decides what the *guest* may ask for. Landlock
+    /// restricts what a **compromised host process** can do if a guest finds a way
+    /// past Wasm entirely — the escape §7.2 lists as "nation-state against the
+    /// sandbox". §7.5 calls this depth behind the boundary, and it is precisely
+    /// because it is depth that it is allowed to be the weakest layer: a host whose
+    /// kernel lacks Landlock is still safe, which is what makes QQQ deployable
+    /// anywhere.
+    ///
+    /// # Why the kernel version matters, and why it is reported rather than assumed
+    ///
+    /// Landlock landed in Linux 5.13. Older kernels return `ENOSYS`, and the
+    /// distinction between "the kernel has no Landlock" and "the kernel refused my
+    /// ruleset" is the difference between an expected skip and a real fault. So the
+    /// error is inspected rather than caught: `ENOSYS` and `EOPNOTSUPP` become
+    /// `Unsupported` with an explanation, and everything else becomes `Failed`.
+    ///
+    /// # Why an empty path list is refused rather than applied
+    ///
+    /// A ruleset with no rules denies every handled access, so applying one with an
+    /// empty list would leave the process unable to open a file — an instant,
+    /// confusing outage. The caller asked for Landlock but named nothing to keep,
+    /// which is a configuration error, and it is reported as one.
+    pub(super) fn landlock(policy: &HardenPolicy) -> StepOutcome {
+        // `Access` and `Compatible` are traits, so they must be in scope for
+        // `AccessFs::from_all` and `Ruleset::compatibility` to resolve. Both are
+        // imported deliberately rather than via a glob: `from_all` is the access
+        // mask that decides *which* filesystem rights the ruleset handles, and
+        // `compatibility` is the setting that decides whether a weaker ruleset is
+        // accepted silently -- the two most security-relevant choices in this
+        // function, so they should be visible at the call site.
+        use landlock::{
+            Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+            RulesetCreatedAttr, RulesetStatus, ABI,
+        };
+
+        if !policy.landlock {
+            return StepOutcome::skipped(
+                STEP_LANDLOCK,
+                "Landlock was not requested; §7.5 treats it as defence in depth \
+                 rather than as the guest boundary",
+            );
+        }
+
+        if policy.landlock_read_paths.is_empty() {
+            return StepOutcome::failed(
+                STEP_LANDLOCK,
+                "Landlock was requested with no readable paths, which would deny \
+                 every filesystem access the ruleset handles and leave the process \
+                 unable to open a file. Name at least one directory in \
+                 `landlock_read_paths`, or turn `landlock` off.",
+            );
+        }
+
+        // # Why the ABI is probed rather than assumed, and why `HardRequirement`
+        //
+        // `set_compatibility(CompatLevel::HardRequirement)` makes every subsequent
+        // build call **error** when the running kernel cannot enforce a requested
+        // right. The crate's own documentation states the default: unsupported
+        // features "are silently ignored by default, which is a sane choice for
+        // most use cases" -- and it is the wrong choice here, because a silently
+        // reduced ruleset reports success while restricting less than the policy
+        // states. That is the `§O-085` shape: a control that is installed and does
+        // less than it claims.
+        //
+        // The call must come BEFORE `handle_access`, because it governs the build
+        // methods that follow it.
+        let ruleset = match Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(ABI::V1))
+            .and_then(Ruleset::create)
+        {
+            Ok(created) => created,
+            Err(e) => return classify_landlock_error(&e),
+        };
+
+        // Every path is resolved individually and the first failure names the path.
+        // A `PathFd::new` failure is usually a typo or a path absent on this host,
+        // and "the ruleset was rejected" without the path sends the reader to the
+        // wrong place.
+        let mut applied = 0usize;
+        let mut created = ruleset;
+        for path in &policy.landlock_read_paths {
+            let fd = match PathFd::new(path) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    return StepOutcome::failed(
+                        STEP_LANDLOCK,
+                        format!(
+                            "the Landlock path {} could not be opened: {e}. A \
+                             non-existent path is reported rather than skipped, \
+                             because ignoring it would leave the process with fewer \
+                             filesystem rights than the operator intended, and the \
+                             symptom would appear somewhere unrelated.",
+                            path.display()
+                        ),
+                    );
+                }
+            };
+            match created.add_rule(PathBeneath::new(fd, AccessFs::from_read(ABI::V1))) {
+                Ok(next) => {
+                    created = next;
+                    applied += 1;
+                }
+                Err(e) => {
+                    return StepOutcome::failed(
+                        STEP_LANDLOCK,
+                        format!("the Landlock rule for {} was refused: {e}", path.display()),
+                    );
+                }
+            }
+        }
+
+        match created.restrict_self() {
+            // # Why the status decides between Applied and Unsupported
+            //
+            // `RulesetStatus` is the crate's own three-valued answer, and it is a
+            // better signal than any errno: `NotEnforced` means the kernel ignored
+            // the ruleset entirely, which is an environment answer and must be
+            // reported as `Unsupported` rather than as a success. Reporting it as
+            // `Applied` would be a hardening step that does nothing while the
+            // report reads clean -- the exact defect this module has already
+            // produced once by accident.
+            Ok(status) => match status.ruleset {
+                RulesetStatus::FullyEnforced => StepOutcome::applied_with(
+                    STEP_LANDLOCK,
+                    format!(
+                        "{applied} read rule(s) fully enforced (Landlock ABI {:?}, \
+                         no_new_privs={})",
+                        status.landlock, status.no_new_privs
+                    ),
+                ),
+                // Partial enforcement at `HardRequirement` means the kernel
+                // enforced a subset despite the request. Treated as a failure: the
+                // operator asked for full coverage and did not get it.
+                RulesetStatus::PartiallyEnforced => StepOutcome::failed(
+                    STEP_LANDLOCK,
+                    format!(
+                        "the kernel enforced only part of the requested Landlock \
+                         ruleset (ABI {:?}). Partial enforcement at \
+                         HardRequirement means the sandbox is weaker than the \
+                         policy states, which must be visible rather than \
+                         reported as applied.",
+                        status.landlock
+                    ),
+                ),
+                RulesetStatus::NotEnforced => StepOutcome::unsupported(
+                    STEP_LANDLOCK,
+                    format!(
+                        "{applied} rule(s) were built, but the kernel did not \
+                         enforce them (Landlock ABI {:?}). This requires Linux \
+                         5.13+; §7.5 lists Landlock as defence in depth behind the \
+                         capability engine, so its absence is not a defect.",
+                        status.landlock
+                    ),
+                ),
+            },
+            Err(e) => classify_landlock_error(&e),
+        }
+    }
+
+    /// Decide whether a Landlock construction failure is the environment or a fault.
+    ///
+    /// # Why this does not simply catch everything
+    ///
+    /// Treating every error as "this kernel has no Landlock" makes the report green
+    /// on any host, including one whose ruleset was genuinely refused. That is the
+    /// `§O-085` shape once more: a control that reports success while doing
+    /// nothing. Only the errors that *mean* "unsupported" are classified that way.
+    fn classify_landlock_error(e: &landlock::RulesetError) -> StepOutcome {
+        let text = e.to_string();
+        // `landlock` renders its errors with the errno name, which is the only
+        // stable signal the crate exposes.
+        let unsupported = text.contains("ENOSYS")
+            || text.contains("EOPNOTSUPP")
+            || text.contains("not supported");
+        if unsupported {
+            StepOutcome::unsupported(
+                STEP_LANDLOCK,
+                format!(
+                    "this kernel does not support the requested Landlock features \
+                     ({text}); Landlock requires Linux 5.13 or newer. §7.5 lists it \
+                     as defence in depth behind the capability engine, so its \
+                     absence is not a defect."
+                ),
+            )
+        } else {
+            StepOutcome::failed(
+                STEP_LANDLOCK,
+                format!(
+                    "the kernel refused the Landlock ruleset: {text}. A refusal is \
+                     reported as a failure rather than as an unsupported platform, \
+                     because treating it as unsupported is how a hardening step \
+                     comes to do nothing while the report reads clean."
+                ),
+            )
+        }
+    }
+
     pub(super) fn seccomp(policy: &HardenPolicy) -> StepOutcome {
         if !policy.seccomp {
             return StepOutcome::skipped(
@@ -1117,7 +1382,8 @@ mod imp {
 #[cfg(not(target_os = "linux"))]
 mod imp {
     use super::{
-        HardenPolicy, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_NO_NEW_PRIVS, STEP_SECCOMP,
+        HardenPolicy, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS,
+        STEP_SECCOMP,
     };
 
     /// `no_new_privs` is a Linux `prctl`, so there is nothing to do elsewhere.
@@ -1144,6 +1410,16 @@ mod imp {
         )
     }
 
+    pub(super) fn landlock(_policy: &HardenPolicy) -> StepOutcome {
+        StepOutcome::unsupported(
+            STEP_LANDLOCK,
+            "Landlock is a Linux LSM (5.13+). §7.5 lists it as defence in depth \
+             behind the capability engine, so its absence is not a defect: a host \
+             without Landlock is still safe against a malicious guest. macOS and \
+             Windows have their own sandbox mechanisms and are not wired here.",
+        )
+    }
+
     pub(super) fn seccomp(_policy: &HardenPolicy) -> StepOutcome {
         StepOutcome::unsupported(
             STEP_SECCOMP,
@@ -1167,6 +1443,10 @@ fn apply_drop_uid(policy: &HardenPolicy) -> StepOutcome {
     imp::drop_uid(policy)
 }
 #[cfg(target_os = "linux")]
+fn apply_landlock(policy: &HardenPolicy) -> StepOutcome {
+    imp::landlock(policy)
+}
+#[cfg(target_os = "linux")]
 fn apply_seccomp(policy: &HardenPolicy) -> StepOutcome {
     imp::seccomp(policy)
 }
@@ -1182,6 +1462,10 @@ fn apply_drop_gid(policy: &HardenPolicy) -> StepOutcome {
 #[cfg(not(target_os = "linux"))]
 fn apply_drop_uid(policy: &HardenPolicy) -> StepOutcome {
     imp::drop_uid(policy)
+}
+#[cfg(not(target_os = "linux"))]
+fn apply_landlock(policy: &HardenPolicy) -> StepOutcome {
+    imp::landlock(policy)
 }
 #[cfg(not(target_os = "linux"))]
 fn apply_seccomp(policy: &HardenPolicy) -> StepOutcome {

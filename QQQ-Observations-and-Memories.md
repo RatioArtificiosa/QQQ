@@ -5267,6 +5267,83 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-093 — `SEC-026`: the "blocked" note named a fact about `nix`, not about Landlock
+
+**What the code said.** `qqq-sys/src/harden.rs` recorded, under "What this module
+deliberately does NOT do":
+
+> **Landlock LSM.** §7.5 lists it for defence in depth behind the capability engine,
+> and it needs a newer kernel API than `nix` currently wraps safely.
+
+Every clause is true. `nix` does not wrap Landlock. And the conclusion drawn from
+it — that Landlock was therefore unimplemented — was false, because a dedicated
+crate exists: `landlock`, maintained by the Landlock authors, with a safe API. The
+note named a *reason* and stopped, which reads as a blocker when it is only a fact
+about one candidate.
+
+This is `§O-082`'s question in its third form: *"is this blocked on the item, or on
+one way of doing it?"* It dissolved `SEC-017` and `SEC-019` before this. The lesson
+worth keeping is about **how the note was written**: "X cannot be done because Y is
+missing" is a claim about the world, while "nix does not wrap X" is a claim about a
+library. Only the second was verified.
+
+**What was built.** `STEP_LANDLOCK`, using the `landlock` crate — a safe API, so the
+`unsafe` exemption process (`GOV-008`, bus factor 1) is not needed and the module
+keeps its `forbid(unsafe_code)`.
+
+Three decisions are worth recording, because each is a place the step could have
+been inert:
+
+1. **Ordering: after the uid drop, before seccomp.** Landlock is not enforced
+   against a process holding `CAP_SYS_ADMIN`, so restricting *before* dropping
+   privilege would produce a sandbox that silently does not bind. And the seccomp
+   filter refuses the `landlock_*` syscalls, so installing the filter first makes
+   the Landlock step fail with a message that points at the kernel rather than at
+   the order. Both mistakes look correct in the source.
+2. **`CompatLevel::HardRequirement`.** The crate's own documentation says
+   unsupported features "are silently ignored by default, which is a sane choice for
+   most use cases" — the wrong choice here, since a silently reduced ruleset reports
+   success while restricting less than the policy claims. With `HardRequirement`,
+   an old kernel errors instead.
+3. **`RulesetStatus`, not the step's own verdict.** `FullyEnforced` → `Applied`,
+   `NotEnforced` → `Unsupported`, `PartiallyEnforced` → `Failed`. `NotEnforced` in
+   particular is a kernel that ignored the ruleset entirely, and reporting it as
+   `Applied` would be a hardening step that does nothing while the report reads
+   clean.
+
+**The behavioural test, and the fault injection that justifies it.** The temptation
+is to assert the step reports `Applied`. That is precisely the assertion that let a
+default-ALLOW seccomp filter pass every test in this workspace (`§O-085`), so the
+test installs a ruleset granting read access to `/proc/self` and **nothing else**,
+then opens `/etc/hostname`.
+
+Fault-injected by granting `/` instead — that is, by making the sandbox permit
+everything the test looks at. The result is the whole point:
+
+```text
+landlock: Applied, "1 read rule(s) fully enforced (Landlock ABI V7, no_new_privs=true)"
+left: Some("allowed")
+```
+
+**The step reported success, at ABI V7, fully enforced — and the path was
+allowed.** `§O-085` reproduced exactly, and this time the test caught it, because
+the claim is behavioural rather than a status check.
+
+Verified live in the Linux bridge: `HARDEN_PROBE:refused`, Landlock ABI **V7**,
+`no_new_privs=true`, 23/23 `harden` tests green.
+
+**A smaller lesson from the same work.** Restoring the fault-injected fixture and
+re-running produced a *failure*, because cargo's mtime granularity did not notice
+the restored file — the container was still running the patched binary. `touch`ing
+the file and re-running gave 23/23. A verification loop that can report a stale
+result is worth knowing about: **after a fault injection, force a rebuild before
+believing the restored run.**
+
+→ `crates/qqq-sys/src/harden.rs`, `crates/qqq-sys/tests/harden.rs`,
+`crates/qqq-sys/Cargo.toml`.
+
+---
+
 ### §O-092 — `SEC-023`: the self-test found two dead checks, and one was unreachable rather than wrong
 
 **What the item asked.** "Establish the responsible-disclosure process and a public

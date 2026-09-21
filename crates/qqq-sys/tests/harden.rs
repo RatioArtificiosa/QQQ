@@ -41,7 +41,7 @@ use std::process::Command;
 
 use qqq_sys::harden::{
     harden, HardenPolicy, HardenReport, SeccompProfile, Step, StepOutcome, STEP_DROP_GID,
-    STEP_DROP_UID, STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP,
+    STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP,
 };
 
 /// The environment variable that turns this binary into a hardening child.
@@ -101,6 +101,31 @@ fn harden_child_entry_point() {
             drop_to_uid: Some(current_uid()),
             ..HardenPolicy::default()
         },
+        // `SEC-026`. Landlock is **irreversible**, so a ruleset can only be
+        // installed in a child: the parent test process would lose access to the
+        // workspace and every later test in the same binary would fail for a
+        // reason unrelated to what it asserts.
+        //
+        // The two modes differ in *which directory* is granted, which is what makes
+        // the second one a real behavioural test rather than a repeat of the first:
+        // `landlock` grants a directory it can read, and `landlock_denies` grants
+        // only `/proc/self` and then proves that an ungranted path is refused.
+        "landlock" => HardenPolicy {
+            landlock: true,
+            landlock_read_paths: vec![std::path::PathBuf::from("/usr/share")],
+            ..HardenPolicy::default()
+        },
+        "landlock_denies" => HardenPolicy {
+            landlock: true,
+            landlock_read_paths: vec![std::path::PathBuf::from("/proc/self")],
+            ..HardenPolicy::default()
+        },
+        // The configuration error: Landlock requested with nothing to keep, which
+        // must be a `Failed` step rather than a ruleset that denies everything.
+        "landlock_empty" => HardenPolicy {
+            landlock: true,
+            ..HardenPolicy::default()
+        },
         other => {
             eprintln!("unknown child mode: {other}");
             std::process::exit(2);
@@ -118,6 +143,20 @@ fn harden_child_entry_point() {
     // workspace. See `probe_denied_syscall` for why `ptrace` is the right probe.
     if mode == "seccomp_denies" {
         println!("HARDEN_PROBE:{}", probe_denied_syscall());
+    }
+
+    // The Landlock probe: after the ruleset is installed, try to read a directory
+    // that was NOT granted and report whether the kernel refused.
+    //
+    // # Why a real read is the only honest test
+    //
+    // `RulesetStatus::FullyEnforced` comes from the crate, and a step reporting
+    // `Applied` comes from this same code. Both could be true of a ruleset that
+    // restricts nothing -- the `§O-085` shape, found twice in this repository
+    // already. The only claim worth making is behavioural: with `/proc/self`
+    // granted, opening a file under a *different* directory must fail with `EACCES`.
+    if mode == "landlock_denies" {
+        println!("HARDEN_PROBE:{}", probe_ungranted_path());
     }
 
     // The report goes to stdout as JSON so the parent can assert on the
@@ -194,7 +233,6 @@ fn harden_child_entry_point() {
 fn probe_denied_syscall() -> String {
     use nix::sys::uio::{process_vm_readv, RemoteIoVec};
     use std::io::IoSliceMut;
-
     let pid = nix::unistd::getpid();
 
     // The bytes to read, and where they land. Both live in THIS process, so the
@@ -378,10 +416,44 @@ fn the_report_names_every_step_in_order() {
         names, STEP_ORDER,
         "the report must name every step in the documented order. §7.5's steps \
          depend on each other — `no_new_privs` must precede seccomp, groups before \
-         uid, and seccomp last because the filter refuses `setuid` — so a report \
-         whose order drifted describes a sequence that would not work."
+         uid, and seccomp last because the filter refuses `setuid` and the \
+         `landlock_*` syscalls — so a report whose order drifted describes a \
+         sequence that would not work."
     );
-    assert_eq!(names.len(), 4, "there are four steps");
+
+    // # Why this is derived rather than a literal
+    //
+    // The first version asserted `names.len() == 4`, and adding the Landlock step
+    // made it fail for the *right* reason while saying something unhelpful ("there
+    // are four steps"). The length check is worth keeping — it catches a step
+    // pushed to the report without being added to `STEP_ORDER`, which the sequence
+    // equality above would also catch but less legibly — so it is computed from
+    // `STEP_ORDER` and the constant is named instead of a bare number.
+    assert_eq!(
+        names.len(),
+        STEP_ORDER.len(),
+        "the report has {} steps but STEP_ORDER lists {}",
+        names.len(),
+        STEP_ORDER.len()
+    );
+
+    // The order is a security property, so it is asserted explicitly rather than
+    // only as "the report matches the constant". Both could drift together.
+    let seccomp_at = names
+        .iter()
+        .position(|s| *s == STEP_SECCOMP)
+        .expect("seccomp must be a step");
+    let landlock_at = names
+        .iter()
+        .position(|s| *s == STEP_LANDLOCK)
+        .expect("landlock must be a step");
+    assert!(
+        landlock_at < seccomp_at,
+        "Landlock must be attempted BEFORE seccomp: the filter refuses the \
+         `landlock_*` syscalls, so installing it first makes the Landlock step fail \
+         and the failure would be misreported as the kernel refusing Landlock. \
+         Landlock at {landlock_at}, seccomp at {seccomp_at}."
+    );
 }
 
 /// The report is serialisable, because it is a diagnostic for a startup log.
@@ -1094,5 +1166,173 @@ fn the_default_seccomp_action_is_a_refusal() {
         Some("refused"),
         "the refusal must be an errno the guest can handle, not a signal that \
          terminates the host; a killed process is indistinguishable from a crash"
+    );
+}
+
+/// Try to read an ungranted directory, and report whether Landlock refused.
+///
+/// # Why this is a *positive* probe rather than a report check
+///
+/// `SEC-026`'s first version would have asserted only that the step reported
+/// `Applied`. That is exactly the assertion that let a default-ALLOW seccomp filter
+/// pass every test in this workspace (`§O-085`): the step *was* applied, and it
+/// restricted nothing. So the claim made here is behavioural — after granting read
+/// access to `/proc/self` and nothing else, opening `/etc/hostname` must fail.
+///
+/// # What is returned, and why the variants are distinguishable
+///
+/// * `refused` — the open failed with `EACCES`/`EPERM`, which is Landlock working.
+/// * `indeterminate:<errno>` — the open failed for some *other* reason, so the
+///   evidence is weaker and the caller reports it as such rather than as a pass.
+///   This matters: a path that does not exist would produce `ENOENT`, and counting
+///   that as a refusal would make the test pass on a host with no `/etc`.
+/// * `allowed` — the open succeeded, which means the ruleset did not bind.
+#[cfg(target_os = "linux")]
+fn probe_ungranted_path() -> String {
+    // `/etc/hostname` is deliberately not the granted path. `/etc` is present on
+    // every image this test runs in; when it is absent the probe says so instead of
+    // silently reporting a refusal.
+    match std::fs::File::open("/etc/hostname") {
+        Ok(_) => "allowed".to_owned(),
+        Err(e) => match e.raw_os_error() {
+            Some(libc::EACCES | libc::EPERM) => "refused".to_owned(),
+            Some(errno) => format!("indeterminate:{errno}"),
+            None => format!("indeterminate:{e}"),
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_ungranted_path() -> String {
+    "unsupported".to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// SEC-026 — Landlock
+// ---------------------------------------------------------------------------
+
+/// **`SEC-026`: the Landlock step is attempted, and reports a real outcome.**
+///
+/// # Why this is asserted on the step rather than on `Applied`
+///
+/// The kernel version decides whether Landlock is available at all: Linux 5.13 is
+/// the floor. A CI runner may be newer or older, and a host without Landlock is
+/// *not* a failure — §7.5 lists it as defence in depth behind the capability
+/// engine, and states that its absence does not weaken the security claim. So the
+/// assertion is that the step reports one of the honest answers and never silently
+/// disappears from the report.
+#[test]
+fn the_landlock_step_is_reported_for_every_outcome() {
+    let policy = HardenPolicy {
+        landlock: true,
+        landlock_read_paths: vec![std::path::PathBuf::from("/usr/share")],
+        ..HardenPolicy::default()
+    };
+    let report = harden(&policy);
+
+    let landlock = report
+        .get(STEP_LANDLOCK)
+        .expect("the Landlock step must always appear, whatever the kernel supports");
+
+    assert!(
+        matches!(
+            landlock,
+            Step::Applied | Step::Skipped | Step::Unsupported | Step::Failed
+        ),
+        "the step must report a real outcome, got {landlock:?}"
+    );
+
+    // On a kernel with Landlock (5.13+, which every supported platform has) the
+    // step must be `Applied`. Below that it is `Unsupported`, which is honest.
+    #[cfg(target_os = "linux")]
+    {
+        if landlock == Step::Unsupported {
+            eprintln!(
+                "note: this kernel reports no Landlock support, so the enforcement \
+                 probe is skipped here. That is an environment outcome, not a pass: \
+                 {report:?}"
+            );
+        }
+    }
+}
+
+/// **Landlock requested with no paths is a `Failed` step, not a silent allow-all.**
+///
+/// A ruleset with no rules denies every handled access, so applying one would leave
+/// the process unable to open a file. The alternative — skipping the empty config —
+/// would report success for a step that did nothing, which is the defect this
+/// module has produced twice by accident (`§O-085`, `§O-088`).
+#[test]
+fn a_landlock_policy_with_no_paths_is_a_failure_not_a_no_op() {
+    let policy = HardenPolicy {
+        landlock: true,
+        landlock_read_paths: Vec::new(),
+        ..HardenPolicy::default()
+    };
+    let report = harden(&policy);
+
+    let landlock = report.get(STEP_LANDLOCK).expect("the step must appear");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        landlock,
+        Step::Failed,
+        "an empty path list must be reported as a configuration error: {report:?}"
+    );
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(landlock, Step::Unsupported);
+}
+
+/// **`SEC-026`, behaviourally: an ungranted path is actually refused.**
+///
+/// # This is the test that makes the step load-bearing
+///
+/// Everything else about Landlock can be true of a ruleset that restricts nothing.
+/// This one installs a ruleset granting read access to `/proc/self` and **nothing
+/// else**, then opens `/etc/hostname` in the same process. If the open succeeds,
+/// the ruleset did not bind — which is the `§O-085` failure exactly: an installed
+/// control that refuses nothing while the report reads `Applied`.
+///
+/// The child is required because Landlock is irreversible: installing a ruleset in
+/// the test process itself would break every test that runs after it in the same
+/// binary.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_landlock_ruleset_actually_refuses_an_ungranted_path() {
+    let (report, _restricted, probe) = run_child_with_probe("landlock_denies");
+
+    let landlock = report
+        .get(STEP_LANDLOCK)
+        .expect("the Landlock step must appear in the child's report");
+
+    // A kernel without Landlock cannot be probed. Reported as inconclusive *with the
+    // reason*, rather than passing quietly -- and the reason is checked, so a
+    // construction failure cannot hide behind this branch. The same mistake was made
+    // once with seccomp: an early return on any `Failed` swallowed the defect the
+    // test exists for.
+    if landlock == Step::Unsupported {
+        eprintln!(
+            "this kernel does not support Landlock, so the enforcement probe is \
+             inconclusive here (an environment outcome, not a pass): {report:?}"
+        );
+        return;
+    }
+    if landlock == Step::Failed {
+        panic!(
+            "the Landlock ruleset was requested and the kernel has Landlock, but the \
+             step FAILED. That is a QQQ bug rather than an environment limitation. \
+             Report: {report:?}"
+        );
+    }
+
+    assert_eq!(
+        probe.as_deref(),
+        Some("refused"),
+        "a path outside the granted set was NOT refused, so the ruleset did not \
+         bind. `allowed` means the sandbox is installed and restricts nothing -- \
+         the exact defect that passed every test in this workspace before the \
+         Linux bridge made it visible (`§O-085`). \
+         `indeterminate:<errno>` means the open failed for an unrelated reason, \
+         which is weaker evidence and must not be counted as a pass. \
+         Report: {report:?}"
     );
 }

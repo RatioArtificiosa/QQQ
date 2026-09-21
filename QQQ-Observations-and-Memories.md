@@ -10417,4 +10417,55 @@ untested.
 
 ---
 
+### §O-123 — A mechanism I assumed instead of reading, and the two CI failures it cost
+
+**The mistake.** `§O-121` was fixed by replacing `dtolnay/rust-toolchain@stable`
+with `@master`, on the belief that `@master` with no `toolchain:` input reads
+`rust-toolchain.toml`. I wrote that belief into the commit message, into a comment in
+the workflow, and into `rust-toolchain.toml`'s documentation as though it were
+established. It is not true. **The action's branch name *is* the version.** Every job
+failed on every platform:
+
+```
+'toolchain' is a required input
+```
+
+**Two CI failures in a row, and they are different mistakes.**
+
+| | `§O-121` | this |
+|---|---|---|
+| What was wrong | a version I never checked | a mechanism I never read |
+| The belief | "local stable is CI's stable" | "`@master` infers the channel" |
+| Detectable by | comparing two versions | reading the action's inputs |
+| Cost | 3 red runs | 4 red jobs × 3 platforms |
+
+The first is the shape this file is full of — an unverified assumption about *state*.
+The second is an unverified assumption about *behaviour*, and it is worse in one
+specific way: `§O-121` was an assumption I did not know I was making, while this one
+I asserted confidently in writing, three times, without opening the action's
+definition. **A belief written into a comment is harder to find later than one left
+in my head**, because a comment reads as documentation.
+
+**The remedy that generalises.** Both failures were found by CI in one run each, on
+three platforms at once — the workflow is doing its job. But neither should have
+needed CI: the action's `action.yml` declares its required inputs, and one read would
+have answered it. **For any third-party action, the contract is its `action.yml` —
+not its README, and not its name.**
+
+**What was salvaged.** The pinning is right and now correct: the channel is explicit
+in all four sites, and because an action input cannot reference a file, the version
+genuinely cannot live in one place — so it lives in four, and
+`tools/check_toolchain.py` is the substitute for a single source of truth. That
+checker earned its place on its **first run**, flagging the `msrv` job's deliberate
+1.97 against the three 1.98 pins. That is exactly the false-positive shape that gets
+a new checker deleted by the next person, so the exemption is a marker adjacent to
+the input rather than a line number or a suppression.
+
+→ `.github/workflows/{ci,advisories}.yml`, `rust-toolchain.toml`,
+`tools/check_toolchain.py`.
+→ Verified green: **11/11 jobs**, including `MSRV (1.97)`, plus the Advisories
+workflow.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

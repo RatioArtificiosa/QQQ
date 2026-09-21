@@ -180,6 +180,15 @@ jobs:
       - name: Prove the reconciliation check catches drift
         run: python tools/check_reconciliation.py --self-test
 
+      # `DOC-019`. Every `QQQ-XXXX` code becomes a page entry with its cause and its
+      # remediation. Generated from the enum so the catalogue cannot be missing a code
+      # the runtime can emit -- a user who hits a new code and finds nothing in the
+      # catalogue is already having a bad time.
+      - name: Validate the error catalogue
+        run: python tools/check_error_catalogue.py
+      - name: Prove the error-catalogue check catches an incomplete enum
+        run: python tools/check_error_catalogue.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

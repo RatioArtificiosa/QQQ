@@ -230,7 +230,21 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §11.3 Documentation as a product surface
 - [ ] **DOC-018** Build the documentation freshness test: compile a sample project against the published docs and fail on drift.
   → §2.6 NN-6 — Human + Machine Documentation Parity
-- [ ] **DOC-019** Publish the error catalogue generator: every `QQQ-XXXX` code becomes a docs page with cause, fix and example.
+- [x] **DOC-019** Publish the error catalogue generator: every `QQQ-XXXX` code becomes a docs page with cause, fix and example.
+  → Done: `docs/errors.md` — **42 codes**, generated from the `ErrorCode` enum's doc
+    comments by `tools/gen_error_catalogue.py`, verified by
+    `tools/check_error_catalogue.py` in CI and in the bridge.
+  → Generated from the enum rather than written, so the catalogue **cannot** be missing
+    a code the runtime can emit. The failure that prevents is specific: a new variant
+    lands, the catalogue is not updated, and the user sent to it finds nothing.
+  → The generator **refuses to emit** a variant with no cause or no
+    `**Remediation:**` line, rather than producing a page with a blank Remedy section
+    that satisfies the generator while failing §12.2's standard. All 42 currently pass.
+  → Codes are grouped into eight documented ranges, so the first thing a reader learns
+    is which subsystem failed.
+  → 8/8 self-test cases, each a realistic mistake rather than a synthetic one: a
+    variant added by copying a neighbour and dropping its doc comment, a duplicated
+    code, a code outside every range, and an enum that is not where the parser looks.
   → §12.2 Error message design standard
 - [ ] **DOC-020** Publish `llms.txt` and `llms-full.txt` at the repository root and on the docs site.
   → §8.5 Making the codebase legible to machines

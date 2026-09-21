@@ -49,6 +49,7 @@ pub mod capability;
 pub mod egress;
 pub mod manifest;
 pub mod normalize;
+pub mod policy;
 pub mod resolve;
 
 pub use capability::{
@@ -61,6 +62,10 @@ pub use manifest::{
 };
 pub use normalize::{
     path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv, SecretRef,
+};
+pub use policy::{
+    glob_match, Binding, Compare, Expr, Field, Literal, Policy, PolicyError, RequirementOutcome,
+    Rule, Selector, TerminationProof, Verb, MAX_EXPR_DEPTH, MAX_RULES, MAX_SOURCE_BYTES,
 };
 pub use resolve::{
     denial, CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode,

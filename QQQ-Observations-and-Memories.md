@@ -4906,6 +4906,59 @@ wrong comment about `rcgen` is as costly as a wrong comment about QQQ.
 
 ---
 
+### §M-010 — A Python splice arithmetic destroyed an untracked file, and the real error was the missing commit
+
+**What happened.** `crates/qqq-cap/src/policy.rs` — 2,474 lines of new work,
+untracked, uncommitted — was reduced to **0 bytes** by a helper script whose
+slice arithmetic was wrong:
+
+```python
+s = s[: -len(TARGET) + len(TARGET)]   # evaluates to s[0:], i.e. no-op
+s = s.replace(TARGET, TARGET[:-len("}\n")] + NEW_TESTS)
+```
+
+The first line was meant to trim the anchor before re-appending it. `-len(TARGET)
++ len(TARGET)` is `0`, so the slice was `s[0:]` — harmless. The **second** line
+was the destructive one: `TARGET` includes the closing `}` of the test module,
+so `TARGET[:-len("}
+")]` strips it, and the replacement text I then supplied
+ended with a different brace arrangement than intended. The net effect was that
+the anchor matched and was replaced by a fragment, and because the operation
+"reported success" nothing surfaced until `cargo test` failed with
+`unresolved imports policy::Policy` — the module had been emptied.
+
+**Why it was unrecoverable.** The file was **untracked**. `git status` said
+`?? crates/qqq-cap/src/policy.rs`, `git ls-files --error-unmatch` refused it,
+there was no stash entry, and no editor backup. `§M-008` records a restore from
+a *stale backup*; this is worse, because there was no copy at all. Recovery was
+a full rewrite from the original `write` call plus the six patch scripts still
+in `.scratch/` — possible only because every edit had been made by a script I
+still had. **If one edit had been made by hand, those lines would be gone.**
+
+**The mistake that actually caused the loss is not the arithmetic.** A field
+agent that shells out a text transformation over a large file must treat the
+file as *the only copy*. I had been editing a 2,400-line untracked file through
+a sequence of `python .scratch/*.py` rewrites and had not committed once —
+because the work was "not finished yet". The working tree was, for that file,
+the sole repository. `§M-007` says *an `edit` anchored on a long literal is a
+rewrite, not an insertion*; this extends it: **a scripted rewrite of an
+untracked file is a rewrite with no undo.**
+
+**Fix, and the rule.** Commit the moment a file compiles, even mid-feature;
+`cargo check` passing is a sufficient checkpoint and a policy module that
+compiles is a coherent thing to preserve. And when appending to a file with a
+script, `read` the last 20 lines, assert on the **exact current tail**, write the
+new content to a **new file** with `write`, and let the tool do the splicing —
+`edit` already rejects an `old_string` that does not appear exactly once, which
+is a safety property a hand-written `str.replace` does not have.
+
+**What made it detectable at all.** `cargo test` failed with an import error
+naming a *module that exists*, which is the signature of an empty module rather
+than a missing one. Without that, the next step would have been to "fix" the
+imports in `lib.rs`, which would have removed the module registration and left
+`CAP-011` looking unimplemented — the defect becoming invisible by being tidied
+away.
+
 ### §M-009 — Three agents in one working tree, and they deleted each other's files
 
 **What happened.** Two long-running implementation tasks were delegated in

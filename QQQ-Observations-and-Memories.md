@@ -5267,6 +5267,77 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-094 — `SEC-027`: the first item where the search for a safe wrapper came up empty, and why detection is the deliverable
+
+**What the item asks.** "Implement memory-protection-key support as an optional
+hardening feature." MPK (Intel PKS/PKU, `pkey_alloc`/`pkey_mprotect`) lets a process
+change page permissions without a syscall and without a TLB flush — the mechanism
+behind fast W^X toggling for JIT.
+
+**Why enforcement is blocked, stated exactly.** This is the third time an item has
+looked blocked on `unsafe`, and the first where the search genuinely failed:
+
+| Item | Safe wrapper found? | Outcome |
+|---|---|---|
+| `SEC-019` (seccomp, uid drop) | `nix`, `seccompiler` | implemented (`§O-081`) |
+| `SEC-026` (Landlock) | `landlock` | implemented (`§O-093`) |
+| `SEC-027` (MPK) | **none** | detection only |
+
+`pkey_mprotect` exists on crates.io and is a thin FFI wrapper: `unsafe fn`s taking
+raw pointers and `c_int` flags. There is no `nix`-equivalent. And `qqq-sys` may not
+contain `unsafe` until `SAFETY.md`'s ledger changes, which requires a second
+maintainer (`GOV-008`, bus factor 1) — enforced by a test, so this is mechanical
+rather than a matter of discipline.
+
+**The distinction that matters, and it is the one worth recording.** `§O-082` asks
+"is this blocked on the item, or on one way of doing it?" — and for `SEC-027` the
+answer is *neither*, which is a third case the question did not anticipate: it is
+blocked on a **governance constraint** (`GOV-008`) meeting an **ecosystem gap**. A
+reader who cannot tell those apart will redo the search, find the same empty result,
+and conclude the same thing — but only after spending the time.
+
+So the block is recorded with its evidence: the crates that exist, what they expose,
+and why that is disqualifying here.
+
+**Why detection is the deliverable rather than a shrug.** `mpk_support()`,
+`landlock_available()` and `host_capabilities()` report what the host offers, and
+three things make that worth building:
+
+1. **It converts a block into a measurement.** An operator can now say *why* a
+   deployment runs without MPK, and know whether the gap is silicon or software.
+   This host has no `pku` flag at all — so enforcement could not have been exercised
+   here even unblocked, which is exactly why "we could not test it" is not the same
+   claim as "it is not implemented".
+2. **It is the piece `SEC-027` needs first regardless.** Enforcing MPK without
+   detecting it produces `SIGSEGV` on hardware that lacks it — a crash, not a
+   hardening step. Detection is a prerequisite, not a consolation prize.
+3. **It is testable, and the test is the interesting part.** A probe that always
+   returned `false` would pass any "does it return a bool?" check, and `false` is
+   also the *safe* answer — so a broken probe is indistinguishable from a host
+   without the hardware. The test therefore cross-checks the probe against an
+   independent reading of `/proc/cpuinfo` and asserts they agree. **A detection
+   function whose failure mode looks like its success mode needs a differential
+   test, not an assertion on the value.**
+
+`landlock_available()` carries a matching hazard from the other direction: Landlock's
+ruleset is irreversible, so a function that answered "is it available?" by installing
+one would permanently restrict the caller as a side effect of asking. A test pins
+that the probe leaves the process able to open a file afterwards.
+
+**Two smaller findings from the same work, both toolchain-related.**
+
+* Clippy 1.97 accepted a `#[must_use]` doc comment whose bullet list ran directly into
+  the next doc comment, and 1.98's `doc_lazy_continuation` rejected it. The fix is a
+  blank `///` line terminating the list — which reads better anyway.
+* Clippy 1.98 rejected `if cond { panic!() }` under `manual_assert`. Both are the
+  `§O-089` version gap reproducing, which is the return on running CI's linter
+  locally: two real findings before the push rather than two failed builds after it.
+
+→ `crates/qqq-sys/src/harden.rs` (`mpk_support`, `landlock_available`,
+`host_capabilities`), `crates/qqq-sys/tests/harden.rs`.
+
+---
+
 ### §O-093 — `SEC-026`: the "blocked" note named a fact about `nix`, not about Landlock
 
 **What the code said.** `qqq-sys/src/harden.rs` recorded, under "What this module

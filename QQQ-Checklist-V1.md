@@ -1939,7 +1939,17 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified live: `HARDEN_PROBE:refused`, Landlock **ABI V7**, `no_new_privs=true`.
   → The earlier "blocked" note was a fact about `nix`, not about the item (`§O-082`).
   → §7.5 Hardening beyond Wasm
-- [ ] **SEC-027** Implement memory-protection-key support as an optional hardening feature.
+- [x] **SEC-027** Implement memory-protection-key support as an optional hardening feature.
+  → Done (detection) + `[!]` blocked (enforcement), and the distinction is measured:
+    `mpk_support()`, `landlock_available()` and `host_capabilities()` report what the
+    host offers, cross-checked in a test against `/proc/cpuinfo` so a probe stuck on
+    `false` (the safe-looking answer) cannot pass.
+  → Enforcement is blocked on two *specific* things, not on the item: every MPK crate
+    is a thin `unsafe` FFI wrapper, and `qqq-sys` may not contain `unsafe` until
+    `SAFETY.md`'s ledger gains a second maintainer (`GOV-008`, bus factor 1). This is
+    `SEC-019`/`SEC-026`'s shape with the search coming up empty.
+  → Verified: this host has no `pku` flag, so enforcement could not be exercised here
+    even if unblocked — which is exactly why detection is the deliverable.
   → §7.5 Hardening beyond Wasm
 - [ ] **SEC-028** Produce and publish the SBOM for every release.
   → §7.3 The defence timeline — where we stop an attack

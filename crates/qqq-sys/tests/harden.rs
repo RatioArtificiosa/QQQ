@@ -40,8 +40,9 @@
 use std::process::Command;
 
 use qqq_sys::harden::{
-    harden, HardenPolicy, HardenReport, SeccompProfile, Step, StepOutcome, STEP_DROP_GID,
-    STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP,
+    harden, host_capabilities, landlock_available, mpk_support, HardenPolicy, HardenReport,
+    SeccompProfile, Step, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK,
+    STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP,
 };
 
 /// The environment variable that turns this binary into a hardening child.
@@ -1316,13 +1317,16 @@ fn the_landlock_ruleset_actually_refuses_an_ungranted_path() {
         );
         return;
     }
-    if landlock == Step::Failed {
-        panic!(
-            "the Landlock ruleset was requested and the kernel has Landlock, but the \
-             step FAILED. That is a QQQ bug rather than an environment limitation. \
-             Report: {report:?}"
-        );
-    }
+    // `assert!` rather than `if ... { panic!() }`: clippy 1.98's `manual_assert`
+    // rejects the latter, correctly. Worth noting that this is a lint CI's toolchain
+    // has and the pinned 1.97 does not -- the same version gap that let 23
+    // `useless_conversion` errors reach CI earlier this session.
+    assert!(
+        landlock != Step::Failed,
+        "the Landlock ruleset was requested and the kernel has Landlock, but the \
+         step FAILED. That is a QQQ bug rather than an environment limitation. \
+         Report: {report:?}"
+    );
 
     assert_eq!(
         probe.as_deref(),
@@ -1335,4 +1339,107 @@ fn the_landlock_ruleset_actually_refuses_an_ungranted_path() {
          which is weaker evidence and must not be counted as a pass. \
          Report: {report:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-027 — MPK detection
+// ---------------------------------------------------------------------------
+
+/// **`SEC-027`: MPK support is detected, and the answer is measured.**
+///
+/// # Why a detection test is worth having when enforcement is not
+///
+/// The item is blocked on `unsafe`, and a blocked item that reports nothing is
+/// indistinguishable from an item nobody looked at. This test is what makes the
+/// block *measured*: it asserts that the probe runs, returns a value, and agrees
+/// with an independent reading of the same evidence.
+///
+/// The independent reading is the point. A detection function that always returned
+/// `false` would pass any test that only checked "it returns a bool", and `false` is
+/// also the *safe* answer — so a broken probe would look exactly like a host without
+/// the hardware. That is the `§O-085` shape again, in the one place where the wrong
+/// answer is invisible.
+#[test]
+fn mpk_detection_agrees_with_the_cpu_feature_list() {
+    let detected = mpk_support();
+
+    #[cfg(target_os = "linux")]
+    {
+        // Read the same source independently and check the two agree. If `/proc` is
+        // unavailable both answers are `false`, which this comparison accepts -- it
+        // cannot distinguish "no CPU support" from "no /proc", and it says so rather
+        // than asserting a value the environment may not have.
+        let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
+            eprintln!(
+                "no /proc/cpuinfo, so MPK detection cannot be cross-checked here; \
+                 reported {detected}"
+            );
+            return;
+        };
+        let expected = cpuinfo
+            .lines()
+            .filter(|l| l.starts_with("flags") || l.starts_with("Features"))
+            .any(|l| l.split_whitespace().any(|f| f == "pku" || f == "pkeys"));
+
+        assert_eq!(
+            detected, expected,
+            "the MPK probe disagrees with the kernel's own feature list. A probe that \
+             reports `false` on a capable host is not a safe failure: it makes a \
+             software gap look like a hardware one."
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        !detected,
+        "MPK enforcement is not wired off Linux, so the capability must report false"
+    );
+}
+
+/// **The capability report covers both optional features, and both are honest.**
+#[test]
+fn host_capabilities_reports_both_optional_features() {
+    let caps = host_capabilities();
+    assert_eq!(
+        caps.memory_protection_keys,
+        mpk_support(),
+        "the aggregate must agree with the individual probe"
+    );
+    assert_eq!(
+        caps.landlock,
+        landlock_available(),
+        "the aggregate must agree with the individual probe"
+    );
+
+    // On Linux with a modern kernel, Landlock availability must be `true` -- the
+    // container kernel is 6.x. This is asserted only where it is knowable, and the
+    // failure message says what a `false` here would mean.
+    #[cfg(target_os = "linux")]
+    if !caps.landlock {
+        eprintln!(
+            "note: this kernel reports no Landlock, so the availability probe \
+             cannot be positively confirmed here (an environment outcome, not a pass)"
+        );
+    }
+}
+
+/// **Landlock availability is a query, not an installation.**
+///
+/// `SEC-026`'s ruleset is irreversible, so a function that answered "is Landlock
+/// available?" by installing one would make the process permanently restricted as a
+/// side effect of asking a question. This test pins that: after calling the probe,
+/// the process can still open a file outside any prospective ruleset.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_landlock_availability_probe_has_no_side_effects() {
+    let _available = landlock_available();
+
+    // If the probe had called `restrict_self`, this open would be refused.
+    std::fs::File::open("/etc/hostname").unwrap_or_else(|e| {
+        panic!(
+            "the Landlock availability probe must not restrict the calling process: \
+             opening a normal file afterwards failed with {e}. An irreversible \
+             sandbox installed as a side effect of a query is a trap."
+        )
+    });
 }

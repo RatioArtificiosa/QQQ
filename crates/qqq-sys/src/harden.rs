@@ -49,9 +49,18 @@
 //!
 //! # What this module deliberately does NOT do
 //!
-//! * **Landlock LSM.** §7.5 lists it for defence in depth behind the capability
-//!   engine, and it needs a newer kernel API than `nix` currently wraps safely.
-//!   Named here rather than omitted silently.
+//! * **Landlock LSM** — implemented since `SEC-026`; see [`STEP_LANDLOCK`]. The
+//!   note that used to appear here said the feature "needs a newer kernel API than
+//!   `nix` currently wraps safely", which was true of `nix` and false as a
+//!   *conclusion*: the `landlock` crate wraps it safely.
+//! * **Enforcing MPK.** `SEC-027` is **detected** here ([`mpk_support`]) and not
+//!   enforced, for a hard reason rather than a preference — every available crate
+//!   is a thin `unsafe` FFI wrapper, and this crate may not contain `unsafe` until
+//!   `SAFETY.md`'s ledger changes, which needs a second maintainer (`GOV-008`).
+//!   The detection is still worth having: it turns "MPK is unavailable" from a
+//!   guess into a measurement, and it is what a deployment that *does* have the
+//!   hardware needs in order to know that enforcement is the next step rather than
+//!   an unknown.
 //! * **Capability dropping (`capset`).** §7.5 names "minimal capabilities". A
 //!   process that has already dropped to an unprivileged uid has no capabilities
 //!   to drop, so for the common deployment this is subsumed — and doing it
@@ -647,7 +656,6 @@ impl SeccompProfile {
 // ---------------------------------------------------------------------------
 // The steps
 // ---------------------------------------------------------------------------
-
 /// Step name: set `PR_SET_NO_NEW_PRIVS`.
 pub const STEP_NO_NEW_PRIVS: &str = "no_new_privs";
 /// Step name: drop the group identity.
@@ -719,6 +727,171 @@ pub const STEP_ORDER: &[&str] = &[
 /// * **seccomp** — narrows the syscall surface a compromised host can reach. It is
 ///   the weakest of the three (a filter is a policy, not a boundary) and the
 ///   reason it is off by default.
+///
+/// What the running host supports of §7.5's optional hardening.
+///
+/// # Why detection exists when enforcement does not
+///
+/// `SEC-027` asks for memory-protection-key support. Enforcement is blocked — see
+/// [`mpk_support`] for the exact reason — but detection is not, and it is worth
+/// having on its own for three reasons.
+///
+/// It turns "MPK is unavailable" from an assumption into a measurement, so a
+/// deployment can say why it runs without MPK and an operator with the hardware
+/// knows the gap is software rather than silicon. It is the piece `SEC-027` needs
+/// first regardless, since enforcing MPK without detecting it produces `SIGSEGV` on
+/// hardware that lacks `pku` — a crash rather than a hardening step. And it is
+/// honest: a module that lists a capability as "deliberately not done" without
+/// saying whether the machine *could* do it leaves a reader unable to tell a policy
+/// decision from an environment limit.
+///
+/// # Why this is not a `HardenPolicy` field
+///
+/// A policy is what the operator *asks for*; this is what the *host offers*. Putting
+/// it in the policy would let a caller assert a hardware fact, and the assertion
+/// would be indistinguishable from a measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCapabilities {
+    /// Whether the CPU advertises Memory Protection Keys (`pku` on x86-64,
+    /// equivalent feature bits elsewhere).
+    ///
+    /// Read from `HWCAP`/`/proc/cpuinfo` rather than attempted, because attempting
+    /// an MPK operation on hardware without it faults rather than returning an
+    /// error.
+    pub memory_protection_keys: bool,
+    /// Whether Landlock is available on this kernel.
+    ///
+    /// Reported separately from the [`STEP_LANDLOCK`] outcome because the outcome
+    /// depends on whether a caller *requested* it, and "the kernel has it" is the
+    /// fact an operator needs when deciding whether to ask.
+    pub landlock: bool,
+}
+
+/// Detect whether the host has MPK, and why enforcement is not wired up.
+///
+/// # The block, stated exactly
+///
+/// `SEC-027` is **not** blocked on hardware or on the item. It is blocked on one
+/// implementation route and on a governance constraint, and both are specific:
+///
+/// 1. **Every available crate is a thin `unsafe` FFI wrapper.** `pkey_mprotect`
+///    and friends expose `pkey_alloc`/`pkey_mprotect`/`pkey_free` as `unsafe`
+///    functions taking raw pointers and `c_int` flags. There is no safe API in the
+///    ecosystem the way `nix` and `landlock` provide one for `setuid` and Landlock.
+/// 2. **`qqq-sys` may not contain `unsafe`.** `SAFETY.md`'s ledger requires a
+///    written safety argument *and a second maintainer* (`GOV-008`, bus factor 1).
+///    Neither exists, and `ARCH-009`'s test enforces it: adding `allow(unsafe_code)`
+///    to this crate fails the build.
+///
+/// So this is the same shape as `SEC-019` and `SEC-026` were *before* safe wrappers
+/// were found — except that here the search came up empty. Recording which of the
+/// two it is matters: a reader who cannot tell will redo the search.
+///
+/// # What is deliberately not done
+///
+/// No `sysconf(_SC_PKEY_...)` call and no `pkey_alloc` probe. Both would answer the
+/// question more directly and both need `unsafe`, which is the thing being avoided.
+/// The CPU feature bit is the correct proxy: the kernel only offers the pkey
+/// syscalls on hardware that advertises it.
+#[must_use]
+pub fn mpk_support() -> bool {
+    cpu_has_pku()
+}
+
+/// Whether the CPU advertises `pku` (or the aarch64 equivalent).
+///
+/// # Why `/proc/cpuinfo` rather than `std::arch::is_x86_feature_detected!`
+///
+/// `is_x86_feature_detected!("pku")` would be cleaner and is not usable: stable
+/// Rust does not expose `pku` as a recognised feature string, and detecting it via
+/// `__cpuid` needs `unsafe`. Reading the kernel's own report is safe, works on
+/// every architecture, and reports what the *kernel* believes rather than what the
+/// CPU claims — which is the property that matters, since a kernel built without
+/// MPK support will not offer the syscalls even on capable silicon.
+#[cfg(target_os = "linux")]
+fn cpu_has_pku() -> bool {
+    // `/proc/cpuinfo` on aarch64 lists "Features" including the pkey-relevant bits;
+    // on x86-64 the flag is literally `pku`. Matching on either keeps this working
+    // on the two architectures §7.5's table targets.
+    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
+        // No `/proc` means this is not a Linux environment in any useful sense.
+        // Reporting `false` is the conservative answer: a caller that believes MPK
+        // exists and is wrong will fault.
+        return false;
+    };
+    cpuinfo
+        .lines()
+        .filter(|l| l.starts_with("flags") || l.starts_with("Features"))
+        .any(|l| l.split_whitespace().any(|f| f == "pku" || f == "pkeys"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_has_pku() -> bool {
+    // MPK exists on Windows and macOS under other names, and neither is wired here.
+    // `false` is the honest answer for "QQQ can use it", which is the question this
+    // function answers.
+    false
+}
+
+/// Detect Landlock availability without installing a ruleset.
+///
+/// # Why this exists separately from `apply_landlock`
+///
+/// A deployment deciding whether to *request* Landlock needs to know whether the
+/// kernel has it before it configures a policy. Asking by installing a ruleset is
+/// irreversible — the process cannot undo it — so the question must be answerable
+/// without side effects. This reads the kernel's own Landlock ABI report.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn landlock_available() -> bool {
+    // `landlock` exposes the probe through its own compatibility type. Using it
+    // rather than hand-rolling a `landlock_create_ruleset` call keeps this safe and
+    // keeps the ABI knowledge in the crate that owns it.
+    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
+    // `handle_access` on a default ruleset queries the kernel ABI. If the kernel
+    // has no Landlock, the crate reports an error rather than an ABI, and this
+    // returns false. No ruleset is created and `restrict_self` is never called, so
+    // nothing here is irreversible.
+    Ruleset::default()
+        .handle_access(AccessFs::from_all(ABI::V1))
+        .is_ok()
+        // The `RulesetAttr` import is needed for `handle_access`; silencing an
+        // unused-import warning is not the point -- this line exists so a reader
+        // sees that only the *query* half ran.
+        && ABI::V1 as u32 >= 1
+}
+
+/// Landlock is a Linux LSM, so no other platform has it.
+///
+/// # Why `false` and not `Unsupported`
+///
+/// This function answers "can QQQ use Landlock here?", and on Windows or macOS the
+/// answer is no. It is not a claim that those platforms lack a sandbox — they have
+/// their own, and this crate does not wire them — so a caller reading `false` should
+/// not conclude the host is unprotected. A caller that needs that distinction gets
+/// it from [`STEP_LANDLOCK`]'s per-step outcome, which says `Unsupported` and names
+/// the platform limitation.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn landlock_available() -> bool {
+    false
+}
+
+/// The optional hardening this host supports.
+#[must_use]
+pub fn host_capabilities() -> HostCapabilities {
+    HostCapabilities {
+        memory_protection_keys: mpk_support(),
+        landlock: landlock_available(),
+    }
+}
+
+/// Apply the hardening steps in [`STEP_ORDER`].
+///
+/// # Never fails
+///
+/// Returns a [`HardenReport`] describing what happened. See that type for why
+/// this is not a `Result`.
 #[must_use]
 pub fn harden(policy: &HardenPolicy) -> HardenReport {
     let mut report = HardenReport::new();

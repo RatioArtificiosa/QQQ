@@ -349,6 +349,28 @@ def content_size(rel: str) -> int | None:
     return len(data.replace(b"\r\n", b"\n"))
 
 
+# Above this size, a document is described qualitatively rather than to the byte.
+#
+# # Why a threshold rather than an exact number everywhere
+#
+# Because the two documents above it -- the Checklist (~253 KB) and the
+# Observations (~572 KB) -- are the two this project edits on **every round**, and
+# an exact byte count for them made `llms.txt` a churn magnet: every edit to
+# either invalidated the index, and the fix was self-referential (regenerating the
+# index is a commit; the next doc commit re-breaks it). A check that fails for a
+# reason unrelated to the change under review is one people regenerate
+# reflexively, and a reflexively-regenerated check is one nobody reads.
+#
+# The number is still useful above the threshold -- it is the *precision* that is
+# not. `large (~572 KB)` tells a model to fetch deliberately; `572 KB` tells it the
+# same thing and goes stale on the next edit.
+VOLATILE_KB = 100
+
+# The bucket a large document's size is reported in, so the number moves only when
+# the document's magnitude changes rather than on every line added.
+SIZE_BUCKET_KB = 10
+
+
 def size_of(rel: str) -> str:
     """A human size for a file, **without its own parentheses**.
 
@@ -369,9 +391,15 @@ def size_of(rel: str) -> str:
         return "missing"
     if n < 1024:
         return f"{n} B"
-    if n < 1024 * 1024:
-        return f"{n // 1024} KB"
-    return f"{n / (1024 * 1024):.1f} MB"
+    kb = n // 1024
+    if kb < VOLATILE_KB:
+        # Small enough to be stable across a change: report it exactly, because
+        # the number is information rather than noise.
+        return f"{kb} KB"
+    # Large and volatile: report the magnitude, bucketed, so the value moves only
+    # when the document changes by a bucket rather than on every edit.
+    bucketed = (kb // SIZE_BUCKET_KB) * SIZE_BUCKET_KB
+    return f"~{bucketed} KB"
 
 
 def first_heading(path: pathlib.Path) -> str:
@@ -403,9 +431,10 @@ def render_index() -> str:
     )
     out.append("")
     out.append(
-        "Sizes are **LF-normalised content byte counts**, so they are identical "
-        "on every platform regardless of the checkout's line endings. They may "
-        "differ slightly from a file manager's figure on Windows."
+        "Sizes are **LF-normalised content byte counts**, so they are identical on "
+        "every platform regardless of the checkout's line endings. The two largest "
+        "documents show a bucketed `~N KB` instead of an exact figure: they change "
+        "on every commit, and an exact count would go stale each time."
     )
     out.append("")
 
@@ -658,6 +687,27 @@ def self_test() -> int:
             "the corpus must say what it could not include",
         )
         FULL_INCLUDES = saved_full
+
+        # --- the churn property: a large document's bucket is stable ------
+        #
+        # The size of the two volatile documents must not move for a small edit,
+        # or the index is invalidated by every commit that touches them.
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            big = tmp / "big.md"
+            # A document just above the threshold, and the same document with 2 KB
+            # added: both must land in the SAME bucket.
+            big.write_bytes(b"x" * (VOLATILE_KB * 1024 + 500))
+            before = len(big.read_bytes()) // 1024 // SIZE_BUCKET_KB
+            big.write_bytes(b"x" * (VOLATILE_KB * 1024 + 2500))
+            after = len(big.read_bytes()) // 1024 // SIZE_BUCKET_KB
+        expect(
+            "a small edit does not move a large document's size bucket",
+            before == after,
+            f"bucket {before} became {after}; a 2 KB edit must not churn the index",
+        )
 
         # --- the determinism property, which is the reason for the above ---
         #

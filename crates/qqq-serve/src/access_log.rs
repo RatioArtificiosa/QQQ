@@ -412,6 +412,15 @@ impl Record {
     /// follows `component`, and `the_two_encodings_carry_the_same_fields` compares
     /// the two renderings field-by-field so the next omission fails a test instead of
     /// shipping.
+    ///
+    /// # Every variable string goes through [`one_line`]
+    ///
+    /// The fixed-width columns are formatted from values this module validates
+    /// (`trace_id`, `span_id`, the level) and are safe by construction. Everything
+    /// else — `tenant`, `component`, `manifest_rev`, `msg`, `code` and both halves of
+    /// every extra field — is data from outside this layer, and is sanitized so the
+    /// one-line guarantee holds no matter what a guest puts in a request. See
+    /// [`one_line`] for the measurement that made this necessary.
     #[must_use]
     pub fn render_human(&self) -> String {
         let mut out = String::with_capacity(160);
@@ -421,16 +430,16 @@ impl Record {
             self.level.as_upper(),
             self.trace_id.as_str(),
             self.span_id.as_str(),
-            truncate(&self.tenant, 12),
-            self.component,
-            self.manifest_rev
+            one_line(&truncate(&self.tenant, 12)),
+            one_line(&self.component),
+            one_line(&self.manifest_rev)
         );
-        let _ = write!(out, "{}", self.msg);
+        let _ = write!(out, "{}", one_line(&self.msg));
         if let Some(code) = &self.code {
-            let _ = write!(out, " ({code})");
+            let _ = write!(out, " ({})", one_line(code));
         }
         for (k, v) in &self.extra {
-            let _ = write!(out, " {k}={v}");
+            let _ = write!(out, " {}={}", one_line(k), one_line(v));
         }
         out
     }
@@ -474,6 +483,23 @@ impl Redactor {
     /// variable resolves to an empty string, and a redactor that treated it as a
     /// secret would corrupt every log line it touched. It is also why the guard is
     /// here rather than at the call site: a caller cannot be relied on to check.
+    ///
+    /// # Why duplicates are removed *before* the length sort
+    ///
+    /// `sort_by_key(Reverse(len)); dedup();` looks right and is not. `sort_by_key` is
+    /// **stable**, so equal-length values keep their input order, and `dedup` only
+    /// removes *adjacent* equal elements. Measured: `from_values(["abcd", "zzzz",
+    /// "abcd"])` kept all **3** — the two `abcd` entries were separated by `zzzz`
+    /// after the sort, so neither sat next to its twin.
+    ///
+    /// The consequence is not cosmetic. The marker is numbered by position (`i + 1`
+    /// in `apply`), so one secret could be reported as both `[redacted:1]` and
+    /// `[redacted:3]` — two identifiers for one secret, which breaks the correlation
+    /// the marker exists to provide.
+    ///
+    /// So: sort by **value** first (a total order, which puts equal elements adjacent
+    /// regardless of length) and `dedup`, then sort by length for the matching order.
+    /// Two passes over a list that is small and fixed at startup.
     #[must_use]
     pub fn from_values<I, S>(values: I) -> Self
     where
@@ -485,11 +511,17 @@ impl Redactor {
             .map(Into::into)
             .filter(|v| !v.is_empty())
             .collect();
-        // Longest first, which is the ordering the redactor depends on. `Reverse`
-        // keeps this a `sort_by_key` rather than a comparator clippy reads as an
-        // accident.
-        values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+
+        // Pass 1: distinct. Sorting by value makes equal elements adjacent; sorting by
+        // length does not, which was the defect.
+        values.sort_unstable();
         values.dedup();
+
+        // Pass 2: longest first, which is what the matching depends on — a short
+        // secret that prefixes a longer one must not match first. `sort_by_key` is
+        // stable and the values are now distinct, so equal lengths keep the value
+        // order from pass 1 and the marker numbering is deterministic.
+        values.sort_by_key(|v| std::cmp::Reverse(v.len()));
         Self { values }
     }
 
@@ -614,6 +646,44 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Replace every character that could break the human format's one-line guarantee.
+///
+/// # Why the human renderer needs this and the JSON renderer does not
+///
+/// `json_string` escapes `\n`, `\r` and every other control character, so a JSON line
+/// can never be split or coloured by its own content — the module docs call log
+/// injection *"exactly the property §10.3's host-side redaction exists to protect."*
+///
+/// The human renderer had **no such guard**, and that was a security defect, not a
+/// cosmetic one. Measured before the fix: a `msg` of
+/// `"GET /x 200\nINFO  fake  fake  fake  false  FORGED LINE"` rendered as **2 lines**,
+/// and a `msg` carrying `ESC[31m` put a raw ANSI escape into an operator's terminal.
+/// Both are guest-controlled: `msg` comes from the request, so a guest could forge a
+/// log line that a `grep`-based alerting rule would read as genuine, or emit terminal
+/// control sequences into whatever reads the log.
+///
+/// # Why the whole record is passed through it, not just `msg`
+///
+/// Every string on the record is guest-influenced — `msg` from the request line,
+/// `code` from a body, `extra` values from whatever the call site logs, and even
+/// `tenant` from a peer address or, later, a header. Sanitizing only `msg` would leave
+/// the same forgery available one field over, which is the "looks handled" failure this
+/// file's redaction docs already warn about.
+///
+/// The replacement is `U+FFFD` rather than a deletion or an escape: a line with a
+/// visibly broken character tells a reader that something was there, while silently
+/// dropping the byte could make two different forged messages render identically.
+#[must_use]
+fn one_line(s: &str) -> String {
+    if s.chars().all(|c| !c.is_control()) {
+        // The common case: no allocation and no copy.
+        return s.to_owned();
+    }
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
 }
 
 /// Encode a string as a JSON string literal, with every character JSON requires
@@ -1016,6 +1086,72 @@ mod tests {
         assert!(
             !r.msg.contains("aaaa") && !r.msg.contains("bbbb"),
             "{}",
+            r.msg
+        );
+    }
+
+    /// **A repeated secret collapses to one value, so it gets one marker.**
+    ///
+    /// # The defect, measured
+    ///
+    /// `from_values` sorted by **length** and then called `dedup`. `sort_by_key` is
+    /// stable, so equal-length values keep their input order, and `dedup` removes only
+    /// *adjacent* equal elements. Measured:
+    /// `from_values(["abcd", "zzzz", "abcd"])` kept all **3** — the two `abcd` entries
+    /// were separated by `zzzz`, so neither sat beside its twin.
+    ///
+    /// `apply` numbers its markers by position, so the same secret was reported as both
+    /// `[redacted:1]` and `[redacted:3]`. That breaks the one thing the marker is for:
+    /// an operator counting occurrences of one secret across lines would see two
+    /// different identifiers and conclude two secrets were leaking.
+    ///
+    /// Two cases are covered, because they fail for the same reason but reach the sort
+    /// differently: equal-length duplicates (interleaved with another equal-length
+    /// value) and different-length duplicates.
+    #[test]
+    fn a_repeated_secret_collapses_to_one_value() {
+        // Equal lengths: the case that was broken. `zzzz` sits between the twins.
+        let interleaved = Redactor::from_values(["abcd", "zzzz", "abcd"]);
+        assert_eq!(interleaved.len(), 2, "the duplicate must collapse");
+
+        // Different lengths: the duplicate is separated by length ordering.
+        let mixed = Redactor::from_values(["abc", "ab", "abc"]);
+        assert_eq!(mixed.len(), 2, "the duplicate must collapse");
+
+        // And the marker numbering follows: one secret, one marker, whichever of the
+        // two distinct values it is.
+        let mut r = record();
+        r.msg = "here abcd and abcd twice".to_owned();
+        let hits = r.redact(&interleaved);
+        assert_eq!(hits, 2, "both occurrences are replaced");
+        assert!(r.msg.contains("[redacted:1]"), "{}", r.msg);
+        assert!(
+            !r.msg.contains("[redacted:2]"),
+            "one secret must not produce a second marker: {}",
+            r.msg
+        );
+        assert!(!r.msg.contains("abcd"), "{}", r.msg);
+    }
+
+    /// Deduplication must not disturb the longest-first *matching* order `apply` needs.
+    ///
+    /// The control for the test above: adding a value sort before the length sort could
+    /// plausibly have broken the ordering that stops a short secret from matching first.
+    #[test]
+    fn dedup_preserves_longest_first_matching() {
+        let redactor = Redactor::from_values(["secret", "secret", "secret-extended-value"]);
+        assert_eq!(
+            redactor.len(),
+            2,
+            "the repeated short value must collapse, leaving two distinct"
+        );
+
+        let mut r = record();
+        r.msg = "value=secret-extended-value".to_owned();
+        r.redact(&redactor);
+        assert!(
+            !r.msg.contains("extended-value") && !r.msg.contains("secret"),
+            "the longer value must still match first: {}",
             r.msg
         );
     }

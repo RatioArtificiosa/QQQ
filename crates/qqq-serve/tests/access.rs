@@ -203,12 +203,16 @@ fn head(target: &str) -> RequestHead {
 }
 
 /// The record the server builds for a response to `GET target`.
+///
+/// `trace` and `span` are both 1 here; the tests that care about their relationship
+/// pass their own values.
 fn record_for(status: u16, target: &str) -> qqq_serve::access_log::Record {
     access_record(
         &head(target),
         target,
         &Response::text(status, "body"),
         "127.0.0.1",
+        1,
         1,
     )
 }
@@ -328,6 +332,7 @@ async fn an_error_response_yields_a_code_on_the_record() {
         &Response::text(500, "boom: QQQ-3007"),
         "127.0.0.1",
         1,
+        1,
     );
     assert_eq!(
         rec.code(),
@@ -372,6 +377,7 @@ async fn a_malformed_code_is_not_extracted() {
             &Response::text(500, body),
             "127.0.0.1",
             1,
+            1,
         );
         assert_eq!(rec.code(), None, "`{body}` is not a code");
     }
@@ -382,6 +388,7 @@ async fn a_malformed_code_is_not_extracted() {
         "/ok",
         &Response::text(500, "QQQ-1234"),
         "127.0.0.1",
+        1,
         1,
     );
     assert_eq!(rec.code(), Some("QQQ-1234"));
@@ -488,4 +495,269 @@ fn the_record_describes_the_request_that_was_sent() {
     assert_eq!(fields.get("path"), Some(&"/orders/42"));
     assert_eq!(fields.get("method"), Some(&"GET"));
     assert_eq!(fields.get("status"), Some(&"200"));
+}
+
+// ---------------------------------------------------------------------------
+// Three defects CodeRabbit found in the first version of this work
+// ---------------------------------------------------------------------------
+//
+// Each was reproduced with a failing test **before** it was fixed, and each test
+// below is the one that failed. They live in the integration suite rather than beside
+// the types because two of the three are about what the *server* does with a record,
+// not about what a record is.
+
+/// The JSON renderer is unchanged, and the human one is now covered by `one_line`.
+///
+/// # Why the fixture puts the newline in the *target*
+///
+/// A first version of this test put the forged line in the response body — which
+/// `access_record` never reads, so the assertion could not fail and the test was
+/// vacuous. The target is the guest-controlled field that actually reaches `msg`, and
+/// it is the realistic vector: a client chooses its own request target, so a request
+/// line of `GET /x&#10;INFO  ... FORGED HTTP/1.1` is something any attacker can send.
+#[test]
+fn a_newline_in_the_request_cannot_forge_a_log_line() {
+    let logger = Logger::new(Format::Human, Level::Info);
+    let target = "/x\u{0a}INFO  00000000000000000000000000000000 0000000000000000 evil evil FORGED";
+    let rec = access_record(
+        &head(target),
+        target,
+        &Response::text(200, "body"),
+        "127.0.0.1",
+        1,
+        1,
+    );
+
+    // The raw newline really is in the record — otherwise this test proves nothing.
+    assert!(
+        rec.msg().contains('\n'),
+        "the fixture must actually contain a newline: {:?}",
+        rec.msg()
+    );
+
+    let line = logger.emit(rec).expect("Info passes");
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "the human format must never produce a second line: {line:?}"
+    );
+    assert!(
+        !line.contains('\n') && !line.contains('\r'),
+        "no line break may survive: {line:?}"
+    );
+    // The forged text is still *present* — as inert data on one line. Deleting it
+    // would hide that something was attempted, and a reader needs to see the attempt.
+    assert!(line.contains("FORGED"), "the attempt stays visible: {line}");
+}
+
+/// **A terminal escape in a request cannot reach an operator's terminal.**
+///
+/// The same defect, the other half: `ESC[31m` in a guest-controlled field was written
+/// through unescaped, so a guest could colour, erase or overwrite what an operator
+/// sees. `is_control()` covers C0 (including `ESC`, `BEL`, `\n`, `\r`, `\t`) and C1.
+#[test]
+fn a_terminal_escape_in_the_request_is_neutralised() {
+    let logger = Logger::new(Format::Human, Level::Info);
+    let rec = access_record(
+        &head("/x"),
+        "/x",
+        &Response::text(200, "body"),
+        "127.0.0.1",
+        1,
+        1,
+    );
+    // Rebuild with an escape in the message, through the public builder.
+    let rec = rec.with_field("note", "a\u{1b}[31mRED\u{1b}[0m b\u{7}");
+
+    let line = logger.emit(rec).expect("Info passes");
+    assert!(
+        !line.contains('\u{1b}'),
+        "no ESC may survive into the human line: {line:?}"
+    );
+    assert!(
+        !line.contains('\u{7}'),
+        "no BEL may survive into the human line: {line:?}"
+    );
+    // The replacement character marks where something was, rather than silently
+    // dropping it — two different forged messages must not render identically.
+    assert!(line.contains('\u{FFFD}'), "{line:?}");
+}
+
+/// The JSON format is unaffected, and was never the problem.
+///
+/// The control for the two tests above: redaction of control characters must not have
+/// changed the JSON encoding, which already escaped them. Without this, the fix could
+/// have introduced the opposite defect — a JSON line whose `msg` was silently
+/// rewritten.
+#[test]
+fn json_still_escapes_rather_than_rewrites() {
+    let logger = Logger::new(Format::Json, Level::Info);
+    let rec = access_record(
+        &head("/x"),
+        "/x",
+        &Response::text(200, "body"),
+        "127.0.0.1",
+        1,
+        1,
+    )
+    .with_field("note", "a\nb\tc");
+
+    let line = logger.emit(rec).expect("Info passes");
+    assert_eq!(line.lines().count(), 1, "{line:?}");
+    let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    // Escaped *and recoverable*: the value round-trips to exactly what was stored.
+    assert_eq!(v["note"], "a\nb\tc");
+    assert!(
+        !line.contains('\u{FFFD}'),
+        "JSON escapes, it does not replace: {line}"
+    );
+}
+
+/// **A trace id identifies a connection, not a request ordinal.**
+///
+/// # The defect, measured
+///
+/// `serve_connection` derived the trace id from its own per-connection counter, and
+/// every connection starts at zero. So the first request on **every** concurrent
+/// connection carried `00000000000000000000000000000001`: correlating two lines from
+/// different connections — the entire reason §10.3 asks for a trace id — was
+/// impossible, and a query grouping by it would collapse unrelated traffic into one
+/// bucket.
+///
+/// The trace id now comes from an atomic counter allocated on the acceptor, and the
+/// span stays per-connection to keep a keep-alive conversation ordered.
+#[test]
+fn concurrent_connections_get_distinct_trace_ids() {
+    let first = access_record(
+        &head("/a"),
+        "/a",
+        &Response::text(200, "x"),
+        "t",
+        // Two different connections, each at its first request (span 1).
+        7,
+        1,
+    );
+    let second = access_record(&head("/b"), "/b", &Response::text(200, "x"), "t", 8, 1);
+
+    assert_ne!(
+        first.trace_id(),
+        second.trace_id(),
+        "two connections must not share a trace id"
+    );
+    // The span *is* the per-connection ordinal, so two first-requests agree on it —
+    // that is correct and is what keeps a keep-alive conversation ordered.
+    assert_eq!(first.span_id(), second.span_id(), "span is per-connection");
+}
+
+/// Within one connection, successive requests share the trace and differ by span.
+///
+/// The other half of the contract: correlation needs the trace to be *stable* across a
+/// conversation, so the fix above must not have made it change per request.
+#[test]
+fn one_connection_keeps_its_trace_across_requests() {
+    let one = access_record(&head("/a"), "/a", &Response::text(200, "x"), "t", 5, 1);
+    let two = access_record(&head("/b"), "/b", &Response::text(200, "x"), "t", 5, 2);
+
+    assert_eq!(
+        one.trace_id(),
+        two.trace_id(),
+        "a conversation shares one trace id"
+    );
+    assert_ne!(
+        one.span_id(),
+        two.span_id(),
+        "each request in it is its own span"
+    );
+    // And the ids are the values the caller supplied, not re-derived.
+    assert_eq!(one.trace_id().as_str(), "00000000000000000000000000000005");
+    assert_eq!(one.span_id().as_str(), "0000000000000001");
+    assert_eq!(two.span_id().as_str(), "0000000000000002");
+}
+
+/// A connection's trace id is allocated by the server, and two connections differ.
+///
+/// # Why this does not restate the counter
+///
+/// A previous draft asserted `AtomicU64::fetch_add` returns distinct values — a test of
+/// the standard library, not of this server, and one that would pass with the accept
+/// loop never calling it. That is the `§O-120` shape: a suite aimed at the wrong
+/// artifact.
+///
+/// What is asserted here is the **allocation function**, which is production code the
+/// accept loop calls once per connection. The server's `println!` sink cannot be read
+/// back from a test, so this is the furthest the property can be pushed without a real
+/// stdout reader — and it covers the part that was wrong.
+#[test]
+fn trace_ids_are_allocated_uniquely() {
+    let counter = qqq_serve::server::TraceCounter::new();
+    let ids: Vec<u64> = (0..1000).map(|_| counter.next_trace()).collect();
+
+    let unique: std::collections::BTreeSet<u64> = ids.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "every connection must get a distinct trace id"
+    );
+
+    // Distinct across *threads* too, since the accept loop is not the only caller in a
+    // multi-threaded runtime — and `fetch_add` is what makes that true.
+    let counter = std::sync::Arc::new(qqq_serve::server::TraceCounter::new());
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let c = std::sync::Arc::clone(&counter);
+            std::thread::spawn(move || (0..250).map(|_| c.next_trace()).collect::<Vec<u64>>())
+        })
+        .collect();
+    let all: Vec<u64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("thread"))
+        .collect();
+    let unique: std::collections::BTreeSet<u64> = all.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        all.len(),
+        "the counter is atomic across threads"
+    );
+}
+
+/// **The first trace id the server ever issues is not the reserved all-zero value.**
+///
+/// # The defect, measured
+///
+/// `TraceCounter` derived `Default`, so the atomic started at `0` and the **first
+/// connection the server accepted** was logged with trace id
+/// `00000000000000000000000000000000`. The W3C Trace Context specification reserves
+/// exactly that value to mean *invalid or absent*, so a tracing backend receiving it
+/// treats the record as having no trace — the request an operator is most likely to
+/// inspect during a startup was the one they could not correlate.
+///
+/// My own tests passed before the fix, and the reason is instructive: they asserted the
+/// ids were **distinct**, and `0` is distinct from `1`. Uniqueness was never the
+/// property at stake — validity was — and no test stated it. This one does.
+#[test]
+fn the_first_trace_id_is_not_the_reserved_zero() {
+    let counter = qqq_serve::server::TraceCounter::new();
+    let first = counter.next_trace();
+
+    assert_ne!(first, 0, "0 is reserved to mean `no trace`");
+    assert_eq!(first, 1, "the first allocation is 1");
+
+    // And through `Default`, which is the path a derived `Default` got wrong. A
+    // `#[derive(Default)]` on `TraceCounter` would silently reinstate the defect, so
+    // this asserts the hand-written impl is the one in force.
+    let via_default = qqq_serve::server::TraceCounter::default();
+    assert_ne!(
+        via_default.next_trace(),
+        0,
+        "`Default` must not be able to produce the reserved id"
+    );
+
+    // Assert on the *rendered* form, because that is what reaches the log.
+    let rec = access_record(&head("/a"), "/a", &Response::text(200, "x"), "t", first, 1);
+    assert_ne!(
+        rec.trace_id().as_str(),
+        "00000000000000000000000000000000",
+        "the rendered trace id must not be the reserved value"
+    );
+    assert_eq!(rec.trace_id().as_str(), "00000000000000000000000000000001");
 }

@@ -10468,4 +10468,152 @@ workflow.
 
 ---
 
+### §O-124 — A doc comment that stated the invariant and did not enforce it
+
+**The defect.** `access_log.rs`'s module docs say, in as many words:
+
+> It is **not** a different data model: the same record, two encodings. A human
+> format that could carry a field the JSON form cannot is a second source of truth
+> for what a log line is.
+
+`render_human` then omitted `manifest_rev`, which `render_json` wrote and §10.3 lists
+as mandatory on **every** line. I wrote the warning and violated it in the same file,
+in the same hour. The integration test caught it only because it happened to check
+that field: the assertion was `human line must carry 'rev-9'`, and the failure output
+showed `acme  qqq-serve  GET /nope 404` — the gap sitting between `component` and
+`msg`.
+
+**Why writing the invariant down did not enforce it.** The two renderers were 15 lines
+apart, and neither *referred to the other*. A comment describing a relationship between
+two pieces of code is not a check on that relationship; it is a note that the author
+was aware of it. Awareness decays at the first edit — which is precisely the argument
+the comment was making, applied to the comment itself.
+
+**The remedy, and why it is shaped this way.** `the_two_encodings_carry_the_same_fields`
+builds one record, renders both ways, and for each field asserts the JSON carries it
+**and** the human line contains its value. It also compares the JSON key set against
+the expected list as a **set** (because `serde_json::Value` sorts keys while
+`render_json` writes §10.3's order), so a field added to one renderer and not the
+comparison fails rather than passing unnoticed. The test found a *second* thing on its
+first run: `level` is `info` in JSON and `INFO` in human, a deliberate difference the
+naive `contains` rejected — so the test now names that as the one exception rather than
+being quietly loosened.
+
+**The generalisable rule.** When documentation asserts a relationship between two
+things, **either write the check or do not write the claim** — and a claim like this
+one is worth keeping only because it is now checked. This is the 13th instance this
+session of *a control believed live that is not*, and the first where the control was a
+sentence I had written myself.
+
+**A second, smaller instance in the same commit.** The level rule (`>=500` → Error,
+`>=400` → Warn, else Info) lived inline inside `serve_connection`. It was correct, and
+it was the entire operational value of the field — but it had no name, so no test could
+state it and no reader could find it. Extracted to the public `server::level_of` not
+for tidiness but because **an unnamed rule cannot be asserted**. The same extraction
+moved the record's construction into `server::access_record`, which also brought
+`serve_connection` back under the line limit honestly instead of by suppression.
+
+→ `crates/qqq-serve/src/access_log.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-serve/tests/access.rs`.
+
+---
+
+### §O-125 — Eight findings from external review, seven of them real, in code whose own tests were green
+
+**Context.** Per the user's instruction, CodeRabbit (advanced account, CLI 0.7.8,
+authenticated as `RatioArtificiosa`) reviews the work. This is the first systematic use,
+and the results are the most useful external signal this project has had.
+
+**How to run it against this repo — the two things that cost time.**
+
+- `coderabbit review --agent --light --committed` returns
+  `{"status":"review_skipped","message":"No committed changes detected"}` on `main`,
+  because `reviewType=committed` diffs the current branch **against itself**
+  (`baseBranch: "main"`, `currentBranch: "main"`) and finds nothing — even with a fresh
+  commit sitting at HEAD. It is not a bug in the CLI; the default base is simply useless
+  on a single-branch repo.
+- **`--base-commit <sha>` is the fix.** `coderabbit review --agent --light --committed
+  --base-commit 13c9cd3` reviews everything since that commit and completes
+  (`"outcome":"completed"`, plus a `reviewedFiles` list). This is the invocation to use
+  for every review from now on.
+- Scope is **always a git diff**. There is no "review the whole repo" flag — the whys
+  are `--committed`, `--uncommitted`, `--include-untracked`, `--dir <path>`, and
+  `--base` / `--base-commit`. Folder-level scope is `--dir`. For a true whole-repo pass,
+  the diff base has to be the empty tree or the first commit.
+- `--light` is **required** on this machine: without it the run dies with
+  `TRPCWebSocketClosedError` / `WebSocket closed`. Even *with* it, a long run can still
+  end in a socket close after emitting findings — the findings that arrived first are
+  valid and worth reading, which is why the JSONL is parsed rather than trusted to be
+  complete.
+- Budget: 10 checks/hour. `coderabbit usage` and `coderabbit stats` report the period
+  and the running count.
+
+**The eight findings, and what each was worth.**
+
+| # | Finding | Verdict | Evidence |
+|---|---|---|---|
+| 1 | `render_human` writes control characters verbatim | **Real, security** | reproduced: a `msg` with `\n` rendered as **2 lines** |
+| 2 | `println!` in `emit_record` can panic | **Real** | a closed stdout makes `println!` panic; the panic is inside a spawned task |
+| 3 | trace id derived from a per-connection counter | **Real** | reproduced: two connections both got `000…001` |
+| 4 | `TraceCounter` starts at `0` | **Real** | reproduced: first id `00000000000000000000000000000000` |
+| 5 | `Redactor` dedups after a length sort | **Real** | reproduced: `["abcd","zzzz","abcd"]` kept **3** |
+| 6 | checklist test count stale (518 vs 524) | **Real but mis-derived** | the counts were stale; CodeRabbit's replacement figure was also wrong |
+| 7 | rewritten `render_human` should also sanitize `extra` keys | **Already covered** | fixed as part of finding 1 — it named the same helper |
+| 8 | (earlier run) `--fail-on` did not gate `--sarif` | **Real** | reproduced last round: exit 0 where it should be 1 |
+
+**Findings 1, 3, 4 and 5 are the ones to study, because they share a cause.**
+
+Each is a *value or guard that looks correct and is not*, in code that had passing tests:
+
+- **1** — the JSON renderer escaped control characters and the human one did not. The
+  module's docs call log injection *"exactly the property §10.3's host-side redaction
+  exists to protect"*, and then guarded one of two encodings. My integration test
+  asserted `!line.contains('\n')` and **passed** — every fixture it built had a
+  newline-free message. A test whose fixtures cannot exhibit the defect is a test that
+  certifies nothing (`§O-118`, again).
+- **3** — "a trace id correlates records across connections", implemented from a counter
+  that restarts per connection. Uniqueness *within* a connection was verified; the
+  property that makes the field worth having was not stated anywhere.
+- **4** — `#[derive(Default)]` on a counter whose first value must not be `0`. My tests
+  asserted ids were **distinct**, and `0` is distinct from `1`. **Uniqueness was never
+  the property at stake; validity was.** The W3C Trace Context spec reserves all-zero to
+  mean *invalid/absent*, so the first connection the server ever accepted — the one an
+  operator looks at during startup — was logged with an id a tracing backend reads as
+  *no trace*.
+- **5** — `sort_by_key(Reverse(len)); dedup();`. `sort_by_key` is **stable**, so
+  equal-length values keep input order and `dedup` (which removes only *adjacent*
+  equals) leaves duplicates that were separated by another equal-length value. The
+  consequence is not cosmetic: the marker is numbered by position, so one secret was
+  reported as both `[redacted:1]` and `[redacted:3]`.
+
+**The pattern, stated plainly.** All four are violations of the same rule this file keeps
+rediscovering: **a check must be aimed at the property that matters, not at a nearby
+property that happens to be easy to assert.** `!contains('\n')` on newline-free input;
+distinctness where validity was needed; uniqueness within a scope where cross-scope
+uniqueness was the point; a `dedup` whose precondition (sortedness by value) was not
+established. None of these is visible from the code's own test suite, because the test
+suite was written by the same reasoning that produced the defect.
+
+**This is the argument for external review, and it is stronger than "fresh eyes".** An
+external reviewer does not share the author's model of what the code is *for*, so it
+does not inherit the author's blind spots about which properties are already handled.
+Seven independent findings across two runs, all in code I had just written and declared
+verified, is a measured rate — and it is why the user's instruction to use CodeRabbit
+was worth following rather than treating as ceremony.
+
+**Skill recorded.** `skills/coderabbit/SKILL.md` documents the install state, the
+`--light` requirement, the `--base-commit` invocation, the JSONL finding types, the
+budget, and the rule that each finding is **reproduced with a failing test before it is
+fixed** — which is what turned all eight into evidence rather than opinion.
+
+**Every fix is fault-injected.** Reverting `one_line` made the forgery test fail with
+**3 lines**; reverting the dedup order made `a_repeated_secret_collapses_to_one_value`
+fail; reverting the counter start to `0` made `the_first_trace_id_is_not_the_reserved_zero`
+fail. A fix whose test passes both before and after is not a test of the fix.
+
+→ `crates/qqq-serve/src/access_log.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-serve/tests/access.rs`, `skills/coderabbit/SKILL.md`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

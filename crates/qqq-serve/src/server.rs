@@ -192,6 +192,18 @@ pub async fn serve(
     // handle whose lifetime the tasks outlive.
     let task_shutdown = shutdown.clone();
 
+    // The trace counter, shared across every connection task.
+    //
+    // # Why the acceptor owns it and the connection does not
+    //
+    // A trace id exists to correlate records **across** connections — that is the
+    // whole reason §10.3 asks for one. A per-connection counter cannot do that: every
+    // connection begins at zero, so the first request on each concurrent connection
+    // produced the identical id `00000000000000000000000000000001`. Measured before
+    // this change, and it is the difference between an identifier and a request
+    // ordinal.
+    let trace_counter = Arc::new(TraceCounter::new());
+
     // The accept loop hands each connection to a task. `accept_stream` takes a
     // synchronous callback, so the spawn happens here rather than inside it —
     // and the callback must not block, because it runs on the acceptor.
@@ -203,12 +215,18 @@ pub async fn serve(
             let connection_config = Arc::clone(&connection_config);
             let local_shutdown = task_shutdown.clone();
             let logger = Arc::clone(&logger);
+            let trace_counter = Arc::clone(&trace_counter);
+
+            // Allocated here, on the acceptor, so the id is fixed before the task
+            // starts and two connections can never share one — not even if the
+            // scheduler runs the tasks in an unexpected order.
+            let trace = trace_counter.next_trace();
 
             tokio::spawn(async move {
-                let tenant = tenant_of(peer);
+                let id = ConnectionId::new(peer, trace);
                 {
                     let mut l = ledger.lock().await;
-                    if !l.admit(&tenant) {
+                    if !l.admit(&id.tenant) {
                         // Refused before reading a byte. Reading a request the
                         // server will not answer spends the attacker's cost on
                         // the defender, which is the wrong way round.
@@ -228,12 +246,12 @@ pub async fn serve(
                     connection_config.as_ref(),
                     &local_shutdown,
                     &logger,
-                    peer,
+                    &id,
                 )
                 .await;
 
                 let mut l = ledger.lock().await;
-                l.release(&tenant);
+                l.release(&id.tenant);
                 let _ = served;
             });
         })
@@ -340,19 +358,26 @@ pub fn access_record(
     path: &str,
     response: &response::Response,
     tenant: &str,
-    seq: u64,
+    trace: u64,
+    span: u64,
 ) -> Record {
     let status = response.status;
     let rec = Record::new(
         level_of(status),
-        TraceId::from_counter(seq),
-        // The span is the request within the connection. Derived from the trace
-        // counter so the two stay correlated without a second source of ordering.
-        TraceId::span(&format!("{seq:016x}"))
+        // **Server-wide**, not per-connection. Measured before the fix: with the trace
+        // id derived from a per-connection counter, the first request on *every*
+        // concurrent connection carried `00000000000000000000000000000001` — so the
+        // "trace id" was a request ordinal, not an identifier, and correlating two
+        // lines from different connections was impossible. The caller supplies a
+        // counter taken from the accept loop, which is unique for the process.
+        TraceId::from_counter(trace),
+        // The span is the request *within* the connection: ordered for a keep-alive
+        // conversation, which is what a span means. It stays per-connection.
+        TraceId::span(&format!("{span:016x}"))
             // Unreachable: the format is exactly 16 hex digits. The fallback exists
             // because a logger must not be able to take the server down, and
             // `unwrap` here would make a logging bug a denial of service.
-            .unwrap_or_else(|_| TraceId::from_counter(seq)),
+            .unwrap_or_else(|_| TraceId::from_counter(span)),
         tenant,
         "qqq-serve",
         MANIFEST_REV_UNKNOWN,
@@ -370,13 +395,131 @@ pub fn access_record(
 
 /// Write one record to stdout, ignoring a write failure.
 ///
-/// A logger must never fail a request: a full disk or a closed pipe is a
-/// deployment problem, not a reason to return a 500 for a request that succeeded.
-/// The failure is silent here by necessity — there is nowhere left to report it
-/// that would not be the same broken sink.
+/// # Why not `println!`
+///
+/// `println!` **panics** when stdout cannot be written — a closed pipe, a full
+/// filesystem, a redirected descriptor below the write end. In `serve_connection` that
+/// panic happens inside a spawned task, so a deployment problem with the log sink would
+/// abort the task handling the request, turning a lost log line into a dropped
+/// connection. A logger must never fail a request; that is the whole point of the
+/// function.
+///
+/// So the write goes through `io::Write` on a locked stdout handle and the result is
+/// discarded. Locking per line rather than holding a guard across the request matters:
+/// stdout is process-global, so a held guard would serialize every connection's logging
+/// against one lock for the life of a keep-alive conversation.
+///
+/// The failure is silent by necessity — there is nowhere left to report it that would
+/// not be the same broken sink. What is *not* silent is the panic this removes.
 fn emit_record(logger: &Logger, record: Record) {
+    use std::io::Write as _;
+
     if let Some(line) = logger.emit(record) {
-        println!("{line}");
+        // `let _` rather than `unwrap`: see above. `writeln!` adds the newline the
+        // access-log contract requires — one record per line.
+        let _ = writeln!(std::io::stdout().lock(), "{line}");
+    }
+}
+
+/// Allocates a trace id per accepted connection.
+///
+/// # Why a type rather than a bare `AtomicU64` in `serve`
+///
+/// The correctness requirement is *"no two connections share a trace id"*, and the
+/// accept loop is not the only place that could try. A named type gives that
+/// requirement one implementation with one test, instead of an `fetch_add` inlined in a
+/// closure that nothing can call directly — which is how the original defect survived:
+/// there was no function to test, so no test was written.
+///
+/// A random id would satisfy uniqueness more cheaply, and is rejected because `§10.5`
+/// requires a deterministic run to produce identical logs: a random trace id makes
+/// every run's output differ, and logs are something a run produces.
+///
+/// `Relaxed` is deliberate and sufficient. The only requirement is that concurrent
+/// allocations get distinct values, which `fetch_add` guarantees irrespective of
+/// ordering; a stronger ordering would cost a fence and buy nothing, because the counter
+/// publishes no other data.
+///
+/// # Why the first id is `1`, not `0`
+///
+/// **An all-zero trace id is not a trace id.** The W3C Trace Context specification
+/// reserves `00000000000000000000000000000000` to mean *invalid/absent*, and a tracing
+/// backend that receives it treats the record as having no trace at all. Starting the
+/// counter at zero — which `AtomicU64::default()` does — handed exactly that value to
+/// the **first connection the server ever accepted**, so the one request an operator is
+/// most likely to look at while starting up was the one they could not correlate.
+///
+/// It is the same class of mistake as the per-connection counter this type replaced:
+/// both produce a *value that looks like an identifier and is not one*. Found by
+/// external review (`§O-125`), after my own tests passed — because they asserted that
+/// ids were *distinct*, and `0` is distinct from `1`.
+#[derive(Debug)]
+pub struct TraceCounter {
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl Default for TraceCounter {
+    /// A counter whose first allocation is `1`.
+    ///
+    /// Hand-written rather than derived: `#[derive(Default)]` would give `0`, which is
+    /// the reserved all-zero id. A derived `Default` on this type is a defect, so the
+    /// implementation is explicit and `0` cannot be reached through it.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TraceCounter {
+    /// A counter whose first allocation is `1`.
+    ///
+    /// `1` because `0` is reserved to mean "no trace"; see the type's documentation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// The trace id for one connection. Unique for the life of the process, and never
+    /// the reserved all-zero value.
+    pub fn next_trace(&self) -> u64 {
+        self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Everything a connection needs to know about *who and where it is*.
+///
+/// # Why this is a struct and not three parameters
+///
+/// `peer`, the tenant derived from it, and the trace id all answer the same question —
+/// "which connection is this?" — and they are only meaningful together: the tenant is a
+/// function of the peer, and the trace id is what ties this connection's records to each
+/// other. Threading them as separate arguments is what pushed `serve_connection` past
+/// the argument limit, and the honest response to that limit is to group the things
+/// that belong together rather than to add an `#[allow]` and leave eight loose
+/// parameters.
+///
+/// It also collapses a latent bug: the tenant was computed twice, once in the acceptor
+/// (for the ledger) and once in `serve_connection`. One type, one derivation.
+#[derive(Debug, Clone)]
+pub struct ConnectionId {
+    /// The client's address.
+    pub peer: SocketAddr,
+    /// The tenant the peer belongs to, derived once from `peer`.
+    pub tenant: String,
+    /// The process-wide trace id, allocated by [`TraceCounter`].
+    pub trace: u64,
+}
+
+impl ConnectionId {
+    /// Derive a connection's identity from its peer and its allocated trace id.
+    #[must_use]
+    pub fn new(peer: SocketAddr, trace: u64) -> Self {
+        Self {
+            peer,
+            tenant: tenant_of(peer),
+            trace,
+        }
     }
 }
 
@@ -393,15 +536,19 @@ async fn serve_connection(
     config: &ConnectionConfig,
     shutdown: &Shutdown,
     logger: &Logger,
-    peer: SocketAddr,
+    id: &ConnectionId,
 ) -> Served {
     let mut conn = Connection::new(config.clone());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
-    // One counter per connection, so the trace ids in a keep-alive conversation
-    // are distinct and ordered. `from_counter` rather than a random id because
-    // `§10.5` requires a deterministic run to produce identical logs.
-    let mut trace_seq: u64 = 0;
-    let tenant = tenant_of(peer);
+    // One counter per connection: this is the **span**, the request's ordinal within
+    // the conversation, so a keep-alive exchange stays ordered.
+    //
+    // It is not the trace id. Deriving the trace from this value was a defect — every
+    // connection starts at zero, so the first request on all of them shared a trace
+    // id. `id.trace` is the process-wide counter and is what correlates records across
+    // connections; see `access_record`.
+    let mut span_seq: u64 = 0;
+    let tenant = id.tenant.clone();
 
     loop {
         // --- Which action does the state machine want? ---------------------
@@ -543,10 +690,10 @@ async fn serve_connection(
         // the status is known by then, and a write failure is reported by the
         // return code rather than by a missing log line. Logging first would mean
         // a record for a request whose response never left the server.
-        trace_seq += 1;
+        span_seq += 1;
         emit_record(
             logger,
-            access_record(&head, path, &response, &tenant, trace_seq),
+            access_record(&head, path, &response, &tenant, id.trace, span_seq),
         );
 
         // Whether the connection may be reused is the **state machine's**

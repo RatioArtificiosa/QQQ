@@ -10937,4 +10937,71 @@ produced the defect.
 
 ---
 
+### §O-131 — A topology constraint that turned out to be the correct design
+
+**Context.** `Manifest` modelled `[server]` (`§O-130`); `qqq-serve` owned the route trie.
+Nothing connected them, and I assumed the fix was a conversion function in one crate or
+the other. It is in neither, and the reason is a rule I had been treating as bureaucracy.
+
+`tools/check_topology.py` enforces §4.3's ordering — **"no crate may depend on a crate
+above it in this list"** — and the order is:
+
+```
+qqq-core, qqq-cap, qqq-abi, qqq-host, qqq-io, qqq-serve, qqq-pkg, qqq-run, qqq-debug
+```
+
+So:
+
+- **`qqq-serve` cannot depend on `qqq-cap`** (position 6 → 2, upward). It would be the
+  obvious place to put "manifest route → router route".
+- **`qqq-cap` cannot depend on `qqq-serve`** (2 → 6 upward, same rule). It would be the
+  other obvious place.
+- **`qqq-run` sits above both** (position 8). It is the *only* crate in the workspace
+  where the two may meet.
+
+**The rule was not in the way — it was the answer.** Having been forced up the stack, the
+placement is obviously right in a way I did not see while trying to violate it: a manifest
+is a **file format**, and the crate that parses it must not need an HTTP implementation to
+do so. `qqq-cap` is used by `qqqai inspect`, by the capability engine and by the CLI's
+`why` command, none of which link a server. And converting *declared intent* into a
+*running server* is orchestration — which is what `qqq-run` is for.
+
+**The generalisable point.** I had read `check_topology.py`'s rule as a lint to satisfy. It
+is a **design constraint that has already been reasoned about**, recorded in §4.3, and its
+value is precisely that it says *no* when the convenient place is the wrong place. When a
+structural check blocks you, the first question is not "how do I get around this" but
+**"what does this constraint already know?"** — the same question `§O-082` asks about
+blocked items.
+
+**The secondary finding, and the one worth keeping.** Adding the edge made the compiler
+report that `qqq-cap::server::METHODS` was imported **privately**. That meant a caller in
+another crate could not compare against the same closed set of HTTP methods — so any
+converter would keep its own copy. Two lists that look identical and drift apart is the
+`§O-130` defect arriving through a lookup table instead of a missing field.
+
+It is now a public re-export with the reason recorded, and a test asserts that **every
+method the manifest accepts maps to a router method**. That test is the guard: it fails if
+either list gains a member the other lacks, which is the only way this can break.
+
+**A third finding, in a checker.** `tools/gen_llms_txt.py` asserts "every `docs/*.md` is
+indexed or excluded", and a **gitignored** document is neither. The rule as written had no
+correct answer for `docs/AGENT-HANDBOOK.md`, and the tempting fix — adding it to
+`EXCLUDED_ALL` — would have failed the neighbouring assertion that every excluded entry is
+*tracked*, correctly, because that list means "tracked, deliberately omitted".
+
+So the rule learned the third category, consulting `git check-ignore` rather than
+re-parsing `.gitignore`: the ignore rules already exist in one place, and a second
+implementation would be a second thing to keep right.
+
+**What the three findings have in common.** Each is a case where **the constraint's
+vocabulary was incomplete** — a crate order with no slot for a legitimate edge, a closed
+set visible to only one crate, and an exclusion list with two categories where there are
+three. In every case the tempting fix was to work around the vocabulary rather than extend
+it, and in every case the workaround would have been silent.
+
+→ `crates/qqq-run/src/serve_routes.rs`, `crates/qqq-cap/src/server.rs`,
+`tools/gen_llms_txt.py`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

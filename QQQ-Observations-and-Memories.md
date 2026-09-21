@@ -5267,6 +5267,73 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-099 — Auditing thirteen items instead of ticking them: eleven were done, and two were not
+
+**What happened.** The P3 section listed `ABI-001` … `ABI-013` as unchecked: thirteen
+WIT interfaces, apparently unwritten. The temptation is to treat "unchecked" as "absent"
+and write thirteen files.
+
+Checking first took three commands:
+
+```text
+ABI-001 -> qqq-http.wit    exists=True    103 lines, 2 interfaces, 3 functions
+ABI-002 -> qqq-fs.wit      exists=True    120 lines, 1 interface,  7 functions
+...
+ABI-011 -> qqq-test.wit    exists=False
+ABI-012 -> qqq-agent.wit   exists=False
+```
+
+**Eleven existed and were substantive; two were genuinely missing.** Ticking eleven items
+took one edit instead of eleven files, and the two that needed writing got the attention
+the others did not need.
+
+**Why the checklist was stale rather than wrong.** This is the expected consequence of
+building bottom-up: the WIT was authored as the interfaces were needed, and the checklist
+was not updated at the time. An unchecked box means "not recorded as done", which is not
+the same claim as "not done" — and the two have completely different costs to confuse.
+Treating the first as the second would have meant **rewriting eleven working interfaces**,
+and the rewrites would have been *worse*, because they would have been written from the
+checklist item's one-line description rather than from the design reasoning in the
+existing files.
+
+**What the audit produced beyond the ticks.** Each record states a measured value — file,
+line count, interface count, function count, read from disk — rather than the word "done".
+A tick that does not say what proves it is the item equivalent of an unverified claim,
+which is what `§O-096` and `§O-098` were both about.
+
+**The two new interfaces, and what they needed.** Both were authored to the standard the
+other thirteen set — reasons rather than descriptions — and getting them to *parse*
+required four corrections, each caught by an existing checker rather than by review:
+
+1. `record progress` declared outside an interface. WIT requires every type inside one:
+   `error: expected `world`, `interface` or `use`, found keyword `record``. The type reads
+   as file-scoped documentation, which is exactly why it was written there.
+2. Missing `@since(version = …)` on nine functions. `CON-007` requires it on **every**
+   exported function, and `check_wit_since.py` enforces it — worth noting that
+   `wasm-tools` accepts a WIT file with no `@since` at all, so the policy is this
+   project's, not the toolchain's.
+3. A **doubled** `@since` on two functions that already carried one: my annotation script
+   added a second, and WIT rejects it with `cannot specify @since twice`.
+4. A stray `#[since(…)]` — the script wrote a Rust attribute where a WIT annotation
+   belongs, because `#[…]` is the muscle-memory form for this project's author.
+
+Four errors from one twenty-line script, and the fourth is the instructive one: a
+mechanical edit over a language whose syntax I know well produced a Rust attribute in a
+WIT file, and **the only reason it was caught in seconds is that a validator already
+existed**. Without `check_wit.py` this would have surfaced as a confusing toolchain error
+about an unexpected `#` character.
+
+**The general lesson, which is the second-order one.** The checkers written over the last
+several rounds — WIT validation, versioning policy, typed errors — paid for themselves
+immediately on new content they had never seen. That is the difference between a check
+that exists and a check that is *load-bearing*: this one caught a mistake made by the same
+agent that wrote it, minutes later.
+
+→ `wit/qqq-test.wit`, `wit/qqq-agent.wit`, `QQQ-Checklist-V1.md` (`ABI-001` … `ABI-013`),
+`docs/wit-reference.md`.
+
+---
+
 ### §O-098 — Two checkers that had to be narrowed, and the difference between a rule that fires and a rule that is right
 
 **Two vocabulary checks (`DOC-012`, `DOC-016`), and both had to be corrected by their own

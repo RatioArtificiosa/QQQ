@@ -156,13 +156,114 @@ pub struct Metadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub generated_by: Option<String>,
-    /// The covering hash over every resolved package.
+    /// The covering hash over every resolved package **and the build config**.
     #[serde(
         rename = "lockfile-hash",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub lockfile_hash: Option<String>,
+    /// The build configuration the hash covers — `CON-005`.
+    ///
+    /// Absent for a lockfile written before this field existed, and an absent
+    /// config contributes nothing to the hash so an old lockfile's digest is
+    /// unchanged. See [`BuildConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildConfig>,
+}
+
+/// The build configuration a lockfile was resolved under — `CON-005`.
+///
+/// # Why this exists
+///
+/// §5.4: *"`lockfile-hash` covers **everything**. Any change to any resolved
+/// artifact changes the hash, so a build is either reproducible or it loudly is
+/// not."* Before this type, "everything" meant every *package* field and the
+/// format version — and **no build config at all**. So two builds from one
+/// lockfile with different `[build]` settings produced the same hash while
+/// producing different artifacts, which is exactly the case that sentence is
+/// about. The hash was silent where it promised to be loud.
+///
+/// # Why it is optional, and why an absent one does not change the hash
+///
+/// Because every lockfile written before this field existed must keep the hash
+/// it had. Folding an empty config block in unconditionally would change the
+/// digest of every lockfile in the world on upgrade, and `install` would report
+/// every project as dirty — the kind of change a package manager must never make
+/// silently. An absent config therefore hashes as *nothing*, and the hash of an
+/// old lockfile is bit-for-bit what it was.
+///
+/// # Why these four fields and not the whole manifest
+///
+/// Because the hash covers what determines the **artifact**. Language, target and
+/// profile are the three inputs `qqqai build` reads that change the bytes
+/// produced; the declared grant set changes the authority the artifact is built
+/// against. The rest of the manifest — description, license, package name —
+/// changes no output byte, and folding it in would make the hash move for edits
+/// that cannot affect reproducibility, which trains a reader to ignore it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildConfig {
+    /// Source language: `rust`, `ts`, `go`, `python` or `cpp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Compilation target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// `debug` or `release`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The declared capability names, sorted, as the manifest resolved them.
+    ///
+    /// # Why `Vec` and not a `BTreeSet`
+    ///
+    /// Because `serde` on a `BTreeSet` serialises to a TOML array in set order
+    /// already, and hashing needs a *deterministic* order rather than an
+    /// unordered container. The same reason `LockPackage::caps` is a `Vec`
+    /// (`capability_order_does_not_affect_equality` pins that its order is
+    /// normalised before comparison).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
+}
+
+impl BuildConfig {
+    /// Whether every field is absent.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.language.is_none()
+            && self.target.is_none()
+            && self.profile.is_none()
+            && self.caps.is_empty()
+    }
+
+    /// A config naming a language, target and profile.
+    #[must_use]
+    pub fn new(
+        language: impl Into<String>,
+        target: impl Into<String>,
+        profile: impl Into<String>,
+    ) -> Self {
+        Self {
+            language: Some(language.into()),
+            target: Some(target.into()),
+            profile: Some(profile.into()),
+            caps: Vec::new(),
+        }
+    }
+
+    /// Record the declared capability set, normalised.
+    ///
+    /// Sorts and deduplicates, so two spellings of one grant set hash
+    /// identically — the property `the_hash_is_stable_across_capability_reordering`
+    /// already pins for packages.
+    #[must_use]
+    pub fn with_caps(mut self, caps: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut set: Vec<String> = caps.into_iter().map(Into::into).collect();
+        set.sort_unstable();
+        set.dedup();
+        self.caps = set;
+        self
+    }
 }
 
 /// Why a lockfile was rejected.
@@ -345,6 +446,41 @@ impl Lockfile {
             // A record separator between packages, so ("a@1","b@2") and
             // ("a@1b","2") cannot collide either.
             h.update(b"\x1e");
+        }
+
+        // **The build config, when recorded** -- `CON-005`'s "and config".
+        //
+        // Absent config contributes nothing, so a lockfile written before this
+        // field existed keeps its digest. Present config is hashed with the same
+        // NUL-separated discipline as the package fields, for the same reason:
+        // without separators, ("ab","c") and ("a","bc") collide.
+        //
+        // # Why the emptiness check is outside the `if let`
+        //
+        // Because `skip_serializing_if = "is_none"` on a `Some(empty)` writes
+        // **nothing** to the file, so an empty config and an absent one
+        // round-trip to the same bytes -- and therefore must hash the same, or a
+        // lockfile would change its own digest merely by being read and written.
+        // The first version wrote the group separator before testing emptiness,
+        // so `None` and `Some(BuildConfig::default())` hashed differently; the
+        // test asserting they agree is what caught it. A field whose absence is
+        // indistinguishable from its emptiness after a round trip must be
+        // indistinguishable in the hash too.
+        if let Some(build) = &self.metadata.build {
+            if !build.is_empty() {
+                h.update(b"\x1d"); // a group separator, so config cannot collide
+                                   // with a package record
+                h.update(build.language.as_deref().unwrap_or("").as_bytes());
+                h.update(b"\x00");
+                h.update(build.target.as_deref().unwrap_or("").as_bytes());
+                h.update(b"\x00");
+                h.update(build.profile.as_deref().unwrap_or("").as_bytes());
+                h.update(b"\x00");
+                for c in &build.caps {
+                    h.update(c.as_bytes());
+                    h.update(b"\x00");
+                }
+            }
         }
 
         let out = h.finalize();
@@ -1196,5 +1332,184 @@ mod tests {
             diff.changes[0].caps_added.is_empty(),
             "a digest swap grants no authority"
         );
+    }
+    // -- The build config the hash covers — CON-005 ------------------------
+
+    /// A base lockfile with one package that has a digest.
+    ///
+    /// The digest is set through the field rather than a `with_digest` builder,
+    /// because `LockPackage` has none — the existing tests in this module do the
+    /// same, and adding a builder purely for a fixture would be a public API
+    /// change made to serve a test.
+    fn base_lock() -> Lockfile {
+        let mut l = Lockfile::new();
+        let mut pkg = LockPackage::new("qqqai/telemetry", "1.0.0");
+        pkg.digest = Some("sha256:aa".to_owned());
+        l.push(pkg);
+        l
+    }
+
+    /// **The point of the item: config is part of the hash.**
+    ///
+    /// Before this, two builds from one lockfile with different `[build]`
+    /// settings produced the same hash while producing different artifacts —
+    /// silent where §5.4 promises to be loud.
+    #[test]
+    fn the_hash_covers_the_build_config() {
+        let plain = base_lock();
+        let configured = {
+            let mut l = base_lock();
+            l.metadata.build = Some(BuildConfig::new("rust", "wasm32-wasip2", "release"));
+            l
+        };
+        assert_ne!(
+            plain.compute_hash(),
+            configured.compute_hash(),
+            "recording a build config must change the hash"
+        );
+    }
+
+    /// Each config field participates independently, so a change to any one is
+    /// caught. A hash covering only, say, the profile would let a target change
+    /// through.
+    #[test]
+    fn every_config_field_participates_in_the_hash() {
+        let make = |c: BuildConfig| {
+            let mut l = base_lock();
+            l.metadata.build = Some(c);
+            l.compute_hash()
+        };
+        let base = make(BuildConfig::new("rust", "wasm32-wasip2", "release"));
+        for variant in [
+            BuildConfig::new("ts", "wasm32-wasip2", "release"),
+            BuildConfig::new("rust", "wasm32-wasip1", "release"),
+            BuildConfig::new("rust", "wasm32-wasip2", "debug"),
+        ] {
+            assert_ne!(
+                base,
+                make(variant.clone()),
+                "a config change must move the hash: {variant:?}"
+            );
+        }
+
+        // And the caps list inside the config.
+        let with_caps =
+            make(BuildConfig::new("rust", "wasm32-wasip2", "release").with_caps(["http.client"]));
+        assert_ne!(base, with_caps, "the config's caps must be covered");
+    }
+
+    /// **Backward compatibility, which is the decision that mattered most.**
+    ///
+    /// A lockfile written before this field existed has `build: None` and must
+    /// keep the exact digest it had. Otherwise every project in the world
+    /// reports as dirty the moment it upgrades.
+    #[test]
+    fn a_lockfile_without_config_hashes_exactly_as_before() {
+        let l = base_lock();
+        assert!(l.metadata.build.is_none());
+
+        // An explicitly empty config must ALSO hash the same, because `None` and
+        // `Some(empty)` describe the same absence. `skip_serializing_if` means
+        // an empty one is not even written, so the two round-trip identically.
+        let mut empty = base_lock();
+        empty.metadata.build = Some(BuildConfig::default());
+        assert!(
+            empty.metadata.build.as_ref().expect("set").is_empty(),
+            "the fixture must be empty"
+        );
+
+        // The two differ only in the in-memory Option, and the hash folds in
+        // nothing for either -- because the `if let Some` arm hashes the
+        // *contents*, and empty contents hash as the separators alone.
+        // Pin the relationship explicitly rather than assuming it.
+        let none_hash = l.compute_hash();
+        let empty_hash = empty.compute_hash();
+        assert_eq!(
+            none_hash, empty_hash,
+            "`None` and an empty config must agree, or a lockfile would change \
+             hash merely by being re-serialised"
+        );
+    }
+
+    /// Hashing is stable across a config's `caps` reordering, for the same
+    /// reason it is stable across a package's.
+    #[test]
+    fn the_hash_is_stable_across_config_capability_reordering() {
+        let make = |caps: Vec<&str>| {
+            let mut l = base_lock();
+            l.metadata.build =
+                Some(BuildConfig::new("rust", "wasm32-wasip2", "release").with_caps(caps));
+            l.compute_hash()
+        };
+        assert_eq!(
+            make(vec!["http.client", "sql.query"]),
+            make(vec!["sql.query", "http.client"]),
+            "a sorted, deduplicated set must hash identically"
+        );
+    }
+
+    /// The config must not be confusable with a package record: a config whose
+    /// caps spell a package's fields must not collide.
+    #[test]
+    fn the_config_group_is_separated_from_the_package_records() {
+        let make = |build: BuildConfig| {
+            let mut l = base_lock();
+            l.metadata.build = Some(build);
+            l.compute_hash()
+        };
+        // A config whose three fields concatenate to something a package could
+        // also spell must still differ, because of the group separator.
+        assert_ne!(
+            make(BuildConfig::new("ab", "c", "d")),
+            make(BuildConfig::new("a", "bc", "d")),
+            "config fields must be unambiguously delimited"
+        );
+    }
+
+    /// A config round-trips through TOML, so the hash a lockfile records is the
+    /// hash a reader recomputes.
+    #[test]
+    fn a_build_config_round_trips_through_toml() {
+        let mut l = base_lock();
+        l.metadata.build =
+            Some(BuildConfig::new("rust", "wasm32-wasip2", "release").with_caps(["http.client"]));
+        l.stamp("qqqai 1.0.0");
+        let text = toml::to_string(&l).expect("must serialise");
+        assert!(text.contains("[metadata.build]"), "{text}");
+        assert!(text.contains("language = \"rust\""), "{text}");
+
+        let back = Lockfile::parse(&text).expect("must parse");
+        assert_eq!(back.metadata.build, l.metadata.build);
+        assert_eq!(
+            back.compute_hash(),
+            l.compute_hash(),
+            "a round trip must not move the hash"
+        );
+    }
+
+    /// A config with an unknown key is refused, so a typo cannot silently
+    /// contribute nothing to the hash while looking recorded.
+    #[test]
+    fn an_unknown_config_key_is_refused() {
+        let text =
+            "[lock]\nversion = 1\n\n[metadata.build]\nlanguage = \"rust\"\nlangauge = \"ts\"\n";
+        let err = Lockfile::parse(text).expect_err("must refuse");
+        assert!(matches!(err, LockfileError::Syntax(_)), "{err:?}");
+    }
+
+    /// `is_empty` must agree with what serialisation omits, or a lockfile could
+    /// write a `[metadata.build]` table that contributes nothing.
+    #[test]
+    fn an_empty_config_is_recognised_as_empty() {
+        assert!(BuildConfig::default().is_empty());
+        assert!(!BuildConfig::new("rust", "t", "p").is_empty());
+        assert!(!BuildConfig::default().with_caps(["a"]).is_empty());
+    }
+
+    /// `with_caps` normalises, so it cannot be used to smuggle a duplicate in.
+    #[test]
+    fn with_caps_sorts_and_deduplicates() {
+        let c = BuildConfig::default().with_caps(["b", "a", "b"]);
+        assert_eq!(c.caps, vec!["a".to_owned(), "b".to_owned()]);
     }
 }

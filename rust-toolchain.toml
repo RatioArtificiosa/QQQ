@@ -30,10 +30,11 @@
 # is a compatibility promise to users, this is a reproducibility promise to
 # contributors.
 #
-# **The MSRV itself is not currently verified by CI.** No workflow builds with
-# 1.97, so `rust-version = "1.97"` is an unverified claim; raising it would go
-# unnoticed and lowering it could break users without any signal. Adding that job
-# is recorded as outstanding work rather than silently implied here.
+# **The MSRV is verified by the `msrv` job in CI**, which builds every target with
+# 1.97 and asserts the exact number of crates it examined. It was briefly an
+# unverified claim: `rust-version = "1.97"` was stated and nothing built with 1.97,
+# so raising it would have gone unnoticed and using a 1.98-only API by accident
+# could have broken users with no signal.
 
 [toolchain]
 channel = "1.98"

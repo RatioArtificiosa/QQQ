@@ -704,6 +704,66 @@ jobs:
         run: python tools/audit_unsafe.py --self-test
 
   # ---------------------------------------------------------------------------
+  # MSRV: does the workspace actually build on the version Cargo.toml promises?
+  # ---------------------------------------------------------------------------
+  #
+  # `Cargo.toml` declares `rust-version = "1.97"` and **nothing built with 1.97**,
+  # so the claim was unverified in both directions: raising it would go unnoticed,
+  # and lowering it (or using a 1.98-only API by accident) could break users with
+  # no signal at all. A promise nothing checks is the shape `§O-066` records.
+  #
+  # Only `check`, not `test`: the MSRV promise is *"this compiles"* — a user on
+  # 1.97 does not inherit this project's test suite. `--all-targets` so a
+  # test-only construct cannot slip past, and `--locked` so the resolution is the
+  # one committed rather than whatever a fresh solve finds today.
+  #
+  # Linux only: the MSRV is a property of the language version, not of the three
+  # platforms, and the matrix would triple the cost of the same answer.
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # An explicit `toolchain:`, deliberately overriding `rust-toolchain.toml`:
+      # this job's whole purpose is to build with something *other* than the
+      # pinned version.
+      - name: Install the MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build every target on the declared MSRV
+        run: cargo check --workspace --all-targets --locked
+
+      # Anti-vacuity: `cargo check` exits 0 on an empty workspace, so a job that
+      # silently stopped seeing any crates would report success forever. The
+      # expected count is measured from the workspace, not written by hand, so
+      # adding a crate cannot make it stale -- and the comparison is exact, because
+      # a `-lt` threshold would still pass with a crate missing.
+      - name: Prove the MSRV job actually examined the workspace
+        run: |
+          set -eu
+          COUNT="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["packages"]))')"
+          case "$COUNT" in
+            ''|*[!0-9]*) echo "the crate count is not a number: '$COUNT'"; exit 1 ;;
+          esac
+          # The workspace has 10 members. Asserting the exact number means a crate
+          # that stops being picked up -- the failure this guard exists for -- is a
+          # failure rather than a smaller success.
+          echo "MSRV checked $COUNT crate(s)"
+          if [ "$COUNT" -ne 10 ]; then
+            echo "expected 10 workspace crates, examined $COUNT"
+            echo "if you added or removed a crate, update this number deliberately"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # Supply chain: licences, advisories, unused dependencies.
   # ---------------------------------------------------------------------------
   supply-chain:

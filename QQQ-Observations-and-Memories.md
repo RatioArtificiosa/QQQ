@@ -10368,4 +10368,53 @@ since `chunks_exact` is not wrong, only newly discouraged.
 
 ---
 
+### §O-122 — An MSRV claim that nothing built, stated in a field and verified by no job
+
+**The finding, one line below the previous one.** `Cargo.toml` declares
+`rust-version = "1.97"`. **No workflow built with 1.97** — the Rust job ran the
+pinned toolchain (now 1.98), and nothing else touched the version at all. So the
+field was a claim false in both directions at once:
+
+* **Raise the real minimum** (by using a 1.98 API) and the claim becomes false while
+  every job stays green, because everything builds on 1.98.
+* **Lower it** (edit the field to 1.96) and nothing objects, despite a promise to
+  users that 1.96 would work.
+
+This is `§O-116`'s shape again — *a commitment with a number on it that nothing
+counts* — and it was found by the same move: **asking what would fail if the claim
+were false, and getting "nothing".**
+
+**Why this is its own entry rather than a footnote to `§O-121`.** `§O-121` was a
+*toolchain* gap: which version runs. This is a *promise* gap: which version is
+claimed to work. They look like one problem and are not — fixing the first (pinning
+1.98) does not touch the second, because the MSRV job must deliberately **not** use
+the pinned toolchain. Two facts, two jobs — and the second is easy to miss precisely
+because it is *uninteresting*: nothing about 1.97 is novel, so nobody looks.
+
+**The job.** `cargo check --workspace --all-targets --locked` on an explicit
+`toolchain: "1.97"`, which overrides `rust-toolchain.toml` — the one job here that
+wants a version other than the pinned one. `check` and not `test` because the
+promise is *"this compiles"*: a user on 1.97 does not inherit this project's test
+suite. `--all-targets` so a test-only construct cannot slip past, and `--locked` so
+the answer is about the committed resolution rather than whatever a fresh solve
+finds today.
+
+**The anti-vacuity guard, and why its first version was too loose.** `cargo check`
+exits 0 on an empty workspace, so a job that silently stopped seeing crates would
+report success forever. The guard counts workspace members from `cargo metadata` —
+verified: **exactly 10.** The first version asserted `-lt 10`, which *passes with a
+crate missing*: the very failure the guard exists for would have been a smaller
+success. It is now `-ne 10`, with a message telling a future author that adding a
+crate means updating the number deliberately. That is the tenth instance of this
+project's recurring lesson, caught this time in a guard written minutes earlier —
+**the shape reappears fastest in the code written to prevent it.**
+
+**Verified before pushing, not after:** `cargo +1.97.1 check --workspace
+--all-targets --locked` → `Finished`, exit 0. The claim was true; it was simply
+untested.
+
+→ `.github/workflows/ci.yml` (the `msrv` job), `rust-toolchain.toml`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

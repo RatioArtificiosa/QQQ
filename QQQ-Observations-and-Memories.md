@@ -5267,6 +5267,68 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-103 — Three bugs in one checker, and all three were the same shape
+
+**What was built.** `DOC-010`: `tools/check_tombstones.py` plus a committed baseline of 93
+Proposal anchors. §0.5 requires a retired section's anchor to be **tombstoned, not
+deleted**, because an anchor is a link target *other* documents point at — deleting one
+breaks citations in a file the change never touched, months later, with nothing indicating
+when or why.
+
+The baseline is the mechanism. A `git` diff would be the obvious approach and is wrong for
+this purpose: it detects *change*, so it fires on every legitimate in-progress edit and
+says nothing about deletion specifically. A committed list that only grows answers the
+actual question — "was an anchor that once existed removed?" — and the append-only property
+is what makes "never deleted" enforceable rather than remembered.
+
+**Three bugs, all found by the self-test, all one shape: a check whose input set excluded
+its target.**
+
+1. **The derivation dropped the section number.** `parse_headings` built each anchor from
+   `f"{level} {title}"`, omitting the section number, so it produced `capability-engine`
+   where §0.5 specifies `64-capability-engine`. Every anchor was wrong — and the check was
+   *internally consistent and consistently incorrect*, so the real corpus passed while the
+   whole mapping was wrong. Only the synthetic cases caught it, because they were the only
+   input that did not come from the same broken function.
+
+2. **The fixtures then disagreed with the code for the same reason.** They wrote
+   `github_anchor("## §6.4 Capability Engine")` by hand — reproducing the same omission —
+   so two cases reported `DEAD` while the *code* was right. The fix is structural: the
+   fixtures now derive their expected anchors through `parse_headings`, the same function
+   the check uses, so a fixture can no longer encode a different rule from the one under
+   test. **A test whose expectation is hand-written can disagree with the implementation
+   without either being obviously wrong.**
+
+3. **A heading marked `(retired)` with no successor was not recognised as retired at all.**
+   The tombstone pattern required the complete `(retired — see §X.Y)` form, so
+   `(retired)` alone never entered the tombstone branch — and the rule "a tombstone must
+   name a successor" therefore never fired on **exactly the case it exists for**. This is
+   `§O-092`'s unreachable-glob bug in a different disguise, and the third instance in this
+   session of a rule that could not fire.
+
+**The consequence that took the most care: the baseline had to be rebuilt, not updated.**
+`--update` *unions* — that is what makes the list append-only — so the 93 wrong entries
+written by bug 1 could not be removed by the check that owns them. The check correctly
+reported all 93 as "disappeared", which is the design working as intended and looks
+identical to a real mass deletion.
+
+So the file was rebuilt from the corrected derivation, and **the header records the
+history**: a baseline whose provenance is invisible is one a future reader cannot audit,
+and the next person to see `01-executive-summary` beside a note about `executive-summary`
+should know why.
+
+**The generalisable rule.** Every one of the three was a *reachability* defect rather than
+a logic defect: the code did what it said, on an input set that did not include the
+interesting case. That is now the fourth instance this session (`§O-092`'s glob, this
+one's two patterns and its derivation), which suggests it deserves its own question when
+writing a check: **"what input would this rule be for, and is that input in the set I
+actually iterate?"**
+
+→ `tools/check_tombstones.py`, `.anchor-baseline.txt`, `.github/workflows/ci.yml`,
+`docker/entrypoint.sh`.
+
+---
+
 ### §O-102 — Proving both directions of a wall that only has one side
 
 **What was built.** `LIC-012`: `tools/check_license_boundary.py` enforces §13.2's licensing

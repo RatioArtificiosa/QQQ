@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """check_scope_table.py -- verify a crate's documented scope table against its module tree.
 
 Why this exists

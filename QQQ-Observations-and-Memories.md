@@ -10788,4 +10788,59 @@ that conclusion instead of rediscovering it.
 
 ---
 
+### §O-129 — The gate must be run *after* the last edit, and fmt was the one I ran early
+
+**The failure.** `c2dd6f3` (CORS, `SRV-019`) went red on all three platforms, in the
+`rustfmt` step, at `cors.rs:906`:
+
+```
+-        assert_eq!(
+-            decided(h, "Access-Control-Max-Age").as_deref(),
+-            Some("600")
+-        );
++        assert_eq!(decided(h, "Access-Control-Max-Age").as_deref(), Some("600"));
+```
+
+Four lines that fit on one. Locally `cargo fmt --all -- --check` passed.
+
+**Why.** I ran `cargo fmt --all` early in the sequence and `--check` right after it,
+then made a final round of edits (`&h` → `h`, removing borrows clippy had flagged) that
+made several lines *shorter*. One crossed rustfmt's width threshold and needed
+re-collapsing. Every other gate — clippy, the full test suite, SPDX, the citation
+checker — was re-run after those edits. `fmt` was the single one I ran mid-sequence and
+never repeated.
+
+**This is the third variant of one mistake**, and naming the axis they share is the
+point:
+
+| | What I assumed | What was true |
+|---|---|---|
+| `§O-121` | local `stable` is CI's `stable` | 1.97 locally, 1.98 on CI |
+| `§O-123` | `@master` infers the toolchain channel | the action's branch name *is* the version |
+| this | a green `--check` means the tree is formatted | a green `--check` means *the tree at that moment* was formatted |
+
+All three are **a local verification that was valid when run and invalid when pushed**.
+The first two concern the *environment* differing; this one concerns *time*. It is the
+most avoidable of the three, because I had the right command and ran it — just not
+again at the end.
+
+**The rule, stated so it is checkable.** *The gate is a single final action, not a set
+of actions interleaved with edits.* After the last edit, run `cargo fmt --all --
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
+--workspace` and the checker suite in one block, with no edit between them and the
+commit. Running one of them earlier is fine; it is failing to run it *again* afterwards
+that produces the false green. This is also why the auto-fix loop is dangerous:
+`cargo fmt --all` and `cargo fix` are *edits*, so anything run before them is
+invalidated by them.
+
+**Why CI is not the problem.** Three platforms caught it in one run each, which is the
+workflow doing its job. But a formatting failure spends a full CI cycle for something a
+local command answers in under a second, and it is the kind of red that trains a reader
+to stop reading reds. CI's value is being the *last* check; using it as the first place
+to run fmt wastes the one signal that cannot be fooled.
+
+→ `crates/qqq-serve/src/cors.rs`; CI run `35625808157`; fixed in `2faa1a0`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -871,6 +871,8 @@ cmd_checks() {
     python3 tools/check_topology.py
     python3 tools/check_no_ambient.py
     python3 tools/gen_schemas.py --check
+    python3 tools/normalize_eol.py --check
+    python3 tools/normalize_eol.py --self-test
     python3 tools/check_wit_errors.py
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py

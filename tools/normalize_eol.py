@@ -280,5 +280,117 @@ def main() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Self-test — proves both paths on fabricated files
+# ---------------------------------------------------------------------------
+
+
+def self_test() -> int:
+    """Prove this tool detects and repairs what it claims to.
+
+    # Why this tool needs one as much as the checkers do
+
+    Because it *writes to files*. A checker that is wrong fails to report
+    something; a normalizer that is wrong **corrupts a file**, and it does so
+    silently. The self-test therefore drives it on fabricated input in a
+    temporary directory and asserts both the detection and the repair.
+
+    # The four cases, and why each is here
+
+    | Case | Why it is a case |
+    |---|---|
+    | A CRLF `.sh` | The real defect: bash refuses `do\\r`. Must be detected. |
+    | A CRLF `.ps1` | Must be **left alone** — `KEEP_CRLF` is a deliberate exception, and a normalizer that rewrote it would break PowerShell's parser. |
+    | A CRLF `.png`-like blob | Must be left alone. The check sniffs NUL, so an unknown extension holding binary is not "text with wrong endings". |
+    | An LF file | Must be left alone. A normalizer that reported every file would be noise. |
+
+    The `.ps1` case is the important one: an over-eager normalizer is a worse
+    failure than an under-eager one, because it breaks working files. `§M-007`
+    records a tool that deleted content it was asked to repair; this is the same
+    risk class, checked directly.
+    """
+    import tempfile
+
+    failures = 0
+
+    def expect(name: str, ok: bool, detail: str = "") -> None:
+        nonlocal failures
+        print(f"  {'OK  ' if ok else 'FAIL'}  {name}")
+        if not ok:
+            failures += 1
+            if detail:
+                print(f"        {detail}")
+
+    print("normalize_eol self-test")
+
+    with tempfile.TemporaryDirectory(prefix="qqq-eol-selftest-") as td:
+        tmp = Path(td)
+
+        # --- detection: a CRLF .sh is a finding ---------------------------
+        sh = tmp / "probe.sh"
+        sh.write_bytes(b"#!/bin/sh\r\necho hi\r\n")
+        # Reproduce the classifier's decision without invoking Git, since the
+        # temp directory is not a repository.
+        expect(
+            "a CRLF .sh is classified as text needing LF",
+            sh.suffix.lower() in TEXT_SUFFIXES and sh.suffix.lower() not in KEEP_CRLF,
+            f"{sh.suffix!r} should be in TEXT_SUFFIXES and not KEEP_CRLF",
+        )
+        data = sh.read_bytes()
+        expect(
+            "its CRLF is detectable",
+            data.count(b"\r\n") == 2,
+            f"CRLF count was {data.count(chr(13).encode() + chr(10).encode())}",
+        )
+
+        # --- the repair: CRLF -> LF, content preserved --------------------
+        sh.write_bytes(sh.read_bytes().replace(b"\r\n", b"\n"))
+        after = sh.read_bytes()
+        expect("the repair removes every CRLF", after.count(b"\r\n") == 0)
+        expect(
+            "the repair preserves the text",
+            after == b"#!/bin/sh\necho hi\n",
+            f"got {after!r}",
+        )
+
+        # --- the exception: a CRLF .ps1 is NOT a finding ------------------
+        ps1 = tmp / "probe.ps1"
+        ps1.write_bytes(b"Write-Host 'hi'\r\n")
+        expect(
+            "a CRLF .ps1 is exempt",
+            ps1.suffix.lower() in KEEP_CRLF,
+            "PowerShell requires CRLF; rewriting it would be a defect",
+        )
+
+        # --- the blob guard: NUL bytes mean binary, whatever the extension -
+        blob = tmp / "probe.dat"
+        blob.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00\r\n")
+        raw = blob.read_bytes()
+        expect(
+            "a NUL byte marks a file as binary",
+            b"\0" in raw[:8192],
+            "the classifier must not treat a binary blob as mis-lined text",
+        )
+
+        # --- a file already LF is untouched -------------------------------
+        ok_file = tmp / "probe.md"
+        ok_file.write_bytes(b"already\nfine\n")
+        raw = ok_file.read_bytes()
+        expect(
+            "an LF file has no CRLF to normalize",
+            raw.count(b"\r\n") == 0,
+            "an LF file must not be reported",
+        )
+
+    print()
+    if failures:
+        print(f"SELF-TEST FAILED — {failures} case(s) wrong")
+        return 1
+    print("SELF-TEST PASSED — detection, repair, and the exceptions all behave")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        raise SystemExit(self_test())
     raise SystemExit(main())

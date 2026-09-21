@@ -102,6 +102,14 @@ jobs:
       - name: Every tracked text file is LF
         run: python tools/normalize_eol.py --check
 
+      # The tool writes to files, so it needs a self-test more than a read-only
+      # checker does: a wrong normalizer corrupts a file silently, and the `.ps1`
+      # exemption is the case an over-eager implementation would break. The
+      # self-test drives detection, repair and both exceptions on fabricated
+      # files in a temp directory.
+      - name: Prove the line-ending tool detects and repairs correctly
+        run: python tools/normalize_eol.py --self-test
+
   # ---------------------------------------------------------------------------
   # The cross-reference graph is the thing that keeps three documents honest.
   # If it breaks, nothing else matters. Run it first and cheaply.

@@ -1,0 +1,196 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for QQQ.
+#
+# # Why this file exists
+#
+# A default review of this repository spends most of its attention on things a
+# generic reviewer cannot know are already enforced — `unsafe` is forbidden
+# workspace-wide, every file needs an SPDX header, every claim needs a citation —
+# and misses the rules that are *specific to this project and enforced by nothing*.
+# The `path_instructions` below state the invariants that are either enforced by a
+# checker (so a review comment about them is noise) or enforced by review alone (so
+# the review is the only thing that can catch them).
+#
+# # The rule this file encodes
+#
+# `/QQQ-Observations-and-Memories.md` and `/PRINCIPLES.md` are where the project's
+# working rules live. A review that contradicts them wastes a round trip, and a
+# review that restates them is not adding information. All four are listed under
+# `knowledge_base.code_guidelines` so the reviewer reads them before commenting.
+
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  changed_files_summary: true
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+
+  abort_on_close: true
+  disable_cache: false
+
+  tools:
+    # `gitleaks` is on: `docs/.env` is gitignored and must never be indexed. A secret
+    # that reaches the index is a control failure, not a style problem.
+    gitleaks:
+      enabled: true
+    # The rest are off deliberately. This repository already runs `cargo clippy
+    # --workspace --all-targets -- -D warnings`, `cargo deny`, `cargo fmt`, and 40+
+    # `tools/*.py` checkers in CI on every push. Enabling linters here would report
+    # what CI already blocks, at the cost of review latency on every run.
+    actionlint:
+      enabled: false
+    checkmake:
+      enabled: false
+    markdownlint:
+      enabled: false
+    ruff:
+      enabled: false
+    shellcheck:
+      enabled: false
+    yamllint:
+      enabled: false
+
+  path_filters:
+    - "!target/**"
+    - "!**/*.lock"
+    - "!Cargo.lock"
+    - "!docs/.env"
+    - "!.scratch/**"
+    # Generated: `tools/gen_schemas.py` and `tools/gen_llms_txt.py` own these, and
+    # `--check` fails CI if they drift. A review comment here cannot be acted on.
+    - "!schemas/**"
+    - "!llms.txt"
+    - "!llms-full.txt"
+
+  path_instructions:
+    - path: "crates/**/*.rs"
+      instructions: |
+        These are the QQQ runtime crates. Rules that a review must respect, with the
+        ones that are reviewed-only marked:
+
+        ENFORCED BY CI (a comment about these is noise — CI blocks them):
+          - `#![forbid(unsafe_code)]` crate-wide and `unsafe_code = "forbid"` in
+            `[workspace.lints.rust]`, which applies to tests too.
+          - `cargo clippy --workspace --all-targets -- -D warnings` must be clean, on
+            1.98. Do not suggest `#[allow(...)]` — either fix the lint, or justify a
+            narrowly-scoped allow in a comment explaining why the alternative is worse.
+          - Every file starts with `// SPDX-License-Identifier: Apache-2.0`.
+          - `rustfmt` formatting.
+
+        REVIEWED ONLY (no checker can see these — this is where a review earns its keep):
+          - **An unnamed rule cannot be asserted.** If a conditional encodes a
+            contract with an operator or another layer, extract it to a named function
+            so a test can state it. Do not accept a magic threshold inline in a hot path.
+          - **A test must be aimed at the property that matters.** The most expensive
+            defects in this project were tests that passed because their fixtures could
+            not exhibit the defect: asserting `!contains('\n')` on newline-free input,
+            asserting ids are *distinct* where *validity* was the requirement. Flag a
+            test whose fixture cannot fail.
+          - **Do not state an invariant in a doc comment without enforcing it.** A
+            comment describing a relationship between two functions is not a check on
+            that relationship. If the docs say "these two encodings agree", something
+            must compare them.
+          - **Public API needs a reason in prose, not just a signature.** This project
+            documents *why* a shape was chosen and what was rejected, because the next
+            reader cannot recover that from the code.
+          - **No silent stubs.** A placeholder is acceptable only when it is documented,
+            named (e.g. `MANIFEST_REV_UNKNOWN`) and the reason it is not real is stated.
+            Flag an `unimplemented!()`, a `todo!()`, or a function that returns a
+            constant where the docs imply work.
+          - **`#[must_use]` on a returned `impl Iterator` is a `clippy::double_must_use`
+            error**, and `#[derive(Default)]` on a type whose zero value is invalid
+            (e.g. an all-zero trace id) is a defect — write the impl by hand.
+
+    - path: "crates/qqq-serve/**"
+      instructions: |
+        `qqq-serve` is the HTTP/1.1 and HTTP/2 server. Additional rules:
+
+          - **RFC 9113 compliance is cited inline.** Where the code implements a
+            specific requirement, the section number is in a comment. If a change
+            affects HTTP/2 behaviour, the citation must be updated or added; a review
+            comment saying "the spec says X" is useful only with the section number.
+          - **Log output is guest-influenced data.** Anything from a request — target,
+            headers, body — must be sanitized before it reaches a log line. Control
+            characters are replaced with U+FFFD so the one-line guarantee holds and a
+            guest cannot forge a record. Flag any new field written verbatim.
+          - **A logger must never fail a request.** `println!` panics on a closed pipe
+            and that panic happens inside a spawned connection task; use `io::Write`
+            and discard the error instead.
+          - **Trace ids are process-wide and non-zero.** The all-zero id is reserved
+            by W3C Trace Context to mean "no trace". Spans are per-connection.
+
+    - path: "tools/**/*.py"
+      instructions: |
+        Every checker in `tools/` follows one contract, and a change that breaks it is
+        a defect even if the checker still works:
+
+          - **`--self-test` with fault injection.** The checker must prove it can fail,
+            not merely that it passes on a clean tree. A checker whose self-test only
+            exercises the passing path is `§O-120`: a suite aimed at the wrong artifact.
+          - **Refuse vacuity.** A checker that finds nothing to check (no pin, no row,
+            no file) must fail rather than pass. "I found no targets" is not success.
+          - **SPDX header**, required by `tools/check_spdx.py`, which itself covers
+            `tools/*.py`. The checkers guard each other.
+
+    - path: "**/*.md"
+      instructions: |
+        - **Anchors are load-bearing.** `tools/check_tombstones.py` fails on a renamed
+          or deleted heading that another document references, because `§O-082`-style
+          citations are how this project records decisions. Do not rename an existing
+          `###` heading; add a new one.
+        - **A checklist item is claimed only after measurement.** `QQQ-Checklist-V1.md`
+          entries state measured values (test counts, command output), not intent. Flag
+          a checked item whose record asserts something no command verified.
+        - **Line endings are LF** for `.md`, enforced by `tools/normalize_eol.py`.
+
+    - path: "docs/**"
+      instructions: |
+        `docs/.env` is gitignored and must never be committed or indexed — it holds
+        Context7 credentials. Only `.env.example` is tracked. A change that adds real
+        credentials to any tracked file is a security defect.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # Every path here must exist: `tools/check_coderabbit_config.py` fails otherwise,
+    # because a guideline file that is absent is a rule the reviewer was never given.
+    #
+    # There is deliberately no `AGENTS.md` in this list. An earlier draft named one —
+    # this project has no such file, its working rules live in
+    # `QQQ-Observations-and-Memories.md`, and the checker caught the stale reference
+    # before it shipped. A config that claims to feed the reviewer a file it cannot
+    # open reads as configuration while doing nothing.
+    filePatterns:
+      - "QQQ-Observations-and-Memories.md"
+      - "PRINCIPLES.md"
+      - "CONTRIBUTING.md"
+      - "QQQ-Proposal-V1.md"
+
+chat:
+  auto_reply: true
+
+early_access: false

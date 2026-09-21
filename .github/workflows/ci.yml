@@ -282,6 +282,18 @@ jobs:
       - name: Prove the toolchain check detects drift and a moving channel
         run: python tools/check_toolchain.py --self-test
 
+      # `.coderabbit.yaml` decides what the external reviewer is shown and which
+      # rules it is told to apply, which makes it a control -- and a control that
+      # silently stops working is worse than one never added, because the review
+      # still runs and still reports clean. The failure modes are all silent: the
+      # file renamed (CodeRabbit reads only `.coderabbit.yaml`), a `path_filters`
+      # entry excluding the source, or a `path_instructions` glob matching no file,
+      # so the prose reads as an enforced rule while nothing enforces it.
+      - name: Verify the external-review configuration is live and specific
+        run: python tools/check_coderabbit_config.py
+      - name: Prove the review-config check detects an inert configuration
+        run: python tools/check_coderabbit_config.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

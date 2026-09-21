@@ -1898,7 +1898,17 @@ Items are grouped below by **phase**, because dependency order matters more than
     inheritance. The real risk was it being silently removed, not enabled.
   → 3 tests + a bridge injection (4/4 now caught) prove the policy is load-bearing.
   → §7.4 Cryptographic posture
-- [ ] **SEC-022** Implement the optional egress proxy with per-tenant policy.
+- [x] **SEC-022** Implement the optional egress proxy with per-tenant policy.
+  → Done: `qqq-cap::egress` — `EgressPolicy` authorizes a `Destination` for a
+    `TenantId` against a resolved `GrantSet`, with a typed `Denial` per layer.
+  → Three layers, in order: capability (the engine's decision is not reviewable),
+    tenant (no policy = no egress), then destination shape (literal IP addresses and
+    cleartext are refused by default).
+  → Literal-address refusal is the SSRF guard: `https://93.184.216.34/` reaches the
+    same server as `https://example.com/` while matching no host pattern, so
+    permitting it would make the allowlist advisory. Fault-injected: disabling it
+    fails 2 tests.
+  → 20 tests; `Denial::label` is bounded for §10.2 metric cardinality.
   → §7.5 Hardening beyond Wasm
 - [ ] **SEC-023** Establish the responsible-disclosure process and a public security-advisory feed.
   → §7.2 Adversary model
@@ -2875,7 +2885,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OQ-011** Decide whether `qqq:ai` ships inside the V1 line or moves to V2.
   → §6.9 `qqq:ai` — local inference as a capability
-- [ ] **OQ-099** Decide the deprecation window: two minor versions, or a fixed time period.
+- [ ] **OQ-012** Decide the deprecation window: two minor versions, or a fixed time period.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
 
 ### AI — Inference capability (staged behind `OQ-011`)

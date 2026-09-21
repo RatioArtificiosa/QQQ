@@ -4406,7 +4406,7 @@ bug, and it will not catch the next one either.
 
 ---
 
-## (heading deleted)
+## 4. MISTAKES AND FIXES
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
 
@@ -5264,6 +5264,82 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 → `docker/compose.yaml`, `docker/entrypoint.sh` (`cmd_guard_prove`),
 `tools/qqqdev.ps1` (`guard-prove`), `docs/development-bridge.md` §2.
+
+---
+
+### §O-091 — A commit shipped the harness's leftovers, and the self-repair contained the same class of bug
+
+Three failures, all discovered by refusing to accept an intermittent result.
+
+**1. The self-repair was built from reading the injection rather than running it.**
+`REVERSALS` is the table that lets `self_test_xrefs.py` undo its own leftovers.
+Check [6]'s entry claimed the injection "prepends a whole bogus item line" and set
+the original text to the empty string. The injection actually does this:
+
+```python
+re.sub(r"(?m)^- \[[ x]\] \*\*CAP-012\*\*", "- [ ] **CAP-011** duplicate", t, count=1)
+```
+
+It rewrites the **prefix of the `CAP-012` line**, keeping CAP-012's description. So
+the "repair" deleted a line that was not there and left the injected text in place
+— then reported success. The corpus lost `CAP-012` and gained a duplicate
+`CAP-011`; on the next run the injection's pattern no longer matched, and the
+harness reported `SKIP duplicate CAP-011: mutation was a no-op`.
+
+That is why consecutive runs disagreed: **run 1 passed, runs 2 and 3 failed.** The
+symptom looked like flakiness. It was deterministic corruption with a one-run lag,
+and treating it as flaky would have hidden it permanently.
+
+**2. The same bug, one layer up: a repair verified by assumption.** The reversal was
+corrected only after reading the byte-exact injected line out of the file. Writing a
+repair table from the injection's *description* is the `§O-085` shape — a control
+that looks right and was never executed against the thing it repairs.
+
+**3. The commit shipped a corrupted corpus, and CI caught it.** Commit `2546546`
+included `QQQ-Checklist-V1.md` with the checklist open-question renamed to the
+`099` form (check [9]) and `QQQ-Observations-and-Memories.md` with the
+MISTAKES-AND-FIXES heading replaced by the deleted-heading placeholder (check [12]),
+both left by an interrupted run. CI's xref job then failed with four errors:
+* check `[2]` — the Proposal cites a checklist item that is not defined, because
+  the item it cited had been renamed;
+* check `[9]`, twice — an Observations open question and a checklist item that no
+  longer correspond, because one side of the pair had been renamed;
+* check `[12]` — Observations is missing the section heading.
+
+Every one of those reads like document drift and points at documents that were
+correct. The working tree *looked* clean because the harness had not been re-run
+since the kill, so the previous repair had never been exercised on it.
+
+**A note on how this entry is written.** The failure lines above are *described*
+rather than quoted, and that is deliberate. This document is scanned for the
+markers the injections introduce, so quoting a marker verbatim makes the
+explanation indistinguishable from the defect it explains — the first draft of
+this entry did exactly that and tripped both the commit gate and check `[9]`. The
+same hazard applies to `HOST-999` and to the deleted-heading placeholder, which is
+why prose about this harness names the faults instead of reproducing them.
+
+**The structural fix: a commit gate that reports and does not repair.**
+
+`self_test_xrefs.py --check-clean` exits non-zero when a marker is present, prints
+which injection left it, and **never edits the tree** — because a gate that silently
+changes what is being committed is not a gate; `git commit -a` would capture the
+repair unseen. It runs in CI *before* `check_xrefs.py`, so the cause is named before
+the symptom is reported.
+
+The distinction is the point: `assert_clean_corpus` self-heals, which is right when a
+developer runs the harness interactively, and `--check-clean` refuses, which is right
+at the point of commit. One tool, two modes, because the correct behaviour depends on
+whether a human is watching.
+
+**The general lesson, and it is the sharpest of the session.** *A repair table is
+code, and code that has never been run against the thing it repairs is a guess.*
+Five of this session's findings were controls that had never been observed firing.
+This one is the sixth, and it was inside the machinery built to detect the first
+five. The check that caught it was not a review or a lint — it was running the same
+command three times and insisting the third answer match the first.
+
+→ `tools/self_test_xrefs.py` (`REVERSALS`, `check_clean_only`),
+`.github/workflows/ci.yml`.
 
 ---
 

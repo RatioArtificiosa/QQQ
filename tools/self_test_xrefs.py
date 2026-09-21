@@ -128,24 +128,51 @@ def restore_all(*_args) -> None:
 #
 # So each marker names the single file its injection targets, and `§99.9` is
 # checked with its distinguishing suffix so it cannot match a latency percentile.
+#
+# # Why every marker is anchored to the START OF A LINE
+#
+# Because the Observations document describes this harness, and in doing so it
+# *quotes* the markers — `## (heading deleted)` and `HOST-999` both appear in prose
+# explaining what the injections do. An unanchored `in` test therefore fired on the
+# documentation, and the guard "repaired" a document that was correct. That is the
+# same false-positive class as the earlier `HOST-999` case, arriving one level up:
+# the detector could not tell a mutation from a description of one.
+#
+# An applied injection is always a whole line (or the start of one), because every
+# mutation in `run_all` anchors on `(?m)^`. Prose quoting a marker puts it mid-line,
+# inside backticks. So `line_start=True` separates them exactly, and the flag is per
+# entry rather than global because the two cases genuinely differ.
 INJECTION_MARKERS = [
-    ("§99.9 Nonexistent section", CHECKLIST, "check [1]: a checklist item citing a bad section"),
-    ("`HOST-999`", PROPOSAL, "check [2]: the Proposal citing a dangling checklist ID"),
+    ("§99.9 Nonexistent section", CHECKLIST, "check [1]: a checklist item citing a bad section", False),
+    ("`HOST-999`", PROPOSAL, "check [2]: the Proposal citing a dangling checklist ID", False),
     (
         "- [ ] **CAP-011** Implement the restricted policy expression language.\n",
         CHECKLIST,
         "check [4]: CAP-011's citation line stripped",
+        False,
     ),
-    ("### REMOVED — The \"Wasm is near-native\"", OBS, "check [8]: the Observations §C-006 entry renamed away"),
-    ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed"),
-    ("`§D-099`", PROPOSAL, "check [10]: the Proposal citing a bad Observations decision"),
-    ("§REMOVED", PROPOSAL, "check [10b]: a decision's citations stripped from the Proposal"),
-    ("## (heading deleted)", OBS, "check [12]: the MISTAKES AND FIXES heading deleted"),
-    ("**CAP-011** duplicate", CHECKLIST, "check [6]: a duplicate checklist ID"),
+    ("### REMOVED — The \"Wasm is near-native\"", OBS, "check [8]: the Observations §C-006 entry renamed away", True),
+    ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed", True),
+    ("`§D-099`", PROPOSAL, "check [10]: the Proposal citing a bad Observations decision", False),
+    ("§REMOVED", PROPOSAL, "check [10b]: a decision's citations stripped from the Proposal", False),
+    ("## (heading deleted)", OBS, "check [12]: the MISTAKES AND FIXES heading deleted", True),
+    ("**CAP-011** duplicate", CHECKLIST, "check [6]: a duplicate checklist ID", False),
     # A safety net for the check [2] variant: the harness renames HOST-001 inside
     # the *checklist* too, and both files must be restored.
-    ("`HOST-999`", CHECKLIST, "check [2]: a checklist ID renamed to a dangling value"),
+    ("`HOST-999`", CHECKLIST, "check [2]: a checklist ID renamed to a dangling value", False),
 ]
+
+
+def marker_is_present(path: Path, marker: str, line_start: bool) -> bool:
+    """Whether `marker` is applied to `path`, as opposed to merely mentioned.
+
+    A line-anchored marker is matched only where it begins a line, which is how an
+    applied injection looks and how prose quoting it does not.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not line_start:
+        return marker in text
+    return any(line.startswith(marker) for line in text.splitlines())
 
 
 # The exact inverse of every injection above, so the harness can undo its own
@@ -188,9 +215,28 @@ REVERSALS = {
     "`§D-099`": ("`§D-099`", "`§D-003`"),
     "§REMOVED": ("§REMOVED", "§D-005"),
     "## (heading deleted)": ("## (heading deleted)", "## 4. MISTAKES AND FIXES"),
-    # The injection prepends a whole bogus item line; the repair removes it. The
-    # original text is empty because nothing was replaced, only inserted.
-    "**CAP-011** duplicate": ("- [ ] **CAP-011** duplicate\n", ""),
+    # # Why this reversal was WRONG the first time, and how it was found
+    #
+    # Check [6]'s injection does `re.sub` on the `CAP-012` **line**, replacing its
+    # `- [x] **CAP-012**` prefix with `- [ ] **CAP-011** duplicate`, so the injected
+    # text keeps CAP-012's description. The original revision of this entry claimed
+    # the injection "prepends a whole bogus item line" and set the original to the
+    # empty string — which is not what the injection does at all.
+    #
+    # The repair therefore deleted a line that was not there, left the injected
+    # line in place, and reported success. The result was a corpus that had *lost*
+    # `CAP-012` and gained a duplicate `CAP-011`. On the next run the injection's
+    # own pattern no longer matched anything, so the harness reported
+    # `SKIP duplicate CAP-011: mutation was a no-op` — a real defect in the
+    # self-repair, surfaced as flakiness across consecutive runs.
+    #
+    # The lesson is one this session keeps relearning: **a repair table is code, and
+    # code that is never executed against the thing it repairs is a guess.** This
+    # entry was written from reading the injection rather than from running it.
+    "**CAP-011** duplicate": (
+        "- [ ] **CAP-011** duplicate Implement `qqqai why <resource>` producing the complete resolution chain.",
+        "- [x] **CAP-012** Implement `qqqai why <resource>` producing the complete resolution chain.",
+    ),
 }
 
 
@@ -221,10 +267,10 @@ def assert_clean_corpus(autofix: bool = True) -> bool:
     `autofix=False` keeps the pure detection available for tests.
     """
     dirty = []
-    for marker, path, source in INJECTION_MARKERS:
+    for marker, path, source, line_start in INJECTION_MARKERS:
         if not path.exists():
             continue
-        if marker in path.read_text(encoding="utf-8"):
+        if marker_is_present(path, marker, line_start):
             dirty.append((path, marker, source))
 
     if not dirty:
@@ -290,9 +336,8 @@ def assert_clean_corpus(autofix: bool = True) -> bool:
     # **Verify the repair.** A restore that is assumed to have worked is the very
     # failure mode this file exists to catch, so the markers are re-checked.
     for path in targets:
-        text = path.read_text(encoding="utf-8")
-        for marker, marker_path, source in INJECTION_MARKERS:
-            if marker_path == path and marker in text:
+        for marker, marker_path, source, line_start in INJECTION_MARKERS:
+            if marker_path == path and marker_is_present(path, marker, line_start):
                 print(
                     f"  !! {path.name} still contains {marker!r} after the repair",
                     file=sys.stderr,
@@ -303,7 +348,53 @@ def assert_clean_corpus(autofix: bool = True) -> bool:
     return True
 
 
+def check_clean_only() -> int:
+    """Refuse if the corpus carries an injection. Does NOT self-heal.
+
+    # Why a separate mode, and why it does not repair
+    #
+    # `assert_clean_corpus` self-heals, which is right when a developer runs the
+    # harness and wrong at the point of commit. A commit gate that silently edits
+    # the tree is a commit gate that commits something other than what was
+    # reviewed — and `git commit -a` would capture the repair without anyone seeing
+    # it.
+    #
+    # So this mode only **reports**, with a non-zero exit, and names the exact
+    # repair to apply. It exists because a real failure got through: commit
+    # `2546546` shipped the corpus with a renamed `OQ-012` and a deleted
+    # `## 4. MISTAKES AND FIXES` heading, both left by an interrupted harness run,
+    # and CI's xref job failed on the pushed commit. The working tree looked clean
+    # because the harness had not yet been re-run since the kill.
+    #
+    # A checker that only runs *after* the damage is a postmortem, not a gate.
+    """
+    dirty = []
+    for marker, path, source, line_start in INJECTION_MARKERS:
+        if path.exists() and marker_is_present(path, marker, line_start):
+            dirty.append((path, marker, source))
+
+    if not dirty:
+        print("corpus is clean: no fault injection is applied")
+        return 0
+
+    print("FATAL: refusing to proceed — the corpus contains a left-over injection.")
+    print("")
+    print("A previous harness run was killed before it could restore. These are NOT")
+    print("real defects in the documents:")
+    print("")
+    for path, marker, source in dirty:
+        print(f"  {path.name}: contains {marker!r}  (left by {source})")
+    print("")
+    print("Repair with:  python tools/self_test_xrefs.py")
+    print("(it reverses the exact substitution), then re-check with `git diff`.")
+    return 1
+
+
 def main() -> int:
+    # `--check-clean` is the commit gate: report only, change nothing.
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-clean":
+        return check_clean_only()
+
     # Install the signal handlers FIRST, so a timeout during any later step still
     # restores. `SIGKILL` cannot be caught, which is why the check below exists.
     for sig in (signal.SIGTERM, signal.SIGINT):

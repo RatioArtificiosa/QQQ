@@ -44,6 +44,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod capability;
+pub mod egress;
 pub mod manifest;
 pub mod normalize;
 pub mod resolve;
@@ -51,6 +52,7 @@ pub mod resolve;
 pub use capability::{
     Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,
 };
+pub use egress::{Decision, Denial, Destination, EgressPolicy, Scheme, TenantEgress, TenantId};
 pub use manifest::{
     group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability, DnsCapability,
     EnvCapability, FsCapability, FsMode, HttpCapability, Manifest, ManifestError, Package,

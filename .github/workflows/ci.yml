@@ -117,6 +117,24 @@ jobs:
       - name: Validate proposal <-> checklist graph
         run: python tools/check_xrefs.py
 
+      # **Before the validator, refuse a corpus that carries a left-over injection.**
+      #
+      # Ordering this first matters. `check_xrefs.py` reports the *symptom* — "the
+      # Proposal cites a checklist item that is not defined", "Observations is
+      # missing a section heading" — which reads exactly like document drift and
+      # sends the reader to edit documents that are correct. The cause is a killed
+      # harness run, and this step says so in one line.
+      #
+      # It exists because the symptom, not the cause, was believed once: a commit
+      # shipped the corpus with a renamed `OQ-012` and a deleted `## 4. MISTAKES AND
+      # FIXES` heading left by an interrupted `self_test_xrefs.py`, and CI failed on
+      # the pushed commit with four errors that all pointed at the wrong thing.
+      #
+      # `--check-clean` reports and exits non-zero; it never edits the tree, because
+      # a gate that silently changes what is being committed is not a gate.
+      - name: Refuse a corpus carrying a left-over fault injection
+        run: python tools/self_test_xrefs.py --check-clean
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

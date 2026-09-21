@@ -66,6 +66,68 @@ def git_files() -> list[Path]:
     return [ROOT / p for p in out.stdout.split("\0") if p]
 
 
+def untracked_would_be_wrong(limit: int = 40) -> list[tuple[Path, str]]:
+    """Untracked text files whose working-tree EOL contradicts `.gitattributes`.
+
+    # Why this exists, and the defect it closes
+
+    `git_files` asks Git for **tracked** files, so this tool has always been
+    blind to a file that has been created but not yet staged. That is exactly
+    the moment a line-ending mistake is cheapest to fix and most expensive to
+    miss, and it bit for real: `tools/bootstrap.sh` was written on Windows,
+    carried CRLF, passed `normalize_eol.py --check` (untracked, therefore
+    invisible), passed every other local gate, and would have shipped a shell
+    script that Linux refuses with
+
+        bash: tools/bootstrap.sh: /bin/bash^M: bad interpreter
+
+    which is `§O-086` — a Windows checkout giving Linux an interpreter named
+    `bash\\r` — recurring in the *workflow* rather than the runtime. The commit
+    that introduced the file is the only place it can be prevented, so the check
+    has to look at untracked files.
+
+    # Why it reports rather than fixes
+
+    Because an untracked file may be work in progress that the author does not
+    want rewritten. The caller decides; this tool's job is to make the problem
+    visible before a commit rather than after a CI failure.
+
+    # Why only files that would be *committed* as text
+
+    Because `.gitattributes` distinguishes them: a `.ps1` is CRLF by design and
+    a `target/` blob is binary. Both are excluded, so the report is actionable
+    rather than a list of things nobody will change.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    findings: list[tuple[Path, str]] = []
+    for rel in out.stdout.split("\0"):
+        if not rel:
+            continue
+        path = ROOT / rel
+        suffix = path.suffix.lower()
+        if suffix in KEEP_CRLF or (suffix and suffix not in TEXT_SUFFIXES):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        # A NUL byte means binary, whatever the extension says.
+        if b"\0" in data[:8192]:
+            continue
+        crlf = data.count(b"\r\n")
+        lf = data.count(b"\n") - crlf
+        if crlf and lf:
+            findings.append((path, f"mixed ({crlf} CRLF, {lf} LF)"))
+        elif crlf:
+            findings.append((path, f"CRLF ({crlf})"))
+        if len(findings) >= limit:
+            break
+    return findings
+
+
 def core_autocrlf() -> str:
     """The repository's `core.autocrlf` setting, or `(unset)`."""
     out = subprocess.run(
@@ -131,6 +193,41 @@ def main() -> int:
         print("\nFix: python tools/normalize_eol.py, then commit.")
         return 1
 
+    # --- Part 1b: files that are about to be committed but are not tracked ---
+    #
+    # The blind spot that let a CRLF shell script reach a commit. See
+    # `untracked_would_be_wrong` for the full account; the short version is that
+    # `git ls-files` cannot see a file that has not been staged, and the commit
+    # that stages it is the last moment the problem is cheap to fix.
+    #
+    # It reports rather than repairs, and it does not fail `--check`: an
+    # untracked file is not yet part of the repository, and failing CI on
+    # something that is not committed would be a false alarm. The normalization
+    # path fixes it, so running the tool without `--check` before `git add`
+    # closes the gap.
+    untracked = untracked_would_be_wrong()
+    if untracked:
+        if check_only:
+            print(
+                f"note: {len(untracked)} untracked text file(s) would be committed "
+                f"with the wrong endings:"
+            )
+            for path, why in untracked:
+                print(f"  {path.relative_to(ROOT)} — {why}")
+            print(
+                "\nRun `python tools/normalize_eol.py` before `git add` to fix "
+                "them; this is not a failure while they are untracked."
+            )
+        else:
+            for path, _why in untracked:
+                raw = path.read_bytes()
+                path.write_bytes(raw.replace(b"\r\n", b"\n"))
+            print(
+                f"normalized {len(untracked)} untracked file(s) before commit:"
+            )
+            for path, _why in untracked:
+                print(f"  {path.relative_to(ROOT)}")
+
     # --- Part 2: the working tree. Drift here is untidy, not broken. ---------
     drifted: list[Path] = []
     for path in git_files():
@@ -157,8 +254,7 @@ def main() -> int:
         print("committed content is LF; working tree matches")
         if autocrlf in ("true", "input"):
             print(
-                f"note: core.autocrlf is `{autocrlf}`, which is not required for "
-                "correctness but removes one more thing that could rewrite a file"
+                f"note: core.autocrlf is `{autocrlf}`, which is not required for "                "correctness but removes one more thing that could rewrite a file"
             )
         return 0
 

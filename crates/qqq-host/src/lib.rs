@@ -69,6 +69,7 @@ const _: () = assert!(
 
 pub mod admission;
 pub mod ambient;
+pub mod arch012;
 pub mod audit;
 pub mod boundary;
 pub mod config;

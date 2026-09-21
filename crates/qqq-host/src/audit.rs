@@ -1584,7 +1584,7 @@ mod tests {
             assert!(
                 DEFAULT_CAPACITY > 0,
                 "a zero default would refuse everything"
-            )
+            );
         };
         assert_eq!(DEFAULT_CAPACITY, 65_536);
         let s = AuditStream::with_default_capacity();

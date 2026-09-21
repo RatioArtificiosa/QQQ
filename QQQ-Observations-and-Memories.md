@@ -11055,4 +11055,69 @@ code. The lesson: after restoring, assert the injection is *gone*
 
 ---
 
+### §O-133 — A lifetime that reads as correct, and four extractions that each had a rule inside
+
+**The bug.** `StreamingHandler` was declared:
+
+```rust
+for<'a> Fn(&'a RequestHead, &'a RouteMatch, &'a mut StreamWriter<'a>)
+    -> Pin<Box<dyn Future<Output = Result<(), StreamError>> + Send + 'a>>
+```
+
+It reads as the obvious spelling and its meaning is wrong in a way the compiler reports at
+the **call site** rather than at the signature:
+
+```
+error[E0499]: cannot borrow `writer` as mutable more than once at a time
+  --> crates\qqq-serve\src\server.rs:760:37
+```
+
+**Why it is wrong.** `StreamWriter<'a>` contains `&'a mut TcpStream`. Writing
+`&'a mut StreamWriter<'a>` makes the caller's borrow of the writer and the writer's own
+borrow of the socket **the same lifetime** — an invariant relationship, which cannot be
+shortened. So the caller could never stop borrowing the writer, and
+`StreamWriter::finish` — the one operation that must run *after* the handler returns — was
+unreachable. The handler could stream and never terminate.
+
+Three lifetimes are needed, and the third is the easy one to miss: `'r` for the request
+and route match, `'w` for the writer's own borrow of the socket, `'s` for the caller's
+borrow **of the writer**. Bounding the returned future by `'s` alone is what lets the
+borrow end.
+
+**The generalisable point.** *A lifetime error reported at the call site is usually a
+mistake in the signature.* The compiler's message was true and pointed at the wrong file:
+I spent a round trying to restructure the caller — scoping the call, capturing the
+`Result` first — when the fix was one line in the type. When the same borrow error
+survives two restructurings of the caller, the caller is not where the problem is.
+
+**Four extractions, and each had a rule inside it.** Clippy's `too_many_lines` fired at
+151 lines once the streaming branch went in. It was right, and the notable thing is what
+came out — every extraction turned out to be a **documented rule that had no name**:
+
+| Extracted | The rule it now names |
+|---|---|
+| `serve_streaming` | `StreamWriter::begin` is the commit point; after it a failure cannot become a status |
+| `reject_body` | `SRV-005`: the body is capped **while it arrives**, because dispatch-first answered **200 OK** to a 3 MiB body against a 2 MiB cap |
+| `begin_drain_if_signalled` | a shutdown stops *reading*; it does not cut off an in-flight response |
+| `write_flat_response` | `will_keep_alive`, not `is_open` — `is_open` advertised keep-alive on the response that closed the connection |
+
+That is four instances of a rule that existed only as a paragraph inside a 151-line
+function, which is the same argument `§O-124` made about the level rule: **an unnamed rule
+cannot be asserted, and a rule buried in a long function is one a test cannot reach.** The
+line limit is not a style preference here; it is a proxy for "this function contains more
+than one idea".
+
+**A fifth observation, about the process.** Three of the Python scripts I wrote to make
+these edits **did not land on disk** — the `write` tool reported success and the file did
+not exist, discovered only when `python .scratch/...` failed with "can't open file". The
+fix each time was to write it again and check `Test-Path` **before** running it, which is
+now the habit. This is the same unreliability `§O-132` recorded from the other direction
+(a backup that did not exist when restoring), and it is the single most time-costly
+tooling quirk in this environment.
+
+→ `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-serve/tests/streaming_route.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -2689,9 +2689,16 @@ Items are grouped below by **phase**, because dependency order matters more than
     chunk length as **body data**. Every HTTP/1.1 test passed, because the framing is correct there; the
     defect lives only in the transition between versions. See `§O-132`.
   → **Measured**: 3 unit + 6 integration tests over a real socket; workspace **1962 passed, 0 failed**.
-  → **Still not wired**: `serve_connection` does not dispatch a streaming route — the route table would
-    have to say which handler kind a route wants. `tests/stream.rs`'s module docs say so rather than
-    implying `serve` can do it.
+  → **Wired**: `qqq-serve::server::Dispatch` carries both handler kinds and `serve` takes it; a matched
+    route whose handler **name** has a streaming entry is served by it, everything else falls through to the
+    flat handler. `Dispatch::flat(handler)` is the constructor for a server with no streaming routes, so no
+    existing caller changed meaning. Keyed by name rather than by a flag on `Route`, because `Route`'s
+    `handler` is already a name the host resolves at dispatch and the router is not the authority on how a
+    guest is invoked.
+  → **Measured**: 4 integration tests through the real accept loop, including one that proves an event
+    reaches the client **while the handler is still parked** — a buffered path would deadlock rather than
+    fail, because the handler awaits a signal the test only sends after reading that event. Workspace
+    **1966 passed, 0 failed**. See `§O-133` for the lifetime bug found on the way.
 - [x] **SRV-005** Implement `max_request_bytes` enforced during streaming, not after buffering.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Done. `BodyReader::account` charges each piece **before it is returned**, so a

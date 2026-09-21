@@ -189,6 +189,14 @@ jobs:
       - name: Prove the error-catalogue check catches an incomplete enum
         run: python tools/check_error_catalogue.py --self-test
 
+      # `DOC-017`. The WIT is the published artifact; a hand-written reference is a
+      # second copy of an interface that already exists, and when they disagree the
+      # WIT is right and the reference is a trap.
+      - name: Validate the WIT reference
+        run: python tools/check_wit_reference.py
+      - name: Prove the WIT-reference check catches a parser regression
+        run: python tools/check_wit_reference.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

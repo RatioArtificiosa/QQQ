@@ -226,7 +226,22 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §3.4 Positioning statement and the language we use
 - [ ] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.
   → §0.4 How to read the cross-references
-- [ ] **DOC-017** Generate the WIT reference documentation from `wit/` into Markdown, with per-language examples.
+- [x] **DOC-017** Generate the WIT reference documentation from `wit/` into Markdown, with per-language examples.
+  → Done: `docs/wit-reference.md` — 13 packages, 20 interfaces, **71 functions** and
+    47 types, generated from `wit/` by `tools/gen_wit_reference.py` and verified by
+    `tools/check_wit_reference.py` in CI and in the bridge.
+  → **Per-language examples are deliberately NOT emitted**, and the page says so rather
+    than showing plausible ones. A Rust or TypeScript example is only known correct once
+    it compiles against the real bindings, and no `qqq-abi` consumer exists to compile
+    against yet. An unbuildable example is documentation that *looks* verified; the
+    section lands with `ABI-*`.
+  → Two real parser bugs found by checking counts rather than eyeballing output: nested
+    `record`/`enum` blocks ended an interface early (so `qqq:http http` reported **0
+    functions** while exporting three), and `resource` methods at brace depth 2 were
+    missed entirely (so the filesystem interface listed no way to use the filesystem).
+    Both outputs were valid Markdown that looked plausible. 71 vs 2 functions.
+  → A third: a variant's case docs leaked into the following resource's description.
+  → 11/11 self-test cases, built to detect exactly those three.
   → §11.3 Documentation as a product surface
 - [ ] **DOC-018** Build the documentation freshness test: compile a sample project against the published docs and fail on drift.
   → §2.6 NN-6 — Human + Machine Documentation Parity

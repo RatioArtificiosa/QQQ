@@ -285,6 +285,47 @@ EXCLUDED = {
 }
 
 
+def content_size(rel: str) -> int | None:
+    """The byte length of a file's **content**, with CRLF normalised away.
+
+    # Why this is not `Path.stat().st_size`
+
+    Because that number depends on the operating system of whoever ran the
+    generator. `core.autocrlf` expands every LF to CRLF on a Windows checkout, so
+    `QQQ-Proposal-V1.md` measures 136,513 bytes here and 134,144 on Linux — a
+    2.4 KB difference for one file, and more for the larger ones.
+
+    Baking that into `llms.txt` made the document **non-reproducible**: CI on
+    Linux would compute one value and a Windows contributor another, so every
+    Windows push failed the drift check, and two people regenerating the same
+    commit produced different files. That is precisely the "control believed live
+    that is not" shape this session keeps finding, except it was a *published
+    document* rather than a check — and it was found by the drift check doing its
+    job on the generator that produced it.
+
+    # Why normalise rather than use `.gitattributes` or a Git object read
+
+    Because a single `read_bytes().replace(b"\r\n", b"\n")` is exact for the
+    question being asked — *how much content is this?* — and needs no subprocess.
+    Reading the committed blob via `git cat-file` would answer a subtly different
+    question (what is committed, not what is here) and would make the generator
+    depend on Git being present.
+
+    # Why the number is still allowed to differ from a file manager's
+
+    Because a reader comparing them will see a small difference on Windows, and
+    that is expected. The alternative — omitting sizes — loses real information:
+    a model deciding whether to fetch a 577 KB document benefits from knowing it
+    is large.
+    """
+    path = ROOT / rel
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    # Normalise to LF so the count is a property of the content.
+    return len(data.replace(b"\r\n", b"\n"))
+
+
 def size_of(rel: str) -> str:
     """A human size for a file, **without its own parentheses**.
 
@@ -300,10 +341,9 @@ def size_of(rel: str) -> str:
     A bare value lets the caller own the punctuation, so there is one place that
     can get it wrong rather than two.
     """
-    path = ROOT / rel
-    if not path.exists():
+    n = content_size(rel)
+    if n is None:
         return "missing"
-    n = path.stat().st_size
     if n < 1024:
         return f"{n} B"
     if n < 1024 * 1024:
@@ -337,6 +377,12 @@ def render_index() -> str:
     out.append(
         "For the documentation concatenated into one document, see "
         "[`llms-full.txt`](llms-full.txt)."
+    )
+    out.append("")
+    out.append(
+        "Sizes are **LF-normalised content byte counts**, so they are identical "
+        "on every platform regardless of the checkout's line endings. They may "
+        "differ slightly from a file manager's figure on Windows."
     )
     out.append("")
 
@@ -552,6 +598,27 @@ def self_test() -> int:
             "the corpus must say what it could not include",
         )
         FULL_INCLUDES = saved_full
+
+        # --- the determinism property, which is the reason for the above ---
+        #
+        # A CRLF file and an LF file with identical text must measure the same,
+        # or `llms.txt` is a function of the checkout rather than of the repo.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            body = "line one\nline two\n"
+            lf_file = tmp / "lf.md"
+            crlf_file = tmp / "crlf.md"
+            lf_file.write_bytes(body.encode())
+            crlf_file.write_bytes(body.replace("\n", "\r\n").encode())
+            lf_len = len(lf_file.read_bytes().replace(b"\r\n", b"\n"))
+            crlf_len = len(crlf_file.read_bytes().replace(b"\r\n", b"\n"))
+        expect(
+            "a CRLF and an LF copy of one text measure the same",
+            lf_len == crlf_len == len(body.encode()),
+            f"LF copy {lf_len}, CRLF copy {crlf_len}, content {len(body.encode())}",
+        )
 
         # --- the heading demotion, which is easy to get wrong -------------
         corpus = render_full()

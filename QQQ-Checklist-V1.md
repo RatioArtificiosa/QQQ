@@ -360,7 +360,46 @@ Items are grouped below by **phase**, because dependency order matters more than
     variant added by copying a neighbour and dropping its doc comment, a duplicated
     code, a code outside every range, and an enum that is not where the parser looks.
   → §12.2 Error message design standard
-- [ ] **DOC-020** Publish `llms.txt` and `llms-full.txt` at the repository root and on the docs site.
+- [x] **DOC-020** Publish `llms.txt` and `llms-full.txt` at the repository root and on the docs site.
+  → Done: `tools/gen_llms_txt.py` (6-case self-test), `llms.txt` (4 KB index),
+    `llms-full.txt` (96 KB corpus, 10 documents), wired into
+    `.github/workflows/ci.yml` **and** `docker/entrypoint.sh`.
+  → **The two files are different documents with different jobs, which is the
+    design §8.5 implies.** `llms.txt` is a **curated index**: a model that has
+    never seen QQQ reads it first and learns what exists, in what order, and what
+    each file is *for* — small enough to fit any context window. `llms-full.txt`
+    is a **corpus**: ten documents whole, each preceded by its repository path so
+    a claim in a generated answer can be traced to its source.
+  → **Generated rather than hand-written**, for the reason `CON-016` records for
+    the schemas: a hand-written index is a *second* statement of what the
+    repository contains, and it goes stale the first time a document is added.
+    The completeness check proves the curation and the tree agree in **both**
+    directions — every `docs/*.md` is either indexed or explicitly excluded, and
+    no exclusion names a file that no longer exists.
+  → **The self-test found three real gaps on its first run.** Four genuine
+    documents were **unindexed** (`docs/adr/README.md`,
+    `docs/advisories/INDEX.md`, `docs/advisories/README.md`,
+    `docs/development-bridge.md`); one exclusion named a file that **does not
+    exist** (`docs/env-example.md` — the real file is `docs/.env`); and the index
+    rendered **`((missing))`** with doubled brackets because `size_of` wrapped its
+    own value while the caller wrapped it again.
+  → **The `.env` exclusion is a security control, not a judgement about what
+    counts as documentation.** `docs/.env` holds credentials: an index linking to
+    it would be a leak, and a corpus embedding it would put the secret in a file
+    designed to be pasted into a model's context window. Verified **directly**
+    rather than by trusting the generator's accounting — neither generated file
+    mentions `.env`, neither carries secret-shaped text, and all 10 provenance
+    markers are present.
+  → **Why the two largest documents are deliberately excluded from the corpus.**
+    `QQQ-Proposal-V1.md` is 133 KB and `QQQ-Observations-and-Memories.md` is
+    577 KB; including them would consume a context window before a reader reached
+    anything else. Both are in the index **with their size stated**, so a consumer
+    can fetch them deliberately — which is the index doing its job rather than an
+    omission.
+  → **The corpus demotes every source heading by one level**, so a document's own
+    `# ` title cannot masquerade as a top-level section of the concatenation. A
+    reader scanning the file can then tell the corpus structure from any one
+    document's.
   → §8.5 Making the codebase legible to machines
 
 ### LIC — Licensing

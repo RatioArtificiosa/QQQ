@@ -2625,8 +2625,32 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Not covered here: HTTP/2 (`SRV-002`) and streaming bodies (`SRV-004`).
     `drain_body` closes the connection on a `chunked` body rather than
     de-chunking, which is `SRV-004`'s work and is stated in `§O-047a`.
-- [ ] **SRV-002** Implement HTTP/2 including multiplexing and flow control.
+- [x] **SRV-002** Implement HTTP/2 including multiplexing and flow control.
   → §6.4 `qqq-serve` — the HTTP and application server
+  → Done in seven layers plus a connection: `h2::frame` (the 9-byte header and
+    every frame type), `h2::hpack` (static and dynamic tables, integer, Huffman),
+    `h2::flow` (both windows and §6.9.2's retroactive delta), `h2::stream` (the
+    §5.1 state table), `h2::settings`, and `h2::conn` — preface, dispatch,
+    multiplexing and `CONTINUATION`-reassembly, driven by
+    `recv(&[u8]) -> Vec<Event>` over buffers rather than a socket so a header
+    block split across three frames is testable by feeding it bytes.
+  → Evidence: **239 tests in the `h2` module** (201 + 38 new) and 418 in
+    `qqq-serve`; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  → **The module had been excluded from the crate's module tree** by a leftover
+    debugging line — 9,370 lines and 201 tests that had never been compiled,
+    linted or run. Restoring it cost two compile errors and one warning.
+    Recorded as `§O-120`, and now guarded by `tools/check_scope_table.py`, which
+    fails when any `.rs` file under `src/` is unreachable from the crate root.
+  → **A wrong test was among the ones that had never run**:
+    `the_second_end_stream_closes_the_stream` asserted a state §5.1 Figure 2 does
+    not have. The implementation was right; the test was corrected.
+  → Three defects found by the new connection tests and fixed: stream
+    replenishment advertised the whole window instead of the credit owed
+    (measured: 65,525 after ten bytes); new streams were never given a
+    flow-control window; and a closed stream id skipped the §5.1.1 monotonicity
+    check.
+  → Not covered: TLS/ALPN negotiation of `h2` on a listener — `crate::server` is
+    HTTP/1.1 only. That is the remaining join and is stated in `h2/mod.rs`.
 - [x] **SRV-003** Implement the compile-time route table as a radix trie.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **SRV-004** Implement streaming bodies end to end with backpressure propagation.

@@ -10214,4 +10214,97 @@ reviewer is an input, not an authority.
 
 ---
 
+### §O-120 — 9,370 lines of HTTP/2 that had not been compiled since the line that excluded them was written
+
+**What was found.** `crates/qqq-serve/src/lib.rs` contained this:
+
+```rust
+pub mod body;
+// h2 temporarily excluded for isolated verification of tls (concurrent worker broke h2/stream.rs; restored below).
+pub mod conn;
+pub mod http1;
+```
+
+The `h2` module was **not in the module tree**. It never was restored "below", and
+the comment stayed. Underneath it sat seven files, **9,370 lines and 201 tests** —
+the complete HTTP/2 protocol: the frame layer, HPACK with a Huffman table, flow
+control, the §5.1 stream state machine, settings. None of it had been compiled,
+linted or run since that line was written.
+
+**Why this is the worst class of defect this project has.** Every previous
+instance of *a control believed live that is not* (`§O-066`, `§M-006`, `§O-092`,
+`§O-103`, `§O-108`, `§O-111`, `§O-116`, `§O-118`) was a control that could not
+fire. This one is the same shape reached from the other side: **9,370 lines of
+production code that nothing looked at**, wearing the comment of a temporary
+measure. The module's own documentation was the only thing claiming otherwise, and
+its claims were false — it described a `conn` submodule that had never been
+written and that two of its own intra-doc links pointed at.
+
+**The cost of restoring it was two compile errors and one warning.** That is the
+entire distance between "9,370 lines of reviewed, tested HTTP/2" and "9,370 lines
+of nothing": a missing `ConnectionError` import in `stream.rs`, and a
+`strip_padding` parameter that was passed and never read. **A single deleted line
+had been indistinguishable from a working module for months** — which is also why
+the crate's scope table read `HTTP/2, multiplexing, flow control | not implemented`
+without anyone noticing the contradiction between the table and the directory.
+
+**The tests that had never run contained a wrong one.** With the module restored,
+200 of 201 passed and one failed: `the_second_end_stream_closes_the_stream`
+asserted `HalfClosedLocal` where §5.1 Figure 2 has one edge out of
+`half-closed (remote)` and it goes to `closed`. The *implementation* was right and
+the **test** was wrong — and nothing could have revealed it while the test was not
+being run. A test that never runs is not evidence of anything, including of its own
+correctness.
+
+**Then the real gap: `conn.rs`.** The module documented a connection layer in its
+layer diagram and in its "what is implemented" table. It did not exist. Written
+now: preface, frame dispatch, multiplexing, `CONTINUATION`-reassembly and
+flow-control accounting, as a state machine over buffers rather than a socket —
+`recv(&[u8]) -> Vec<Event>` — so a header block split across three frames and two
+streams interleaving are testable by feeding it bytes. 38 tests, each rule stated
+with its citation.
+
+**Three defects the new tests found, from the other side of the same lesson.**
+All three were in code that had *just* been restored, and all three had been
+invisible for the same reason:
+
+1. `FlowControl::take_stream_replenishment` returned the window's remaining size
+   instead of the credit owed — contradicting its own doc comment, which said
+   *"Returning only the credit owed"*. Measured: ten bytes of body produced a
+   `WINDOW_UPDATE` of **65,525**, the entire initial window. It survived because
+   the function had **no test and no caller**; `conn` is its first, and the defect
+   appeared on the first call. *Untested and uncalled is a third category beside
+   "correct" and "wrong", and it is the one that hides longest.*
+2. New streams never got a flow-control window, so no credit ever accrued and the
+   connection would stall permanently once the peer's initial window was spent —
+   presenting as a hung client rather than as an error.
+3. A closed stream id skipped admission, letting a peer reuse a finished id. §5.1.1
+   makes that a connection error.
+
+**Two of the new tests were themselves wrong, and running them is what said so.**
+One asserted that repeating a stream id ends the connection; §5.1's state table
+answers first, and a second `HEADERS` on a stream that already ended is a
+stream-scoped `STREAM_CLOSED`. The other asserted an oversized declared frame
+length — but a 24-bit field cannot express a value over `MAX_FRAME_PAYLOAD`, so
+the guard it claimed to exercise is unreachable and the test could not fail. Both
+were replaced by tests of what the code genuinely guarantees. **This is the third
+time in this project that a test was the thing that was wrong** (`§O-116`, and
+`hpack.rs`'s hand-miscounted 54); the pattern is consistent enough to state: when a
+test and its code disagree, which one is wrong is decided by the specification, not
+by which was written first.
+
+**The prevention.** `tools/check_scope_table.py`, in CI and in
+`docker/entrypoint.sh`, with a 5-case fault-injection self-test. It walks `mod`
+declarations and **fails when a `.rs` file under `src/` is unreachable from the
+crate root** — precisely the defect that shipped — and refuses a scope table with
+no `implemented` row as vacuous. Verified by re-injecting the original exclusion:
+it names all seven `h2` files as `never compiled`. The crate's scope table is
+corrected, and now says what the code does.
+
+→ `crates/qqq-serve/src/{lib.rs,h2/mod.rs,h2/conn.rs,h2/{error,flow,frame,hpack,settings,stream}.rs}`,
+`tools/check_scope_table.py`, `.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+→ 418 tests in `qqq-serve` (201 previously dead, 38 new), 1804 workspace-wide.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

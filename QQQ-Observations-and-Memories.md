@@ -9396,4 +9396,89 @@ the same one `expect_failure`'s SKIP reports.
 
 ---
 
+### §O-110 — A hash that promised to cover "everything" and covered the artifacts only
+
+**What §5.4 says.**
+
+> **`lockfile-hash` covers everything.** Any change to any resolved artifact
+> changes the hash, so a build is either reproducible or it loudly is not.
+
+and the checklist item spells out the same sentence in the form the code has to
+satisfy: *covering all resolved artifacts **and config***.
+
+**What was measured.** `Lockfile::compute_hash` covered the format version and
+every per-package field — `name`, `version`, `source`, `digest`, `wit`, `caps` —
+and **no build config at all**. Nothing in the digest depended on the language,
+the target, or the profile. So two builds from one lockfile with different
+`[build]` settings produced **the same hash while producing different artifacts**.
+
+That is the precise case the sentence exists to catch:*"a build is either
+reproducible or it loudly is not."* It was silent where it promised to be loud,
+and the failure would surface as a reproducible-build check that passes on two
+artifacts that are not the same.
+
+**Why the existing thirty-eight tests could not see it.** Every one of them tests
+a field the hash *does* cover: `the_hash_covers_the_artifact_digest`,
+`the_hash_covers_the_capabilities`, `the_hash_changes_with_every_covered_field`,
+`field_boundaries_are_unambiguous`. A suite organised as "each covered field has
+a test" is structurally incapable of noticing a field that was never added — the
+input set excludes the target, which is `§O-092`/`§O-103`'s shape for the fourth
+time this session, arriving this time in a *test suite* rather than a checker.
+
+The audit that found it was the same one that has now found fifteen items of
+already-done work: read the item's wording, measure what the code does, and
+compare the two. The wording said "and config"; the code said nothing about
+config.
+
+**The fix, and the two decisions in it.**
+
+`BuildConfig` (language, target, profile, caps) is recorded at
+`[metadata.build]` and folded into the digest with the same NUL-separated
+discipline the package fields use. Two choices carry the design:
+
+1. **Four fields, not the whole manifest.** Language, target and profile are the
+   three inputs that change the bytes `qqqai build` produces, and the declared
+   grant set changes the authority the artifact is built against. Description,
+   licence and package name change no output byte; folding them in would move the
+   hash for edits that cannot affect reproducibility, which trains a reader to
+   ignore it.
+2. **An absent config contributes nothing.** Every lockfile written before this
+   field existed keeps its exact digest. Folding in an empty block
+   unconditionally would change the digest of every lockfile in the world on
+   upgrade and report every project as dirty — a change a package manager must
+   never make silently.
+
+**And the defect the new tests found, in code I had just written.** The first
+version wrote the config's group separator *before* testing whether the config was
+empty:
+
+```rust
+if let Some(build) = &self.metadata.build {
+    h.update(b"\x1d");          // <- written even for an empty config
+    ...
+}
+```
+
+`skip_serializing_if` writes **nothing** for an empty config, so `Some(empty)`
+round-trips to the same bytes as `None` — and the two hashed differently. A
+lockfile would change its own digest merely by being read and written, which is
+the reproducibility property this whole item is about, broken by the code adding
+it.
+
+It was caught by `a_lockfile_without_config_hashes_exactly_as_before`, whose
+assertion was *"`None` and an empty config must agree, or a lockfile would change
+hash merely by being re-serialised"*. That assertion was not obvious to write —
+the natural test checks only the `None` case — and it is the one that failed.
+
+**The generalisable rule.** A field whose *absence* is indistinguishable from its
+*emptiness* after a round trip must be indistinguishable in any hash over it,
+because otherwise the digest is a function of the in-memory representation rather
+than of the file. `skip_serializing_if` is exactly where that divergence is
+introduced, and it is invisible in the type.
+
+→ `crates/qqq-pkg/src/lock.rs` (`BuildConfig`, `compute_hash`, 9 new tests, 44 in
+the module).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

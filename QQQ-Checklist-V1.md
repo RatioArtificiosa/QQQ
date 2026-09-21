@@ -1100,7 +1100,46 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CON-004** Finalize and publish the `qqq.lock` schema including per-package `caps`.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **CON-005** Implement `lockfile-hash` covering all resolved artifacts and config.
+- [x] **CON-005** Implement `lockfile-hash` covering all resolved artifacts and config.
+  → Done: `crates/qqq-pkg/src/lock.rs` — `compute_hash`, `stamp`, the
+    `lockfile-hash` metadata field, and `BuildConfig`. **44 tests** in the module
+    (9 new), all green.
+  → **The item's two clauses were satisfied to different degrees, and the audit
+    found the gap by reading the wording (`§O-110`).** "All resolved artifacts"
+    was covered: the format version and every per-package field — `name`,
+    `version`, `source`, `digest`, `wit`, `caps` — with NUL separators so
+    `("ab","c")` cannot collide with `("a","bc")`, and a record separator so two
+    packages cannot collide either. **"And config" was not covered at all**, so
+    two builds from one lockfile with different `[build]` settings produced the
+    **same hash while producing different artifacts** — silent exactly where
+    §5.4 promises *"a build is either reproducible or it loudly is not."*
+  → **Why the existing 38 tests could not see it**: every one of them tests a
+    field the hash *does* cover (`the_hash_covers_the_artifact_digest`,
+    `the_hash_covers_the_capabilities`, `the_hash_changes_with_every_covered_field`).
+    A suite organised as "each covered field has a test" is structurally
+    incapable of noticing a field that was never added — the input set excludes
+    the target, which is `§O-092`/`§O-103`'s shape for the fourth time, this time
+    in a *test suite* rather than a checker.
+  → **`BuildConfig` is four fields, not the whole manifest.** Language, target and
+    profile are the three inputs that change the bytes `qqqai build` produces, and
+    the declared grant set changes the authority the artifact is built against.
+    Description, licence and package name change no output byte, and folding them
+    in would move the hash for edits that cannot affect reproducibility — which
+    trains a reader to ignore it.
+  → **An absent config contributes nothing**, so every lockfile written before
+    this field existed keeps its exact digest. Folding in an empty block
+    unconditionally would change every lockfile in the world on upgrade and
+    report every project as dirty — a change a package manager must never make
+    silently.
+  → **And the defect the new tests found, in code written minutes earlier**: the
+    first version wrote the config's group separator *before* testing whether the
+    config was empty, so `None` and `Some(BuildConfig::default())` hashed
+    differently — while `skip_serializing_if` makes them identical *files*. A
+    lockfile would have changed its own digest merely by being read and written.
+    Caught by `a_lockfile_without_config_hashes_exactly_as_before`, whose
+    assertion was the non-obvious one: the natural test checks only the `None`
+    case. **A field whose absence is indistinguishable from its emptiness after a
+    round trip must be indistinguishable in any hash over it.**
   → §5.4 The lockfile — `qqq.lock`
 - [ ] **CON-006** Implement reproducible-build verification that fails when output digests are unstable.
   → §5.4 The lockfile — `qqq.lock`

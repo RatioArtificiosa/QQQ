@@ -38,6 +38,10 @@ rustls.workspace = true
 # identifier a client certificate has — a common name is chosen by the client
 # and is not unique across issuers.
 sha2.workspace = true
+# WebSocket handshake only (`SRV-009`). See the workspace manifest for why SHA-1 is
+# correct there and not a mistake.
+sha1.workspace = true
+base64.workspace = true
 # `sync` is added to the workspace's feature set because the connection ledger is
 # shared across connection tasks. Cargo unions features across the graph, so this
 # enables it for every crate in the workspace — which is why the reason is

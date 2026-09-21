@@ -96,6 +96,8 @@ pub mod sse;
 /// Streaming responses: writing a body in pieces, after the head.
 pub mod stream;
 pub mod tls;
+/// The WebSocket opening handshake, per RFC 6455 §4.
+pub mod ws;
 
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use cors::{Cors, CorsError, Decision, Origin, Reason};
@@ -115,3 +117,4 @@ pub use server::{serve, Dispatch, Handler, RouteMatch, Served, ServerConfig};
 pub use stream::{
     emit_stream_record, StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler,
 };
+pub use ws::{accept_for, Handshake, HandshakeError};

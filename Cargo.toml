@@ -92,6 +92,23 @@ sha2 = "0.10"
 ed25519-dalek = "2"
 rustls = "0.23"
 
+# RFC 6455's handshake, and **the one place SHA-1 is correct**.
+#
+# `Sec-WebSocket-Accept` is `base64(SHA1(client_key ++ GUID))`, where the GUID is a
+# fixed constant from the specification. It is not a security control: it proves the
+# server read the handshake rather than being a proxy that passed the upgrade through
+# blindly. An attacker who can compute SHA-1 gains nothing, because the value is derived
+# entirely from a key the client itself chose.
+#
+# Recorded here because `sha1` next to `sha2` invites the question "why is a broken hash
+# in this dependency list?", and the answer needs to be where the dependency is rather
+# than in a commit message. `deny.toml` does not flag it: the advisory database has no
+# entry for "a protocol mandates this".
+sha1 = "0.10"
+# Already in the lockfile transitively (rustls brings it), so declaring it directly adds
+# no resolution. Used for the same handshake value.
+base64 = "0.22"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

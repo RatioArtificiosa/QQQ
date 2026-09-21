@@ -5267,6 +5267,48 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-101 — A licence header that contradicts `Cargo.toml` is worse than none
+
+**What was built.** `LIC-006`: `SPDX-License-Identifier: Apache-2.0` on **145 files** —
+every `.rs` under `crates/` and `fuzz/fuzz_targets/`, every `wit/*.wit`, every
+`tools/*.py` — plus `tools/check_spdx.py` to enforce it in CI and in the bridge.
+
+**Why per-file at all, when `Cargo.toml` already declares the workspace licence.** The
+manifest covers the *crate*. A file copied between crates, vendored into another project,
+or pasted into a gist carries no context — and §13.2's model depends on which licence
+governs which code. The header is what travels with the file.
+
+**Three decisions that are the substance of the check.**
+
+1. **The identifier must *match* the manifest.** A header naming a different licence from
+   `Cargo.toml` is worse than a missing one: a missing header leaves a scanner saying "no
+   licence determined", which is accurate, while a wrong one has the scanner report a
+   contradiction as fact. The check compares the two rather than only requiring presence.
+2. **The header is read from the first five lines only.** A file that *documents* the SPDX
+   convention mentions the string deep inside it, and a naive `in text` search accepts
+   that as the file's own licence — so an unheadered file passes. There is a self-test case
+   for exactly this, and it is the case a check written without one would have missed.
+3. **Exemptions are an explicit list, not a heuristic.** "Skip files that look generated"
+   is a rule nobody can audit: a developer cannot tell whether their file will be skipped,
+   and a reviewer cannot see what is covered. The list is checked too — an entry that no
+   longer matches a file is reported, so it cannot quietly grow a population of one.
+
+**Two mechanics that had to be right for the headers to be harmless.** A **shebang** must
+stay line 1 because the kernel reads it, so the header goes immediately after. And Rustdoc
+attaches `//!` to the enclosing item regardless of preceding `//` comments, which is why
+the header can go above the module docs without detaching them — verified by compiling
+every target, not by reasoning about rustdoc.
+
+**On the number.** 145 files were headed against 86 `.rs` files, which is 59 more than a
+`**/*.rs` glob suggests. The WIT and tooling files are distributed with the crates, so they
+need the header for the same reason — and a check scoped to `.rs` would have left the
+published interface files unlicensed while reporting success.
+
+→ `tools/check_spdx.py`, 145 source files, `.github/workflows/ci.yml`,
+`docker/entrypoint.sh`.
+
+---
+
 ### §O-100 — Two WIT files were published, validated, documented, and invisible to the runtime
 
 **What `ABI-015`'s audit found, before the check existed to find it.**

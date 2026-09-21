@@ -294,6 +294,16 @@ jobs:
       - name: Prove the review-config check detects an inert configuration
         run: python tools/check_coderabbit_config.py --self-test
 
+      # A docstring in `tools/` cited a Checklist item that does not exist -- the
+      # `DX` series ends at `DX-020`, and the number cited was three digits past it.
+      # It was invented, wrapped in a quotation so it read as a citation, and repeated
+      # in a commit message. Nothing caught it: `check_xrefs.py` covers `§O-…`
+      # references and had no reason to look at a `DX-` token. See Observations §O-126.
+      - name: Verify every checklist identifier cited in code exists
+        run: python tools/check_checklist_citations.py
+      - name: Prove the citation check catches a fabricated identifier
+        run: python tools/check_checklist_citations.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

@@ -2,8 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate `.coderabbit.yaml`, the external-review configuration.
 
-Implements Checklist ``DX-029``: *"Configuration that decides what an external
-reviewer sees must itself be checked."*
+**There is no Checklist item for this.** A first version of this docstring cited an
+identifier that does not exist -- `DX-029` (not-a-checklist-item); the checklist's
+`DX` series ends at `DX-020`. Inventing an identifier and writing it as though it
+were a citation is the same failure the `§O-11x` series is about, committed against
+the project's own ledger, and it is recorded as `§O-126`. This work is justified by
+the observations, not by a checklist row, and
+`tools/check_checklist_citations.py` now exists to catch the next one.
 
 # Why this exists
 

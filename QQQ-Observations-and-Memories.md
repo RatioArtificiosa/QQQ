@@ -10616,4 +10616,51 @@ fail. A fix whose test passes both before and after is not a test of the fix.
 
 ---
 
+### §O-126 — I invented a checklist identifier and cited it as though it were real
+
+**The mistake.** Writing `tools/check_coderabbit_config.py`, I opened its docstring
+with:
+
+```
+Implements Checklist ``DX-029``: *"Configuration that decides what an external
+reviewer sees must itself be checked."*
+```
+
+**There is no `DX-029`.** The checklist's `DX` series ends at `DX-020`
+(`Implement the ten-minute script as an automated, CI-run acceptance test`). I made the
+identifier up, wrote a quotation around it as though it were the item's text, and then
+repeated the claim in the commit message footer as `Checklist: DX-029`.
+
+**Why this is worse than a typo, and belongs in this file.** Every other entry here is
+about code. This one is about the project's **record**, and the record is what makes
+the rest trustworthy: a reader who finds `DX-029` cited in a docstring reasonably
+believes a requirement exists, and cannot discover otherwise without going and counting.
+It is `§O-082`'s *"is this blocked on the item, or on one way of doing it?"* inverted —
+I created an item to justify work instead of checking whether one existed.
+
+It is also, precisely, the failure this file has documented more than a dozen times in
+other guises: **a citation that looks like evidence and is not.** The only difference is
+that the subject here is prose about the code rather than the code.
+
+**How it was caught.** Not by me — I wrote it into a commit message and moved on. It
+surfaced when I went to *tick* the item and `grep` found no `DX-029` anywhere in the
+checklist. That is luck, at the end of the work, after the commit had been pushed.
+
+**The remedy.** The docstring now states plainly that no checklist item exists and that
+the work is justified by these observations instead. The rule it yields is worth
+keeping: **cite an identifier only after reading it in the document that defines it.**
+The project already applies this to `§O-…` references — I look each one up rather than
+recalling it — and I did not extend it to the checklist because I was writing a
+docstring rather than a decision.
+
+**A check is owed.** `tools/check_xrefs.py` and `tools/check_tombstones.py` validate
+cross-references between documents; neither covers a bare `DX-0NN` appearing in a
+Python docstring. The cheap version — every `XX-0NN` token under `tools/` and `crates/`
+must appear in `QQQ-Checklist-V1.md` — is worth adding the next time a checker is
+touched. Recorded here rather than silently dropped.
+
+→ `tools/check_coderabbit_config.py` (docstring); commit `3e44125` (message footer).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

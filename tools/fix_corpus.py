@@ -11,8 +11,9 @@ Fixes two defect classes found by tools/check_xrefs.py:
      creates the question. This is more useful than citing an appendix anyway.
 
   B. The Proposal cites checklist ID *ranges* that overstate the real count
-     (e.g. "LANG-001 … LANG-048" when LANG stops at 040). Ranges are rewritten
-     to close on the highest ID that actually exists in that area.
+     (e.g. "LANG-001 … LANG-048" when LANG stops at 040 — `LANG-048` is
+     not-a-checklist-item, named here only as the example of the defect). Ranges
+     are rewritten to close on the highest ID that actually exists in that area.
 
 Idempotent: running it twice changes nothing the second time.
 """

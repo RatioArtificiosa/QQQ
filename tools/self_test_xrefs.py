@@ -9,6 +9,15 @@ false confidence. Run this after any change to check_xrefs.py.
 
 Usage:  python tools/self_test_xrefs.py
 Exit:   0 = all fault injections were correctly detected, 1 = a check is dead
+
+# checklist-citations-exempt
+
+This file is exempt from `tools/check_checklist_citations.py`, in full: fabricating
+references that resolve to nothing is *what it is for*. It writes `HOST-999` and
+`OQ-099` into documents to prove `check_xrefs.py` catches them, so every one of those
+identifiers is deliberate. The declaration is here rather than repeated on each line
+— nine copies of the same comment would be nine places to keep right, and the tenth
+fabricated marker added later would be missed.
 """
 
 from __future__ import annotations
@@ -122,11 +131,11 @@ def restore_all(*_args) -> None:
 #
 # # Why each entry is (marker, file, description)
 #
-# Some markers legitimately occur in prose: `HOST-999` and `§D-099` are named in
-# the Observations document's own table describing this harness. Scanning every
-# file for them produced FALSE POSITIVES — the guard would have "repaired" the
-# Observations document on every clean run, destroying the very table that explains
-# it.
+# Some markers legitimately occur in prose: `HOST-999` (not-a-checklist-item) and
+# `§D-099` are named in the Observations document's own table describing this harness.
+# Scanning every file for them produced FALSE POSITIVES — the guard would have
+# "repaired" the Observations document on every clean run, destroying the very table
+# that explains it.
 #
 # So each marker names the single file its injection targets, and `§99.9` is
 # checked with its distinguishing suffix so it cannot match a latency percentile.

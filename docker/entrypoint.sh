@@ -911,6 +911,8 @@ cmd_checks() {
     python3 tools/check_toolchain.py --self-test
     python3 tools/check_coderabbit_config.py
     python3 tools/check_coderabbit_config.py --self-test
+    python3 tools/check_checklist_citations.py
+    python3 tools/check_checklist_citations.py --self-test
     python3 tools/self_test_schemas.py
 
     # The mutating one, then the validator that proves it restored everything.

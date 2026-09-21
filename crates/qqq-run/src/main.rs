@@ -518,6 +518,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             Ok(qqq_run::commands::caps(loaded))
         }),
         CommandName::Inspect => dispatch_inspect(name, args, &mut out),
+        CommandName::Audit => dispatch_audit(name, args, &mut out),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
         CommandName::Run => dispatch_run(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
@@ -657,6 +658,102 @@ fn dispatch_inspect(
 /// own flag vocabulary. Keeping it inline would make the dispatcher grow with
 /// every command that gains options, and the dispatcher is the one function
 /// that must stay readable — it is the map of the whole CLI.
+/// Dispatch `qqqai audit` -- `CLI-016`.
+///
+/// # What §5.2 asks for
+///
+/// > | `qqqai audit <artifact>` | Full security posture: caps, limits, supply
+/// > chain, provenance | `--json`, `--sarif`, `--fail-on <severity>` |
+///
+/// Four surfaces, all reported; two output modes plus a threshold. The SARIF mode
+/// is what earns the command its place: GitHub code scanning reads it, so a
+/// capability change appears in the **Security tab of a pull request** beside the
+/// `CodeQL` results, with no QQQ-specific integration.
+///
+/// # Why `--fail-on` defaults to off
+///
+/// Because an audit that fails by default cannot be *read*. A developer running it
+/// locally would get a non-zero exit for findings they may already know about and
+/// would learn to append `|| true`, which turns the gate off for everybody. The
+/// threshold is opt-in, which is what the flag is for.
+///
+/// # Why the SARIF branch prints and returns a placeholder payload
+///
+/// Because `with_manifest` owns the emit, and for SARIF the correct behaviour is
+/// **not** to emit an envelope at all: a consumer parsing the output as SARIF must
+/// not have to unwrap `data` first. So the SARIF text goes to stdout directly and
+/// the returned payload is never printed -- `with_manifest` is used here for its
+/// manifest *loading*, and its output path is bypassed.
+fn dispatch_audit(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let mut sarif = false;
+    let mut fail_on: Option<qqq_run::audit::Severity> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--sarif" {
+            sarif = true;
+        } else if a == "--fail-on" {
+            let Some(v) = args.get(i + 1) else {
+                let e = missing_value("--fail-on");
+                let _ = out.emit_error(name, &e);
+                return ExitCode::from(exit::USAGE);
+            };
+            match qqq_run::audit::parse_fail_on(v) {
+                Ok(sev) => fail_on = Some(sev),
+                Err(e) => {
+                    let _ = out.emit_error(name, &e);
+                    return ExitCode::from(exit::USAGE);
+                }
+            }
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--fail-on=") {
+            match qqq_run::audit::parse_fail_on(v) {
+                Ok(sev) => fail_on = Some(sev),
+                Err(e) => {
+                    let _ = out.emit_error(name, &e);
+                    return ExitCode::from(exit::USAGE);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Printed *before* the threshold is checked, so a failing run still says what
+    // failed. A gate that exits before explaining itself is one people work
+    // around.
+    let mut meets_threshold = false;
+
+    let code = with_manifest(name, out, args, |loaded| {
+        let lock = qqq_run::sibling_lockfile(loaded);
+        let report = qqq_run::audit::audit(loaded, lock.as_ref());
+
+        if sarif {
+            // Raw, not enveloped: see the doc comment.
+            println!("{}", report.to_sarif());
+            return Ok(qqq_run::AuditOutput::from(&report));
+        }
+
+        if let Some(threshold) = fail_on {
+            meets_threshold = report.fails_at(threshold);
+        }
+        print!("{}", report.render());
+        Ok(qqq_run::AuditOutput::from(&report))
+    });
+
+    // A manifest that could not be loaded has already reported its own failure,
+    // so the threshold is only consulted on a successful audit.
+    if code == ExitCode::from(exit::OK) && meets_threshold {
+        return ExitCode::from(exit::FAILURE);
+    }
+    code
+}
+
+/// Dispatch `qqqai build`.
 fn dispatch_build(
     name: CommandName,
     args: &[String],

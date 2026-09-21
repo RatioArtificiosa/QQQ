@@ -840,6 +840,28 @@ pub fn inspect(loaded: &LoadedManifest) -> Result<InspectOutput> {
     })
 }
 
+/// Read the `qqq.lock` that sits beside a loaded manifest, if there is one.
+///
+/// # Why `None` covers both "absent" and "unparseable"
+///
+/// Because the audit's supply-chain section is *optional context*, and the two
+/// cases lead to the same action: run `qqqai install`. A malformed lockfile is
+/// reported by `install` with its own error and line number, which is a better
+/// diagnostic than an audit finding could produce -- so duplicating it here would
+/// be a second, worse report of the same problem.
+///
+/// The distinction that **does** matter is `None` versus an empty lockfile: no
+/// lockfile means the supply-chain surface was never examined, while an empty one
+/// means it was examined and found to declare nothing. [`crate::audit::audit`]
+/// reports neither as clean, which is the point.
+#[must_use]
+pub fn sibling_lockfile(loaded: &LoadedManifest) -> Option<qqq_pkg::lock::Lockfile> {
+    let dir = loaded.path.parent()?;
+    let path = dir.join("qqq.lock");
+    let text = std::fs::read_to_string(&path).ok()?;
+    qqq_pkg::lock::Lockfile::parse(&text).ok()
+}
+
 /// Classify a grant set's security posture.
 ///
 /// The rule is deliberately simple and stated here rather than inferred:

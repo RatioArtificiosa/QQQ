@@ -28,6 +28,8 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod audit;
+pub use audit::{AuditOutput, FindingOutput};
 pub mod build;
 pub mod commands;
 pub mod deps;
@@ -60,9 +62,9 @@ pub use build::{
 };
 pub use commands::{
     caps, classify_posture, developer_overlay, diff_artifacts, fix_stanza_for, inspect,
-    inspect_artifact, why, ArtifactDiff, ArtifactReport, CapabilityChange, CapabilityReport,
-    CapsOutput, InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput,
-    WhyStep,
+    inspect_artifact, sibling_lockfile, why, ArtifactDiff, ArtifactReport, CapabilityChange,
+    CapabilityReport, CapsOutput, InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup,
+    Posture, WhyOutput, WhyStep,
 };
 pub use deps::{add, remove, DependencyChangeOutput, DependencyEdit};
 pub use dev::{

@@ -1256,7 +1256,54 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CAP-010** Prove the narrowing invariant with a test: no overlay configuration can widen a declared grant.
   → Done: `no_overlay_can_ever_widen` in `qqq-cap::resolve`: every layer x every mode x every capability.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CAP-011** Implement the restricted policy expression language with static analysability and termination proofs.
+- [x] **CAP-011** Implement the restricted policy expression language with static analysability and termination proofs.
+  → Done: `crates/qqq-cap/src/policy.rs` — lexer, parser, static analyser,
+    executable termination proof, scope/demand evaluator. **72 tests**, all
+    green. Bounds: `MAX_EXPR_DEPTH` 16, `MAX_RULES` 4096,
+    `MAX_SOURCE_BYTES` 1 MiB.
+  → **The three claims §6.2 makes are made true rather than asserted.**
+    *Non-Turing-complete*: no loop, no recursion, no user-defined function, no
+    variable, no quantifier — every comparison is a field against a literal.
+    *Statically analysable*: `Field` is an enum, so an unknown name is a parse
+    error rather than a run-time `None`, and `Expr::eval` is **total**, so no
+    predicate can be undecided when a request arrives. *Provably terminating*:
+    `Policy::prove_terminating` returns a `TerminationProof` holding the
+    **measured** facts (max depth, rule count, comparison count,
+    `has_repetition`, `has_unbounded_input`), and parsing runs it at
+    construction — so a policy that cannot be proven cannot exist as a value.
+  → **Widening is unreachable, not merely unwritten.** `Policy::overlay` returns
+    an `Overlay`, whose only use in `qqq-cap` is `GrantSet::narrow`, which
+    intersects. A policy has no other output, so there is nothing that could
+    widen and nothing to check.
+    `no_policy_can_widen_a_grant_set` demonstrates it from the empty set with a
+    hostile allow-everything policy.
+  → **Two of §6.2's own examples did not parse, and both were filed as fixture
+    errors first (`§O-106`).** `deny http.client to host "*.onion"` had no `to`
+    clause, so the language could not express a **destination constraint** —
+    a §7.1 threat row. `require mfa when capability == "sign"` read `mfa` as a
+    capability. Fixed by adding `Field::Host` with a real `to` clause, and by
+    letting `require` accept a field name as an **ambient requirement**. The
+    third example, `subject.department`, is **still refused** and that is
+    correct: `host` and `mfa` are values the host has, `department` is not, and
+    admitting it would create a field that always evaluates to "unknown" — a
+    rule that silently never fires.
+  → **The condition of a `require` splits into scope and demand, per
+    comparison** (`§O-107`): a comparison on `capability` says "this rule is
+    about X"; every other comparison says "and this must hold". Four readings
+    were tried; reading the condition as pure demand made one rule about signing
+    keys a permanent failure for the whole deployment, and reading it as pure
+    scope made the rule inert. An `or` that mixes the two roles has no sound
+    reading and is a parse error naming the rewrite.
+  → Fault injection throughout: the depth bound is enforced *during* parsing (a
+    bound checked afterwards has already paid the stack cost it exists to
+    prevent); `deep_not_nesting_is_bounded_by_the_proof_not_the_parser` pins
+    that a `not` chain costs two depth levels while the parser recurses one
+    frame, so the parser's bound and the proof's bound are different quantities;
+    `a_destination_without_a_star_is_an_equality_and_a_dot_is_literal` pins that
+    `to host "a.b"` cannot match `axb`; and `glob_match` is a hand-written
+    linear matcher tested against an independent reference answer, because a
+    regex engine is a compiler whose catastrophic backtracking would be driven
+    by a policy file.
   → §6.2 `qqq-cap` — the capability engine
 - [x] **CAP-012** Implement `qqqai why <resource>` producing the complete resolution chain.
   → Done: `qqqai why` renders the resolution trace with the deciding layer and the fix stanza.

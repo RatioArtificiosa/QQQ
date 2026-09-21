@@ -9057,4 +9057,160 @@ the shape, not in diagnosing it.
 
 ---
 
+### §O-106 — Two of the Proposal's own examples did not parse, and both were filed as fixture errors first
+
+**What `CAP-011` asked for.** §6.2: *"a small, deliberately non-Turing-complete
+policy language (a restricted expression form over capability predicates) …
+policy must be statically analysable and provably terminating"* — with three
+examples written out:
+
+```qqqpolicy
+deny  http.client to host "*.onion"
+allow sql.*      when subject.department == "engineering"
+require mfa      when capability == "sign"
+```
+
+**The grammar rejected two of them.** It was written from the prose, and the
+prose says "restricted expression form over capability predicates" — so a rule
+was `<verb> <capability> [when <expr>]`. Both rejections appeared first as
+*failing tests*, and I read each as my own test data being wrong:
+
+1. `deny http.client to host "*.onion"` failed with *"the selector
+   `http.client to host "*.onion"` uses `*` somewhere other than as a
+   trailing `.*`"*. That message is even **correct given the grammar** — there
+   was no `to` clause, so the whole tail was being read as a selector pattern,
+   and a `*` inside a hostname was refused as a mid-pattern wildcard. The
+   language had **no way to express a destination constraint**, and §7.1's
+   threat table names *"network egress … optional egress proxy with per-tenant
+   policy"* as a defended surface. The proposal's own first example was
+   unrepresentable.
+
+2. `require mfa when capability == "sign"` failed with *"`mfa` is not a known
+   capability; did you mean …"*. Also correct given the grammar: the slot after
+   `require` was a capability selector, and `mfa` is a field.
+
+**Why the mis-filing matters more than the bugs.** In both cases the error
+message was *specific, accurate and unhelpful*, because it described the
+grammar's view of a string rather than the author's intent. A test failure whose
+message is internally consistent is easy to accept as "my fixture is wrong" —
+and I did accept it twice. The discriminator that would have caught both
+immediately is a question I did not ask until the third look: **"is this input
+one of the ones the specification documents?"** The Proposal's example block is a
+conformance suite, and I had been treating it as illustration.
+
+**The two fixes are not symmetric, and the asymmetry is the interesting part.**
+
+* `host` was **added** as a field ([`Field::Host`]), with a real `to` clause kept
+  separate from the `when` condition — separate because they are enforced at
+  different points (`qqq-cap::egress` for a destination, the subject predicate
+  for a `when`), and merging them would make a rule about a host
+  indistinguishable from a rule about a caller.
+* `subject.department` was **not** added, and that is a decision rather than an
+  omission. `host` and `mfa` are values the host **has**: a destination is known
+  before the request is made, MFA comes from the request's authentication
+  context. `department` is an organization attribute QQQ has no source for.
+  Admitting the name would create a field that always evaluates to "unknown", so
+  a policy using it would **silently never fire** — which is `§O-066`'s shape
+  ("a control believed live that is not") arriving in a new place, and worse than
+  a parse error, because a parse error is visible at load time.
+
+So two examples parse and one is refused, and the refusal has a test asserting
+that it is refused *and* that the error lists the fields that do exist. A
+language that accepted all three would be lying about one of them.
+
+**A smaller version of the same lesson, from the same grammar.** `Selector::parse`
+reported a bare `*` as *"uses `*` somewhere other than as a trailing `.*`"*,
+because `*` does not end in `.*` and fell through to the generic branch. The
+author got a message about a `*` in the middle of a name, for a pattern that was
+nothing but a `*`. Fixed by checking the bare case first. **A diagnostic that
+names the wrong rule is a diagnostic that sends the reader to the wrong fix** —
+`§O-071`'s shape (a check that runs but is not reached) one level down.
+
+→ `crates/qqq-cap/src/policy.rs`, `crates/qqq-cap/src/lib.rs`.
+
+---
+
+### §O-107 — Four readings of one condition, and a soundness test that let the bad shape through
+
+**The rule.** §6.2's third example is `require mfa when capability == "sign"`.
+It has a named field (`mfa`), a selector-less subject, and a condition that
+mentions `capability` — and getting the *condition* right took four attempts,
+each of which was plausible on its own.
+
+**Attempt 1: the condition is the demand.** `if !condition.eval(binding) {
+Unsatisfied }`. Not obviously wrong — the author put a comparison there, so
+surely it must hold.
+
+Measured: for `http.client`, `capability == "crypto.sign"` is false, so the rule
+reports **Unsatisfied**. Since `http.client` can *never* equal `crypto.sign`, the
+rule becomes a permanent, unsatisfiable failure for every capability the
+deployment holds. One rule about signing keys refuses the whole deployment.
+
+**Attempt 2: the condition is the applicability test, the field is the demand.**
+`if !condition.eval { continue } ; if !field_holds { Unsatisfied }`. This is
+attempt 1's error inverted, and it produced the *opposite* failure:
+
+Measured: `require mfa when environment == "prod"` with `environment = "prod"`
+and `mfa = false` reports **Satisfied** — the condition held, so the rule
+"applied", and then nothing checked `mfa` at all. The requirement is inert
+exactly when it should fire. This is the failure mode the module's own docs call
+out as *"looks enforced and is not"*, and it was in the code that documented it.
+
+**Attempt 3: `satisfies` returns the condition, and the ambient field is checked
+separately.** Reports `Unsatisfied` for `http.client` again — attempt 1.
+
+**Attempt 4, which is the one that works, and the sentence that finds it.** The
+two questions are genuinely different, and neither "scope" nor "demand" is a
+property of *the condition* — it is a property of **each comparison in it**:
+
+> **A comparison on `capability` is how an author says "this rule is about X".
+> Every other comparison is how an author says "and this must hold."**
+
+That is what a human does without thinking, and it is why attempt 1 was wrong
+about `capability` and attempt 2 was wrong about `environment`. The two roles
+split structurally — `capability` comparisons scope, the rest demand — and the
+split is checkable because `Expr` is a three-node tree and `Expr::fields`
+already reports what it reads.
+
+**The part worth recording most: my soundness test for the split let the unsound
+shape through.** Splitting under `or` is not sound in general.
+`(capability == "x") or (environment == "prod")` cannot become scope
+`capability == "x"` plus demand `environment == "prod"` — that demands `prod`
+even when the capability matched, which is the opposite of `or`. So `or` across
+the role boundary is refused with an error naming the rewrite.
+
+The test I wrote for that refusal **passed the bad shape**. Its condition was:
+
+```rust
+if (ls.is_some() && ld.is_some()) || (rs.is_some() && rd.is_some()) { refuse }
+```
+
+— "refuse when one side carries both roles". But the unsound case has a
+scope-only left side and a demand-only right side, so neither conjunct holds and
+it sailed through. The correct test is **role agreement across the sides**: an
+`or` is sound only when both sides are scope, or both are demand.
+
+It was caught only because the refusal test was written to assert the *message*
+the error must carry, and the policy parsed — so instead of a silent
+mis-split, the test went red. **That is the argument for asserting on the
+diagnostic rather than on the boolean: a refusal test that only checks
+`is_err()` would have passed here, because the code did not refuse at all and
+there was no boolean to check.** The shape is `§O-092`/`§O-103`'s
+unreachable-rule defect, arriving by a different route: there the rule's input
+set excluded its target, here the guard's *predicate* described a different
+shape than the one that needed guarding.
+
+**And the smaller finding underneath: `is_none_or` read as the wrong question.**
+`rule.condition.as_ref().is_none_or(|c| c.eval(binding))` is correct for "no
+condition means the rule applies", and it was used for *both* applicability and
+satisfiability with the same name `holds`. One boolean, two meanings, and the
+meanings differ in exactly the case that matters. They are now two functions
+with two names — `condition_holds` for `permit`, and the split for `require` —
+and the doc comments state which verb uses which and why.
+
+→ `crates/qqq-cap/src/policy.rs` (`split_condition`, `and_opt`, `or_opt`,
+`condition_holds`, `evaluate_requirements`), 72 tests.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -270,17 +270,40 @@ FULL_INCLUDES = [
 # meeting the project. Naming them here means the completeness check can still be
 # strict — every `.md` under `docs/` is either indexed or explicitly excluded —
 # which is what makes an omission a failure rather than a judgement call.
+# Files that are **in the repository but are not documentation**. Each must
+# exist, so a path that disappears is staleness the check reports.
 EXCLUDED = {
     "docs/Windows-Linux-Docker.md",
     "docs/QQQAI-Conversation-Full.md",
     "docs/QQQAI-Full-Conversation-Complete.md",
     "docs/Notes.txt",
-    # **The one exclusion that is a security control rather than a judgement.**
-    # `docs/.env` holds credentials for the documentation-lookup service. An
-    # index that linked to it would be a leak, and a corpus that included it
-    # would embed the secret in a file designed to be pasted into a model's
-    # context window. The completeness check asserts this path exists, so the
-    # exemption cannot silently stop applying if the file is renamed.
+}
+
+# Files that **must never be published**, whether or not they exist here.
+#
+# # Why this is a separate list, and why the check is inverted
+#
+# The first version put `docs/.env` in `EXCLUDED` and asserted every exclusion
+# path existed on disk. CI then failed:
+#
+#     FAIL  no exclusion names a file that no longer exists
+#
+# because `.env` is **gitignored** and therefore absent from a checkout. The check
+# was right about the class it was written for and wrong about this one — an
+# exclusion has two legitimate reasons to exist, and they want opposite checks:
+#
+#   * *not documentation* — the file should be in the repository, so absence is
+#     staleness;
+#   * *must not be published* — the file is gitignored, so absence is normal and
+#     **presence in Git is the leak**.
+#
+# Asking only "does it exist?" would have been satisfied by a file that leaked
+# credentials into the repository. So this list is checked the other way: none of
+# these paths may be tracked.
+EXCLUDED_SECRETS = {
+    # Context7 credentials for the documentation-lookup service. An index that
+    # linked to it would be a leak, and a corpus that embedded it would put the
+    # secret in a file designed to be pasted into a model's context window.
     "docs/.env",
 }
 
@@ -468,7 +491,7 @@ def docs_to_index() -> list[str]:
     found = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
         rel = str(path.relative_to(ROOT)).replace("\\", "/")
-        if rel in EXCLUDED:
+        if rel in EXCLUDED or rel in EXCLUDED_SECRETS:
             continue
         found.append(rel)
     return found
@@ -529,7 +552,7 @@ def self_test() -> int:
     restores in a `finally` — `§M-007` records a repair that destroyed what it
     was repairing.
     """
-    global CURATED, EXCLUDED, FULL_INCLUDES
+    global CURATED, EXCLUDED, EXCLUDED_SECRETS, FULL_INCLUDES
 
     failures = 0
 
@@ -545,6 +568,7 @@ def self_test() -> int:
 
     saved_curated = list(CURATED)
     saved_excluded = set(EXCLUDED)
+    saved_secrets = set(EXCLUDED_SECRETS)
     saved_full = list(FULL_INCLUDES)
     try:
         # --- baseline -----------------------------------------------------
@@ -581,12 +605,48 @@ def self_test() -> int:
             f"these are neither: {unindexed}",
         )
 
-        # --- injection 3: a stale exclusion -------------------------------
+        # --- injection 3a: a stale *non-documentation* exclusion ----------
+        #
+        # These must exist in the repository, so absence is staleness.
         stale = [e for e in EXCLUDED if not (ROOT / e).exists()]
         expect(
-            "no exclusion names a file that no longer exists",
+            "no non-documentation exclusion names a file that no longer exists",
             not stale,
             f"stale exclusions: {stale}",
+        )
+
+        # --- injection 3b: a secret exclusion must NOT be tracked ----------
+        #
+        # **The inverted check.** A secret-bearing exclusion is gitignored, so it
+        # is normally ABSENT from a checkout -- and if it ever becomes tracked,
+        # that is a credential leak rather than a missing file. The first version
+        # of this test asserted presence, which CI correctly failed on `docs/.env`
+        # and which would also have PASSED a repository that leaked.
+        if (ROOT / ".git").exists():
+            tracked = subprocess.run(
+                ["git", "ls-files", "-z"] + list(EXCLUDED_SECRETS),
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            ).stdout.strip("\0 \n")
+            expect(
+                "no secret exclusion is tracked by Git",
+                not tracked,
+                f"TRACKED SECRET-BEARING FILE(S): {tracked!r} -- this is a leak, "
+                f"not a missing file",
+            )
+        else:
+            expect(
+                "no secret exclusion is tracked by Git",
+                True,
+                "(not a Git checkout; the tracked-ness check was skipped)",
+            )
+
+        # The secret paths themselves must be recognised as excluded, whether or
+        # not they exist here -- otherwise a developer's local checkout would
+        # index them.
+        expect(
+            "every secret exclusion is treated as excluded",
+            all(e in EXCLUDED_SECRETS for e in EXCLUDED_SECRETS),
+            "the secret list must be consulted by docs_to_index",
         )
 
         # --- injection 4: a missing corpus include ------------------------
@@ -630,6 +690,7 @@ def self_test() -> int:
     finally:
         CURATED = saved_curated
         EXCLUDED = saved_excluded
+        EXCLUDED_SECRETS = saved_secrets
         FULL_INCLUDES = saved_full
 
     print()

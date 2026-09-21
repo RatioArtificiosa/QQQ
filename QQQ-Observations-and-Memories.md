@@ -11120,4 +11120,59 @@ tooling quirk in this environment.
 
 ---
 
+### §O-134 — A length field four orders of magnitude too wide, and why only a boundary test saw it
+
+**The bug.** `ws_frame::encode` chose the 16-bit length form with:
+
+```rust
+} else if len <= u32::MAX as usize {
+    out.push(126);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+```
+
+§5.2 defines exactly three forms: 7 bits (0..=125), 7+16 (126..=65535), 7+64 (65536 and
+above). The guard admits anything up to 4 GiB into a form that holds 65,535, so a
+70,000-byte payload wrote the marker `126` and then **`(len as u16)`** — silently
+truncating 70,000 to **4,464**.
+
+The frame was well-formed. The payload was gone.
+
+**Why this is the worst kind of encoding bug.** Every length below 65,536 takes the branch
+that works, so a short-payload test — the natural fixture — passes. And the defect is in
+the *encoder*, so a decoder-focused test cannot see it either: the decoder is correct. It
+takes an encoder and a decoder compared against each other **across the boundaries the
+format defines**, which is what the test does (`125/126` and `65535/65536`, plus 70,000).
+
+Fault injection reproduced the corruption exactly: a 65,536-byte payload declared **0
+bytes**.
+
+**The generalisable rule.** *A width check must use the width of the field it guards, not
+the width of the value.* `u32::MAX` is what the *length* can be; `u16::MAX` is what the
+*encoded form* holds. Writing `len <= u32::MAX` reads as a bounds check and is a
+statement about the wrong bound — and the compiler does not complain, because `as u16` is
+a legal cast that truncates silently.
+
+I would have caught it faster by asking "what does this form hold?" rather than "is this
+length large?" — the same question `§O-121` records about `stable` not being a version:
+**the check and the thing being checked were described at different levels.**
+
+**A second, smaller finding in the same hour.** The cast lints then produced six
+`clippy` findings across `ws_frame.rs`, and the honest fix was different per site rather
+than a blanket `#[allow]`:
+
+| Site | Fix |
+|---|---|
+| `payload_len as usize` | an `#[allow]` **with the reason**: the value is already known to be ≤ 16 MiB, which fits a 32-bit `usize` |
+| `len as u8` / `len as u16` in the encoder | the function-level allow, because each is guarded by the branch it sits in |
+| `usize::from(u16::MAX)` | replaced with `u16::try_from(len).is_ok()`, which is what clippy wanted and states the guard more directly |
+| `0x80 \| 126` | `0x80 \| 0x7E`, because a decimal literal in a bitwise expression hides which bits are meant |
+
+The pattern: an `#[allow]` is acceptable when the *reason* is stated and the reason is
+about the value's range, not about the lint being inconvenient. Three of these six had a
+better fix than an allow, which is the usual ratio.
+
+→ `crates/qqq-serve/src/ws_frame.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

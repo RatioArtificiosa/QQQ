@@ -5267,6 +5267,69 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-097 — Two generated references, and why counting is the only way to see that a parser has stopped working
+
+**What was built.** Two more generated artifacts, completing the documentation set:
+
+* `docs/errors.md` — **42 error codes** from the `ErrorCode` enum (`DOC-019`).
+* `docs/wit-reference.md` — **13 packages, 20 interfaces, 71 functions, 47 types** from
+  the `.wit` files (`DOC-017`).
+
+Both are generated because a hand-written copy of a machine-readable source is a second
+definition, and the failure is asymmetric: when the two disagree, the generator's source
+is right and the document is a trap. For errors it sends a user to a code that no longer
+exists; for WIT it sends a developer to a signature that does not compile.
+
+**The error catalogue's specific guarantee.** The generator **refuses to emit** a variant
+with no cause or no `**Remediation:**` line, rather than producing a page with a blank
+Remedy section. A blank section would satisfy the generator while failing §12.2's
+standard — and the standard exists because a code that does not tell the user what to do
+has failed at the only moment it mattered. All 42 variants already met it.
+
+**Three parser bugs in the WIT generator, and what they have in common.**
+
+1. **Nested blocks closed an interface early.** Matching `}` at column 0 ended the
+   interface at the first nested `record` or `enum`, so every function declared after
+   one vanished. `qqq:http@1.0.0 http` reported **0 functions** while exporting three.
+2. **`resource` methods were invisible.** They sit at brace depth 2, and a depth-1-only
+   scan missed all seven of `resource directory`'s methods — producing a filesystem
+   reference that listed no way to use the filesystem.
+3. **A variant's docs leaked.** The cases inside `enum why { ... }` left their doc text
+   pending, and the next declaration inherited it: `resource directory` was documented
+   with an error case's description.
+
+Fix one and two raised the count from **2 functions to 71**.
+
+**Every one of those outputs was valid Markdown that looked plausible.** The generator
+ran, produced a well-formed document, and reported success. Nothing about reading the
+file reveals that 96% of the API is missing, because an interface with no functions
+looks the same as an interface that has none — and one of them (`filesystem`) is a
+plausible thing to have none of.
+
+**That is why the self-test counts.** Its fixture is a synthetic WIT file containing
+exactly the structures that broke the parser — a function *after* a nested block, a
+resource with methods, a variant whose docs could leak — and it asserts the counts
+directly rather than comparing the generated file to itself. A comparison would have
+passed on every one of those bugs.
+
+The generalisation, which is the reason this entry is worth more than the three fixes:
+**a test that compares a generator's output to a previous run of the same generator can
+only ever detect change, never error.** Two of the three bugs here were present from the
+first run, so nothing changed and nothing failed. Counting against an independent
+expectation is what turns "it produced a file" into "it produced the right file".
+
+**One deliberate omission, stated on the page.** `DOC-017` asks for per-language
+examples. They are not emitted, and the generated document says why: an example is only
+known correct once it compiles against real bindings, and no `qqq-abi` consumer exists to
+compile against. An example that cannot be built is documentation that *looks* verified,
+so the section is absent rather than plausible — and it lands with `ABI-*`.
+
+→ `docs/errors.md`, `docs/wit-reference.md`, `tools/gen_error_catalogue.py`,
+`tools/check_error_catalogue.py`, `tools/gen_wit_reference.py`,
+`tools/check_wit_reference.py`, `.github/workflows/ci.yml`.
+
+---
+
 ### §O-096 — The documentation system: three generated artifacts, and three self-tests that were wrong before the code was
 
 **What was built.** Five `DOC-` items, and the notable thing is that four of them landed

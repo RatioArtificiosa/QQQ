@@ -4,17 +4,17 @@
 
 For the documentation concatenated into one document, see [`llms-full.txt`](llms-full.txt).
 
-Sizes are **LF-normalised content byte counts**, so they are identical on every platform regardless of the checkout's line endings. The two largest documents show a bucketed `~N KB` instead of an exact figure: they change on every commit, and an exact count would go stale each time.
+Sizes are **LF-normalised content byte counts**, identical on every platform regardless of the checkout's line endings. Documents above 100 KB are labelled `large` instead of being measured: they change on every commit, and a number would go stale.
 
 ## Start here
 
 - [README.md](README.md) — What QQQ is, in one page. _(human)_ (11 KB)
-- [QQQ-Proposal-V1.md](QQQ-Proposal-V1.md) — The full specification. Every other document derives from this one; section numbers are stable and are cited by the checklist. (~130 KB)
+- [QQQ-Proposal-V1.md](QQQ-Proposal-V1.md) — The full specification. Every other document derives from this one; section numbers are stable and are cited by the checklist. (large)
 
 ## What is built, and what was learned building it
 
-- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 586 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (~250 KB)
-- [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (~570 KB)
+- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 586 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
+- [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (large)
 
 ## The machine contracts (for an agent)
 

@@ -372,26 +372,49 @@ def content_size(rel: str) -> int | None:
     return len(data.replace(b"\r\n", b"\n"))
 
 
-# Above this size, a document is described qualitatively rather than to the byte.
+# Above this size, a document is described with a WORD rather than a number.
 #
-# # Why a threshold rather than an exact number everywhere
+# # Why a threshold, and why the answer is qualitative rather than bucketed
 #
-# Because the two documents above it -- the Checklist (~253 KB) and the
-# Observations (~572 KB) -- are the two this project edits on **every round**, and
-# an exact byte count for them made `llms.txt` a churn magnet: every edit to
-# either invalidated the index, and the fix was self-referential (regenerating the
-# index is a commit; the next doc commit re-breaks it). A check that fails for a
-# reason unrelated to the change under review is one people regenerate
-# reflexively, and a reflexively-regenerated check is one nobody reads.
+# The two documents above it -- the Checklist (~250 KB) and the Observations
+# (~580 KB) -- are the two this project edits on **every round**. Recording their
+# exact size made `llms.txt` a churn magnet, and the fix was self-referential
+# (regenerating the index is a commit; the next doc commit re-breaks it).
 #
-# The number is still useful above the threshold -- it is the *precision* that is
-# not. `large (~572 KB)` tells a model to fetch deliberately; `572 KB` tells it the
-# same thing and goes stale on the next edit.
+# Bucketing to 10 KB was the second attempt, and it reduced the frequency without
+# removing the class: `O-116` crossed a boundary and CI failed with the identical
+# drift message. **A document edited every round crosses any bucket eventually.**
+#
+# So above the threshold there is no number. A word answers the question the
+# number existed to answer -- *should a consumer fetch this?* -- and cannot go
+# stale. "very large" is not less useful than "580 KB" for that decision; it is
+# only less precise.
 VOLATILE_KB = 100
 
-# The bucket a large document's size is reported in, so the number moves only when
-# the document's magnitude changes rather than on every line added.
-SIZE_BUCKET_KB = 10
+
+def label_for(data: bytes) -> str:
+    """The qualitative label for a document's bytes, for the churn self-test.
+
+    # Why this takes bytes rather than a path
+
+    Because the test needs to evaluate a *hypothetical* size without writing a file
+    into the repository. Taking bytes makes the label function testable in
+    isolation, which is the only way to assert the property that failed twice.
+    """
+    kb = len(data.replace(b"\r\n", b"\n")) // 1024
+    if kb < VOLATILE_KB:
+        return f"{kb} KB"
+    # **One word, with no upper boundary.**
+    #
+    # A `very large` tier above 1 MB was the third attempt at this, and the
+    # self-test caught it: growing a document 20x produced
+    # `large, large, very large`. That is the identical defect one level up --
+    # any function of a monotonic quantity has a boundary, and beyond a boundary
+    # is a drift failure. The Observations is at 585 KB and grows every round, so
+    # a 1 MB line would have been crossed eventually.
+    #
+    # Above the threshold there is therefore **no line to cross**.
+    return "large"
 
 
 def size_of(rel: str) -> str:
@@ -416,13 +439,21 @@ def size_of(rel: str) -> str:
         return f"{n} B"
     kb = n // 1024
     if kb < VOLATILE_KB:
-        # Small enough to be stable across a change: report it exactly, because
+        # Small enough that a change does not move it: report it exactly, because
         # the number is information rather than noise.
         return f"{kb} KB"
-    # Large and volatile: report the magnitude, bucketed, so the value moves only
-    # when the document changes by a bucket rather than on every edit.
-    bucketed = (kb // SIZE_BUCKET_KB) * SIZE_BUCKET_KB
-    return f"~{bucketed} KB"
+    # **Above the threshold, no number at all -- and this took two attempts.**
+    #
+    # The first version printed the exact size and churned on every commit. The
+    # second bucketed to 10 KB, which reduced the frequency and left the class:
+    # `O-116` pushed the Observations past a boundary and CI failed with the same
+    # drift message. These two documents are edited every round, so they will
+    # cross any bucket eventually.
+    #
+    # A word answers the question the number was there to answer -- *should a
+    # consumer fetch this?* -- and cannot go stale, **because there is no upper
+    # boundary to cross**. See `label_for` for the three attempts this took.
+    return "large"
 
 
 def first_heading(path: pathlib.Path) -> str:
@@ -454,10 +485,10 @@ def render_index() -> str:
     )
     out.append("")
     out.append(
-        "Sizes are **LF-normalised content byte counts**, so they are identical on "
-        "every platform regardless of the checkout's line endings. The two largest "
-        "documents show a bucketed `~N KB` instead of an exact figure: they change "
-        "on every commit, and an exact count would go stale each time."
+        "Sizes are **LF-normalised content byte counts**, identical on every "
+        "platform regardless of the checkout's line endings. Documents above "
+        f"{VOLATILE_KB} KB are labelled `large` instead of being measured: they "
+        "change on every commit, and a number would go stale."
     )
     out.append("")
 
@@ -721,25 +752,45 @@ def self_test() -> int:
         )
         FULL_INCLUDES = saved_full
 
-        # --- the churn property: a large document's bucket is stable ------
+        # --- the churn property: a large document's LABEL never moves -----
         #
-        # The size of the two volatile documents must not move for a small edit,
-        # or the index is invalidated by every commit that touches them.
+        # **This is the property that failed twice.** The first version recorded an
+        # exact size and churned on every commit; the second bucketed to 10 KB and
+        # churned when `O-116` crossed a boundary. The label must be constant for
+        # ANY growth a real edit could produce.
         import tempfile as _tf
 
-        with _tf.TemporaryDirectory() as td:
-            tmp = pathlib.Path(td)
-            big = tmp / "big.md"
-            # A document just above the threshold, and the same document with 2 KB
-            # added: both must land in the SAME bucket.
-            big.write_bytes(b"x" * (VOLATILE_KB * 1024 + 500))
-            before = len(big.read_bytes()) // 1024 // SIZE_BUCKET_KB
-            big.write_bytes(b"x" * (VOLATILE_KB * 1024 + 2500))
-            after = len(big.read_bytes()) // 1024 // SIZE_BUCKET_KB
+        # **The no-boundary property, which is the one that matters.**
+        #
+        # The test grows a document across FOUR orders of magnitude, because the
+        # previous versions each had a boundary somewhere and each was crossed:
+        # an exact size (every commit), a 10 KB bucket (O-116), and a 1 MB word
+        # boundary (caught by this very test). A single growth step would not have
+        # found the third.
+        labels = [
+            label_for(b"x" * (VOLATILE_KB * 1024 + 1)),
+            label_for(b"x" * (VOLATILE_KB * 1024 * 2)),
+            label_for(b"x" * (VOLATILE_KB * 1024 * 20)),
+            label_for(b"x" * (VOLATILE_KB * 1024 * 200)),
+            label_for(b"x" * (8 * 1024 * 1024 * 1024)),
+        ]
         expect(
-            "a small edit does not move a large document's size bucket",
-            before == after,
-            f"bucket {before} became {after}; a 2 KB edit must not churn the index",
+            "a large document's label never moves, however much it grows",
+            len(set(labels)) == 1,
+            f"labels were {labels}; any boundary a growing document can cross is "
+            f"a future drift failure",
+        )
+        expect(
+            "and the label still says it is large",
+            "large" in labels[0],
+            f"the label was {labels[0]!r}",
+        )
+        # The small-document path still reports a number, because stability is
+        # what makes a number worth printing.
+        expect(
+            "a small document still reports an exact size",
+            label_for(b"x" * 4096) == "4 KB",
+            f"got {label_for(b'x' * 4096)!r}",
         )
 
         # --- the determinism property, which is the reason for the above ---

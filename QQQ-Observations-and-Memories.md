@@ -9679,4 +9679,107 @@ mechanical, and make it loud.
 
 ---
 
+### §O-113 — Three defects in one bootstrap script, and the third was in the tool meant to prevent the second
+
+**The item.** `FND-012`:
+
+> Install `wasm-tools` and the `wasmtime` CLI into the developer bootstrap script
+> (both were found missing on the reference machine).
+
+**Measured before writing anything.** `wasm-tools 1.259.0` is present; **the
+`wasmtime` CLI is absent**. So the item's premise is still exactly true, and its
+second half is the half that bites: `cargo test` passes without the CLI, because
+nothing in the suite exercises it, and a contributor fails later on the one task
+that does — with an error that never mentions the missing tool.
+
+**And the repository had no bootstrap script at all.** §12.1 is titled *"The first
+ten minutes (a spec, not a wish)"* and specifies the **end-user** path
+(`curl … | sh`); nothing specified the **contributor** path from `git clone` to a
+working environment. That is the gap the item actually names.
+
+**Defect 1, caught before it shipped: I invented a version.** The first draft
+pinned `wasmtime` to `27.0.0`, from memory. `Cargo.toml` says `wasmtime = "48"`,
+`Cargo.lock` resolves `48.0.2`, and `docs/reconciliation.md` records the pin as a
+deliberate correction (*"Wasmtime recommended without a version"* → *"Pinned to
+Wasmtime 48.x"*). A script installing 27 would have produced a CLI that cannot
+instantiate the components the engine loads, and the failure would appear at run
+time in a different component. **Every version in the script now comes from a file
+in the repository**, and the ones that cannot (`wasm-tools`, which is not a Rust
+dependency) are checked for **capability** instead: the script runs
+`wasm-tools component wit` per file and requires it to succeed. A version is a
+proxy for *"will this work"*; `§O-109` records four measurements of one property
+where three were proxies and all three were wrong.
+
+**Defect 2: the capability check was wrong, and blamed the tool.** The script ran
+`wasm-tools component wit wit/` as a directory-wide validation and reported:
+
+```text
+[fail] wasm-tools 1.259.0 cannot parse wit/ - it is too old for this encoding
+       Upgrade: cargo install wasm-tools --locked --force
+```
+
+That message is wrong in both halves. `wit/` holds **15 separate packages**, each
+declaring its own `package`, and `wasm-tools` correctly refuses to merge them:
+
+```text
+error: failed to parse package: wit/: package identifier `qqq:ai@1.0.0`
+does not match previous package name of `qqq:agent@1.0.0`
+```
+
+Measured: all 15 files parse individually with **zero** failures, and
+`tools/check_wit.py` already validates per file for exactly this reason. So the
+**invocation** was invalid, not the tool — and the diagnostic sent the reader to
+`cargo install --force`, which would not have helped. This is `§O-106`'s lesson
+(a diagnostic that names the wrong rule sends the reader to the wrong fix) for the
+**fourth** time this session.
+
+**Defect 3, and the one worth the record: the shell script shipped with CRLF.**
+`tools/bootstrap.sh` was written on Windows, carried CRLF, and `bash` refused it:
+
+```text
+bash: tools/bootstrap.sh: line 75: syntax error near unexpected token `do\r'
+```
+
+This is `§O-086` — *a Windows checkout giving Linux an interpreter named
+`bash\r`* — recurring. But it did not recur in the **runtime**; it recurred in the
+**workflow**, and that is the finding:
+
+> `tools/normalize_eol.py` asked `git ls-files` for **tracked** files. A file that
+> has been created but not staged is invisible to it. So the CRLF `.sh` passed
+> `normalize_eol.py --check`, passed `cargo fmt`, passed clippy, passed every
+> local gate — and the commit that added it is the last moment the problem is
+> cheap to fix.
+
+**The tool meant to prevent this class could not see the exact situation in which
+it happens.** That is `§O-092`/`§O-103`'s shape again — a rule whose input set
+excludes its target — and here the target is *"a file about to be committed"*.
+
+**The fix, and why it reports rather than fails.** `untracked_would_be_wrong()`
+lists untracked text files whose working-tree EOL contradicts `.gitattributes`,
+excluding binary blobs by NUL sniff and `.ps1` by the `KEEP_CRLF` set. It
+**reports** under `--check` rather than failing, because an untracked file is not
+yet part of the repository and failing CI on it would be a false alarm; the write
+path **repairs** it, so running the tool before `git add` closes the gap. Proven
+with a real probe file, and the `.ps1` exemption is asserted because an
+**over-eager** normalizer breaking working files is a worse failure than an
+under-eager one — `§M-007`'s risk class.
+
+**And the tool had no self-test.** Every other checker in `tools/` has one; this
+one did not, and it is the only one that *writes to files*. A wrong checker fails
+to report; a wrong normalizer **corrupts silently**. It now has seven cases on
+fabricated files in a temp directory, wired into both CI and the Linux bridge.
+
+**The pattern, named for the fourth time this round.** Each defect was found by
+*using* the thing rather than reading it: running the script found the version
+error, running the capability check found the invocation error, and committing the
+script found the EOL blind spot. **The bootstrap script's first three runs each
+revealed a defect in the bootstrap script**, which is the same reason every
+generator here ships with a self-test.
+
+→ `tools/bootstrap.sh`, `tools/bootstrap.ps1`, `tools/normalize_eol.py`
+(self-test + the untracked check), `.github/workflows/ci.yml`,
+`docker/entrypoint.sh`, `skills/find-docs/SKILL.md`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

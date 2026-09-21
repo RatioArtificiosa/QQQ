@@ -140,8 +140,44 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **FND-011** Delete the scratch verification crate at `.scratch/witprobe` once its findings are folded into the test suite; port its three assertions into `crates/qqq-host/tests/`.
   → Done: `.scratch/witprobe` deleted; its four assertions ported to `crates/qqq-host/tests/engine.rs` with control cases (4 tests pass).
   → §0.4 How to read the cross-references
-- [ ] **FND-012** Install `wasm-tools` and the `wasmtime` CLI into the developer bootstrap script (both were found missing on the reference machine).
-  → Partial: `wasm-tools` is used by the test fixtures, but no bootstrap script installs it.
+- [x] **FND-012** Install `wasm-tools` and the `wasmtime` CLI into the developer bootstrap script (both were found missing on the reference machine).
+  → Done: `tools/bootstrap.sh` (bash) and `tools/bootstrap.ps1` (PowerShell),
+    both with `--check` / `-Check` for CI. Measured on the reference machine
+    before: **`wasm-tools 1.259.0` present, the `wasmtime` CLI absent** — so the
+    item's premise was still exactly true.
+  → **End-to-end proof rather than a claim.** `-Check` reported
+    `the wasmtime CLI is not installed`, printed
+    `cargo install wasmtime-cli --version ^48 --locked`, that command installed
+    **`wasmtime-cli v48.0.2`**, and the re-check then passed:
+    `wasmtime 48.0.2 (matches the pinned crate major)`. The detection, the
+    remediation and the verification are the same loop, exercised for real.
+  → **Every version comes from a file in the repository.** The first draft pinned
+    wasmtime to `27.0.0` from memory; `Cargo.toml` says `wasmtime = "48"`,
+    `Cargo.lock` resolves `48.0.2`, and `docs/reconciliation.md` records the pin
+    as a deliberate correction. A script installing 27 would have produced a CLI
+    that cannot instantiate the components the engine loads (`§O-113`).
+  → **For `wasm-tools` — not a Rust dependency, so unpinnable — the check is
+    CAPABILITY, not a version string**: it must parse every `wit/` file. A version
+    is a proxy for *"will this work"*, and `§O-109` records four measurements of
+    one property where three were proxies and all three were wrong.
+  → **Two defects the script's own runs found, both fixed.** It first ran
+    `wasm-tools component wit wit/` as a directory-wide check, which **correctly**
+    fails — `wit/` holds 15 separate packages, each declaring its own `package` —
+    and then blamed the tool (*"too old for this encoding"*), sending the reader
+    to `cargo install --force`, which would not have helped. The diagnostic named
+    the wrong cause: `§O-106`'s lesson for the fourth time this session. Now per
+    file, matching `tools/check_wit.py`. And `bootstrap.sh` shipped with CRLF,
+    which bash refused with ``syntax error near unexpected token `do\r'`` —
+    `§O-086` recurring in the workflow rather than the runtime.
+  → **Three outcomes, not two**: `ok` / `warn` / `fail`, because *present but
+    wrong* and *absent* need different fixes (an upgrade versus an install), and
+    reporting both as "not found" sends the reader to the wrong command — the
+    same distinction `SEC-019`'s hardening report makes with four variants where
+    a bool would collapse two real situations.
+  → Auxiliary CI tools (`cargo-fuzz`, `cargo-cyclonedx`, `cargo-deny`,
+    `cargo-machete`) are warnings rather than failures: a contributor can run
+    `cargo test` without them and should not be blocked from starting, but should
+    know before opening a PR that fails.
   → §12.1 The first ten minutes (a spec, not a wish)
 
 ### DOC — Documentation machinery

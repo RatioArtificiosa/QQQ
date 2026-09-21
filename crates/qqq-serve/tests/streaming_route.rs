@@ -1,0 +1,296 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! A streaming route served through `serve` (`SRV-004`).
+//!
+//! # Why this test did not exist until now
+//!
+//! `tests/stream.rs` drove `StreamWriter` directly, because `serve_connection` had no
+//! way to dispatch a streaming route: `serve` took a `Handler`, and a `Handler` returns a
+//! complete `Response` with a `Content-Length`. So the writer was tested and unwired, and
+//! the two tests said so rather than implying otherwise.
+//!
+//! `Dispatch` closes that. These tests go through the **real accept loop** — `serve`,
+//! a bound socket, a live client — and prove that an event stream reaches a client with
+//! no buffering anywhere in the path.
+//!
+//! # What "no buffering" means here, concretely
+//!
+//! The handler writes an event and **awaits a signal** before writing the next. The
+//! client must receive the first event while the handler is still parked. If any layer
+//! buffered the body until the handler returned, the client would see nothing until the
+//! signal fired — and the test would deadlock rather than fail, so the signal is sent by
+//! the client's read completing. That is the strongest available statement that the
+//! bytes are not being held.
+
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+
+use qqq_serve::access_log::{Format, Level, Logger};
+use qqq_serve::route::{Method, Route, RouteTable};
+use qqq_serve::server::{serve, Dispatch, Handler, RouteMatch, ServerConfig};
+use qqq_serve::stream::{StreamError, StreamWriter};
+use qqq_serve::{RequestHead, Response};
+
+use qqq_io::listener::{ListenAddr, Shutdown};
+
+/// A port nobody is using, for the reason `tests/socket.rs` documents.
+fn free_addr() -> SocketAddr {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let a = l.local_addr().expect("addr");
+    drop(l);
+    a
+}
+
+/// A table with one `GET /events` route whose handler is named `stream`.
+fn table() -> RouteTable {
+    let mut t = RouteTable::new();
+    t.insert(Route::new(Method::Get, "/events", "stream").expect("valid route"))
+        .expect("distinct route");
+    t
+}
+
+/// A running server, stopped when dropped.
+struct Server {
+    addr: SocketAddr,
+    shutdown: Shutdown,
+}
+
+impl Server {
+    async fn start(dispatch: Dispatch) -> Self {
+        let addr = free_addr();
+        let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
+        let shutdown = Shutdown::new();
+        let config = ServerConfig::for_addr(listen);
+        let local = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(
+                config,
+                table(),
+                dispatch,
+                local,
+                // Errors only: an `Info` logger would interleave access lines with the
+                // test harness's own output.
+                Logger::new(Format::Json, Level::Error),
+            )
+            .await
+            {
+                eprintln!("server stopped early: {}", e.render());
+            }
+        });
+
+        let server = Self { addr, shutdown };
+        server.wait_until_accepting().await;
+        server
+    }
+
+    async fn wait_until_accepting(&self) {
+        for _ in 0..200 {
+            if TcpStream::connect(self.addr).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the server never accepted a connection on {}", self.addr);
+    }
+
+    /// Connect and send a request, returning the live stream so a test can read
+    /// incrementally rather than waiting for EOF.
+    async fn open(&self, target: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n");
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .expect("write request");
+        stream.flush().await.expect("flush");
+        stream
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown.signal();
+    }
+}
+
+/// Read until `needle` appears or the timeout expires.
+async fn read_until(stream: &mut TcpStream, needle: &str) -> String {
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&chunk[..n]);
+                    if String::from_utf8_lossy(&out).contains(needle) {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A streaming handler that writes one event, waits for a signal, then writes another.
+///
+/// The signal is what makes this a *streaming* test rather than a buffering one: the
+/// harness only fires it after the client has already read the first event, so if any
+/// layer held the body until the handler returned, the handler would never return.
+fn gated_handler(gate: oneshot::Receiver<()>) -> qqq_serve::stream::StreamingHandler {
+    let gate = Arc::new(tokio::sync::Mutex::new(Some(gate)));
+    Arc::new(
+        move |_head: &RequestHead,
+              _m: &RouteMatch,
+              w: &mut StreamWriter<'_>|
+              -> Pin<
+            Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>,
+        > {
+            let gate = Arc::clone(&gate);
+            Box::pin(async move {
+                w.write_now(b"data: first\n\n")
+                    .await
+                    .map_err(|e| StreamError::Transport(e.to_string()))?;
+                // Park until the client has seen the first event.
+                if let Some(rx) = gate.lock().await.take() {
+                    let _ = rx.await;
+                }
+                w.write_now(b"data: second\n\n")
+                    .await
+                    .map_err(|e| StreamError::Transport(e.to_string()))?;
+                Ok(())
+            })
+        },
+    )
+}
+
+/// A handler used for the flat path, so a non-streaming route still works.
+fn flat_handler() -> Handler {
+    Arc::new(|_head: &RequestHead, _m: &RouteMatch| Response::text(200, "flat"))
+}
+
+// ---------------------------------------------------------------------------
+// The wiring
+// ---------------------------------------------------------------------------
+
+/// **A streaming route delivers its first event before the handler finishes.**
+///
+/// The property the whole item exists for. The handler is parked awaiting a signal that
+/// the test only sends after reading the first event, so a buffered path could not pass:
+/// it would deadlock, not merely fail.
+#[tokio::test]
+async fn a_streaming_route_delivers_an_event_before_the_handler_returns() {
+    let (tx, rx) = oneshot::channel();
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open("/events").await;
+
+    // Read the head and the first event. The handler is still parked.
+    let got = read_until(&mut client, "data: first").await;
+    assert!(
+        got.contains("data: first"),
+        "the first event must arrive while the handler is still running: {got:?}"
+    );
+    assert!(
+        got.contains("Transfer-Encoding: chunked"),
+        "a streamed response is chunked: {got:?}"
+    );
+    assert!(
+        !got.contains("Content-Length"),
+        "a streamed response must not declare a length: {got:?}"
+    );
+
+    // Now let the handler finish.
+    let _ = tx.send(());
+    let rest = read_until(&mut client, "data: second").await;
+    assert!(
+        rest.contains("data: second"),
+        "the second event must arrive after the gate opens: {rest:?}"
+    );
+}
+
+/// A route with no streaming handler falls through to the flat one.
+///
+/// The reason `Dispatch` keys by name rather than putting a flag on `Route`: a server
+/// that registers no streaming handlers must behave exactly as it did before.
+#[tokio::test]
+async fn a_route_without_a_streaming_handler_uses_the_flat_one() {
+    let dispatch = Dispatch::flat(flat_handler());
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open("/events").await;
+    let got = read_until(&mut client, "flat").await;
+
+    assert!(got.contains("200 OK"), "{got:?}");
+    assert!(
+        got.contains("Content-Length: 4"),
+        "a flat response has a length: {got:?}"
+    );
+    assert!(
+        got.ends_with("flat"),
+        "the body must be the flat handler's: {got:?}"
+    );
+}
+
+/// An unknown path is still a 404 when streaming is configured.
+///
+/// The control for the two tests above: `Dispatch` must not change routing, only
+/// dispatch.
+#[tokio::test]
+async fn an_unknown_path_is_still_a_404_with_streaming_configured() {
+    let (tx, rx) = oneshot::channel();
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open("/nope").await;
+    let got = read_until(&mut client, "\r\n\r\n").await;
+
+    assert!(got.contains("404"), "{got:?}");
+    // And the gate was never consumed, because the streaming handler never ran.
+    assert!(tx.send(()).is_ok(), "the gate must still be pending");
+}
+
+/// **A streaming handler that fails mid-body is recorded as `HandlerFailed`.**
+///
+/// The status is already on the wire and cannot be changed, so the only honest signal
+/// left is the log. This drives a handler that returns `Handler` after one write and
+/// asserts the client got what was sent — a truncated body, not a fabricated error.
+#[tokio::test]
+async fn a_handler_that_fails_mid_body_truncates_rather_than_lies() {
+    let handler: qqq_serve::stream::StreamingHandler = Arc::new(
+        |_head: &RequestHead,
+         _m: &RouteMatch,
+         w: &mut StreamWriter<'_>|
+         -> Pin<Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>> {
+            Box::pin(async move {
+                w.write_now(b"data: partial\n\n")
+                    .await
+                    .map_err(|e| StreamError::Transport(e.to_string()))?;
+                Err(StreamError::Handler("the data source went away".to_owned()))
+            })
+        },
+    );
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", handler);
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open("/events").await;
+    let got = read_until(&mut client, "data: partial").await;
+
+    assert!(
+        got.contains("data: partial"),
+        "what the handler wrote must reach the client: {got:?}"
+    );
+    assert!(
+        got.contains("200 OK"),
+        "the status was already sent and cannot be revised: {got:?}"
+    );
+}

@@ -100,6 +100,59 @@ impl ServerConfig {
 /// hold a connection open by accident.
 pub type Handler = Arc<dyn Fn(&RequestHead, &RouteMatch) -> Response + Send + Sync>;
 
+/// The handlers a server dispatches to, by kind.
+///
+/// # Why a streaming handler is registered by **name**, not by a field on `Route`
+///
+/// [`crate::route::Route`]'s `handler` is deliberately a name the host resolves at
+/// dispatch, so a component instance can be replaced on reload without rebinding a
+/// pointer. A `streaming: bool` on `Route` would be a second, parallel statement about
+/// the same handler, and the router is not the authority on how a guest is invoked —
+/// the dispatcher is.
+///
+/// Keying by name also means the two kinds can be registered independently: a route
+/// whose name has no streaming handler falls through to the flat one, which is what a
+/// server with no streaming routes at all should do.
+#[derive(Clone)]
+pub struct Dispatch {
+    /// The flat handler, called for every matched route without a streaming entry.
+    pub flat: Handler,
+    /// Streaming handlers, by the route's `handler` name.
+    ///
+    /// Empty by default. A server that registers none behaves exactly as before, which
+    /// is why adding this did not change any existing caller's meaning.
+    pub streaming: Arc<std::collections::BTreeMap<String, crate::stream::StreamingHandler>>,
+}
+
+impl Dispatch {
+    /// A dispatcher with only a flat handler — no streaming routes.
+    #[must_use]
+    pub fn flat(handler: Handler) -> Self {
+        Self {
+            flat: handler,
+            streaming: Arc::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Register a streaming handler for a route's handler name.
+    #[must_use]
+    pub fn with_streaming(
+        mut self,
+        name: impl Into<String>,
+        handler: crate::stream::StreamingHandler,
+    ) -> Self {
+        let streaming = Arc::make_mut(&mut self.streaming);
+        streaming.insert(name.into(), handler);
+        self
+    }
+
+    /// The streaming handler for a name, if one is registered.
+    #[must_use]
+    pub fn streaming_for(&self, name: &str) -> Option<&crate::stream::StreamingHandler> {
+        self.streaming.get(name)
+    }
+}
+
 /// The route decision a handler is given.
 ///
 /// Carries the matched handler name and the captured parameters, so a handler
@@ -154,7 +207,7 @@ pub enum Served {
 pub async fn serve(
     config: ServerConfig,
     table: RouteTable,
-    handler: Handler,
+    dispatch: Dispatch,
     shutdown: Shutdown,
     logger: Logger,
 ) -> Result<()> {
@@ -210,7 +263,7 @@ pub async fn serve(
     let result = listener
         .accept_stream(&shutdown, move |stream, peer| {
             let table = Arc::clone(&table);
-            let handler = Arc::clone(&handler);
+            let dispatch = dispatch.clone();
             let ledger = Arc::clone(&ledger);
             let connection_config = Arc::clone(&connection_config);
             let local_shutdown = task_shutdown.clone();
@@ -239,7 +292,7 @@ pub async fn serve(
                 let served = serve_connection(
                     stream,
                     &table,
-                    &handler,
+                    &dispatch,
                     // Dereferenced from the `Arc`: the function borrows the
                     // config, and passing the `Arc` would force it to know about
                     // how the caller shares it.
@@ -421,6 +474,195 @@ fn emit_record(logger: &Logger, record: Record) {
     }
 }
 
+/// Write a buffered response, returning an outcome when the connection ends here.
+///
+/// `None` means the connection may be reused and the caller should read the next request.
+/// `Some(..)` means it is finished, for one of two reasons — and they are different, which
+/// is why this returns an `Option` rather than a `bool`.
+///
+/// # The rule this function exists to hold
+///
+/// **Whether a connection may be reused is the state machine's decision, and the question
+/// to ask it is `will_keep_alive`, not `is_open`.**
+///
+/// `is_open` answers "has this connection been closed?" — `true` for the whole of a
+/// request that is about to be the last one. Using it here advertised
+/// `Connection: keep-alive` on the very response that closed the connection, which is how
+/// an HTTP/1.0 request came back with keep-alive after a correct encoder and a correct
+/// state machine.
+///
+/// The response carries no opinion of its own: a `keep_alive` flag on `Response` would be
+/// a second authority on the same answer, and the two would eventually disagree in exactly
+/// this way.
+///
+/// # Why the close is a half-close
+///
+/// `shutdown` sends the FIN rather than dropping the socket, so the response is not
+/// discarded by a RST before the client has read it. Dropping a `TcpStream` with unread
+/// data in flight is how a client receives a connection reset instead of a body.
+async fn write_flat_response(
+    stream: &mut TcpStream,
+    conn: &mut Connection,
+    head: &RequestHead,
+    response: &Response,
+) -> Option<Served> {
+    let keep_alive = conn.will_keep_alive(false);
+    let bytes = response::write_response(response, head.version, keep_alive);
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        // A write failure is the client's problem, not the server's: it disconnected
+        // before reading the response.
+        return Some(Served::ClientClosed);
+    }
+
+    conn.on_response_sent(Instant::now(), !keep_alive);
+    if keep_alive {
+        return None;
+    }
+    let _ = stream.shutdown().await;
+    Some(Served::HandlerClosed)
+}
+
+/// Start a graceful drain when shutdown is signalled, returning an outcome if the
+/// connection is already finished.
+///
+/// # The rule
+///
+/// **A shutdown stops *reading*; it does not cut off an in-flight response.** The
+/// request above this point has already been answered, so a client is never left
+/// mid-response — and the drain deadline from `ConnectionConfig` is what bounds how long
+/// the server waits for the connection to end on its own rather than closing it.
+///
+/// Extracted so the rule has a name, and because `serve_connection` had grown past the
+/// line limit. Returning `Option<Served>` rather than the outcome directly keeps the
+/// "not yet finished" case distinguishable from "finished cleanly" — the two would be
+/// the same value if this returned `Served`.
+fn begin_drain_if_signalled(conn: &mut Connection, shutdown: &Shutdown) -> Option<Served> {
+    if !shutdown.is_signalled() {
+        return None;
+    }
+    conn.begin_drain(Instant::now());
+    match conn.poll(Instant::now()) {
+        Action::Close(reason) => Some(outcome_of(reason)),
+        Action::ReadRequest | Action::WriteResponse => None,
+    }
+}
+
+/// Answer a request whose body was malformed or over the cap, and close.
+///
+/// # Why this is a named function
+///
+/// Extracted so the rule it encodes has a name a test and a reader can refer to, and
+/// because `serve_connection` had grown past the line limit. The rule:
+///
+/// > **The body is capped while it arrives, and a breach is answered before the
+/// > handler runs.**
+///
+/// `SRV-005`. A first version dispatched first and drained afterwards, so a 3 MiB
+/// chunked body against a 2 MiB cap was answered **200 OK** — the guest ran, the
+/// response was written, and only then did the drain discover the body was too large.
+/// The client was told the request succeeded. Found by
+/// `a_chunked_body_past_the_cap_is_cut_off` in `tests/socket.rs`.
+///
+/// The connection closes because the framing offset is no longer knowable: the decoder
+/// stopped mid-body, so where the next request would begin is unknown.
+async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+    let resp = response::error_response(
+        &Error::new(
+            ErrorCode::RequestBodyTooLarge,
+            "the request body exceeded max_request_bytes while arriving",
+        ),
+        false,
+    );
+    let bytes = response::write_response(&response::from_error(&resp), head.version, false);
+    let _ = stream.write_all(&bytes).await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+    Served::BodyRejected
+}
+
+/// Serve one request through a streaming handler.
+///
+/// # Why this is separate from `serve_connection`
+///
+/// A streaming exchange has a different shape from a buffered one: it writes its own
+/// head, it owns the socket until the handler returns, it terminates the body itself,
+/// and it **closes the connection** rather than returning to the request loop. Mixing
+/// that into the loop made one function do two things and pushed it past the line limit;
+/// separating them makes each readable and is what the lint was asking for.
+///
+/// # The commit point
+///
+/// `StreamWriter::begin` is where the status goes on the wire. Before it, a failure can
+/// still produce a normal error response; after it, the only honest signal left is the
+/// log — which is why [`crate::stream::StreamOutcome`] distinguishes a handler that
+/// failed *mid-body* from one that completed.
+#[allow(clippy::too_many_arguments)]
+async fn serve_streaming(
+    stream: &mut TcpStream,
+    dispatch: &Dispatch,
+    stream_handler: &crate::stream::StreamingHandler,
+    head: &RequestHead,
+    path: &str,
+    matched: &RouteMatch,
+    id: &ConnectionId,
+    tenant: &str,
+    logger: &Logger,
+    span: u64,
+) -> Served {
+    let _ = dispatch;
+    // The status is not on the wire until the handler writes a head, so a handler that
+    // fails before `begin` could still produce an error response. `begin` is the commit.
+    let streaming_response = Response::status(200);
+    let Ok(mut writer) =
+        crate::stream::StreamWriter::begin(stream, &streaming_response, head.version).await
+    else {
+        // The client was already gone, or the socket failed before anything was
+        // committed. Nothing to log beyond the connection outcome.
+        return Served::ClientClosed;
+    };
+
+    // Scoped so the mutable borrow of `writer` ends before `finish` needs it.
+    // `StreamingHandler` takes `&'s mut StreamWriter<'w>` and returns a future borrowing
+    // it, so the borrow spans the whole call; capturing only the `Result` releases it.
+    let handler_result = stream_handler(head, matched, &mut writer).await;
+    let outcome = match handler_result {
+        Ok(()) => match writer.finish().await {
+            Ok(()) => crate::stream::StreamOutcome::Completed,
+            Err(_) => crate::stream::StreamOutcome::HandlerFailed,
+        },
+        Err(crate::stream::StreamError::Transport(_)) => crate::stream::StreamOutcome::ClientClosed,
+        Err(crate::stream::StreamError::Handler(_)) => crate::stream::StreamOutcome::HandlerFailed,
+    };
+    let written = writer.written();
+
+    crate::stream::emit_stream_record(
+        logger,
+        &crate::stream::StreamRecord {
+            head,
+            path,
+            status: streaming_response.status,
+            outcome,
+            written,
+            tenant,
+            peer: id.peer,
+            trace: id.trace,
+            span,
+        },
+    );
+
+    // A stream ends when the client disconnects or the handler returns, and at that point
+    // the connection is in a state the request loop has no way to reason about — a
+    // half-consumed body may still be in flight. `StreamWriter::begin` already forces
+    // `Connection: close` for the same reason.
+    let _ = stream.shutdown().await;
+    match outcome {
+        crate::stream::StreamOutcome::Completed | crate::stream::StreamOutcome::ClientClosed => {
+            Served::HandlerClosed
+        }
+        crate::stream::StreamOutcome::HandlerFailed => Served::ClientClosed,
+    }
+}
+
 /// Allocates a trace id per accepted connection.
 ///
 /// # Why a type rather than a bare `AtomicU64` in `serve`
@@ -532,7 +774,7 @@ impl ConnectionId {
 async fn serve_connection(
     mut stream: TcpStream,
     table: &RouteTable,
-    handler: &Handler,
+    dispatch: &Dispatch,
     config: &ConnectionConfig,
     shutdown: &Shutdown,
     logger: &Logger,
@@ -574,14 +816,8 @@ async fn serve_connection(
             Action::ReadRequest | Action::WriteResponse => {}
         }
 
-        if shutdown.is_signalled() {
-            // Begin a graceful drain and stop reading. The in-flight request
-            // above has already been answered, so a client is not cut off
-            // mid-response.
-            conn.begin_drain(Instant::now());
-            if let Action::Close(reason) = conn.poll(Instant::now()) {
-                return outcome_of(reason);
-            }
+        if let Some(served) = begin_drain_if_signalled(&mut conn, shutdown) {
+            return served;
         }
 
         conn.begin_request(now);
@@ -620,47 +856,55 @@ async fn serve_connection(
         let client_wants_keep_alive = wants_keep_alive(&head);
         conn.on_request_parsed(client_wants_keep_alive);
 
-        // Consume the body **before** dispatching, so `max_request_bytes` is
-        // enforced while the bytes arrive rather than after the guest has been
-        // asked to serve them.
+        // **Consume the body before dispatching**, so `max_request_bytes` is enforced
+        // while the bytes arrive rather than after the guest has been asked to serve
+        // them. `reject_body` states what happens on a breach and why the ordering is
+        // the rule rather than a preference — including the 200 OK that a
+        // dispatch-first version returned for an over-cap body.
         //
-        // This ordering is `SRV-005`, and getting it wrong is not a slow path —
-        // it is a failure of the cap. A first version dispatched first and
-        // drained afterwards, so a 3 MiB chunked body against a 2 MiB cap was
-        // answered **200 OK**: the guest ran, the response was written, and only
-        // then did the drain discover the body was too large. The client was
-        // told the request succeeded.
-        //
-        // Found by `a_chunked_body_past_the_cap_is_cut_off` in
-        // `tests/socket.rs`, which asserts on the response rather than on an
-        // error value — the unit tests in `tests/body.rs` all passed, because
-        // the decoder was correct and the *server* was asking it too late
-        // (`§O-047a`'s shape again: two correct halves joined in the wrong
-        // order).
-        //
-        // The body is still only drained, not delivered: handing a stream to the
-        // guest is the capability path, and what exists today is the enforcement
-        // that must happen regardless of whether anyone reads it.
+        // The body is drained, not delivered: handing a stream to the guest is the
+        // capability path, and what exists today is the enforcement that must happen
+        // regardless of whether anyone reads it.
         if !drain_body(&mut stream, &mut buf, &head).await {
-            // The body was malformed or exceeded the cap. A 413 is the honest
-            // answer, and the connection closes because the framing offset is no
-            // longer knowable.
-            let resp = response::error_response(
-                &Error::new(
-                    ErrorCode::RequestBodyTooLarge,
-                    "the request body exceeded max_request_bytes while arriving",
-                ),
-                false,
-            );
-            let bytes = response::write_response(&response::from_error(&resp), head.version, false);
-            let _ = stream.write_all(&bytes).await;
-            let _ = stream.flush().await;
-            let _ = stream.shutdown().await;
-            return Served::BodyRejected;
+            return reject_body(&mut stream, &head).await;
+        }
+
+        // --- A streaming route takes a different path entirely --------------
+        //
+        // Extracted rather than inlined: the block is a self-contained exchange with its
+        // own record and its own return, and inlining it pushed `serve_connection` past
+        // the line limit — which is the extraction the lint was asking for, not a
+        // suppression.
+        if let Some(m) = table.match_route(head.method, path) {
+            if let Some(stream_handler) = dispatch.streaming_for(&m.handler) {
+                let matched = RouteMatch {
+                    handler: m.handler.clone(),
+                    pattern: m.pattern.clone(),
+                    params: m
+                        .params
+                        .iter()
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                        .collect(),
+                };
+                span_seq += 1;
+                return serve_streaming(
+                    &mut stream,
+                    dispatch,
+                    stream_handler,
+                    &head,
+                    path,
+                    &matched,
+                    id,
+                    &tenant,
+                    logger,
+                    span_seq,
+                )
+                .await;
+            }
         }
 
         let response = if let Some(m) = table.match_route(head.method, path) {
-            handler(
+            (dispatch.flat)(
                 &head,
                 &RouteMatch {
                     handler: m.handler.clone(),
@@ -696,39 +940,14 @@ async fn serve_connection(
             access_record(&head, path, &response, &tenant, id.trace, span_seq),
         );
 
-        // Whether the connection may be reused is the **state machine's**
-        // decision, and the question to ask it is `will_keep_alive`, not
-        // `is_open`.
-        //
-        // `is_open` answers "has this connection been closed?" — `true` for the
-        // whole of a request that is about to be the last one. Using it here
-        // advertised `Connection: keep-alive` on the very response that closed
-        // the connection, which is how an HTTP/1.0 request came back with
-        // keep-alive after a correct encoder and a correct state machine.
-        //
-        // The response carries no opinion of its own: a `keep_alive` flag on
-        // `Response` would be a second authority on the same answer, and the two
-        // would eventually disagree in exactly this way.
-        let keep_alive = conn.will_keep_alive(false);
-        let bytes = response::write_response(&response, head.version, keep_alive);
-        if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
-            // A write failure is the client's problem, not the server's: it
-            // disconnected before reading the response.
-            return Served::ClientClosed;
+        // `None` means the connection may be reused, so the loop reads the next
+        // request. The body was consumed **before** the handler ran, so the connection
+        // is already positioned at it — there is deliberately no drain here, because a
+        // second consumer of the same body would either read the next request as this
+        // request's body or block on bytes already accounted for.
+        if let Some(served) = write_flat_response(&mut stream, &mut conn, &head, &response).await {
+            return served;
         }
-
-        conn.on_response_sent(Instant::now(), !keep_alive);
-        if !keep_alive {
-            // Half-close rather than dropping the socket, so the FIN follows the
-            // response instead of a RST discarding data the client has not read.
-            let _ = stream.shutdown().await;
-            return Served::HandlerClosed;
-        }
-        // The body was consumed **before** the handler ran, so the connection is
-        // already positioned at the next request. There is deliberately no drain
-        // here: a second consumer of the same body would either read the next
-        // request as this request's body or block waiting for bytes that were
-        // already accounted for.
     }
 }
 

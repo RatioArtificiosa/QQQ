@@ -245,16 +245,36 @@ impl<'a> StreamWriter<'a> {
 /// `&RequestHead` rather than owning it: the writer belongs to the connection, and a
 /// handler that owned it could drop it mid-body.
 pub type StreamingHandler = std::sync::Arc<
-    dyn for<'a> Fn(
-            &'a RequestHead,
-            &'a crate::server::RouteMatch,
-            &'a mut StreamWriter<'a>,
+    dyn for<'r, 's, 'w> Fn(
+            &'r RequestHead,
+            &'r crate::server::RouteMatch,
+            &'s mut StreamWriter<'w>,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + 's>,
         > + Send
         + Sync,
 >;
 
+/// # Why three lifetimes instead of one
+///
+/// The obvious spelling ties everything to one `'a`:
+///
+/// ```text
+/// for<'a> Fn(&'a RequestHead, &'a RouteMatch, &'a mut StreamWriter<'a>)
+///     -> Pin<Box<dyn Future + 'a>>
+/// ```
+///
+/// It reads as correct and is not. The future's lifetime would be bounded by the
+/// **writer's** borrow, so that borrow could never end — and the caller could therefore
+/// never call [`StreamWriter::finish`], which is the one operation that must happen
+/// after the handler returns. The compiler reports it as "cannot borrow `writer` as
+/// mutable more than once", which is true and points at the caller rather than at the
+/// signature where the mistake is.
+///
+/// The fix is to let the request and route borrows (`'r`) be independent of the writer
+/// borrow (`'w`), and to bound the returned future by `'w` alone. That is the honest
+/// statement of what the handler does: it reads the request for the length of the call,
+/// and it holds the writer until it is done writing.
 /// Why a streaming handler stopped.
 ///
 /// Deliberately not `std::io::Error`: a handler failing to produce its *data* and a

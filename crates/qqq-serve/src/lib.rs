@@ -111,7 +111,7 @@ pub use response::{
 pub use route::{
     Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,
 };
-pub use server::{serve, Handler, RouteMatch, Served, ServerConfig};
+pub use server::{serve, Dispatch, Handler, RouteMatch, Served, ServerConfig};
 pub use stream::{
     emit_stream_record, StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler,
 };

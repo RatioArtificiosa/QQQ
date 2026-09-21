@@ -10843,4 +10843,98 @@ to run fmt wastes the one signal that cannot be fooled.
 
 ---
 
+### §O-130 — Four features were "complete" and unreachable, because a manifest table did not exist
+
+**The finding.** `SRV-004` (streaming bodies), `SRV-009` (WebSockets), `SRV-010` (SSE)
+and `SRV-019` (CORS) were each implemented in `qqq-serve` with real tests, and **none
+was reachable**. `Manifest` modelled `[package]`, `[build]`, `[capabilities]`,
+`[limits]`, `[dependencies]` and `[dev-dependencies]` — and not `[server]`. A manifest
+declaring `routes` parsed successfully and the whole table was **inert**: the server
+would start, accept connections, and 404 everything, with nothing saying why.
+
+**Why this is the same defect as `[dependencies]`, one table over.** That field's own
+doc comment already records it:
+
+> Before this field existed, a manifest containing `[dependencies]` parsed
+> **successfully** and the dependencies were silently dropped [...] A dependency that
+> silently does not exist is worse than one that fails to resolve, because the first is
+> discovered at runtime by the person least able to explain it.
+
+A *route* that silently does not exist is worse in exactly the same way and more
+visible. **The lesson had already been written down, in the file, as a comment on the
+field directly above the gap** — and I read past it four times while implementing the
+features that needed it.
+
+**The failure mode this names.** I built `cors.rs`, `sse.rs` and the streaming framing
+carefully, tested each against its specification, and pronounced them done. Every one
+was correct. What none of them had was a **caller**, and the reason none had a caller is
+that the layer that would carry the configuration did not model the configuration. This
+is `§O-118`'s shape — two correct halves with nothing between them — at three levels of
+the stack rather than two.
+
+It is also the answer to a question I should have asked at the first of the four:
+**"what calls this?"** For `cors.rs` the answer was "nothing, and nothing can". I
+checked reachability for the `h2` module after `§O-120` and did not check it for a
+module I had just written.
+
+**What modelling the section bought, beyond the four items.** Two security decisions
+that only exist because the section is now a type:
+
+- **`default_auth` defaults to `deny`.** A manifest that lists routes and forgets the
+  line must fail closed. Defaulting to `none` publishes every route because the author
+  omitted one line; defaulting to `bearer-jwt` guesses at a mechanism they may not have.
+- **`deny` is a member of `AuthMode`, not an absence.** An `Option<AuthMode>` where
+  `None` meant "no authentication" would make *the author forgot* and *the author asked
+  for no authentication* the same value — the distinction that matters most in this
+  file.
+
+And `Server::unauthenticated_routes()` answers the first question an auditor asks, and
+the one a manifest change most often gets wrong: adding `auth = "none"` to make a health
+check work, and forgetting it is now public.
+
+**A pre-existing schema bug, found by the attempt to document the new field.** Adding
+it made `gen_schemas.py` fail with `unrecognised Rust type: 'crate::server::Server'` —
+honest behaviour, since it refuses rather than publishing a schema with a field it
+cannot describe. Investigating that found:
+
+```python
+FIELD = re.compile(r"^\s*pub\s+([a-z_][a-z0-9_]*)\s*:\s*([^,]+),\s*$")
+```
+
+`[^,]+` stops at the first comma — *including one inside a generic*. So
+`pub dev_dependencies: BTreeMap<String, Dependency>,` captured `BTreeMap<String` and
+failed on the rest. **`dependencies` and `dev-dependencies` have never appeared in the
+published `schema/qqq-toml.schema.json`**, while `gen_schemas.py --check` reported it
+current. Verified against the committed schema at HEAD: its `Manifest` properties were
+`package`, `build`, `capabilities`, `limits` — two tables missing, silently, for as long
+as the file has existed.
+
+The fix took three attempts, and each failure is worth recording because the second and
+third are how a "small regex fix" becomes a lost afternoon:
+
+| Attempt | Result |
+|---|---|
+| `[^,]+` (original) | silently drops every field whose type contains a comma |
+| `(.+),\s*$` | **correct but hangs** — `\s*` and `.` both match a space, `$` retried at every position |
+| `(.*),\s*$` | also hangs, same ambiguity |
+| `([^,<]*(?:<[^<>]*>[^<,]*)*)` | each character consumed by exactly one alternative; nothing to backtrack into |
+
+During the second attempt I also **broke the reader** with an edit that deleted an
+`i += 1`, and the symptom was *OutOfMemoryException* rather than any error message —
+the loop re-read one line forever and appended a field each time. A tool that reports a
+defect in itself by exhausting memory is the worst possible shape, and it cost four
+rounds to find because the failure presented as a timeout with no output.
+
+**The rule.** *A generator that reads source must be tested on the source it reads.*
+`self_test_schemas.py` drives `gen_schemas.py` with fabricated source and asserts seven
+drift cases — and all seven passed **while** `dev_dependencies` was missing from the
+output, because none of them used a type containing a comma. The self-test's fixtures
+were as blind as my test fixtures in `§O-127`: both were written by the reasoning that
+produced the defect.
+
+→ `crates/qqq-cap/src/server.rs`, `crates/qqq-cap/src/manifest.rs`,
+`tools/gen_schemas.py`, `schema/qqq-toml.schema.json`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

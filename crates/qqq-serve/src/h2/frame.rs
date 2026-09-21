@@ -1034,8 +1034,15 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "a multiple of 6 bytes",
                 });
             }
-            let mut params = Vec::with_capacity(length as usize / 6);
-            for chunk in payload.chunks_exact(6) {
+            // `as_chunks` rather than `chunks_exact`, which clippy 1.98 rejects for
+            // a constant chunk size. The six bytes are `SETTINGS`' own layout:
+            // a 16-bit identifier followed by a 32-bit value (RFC 9113 §6.5).
+            // `as_chunks` also proves the conversion is total — `length % 6 == 0`
+            // was checked above, so the remainder is empty by construction and the
+            // array type is what makes that checkable rather than assumed.
+            let (chunks, _remainder) = payload.as_chunks::<6>();
+            let mut params = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
                 let id = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
                 params.push((SettingId::from_u16(id), value));

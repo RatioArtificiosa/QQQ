@@ -846,7 +846,7 @@ mod imp {
                      rather than a configuration error"
                 ));
             };
-            rules.insert(i64::from(nr), Vec::new());
+            rules.insert(nr, Vec::new());
         }
 
         let filter = SeccompFilter::new(
@@ -888,153 +888,226 @@ mod imp {
         static TABLE: OnceLock<HashMap<&'static str, i64>> = OnceLock::new();
 
         let table = TABLE.get_or_init(|| {
-            // `libc::SYS_*` are `c_long` and differ per architecture; taking them
-            // through this table is what keeps the profile portable.
             let mut m = HashMap::new();
-            macro_rules! syscalls {
-                ($($name:literal => $const:expr),* $(,)?) => {
-                    $( m.insert($name, i64::from($const)); )*
-                };
-            }
-            syscalls! {
-                "exit" => libc::SYS_exit,
-                "exit_group" => libc::SYS_exit_group,
-                "clone" => libc::SYS_clone,
-                "futex" => libc::SYS_futex,
-                "sched_yield" => libc::SYS_sched_yield,
-                "gettid" => libc::SYS_gettid,
-                "getpid" => libc::SYS_getpid,
-                "getppid" => libc::SYS_getppid,
-                "tgkill" => libc::SYS_tgkill,
-                "rt_sigaction" => libc::SYS_rt_sigaction,
-                "rt_sigprocmask" => libc::SYS_rt_sigprocmask,
-                "rt_sigreturn" => libc::SYS_rt_sigreturn,
-                "sigaltstack" => libc::SYS_sigaltstack,
-                "prctl" => libc::SYS_prctl,
-                "brk" => libc::SYS_brk,
-                "mmap" => libc::SYS_mmap,
-                "munmap" => libc::SYS_munmap,
-                "mremap" => libc::SYS_mremap,
-                "madvise" => libc::SYS_madvise,
-                "mprotect" => libc::SYS_mprotect,
-                "read" => libc::SYS_read,
-                "write" => libc::SYS_write,
-                "readv" => libc::SYS_readv,
-                "writev" => libc::SYS_writev,
-                "pread64" => libc::SYS_pread64,
-                "pwrite64" => libc::SYS_pwrite64,
-                "close" => libc::SYS_close,
-                "dup" => libc::SYS_dup,
-                "dup2" => libc::SYS_dup2,
-                "dup3" => libc::SYS_dup3,
-                "fcntl" => libc::SYS_fcntl,
-                "ioctl" => libc::SYS_ioctl,
-                "lseek" => libc::SYS_lseek,
-                "pipe" => libc::SYS_pipe,
-                "pipe2" => libc::SYS_pipe2,
-                "eventfd" => libc::SYS_eventfd,
-                "eventfd2" => libc::SYS_eventfd2,
-                "epoll_create" => libc::SYS_epoll_create,
-                "epoll_create1" => libc::SYS_epoll_create1,
-                "epoll_ctl" => libc::SYS_epoll_ctl,
-                "epoll_wait" => libc::SYS_epoll_wait,
-                "epoll_pwait" => libc::SYS_epoll_pwait,
-                "poll" => libc::SYS_poll,
-                "ppoll" => libc::SYS_ppoll,
-                "select" => libc::SYS_select,
-                "pselect6" => libc::SYS_pselect6,
-                "socket" => libc::SYS_socket,
-                "socketpair" => libc::SYS_socketpair,
-                "bind" => libc::SYS_bind,
-                "listen" => libc::SYS_listen,
-                "accept" => libc::SYS_accept,
-                "accept4" => libc::SYS_accept4,
-                "connect" => libc::SYS_connect,
-                "shutdown" => libc::SYS_shutdown,
-                "sendto" => libc::SYS_sendto,
-                "recvfrom" => libc::SYS_recvfrom,
-                "sendmsg" => libc::SYS_sendmsg,
-                "recvmsg" => libc::SYS_recvmsg,
-                "getsockname" => libc::SYS_getsockname,
-                "getpeername" => libc::SYS_getpeername,
-                "getsockopt" => libc::SYS_getsockopt,
-                "setsockopt" => libc::SYS_setsockopt,
-                "clock_gettime" => libc::SYS_clock_gettime,
-                "clock_nanosleep" => libc::SYS_clock_nanosleep,
-                "nanosleep" => libc::SYS_nanosleep,
-                "gettimeofday" => libc::SYS_gettimeofday,
-                "timerfd_create" => libc::SYS_timerfd_create,
-                "timerfd_settime" => libc::SYS_timerfd_settime,
-                "timerfd_gettime" => libc::SYS_timerfd_gettime,
-                "openat" => libc::SYS_openat,
-                "stat" => libc::SYS_stat,
-                "statx" => libc::SYS_statx,
-                "lstat" => libc::SYS_lstat,
-                "fstat" => libc::SYS_fstat,
-                "fstatfs" => libc::SYS_fstatfs,
-                "statfs" => libc::SYS_statfs,
-                "newfstatat" => libc::SYS_newfstatat,
-                "access" => libc::SYS_access,
-                "faccessat" => libc::SYS_faccessat,
-                "getdents64" => libc::SYS_getdents64,
-                "readlink" => libc::SYS_readlink,
-                "readlinkat" => libc::SYS_readlinkat,
-                "getcwd" => libc::SYS_getcwd,
-                "chdir" => libc::SYS_chdir,
-                "fchdir" => libc::SYS_fchdir,
-                "rename" => libc::SYS_rename,
-                "renameat" => libc::SYS_renameat,
-                "unlink" => libc::SYS_unlink,
-                "unlinkat" => libc::SYS_unlinkat,
-                "mkdir" => libc::SYS_mkdir,
-                "mkdirat" => libc::SYS_mkdirat,
-                "rmdir" => libc::SYS_rmdir,
-                "fsync" => libc::SYS_fsync,
-                "fdatasync" => libc::SYS_fdatasync,
-                "ftruncate" => libc::SYS_ftruncate,
-                "truncate" => libc::SYS_truncate,
-                "fallocate" => libc::SYS_fallocate,
-                "sendfile" => libc::SYS_sendfile,
-                "splice" => libc::SYS_splice,
-                "getrandom" => libc::SYS_getrandom,
-                "getuid" => libc::SYS_getuid,
-                "geteuid" => libc::SYS_geteuid,
-                "getgid" => libc::SYS_getgid,
-                "getegid" => libc::SYS_getegid,
-                "getgroups" => libc::SYS_getgroups,
-                "uname" => libc::SYS_uname,
-                "sysinfo" => libc::SYS_sysinfo,
-            }
-            // Architecture-specific optional entries, added only where they exist.
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            {
-                m.insert("clone3", i64::from(libc::SYS_clone3));
-                m.insert("rseq", i64::from(libc::SYS_rseq));
-                m.insert("set_robust_list", i64::from(libc::SYS_set_robust_list));
-                m.insert("get_robust_list", i64::from(libc::SYS_get_robust_list));
-                m.insert("sched_getaffinity", i64::from(libc::SYS_sched_getaffinity));
-                m.insert("set_tid_address", i64::from(libc::SYS_set_tid_address));
-                m.insert("rt_sigtimedwait", i64::from(libc::SYS_rt_sigtimedwait));
-                m.insert("restart_syscall", i64::from(libc::SYS_restart_syscall));
-                m.insert("arch_prctl", i64::from(libc::SYS_arch_prctl));
-                m.insert("memfd_create", i64::from(libc::SYS_memfd_create));
-                m.insert("close_range", i64::from(libc::SYS_close_range));
-                m.insert("epoll_pwait2", i64::from(libc::SYS_epoll_pwait2));
-                m.insert("sendmmsg", i64::from(libc::SYS_sendmmsg));
-                m.insert("recvmmsg", i64::from(libc::SYS_recvmmsg));
-                m.insert("openat2", i64::from(libc::SYS_openat2));
-                m.insert("faccessat2", i64::from(libc::SYS_faccessat2));
-                m.insert("renameat2", i64::from(libc::SYS_renameat2));
-                m.insert("copy_file_range", i64::from(libc::SYS_copy_file_range));
-                m.insert("io_uring_setup", i64::from(libc::SYS_io_uring_setup));
-                m.insert("io_uring_enter", i64::from(libc::SYS_io_uring_enter));
-                m.insert("io_uring_register", i64::from(libc::SYS_io_uring_register));
-            }
+            insert_portable_syscalls(&mut m);
+            insert_optional_syscalls(&mut m);
             m
         });
 
         table.get(name).copied()
     }
+
+    /// The syscalls present on every supported Linux architecture.
+    ///
+    /// # Why this is a separate function from [`insert_optional_syscalls`]
+    ///
+    /// Two reasons, in order of importance.
+    ///
+    /// **It is the honest split.** These entries exist everywhere; the ones in the
+    /// sibling function are added only where the architecture provides them. Merging
+    /// them hid that distinction behind one long list, and a reader could not tell
+    /// which names were guaranteed.
+    ///
+    /// **`clippy::too_many_lines` at 1.98 requires it.** The combined function
+    /// reached 146 lines against a threshold of 100, and the failure appeared only
+    /// when the container was given CI's toolchain version -- 1.97 was content. The
+    /// refactor is one the lint asked for and the code wanted anyway.
+    ///
+    /// `libc::SYS_*` are `c_long`; the target is `i64`. On 64-bit Linux those are
+    /// the same type, so an explicit conversion is a no-op that clippy 1.98 rejects
+    /// as `useless_conversion`, while on a 32-bit target it would be required. The
+    /// supported architectures here are all 64-bit, and the test below pins that
+    /// assumption rather than leaving it implicit.
+    fn insert_portable_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+        insert_process_and_memory_syscalls(m);
+        insert_io_and_poll_syscalls(m);
+        insert_network_and_fs_syscalls(m);
+    }
+
+    /// Process lifecycle, signals, memory, and the thread primitives a guest
+    /// runtime cannot work without.
+    fn insert_process_and_memory_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+        macro_rules! syscalls {
+            ($($name:literal => $const:expr),* $(,)?) => {
+                $( m.insert($name, $const); )*
+            };
+        }
+        syscalls! {
+            "exit" => libc::SYS_exit,
+            "exit_group" => libc::SYS_exit_group,
+            "clone" => libc::SYS_clone,
+            "futex" => libc::SYS_futex,
+            "sched_yield" => libc::SYS_sched_yield,
+            "gettid" => libc::SYS_gettid,
+            "getpid" => libc::SYS_getpid,
+            "getppid" => libc::SYS_getppid,
+            "tgkill" => libc::SYS_tgkill,
+            "rt_sigaction" => libc::SYS_rt_sigaction,
+            "rt_sigprocmask" => libc::SYS_rt_sigprocmask,
+            "rt_sigreturn" => libc::SYS_rt_sigreturn,
+            "sigaltstack" => libc::SYS_sigaltstack,
+            "prctl" => libc::SYS_prctl,
+            "brk" => libc::SYS_brk,
+            "mmap" => libc::SYS_mmap,
+            "munmap" => libc::SYS_munmap,
+            "mremap" => libc::SYS_mremap,
+            "madvise" => libc::SYS_madvise,
+            "mprotect" => libc::SYS_mprotect,
+            "getuid" => libc::SYS_getuid,
+            "geteuid" => libc::SYS_geteuid,
+            "getgid" => libc::SYS_getgid,
+            "getegid" => libc::SYS_getegid,
+            "getgroups" => libc::SYS_getgroups,
+            "uname" => libc::SYS_uname,
+            "sysinfo" => libc::SYS_sysinfo,
+        }
+    }
+
+    /// Descriptor I/O, readiness polling, timers, and random bytes.
+    fn insert_io_and_poll_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+        macro_rules! syscalls {
+            ($($name:literal => $const:expr),* $(,)?) => {
+                $( m.insert($name, $const); )*
+            };
+        }
+        syscalls! {
+            "read" => libc::SYS_read,
+            "write" => libc::SYS_write,
+            "readv" => libc::SYS_readv,
+            "writev" => libc::SYS_writev,
+            "pread64" => libc::SYS_pread64,
+            "pwrite64" => libc::SYS_pwrite64,
+            "close" => libc::SYS_close,
+            "dup" => libc::SYS_dup,
+            "dup2" => libc::SYS_dup2,
+            "dup3" => libc::SYS_dup3,
+            "fcntl" => libc::SYS_fcntl,
+            "ioctl" => libc::SYS_ioctl,
+            "lseek" => libc::SYS_lseek,
+            "pipe" => libc::SYS_pipe,
+            "pipe2" => libc::SYS_pipe2,
+            "eventfd" => libc::SYS_eventfd,
+            "eventfd2" => libc::SYS_eventfd2,
+            "epoll_create" => libc::SYS_epoll_create,
+            "epoll_create1" => libc::SYS_epoll_create1,
+            "epoll_ctl" => libc::SYS_epoll_ctl,
+            "epoll_wait" => libc::SYS_epoll_wait,
+            "epoll_pwait" => libc::SYS_epoll_pwait,
+            "poll" => libc::SYS_poll,
+            "ppoll" => libc::SYS_ppoll,
+            "select" => libc::SYS_select,
+            "pselect6" => libc::SYS_pselect6,
+            "clock_gettime" => libc::SYS_clock_gettime,
+            "clock_nanosleep" => libc::SYS_clock_nanosleep,
+            "nanosleep" => libc::SYS_nanosleep,
+            "gettimeofday" => libc::SYS_gettimeofday,
+            "timerfd_create" => libc::SYS_timerfd_create,
+            "timerfd_settime" => libc::SYS_timerfd_settime,
+            "timerfd_gettime" => libc::SYS_timerfd_gettime,
+            "getrandom" => libc::SYS_getrandom,
+        }
+    }
+
+    /// Sockets and the filesystem.
+    fn insert_network_and_fs_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+        macro_rules! syscalls {
+            ($($name:literal => $const:expr),* $(,)?) => {
+                $( m.insert($name, $const); )*
+            };
+        }
+        syscalls! {
+            "socket" => libc::SYS_socket,
+            "socketpair" => libc::SYS_socketpair,
+            "bind" => libc::SYS_bind,
+            "listen" => libc::SYS_listen,
+            "accept" => libc::SYS_accept,
+            "accept4" => libc::SYS_accept4,
+            "connect" => libc::SYS_connect,
+            "shutdown" => libc::SYS_shutdown,
+            "sendto" => libc::SYS_sendto,
+            "recvfrom" => libc::SYS_recvfrom,
+            "sendmsg" => libc::SYS_sendmsg,
+            "recvmsg" => libc::SYS_recvmsg,
+            "getsockname" => libc::SYS_getsockname,
+            "getpeername" => libc::SYS_getpeername,
+            "getsockopt" => libc::SYS_getsockopt,
+            "setsockopt" => libc::SYS_setsockopt,
+            "openat" => libc::SYS_openat,
+            "stat" => libc::SYS_stat,
+            "statx" => libc::SYS_statx,
+            "lstat" => libc::SYS_lstat,
+            "fstat" => libc::SYS_fstat,
+            "fstatfs" => libc::SYS_fstatfs,
+            "statfs" => libc::SYS_statfs,
+            "newfstatat" => libc::SYS_newfstatat,
+            "access" => libc::SYS_access,
+            "faccessat" => libc::SYS_faccessat,
+            "getdents64" => libc::SYS_getdents64,
+            "readlink" => libc::SYS_readlink,
+            "readlinkat" => libc::SYS_readlinkat,
+            "getcwd" => libc::SYS_getcwd,
+            "chdir" => libc::SYS_chdir,
+            "fchdir" => libc::SYS_fchdir,
+            "rename" => libc::SYS_rename,
+            "renameat" => libc::SYS_renameat,
+            "unlink" => libc::SYS_unlink,
+            "unlinkat" => libc::SYS_unlinkat,
+            "mkdir" => libc::SYS_mkdir,
+            "mkdirat" => libc::SYS_mkdirat,
+            "rmdir" => libc::SYS_rmdir,
+            "fsync" => libc::SYS_fsync,
+            "fdatasync" => libc::SYS_fdatasync,
+            "ftruncate" => libc::SYS_ftruncate,
+            "truncate" => libc::SYS_truncate,
+            "fallocate" => libc::SYS_fallocate,
+            "sendfile" => libc::SYS_sendfile,
+            "splice" => libc::SYS_splice,
+        }
+    }
+
+    /// Syscalls added only on the architectures that provide them.
+    ///
+    /// Keeping these separate is deliberate: a reader can tell at a glance which
+    /// names are guaranteed to resolve and which depend on the target.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn insert_optional_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+        macro_rules! syscalls {
+            ($($name:literal => $const:expr),* $(,)?) => {
+                $( m.insert($name, $const); )*
+            };
+        }
+        syscalls! {
+            "clone3" => libc::SYS_clone3,
+            "rseq" => libc::SYS_rseq,
+            "set_robust_list" => libc::SYS_set_robust_list,
+            "get_robust_list" => libc::SYS_get_robust_list,
+            "sched_getaffinity" => libc::SYS_sched_getaffinity,
+            "set_tid_address" => libc::SYS_set_tid_address,
+            "rt_sigtimedwait" => libc::SYS_rt_sigtimedwait,
+            "restart_syscall" => libc::SYS_restart_syscall,
+            "arch_prctl" => libc::SYS_arch_prctl,
+            "memfd_create" => libc::SYS_memfd_create,
+            "close_range" => libc::SYS_close_range,
+            "epoll_pwait2" => libc::SYS_epoll_pwait2,
+            "sendmmsg" => libc::SYS_sendmmsg,
+            "recvmmsg" => libc::SYS_recvmmsg,
+            "openat2" => libc::SYS_openat2,
+            "faccessat2" => libc::SYS_faccessat2,
+            "renameat2" => libc::SYS_renameat2,
+            "copy_file_range" => libc::SYS_copy_file_range,
+            "io_uring_setup" => libc::SYS_io_uring_setup,
+            "io_uring_enter" => libc::SYS_io_uring_enter,
+            "io_uring_register" => libc::SYS_io_uring_register,
+        }
+    }
+
+    /// No optional syscalls on architectures without the entries above.
+    ///
+    /// Present so `syscall_number` can call it unconditionally, which keeps the
+    /// supported/unconditional split in one place instead of in a `cfg` inside a
+    /// closure body.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn insert_optional_syscalls(_m: &mut std::collections::HashMap<&'static str, i64>) {}
 }
 
 // ---------------------------------------------------------------------------

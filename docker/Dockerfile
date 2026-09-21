@@ -74,6 +74,31 @@ RUN rustc --version | grep -q '^rustc 1\.97\.' \
 RUN rustup toolchain install nightly --profile minimal \
     && rustup component add rust-src --toolchain nightly || true
 
+# # Why a SECOND stable toolchain, matching CI
+#
+# Found by a CI failure this environment could not have caught. CI installs
+# `dtolnay/rust-toolchain@stable`, which tracks the newest release; the container
+# pinned 1.97. When CI moved to 1.98, its clippy began rejecting 23
+# `useless_conversion` sites in `qqq-sys` that 1.97 accepted silently --
+# `i64::from(libc::SYS_clone3)` where `c_long` is already `i64` on 64-bit Linux.
+#
+# So the container was running a *different linter version* from the one that
+# gates the merge, and "it passed locally" was not evidence about CI. A bridge
+# whose whole purpose is trustworthy verification cannot have that gap.
+#
+# The fix is not to chase `stable` -- that would make the container
+# non-reproducible, which is worse. It is to pin the version CI currently
+# resolves to, and to carry BOTH: 1.97 is the MSRV floor the Dockerfile asserts
+# below, and 1.98 is what CI lints with. `qqqdev checks` runs the newer one.
+#
+# `CI_CLIPPY_TOOLCHAIN` is the single place to bump when CI moves.
+ARG CI_CLIPPY_TOOLCHAIN=1.98
+RUN rustup toolchain install "${CI_CLIPPY_TOOLCHAIN}" --profile minimal -c clippy
+
+# Record it for the entrypoint and for `qqqdev status`, so the version in use is
+# never an assumption.
+ENV QQQ_CI_TOOLCHAIN=${CI_CLIPPY_TOOLCHAIN}
+
 # `cargo-fuzz` is pinned with `--locked` for the same reason CI does it: an
 # unpinned fuzzer is a component of the verification that changes without a
 # commit.

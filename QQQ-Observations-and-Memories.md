@@ -5267,6 +5267,71 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-089 — "It passed locally" was not evidence: the container and CI linted with different Rust versions
+
+**What happened.** A green local run, a red CI run — twice, on the same commit that
+had just been verified. CI's clippy:
+
+```text
+error: useless conversion to the same type: `i64`
+   --> crates/qqq-sys/src/harden.rs:1031:47
+help: consider removing `i64::from()`: `libc::SYS_io_uring_register`
+error: could not compile `qqq-sys` (lib) due to 23 previous errors
+```
+
+**The cause was a version gap, not a code bug.** CI installs
+`dtolnay/rust-toolchain@stable`, which tracks the newest release — 1.98 at the time
+of writing. The container pinned **1.97**. Clippy 1.98 added `useless_conversion`
+coverage that 1.97 did not have, so `i64::from(libc::SYS_clone3)` (where `c_long`
+is already `i64` on 64-bit Linux) passed 1.97 silently and failed 1.98 loudly.
+
+This is the most uncomfortable finding of the session, because it invalidates the
+*form* of the previous verification rather than a specific claim: "all gates green
+locally" described a linter that was not the one gating the merge. The bridge had
+been built to close exactly this class of gap between environments, and it had a
+gap of its own.
+
+**Why it was not noticed earlier.** The previous commit's CI run had **also failed**
+with the same 23 errors, and I had not checked it before continuing. That is a
+process failure on top of a tooling one: the rule is "after every push, verify CI
+is green", and one push went by unverified. Checking it is what surfaced the whole
+finding.
+
+**The fix, and why it is not "pin stable to 1.97".** Pinning backwards would make
+the container's pass *less* meaningful, not more: the code would still fail the gate
+that actually decides whether it merges. So both toolchains are now in the image,
+with distinct roles:
+
+* **1.97** is the asserted MSRV — the Dockerfile regex-checks it at build time, and
+  it is what `test` uses.
+* **1.98** is what CI lints with, installed as `ARG CI_CLIPPY_TOOLCHAIN=1.98` and
+  exported as `QQQ_CI_TOOLCHAIN`.
+
+`qqqdev checks` now runs CI's linter **first**, via a new `cmd_lint_ci`. The ARG is
+the single place to bump when CI moves, and `status` prints which version is in use
+so the value is never an assumption.
+
+**The code fix was worth making on its own merits.** Removing 23 redundant
+conversions was correct. The `too_many_lines` error that followed was also correct —
+the syscall table had grown to 146 lines — and the refactor it forced is an
+improvement: the table is now split into `insert_process_and_memory_syscalls`,
+`insert_io_and_poll_syscalls`, and `insert_network_and_fs_syscalls`, with the
+architecture-specific entries in a separate `insert_optional_syscalls`. A reader can
+now see which syscall names are guaranteed to resolve and which depend on the
+target, which the single 146-line list actively obscured. **A lint asking for a
+refactor asked for a real one.**
+
+**The general lesson.** *A verification environment must match the gate it predicts,
+in version as well as in kind.* And the corollary that cost the most here: **check
+CI after every push, before building on top of it** — two commits were stacked on a
+red build, and each one carried the same defect forward.
+
+→ `docker/Dockerfile` (`CI_CLIPPY_TOOLCHAIN`), `docker/entrypoint.sh`
+(`cmd_lint_ci`), `crates/qqq-sys/src/harden.rs` (`syscall_number` and the three
+category functions), `.github/workflows/ci.yml`.
+
+---
+
 ### §O-088 — The source guard never worked: it hashed empty input, and the harness that proved it "worked" was itself poisoned
 
 **What happened.** Having written `cmd_guard_prove` to prove the bridge's source

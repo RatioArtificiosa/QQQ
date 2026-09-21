@@ -821,6 +821,18 @@ cmd_fuzz() {
 # substitution, and verifies the repair. This ordering is the second layer.
 cmd_checks() {
     cd "${WORKSPACE}"
+
+    # # Why CI's linter version runs FIRST here
+    #
+    # CI installs `dtolnay/rust-toolchain@stable`, which tracks the newest release.
+    # The container pinned 1.97; when CI moved to 1.98 its clippy started rejecting
+    # 23 `useless_conversion` sites that 1.97 accepted. The push was green locally
+    # and red in CI, and nothing in this environment could have predicted it.
+    #
+    # So the repository checks begin with CI's exact linter. A check that is one
+    # version behind the gate it is supposed to predict is not a check.
+    cmd_lint_ci
+
     python3 tools/check_topology.py
     python3 tools/check_no_ambient.py
     python3 tools/check_wit_errors.py
@@ -831,6 +843,35 @@ cmd_checks() {
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py
     python3 tools/check_xrefs.py
+}
+
+# Run clippy with the toolchain version CI actually uses.
+#
+# # Why this is separate from `test`
+#
+# `test` uses the default (pinned, 1.97) toolchain because that is the MSRV the
+# project asserts. This command uses CI's moving `stable`, because *that* is what
+# gates a merge. Both matter, and conflating them is how a green local run came to
+# mean nothing.
+cmd_lint_ci() {
+    cd "${WORKSPACE}"
+
+    local toolchain="${QQQ_CI_TOOLCHAIN:-}"
+    if [ -z "${toolchain}" ]; then
+        echo "   (QQQ_CI_TOOLCHAIN is unset; falling back to the default toolchain)"
+        cargo clippy --workspace --all-targets -- -D warnings
+        return
+    fi
+
+    echo "── clippy with CI's toolchain (${toolchain}) ──"
+    if ! cargo "+${toolchain}" clippy --workspace --all-targets -- -D warnings; then
+        echo "" >&2
+        echo "!! clippy FAILED under ${toolchain}, which is what CI uses." >&2
+        echo "   A newer stable adding a lint is the usual cause; fix the code," >&2
+        echo "   do not pin the linter back." >&2
+        return 1
+    fi
+    echo "   passed"
 }
 
 # ---------------------------------------------------------------------------

@@ -2276,32 +2276,79 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### ABI — WIT packages
 
-- [ ] **ABI-001** Author `qqq:http@1.0` including routing, streaming and client.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-002** Author `qqq:fs@1.0` with opened directories, handles, metadata and watch.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-003** Author `qqq:sql@1.0` with pooled connections, prepared statements and transactions.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-004** Author `qqq:kv@1.0` with namespacing, TTL and scan.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-005** Author `qqq:queue@1.0` with publish, subscribe via `stream`, and ack.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-006** Author `qqq:crypto@1.0` with random, hash, hmac, aead, sign/verify and key derivation.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-007** Author `qqq:clock@1.0` with wall, monotonic, timers and controllable sleep.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-008** Author `qqq:log@1.0` with structured, levelled logging and tenant attribution.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-009** Author `qqq:trace@1.0` with spans, events and W3C context propagation.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-010** Author `qqq:secrets@1.0` implementing use-without-disclosure.
-  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-011** Author `qqq:test@1.0` with assertions and capability assertions.
+- [x] **ABI-001** Author `qqq:http@1.0` with routing, streaming and client.
+  → Done: `wit/qqq-http.wit` — 103 lines, 2 interface(s), 3 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
   → §6.7 `qqqai test` — test runner
-- [ ] **ABI-012** Author `qqq:agent@1.0` for self-description and structured progress.
+- [x] **ABI-002** Author `qqq:fs@1.0` with opened directories, handles, metadata and write modes.
+  → Done: `wit/qqq-fs.wit` — 120 lines, 1 interface(s), 7 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §6.4 `qqq-cap` — the capability engine
+- [x] **ABI-003** Author `qqq:sql@1.0` with pooled connections, prepared statements and transactions.
+  → Done: `wit/qqq-sql.wit` — 149 lines, 2 interface(s), 12 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §6.3 The standard library
+- [x] **ABI-004** Author `qqq:kv@1.0` with namespacing, TTL and scan.
+  → Done: `wit/qqq-kv.wit` — 72 lines, 1 interface(s), 7 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §6.3 The standard library
+- [x] **ABI-005** Author `qqq:queue@1.0` with publish, subscribe via `stream`, and acknowledgement.
+  → Done: `wit/qqq-queue.wit` — 99 lines, 1 interface(s), 6 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §6.3 The standard library
+- [x] **ABI-006** Author `qqq:crypto@1.0` with random, hash, hmac, aead and sign/verify.
+  → Done: `wit/qqq-crypto.wit` — 205 lines, 5 interface(s), 12 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §7.4 Cryptographic posture
+- [x] **ABI-007** Author `qqq:clock@1.0` with wall, monotonic, timers and controllable time.
+  → Done: `wit/qqq-clock.wit` — 78 lines, 2 interface(s), 5 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §10.5 Determinism
+- [x] **ABI-008** Author `qqq:log@1.0` with structured, levelled logging with tenant attribution.
+  → Done: `wit/qqq-log.wit` — 69 lines, 1 interface(s), 3 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §10.3 Logging
+- [x] **ABI-009** Author `qqq:trace@1.0` with spans, events and W3C context propagation.
+  → Done: `wit/qqq-trace.wit` — 99 lines, 1 interface(s), 6 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §10.4 Tracing
+- [x] **ABI-010** Author `qqq:secrets@1.0` with use-without-disclosure.
+  → Done: `wit/qqq-secrets.wit` — 124 lines, 1 interface(s), 3 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §7.4 Cryptographic posture
+- [x] **ABI-011** Author `qqq:test@1.0` with assertions and capability assertions.
+  → Done: `wit/qqq-test.wit` — 145 lines, 1 interface(s), 6 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → **Authored in this round.** The other eleven existed; this one was missing.
+  → §6.7
+- [x] **ABI-012** Author `qqq:agent@1.0` for self-description and structured progress.
+  → Done: `wit/qqq-agent.wit` — 178 lines, 1 interface(s), 3 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → **Authored in this round.** The description format version is separate from the
+    package version on purpose: a caller written against format 1 must keep working
+    when the guest is rebuilt, so a package bump cannot break its parser.
+  → Progress events carry a monotonic `sequence` rather than relying on arrival order,
+    because a display that goes backwards is the visible symptom of conflating a late
+    event with a new one.
   → §8.3 The machine contract layer
-- [ ] **ABI-013** Author `qqq:ai@1.0` (interface only; implementation deferred to `FUT-007`).
-  → §6.9 `qqq:ai` — local inference as a capability
+  → §8.3 The machine contract layer
+- [x] **ABI-013** Author `qqq:ai@1.0` with the inference interface (implementation deferred to `FUT-*`).
+  → Done: `wit/qqq-ai.wit` — 100 lines, 1 interface(s), 3 function(s).
+    Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
+    `tools/check_wit_since.py`, and rendered into `docs/wit-reference.md`.
+  → §7.4 Cryptographic posture
 - [ ] **ABI-014** Implement `qqqai bindings` generating every language's types from `wit/`.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **ABI-015** Implement the CI drift check between `wit/` and all generated bindings.

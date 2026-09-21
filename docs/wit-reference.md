@@ -27,12 +27,13 @@ is absent rather than plausible, and it lands when `ABI-*` provides a consumer t
 compile the examples in CI.
 
 
-**13 package(s), 20 interface(s), 52 function(s).**
+**15 package(s), 22 interface(s), 61 function(s).**
 
 ## Interfaces
 
 | Package | Interface | Functions |
 |---|---|---|
+| `qqq:agent@1.0.0` | [`descriptor`](#qqqagent100-descriptor) | 3 |
 | `qqq:ai@1.0.0` | [`inference`](#qqqai100-inference) | 3 |
 | `qqq:clock@1.0.0` | [`wall-clock`](#qqqclock100-wall-clock) | 3 |
 | `qqq:clock@1.0.0` | [`monotonic-clock`](#qqqclock100-monotonic-clock) | 2 |
@@ -52,7 +53,36 @@ compile the examples in CI.
 | `qqq:secrets@1.0.0` | [`secret-use`](#qqqsecrets100-secret-use) | 3 |
 | `qqq:sql@1.0.0` | [`database`](#qqqsql100-database) | 3 |
 | `qqq:sql@1.0.0` | [`transaction`](#qqqsql100-transaction) | 1 |
+| `qqq:test@1.0.0` | [`assertions`](#qqqtest100-assertions) | 6 |
 | `qqq:trace@1.0.0` | [`tracing`](#qqqtrace100-tracing) | 2 |
+
+## Package `qqq:agent@1.0.0`
+
+Source: [`wit/qqq-agent.wit`](../wit/qqq-agent.wit)
+
+### `descriptor`
+
+What the guest tells its caller about itself and about its work.
+
+**Types**
+
+* `record capability-claim`
+  What the guest tells its caller about itself and about its work.
+* `record self-description`
+  What the guest is and what it offers.
+* `variant agent-error`
+  Why an agent operation failed.
+* `record progress`
+  How far along some work is.
+
+**Functions**
+
+* `describe()` → `result<self-description, agent-error>`
+  Return what this guest is.
+* `publish(progress: progress)` → `result<_, agent-error>`
+  Publish a progress event.
+* `request-stop()` → `result<_, agent-error>`
+  Ask the guest to stop at its next checkpoint.
 
 ## Package `qqq:ai@1.0.0`
 
@@ -489,6 +519,36 @@ Transactions.
 
 * `begin(database: string)` → `result<txn, sql-error>`
   Begin a transaction on a named database.
+
+## Package `qqq:test@1.0.0`
+
+Source: [`wit/qqq-test.wit`](../wit/qqq-test.wit)
+
+### `assertions`
+
+Assertions available to a component under test.
+
+**Types**
+
+* `variant assertion-error`
+  Assertions available to a component under test.
+* `variant outcome`
+  How the current test terminated, for the runner to classify.
+
+**Functions**
+
+* `mark-fuel(name: string)` → `result<_, assertion-error>`
+  Record the current fuel consumption as the baseline for later comparisons.
+* `assert-fuel-below(mark: string, limit: u64)` → `result<_, assertion-error>`
+  Fail unless the named function consumed less than `limit` fuel since
+* `assert-caps-only(allowed: list<string>)` → `result<_, assertion-error>`
+  Fail if the code under test attempts any capability outside `allowed`.
+* `assert-no-capability(capability: string)` → `result<_, assertion-error>`
+  Fail if the code under test attempts `capability` at all.
+* `report(passed: bool, message: string, location: option<string>)` → `result<_, assertion-error>`
+  Report an assertion that the guest evaluated itself.
+* `fuel-since(mark: string)` → `result<u64, assertion-error>`
+  How much fuel has been consumed since the given mark.
 
 ## Package `qqq:trace@1.0.0`
 

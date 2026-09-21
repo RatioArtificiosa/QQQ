@@ -1,0 +1,178 @@
+// QQQ agent interface — self-description and structured progress.
+//
+// # Why an agent needs this, and why it is not logging
+//
+// §8.1 distinguishes four agent relationships, and the third is *agent as host inside
+// QQQ*: an agent runtime running **on** QQQ. That agent is a guest. It needs to tell its
+// caller what it can do and how far it has got, and neither is a log line.
+//
+// A log line is prose for a human reading later. A progress event is structured data for
+// a program deciding **now** — whether to wait, to cancel, to scale, or to try a
+// different capability. Collapsing the two means the caller parses strings, and string
+// parsing is how a contract becomes folklore.
+//
+// # The distinction between this and `qqq:log`
+//
+// `qqq:log` is diagnostics: it may be sampled, filtered or dropped, and a deployment
+// that discards all of it is still correct.
+//
+// This interface is a **contract**: if a guest publishes progress and the host drops it,
+// the caller's cancellation logic silently stops working. So these events are not
+// filterable, and the interface says so — a `log`-shaped channel that a deployment may
+// turn off is the wrong shape for control flow.
+//
+// # What is deliberately absent
+//
+// No "send a message to another agent". Agents coordinating directly would be a
+// peer-to-peer channel bypassing the capability model — a guest could name another
+// guest, which is exactly the cross-tenant handle §7.2 says must not exist. Coordination
+// goes through the host, and this interface stays one-directional.
+//
+// See Proposal §8.3 and Checklist `ABI-012`.
+package qqq:agent@1.0.0;
+
+/// What the guest tells its caller about itself and about its work.
+interface descriptor {
+  /// A capability the guest claims it may use.
+  ///
+  /// # Why this is a *claim* and not a grant
+  ///
+  /// The host's `GrantSet` is authoritative (§6.2). This list is what the guest
+  /// *believes* it can do, and the two can disagree — a guest built against a newer
+  /// manifest, or one probing its environment.
+  ///
+  /// Recording both makes the disagreement visible. A caller that sees a guest claiming
+  /// `http.client` when the grant set does not include it has found either a stale
+  /// artifact or a confused one, and either is worth knowing before the work starts.
+  record capability-claim {
+    /// The capability name, in `namespace.operation` form (`http.client`, `fs.read`).
+    name: string,
+    /// Whether the guest considers this claim required or optional.
+    ///
+    /// A required claim that is not granted means the guest cannot serve its purpose, so
+    /// a caller can refuse the run rather than discovering it half-way through.
+    required: bool,
+  }
+
+  /// What the guest is and what it offers.
+  ///
+  /// # Why the version is separate from the package version
+  ///
+  /// The package version names a *build*. This version names the *description format*,
+  /// and a caller written against description format 1 must keep working when the guest
+  /// is rebuilt. Tying them together would mean every guest release potentially breaks
+  /// every caller's parser.
+  record self-description {
+    /// A short, stable identifier for this guest — a tool name, not a sentence.
+    ///
+    /// Stable because a caller may key on it. A paragraph belongs in `summary`.
+    name: string,
+    /// The description-format version this guest emits.
+    description-version: u32,
+    /// One sentence, for a human.
+    summary: string,
+    /// The capabilities the guest claims, possibly empty for a pure guest.
+    capabilities: list<capability-claim>,
+    /// Whether the guest can be cancelled cooperatively.
+    ///
+    /// # Why a guest declares this
+    ///
+    /// A caller that needs to stop work has two options: ask, or terminate. Asking only
+    /// works on a guest that checks. Declaring which is the case lets a caller choose
+    /// correctly instead of guessing and either waiting forever or killing eagerly.
+    cancellable: bool,
+  }
+
+  /// Why an agent operation failed.
+  variant agent-error {
+    /// The guest is not permitted to do this — the host refused, not the guest's logic.
+    ///
+    /// Distinct from `internal` because the caller's remedy is different: this one may
+    /// be fixed by a manifest change, the other cannot.
+    not-permitted(string),
+    /// Progress was published after the run completed, or out of order.
+    ///
+    /// A sequence violation rather than a data error. Reporting it keeps a caller's
+    /// state machine honest instead of silently ignoring the event.
+    sequencing(string),
+    /// The caller asked the guest to stop, and it acknowledged.
+    ///
+    /// Carried as an error because the operation did not complete — and a caller must
+    /// not treat a cancelled run as a successful one with a short result.
+    cancelled,
+    /// Something failed inside the guest.
+    internal(string),
+  }
+
+  /// Return what this guest is.
+  ///
+  /// Cheap by contract: a caller may invoke it before deciding whether to run anything,
+  /// so it must not perform work the description does not need.
+  @since(version = 1.0.0)
+  describe: func() -> result<self-description, agent-error>;
+
+  /// Publish a progress event.
+  ///
+  /// # Why `completed` and `total` are both optional
+  ///
+  /// An agent that knows how many items remain reports both, and a caller can render a
+  /// percentage. An agent exploring an unbounded problem knows neither, and inventing a
+  /// `total` to satisfy the signature would produce a progress bar that lies.
+  ///
+  /// Both absent means "work happened, extent unknown", which is honest and still useful
+  /// — it tells a caller the agent is alive without claiming to know how far along it is.
+  @since(version = 1.0.0)
+  publish: func(progress: progress) -> result<_, agent-error>;
+
+  /// Ask the guest to stop at its next checkpoint.
+  ///
+  /// # Why this returns rather than kills
+  ///
+  /// Cooperative cancellation lets a guest finish the work it has in flight — a partial
+  /// write, a lock release, an acknowledgment. Terminating instead leaves those in an
+  /// unknown state, and the caller finds out later.
+  ///
+  /// A guest that declares `cancellable: false` should return `not-permitted` here rather
+  /// than accept and ignore the request, because a caller waiting for a stop that will
+  /// never come has no way to tell a slow guest from a dead one.
+  @since(version = 1.0.0)
+  request-stop: func() -> result<_, agent-error>;
+
+  /// How far along some work is.
+  ///
+  /// # Why this is declared INSIDE the interface
+  ///
+  /// WIT requires every type to live inside an interface or a world; a `record` at the
+  /// file's top level is a parse error:
+  ///
+  ///     error: expected `world`, `interface` or `use`, found keyword `record`
+  ///
+  /// The first version of this file had it outside, because the type reads as
+  /// file-scoped documentation. Caught by `tools/check_wit.py`, which parses every file
+  /// — the WIT would not have compiled, but the failure would have appeared as a
+  /// confusing toolchain error rather than as a naming problem here.
+  ///
+  /// A separate named type because it is what [`publish`](#publish) carries and what a
+  /// caller stores: naming it lets a caller hold one without holding the interface.
+  record progress {
+    /// A stable identifier for the work item — not a human-readable label.
+    ///
+    /// Stable so a caller can correlate two events about the same item. Prose that changes
+    /// between events would break that, which is why the human label is separate.
+    item: string,
+    /// What is happening, for a human. May be empty.
+    label: option<string>,
+    /// How many units are finished, when known.
+    completed: option<u64>,
+    /// How many units the work has in total, when known.
+    total: option<u64>,
+    /// A revision counter, so a caller can discard an event that arrived out of order.
+    ///
+    /// # Why a counter rather than trusting arrival order
+    ///
+    /// Events may be delivered concurrently or across a reconnect. Without a monotonic
+    /// sequence a caller has no way to tell a late event from a new one, and a progress
+    /// display that goes backwards is the visible symptom of getting that wrong.
+    sequence: u64,
+  }
+}

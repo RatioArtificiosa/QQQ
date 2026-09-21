@@ -1,0 +1,145 @@
+// QQQ test-assertion interface.
+//
+// # Why this is an interface and not a library
+//
+// Every testing framework has assertions, and they all live in the *language's*
+// library. That is fine until the assertion needs to know something the language
+// cannot see: whether the code under test asked for a capability the test declared it
+// should not need, or how much fuel it consumed.
+//
+// Those questions are answered by the host, because the host is what enforces
+// capabilities and meters execution. So the assertions that exploit QQQ's architecture
+// — the ones §6.7 calls "the differentiators" — are host calls, and this is their
+// interface.
+//
+// # What this deliberately is NOT
+//
+// It is not a test *runner*. Discovery, filtering, parallelism and reporting are the
+// CLI's job (§6.7), and a guest has no business enumerating its own tests. What a guest
+// needs is the ability to *assert*, and to fail with a message a human can act on.
+//
+// # Why capability assertions are the interesting ones
+//
+// A test that exercises a pure function should not need `http.client`. Today that is a
+// convention: the code happens not to call anything. With `assert-no-capability`, it is
+// a property — if someone later adds an HTTP call to a function the test says is pure,
+// the test fails, and it fails at the point where the request is *attempted* rather than
+// somewhere downstream where the effect is visible.
+//
+// That is a class of bug that is otherwise invisible until production, because a test
+// double usually returns something plausible.
+//
+// See Proposal §6.7 and Checklist `ABI-011`.
+package qqq:test@1.0.0;
+
+/// Assertions available to a component under test.
+interface assertions {
+  /// Why an assertion could not be evaluated at all.
+  ///
+  /// **Distinct from a failed assertion.** A failure is a *result* — the test ran and
+  /// the condition was false, which is the framework working. This error means the
+  /// assertion could not be checked, which is a defect in the test or in the host.
+  ///
+  /// Collapsing the two would make a broken test look like a failing one, and the
+  /// diagnosis differs entirely: one means "fix the code", the other means "fix the
+  /// test".
+  variant assertion-error {
+    /// The host recorded no fuel baseline, so a fuel assertion has nothing to compare.
+    ///
+    /// Raised when `assert-fuel-below` is called without a prior `mark-fuel`.
+    no-fuel-baseline,
+    /// A capability name the host does not recognise.
+    ///
+    /// A typo in a capability name would otherwise assert nothing, and pass. This is
+    /// the one error here that is almost always a test bug.
+    unknown-capability(string),
+    /// The assertion is not permitted in this context — e.g. inside a host callback
+    /// where the guest is not running on its own stack.
+    ///
+    /// The alternative would be to evaluate it anyway and report a result that means
+    /// something different from what the caller asked.
+    not-assertable(string),
+  }
+
+  /// Record the current fuel consumption as the baseline for later comparisons.
+  ///
+  /// # Why a marker rather than an absolute number
+  ///
+  /// A test that asserted "this function uses fewer than 10,000 fuel units" would break
+  /// whenever the compiler improved, whenever the engine version changed, and whenever
+  /// anyone added a branch. The interesting property is *relative*: this call costs less
+  /// than that one. Marking a baseline is how a guest states that comparison without
+  /// hard-coding a number that is true for one build.
+  @since(version = 1.0.0)
+  mark-fuel: func(name: string) -> result<_, assertion-error>;
+
+  /// Fail unless the named function consumed less than `limit` fuel since
+  /// [`mark-fuel`].
+  ///
+  /// This turns a performance regression into a **test failure** rather than a
+  /// benchmark someone reads later. §6.7 lists it as a differentiator because fuel is
+  /// deterministic: the same input costs the same everywhere, so a threshold means the
+  /// same thing on every machine — which is not true of wall-clock timing.
+  @since(version = 1.0.0)
+  assert-fuel-below: func(mark: string, limit: u64) -> result<_, assertion-error>;
+
+  /// Fail if the code under test attempts any capability outside `allowed`.
+  ///
+  /// # Why the parameter is a list and not a single name
+  ///
+  /// Real tests need more than one — a function that logs and reads a file legitimately
+  /// uses `log` and `fs.read`. Expressing that as "assert each of these is used" would
+  /// be wrong (the test may not exercise the log path), so the assertion is a *bound*:
+  /// nothing outside the list may be attempted.
+  @since(version = 1.0.0)
+  assert-caps-only: func(allowed: list<string>) -> result<_, assertion-error>;
+
+  /// Fail if the code under test attempts `capability` at all.
+  ///
+  /// The strict form, for a test that declares its subject pure. Prefer
+  /// [`assert-caps-only`] when the subject legitimately touches something.
+  @since(version = 1.0.0)
+  assert-no-capability: func(capability: string) -> result<_, assertion-error>;
+
+  /// Report an assertion that the guest evaluated itself.
+  ///
+  /// # Why this exists when the guest could just trap
+  ///
+  /// A trap ends the instance, which means the first failure hides every later one and
+  /// nothing after it runs. Reporting through the host records the failure and lets the
+  /// test continue, so one run reports all the failures rather than one.
+  ///
+  /// `location` is a caller-supplied string and is **not** trusted: it appears in the
+  /// report verbatim, so a test that lies about where it failed makes a confusing report
+  /// rather than a false one. It cannot affect whether the test passed.
+  @since(version = 1.0.0)
+  report: func(passed: bool, message: string, location: option<string>) -> result<_, assertion-error>;
+
+  /// How much fuel has been consumed since the given mark.
+  ///
+  /// Useful for a test that wants to *print* its cost rather than assert on it — for
+  /// example to detect drift across runs without failing on it.
+  @since(version = 1.0.0)
+  fuel-since: func(mark: string) -> result<u64, assertion-error>;
+
+  /// How the current test terminated, for the runner to classify.
+  ///
+  /// # Why the outcome is reported rather than inferred from the exit
+  ///
+  /// A guest that traps and a guest that reports a failure both stop. Inferring "failure"
+  /// from "did not return normally" would mean an out-of-fuel termination and a genuine
+  /// assertion failure produce the same report, and the first is an infrastructure
+  /// problem rather than a test result.
+  variant outcome {
+    /// Every assertion passed.
+    passed,
+    /// At least one assertion failed. The message names them.
+    failed(string),
+    /// The test could not run — a missing fixture, an unavailable capability.
+    ///
+    /// Deliberately not a failure: a suite that cannot start is a different problem from
+    /// one whose assertions fail, and conflating them makes a broken environment look
+    /// like a broken build.
+    errored(string),
+  }
+}

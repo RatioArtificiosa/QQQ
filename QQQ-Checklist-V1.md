@@ -2351,7 +2351,21 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §7.4 Cryptographic posture
 - [ ] **ABI-014** Implement `qqqai bindings` generating every language's types from `wit/`.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **ABI-015** Implement the CI drift check between `wit/` and all generated bindings.
+- [x] **ABI-015** Implement the CI drift check between `wit/` and all generated bindings.
+  → Done: `tools/check_wit_bindings.py` — asserts that every `wit/*.wit` file is embedded
+    in `crates/qqq-abi/src/wit.rs`, that every `include_str!` names a file that exists,
+    that `ALL_WIT` registers the package each file declares, and that the registry is
+    sorted so an *absent* entry is visible in a diff.
+  → **The audit found the repository already drifted by two files.** `wit/` held 15 and
+    the crate embedded 13: `qqq-test.wit` and `qqq-agent.wit` had been authored,
+    validated and rendered into the reference documentation while remaining **invisible
+    to the runtime** — no host could serve them and no binding could be generated from
+    them. Nothing was broken, which is what made it dangerous: every existing check
+    looked at `wit/` and found it fine, and nothing looked at the *relationship* between
+    the directory and the crate.
+  → Fixed by embedding both, and a stray insertion inside the `ALL_WIT` doc comment was
+    caught by the workspace's own missing-documentation lint.
+  → 7/7 self-test cases, covering drift in both directions plus an unsorted registry.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **ABI-016** Resolve open question `OQ-005`: ratify the shared-memory policy at the interface level.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth

@@ -215,6 +215,15 @@ jobs:
       - name: Prove every fact has a re-verification cadence
         run: python tools/check_verified_facts.py --self-test
 
+      # `ABI-015`. `qqq-abi` is how the runtime publishes its interfaces. A `.wit` file
+      # in the directory but not embedded exists on disk and NOWHERE ELSE — no host can
+      # serve it, no binding can be generated, and nothing reports it. The audit that
+      # produced this check found the repository already drifted by two files.
+      - name: Validate that every WIT file is embedded in qqq-abi
+        run: python tools/check_wit_bindings.py
+      - name: Prove the bindings check catches drift in both directions
+        run: python tools/check_wit_bindings.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

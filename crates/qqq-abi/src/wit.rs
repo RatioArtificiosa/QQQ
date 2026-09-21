@@ -65,12 +65,29 @@ pub const ENV_WIT: &str = include_str!("../../../wit/qqq-env.wit");
 /// The `qqq:trace` interface source.
 pub const TRACE_WIT: &str = include_str!("../../../wit/qqq-trace.wit");
 
+/// The `qqq:test` interface source: assertions and capability assertions (`ABI-011`).
+pub const TEST_WIT: &str = include_str!("../../../wit/qqq-test.wit");
+
+/// The `qqq:agent` interface source: self-description and progress (`ABI-012`).
+pub const AGENT_WIT: &str = include_str!("../../../wit/qqq-agent.wit");
+
 /// Every interface this crate defines, in a stable order.
 ///
-/// The order is the **dependency** order a reader should follow: the ambient
-/// primitives first (`clock`, `crypto`), then the observability pair, then the
-/// privileged ones (`secrets`, `env`), then the I/O interfaces.
+/// The order is **alphabetical by interface name**, and that is not decoration: an
+/// unsorted registry makes an *absent* entry invisible in a diff, because the eye cannot
+/// tell which name is missing from an arbitrary order. Sorted, a gap shows as a name out
+/// of place. `tools/check_wit_bindings.py` enforces it for that reason — a readability
+/// property with a concrete failure mode, not a style preference.
+///
+/// # Why this list and `wit/` must agree
+///
+/// A `.wit` file in the directory that is not embedded here exists on disk and
+/// **nowhere else**: no host can serve it, no binding can be generated from it, and
+/// nothing else reports the difference. That drift happened once — two files were
+/// authored, validated and documented while remaining invisible to the runtime — which
+/// is why the check exists rather than a convention.
 pub const ALL_WIT: &[(&str, &str)] = &[
+    ("qqq:agent@1.0.0", AGENT_WIT),
     ("qqq:ai@1.0.0", AI_WIT),
     ("qqq:clock@1.0.0", CLOCK_WIT),
     ("qqq:crypto@1.0.0", CRYPTO_WIT),
@@ -83,6 +100,7 @@ pub const ALL_WIT: &[(&str, &str)] = &[
     ("qqq:queue@1.0.0", QUEUE_WIT),
     ("qqq:secrets@1.0.0", SECRETS_WIT),
     ("qqq:sql@1.0.0", SQL_WIT),
+    ("qqq:test@1.0.0", TEST_WIT),
     ("qqq:trace@1.0.0", TRACE_WIT),
 ];
 

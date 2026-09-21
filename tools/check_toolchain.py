@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""check_toolchain.py -- the toolchain version must be the same everywhere it is stated.
+
+Why this exists
+---------------
+
+Observations §O-121: CI ran `dtolnay/rust-toolchain@stable` while this machine ran
+1.97.1. `stable` is a moving target, so `clippy -- -D warnings` passed locally and
+failed in CI on a lint that one toolchain has and the other does not. The fix was to
+state the version in every place that needs it.
+
+Stating a version in four places creates a new failure mode: **three of them get
+updated.** `dtolnay/rust-toolchain@master` requires an explicit `toolchain:` input
+(an action input cannot reference a file), so the version cannot live in one place
+and be read from there. This checker is the substitute for that: it fails when the
+statements disagree, and it names every location so the fix is one edit round.
+
+It also verifies the *relationship* between the two distinct numbers:
+
+* **`rust-toolchain.toml`** -- the toolchain the workspace is built and linted with.
+* **`Cargo.toml`'s `rust-version`** -- the MSRV, the oldest toolchain that works.
+
+These are deliberately different (linting with the MSRV would prevent adopting any
+new lint), and the MSRV must be the *older* of the two. A CI job builds with the
+MSRV separately (`§O-122`); here we only assert the ordering, because a build
+running an *older* toolchain than the MSRV claim is the contradiction.
+
+Usage
+-----
+
+    python tools/check_toolchain.py [--self-test]
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+#: Files that may state the pinned toolchain, with the pattern that states it.
+#:
+#: The MSRV job in `ci.yml` deliberately pins a *different* channel (the MSRV), and
+#: is excluded by its own marker rather than by a line number — see `MSRV_JOB`.
+PIN_SITES = [
+    ("rust-toolchain.toml", re.compile(r'^\s*channel\s*=\s*"([^"]+)"', re.MULTILINE)),
+    (".github/workflows/ci.yml", re.compile(r'^\s*toolchain:\s*"([^"]+)"', re.MULTILINE)),
+    (".github/workflows/advisories.yml", re.compile(r'^\s*toolchain:\s*"([^"]+)"', re.MULTILINE)),
+]
+
+#: A block that explicitly overrides the pin and must NOT be compared to it.
+#:
+#: The `msrv` job exists precisely to build with something other than the pinned
+#: toolchain. It marks itself with this comment, so the exclusion is a property of
+#: the job's purpose rather than of where it happens to sit in the file.
+MSRV_JOB = re.compile(r"# *msrv-exempt", re.IGNORECASE)
+
+#: The MSRV declaration.
+CARGO = "Cargo.toml"
+MSRV = re.compile(r'^\s*rust-version\s*=\s*"([^"]+)"', re.MULTILINE)
+
+
+def minor(v: str) -> tuple[int, ...]:
+    """The comparable part of a version string, ignoring non-numeric suffixes."""
+    out = []
+    for part in v.split("."):
+        digits = re.match(r"\d+", part)
+        if digits is None:
+            break
+        out.append(int(digits.group()))
+    return tuple(out)
+
+
+def collect() -> tuple[list[tuple[str, str]], int]:
+    """Every stated pin, and the number of pin sites that stated nothing.
+
+    A `toolchain:` line within a few lines after an `msrv-exempt` marker belongs to
+    a job that means to use a different version, and is skipped. The window is
+    short on purpose: the marker must be adjacent to the input it excuses, so a
+    stray marker elsewhere in the file cannot silently disable the check.
+    """
+    found: list[tuple[str, str]] = []
+    missing = 0
+    for rel, pattern in PIN_SITES:
+        path = REPO / rel
+        if not path.exists():
+            missing += 1
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        exempt: set[int] = set()
+        for i, line in enumerate(lines):
+            if MSRV_JOB.search(line):
+                exempt.update(range(i, min(i + 12, len(lines))))
+        for m in pattern.finditer(text):
+            line_no = text.count("\n", 0, m.start())
+            if line_no in exempt:
+                continue
+            found.append((rel, m.group(1)))
+    return found, missing
+
+
+def run(verbose: bool = True) -> list[str]:
+    problems: list[str] = []
+    pins, missing = collect()
+
+    if missing:
+        problems.append(f"{missing} pin site(s) do not exist -- the pattern or the path is wrong")
+
+    if not pins:
+        # Anti-vacuity: a check that found nothing must fail, not pass.
+        problems.append(
+            "no toolchain pin found anywhere -- the check would pass while inspecting nothing"
+        )
+        return problems
+
+    versions = {v for _, v in pins}
+    if len(versions) > 1:
+        detail = ", ".join(f"{rel}={v}" for rel, v in pins)
+        problems.append(
+            f"the pinned toolchain disagrees across {len(versions)} values ({detail}); "
+            f"`dtolnay/rust-toolchain@master` needs an explicit channel, so these must be "
+            f"edited together"
+        )
+    elif verbose:
+        for rel, v in pins:
+            print(f"  OK    {rel}: {v}")
+
+    # The MSRV must be declared, and must not be newer than the pinned toolchain.
+    cargo = REPO / CARGO
+    text = cargo.read_text(encoding="utf-8", errors="replace")
+    m = MSRV.search(text)
+    if m is None:
+        problems.append(f"{CARGO} declares no `rust-version` (the MSRV) -- required for publication")
+        return problems
+    msrv = m.group(1)
+    pinned = sorted(versions)[0]
+
+    if minor(msrv) > minor(pinned):
+        problems.append(
+            f"the MSRV ({msrv}) is newer than the pinned toolchain ({pinned}); the build would "
+            f"use a toolchain older than the one Cargo.toml promises works"
+        )
+    elif verbose:
+        print(f"  OK    {CARGO}: rust-version = {msrv}, pinned toolchain {pinned}")
+
+    # A `stable`/`nightly` channel pin defeats the purpose of pinning.
+    for rel, v in pins:
+        if v in {"stable", "nightly", "beta"}:
+            problems.append(
+                f"{rel} pins the moving channel `{v}`: that is what caused §O-121, and it makes "
+                f"the local and CI toolchains diverge silently"
+            )
+
+    return problems
+
+
+def self_test() -> int:
+    """Fault-inject: disagreeing pins, a moving channel, and a too-new MSRV."""
+    import shutil
+    import tempfile
+
+    global REPO, PIN_SITES
+    print("self-test: fault injection")
+    failures = 0
+    tmp = Path(tempfile.mkdtemp(prefix="qqq-toolchain-"))
+    saved_repo, saved_sites = REPO, PIN_SITES
+    try:
+        REPO = tmp
+        (tmp / ".github" / "workflows").mkdir(parents=True)
+
+        def build(pin_toml: str, pin_ci: str, pin_adv: str, msrv: str) -> None:
+            (tmp / "rust-toolchain.toml").write_text(pin_toml, encoding="utf-8")
+            (tmp / ".github/workflows/ci.yml").write_text(pin_ci, encoding="utf-8")
+            (tmp / ".github/workflows/advisories.yml").write_text(pin_adv, encoding="utf-8")
+            (tmp / "Cargo.toml").write_text(
+                f'[workspace]\nrust-version = "{msrv}"\n', encoding="utf-8"
+            )
+
+        good = 'channel = "1.98"'
+        good_ci = 'with:\n  toolchain: "1.98"'
+        good_adv = 'with:\n  toolchain: "1.98"'
+
+        build(good, good_ci, good_adv, "1.97")
+        if run(verbose=False):
+            print(f"  FAIL  a consistent set was reported broken: {run(verbose=False)}")
+            failures += 1
+        else:
+            print("  OK    a consistent set passes")
+
+        # Injection 1: CI drifted from the file.
+        build(good, 'with:\n  toolchain: "1.99"', good_adv, "1.97")
+        if any("disagrees" in p for p in run(verbose=False)):
+            print("  OK    a drifted CI pin is detected")
+        else:
+            print("  FAIL  drift was not detected")
+            failures += 1
+
+        # Injection 2: a moving channel.
+        build(good, 'with:\n  toolchain: "stable"', good_adv, "1.97")
+        if any("moving channel" in p for p in run(verbose=False)):
+            print("  OK    a moving channel is detected")
+        else:
+            print("  FAIL  `stable` was accepted")
+            failures += 1
+
+        # Injection 3: an MSRV newer than the pinned toolchain.
+        build(good, good_ci, good_adv, "2.0")
+        if any("newer than the pinned" in p for p in run(verbose=False)):
+            print("  OK    an MSRV newer than the pin is detected")
+        else:
+            print("  FAIL  a too-new MSRV was accepted")
+            failures += 1
+
+        # Injection 4: no pin anywhere (the vacuity case).
+        (tmp / "rust-toolchain.toml").write_text("# nothing\n", encoding="utf-8")
+        (tmp / ".github/workflows/ci.yml").write_text("steps: []\n", encoding="utf-8")
+        (tmp / ".github/workflows/advisories.yml").write_text("steps: []\n", encoding="utf-8")
+        if any("inspecting nothing" in p for p in run(verbose=False)):
+            print("  OK    finding no pin at all is refused as vacuous")
+        else:
+            print("  FAIL  the vacuity case was not detected")
+            failures += 1
+
+        # Injection 5: no MSRV declared.
+        build(good, good_ci, good_adv, "1.97")
+        (tmp / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+        if any("no `rust-version`" in p for p in run(verbose=False)):
+            print("  OK    a missing MSRV is detected")
+        else:
+            print("  FAIL  a missing MSRV was accepted")
+            failures += 1
+    finally:
+        REPO, PIN_SITES = saved_repo, saved_sites
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        print(f"\nSELF-TEST FAILED -- {failures} injection(s) not detected")
+        return 1
+    print("\nSELF-TEST PASSED -- every fault is detected")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    problems = run(verbose=not args.quiet)
+    if problems:
+        for p in problems:
+            print(f"  FAIL  {p}")
+        print(f"\nTOOLCHAIN FAILED -- {len(problems)} problem(s)")
+        return 1
+    print("\nTOOLCHAIN OK -- every stated version agrees")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

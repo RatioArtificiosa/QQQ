@@ -270,6 +270,18 @@ jobs:
       - name: Prove the scope-table check detects an orphaned module
         run: python tools/check_scope_table.py --self-test
 
+      # The toolchain version is stated in four places, because an action input
+      # cannot reference a file: `rust-toolchain.toml`, two `toolchain:` inputs in
+      # this workflow, and one in `advisories.yml`. `dtolnay/rust-toolchain@master`
+      # requires an explicit channel, so they cannot be reduced to one source --
+      # this check is the substitute. It also asserts the MSRV is the *older* of
+      # the two numbers, and refuses a moving channel like `stable`, which is what
+      # caused §O-121 in the first place.
+      - name: Verify every stated toolchain version agrees
+        run: python tools/check_toolchain.py
+      - name: Prove the toolchain check detects drift and a moving channel
+        run: python tools/check_toolchain.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the
@@ -525,21 +537,30 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust
-        # **`@master` with no `toolchain:` input reads `rust-toolchain.toml`.**
+        # **`@master` requires an explicit `toolchain:` input.**
         #
-        # This was `@stable`, which names whatever `stable` is on the day the job
-        # runs -- a moving target that silently diverged from the toolchain on a
-        # developer's machine. It cost three red CI runs: `chunks_exact` with a
-        # constant chunk size is a lint added in 1.98, the local toolchain was
-        # 1.97.1, and a commit that passed `clippy -- -D warnings` three times
-        # locally was rejected on all three Rust platforms (Observations §O-121).
+        # This step read `dtolnay/rust-toolchain@stable`, which names whatever
+        # `stable` is on the day the job runs -- a moving target that silently
+        # diverged from the toolchain on a developer's machine. It cost three red
+        # CI runs: `chunks_exact` with a constant chunk size is a lint added in
+        # 1.98, the local toolchain was 1.97.1, and a commit that passed
+        # `clippy -- -D warnings` three times locally was rejected on all three
+        # Rust platforms (Observations §O-121).
         #
-        # The rule that came out of it: **reproduce the exact command CI runs, in
-        # the environment CI runs it in**. A command is not the whole
-        # specification; the toolchain version is part of it. Reading the file
-        # makes the two agree by construction rather than by coincidence.
+        # The first fix -- `@master` with no `toolchain:` input, on the belief that
+        # it would read `rust-toolchain.toml` -- failed on every platform with
+        # `'toolchain' is a required input`. The action's *branch name* is the
+        # version; `@master` does not infer one. So the channel is written out
+        # here, and `rust-toolchain.toml` carries the same number for local use.
+        # The two must be changed together, which is a real cost and the honest
+        # one: an action input cannot reference a file.
+        #
+        # The rule that came out of all of this: **reproduce the exact command CI
+        # runs, in the environment CI runs it in.** A command is not the whole
+        # specification; the toolchain version is part of it.
         uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98"
           components: rustfmt, clippy
           targets: wasm32-wasip2
 
@@ -727,10 +748,13 @@ jobs:
 
       # An explicit `toolchain:`, deliberately overriding `rust-toolchain.toml`:
       # this job's whole purpose is to build with something *other* than the
-      # pinned version.
+      # pinned version. `msrv-exempt` tells `tools/check_toolchain.py` not to
+      # compare this channel against the pin, and the marker must stay adjacent to
+      # the input it excuses.
       - name: Install the MSRV toolchain
         uses: dtolnay/rust-toolchain@master
         with:
+          # msrv-exempt
           toolchain: "1.97"
           targets: wasm32-wasip2
 
@@ -771,9 +795,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # Reads `rust-toolchain.toml`, like the Rust job: see the note there for why
-      # `@stable` was a moving target that cost three red runs (§O-121).
+      # An explicit channel, because `@master` requires one: see the note in the
+      # Rust job for why `@stable` was a moving target that cost three red runs
+      # (§O-121). Keep this in step with `rust-toolchain.toml`.
       - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-deny

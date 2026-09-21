@@ -154,6 +154,14 @@ jobs:
       - name: Prove the scope checker rejects disagreement
         run: python tools/check_security_scope.py --self-test
 
+      # `SEC-001`. A threat model's most perishable content is its mitigation-to-code
+      # mapping: every `Where:` line names a module a refactor can move, and the
+      # document keeps asserting the defence confidently after it has gone.
+      - name: Validate the threat model
+        run: python tools/check_threat_model.py
+      - name: Prove the threat-model checker rejects stale claims
+        run: python tools/check_threat_model.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

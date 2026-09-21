@@ -1159,7 +1159,19 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### SEC — Security engineering
 
-- [ ] **SEC-001** Write the threat model document covering §7.1 assets and §7.2 adversaries.
+- [x] **SEC-001** Write the threat model document covering §7.1 assets and §7.2 adversaries.
+  → Done: `docs/threat-model.md` — all six §7.1 assets and all seven §7.2 adversaries
+    (plus the host administrator, listed rather than omitted). Each adversary names
+    the code that defends it, how that is verified, **and its residual risk**.
+  → It states first, and checks, that **no external audit has occurred**: §4's
+    "validated by an adversary?" column is `No` for every row, because presenting a
+    design model as a validated one would be the most dangerous document here.
+  → `tools/check_threat_model.py` keeps it true: 9 code references must resolve to
+    real crates and modules, every §7.2 adversary must have a section, and claiming
+    external validation while `SEC-024`/`SEC-025` are unticked fails the build.
+    8/8 self-test cases.
+  → It immediately caught a real error in the document — `qqq-host::limits` had been
+    renamed to `quota` — which is exactly the decay it exists for.
   → §7.1 What we are defending, precisely
 - [x] **SEC-002** Implement the rule that an ungranted import is absent, not merely denied, and prove it by test.
   → Done: the property was already implemented — `build_linker` populates the
@@ -1187,7 +1199,18 @@ Items are grouped below by **phase**, because dependency order matters more than
     tests), and a granted control belongs here once Phase P5's toolchains can
     produce a component from WIT.
   → §7.3 The defence timeline — where we stop an attack
-- [ ] **SEC-003** Implement manifest capability validation with a deny-by-default posture throughout.
+- [x] **SEC-003** Implement manifest capability validation with a deny-by-default posture throughout.
+  → Done (verified, not assumed): `Manifest::validate` covers package identity,
+    build, limits, dependencies, fs paths and http hosts; all 13 manifest structs
+    carry `#[serde(deny_unknown_fields)]`, so a typo'd capability field is a parse
+    error rather than a silently ignored grant.
+  → Deny-by-default is proven at three layers, each by a passing test:
+    `minimal_manifest_parses_and_grants_nothing` (manifest),
+    `normalization_of_an_empty_manifest_yields_nothing` (normalize) and
+    `empty_grant_set_grants_nothing` (resolve).
+  → `declared_capabilities` derives grants only from what is present and non-empty:
+    an absent `[capabilities]` entry yields nothing, and an empty `http.client` list
+    does not grant `HttpClient`.
   → §7.2 Adversary model
 - [x] **SEC-004** Build the hostile-guest test suite (≥200 cases) with a specified expected failure for each.
   → Done: `crates/qqq-host/tests/hostile_guests.rs` — a **table-driven** suite of
@@ -1922,9 +1945,18 @@ Items are grouped below by **phase**, because dependency order matters more than
     check and an unreachable filename check (the glob only matched well-formed
     names, so a malformed one was invisible).
   → §7.2 Adversary model
-- [ ] **SEC-024** Commission external security audit #1 before the private alpha (M7).
+- [!] **SEC-024** Commission external security audit #1 before the private alpha (M7).
+  → **Blocked**, and this one genuinely is: it requires engaging a third-party firm and
+    paying them. `§O-082`'s question — "blocked on the item, or on one way of doing
+    it?" — has no third answer here, unlike `SEC-017`, `SEC-019` and `SEC-026`, which
+    all dissolved. Recorded in `§O-095` with what *would* unblock it.
+  → What is done in the meantime: `docs/threat-model.md` states in its first section
+    that no validation has occurred, and `tools/check_threat_model.py` fails the build
+    if that claim is made while this item is open.
   → §16 — Definition of Done for V1
-- [ ] **SEC-025** Commission external security audit #2 before the public beta (M10).
+- [!] **SEC-025** Commission external security audit #2 before the public beta (M10).
+  → **Blocked** on the same condition as `SEC-024`: an external engagement, not a
+    technical obstacle. See `§O-095`.
   → §16 — Definition of Done for V1
 - [x] **SEC-026** Implement Landlock LSM integration as defence in depth on Linux ≥ 5.13.
   → Done: `STEP_LANDLOCK` in `qqq-sys::harden`, using the `landlock` crate (safe, so

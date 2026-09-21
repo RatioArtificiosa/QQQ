@@ -5267,6 +5267,63 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-095 — `SEC-001`/`SEC-024`: the threat model that had to say what it was not, and the first honest block
+
+**Two items, one document.**
+
+`SEC-001` asks for a threat model covering §7.1's assets and §7.2's adversaries.
+`SEC-024`/`SEC-025` ask for two external audits. Those audits are what would turn the
+threat model from a *design argument* into a *validated result*, so the two are
+inseparable in practice — and only one of them was implementable.
+
+**What was built.** `docs/threat-model.md`: six assets, seven adversaries (plus the
+host administrator, listed rather than omitted), each with the code that defends it,
+how that is verified, and **its residual risk**.
+
+**The design decision that mattered most.** The document's first section states that
+**no external audit has occurred**, and §4 carries a "validated by an adversary?"
+column that reads `No` for every row. A threat model is the most persuasive artifact a
+security project produces, and the persuasion is unearned when the reasoning is
+presented as evidence. The failure is not a wrong claim — it is a *plausible* document
+that a reader adopts because it reads like a finished one.
+
+So the statement is not only prose: `tools/check_threat_model.py` fails the build when
+the document claims external validation while `SEC-024` and `SEC-025` are unticked.
+The honesty is enforced rather than trusted, and it will revise itself automatically
+when the audits complete, because the check reads the checklist.
+
+**What else the checker enforces, and why each is a real decay.** A threat model's
+most perishable content is its mitigation-to-code mapping:
+
+* Every `crate::module` reference must resolve to a real crate and a real module file.
+  A refactor moves a defence, the prose stays confident, and a reviewer reading it
+  cannot tell. **It caught a live example on its first run**: the document named
+  `qqq-host::limits`, and the module is `qqq-host::quota`.
+* Every §7.2 adversary needs a section, so the document cannot quietly cover fewer
+  adversaries than the Proposal states. The Proposal is checked too, so neither can
+  drift away from the other.
+* Internal links must resolve.
+
+8/8 self-test cases.
+
+**`SEC-024`/`SEC-025`, and the first time the answer was really "blocked".**
+`§O-082` asks "is this blocked on the item, or on one way of doing it?" — and it has
+dissolved three apparent blocks in this session (`SEC-017`, `SEC-019`, `SEC-026`). It
+does not dissolve this one. Commissioning an external audit requires selecting a firm,
+agreeing a scope, and paying them; there is no implementation route, no crate that
+provides it, and no test that substitutes. **The question is worth asking every time,
+and the answer is not always yes** — recording *why* it is no here is what keeps the
+question from becoming a ritual.
+
+Both are marked `[!]` with the reason, and what would unblock them: an engagement and
+a budget. What was done in the meantime is the honesty enforcement above — the threat
+model states its own unvalidated status, and fails the build if it stops.
+
+→ `docs/threat-model.md`, `tools/check_threat_model.py`, `QQQ-Checklist-V1.md`
+(`SEC-024`, `SEC-025`), `.github/workflows/ci.yml`.
+
+---
+
 ### §O-094 — `SEC-027`: the first item where the search for a safe wrapper came up empty, and why detection is the deliverable
 
 **What the item asks.** "Implement memory-protection-key support as an optional

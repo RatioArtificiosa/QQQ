@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The hostile-guest suite — `SEC-004`, and the proof for `SEC-002`, `SEC-005`,
 //! `SEC-006`, `SEC-007` and `SEC-008`.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! SETTINGS: the parameters both ends of a connection declare about themselves.
 //!
 //! Implements `SRV-002`; RFC 9113 §6.5 (the frame), §6.5.2 (the parameters),

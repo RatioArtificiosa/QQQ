@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify `docs/reconciliation.md` matches Appendix A (`DOC-013`).
 
 A thin wrapper over `tools/gen_reconciliation.py --check`, with a self-test.

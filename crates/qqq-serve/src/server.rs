@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The accept loop: joining the socket layer to the connection state machine.
 //!
 //! Implements `SRV-001` (HTTP/1.1 with keep-alive, timeouts and connection

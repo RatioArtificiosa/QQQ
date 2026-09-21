@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate the security-advisory register (`SEC-023`).
 
 A security index that drifts is worse than no index: it tells a reader they are

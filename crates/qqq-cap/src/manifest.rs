@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `qqq.toml` manifest: the developer's declaration of capability.
 //!
 //! This module implements pipeline steps **1. PARSE** and part of

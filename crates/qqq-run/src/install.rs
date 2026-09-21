@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai install` — resolve the manifest's dependencies, write `qqq.lock`, and
 //! report the capability diff.
 //!

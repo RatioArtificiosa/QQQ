@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-stream state and frame legality (RFC 9113 §5.1).
 //!
 //! Implements `SRV-002`; RFC 9113 §5.1 (stream states), §5.1.1 (stream

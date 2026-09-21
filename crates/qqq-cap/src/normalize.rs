@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Pipeline step 2: **NORMALIZE** (Proposal §6.2, Checklist `CAP-003`).
 //!
 //! Turns a syntactically valid manifest into a *resolved configuration* whose

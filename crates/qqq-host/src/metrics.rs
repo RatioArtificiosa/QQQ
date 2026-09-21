@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Instance and execution metrics — `HOST-019`, and the Instance/Execution/
 //! Memory rows of Proposal §10.2.
 //!

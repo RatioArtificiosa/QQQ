@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Second-pass corpus repair.
 
 1. Removes leftover secondary citation lines that point at appendices

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Check off checklist items that the implemented code genuinely satisfies.
 
 Every edit is justified by evidence gathered from the source tree, not from

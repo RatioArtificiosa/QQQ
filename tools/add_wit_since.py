@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Insert `@since(version = 1.0.0)` before every exported function in `wit/`.
 
 One-time migration for `CON-007`/`CON-008`. The version is `1.0.0` for every

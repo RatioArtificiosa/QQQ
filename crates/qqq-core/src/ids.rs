@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Identifiers and version types.
 //!
 //! Every identifier in QQQ exists so that an error, a log line, an audit record

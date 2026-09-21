@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Flow control (RFC 9113 §5.2, §6.9).
 //!
 //! Implements `SRV-002`; RFC 9113 §5.2 (flow control), §5.2.1 (the two windows),

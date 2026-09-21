@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! TLS configuration: the documented cipher policy, ALPN, and mTLS.
 //!
 //! Implements `SRV-007` (TLS via rustls with a documented cipher policy),

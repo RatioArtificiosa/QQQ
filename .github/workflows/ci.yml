@@ -224,6 +224,14 @@ jobs:
       - name: Prove the bindings check catches drift in both directions
         run: python tools/check_wit_bindings.py --self-test
 
+      # `LIC-006`. A file without an SPDX header has no licence any scanner can
+      # determine, and §13.2's model depends on which licence governs which code — the
+      # workspace `Cargo.toml` covers the crate, not a file copied out of it.
+      - name: Validate SPDX headers on every source file
+        run: python tools/check_spdx.py
+      - name: Prove the SPDX check rejects a missing or wrong header
+        run: python tools/check_spdx.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

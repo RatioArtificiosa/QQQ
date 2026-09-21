@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `qqqai` binary.
 //!
 //! # Why the argument parsing is hand-written

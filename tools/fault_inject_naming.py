@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove the naming tests detect the defect the objective names.
 
 The objective states: *"a build producing a `qqq` binary is a defect."*

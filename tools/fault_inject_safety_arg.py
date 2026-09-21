@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove the ARCH-009 exception-process test catches the one state that matters.
 
 `the_unsafe_exception_was_granted_through_its_process` permits three of the four

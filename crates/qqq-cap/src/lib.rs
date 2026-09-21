@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-cap
 //!
 //! The QQQ capability engine — **the single authority gate**, and the subsystem

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The accept loop, exercised over a real socket.
 //!
 //! # Why these tests bind a port

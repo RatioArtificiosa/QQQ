@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Engine-level integration tests, ported from the `.scratch/witprobe` probe.
 //!
 //! Implements Checklist `FND-011`: *"Delete the scratch verification crate at

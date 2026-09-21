@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Hardening tests — `SEC-019`.
 //!
 //! # Why these tests re-execute the test binary

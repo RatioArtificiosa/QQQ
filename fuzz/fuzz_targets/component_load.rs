@@ -1,4 +1,6 @@
 #![no_main]
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fuzz target: the component loader — `SEC-012`.
 //!
 //! # Why this is the highest-value target in the programme

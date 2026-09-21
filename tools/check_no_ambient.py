@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Enforce "no hidden global state" across the runtime crates — `CON-010`, `CON-018`.
 
 # The rule

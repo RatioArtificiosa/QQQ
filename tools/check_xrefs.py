@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """QQQ cross-reference validator.
 
 Proves the three-document corpus is internally consistent. Fails CI on any of:

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate the corrections table in `docs/reconciliation.md` (`DOC-013`).
 
 Reads the Proposal's Appendix A table and the Observations' `§C-NNN` headings, and

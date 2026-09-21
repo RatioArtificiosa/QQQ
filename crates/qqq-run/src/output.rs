@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The shared output layer.
 //!
 //! Implements `CLI-001` and `CLI-002`: **every command supports `--json`, and

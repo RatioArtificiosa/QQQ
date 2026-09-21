@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Extracting a [`SourceMap`] from a Wasm component's DWARF sections.
 //!
 //! # Where the DWARF lives

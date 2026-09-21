@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The capability-facing commands: `why`, `caps` and `inspect`.
 //!
 //! These three are what make the capability model *usable*. The engine in

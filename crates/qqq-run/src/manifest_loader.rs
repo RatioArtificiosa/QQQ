@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Manifest loading: locating, parsing and normalizing `qqq.toml`.
 //!
 //! Shared by every command that needs to know what a project is allowed to do.

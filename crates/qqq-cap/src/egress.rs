@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # Per-tenant egress policy (`SEC-022`)
 //!
 //! The layer between "a manifest declares outbound hosts" and "a request actually

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Check that glossary terms used in WIT doc comments exist in the glossary (`DOC-012`).
 
 # The problem

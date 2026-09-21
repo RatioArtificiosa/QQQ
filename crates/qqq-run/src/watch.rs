@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The file watcher behind `qqqai dev`: ignore rules and debounce.
 //!
 //! Implements `DX-009`; Proposal §6.6 ("file watcher with debounce and ignore

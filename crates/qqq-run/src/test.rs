@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai test` — the built-in test runner.
 //!
 //! Implements `CLI-012`; Proposal §6.7.

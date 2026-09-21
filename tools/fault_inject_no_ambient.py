@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove `tools/check_no_ambient.py` detects the violations it claims to.
 
 `CON-010` / `CON-018` forbid hidden global state. Four injections, chosen so that

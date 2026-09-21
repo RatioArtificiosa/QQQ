@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate generated CycloneDX SBOM files (`SEC-028`).
 
 An SBOM generation step that succeeds is not evidence that the SBOM is *useful*.

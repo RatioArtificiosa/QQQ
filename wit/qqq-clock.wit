@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ clock interface.
 //
 // Time is a **capability**, not a right. A guest that reads the wall clock can

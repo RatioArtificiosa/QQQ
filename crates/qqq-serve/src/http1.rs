@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP/1.1 request parsing, with the bomb limits Proposal §6.4 requires.
 //!
 //! Implements the parsing half of `SRV-001` and the header-bomb mitigation of

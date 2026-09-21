@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end DWARF extraction: build a real component with debug info and map
 //! a real bytecode offset back to a real source line.
 //!

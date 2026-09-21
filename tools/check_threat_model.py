@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Keep the threat model's claims pointing at real code (`SEC-001`).
 
 # The decay this prevents

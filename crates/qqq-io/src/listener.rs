@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Listen addresses, listener configuration, and the accept loop.
 //!
 //! Implements the transport half of `SRV-001` and step 1 of the §4.4 request

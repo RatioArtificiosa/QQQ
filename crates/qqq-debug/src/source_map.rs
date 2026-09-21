@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The source map: a sorted table from Wasm bytecode offset to source location.
 //!
 //! # Why a flat sorted table and not the DWARF tree

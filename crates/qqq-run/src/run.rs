@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai run` — execute a built component under the capability sandbox.
 //!
 //! Implements Proposal §5.2's `run` row and the execution half of §4.6;

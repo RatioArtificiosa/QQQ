@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove `tools/check_batch_first.py` detects the pair defects it claims to.
 
 `CON-012`'s batch-first rule is only partly decidable, and the checker

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The grant-built linker — where the capability model becomes enforcement.
 //!
 //! This is **the single most security-critical function in QQQ**. It is the

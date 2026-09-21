@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Check that every WIT file is embedded in `qqq-abi`, and vice versa (`ABI-015`).
 
 `qqq-abi` is how the runtime publishes its interfaces: the crate embeds each `.wit` with

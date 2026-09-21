@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify the crate topology against Proposal §4.3.
 
 The Proposal makes two claims that are mechanically checkable:

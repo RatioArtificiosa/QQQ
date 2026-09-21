@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The instance lifecycle: store construction, limit binding, execution and
 //! trap handling.
 //!

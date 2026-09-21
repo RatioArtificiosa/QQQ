@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Fault-injection harness for tools/check_xrefs.py.
 
 Proves the validator actually detects the failure modes it claims to detect.

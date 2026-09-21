@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The host-side regression corpus — `SEC-012`'s always-on half for the loader
 //! and the boundary checks.
 //!

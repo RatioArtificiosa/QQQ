@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Exhaustive audit of `unsafe` in the QQQ workspace, for SEC-020.
 
 # Why this is a script rather than one grep

@@ -1,4 +1,6 @@
 #![no_main]
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fuzz target: the manifest parser — `SEC-012`.
 //!
 //! # The property being fuzzed, which is stronger than "does not panic"

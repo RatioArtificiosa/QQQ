@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ filesystem interface.
 //
 // Built over `wasi:filesystem`, adding the mode and quota enforcement the

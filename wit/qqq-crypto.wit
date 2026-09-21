@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ cryptography interface.
 //
 // Randomness is a **capability**, not a right. A guest that can draw entropy

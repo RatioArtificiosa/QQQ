@@ -317,7 +317,23 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §13.2 The licence model, and why NN-8 still holds
 - [ ] **LIC-005** Define the revenue-attestation mechanism for the free-tier boundary (open question `OQ-001`).
   → §13.2 The licence model, and why NN-8 still holds
-- [ ] **LIC-006** Add SPDX headers to every source file and a CI check that they are present and correct.
+- [x] **LIC-006** Add SPDX headers to every source file and a CI check that they are present and correct.
+  → Done: **145 files** now carry `SPDX-License-Identifier: Apache-2.0` — every `.rs`
+    under `crates/` and `fuzz/fuzz_targets/`, every `wit/*.wit`, and every `tools/*.py`.
+    `tools/check_spdx.py` enforces it in CI and in the bridge.
+  → The identifier must match the workspace's declared licence, because a header naming a
+    different licence from `Cargo.toml` is **worse than none**: it is a contradiction a
+    scanner reports as fact.
+  → The header is looked for only in the **first five lines**. A mention of SPDX deeper in
+    a file is documentation *about* licensing, not the file's own licence, and accepting it
+    would let a file be unheadered while containing the string.
+  → Placement preserves a **shebang** as line 1 — the kernel reads it — and Rustdoc
+    attaches `//!` regardless of preceding `//` comments, which is why the header goes
+    above it.
+  → Exemptions are an **explicit list, not a heuristic**, and the checker reports an entry
+    that stops matching a file, so the list cannot quietly grow a population of one.
+  → 7/7 self-test cases: no header, correct header, wrong licence, a deep mention that must
+    not count, a `.wit` file, and the workspace licence being readable.
   → §13.2 The licence model, and why NN-8 still holds
 - [x] **LIC-007** Configure `cargo-deny` to enforce the dependency licence allowlist.
   → Done: `deny.toml` — the licence allowlist derived from `cargo metadata` over the real tree, with the copyleft branches of OR-expressions deliberately not listed.

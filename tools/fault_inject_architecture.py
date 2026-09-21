@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove the architecture tests detect real violations.
 
 Three injections, each of which must make exactly the intended test go red:

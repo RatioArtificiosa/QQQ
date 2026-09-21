@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end tests for the listener and the accept loop.
 //!
 //! These bind real sockets on the loopback interface. That is deliberate: the

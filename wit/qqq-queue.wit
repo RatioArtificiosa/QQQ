@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ message queue interface.
 //
 // Publishing and subscribing are **separate capabilities**, because they are

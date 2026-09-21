@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The QQQ error model.
 //!
 //! Every failure a user or an agent can observe has a **stable code** of the

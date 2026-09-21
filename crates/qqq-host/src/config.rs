@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Engine and store configuration, derived from the manifest.
 //!
 //! Implements the configuration half of `HOST-001` and the limit binding of

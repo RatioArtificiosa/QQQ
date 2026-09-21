@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify P0 Foundation checklist items against the repository.
 
 This is deliberately a *reporting* tool, not a gating one. It answers one

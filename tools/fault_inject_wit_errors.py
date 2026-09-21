@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove `tools/check_wit_errors.py` detects the violations it claims to.
 
 `CON-009` defines the typed-error rule; the checker enforces it. A rule enforced

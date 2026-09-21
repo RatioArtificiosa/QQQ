@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The HTTP/2 frame layer: the 9-byte header, and every frame type `SRV-002`
 //! requires.
 //!

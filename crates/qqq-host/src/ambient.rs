@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Host implementations of the ambient interfaces: `qqq:clock` and
 //! `qqq:crypto`.
 //!

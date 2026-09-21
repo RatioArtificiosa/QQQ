@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture tests — the invariants of Proposal §4.1 and §4.3, checked as
 //! tests rather than asserted in prose.
 //!

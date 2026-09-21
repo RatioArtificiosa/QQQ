@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The end-to-end subrequest-amplification proof — `SEC-009`.
 //!
 //! # Why this file exists separately from `refusal_amplification.rs`

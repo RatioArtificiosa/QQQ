@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify `docs/glossary.md` matches its source (`DOC-011`).
 
 A thin wrapper over `tools/gen_glossary.py --check`, with a self-test.

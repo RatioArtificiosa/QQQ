@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The compile-time route table: a radix trie over path segments.
 //!
 //! Implements `SRV-003`; Proposal §6.4. Also resolves `OQ-007` / `SRV-006`.

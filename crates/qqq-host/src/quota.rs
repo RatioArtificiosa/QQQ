@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-instance quotas: the subrequest budget and the handle quota —
 //! `SEC-008` and `SEC-009`.
 //!

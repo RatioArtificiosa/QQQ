@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-abi
 //!
 //! The QQQ host interfaces, defined in **WIT first** and implemented in Rust

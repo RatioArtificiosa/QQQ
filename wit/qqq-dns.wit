@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ DNS interface.
 //
 // Resolution is a **capability**, and a covert one: a guest that can resolve an

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `qqq:crypto` host implementation — `random` and `hashing`.
 //!
 //! Wires `wit/qqq-crypto.wit` to the [`AmbientState`] already in the store.

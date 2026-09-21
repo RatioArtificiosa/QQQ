@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai update` — move dependencies forward within their declared ranges.
 //!
 //! Implements `CLI-007`; Proposal §5.2 (command table) and §5.4 (the capability

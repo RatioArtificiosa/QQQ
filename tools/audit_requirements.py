@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Requirement audit: checks the corpus against the literal objective text.
 
 Each requirement from the brief is an executable assertion. Run this to

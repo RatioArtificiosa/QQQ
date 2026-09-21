@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai new` — scaffold a project.
 //!
 //! Implements `CLI-003` and `DX-001`; Proposal §5.2, §12.1.

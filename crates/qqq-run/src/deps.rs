@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai add` and `qqqai remove` — editing `[dependencies]` in `qqq.toml`.
 //!
 //! Implements `CLI-005`; Proposal §5.2 (command table) and §5.3 (`[dependencies]`).

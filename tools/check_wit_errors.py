@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Enforce the typed-error rule on every WIT interface — Checklist `CON-009`.
 
 # The rule

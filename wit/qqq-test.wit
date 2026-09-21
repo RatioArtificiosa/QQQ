@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ test-assertion interface.
 //
 // # Why this is an interface and not a library

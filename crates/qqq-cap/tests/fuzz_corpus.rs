@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The regression corpus — `SEC-012`'s always-on half.
 //!
 //! # Why this file exists rather than the corpus living only in `fuzz/`

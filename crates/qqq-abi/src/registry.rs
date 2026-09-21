@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The interface registry: the single source of truth binding capabilities to
 //! the interfaces they unlock.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-serve
 //!
 //! The HTTP and application server: routing, listener shards, HTTP/1.1, HTTP/2.

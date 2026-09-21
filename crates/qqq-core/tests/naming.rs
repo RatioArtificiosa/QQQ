@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The naming invariant — `§D-001`, and the one rule the objective calls a defect.
 //!
 //! # The rule

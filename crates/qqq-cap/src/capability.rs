@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The capability vocabulary.
 //!
 //! A **capability** is a named, typed grant of authority. QQQ has three kinds

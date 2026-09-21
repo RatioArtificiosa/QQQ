@@ -1,4 +1,6 @@
 #![no_main]
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fuzz target: the host interfaces — `SEC-012`.
 //!
 //! # What "the host interfaces" means here, and what fuzzing them can prove

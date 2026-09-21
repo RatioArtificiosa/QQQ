@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Semantic versions and requirement matching.
 //!
 //! Implements the versioning half of `PKG-003` and the version format checked by

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate `docs/glossary.md` from the Proposal's §0.6 glossary table (`DOC-011`).
 
 # Why generated rather than written

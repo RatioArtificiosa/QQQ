@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate every WIT interface with `wasm-tools`.
 
 # Why this script exists

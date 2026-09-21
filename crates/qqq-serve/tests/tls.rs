@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! TLS and mTLS, driven by **real handshakes** in process.
 //!
 //! Implements the test half of `SRV-007`, `SRV-008` and `SEC-017`; Proposal §6.4

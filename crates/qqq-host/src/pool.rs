@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The instance pool: acquisition, backpressure and occupancy — `HOST-012` and
 //! the instance half of `HOST-019`.
 //!

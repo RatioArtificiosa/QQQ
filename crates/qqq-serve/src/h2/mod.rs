@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP/2: the frame layer, HPACK, stream state, flow control and multiplexing.
 //!
 //! Implements Checklist `SRV-002` — *"Implement HTTP/2 including multiplexing and

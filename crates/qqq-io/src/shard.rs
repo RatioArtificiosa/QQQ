@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Listener shards and connection assignment.
 //!
 //! Implements `ARCH-011`'s step 1 and the sharding half of Proposal §4.2.

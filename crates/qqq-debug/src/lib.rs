@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-debug
 //!
 //! DWARF source mapping for QQQ: turning a Wasm bytecode offset into a file and

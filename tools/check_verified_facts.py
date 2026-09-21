@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify `docs/verified-facts.md` matches Appendix B (`DOC-016`).
 
 A wrapper over `tools/gen_verified_facts.py --check`, with a self-test.

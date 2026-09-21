@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ key-value interface.
 //
 // Namespaced by the host, so a manifest granting `sessions` and `cart` gives a

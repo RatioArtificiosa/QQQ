@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove `tools/check_wit_since.py` detects the violations it claims to.
 
 `CON-008` requires the CI check; a check that has never been seen to fail is worth

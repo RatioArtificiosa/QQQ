@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Input validation at every guest-to-host boundary — `SEC-011`.
 //!
 //! # The requirement, and why "add checks" is not an implementation of it

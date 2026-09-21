@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The content-addressed store.
 //!
 //! Implements `PKG-001` (layout and verification) and `PKG-014` (offline

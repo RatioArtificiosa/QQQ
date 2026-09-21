@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Measures the cost of the refusal-amplification policy — `SEC-009`'s evidence.
 //!
 //! Run with `cargo run --release --example refusal_probe -p qqq-host`.

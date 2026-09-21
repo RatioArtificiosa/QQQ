@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HPACK: header compression for HTTP/2 (RFC 7541).
 //!
 //! Implements `SRV-002`; RFC 7541 §4 (dynamic table), §5 (primitives), §6

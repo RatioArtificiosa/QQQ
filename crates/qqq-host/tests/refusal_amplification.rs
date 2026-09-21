@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The refusal-amplification measurement — the evidence behind
 //! [`qqq_host::SubrequestBudget`]'s poisoning rule.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Resource-handle tables: pooling and lifetime diagnostics -- `HOST-022`.
 //!
 //! # What a handle is, and why the table matters

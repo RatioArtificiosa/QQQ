@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linux process hardening — `SEC-019`.
 //!
 //! Implements Proposal §7.5:

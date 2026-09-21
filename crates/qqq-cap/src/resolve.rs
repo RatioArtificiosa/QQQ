@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The capability resolution pipeline — steps 3 through 6 of Proposal §6.2.
 //!
 //! This module implements the single most important invariant in QQQ:

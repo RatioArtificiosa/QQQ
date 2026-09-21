@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Enforce the WIT interface-versioning policy — Checklist `CON-007` and `CON-008`.
 
 # The policy

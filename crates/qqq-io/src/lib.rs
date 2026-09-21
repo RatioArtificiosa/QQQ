@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-io
 //!
 //! The reactor abstraction: accept loops, listener sharding, and readiness.

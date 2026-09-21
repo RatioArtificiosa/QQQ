@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The WIT interface definitions.
 //!
 //! Every host capability is defined here **in WIT before it is implemented in

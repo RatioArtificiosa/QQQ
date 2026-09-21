@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `qqq:secrets` host implementation: use a secret without disclosing it --
 //! `CAP-016`.
 //!

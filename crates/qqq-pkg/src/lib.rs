@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-pkg
 //!
 //! The dependency manager: content-addressed store, version solving, and the

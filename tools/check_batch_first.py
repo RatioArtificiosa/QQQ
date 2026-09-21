@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Enforce the batch-first rule where it is **decidable** — Checklist `CON-012`.
 
 # The rule, and the honest scope of a check for it

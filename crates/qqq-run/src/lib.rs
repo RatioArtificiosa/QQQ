@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-run
 //!
 //! The `qqqai` command-line interface.

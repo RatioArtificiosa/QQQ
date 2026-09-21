@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Host-function panic containment — `HOST-011`.
 //!
 //! Proposal §2.2 makes this a security requirement, not a robustness nicety:

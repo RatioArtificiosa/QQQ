@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate `docs/verified-facts.md` from the Proposal's Appendix B (`DOC-016`).
 
 Appendix B is the register of external facts the project depends on, each with the

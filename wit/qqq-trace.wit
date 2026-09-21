@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ distributed tracing interface.
 //
 // Spans carry W3C Trace Context, and sampling decisions are made by the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Streaming request bodies: incremental framing, and the cap enforced *while*
 //! the body arrives rather than after it is buffered.
 //!

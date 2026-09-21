@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Module preloading: compile at deploy, not on the first request -- `HOST-021`.
 //!
 //! # What the problem actually is

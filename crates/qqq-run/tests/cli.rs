@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end tests that run the **real `qqqai` binary** and inspect its output.
 //!
 //! # Why these exist, and why they are separate from the unit tests

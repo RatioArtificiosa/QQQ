@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Streaming request bodies over real bytes: chunked decoding, the size cap
 //! enforced while the body arrives, and the framing offset left exact.
 //!

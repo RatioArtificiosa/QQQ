@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The lockfile — `qqq.lock` — and the capability diff.
 //!
 //! Implements `PKG-004` and the capability-aware half of `PKG-009`; Proposal

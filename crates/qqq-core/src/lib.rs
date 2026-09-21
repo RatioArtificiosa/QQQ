@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-core
 //!
 //! Shared types for the QQQ runtime: identifiers, the version model, and the

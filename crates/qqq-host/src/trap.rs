@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The trap taxonomy — mapping engine failures to stable `QQQ-3xxx` codes.
 //!
 //! Proposal §6.1 requires that a guest failure never takes down the host, and

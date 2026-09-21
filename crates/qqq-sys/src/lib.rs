@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqq-sys` -- see `QQQ-Proposal-V1.md` §4.3 for the crate topology.
 //!
 //! Implements the Linux hardening of Proposal §7.5 (`SEC-019`). See

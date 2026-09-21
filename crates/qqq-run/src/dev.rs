@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai dev` — the development server with hot reload.
 //!
 //! Implements `CLI-010`, `DX-003` and the tier-1 half of `DX-006`; Proposal §6.6

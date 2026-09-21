@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # qqq-host
 //!
 //! The QQQ execution engine. Owns the Wasmtime engine and turns a component

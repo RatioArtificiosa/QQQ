@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate the WIT reference from `wit/` into Markdown (`DOC-017`).
 
 Every interface, its types, its error variants, and every exported function — with the

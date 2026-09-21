@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `qqq:clock` host implementation.
 //!
 //! Wires the WIT package in `wit/qqq-clock.wit` to the [`AmbientState`] already

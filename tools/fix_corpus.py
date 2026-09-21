@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """One-shot repair tool for the QQQ corpus.
 
 Fixes two defect classes found by tools/check_xrefs.py:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `qqqai build` — compile a project to a `.component.wasm`.
 //!
 //! Implements Proposal §4.6 (the artifact model) and §5.2's `build` row;

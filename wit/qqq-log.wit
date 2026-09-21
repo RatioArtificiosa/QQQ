@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ structured logging interface.
 //
 // Logs carry tenant and trace attribution applied by the **host**, not the

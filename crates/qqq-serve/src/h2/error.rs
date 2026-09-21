@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP/2 error types: connection errors, stream errors, and their wire codes.
 //!
 //! Implements `SRV-002`; RFC 9113 §5.4 (error codes), §5.4.1 (connection error),

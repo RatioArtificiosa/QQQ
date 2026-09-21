@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Keep the published security scope consistent (`SEC-030`).
 
 # The problem this solves

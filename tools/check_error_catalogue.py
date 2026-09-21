@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify `docs/errors.md` matches the `ErrorCode` enum (`DOC-019`).
 
 A wrapper over `tools/gen_error_catalogue.py --check`, with a self-test.

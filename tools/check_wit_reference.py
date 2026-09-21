@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify `docs/wit-reference.md` matches `wit/` (`DOC-017`).
 
 A wrapper over `tools/gen_wit_reference.py --check`, with a self-test that drives the

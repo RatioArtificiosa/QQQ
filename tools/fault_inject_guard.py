@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Fault-inject the HOST-011 guard check: remove one guard, expect the test to fail.
 
 Two properties this script exists to guarantee, both learned the hard way:

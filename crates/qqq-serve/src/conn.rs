@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Connection lifecycle: keep-alive, idle deadlines, and graceful drain.
 //!
 //! Implements `SRV-011` and `SRV-012`; Proposal §6.4 (*"HTTP keep-alive,

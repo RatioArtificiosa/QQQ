@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP/1.1 response writing, with the trap-to-status mapping.
 //!
 //! Implements the response half of `SRV-001` and the status policy of Proposal

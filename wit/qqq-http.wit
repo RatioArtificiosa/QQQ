@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // QQQ HTTP interface.
 //
 // Built over `wasi:http`, adding the routing and headers an application

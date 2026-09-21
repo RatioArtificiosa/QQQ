@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate the error catalogue from `qqq-core`'s `ErrorCode` enum (`DOC-019`).
 
 Every `QQQ-XXXX` code becomes a catalogue entry with its cause and its remediation,

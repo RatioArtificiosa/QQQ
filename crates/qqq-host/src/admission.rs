@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Admission control: refuse a component whose declared requirements exceed the
 //! host's capacity — `HOST-023`.
 //!

@@ -199,7 +199,22 @@ Items are grouped below by **phase**, because dependency order matters more than
     new term in the source. The second is the one that actually happens, and the first
     version of a check like this often only tests the other. 4/4 cases.
   → §0.6 Glossary
-- [ ] **DOC-012** Add a CI check that every glossary term used in WIT doc comments exists in the glossary.
+- [x] **DOC-012** Add a CI check that every glossary term used in WIT doc comments exists in the glossary.
+  → Done: `tools/check_glossary_usage.py` — scans all `///` lines in `wit/` (631
+    across 13 files) for six curated *confusable pairs*: terms QQQ defines differently
+    from the industry, where using the industry word is not a typo but a second
+    vocabulary. `wasm module` → `component`, `plugin` → `component`, `permission` →
+    `capability` and three more.
+  → **Two rules were removed after their first run**, and that is the interesting part.
+    `thread` and `container` both fired on ordinary English ("would force every
+    consumer onto its own thread", "the container image is read-only"), where neither is
+    a vocabulary mistake. A check that fires on prose gets disabled, and a disabled
+    check is worth nothing, so a rule must catch a *mistake* rather than a word. The
+    removal is recorded in the source rather than done silently, because the next person
+    will reach for `thread` too.
+  → Matching is word-boundary, so `containerisation` does not fire on `container`.
+  → 14/14 self-test cases: every rule must fire on positive input, and the negative
+    cases are the false positives that would have got it disabled.
   → §0.6 Glossary
 - [x] **DOC-013** Maintain `docs/reconciliation.md` tracking every correction made to the source corpus, kept in sync with Appendix A.
   → Done: `tools/gen_reconciliation.py` regenerates the table between explicit

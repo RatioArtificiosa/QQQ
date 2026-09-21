@@ -197,6 +197,15 @@ jobs:
       - name: Prove the WIT-reference check catches a parser regression
         run: python tools/check_wit_reference.py --self-test
 
+      # `DOC-012`. §0.6 says "where a term is contested in the industry, the definition
+      # here wins" — which only holds if the WIT docs use those terms as defined. A WIT
+      # comment saying "wasm module" gives a component author a second vocabulary, in
+      # the artifact they actually read.
+      - name: Validate glossary usage in the WIT docs
+        run: python tools/check_glossary_usage.py
+      - name: Prove the glossary-usage check fires on each confusable term
+        run: python tools/check_glossary_usage.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

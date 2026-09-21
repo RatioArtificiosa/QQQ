@@ -9322,11 +9322,21 @@ table meant scanning the source for `func_wrap(`, and the first scan found **20*
 where the source has 8:
 
 ```text
-("host_clock.rs", "engine", 409)          a test helper, inside #[cfg(test)]
-("host_crypto.rs", "{name}\\", 439)        an escaped quote in a doc comment
-("host_crypto.rs", "digest\\", 497..499)   doc-comment prose
-("host_crypto.rs", "get\\", 817)           doc-comment prose
+host_clock.rs:409   a test helper, inside #[cfg(test)]
+host_crypto.rs:428  doc-comment prose quoting `func_wrap("digest"` layout
+host_crypto.rs:439  an escaped quote inside a `format!` in a test
+host_crypto.rs:497  doc-comment prose
+host_crypto.rs:498  doc-comment prose
+host_crypto.rs:499  doc-comment prose
+host_crypto.rs:507  doc-comment prose
+host_crypto.rs:817  a `.find("func_wrap(\"get\"")` inside a test
+host_crypto.rs:932  a `linker.instance(interface)` probe in a test
 ```
+
+Nine candidates, none of them a registration, and the count is reproducible: a
+count of `func_wrap(` across the three files gives **20**, while the production
+scan gives **8** -- the difference is those nine lines plus the one registration
+the naive scan sees twice.
 
 **This is `§O-071`'s name-extractor bug verbatim, in new code written an hour
 after recording it.** *"The name extractor read doc comments, inventing `name` as

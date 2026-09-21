@@ -2676,6 +2676,22 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Not covered: handing a **`stream<u8>` to the guest** — that is the
     capability path (`qqq-host` + `qqq:http`), and what exists here is the
     server-side framing and enforcement it will sit on.
+  → **Response side, added later**: `qqq-serve::stream` — `StreamWriter` (head, then pieces, then a
+    version-aware terminator), `StreamOutcome` (`Completed` / `ClientClosed` / `HandlerFailed`, with
+    `ClientClosed` at `Info` because a client closing an event stream is the normal end of one), and
+    `StreamRecord`. A **second** handler type rather than a change to `Handler`, because `Handler`'s own
+    docs state the property worth keeping: it "does not touch the socket", which keeps routing and encoding
+    testable without a listener and means a handler cannot hold a connection open by accident. A streaming
+    handler violates all of that by necessity — which is the point of an event stream — so the two are
+    separate and the difference is visible at the call site.
+  → **A real protocol bug found by the tests**: `write` called `write_chunk` unconditionally, gating only
+    the *terminator* on the version. An HTTP/1.0 client received `13\r\nraw-body-for-http10\r\n` — the
+    chunk length as **body data**. Every HTTP/1.1 test passed, because the framing is correct there; the
+    defect lives only in the transition between versions. See `§O-132`.
+  → **Measured**: 3 unit + 6 integration tests over a real socket; workspace **1962 passed, 0 failed**.
+  → **Still not wired**: `serve_connection` does not dispatch a streaming route — the route table would
+    have to say which handler kind a route wants. `tests/stream.rs`'s module docs say so rather than
+    implying `serve` can do it.
 - [x] **SRV-005** Implement `max_request_bytes` enforced during streaming, not after buffering.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Done. `BodyReader::account` charges each piece **before it is returned**, so a

@@ -111,6 +111,26 @@ pub struct StoreData {
 
     /// The handle quota for this instance — `SEC-008`.
     pub handles: crate::quota::HandleQuota,
+
+    /// Which tenant this instance serves, and under which grants — `CAP-014`.
+    ///
+    /// # Why the scope lives in the store rather than beside it
+    ///
+    /// The alternative — a field on the pooled-instance wrapper — puts the
+    /// tenant identity in the one struct that is *copied out* of the pool and
+    /// handed to a request handler. Anything that can be reassigned on the way
+    /// is a cross-tenant path. Inside the store it is created with the store
+    /// and reachable only by immutable reference, so "this instance belongs to
+    /// tenant X" is a property of the thing doing the work.
+    ///
+    /// `None` means the store was not scoped to a tenant at all, which is the
+    /// correct state for the single-tenant `qqqai run` path and for the many
+    /// unit tests that exercise capabilities without a server. It is **not** a
+    /// wildcard: [`StoreData::tenant_scope`] returns `None` and the server
+    /// refuses to hand an unscoped store to a tenant-serving request path. A
+    /// `None` that meant "any tenant" would be the failure this field exists to
+    /// prevent.
+    pub tenant: Option<crate::tenant::TenantScope>,
 }
 
 impl Default for StoreData {
@@ -132,6 +152,7 @@ impl Default for StoreData {
             // the failure mode §2.5 exists to forbid.
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
+            tenant: None,
         }
     }
 }
@@ -148,6 +169,7 @@ impl StoreData {
             ambient: crate::ambient::AmbientState::default(),
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
+            tenant: None,
         }
     }
 
@@ -187,7 +209,42 @@ impl StoreData {
             // from somewhere else is how one of them ends up not being applied.
             subrequests: crate::quota::SubrequestBudget::new(manifest.limits.max_subrequests),
             handles: crate::quota::HandleQuota::new(manifest.limits.max_open_handles),
+            tenant: None,
         }
+    }
+
+    /// Scope this instance to a tenant and a grant set — `CAP-014`.
+    ///
+    /// # Why this consumes `self` rather than taking `&mut self`
+    ///
+    /// Because a store must not be *scoped twice*. `self` by value makes the
+    /// second call impossible without an explicit rebuild, and the rebuild is
+    /// the point: an instance that changes tenant must be a new instance, with
+    /// a fresh handle table and fresh ambient state, not the old one wearing a
+    /// new label. `with_deterministic_ambient` follows the same shape for the
+    /// same reason.
+    ///
+    /// # Why the digest is passed separately from the grants
+    ///
+    /// The store already holds a `GrantSet`, and `GrantSet::digest()` exists —
+    /// so the caller could be spared the argument. It is required anyway for
+    /// one property: the digest that **keys the pool** and the digest **stored
+    /// in the instance** are then provably the same value, because the same
+    /// [`crate::tenant::GrantDigest`] is passed to both. Deriving it inside
+    /// would leave open the possibility that the pool was keyed on a digest of
+    /// the pre-normalization manifest while the store recorded the
+    /// post-normalization one — two descriptions of one grant set, and a pool
+    /// that misses on every lookup or, worse, on some.
+    #[must_use]
+    pub fn with_tenant(mut self, scope: crate::tenant::TenantScope) -> Self {
+        self.tenant = Some(scope);
+        self
+    }
+
+    /// The tenant this instance is scoped to, if any.
+    #[must_use]
+    pub fn tenant_scope(&self) -> Option<&crate::tenant::TenantScope> {
+        self.tenant.as_ref()
     }
 
     /// Install the deterministic ambient state.
@@ -711,6 +768,11 @@ mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
 
+    /// A minimal well-formed manifest: `[package]` requires both `name` and
+    /// `version`, and a bare `name = "..."` is rejected with `MissingField`.
+    /// Recording the shape here means the next test does not rediscover it.
+    const MINIMAL_MANIFEST: &str = "[package]\nname = \"acme\"\nversion = \"1.0.0\"\n";
+
     fn grants_from(src: &str) -> GrantSet {
         let m = Manifest::parse(src).expect("test manifest");
         GrantSet::from_manifest(&m)
@@ -1201,5 +1263,164 @@ mod tests {
         };
         assert_eq!(empty.to_string(), "(none)");
         assert!(!empty.has("qqq:http@1.0.0"));
+    }
+
+    // -- Tenant scoping — `CAP-014` ---------------------------------------
+
+    /// A store built without a tenant has no scope, and that `None` is a
+    /// refusal rather than a wildcard.
+    ///
+    /// The distinction matters because `None` is the value the single-tenant
+    /// `qqqai run` path and every existing unit test produce. If `None` meant
+    /// "any tenant", every one of those stores would silently be a
+    /// cross-tenant hole the day it was handed to a server request.
+    #[test]
+    fn an_unscoped_store_reports_no_tenant_rather_than_any_tenant() {
+        let data = StoreData::default();
+        assert!(data.tenant_scope().is_none());
+        assert!(StoreData::new(GrantSet::empty()).tenant_scope().is_none());
+    }
+
+    /// The scope travels with the store, and the digest stored in the store is
+    /// the digest the caller can key a pool on.
+    ///
+    /// This is the "same value to both" property documented on
+    /// [`StoreData::with_tenant`]: the host must not have to re-derive the
+    /// grant digest to look the instance up, because a re-derivation is where
+    /// a pre-/post-normalization mismatch would enter.
+    #[test]
+    fn a_scoped_store_carries_the_tenant_and_the_grant_digest_it_was_keyed_on() {
+        use crate::tenant::{GrantDigest, TenantScope};
+        use qqq_cap::egress::TenantId;
+
+        let grants =
+            GrantSet::from_manifest(&Manifest::parse(MINIMAL_MANIFEST).expect("test manifest"));
+        let digest = GrantDigest::new(&grants.digest()).expect("GrantSet::digest is canonical hex");
+        let tenant = TenantId::new("acme").expect("test tenant");
+
+        let data =
+            StoreData::new(grants).with_tenant(TenantScope::new(tenant.clone(), digest.clone()));
+
+        let scope = data.tenant_scope().expect("the store is scoped");
+        assert_eq!(scope.tenant(), &tenant);
+        assert_eq!(scope.grants(), &digest);
+        assert!(scope.probe(&tenant, &digest).is_ok());
+    }
+
+    /// **The end-to-end isolation test.**
+    ///
+    /// Two stores, two tenants, one shared component digest. Neither store's
+    /// scope accepts the other's identity, and their pool keys differ. This is
+    /// §7.1's "no cross-tenant handles" exercised through the real types rather
+    /// than through the ledger alone.
+    #[test]
+    fn two_tenants_over_one_artifact_cannot_adopt_each_others_scope() {
+        use crate::tenant::{ComponentDigest, GrantDigest, InstanceKey, TenantScope};
+        use qqq_cap::egress::TenantId;
+
+        let manifest = Manifest::parse(MINIMAL_MANIFEST).expect("test manifest");
+        let grants = GrantSet::from_manifest(&manifest);
+        let gd = GrantDigest::new(&grants.digest()).expect("canonical digest");
+        let cd = ComponentDigest::new("0011223344556677").expect("canonical digest");
+
+        let acme = TenantId::new("acme").expect("tenant");
+        let globex = TenantId::new("globex").expect("tenant");
+
+        let acme_store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_tenant(TenantScope::new(acme.clone(), gd.clone()));
+        let globex_store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_tenant(TenantScope::new(globex.clone(), gd.clone()));
+
+        let acme_scope = acme_store.tenant_scope().expect("scoped");
+        let globex_scope = globex_store.tenant_scope().expect("scoped");
+
+        // Each refuses the other, and the refusal names both sides.
+        let err = acme_scope
+            .probe(&globex, &gd)
+            .expect_err("acme must refuse globex's identity");
+        assert!(err.to_string().contains("globex"), "{err}");
+        assert!(globex_scope.probe(&acme, &gd).is_err());
+
+        // The pool keys diverge even though component and grants are shared.
+        let acme_key = InstanceKey::new(acme, cd.clone(), gd.clone());
+        let globex_key = InstanceKey::new(globex, cd, gd);
+        assert_ne!(acme_key, globex_key);
+    }
+
+    /// A narrowed grant set invalidates the old store's scope, so a pooled
+    /// instance built under wider grants cannot be reused after the operator
+    /// revokes them.
+    ///
+    /// # Why the wide manifest must actually grant something
+    ///
+    /// The first version of this test used a capability-free manifest for the
+    /// "wide" side and compared its digest to `GrantSet::empty()`. Both are the
+    /// empty capability set, and `GrantSet::digest` is SHA-256 over the
+    /// **capability names only** — so both digests are the SHA-256 of the empty
+    /// input, `e3b0c442…`, and the test failed on its own premise rather than on
+    /// the code. The lesson generalizes: a fixture whose digest is a function
+    /// of an empty list distinguishes nothing, and a test built on one proves
+    /// nothing while looking like it does (`§O-105`).
+    #[test]
+    fn narrowing_the_grants_invalidates_a_warm_instances_scope() {
+        use crate::tenant::{GrantDigest, TenantScope};
+        use qqq_cap::egress::TenantId;
+
+        // The wide set really does grant something.
+        let wide = grants_from(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nrandom = true\nhash = [\"sha256\"]\n",
+        );
+        let narrow = GrantSet::empty();
+
+        let wide_digest = GrantDigest::new(&wide.digest()).expect("canonical");
+        let narrow_digest = GrantDigest::new(&narrow.digest()).expect("canonical");
+        assert_ne!(wide_digest, narrow_digest, "the digests must differ");
+        assert!(!wide.capabilities().is_empty(), "the wide set is not empty");
+
+        let tenant = TenantId::new("acme").expect("tenant");
+        let scope = TenantScope::new(tenant.clone(), wide_digest);
+
+        let refusal = scope
+            .probe(&tenant, &narrow_digest)
+            .expect_err("the narrowed digest must not match the warm instance");
+        assert!(
+            refusal.to_string().contains("revoked"),
+            "the refusal must explain that authority was revoked: {refusal}"
+        );
+    }
+
+    /// The empty grant set has a stable, non-empty digest — and it is the
+    /// SHA-256 of the empty input, because the digest covers capability names
+    /// and nothing else.
+    ///
+    /// Pinned because it is a value that two *different* descriptions collide
+    /// on: a manifest declaring no capabilities and a manifest declaring
+    /// `[capabilities]` with everything off resolve to the same authority and
+    /// therefore the same digest. That is correct — the digest is specified to
+    /// depend on effective authority, and two routes to "nothing" are one
+    /// authority. What would be a bug is an *empty string*, since that is
+    /// indistinguishable from an unset field.
+    #[test]
+    fn the_empty_grant_set_digests_to_the_sha256_of_nothing_not_to_an_empty_string() {
+        use crate::tenant::GrantDigest;
+
+        let empty = GrantSet::empty();
+        let digest = empty.digest();
+        assert_eq!(
+            digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "the empty grant set must digest to SHA-256 of the empty input"
+        );
+        assert!(
+            GrantDigest::new(&digest).is_ok(),
+            "the digest must be canonical lowercase hex"
+        );
+
+        // Two spellings of "no capability" are one authority, so one digest.
+        assert_eq!(
+            grants_from(MINIMAL_MANIFEST).digest(),
+            digest,
+            "a capability-free manifest is the empty grant set"
+        );
     }
 }

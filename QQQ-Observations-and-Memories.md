@@ -8879,4 +8879,129 @@ entry is the correction.
 
 | 2026-09-20 | **The Linux development bridge built (`§O-084`), and it found a real security defect in its first hour (`§O-085`).** `docker/` + `tools/qqqdev.ps1` run the Linux half of verification from Windows: a pinned Rust 1.97 image with nightly, `cargo-fuzz` and ASan; a one-shot `run --rm` service; and a `status`/`test`/`test-linux`/`checks`/`inject`/`fuzz`/`matrix`/`build`/`shell`/`clean` command set. **The one-way rule is enforced in code, not documented**: build output goes to named volumes (never a bind-mounted path), so the host's **17 GB** of Windows artifacts (`target/` 12.5 GB, `fuzz/` 4.5 GB) cannot be contaminated — and a source guard hashes every tracked file before and after each command, failing with exit 3 if one changed. **The finding:** `SEC-019`'s seccomp filter is installed with `Errno(EPERM)` as its default action, and the test asserted only that it was **installed** — so changing the action to `Allow` (a default-ALLOW filter, i.e. the exact bypass the profile prevents) **passed every test in the workspace**. It was invisible to Windows because the code is `#[cfg(target_os = "linux")]` and the test was compiled out. Four probe designs failed before the fifth worked — an `unsafe` block the workspace lint correctly forbids even in tests; `TRACEME` in the child (stops awaiting a tracer, hanging 60 s); `TRACEME` in a grandchild (the stop happens at **`execve`**, so the child never executes); and finally `process_vm_readv` on self, whose two required properties were **measured** first (succeeds unfiltered as uid 1000; denied by the profile). Then the test *still* passed, for a fifth reason: `seccompiler` refuses to **construct** a filter whose actions are both `Allow`, so the step reported `Failed` and the "environment inconclusive" early-return swallowed it. **A detection reported as "inconclusive" is a detection lost.** Now CAUGHT, with 2 tests failing, and the injection is a permanent `qqqdev inject` case. **This is the fifth instance of one shape** — believed vs actual: the memory limit was advisory; the refusal path *was* the amplification; the boundary check was unreachable; the capability diff compared a value to itself; the seccomp filter was installed and inert. Five build defects were also found in the bridge itself by running it (`/results` and `~/.cargo/registry` root-owned; `$LASTEXITCODE` replaced by container output; `${CARGO_HOME}` interpolated before its `ENV`; and CRLF in the entrypoint — `§O-086`, where a Windows checkout gave Linux an interpreter named `bash\r`, because `.gitattributes` normalises on **commit** while Docker builds from the **working tree**). | Architect |
 
+### §O-104 — A tenancy that was structural in one place and merely probable in another
+
+**What `CAP-014` asked for, and what was actually there.**
+
+> Implement per-tenant grant isolation and prove no cross-tenant handle leakage.
+
+The `→ Partial:` note was right about both halves. `TenantId`, `TenantEgress` and
+`EgressPolicy` existed in `qqq-cap::egress`; `HandleTable` in `qqq-host::handles`
+had a generation counter and 22 tests. What did not exist was any **link** between
+them: nothing in the workspace could state "this instance belongs to tenant X", so
+nothing could state that a handle created under X could not be reached by Y.
+
+**The distinction the item turns on.** Per-tenant *grant isolation* was already
+structural, and already tested: `build_linker` is called per instance from the
+resolved grant set, so an ungranted import is **absent** rather than denied.
+Handle *containment* was already structural too, but for a different reason —
+`HandleTable` is a field of `StoreData`, and `StoreData` is not shared between
+stores. Neither of those two facts is a statement about tenants. Two tenants
+running the same artifact under the same grant set produce two `StoreData`
+values whose handle tables are indistinguishable, and the claim "no cross-tenant
+handles" was true only because *nothing routed between them yet*.
+
+**That is the gap, stated precisely: the property held by construction of the
+call graph rather than by construction of the types.** It would have stopped
+being true the first time a pool was added, and nothing would have failed.
+
+**The key, and the field that is easy to leave out.** The obvious pool key is
+`(tenant, component digest)`. `ComponentDigest` is a content hash; a manifest
+revision is a separate value. Two deployments of **the same wasm bytes** under
+different grants — the common case for a staging tenant and a production tenant,
+or for one tenant whose grants were narrowed — share a component digest and do
+not share authority. Keying on the digest alone hands a pooled instance created
+under the wider grants to the narrower deployment. `InstanceKey` therefore takes
+three fields, and `one_component_under_two_grant_sets_is_two_keys` is the test
+that separates them; without it every other test in the module passes.
+
+**Two decisions made unreachable rather than merely unwritten.**
+
+The first is re-scoping. A `set_tenant` would be the whole vulnerability on its
+own: the pool could be perfectly correct and one call in one request path would
+undo it. So `TenantScope` fixes the tenant at construction and the only mutation
+available is `for_same_tenant`, which refuses to change the tenant at all, and
+consumes `self` rather than taking `&mut self` — a store cannot be scoped twice
+without an explicit rebuild, and the rebuild is the point.
+
+The second is the `None` case. `StoreData::tenant` is `Option<TenantScope>`,
+because most existing stores are single-tenant: `qqqai run` and 280 unit tests.
+The tempting reading of `None` is "any tenant", which would silently make every
+one of those stores a cross-tenant hole the day one was handed to a server
+request. `None` means **unscoped**, the accessor returns `None` (not a wildcard
+scope), and `an_unscoped_store_reports_no_tenant_rather_than_any_tenant` pins it.
+
+**A check I wrote, then deleted, because it could not fail.** The first
+`TenantLedger::is_isolated` was `self.live.keys().all(|k| k.tenant() == k.tenant())`.
+It compiles, it runs, it returns `true` forever. In a `BTreeMap<InstanceKey, _>`
+the key **is** the filing, so "is every key filed under its own tenant" is not a
+question the type can be asked — which means the check carried no information at
+all (`§M-006`). The real invariant the type can hold is a **conservation** one:
+every entry has a non-zero count. A zero-count slot is the concrete cross-tenant
+leak — a pool slot not returned to the allocator, still carrying the key that
+created it, so a later tenant's acquire revives it with the previous tenant's
+claims attached. `is_isolated` checks that, and
+`a_ledger_with_a_zero_count_slot_is_detected_as_not_isolated` injects the fault
+directly into the private map to show the check is not blind.
+
+**And the ordering choice, pinned.** `probe` checks the tenant before the grant
+digest, so a handle differing in both names the more severe reason. The error
+naming *both* sides is what makes the refusal actionable: "denied" is not, "this
+store belongs to `acme`, the handle to `globex`" is.
+
+→ `crates/qqq-host/src/tenant.rs` (22 tests), `crates/qqq-host/src/linker.rs`
+(`StoreData::with_tenant`, `tenant_scope`, 4 tests), `crates/qqq-host/src/lib.rs`.
+
+---
+
+### §O-105 — The test failed on its own premise, and the code was right
+
+**A fixture whose digest is a function of an empty list distinguishes nothing.**
+
+`narrowing_the_grants_invalidates_a_warm_instances_scope` proves that a pooled
+instance built under wider grants is not reusable after the operator narrows
+them. Its first version built the "wide" side from a capability-free manifest
+and compared that digest against `GrantSet::empty()`. It failed:
+
+```
+assertion `left != right` failed: the digests must differ
+  left:  GrantDigest("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+ right:  GrantDigest("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+```
+
+`e3b0c442…` is the SHA-256 of the **empty input**. `GrantSet::digest` hashes the
+capability names and nothing else, so a manifest declaring no capabilities *is*
+the empty grant set, and the two sides were one value. **The code was correct;
+my premise was wrong.** The fix is a manifest that actually grants something —
+and the failure is worth keeping for a second reason, because the shape recurs:
+a fixture parameterized by an empty collection cannot distinguish any
+implementation from any other, and it fails only if you happen to compare it to
+itself. Most such fixtures pass, which is worse.
+
+**Why it is pinned rather than merely fixed.**
+`the_empty_grant_set_digests_to_the_sha256_of_nothing_not_to_an_empty_string`
+asserts the literal value, and asserts that a capability-free manifest produces
+it. Two things are being protected. First, an **empty string** would be the bug:
+`""` is indistinguishable from an unset field and would make "no grants
+recorded" and "no grants" the same value. Second, that two *different*
+descriptions — a manifest with no `[capabilities]` table, and one with the table
+present and everything off — collide on one digest is **correct**: the digest is
+specified to depend on effective authority, and two routes to "nothing" are one
+authority. Stating that as a test is what keeps a future "improvement" to the
+digest from turning it into a per-manifest value, which would double the pool
+size for every project that narrowed away all its grants.
+
+**A smaller discovery from the same round.** `Manifest::parse("name = \"a\"")`
+fails with `MissingField { field: "package" }`; `[package]` requires **both**
+`name` and `version`, and a bare `name` key is not a package header. Three new
+tests hit this before the shape was recorded as `MINIMAL_MANIFEST`, which is now
+a named constant beside `grants_from` so the fourth does not rediscover it.
+Recorded as a *minor* note rather than a finding, because the error message
+named the missing field and the fix took one line — the cost was in not knowing
+the shape, not in diagnosing it.
+
+→ `crates/qqq-host/src/linker.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

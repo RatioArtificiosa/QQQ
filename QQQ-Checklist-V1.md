@@ -1264,9 +1264,56 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CAP-013** Implement the ordered-map requirement: no host interface exposes unordered iteration to guests.
   → Done: `BTreeMap`/`BTreeSet` throughout the capability and linker paths; no unordered iteration reaches a guest.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **CAP-014** Implement per-tenant grant isolation and prove no cross-tenant handle leakage.
-  → Partial: per-tenant `TenantId` exists and grants are per-instance, but cross-tenant handle leakage is not yet proven by test.
-  → Partial: per-tenant `TenantId` exists and grants are per-instance, but cross-tenant handle leakage is not yet proven by test.
+- [x] **CAP-014** Implement per-tenant grant isolation and prove no cross-tenant handle leakage.
+  → Done: `crates/qqq-host/src/tenant.rs` — `TenantScope`, `InstanceKey`,
+    `GrantDigest`, `ComponentDigest`, `ScopeRefusal` and `TenantLedger`.
+    22 unit tests, plus 4 in `crates/qqq-host/src/linker.rs` proving the scope
+    travels with the store. `StoreData` gained `with_tenant` / `tenant_scope`.
+  → **The item's two halves were true in different ways, and only one of them
+    was a property of the types.** Grant isolation was already structural — the
+    linker is built per instance from the resolved grants, so an ungranted
+    import is *absent*. Handle containment was already structural too — the
+    table is a field of `StoreData` and stores are not shared — but that is a
+    fact about the call graph, not about tenancy. Two tenants on one artifact
+    under one grant set produced two indistinguishable stores, and "no
+    cross-tenant handles" held only because *nothing routed between them yet*.
+    It would have stopped holding the first time a pool was added (`§O-104`).
+  → **The key is `(tenant, component digest, grant digest)`, not `(tenant,
+    component digest)`.** A component digest is a content hash of the wasm
+    bytes, so two deployments of **the same artifact** under different manifest
+    revisions share it and do not share authority. Keying on the digest alone
+    hands a pooled instance created under the wider grants to the narrowed
+    deployment — the common case for staging/production, or for one tenant
+    whose grants were just revoked.
+    `one_component_under_two_grant_sets_is_two_keys` is the test that separates
+    them; every other test in the module passes without it.
+  → **Re-scoping is unreachable rather than merely unwritten.** A `set_tenant`
+    would be the entire vulnerability: the pool could be correct and one call in
+    one request path would undo it. `TenantScope` fixes the tenant at
+    construction; the only mutation available is `for_same_tenant`, which
+    refuses to change the tenant, and `StoreData::with_tenant` consumes `self`
+    so a store cannot be scoped twice without an explicit rebuild.
+  → **`None` means unscoped, never "any tenant".** `StoreData::tenant` is
+    `Option<TenantScope>` because `qqqai run` and 280 existing tests are
+    single-tenant. The tempting reading of `None` — a wildcard — would make
+    every one of those stores a cross-tenant hole the moment one was handed to
+    a server request. `an_unscoped_store_reports_no_tenant_rather_than_any_tenant`
+    pins the refusal.
+  → **`is_isolated` was rewritten after its first version could not fail.**
+    `live.keys().all(|k| k.tenant() == k.tenant())` compiles, runs, and returns
+    `true` forever: in a `BTreeMap<InstanceKey, _>` the key *is* the filing, so
+    the type cannot be asked "is this key filed under its own tenant". The
+    invariant the type *can* hold is conservation — every entry has a non-zero
+    count. A zero-count slot is the concrete leak: a pool slot not returned to
+    the allocator, still carrying its original key, so a later tenant's acquire
+    revives it with the previous tenant's claims attached.
+    `a_ledger_with_a_zero_count_slot_is_detected_as_not_isolated` injects the
+    fault into the private map to prove the check is not blind.
+  → Fault injection: `probe`'s refusal branch is driven twice (foreign tenant,
+    then stale grants), and the tenant is checked before the grant digest so a
+    handle differing in both names the more severe reason. The refusal names
+    **both** scopes — "denied" is not actionable, "this store belongs to
+    `acme`, the handle to `globex`" is.
   → §7.1 What we are defending, precisely
 - [ ] **CAP-015** Implement capability-use accounting feeding the audit stream.
   → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.

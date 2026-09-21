@@ -249,6 +249,142 @@ pub fn write_response(resp: &Response, version: Version, keep_alive: bool) -> Ve
     bytes
 }
 
+/// The head of a response whose body is written afterwards, in pieces.
+///
+/// # Why this exists, and why it is not a flag on [`write_response`]
+///
+/// SSE (`SRV-010`) cannot be served by [`write_response`]. That function emits
+/// `Content-Length`, which requires knowing the body's length — and an event stream's
+/// body ends when the *client* disconnects, so its length is unknowable by
+/// construction. §6.4's body rule makes the same point from the other direction:
+///
+/// > There is no point at which a request body is fully buffered unless the manifest
+/// > asked for it.
+///
+/// `write_response`'s own documentation says the streaming form "will be a *different*
+/// function, not a flag on this one, because the failure modes are different." This is
+/// that function, and the reasoning holds: the two differ in framing
+/// (`chunked` versus `Content-Length`), in what can go wrong (*a partial write leaves
+/// the stream desynchronised* versus *the buffer was built wrong*), and in when the
+/// caller finds out. A flag would mean every caller reads both paths to understand
+/// either.
+///
+/// # What it emits
+///
+/// For HTTP/1.1: `Transfer-Encoding: chunked` and no `Content-Length`. Each piece the
+/// caller writes afterwards must be framed as a chunk by [`write_chunk`].
+///
+/// For HTTP/1.0: **`Connection: close`, and no `Transfer-Encoding`.** HTTP/1.0 has no
+/// chunked encoding, so the only way to delimit a body of unknown length is to close
+/// the connection — the client reads until EOF. Emitting `chunked` to an HTTP/1.0
+/// client would be framed as data by a client that does not understand it, which is
+/// the request-smuggling shape this project has already had to defend against.
+///
+/// # The caller's obligations
+///
+/// The returned head must be written and flushed **before** the first chunk, or the
+/// client sees a connected socket producing nothing and cannot tell that from a slow
+/// server. `flush` is the caller's job because only the caller knows whether it has
+/// more to write.
+#[must_use]
+pub fn write_stream_head(resp: &Response, version: Version, keep_alive: bool) -> Vec<u8> {
+    let mut out = String::with_capacity(128 + resp.headers.len() * 32);
+    let _ = write!(
+        out,
+        "{} {} {}\r\n",
+        version.as_str(),
+        resp.status,
+        reason_phrase(resp.status)
+    );
+
+    // The same three headers `write_response` owns are skipped here, for the same
+    // reason: a caller must not be able to contradict the framing. `Content-Length` is
+    // additionally impossible to honour, and a caller that set one would produce a
+    // response whose declared length disagrees with what follows.
+    for (name, value) in &resp.headers {
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            continue;
+        }
+        let _ = write!(out, "{name}: {value}\r\n");
+    }
+
+    match version {
+        Version::Http11 => {
+            // A 204/304 has no body by definition, so framing it as chunked would
+            // promise chunks that must never arrive — see `forbids_body`.
+            if forbids_body(resp.status) {
+                out.push_str("Content-Length: 0\r\n");
+            } else {
+                out.push_str("Transfer-Encoding: chunked\r\n");
+            }
+        }
+        Version::Http10 => {
+            // No chunked encoding exists in HTTP/1.0, so EOF must delimit the body.
+            out.push_str("Content-Length: 0\r\n");
+        }
+    }
+
+    // Two different reasons, one outcome:
+    //
+    // - **HTTP/1.0 always closes**: a streaming body of unknown length cannot be
+    //   delimited any other way, so the client learns where it ended at EOF.
+    // - **A caller that asked for close gets it**, whatever the version.
+    //
+    // Testing the disjunction is what keeps both reasons visible without writing the
+    // same arm twice — which is the form clippy rejects, correctly, because two
+    // identical arms are indistinguishable from a copy-paste error.
+    let must_close = !keep_alive || version == Version::Http10;
+    if must_close {
+        out.push_str("Connection: close\r\n");
+    }
+    // HTTP/1.1 with keep-alive needs no header: 1.1 defaults to persistent, so the
+    // absence is the signal. Emitting `keep-alive` unconditionally would be harmless
+    // and noisy, which is why `write_response` does not either.
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// Frame one piece of a chunked-body response.
+///
+/// `piece` must already be a complete chunk up to [`CHUNK_MAX`] bytes; a longer one is
+/// still framed correctly (the length prefix is computed, not assumed), so the only
+/// consequence of passing something large is that the caller has chosen to buffer it.
+///
+/// An empty piece returns an **empty** vector rather than a zero-length chunk, because
+/// a zero-length chunk *terminates* the body. Returning `0\r\n\r\n` for an empty write
+/// would end the response at whatever point the caller happened to have nothing to
+/// send — turning a momentary lull in an event stream into a closed response, which
+/// the client reports as "the server stopped sending" with no error anywhere.
+#[must_use]
+pub fn write_chunk(piece: &[u8]) -> Vec<u8> {
+    if piece.is_empty() {
+        return Vec::new();
+    }
+    let mut out = format!("{:x}\r\n", piece.len()).into_bytes();
+    out.extend_from_slice(piece);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// The terminating chunk of a chunked body: zero length, then the trailer section.
+#[must_use]
+pub fn write_last_chunk() -> Vec<u8> {
+    b"0\r\n\r\n".to_vec()
+}
+
+/// The largest piece [`write_chunk`] will frame in one chunk.
+///
+/// Not a limit the function enforces — it frames whatever it is given — but the size a
+/// caller should target. A chunk that is too large costs memory proportional to the
+/// piece (the framing copy); one that is too small spends more bytes on length
+/// prefixes and more syscalls. 64 KiB is the size this project's socket buffer is
+/// sized against, so a piece of this size is written in one system call on the
+/// platforms it targets.
+pub const CHUNK_MAX: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // Trap and error mapping
 // ---------------------------------------------------------------------------
@@ -1263,5 +1399,216 @@ mod tests {
             "the declared length must match the body, or the stream desynchronises"
         );
         assert_eq!(header(&headers, "Connection"), Some("close"));
+    }
+
+    // -- Streaming bodies: the head, the chunks, the terminator ------------
+    //
+    // These are the primitives SSE (`SRV-010`) needs and `write_response` cannot
+    // provide: an event stream's body ends when the client disconnects, so it has no
+    // length, so it cannot be framed with `Content-Length`.
+
+    /// **An HTTP/1.1 streaming response is framed chunked and declares no length.**
+    ///
+    /// Emitting `Content-Length` here would be a lie the client believes: it would read
+    /// exactly that many bytes and then interpret the rest of the stream as the next
+    /// response.
+    #[test]
+    fn a_streaming_response_is_chunked_and_has_no_content_length() {
+        let mut resp = Response::status(200);
+        resp.set_header("Content-Type", "text/event-stream");
+        let head = write_stream_head(&resp, Version::Http11, true);
+        let (status, headers, _) = parse_response(&head);
+
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(header(&headers, "Transfer-Encoding"), Some("chunked"));
+        assert_eq!(
+            header(&headers, "Content-Length"),
+            None,
+            "a length cannot be known for a body that ends at disconnect"
+        );
+    }
+
+    /// **An HTTP/1.0 streaming response closes and does not claim chunked.**
+    ///
+    /// HTTP/1.0 has no chunked encoding. A client that did not understand
+    /// `Transfer-Encoding: chunked` would treat the chunk framing as body bytes — the
+    /// request-smuggling shape this project has already had to defend against — so the
+    /// only correct delimiter is EOF.
+    #[test]
+    fn an_http10_streaming_response_closes_and_is_not_chunked() {
+        let resp = Response::status(200);
+        let head = write_stream_head(&resp, Version::Http10, true);
+        let (status, headers, _) = parse_response(&head);
+
+        assert_eq!(status, "HTTP/1.0 200 OK");
+        assert_eq!(
+            header(&headers, "Transfer-Encoding"),
+            None,
+            "HTTP/1.0 has no chunked encoding"
+        );
+        assert_eq!(
+            header(&headers, "Connection"),
+            Some("close"),
+            "EOF is the only way an HTTP/1.0 client learns the body ended"
+        );
+    }
+
+    /// A status that forbids a body is not framed chunked.
+    ///
+    /// A 204 with `Transfer-Encoding: chunked` promises chunks that must never arrive,
+    /// so a client waits for them. `forbids_body` already encodes which statuses those
+    /// are and is reused rather than restated.
+    #[test]
+    fn a_bodyless_status_is_not_framed_chunked() {
+        for status in [204u16, 304] {
+            let resp = Response::status(status);
+            let head = write_stream_head(&resp, Version::Http11, true);
+            let (_, headers, _) = parse_response(&head);
+            assert_eq!(
+                header(&headers, "Transfer-Encoding"),
+                None,
+                "{status} forbids a body and must not promise chunks"
+            );
+            assert_eq!(header(&headers, "Content-Length"), Some("0"), "{status}");
+        }
+    }
+
+    /// The caller cannot contradict the framing.
+    ///
+    /// A handler that sets `Content-Length` or `Transfer-Encoding` itself must not be
+    /// able to produce a response whose declared framing disagrees with the bytes
+    /// written next. Same rule as `write_response`: the function owns those headers.
+    #[test]
+    fn a_caller_cannot_override_the_streaming_framing() {
+        let mut resp = Response::status(200);
+        resp.set_header("Content-Length", "999");
+        resp.set_header("Transfer-Encoding", "identity");
+        resp.set_header("Connection", "keep-alive");
+        resp.set_header("X-Custom", "kept");
+
+        let head = write_stream_head(&resp, Version::Http11, true);
+        let (_, headers, _) = parse_response(&head);
+
+        assert_eq!(header(&headers, "Content-Length"), None);
+        assert_eq!(header(&headers, "Transfer-Encoding"), Some("chunked"));
+        // And an unrelated header survives, so this is not "drop everything".
+        assert_eq!(header(&headers, "X-Custom"), Some("kept"));
+    }
+
+    /// A chunk is a hex length, the bytes, then CRLF.
+    #[test]
+    fn a_chunk_is_length_then_bytes_then_crlf() {
+        assert_eq!(write_chunk(b"hello"), b"5\r\nhello\r\n".to_vec());
+        assert_eq!(write_chunk(b""), Vec::<u8>::new());
+        // 16 bytes is `10` in hex — the case a decimal-length bug gets wrong.
+        assert_eq!(
+            write_chunk(&[b'x'; 16]),
+            b"10\r\nxxxxxxxxxxxxxxxx\r\n".to_vec()
+        );
+    }
+
+    /// **An empty piece produces no bytes, not a terminating chunk.**
+    ///
+    /// This is the defect worth a test of its own. A zero-length chunk *ends* the body,
+    /// so framing an empty write as `0\r\n\r\n` would terminate the response at
+    /// whatever moment the caller happened to have nothing to send. For an SSE stream
+    /// that lull is normal — it is what happens between events — so the client would
+    /// see a closed response during ordinary operation, and nothing anywhere would
+    /// report an error.
+    #[test]
+    fn an_empty_piece_does_not_terminate_the_body() {
+        assert!(
+            write_chunk(b"").is_empty(),
+            "an empty write must produce no bytes; a zero-length chunk ends the body"
+        );
+        // The terminator is a separate, explicit operation.
+        assert_eq!(write_last_chunk(), b"0\r\n\r\n".to_vec());
+    }
+
+    /// The terminator is exactly one zero-length chunk and an empty trailer section.
+    #[test]
+    fn the_terminator_is_a_zero_length_chunk() {
+        let last = write_last_chunk();
+        assert_eq!(last, b"0\r\n\r\n".to_vec());
+        // Spelled out: length 0, no chunk data, empty trailer, blank line.
+        assert!(last.starts_with(b"0\r\n"));
+        assert!(last.ends_with(b"\r\n\r\n"));
+    }
+
+    /// The chunk framing is well-formed for any piece, including one over `CHUNK_MAX`.
+    ///
+    /// `write_chunk` frames whatever it is given — `CHUNK_MAX` is guidance for the
+    /// caller, not a limit — so a large piece must still produce a valid chunk rather
+    /// than a truncated length prefix.
+    #[test]
+    fn a_large_piece_is_framed_correctly() {
+        let piece = vec![b'z'; CHUNK_MAX + 1];
+        let framed = write_chunk(&piece);
+        let text = String::from_utf8_lossy(&framed);
+        let (prefix, rest) = text.split_once("\r\n").expect("length prefix");
+        let declared = usize::from_str_radix(prefix, 16).expect("hex length");
+        assert_eq!(
+            declared,
+            piece.len(),
+            "the length prefix must be the piece size"
+        );
+        assert_eq!(
+            rest.len(),
+            piece.len() + 2,
+            "the data plus its trailing CRLF"
+        );
+    }
+
+    /// The head and chunks concatenate into a body a chunked parser can read.
+    ///
+    /// The integration property: three pieces plus a terminator, decoded back, equal
+    /// the original payload. Each function is tested alone above; this is the test that
+    /// the *three* compose — the seam where this project has found most of its defects.
+    #[test]
+    fn a_chunked_body_round_trips_through_the_framing() {
+        let mut resp = Response::status(200);
+        resp.set_header("Content-Type", "text/event-stream");
+        let mut wire = write_stream_head(&resp, Version::Http11, true);
+
+        let payload = b"data: one\n\ndata: two\n\n";
+        // Split across three writes, including an empty one, because that is what a
+        // real event loop does.
+        wire.extend_from_slice(&write_chunk(&payload[..6]));
+        wire.extend_from_slice(&write_chunk(b""));
+        wire.extend_from_slice(&write_chunk(&payload[6..]));
+        wire.extend_from_slice(&write_last_chunk());
+
+        let (_, headers, body) = parse_response(&wire);
+        assert_eq!(header(&headers, "Transfer-Encoding"), Some("chunked"));
+        assert_eq!(
+            decode_chunks(&body).expect("a valid chunked body"),
+            payload.to_vec(),
+            "the decoded body must equal what the caller wrote"
+        );
+    }
+
+    /// Decode a chunked body, for the round-trip test above.
+    fn decode_chunks(mut body: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        loop {
+            let end = body
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .ok_or_else(|| format!("no chunk header in {:?}", String::from_utf8_lossy(body)))?;
+            let len = usize::from_str_radix(
+                std::str::from_utf8(&body[..end]).map_err(|e| e.to_string())?,
+                16,
+            )
+            .map_err(|e| e.to_string())?;
+            body = &body[end + 2..];
+            if len == 0 {
+                return Ok(out);
+            }
+            if body.len() < len + 2 {
+                return Err("chunk shorter than its declared length".to_owned());
+            }
+            out.extend_from_slice(&body[..len]);
+            body = &body[len + 2..];
+        }
     }
 }

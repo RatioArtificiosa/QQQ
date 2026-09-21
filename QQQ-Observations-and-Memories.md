@@ -10663,4 +10663,63 @@ touched. Recorded here rather than silently dropped.
 
 ---
 
+### §O-127 — The SSE framing rules are invisible in the example that introduces them
+
+**Context.** `SRV-010` implements Server-Sent Events. The format's canonical
+introduction is one line:
+
+```
+data: hello
+
+```
+
+Every rule that matters is absent from it, and four of them were defects in my first
+draft — found by tests, not by reading. This is worth recording because SSE is a
+format where "it looks trivial" is the reason implementations get it wrong, and
+because all four have the same shape as the rest of `§O-11x`: *a thing that looks
+correct and is not.*
+
+| # | The rule | What my first draft did | The consequence |
+|---|---|---|---|
+| 1 | A comment (`:text`) is not data | emitted `:ping\ndata:\n\n` | the client dispatches an **empty message**, waking every listener on an idle connection — the opposite of a keep-alive's purpose |
+| 2 | The parser strips **exactly one** space after the colon | wrote `data:{payload}` | a payload starting with a space lost it: `data:  x` carries ` x`, `data: x` carries `x` |
+| 3 | An event with any `data` field needs at least one `data:` line | a newline-only payload emitted **no** `data:` line | the message became a bare blank line — an event with no fields, indistinguishable from a stray separator |
+| 4 | The line-break set is `\r\n`, `\n` **and `\r`** | filter closure was vacuous | `|l| !l.is_empty() \|\| s.is_empty()` ignores `l`, so it either kept everything or dropped everything |
+
+**Rule 4 is the one to look at**, because it is a *test-visible* bug that a passing
+suite hid. The closure's first operand is a function of `l` and the second of `s`, so
+the whole predicate is constant per string: for a non-empty `s` it is always true, and
+for an empty one always false. It reads as a deliberate condition and is a tautology.
+`clippy` does not flag it; the tests did, once one of them asserted what `"\n"` splits
+into.
+
+**Rule 3 is the one that took two attempts**, and the second attempt is the
+interesting one. My first fix made `split_lines` keep empty fields "when the whole
+payload is empty" — the same vacuous predicate as rule 4, arrived at twice. The
+correct decomposition separates the two concerns: the splitter drops empty fields
+(they carry no information, since the client joins with `\n` and removes the last), and
+the **encoder** guarantees at least one `data:` line for any event carrying data. Two
+rules that must agree, stated in two places — and the test
+`a_newline_payload_is_the_same_event_as_an_empty_one` is what pins them together.
+
+**The generalisable rule.** *An example is not a specification.* `data: hello\n\n` is
+the introduction to SSE in every tutorial, and it exercises none of the four rules
+above. Reading the specification's **parsing algorithm** — not its examples — is what
+surfaced rules 1, 2 and 3, and writing a parser *from that algorithm* rather than from
+my own encoder is what made the round-trip tests meaningful. Two bugs that agree with
+each other pass a round-trip test; a specification-derived parser does not agree with
+a wrong encoder.
+
+**And the honest boundary.** `Handler` is synchronous and returns a complete
+`Vec<u8>` body, so no handler can stream today. SSE is therefore complete at the
+framing and framing-level integration, and *not* reachable through `serve`. That is
+recorded in the checklist entry, in the integration test's module docs, and here —
+because a feature that looks finished and cannot be called is exactly the defect this
+file exists to catch, and the temptation to tick the box and move on was real.
+
+→ `crates/qqq-serve/src/sse.rs`, `crates/qqq-serve/src/response.rs`,
+`crates/qqq-serve/tests/sse.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

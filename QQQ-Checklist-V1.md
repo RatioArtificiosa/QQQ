@@ -1362,9 +1362,49 @@ Items are grouped below by **phase**, because dependency order matters more than
     **both** scopes — "denied" is not actionable, "this store belongs to
     `acme`, the handle to `globex`" is.
   → §7.1 What we are defending, precisely
-- [ ] **CAP-015** Implement capability-use accounting feeding the audit stream.
-  → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.
-  → Partial: fuel and duration per execution are reported; capability-use accounting into an audit stream is not built.
+- [x] **CAP-015** Implement capability-use accounting feeding the audit stream.
+  → Done: `crates/qqq-host/src/audit.rs` — `AuditStream`, `AuditRecord`,
+    `AuditFields`, `Outcome`, `Ledger`, `Append`, `AppendCounters`. **34 tests**,
+    all green. `DEFAULT_CAPACITY` 65,536.
+  → **§10.1's three emphasised words are each a property a log does not have,
+    and each has its own test.** *Append-only*: a full stream **refuses**
+    (`Append::Full`) rather than overwriting — under the exact condition an audit
+    stream is needed, a ring would evict the *start* of an incident, and the
+    oldest records are the interesting ones. *Hash-chained*: every record carries
+    its predecessor's digest and its own, so editing one field invalidates every
+    later digest; `verify_chain` returns the **index** of the first break, not a
+    boolean, because an index is an investigation and a boolean is only an alarm.
+    *Evidence*: `AppendCounters` splits `recorded` from `refused`, so a gap is
+    **visible as a value** — a caller that cannot tell "nothing happened" from
+    "everything was refused" has no way to escalate.
+  → **"Granted, denied, and *attempted*" is honoured as three outcomes, not
+    two.** `Failed` is a fourth and is deliberately distinct from `Denied`: a
+    denial means the guest was not permitted, a failure means it was permitted
+    and the operation did not succeed — different remediations. `Attempted` is
+    the one that makes the record evidence, because it is the only outcome that
+    can show an intent that was **not** realised; without it, *"a component was
+    deployed needing authority the manifest does not grant"* — the most common
+    real event — leaves no record at all.
+  → **The chain is a hash chain rather than a Merkle tree**, because the threat
+    is retroactive editing and not third-party inclusion proofs: one comparison
+    per record buys "any mutation invalidates every later digest". Fields are
+    hashed with a **length prefix**, so the encoding is injective —
+    `the_field_encoding_is_injective_across_a_split` pins that `ab`+`c` cannot
+    hash as `a`+`bc`, which an un-prefixed concatenation would allow and which a
+    guest controlling a function name could use to forge a record.
+  → **`Ledger` answers §10.2's Capability row in all three of its dimensions** —
+    uses by capability, denials by capability, **by tenant**. The tenant
+    dimension is not a convenience: §7.1 names a compromised tenant as an
+    adversary, and "which tenant is this?" is the first question a responder
+    asks. A total answers nothing about that.
+  → Fault injection: editing a field, removing a record and reordering two
+    records are each detected, and each names the broken record; every one of the
+    eight `AuditFields` is covered by the digest, tested in two halves so a
+    failure names which class of field collided; the export **refuses** a
+    corrupted stream rather than emitting a valid-looking document; and
+    `assertions_on_constants` was fixed with a `const` block rather than
+    suppressed, because a runtime assertion of `DEFAULT_CAPACITY > 0` can never
+    fail and so carries no information (`§M-006`).
   → §10.1 The three signals, plus one unique to QQQ
 - [x] **CAP-016** Implement the `qqq:secrets` interface: use a secret without disclosing it.
   → Done: `crates/qqq-host/src/host_secrets.rs` — `SecretStore`, `SecretMaterial`,

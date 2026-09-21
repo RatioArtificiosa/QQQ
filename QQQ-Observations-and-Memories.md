@@ -9213,4 +9213,80 @@ and the doc comments state which verb uses which and why.
 
 ---
 
+### §O-108 — The fault injection that left the fault in place, and a check that went dead because its own test stopped reproducing it
+
+**What happened.** CI failed on a docs-only commit with:
+
+```
+check [4] checklist item with no Proposal citation
+  SKIP  strip CAP-011's citation line: mutation was a no-op (the test itself is wrong)
+8/9 fault injections detected
+SELF-TEST FAILED — a validator check is dead
+```
+
+The harness was right, and the failure is worth reading carefully because the
+thing that broke was neither the validator nor the document.
+
+**The mechanism.** Check [4] asserts that every checklist item cites a Proposal
+section. Its fault injection mutates `CAP-011` to remove that citation, using:
+
+```python
+r"(?m)^- \[[ x]\] \*\*CAP-011\*\*[^\r\n]*\r?\n(?:  → [^\r\n]*\r?\n?)*"
+```
+
+The `*` was meant to consume the heading and its `→` lines. It consumed the
+heading and **one** `→` line, because in this document every `→` entry is
+followed by continuation lines indented four spaces — which do not start with
+`  → ` — so the repetition terminated immediately. That was harmless while
+`CAP-011` had a single one-line citation. Ticking it added a `→ Done:` line and
+six more `→` entries with continuations, and the mutation left **six citations
+standing**. The item still cited §6.2, so check [4] correctly did not fire, and
+the harness correctly reported its own injection as a no-op.
+
+**Why this is a distinct failure from the ones already recorded.** `§O-092` and
+`§O-103` are *a rule whose input set excludes its target* — the check cannot fire
+because the corpus shape never reaches it. This is the mirror: **the injection
+did not reproduce the property the check tests for.** It removed one *syntactic
+instance* of "has a citation" rather than the property itself, so the mutation was
+a no-op against a check that was perfectly alive. A fault injection that leaves
+the fault in place tests nothing while looking like it tests something, and it is
+strictly more dangerous than no injection, because the green result is cited as
+evidence.
+
+**Two red flags already in this file, not applied to the new code.** The harness
+has a comment three lines above the check-[6] reversal saying *"a repair table is
+code, and code that is never executed against the thing it repairs is a guess"* —
+and the check-[4] reversal was exactly that: a hand-typed original listing the
+heading plus one citation. It would have restored one line and left the item
+different from before the injection. The comment was written after making this
+mistake once and did not prevent making it again one entry down.
+
+**The fix is structural in three parts, and each removes a way to go stale.**
+
+1. **The pattern stops counting.** It is now *"the heading, then every following
+   line that is indented and is not itself a new list item"*:
+   `^…(?:(?!- \[[ x!]\])[ \t]+[^\r\n]*\r?\n)*`. That is what "part of this
+   item" means in this document, so an entry gaining another paragraph or another
+   arrow cannot invalidate it.
+2. **The pattern is shared** between the mutation, the leftover-marker guard and
+   the repair table, so the three cannot disagree about what "the CAP-011 block"
+   is. They previously held three independent transcriptions of the same block.
+3. **The "original" is captured, not typed.** `CAP_011_ORIGINAL` is read from the
+   live checklist at import time; if the anchor stops matching it is `None` and
+   the harness reports that rather than guessing.
+
+**The generalisable rule, which is the reason this is an observation and not just
+a commit message.** A self-test's fault injection is itself code under test, and
+it has a failure mode the code it tests does not: **it can stop producing the
+fault while continuing to report success.** `expect_failure` already reports SKIP
+rather than passing silently, which is what made this a red build instead of a
+quietly weakened guard — and that check was added for a previous instance of the
+same class. The next step for anything anchor-shaped is to assert the *property*
+is gone (`"→ §" not in block`) and not merely that the substitution changed bytes.
+
+→ `tools/self_test_xrefs.py` (`CAP_011_BLOCK`, `CAP_011_ORIGINAL`), and the
+shared pattern used by the mutation, the marker guard and `REVERSALS`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

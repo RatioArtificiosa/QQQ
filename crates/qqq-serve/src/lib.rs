@@ -98,6 +98,8 @@ pub mod stream;
 pub mod tls;
 /// The WebSocket opening handshake, per RFC 6455 §4.
 pub mod ws;
+/// A live WebSocket connection: the loop between the handshake and the guest.
+pub mod ws_conn;
 /// The WebSocket frame layer, per RFC 6455 §5.
 pub mod ws_frame;
 /// Message assembly: turning a sequence of frames into whole messages.

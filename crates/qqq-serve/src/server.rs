@@ -137,6 +137,16 @@ pub struct Dispatch {
     /// Empty by default. A server that registers none behaves exactly as before, which
     /// is why adding this did not change any existing caller's meaning.
     pub streaming: Arc<std::collections::BTreeMap<String, crate::stream::StreamingHandler>>,
+    /// WebSocket handlers, by the route's `handler` name.
+    ///
+    /// A third kind, for the same reason there are two: a WebSocket connection is not a
+    /// request that produces a response — it **becomes a different protocol** and stays
+    /// open. A flat handler cannot express that and a streaming one should not have to.
+    ///
+    /// Keyed by name like the others, so a route whose handler has no WebSocket entry
+    /// falls through to whichever kind it does have.
+    pub websocket:
+        Arc<std::collections::BTreeMap<String, Arc<dyn crate::ws_conn::WebSocketHandler>>>,
 }
 
 impl Dispatch {
@@ -146,6 +156,7 @@ impl Dispatch {
         Self {
             flat: handler,
             streaming: Arc::new(std::collections::BTreeMap::new()),
+            websocket: Arc::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -165,6 +176,24 @@ impl Dispatch {
     #[must_use]
     pub fn streaming_for(&self, name: &str) -> Option<&crate::stream::StreamingHandler> {
         self.streaming.get(name)
+    }
+
+    /// Register a WebSocket handler for a route's handler name.
+    #[must_use]
+    pub fn with_websocket(
+        mut self,
+        name: impl Into<String>,
+        handler: Arc<dyn crate::ws_conn::WebSocketHandler>,
+    ) -> Self {
+        let websocket = Arc::make_mut(&mut self.websocket);
+        websocket.insert(name.into(), handler);
+        self
+    }
+
+    /// The WebSocket handler for a name, if one is registered.
+    #[must_use]
+    pub fn websocket_for(&self, name: &str) -> Option<&Arc<dyn crate::ws_conn::WebSocketHandler>> {
+        self.websocket.get(name)
     }
 }
 
@@ -630,6 +659,52 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
     let _ = stream.flush().await;
     let _ = stream.shutdown().await;
     Served::BodyRejected
+}
+
+/// Serve a request that arrived on a WebSocket route.
+///
+/// # Two outcomes, and why both are needed
+///
+/// A WebSocket route can be reached two ways, and they are different protocols:
+///
+/// - **With an upgrade** (§4.2.1): the connection becomes a WebSocket and stays open.
+///   `serve_websocket` owns it from the handshake onward.
+/// - **Without one**: it is an ordinary HTTP request that happened to match the route. It
+///   gets a `400` naming the missing header. Answering it with a `101` would put the
+///   connection into frame mode for a client still speaking HTTP.
+///
+/// Extracted because `serve_connection` is the connection's life cycle and this is a
+/// whole protocol transition happening in the middle of it — and because inlining it
+/// pushed that function past the line limit, which is the extraction the lint asked for.
+async fn serve_ws_route(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    handler: &dyn crate::ws_conn::WebSocketHandler,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    span: u64,
+) -> Served {
+    if !crate::ws_conn::is_upgrade_request(head) {
+        let refusal = crate::ws_conn::not_an_upgrade();
+        if stream.write_all(&refusal).await.is_err() || stream.flush().await.is_err() {
+            return Served::ClientClosed;
+        }
+        let _ = stream.shutdown().await;
+        return Served::HandlerClosed;
+    }
+
+    let ws_ctx = crate::ws_conn::WsContext {
+        peer: ctx.id.peer,
+        tenant,
+        logger: ctx.logger,
+        trace: ctx.id.trace,
+        span,
+    };
+    let outcome = crate::ws_conn::serve_websocket(stream, head, handler, None, &ws_ctx).await;
+    match outcome {
+        crate::ws_conn::WsOutcome::ProtocolError => Served::ClientClosed,
+        _ => Served::HandlerClosed,
+    }
 }
 
 /// Answer a request whose head could not be parsed, and close.
@@ -1129,6 +1204,27 @@ async fn serve_connection(
                     )
                     .await;
                 }
+            }
+        }
+
+        // --- A WebSocket route leaves HTTP entirely -------------------------
+        //
+        // `serve_ws_route` owns the whole exchange. Checked **first**, before streaming
+        // and before the flat handler, because an upgrade request is not a request for a
+        // response: answering it with a body commits the connection to HTTP and makes the
+        // upgrade impossible.
+        if let Some(m) = table.match_route(head.method, path) {
+            if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
+                span_seq += 1;
+                return serve_ws_route(
+                    &mut stream,
+                    &head,
+                    ws_handler.as_ref(),
+                    ctx,
+                    &tenant,
+                    span_seq,
+                )
+                .await;
             }
         }
 

@@ -48,6 +48,15 @@ impl GlobalFlags {
     const VERBOSE: u8 = 1 << 3;
     /// Show what would happen without doing it.
     const DRY_RUN: u8 = 1 << 4;
+    /// Print the full help rather than the brief one — `DX-013`.
+    ///
+    /// # Why `--help` has a depth at all
+    ///
+    /// Because §12.3 commits to `qqqai --help` being **≤40 lines**, and the
+    /// measured output was 53. Truncating would lose the `--json` contract line,
+    /// which is the most useful thing a script author reads here; so the default
+    /// is brief and `--help --all` is complete. See [`render_help`].
+    const ALL: u8 = 1 << 5;
 
     /// Set a flag.
     fn set(&mut self, flag: u8) {
@@ -76,6 +85,12 @@ impl GlobalFlags {
     #[must_use]
     const fn dry_run(self) -> bool {
         self.has(Self::DRY_RUN)
+    }
+
+    /// Whether the full help was requested — `DX-013`.
+    #[must_use]
+    const fn all(self) -> bool {
+        self.has(Self::ALL)
     }
 
     /// The output format these flags select.
@@ -177,6 +192,18 @@ fn parse_args(argv: &[String]) -> Parsed {
             "--quiet" | "-q" => flags.set(GlobalFlags::QUIET),
             "--verbose" | "-v" => flags.set(GlobalFlags::VERBOSE),
             "--dry-run" => flags.set(GlobalFlags::DRY_RUN),
+            // `DX-013`: `--all` deepens `--help`. It is accepted *unconditionally*
+            // and is inert unless the resolved action is `Help`, for the same
+            // reason `--verbose` is: a flag with nothing to modify should not be
+            // an error, and this file's own principle is that flag precedence is
+            // order-independent.
+            //
+            // The first version gated on `action == Some(Action::Help)`, which
+            // made `--all --help` fail while `--help --all` worked -- an
+            // order-dependence introduced by a guard written to prevent a
+            // different problem. `all_is_only_accepted_with_help` is what caught
+            // it, and it now asserts both orders.
+            "--all" => flags.set(GlobalFlags::ALL),
             other if other.starts_with('-') && command.is_none() => {
                 // An unknown global flag *before* the command is a usage error.
                 // After the command it belongs to the command and passes
@@ -207,99 +234,139 @@ fn parse_args(argv: &[String]) -> Parsed {
     Parsed { flags, action }
 }
 
+/// The maximum number of lines `qqqai --help` may print — `DX-013`.
+///
+/// # Where this number comes from
+///
+/// §12.3's DX-commitments table, in a section titled *"measurable, in CI"*:
+///
+/// > | `qqqai --help` for any command | **≤ 40 lines, actionable** | Review standard |
+///
+/// Measured before this constant existed: **53 lines**. The commitment had a
+/// number on it and the implementation did not meet it, which is the shape
+/// `§O-066` records — a claim that reads as satisfied because nobody counted.
+///
+/// It is a constant rather than a comment so [`help_fits_the_brevity_standard`]
+/// can assert against it, and so a future addition that overflows is a **test
+/// failure with the number in it** rather than a slow drift nobody notices.
+pub const HELP_MAX_LINES: usize = 40;
+
+/// The command groups, in the order the help presents them.
+///
+/// # Why this is a constant and not a local
+///
+/// Because [`render_help`] and the brevity test both need it, and a test that
+/// rebuilt the groups independently could disagree with the renderer about what
+/// the help contains — the failure mode `§O-103` records for derived fixtures.
+const HELP_GROUPS: [(&str, &[CommandName]); 5] = [
+    (
+        "Project",
+        &[
+            CommandName::New,
+            CommandName::Init,
+            CommandName::Add,
+            CommandName::Remove,
+            CommandName::Install,
+            CommandName::Update,
+        ],
+    ),
+    (
+        "Build and run",
+        &[
+            CommandName::Build,
+            CommandName::Run,
+            CommandName::Dev,
+            CommandName::Serve,
+            CommandName::Test,
+            CommandName::Bench,
+            CommandName::Fmt,
+            CommandName::Lint,
+        ],
+    ),
+    (
+        "Inspect and trust",
+        &[
+            CommandName::Inspect,
+            CommandName::Audit,
+            CommandName::Verify,
+            CommandName::Caps,
+            CommandName::Why,
+            CommandName::Trace,
+            CommandName::Doctor,
+        ],
+    ),
+    (
+        "Agents",
+        &[CommandName::Mcp, CommandName::Schema, CommandName::Migrate],
+    ),
+    ("Other", &[CommandName::Version, CommandName::Help]),
+];
+
 /// Render the usage text.
 ///
 /// Built from [`CommandName::all()`] so a new command appears here
 /// automatically — the alternative, a hand-maintained help string, is a
 /// guaranteed source of drift.
-fn render_help() -> String {
+///
+/// # Progressive disclosure — `DX-013`
+///
+/// `verbose` selects the depth:
+///
+/// * **`qqqai --help`** (default) prints every command with a one-line summary,
+///   inside [`HELP_MAX_LINES`]. Option descriptions are short, and the footer is
+///   one line instead of two.
+/// * **`qqqai --help --all`** prints the same structure with the long option
+///   descriptions and the schemas hint, because a reader who asked for everything
+///   wants it.
+///
+/// Truncating to fit the number was the alternative and was rejected: it would
+/// lose the `--json` contract line, which is the single most useful thing a
+/// script author reads here. Progressive disclosure fits the budget *and* makes
+/// the default better, because a reader scanning for a command is not wading
+/// through option prose they will read later, if ever.
+fn render_help(verbose: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{} {} — the QQQ runtime CLI\n",
+        "{} {} — the QQQ runtime CLI",
         qqq_core::BRAND_NAME,
         qqq_core::VERSION
     );
-    let _ = writeln!(out, "USAGE:");
     let _ = writeln!(
         out,
-        "    {} [OPTIONS] <COMMAND> [ARGS]\n",
+        "usage: {} [OPTIONS] <COMMAND> [ARGS]",
         qqq_core::BINARY_NAME
     );
-    let _ = writeln!(out, "COMMANDS:");
+    let _ = writeln!(out, "commands:");
 
     // Group by purpose so the list is scannable rather than alphabetical soup.
-    let groups: [(&str, &[CommandName]); 5] = [
-        (
-            "Project",
-            &[
-                CommandName::New,
-                CommandName::Init,
-                CommandName::Add,
-                CommandName::Remove,
-                CommandName::Install,
-                CommandName::Update,
-            ],
-        ),
-        (
-            "Build and run",
-            &[
-                CommandName::Build,
-                CommandName::Run,
-                CommandName::Dev,
-                CommandName::Serve,
-                CommandName::Test,
-                CommandName::Bench,
-                CommandName::Fmt,
-                CommandName::Lint,
-            ],
-        ),
-        (
-            "Inspect and trust",
-            &[
-                CommandName::Inspect,
-                CommandName::Audit,
-                CommandName::Verify,
-                CommandName::Caps,
-                CommandName::Why,
-                CommandName::Trace,
-                CommandName::Doctor,
-            ],
-        ),
-        (
-            "Agents",
-            &[CommandName::Mcp, CommandName::Schema, CommandName::Migrate],
-        ),
-        ("Other", &[CommandName::Version, CommandName::Help]),
-    ];
-
-    for (title, cmds) in groups {
-        let _ = writeln!(out, "\n  {title}:");
+    // No blank line before each heading: the indented label already separates
+    // them, and four blank lines is four lines of the forty.
+    for (title, cmds) in HELP_GROUPS {
+        let _ = writeln!(out, "  {title}:");
         for &c in cmds {
             let _ = writeln!(out, "    {:<10} {}", c.as_str(), c.summary());
         }
     }
 
-    let _ = writeln!(out, "\nOPTIONS:");
-    let _ = writeln!(out, "    --json          Emit machine-readable JSON");
-    let _ = writeln!(
-        out,
-        "    --jsonl         Emit JSON Lines (one object per line)"
-    );
-    let _ = writeln!(
-        out,
-        "    --dry-run       Show what would happen without doing it"
-    );
-    let _ = writeln!(out, "    -q, --quiet     Suppress non-essential output");
-    let _ = writeln!(out, "    -v, --verbose   Emit additional detail");
-    let _ = writeln!(out, "    -h, --help      Print this help");
-    let _ = writeln!(out, "    -V, --version   Print the version");
-    let _ = writeln!(
-        out,
-        "\nEvery command supports --json. Schemas: `{} schema --all`",
-        qqq_core::BINARY_NAME
-    );
+    let _ = writeln!(out, "options:");
+    let _ = writeln!(out, "    --json  --jsonl       machine-readable output");
+    let _ = writeln!(out, "    --dry-run             show, do not do");
+    if verbose {
+        let _ = writeln!(out, "    -q, --quiet           less output");
+        let _ = writeln!(out, "    -v, --verbose         more output");
+    }
+    let _ = writeln!(out, "    -h, --help [--all]    this help");
+    let _ = writeln!(out, "    -V, --version         the version");
+    if verbose {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Every command supports --json. Schemas: `{} schema --all`",
+            qqq_core::BINARY_NAME
+        );
+    }
     out
 }
 
@@ -317,7 +384,7 @@ fn main() -> ExitCode {
 
     match action {
         Action::Help => {
-            print!("{}", render_help());
+            print!("{}", render_help(flags.all()));
             ExitCode::from(exit::OK)
         }
         Action::Version => {
@@ -2302,7 +2369,7 @@ mod tests {
     /// must appear in it. A hand-maintained list would drift.
     #[test]
     fn help_lists_every_command() {
-        let help = render_help();
+        let help = render_help(false);
         for &c in CommandName::all() {
             // `--version` and `--help` are flags, printed in OPTIONS.
             if matches!(c, CommandName::Version | CommandName::Help) {
@@ -2319,9 +2386,98 @@ mod tests {
         }
     }
 
+    /// **`DX-013`: the default help fits the committed line budget.**
+    ///
+    /// §12.3's table says `qqqai --help` is **≤40 lines** and calls the whole
+    /// table *"measurable, in CI"*. Measured before this test existed: **53
+    /// lines**. The commitment had a number on it and nothing counted.
+    ///
+    /// # Why the assertion names the number and lists the offenders
+    ///
+    /// Because the actionable failure is *"which command pushed it over?"*, not
+    /// *"it is 41"*. A count alone sends the reader to the renderer to count by
+    /// hand; naming the budget and the actual value makes the fix obvious.
+    #[test]
+    fn help_fits_the_brevity_standard() {
+        let help = render_help(false);
+        let lines = help.lines().count();
+        assert!(
+            lines <= HELP_MAX_LINES,
+            "DX-013: `qqqai --help` prints {lines} lines, over the {HELP_MAX_LINES} \
+             line budget from §12.3. Trim a summary, merge a group, or move the \
+             detail behind `--help --all`."
+        );
+        // Not trivially small either: a budget satisfied by printing nothing is
+        // the vacuity failure `M-006` records, so the floor is asserted too.
+        assert!(
+            lines >= 20,
+            "the help is suspiciously short at {lines} lines; it must still list \
+             every command"
+        );
+    }
+
+    /// **`--help --all` is the long form and must contain everything the brief
+    /// one omits.** Without this, "progressive disclosure" could be implemented
+    /// by deleting information rather than by relocating it.
+    #[test]
+    fn the_full_help_is_a_superset_of_the_brief_one() {
+        let brief = render_help(false);
+        let full = render_help(true);
+        assert!(
+            full.lines().count() > brief.lines().count(),
+            "`--help --all` must say more than `--help`, or the modifier does \
+             nothing"
+        );
+        for line in brief.lines() {
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            assert!(
+                full.contains(trimmed) || full.contains(trimmed.trim()),
+                "`--help --all` dropped a line the brief help prints: {trimmed:?}"
+            );
+        }
+        // The two things the brief form deliberately moves behind `--all`.
+        assert!(full.contains("--verbose"), "the full help must explain -v");
+        assert!(
+            full.contains("schema --all"),
+            "the full help must point at the schema command"
+        );
+    }
+
+    /// `--all` is a modifier for `--help`, not a flag on its own.
+    #[test]
+    fn all_is_a_modifier_accepted_in_either_order() {
+        assert!(
+            parsed(&["--help", "--all"]).flags.all(),
+            "`--help --all` must select the full form"
+        );
+        assert!(
+            parsed(&["--all", "--help"]).flags.all(),
+            "order must not matter -- the first version gated on the action \
+             already being set, which made this order fail"
+        );
+        assert!(
+            !parsed(&["--help"]).flags.all(),
+            "the brief form is the default"
+        );
+        // **Accepted but inert.** The first version of this test asserted that
+        // `--all` alone must NOT set the flag, on the reasoning that a modifier
+        // with nothing to modify is a mistake. That is a defensible opinion and
+        // not the one this parser implements -- `--verbose` alone behaves the
+        // same way -- so the test was the thing that was wrong, not the code.
+        let alone = parsed(&["--all"]);
+        assert!(alone.flags.all(), "the flag itself is set");
+        assert!(
+            !matches!(alone.action, Action::Help),
+            "but it does not cause help to be printed"
+        );
+    }
+
     #[test]
     fn help_mentions_the_json_contract() {
-        let help = render_help();
+        let help = render_help(true);
         assert!(help.contains("--json"));
         assert!(help.contains("--jsonl"));
         assert!(

@@ -881,6 +881,10 @@ cmd_checks() {
     python3 tools/check_security_scope.py --self-test
     python3 tools/check_threat_model.py
     python3 tools/check_threat_model.py --self-test
+    python3 tools/check_glossary.py
+    python3 tools/check_glossary.py --self-test
+    python3 tools/check_reconciliation.py
+    python3 tools/check_reconciliation.py --self-test
 
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py

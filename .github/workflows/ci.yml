@@ -162,6 +162,24 @@ jobs:
       - name: Prove the threat-model checker rejects stale claims
         run: python tools/check_threat_model.py --self-test
 
+      # `DOC-011`. A generated document that does not say so gets hand-edited, and
+      # the next generation silently reverts the edit -- a confusing loss that reads
+      # as a tool bug. The glossary says it is generated, and this fails the build
+      # when it and the Proposal's §0.6 table disagree in *either* direction.
+      - name: Validate the generated glossary
+        run: python tools/check_glossary.py
+      - name: Prove the glossary check catches drift
+        run: python tools/check_glossary.py --self-test
+
+      # `DOC-013`. The corrections are recorded in three places -- Appendix A, the
+      # Observations' `§C` entries, and docs/reconciliation.md -- because each serves a
+      # different reader. Three copies is two too many in principle, and a machine
+      # check is the only thing that justifies the arrangement.
+      - name: Validate the reconciliation table
+        run: python tools/check_reconciliation.py
+      - name: Prove the reconciliation check catches drift
+        run: python tools/check_reconciliation.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

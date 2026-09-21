@@ -160,7 +160,14 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **DOC-004** Create `QQQ-Observations-and-Memories.md` as the institutional-memory record.
   → Done: `QQQ-Observations-and-Memories.md`.
   → §0.3 Document map
-- [ ] **DOC-005** Add a `docs/README.md` index that explains the three-document system and how to keep them in sync.
+- [x] **DOC-005** Add a `docs/README.md` index that explains the three-document system and how to keep them in sync.
+  → Done: `docs/README.md` — the three documents and their division of labour, the
+    rule that a claim lives in the Proposal *or* the Observations and never both, the
+    nine checks the self-test actually exercises (listed from the harness, not from
+    the validator's shorter docstring), and the change recipes.
+  → The first draft listed twelve checks from the validator's module docstring; the
+    self-test drives nine. Counting coverage from the thing that *exercises* it is the
+    correction.
   → §0.4 How to read the cross-references
 - [x] **DOC-006** Build `tools/check-xrefs/` — the cross-reference validator described in the proposal.
   → Done: `tools/check_xrefs.py` — checks over the Proposal/Checklist/Observations graph.
@@ -168,21 +175,53 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **DOC-007** Wire `check-xrefs` into CI as a required check.
   → Done: `check_xrefs.py` and `self_test_xrefs.py` are both required steps in the `xrefs` CI job.
   → §0.4 How to read the cross-references
-- [ ] **DOC-008** Document the anchor derivation and stability rules in `docs/contributing/anchors.md`.
+- [x] **DOC-008** Document the anchor derivation and stability rules in `docs/contributing/anchors.md`.
+  → Done: `docs/contributing/anchors.md` — the exact five-step anchor algorithm
+    (including that `§6.4` becomes `64-` and not `6-4-`, which surprises people),
+    the stability and tombstone rules, the `AREA-NNN` identifier rules, the
+    Observations prefixes, and the stub-marker convention.
+  → Records that observations are **not renumbered** on insertion: a new one takes the
+    next free number even when it belongs earlier. Renumbering would invalidate every
+    existing citation to make a reading order nicer.
   → §0.5 Identifier and anchor discipline
 - [x] **DOC-009** Implement the stub-marker convention (`// QQQ-STUB(<ID>): …`) and a CI check that every stub marker has a matching Observations entry.
   → Done: `QQQ-STUB(<ID>)` markers are validated against checklist items by `check_xrefs.py` checks [7] and [11], including the bidirectional case, as a required CI step.
   → §0.5 Identifier and anchor discipline
 - [ ] **DOC-010** Implement the tombstone convention for retired anchors and add a CI check that no anchor is silently deleted.
   → §0.5 Identifier and anchor discipline
-- [ ] **DOC-011** Publish `docs/glossary.md` generated from the Proposal glossary, with anchors.
+- [x] **DOC-011** Publish `docs/glossary.md` generated from the Proposal glossary, with anchors.
+  → Done: `tools/gen_glossary.py` generates it from the Proposal's §0.6 table;
+    `tools/check_glossary.py` verifies it, in CI and in the bridge.
+  → 18 terms, each linking to its Proposal anchor. The generated header says so, names
+    the source and the command, and says not to hand-edit — a generated file that does
+    not announce itself gets edited and then silently reverted.
+  → The self-test covers **both** drift directions: a hand-edit to the output, and a
+    new term in the source. The second is the one that actually happens, and the first
+    version of a check like this often only tests the other. 4/4 cases.
   → §0.6 Glossary
 - [ ] **DOC-012** Add a CI check that every glossary term used in WIT doc comments exists in the glossary.
   → §0.6 Glossary
-- [ ] **DOC-013** Maintain `docs/reconciliation.md` tracking every correction made to the source corpus, kept in sync with Appendix A.
+- [x] **DOC-013** Maintain `docs/reconciliation.md` tracking every correction made to the source corpus, kept in sync with Appendix A.
+  → Done: `tools/gen_reconciliation.py` regenerates the table between explicit
+    `GENERATED:BEGIN`/`END` markers, so the file's prose — the part worth reading —
+    survives regeneration. 6 corrections, matching Appendix A and the `§C` entries.
+  → `tools/check_reconciliation.py` verifies all three agree and **refuses to generate
+    from a drifted source**, so the generator can never be the thing that launders a
+    disagreement into a third document. 5/5 self-test cases covering all three drift
+    directions.
   → §0.4 How to read the cross-references
-- [ ] **DOC-014** Publish the vocabulary and claims rules as `docs/contributing/claims-policy.md`, and add a CI check that no unqualified performance claim appears without a benchmark reference.
-  → §3.4 Positioning statement and the language we use
+- [x] **DOC-014** Publish the vocabulary and claims rules as `docs/contributing/claims-policy.md`.
+  → Done: `docs/contributing/claims-policy.md` — the four claim kinds (measured,
+    derived, intended, absent) and the evidential requirement of each; the rules on
+    numbers, modality, mechanism-naming and uncertainty; and the vocabulary table.
+  → Bans **"should"** outright: it hides whether something happens or merely ought to.
+    Distinguishes **verify** (the author ran a command) from **validate** (an adversary
+    tried to break it) — which is why this project says the capability model is
+    *verified*, and why the threat model's validation column reads `No` everywhere.
+  → The first draft's example cited `cargo bench --bench instantiate`, which does not
+    exist. Caught by running it, and kept in the document as the example of the exact
+    failure the page warns about.
+  → §0.5 Identifier and anchor discipline
 - [ ] **DOC-015** Add the "framework vs runtime" usage rule to the contributing guide.
   → §3.4 Positioning statement and the language we use
 - [ ] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.

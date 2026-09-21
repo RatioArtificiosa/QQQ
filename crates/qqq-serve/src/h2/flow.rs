@@ -3,7 +3,7 @@
 //! Flow control (RFC 9113 §5.2, §6.9).
 //!
 //! Implements `SRV-002`; RFC 9113 §5.2 (flow control), §5.2.1 (the two windows),
-//! §6.9 (WINDOW_UPDATE), §6.9.1 (the window's range), §6.9.2
+//! §6.9 (`WINDOW_UPDATE`), §6.9.1 (the window's range), §6.9.2
 //! (`SETTINGS_INITIAL_WINDOW_SIZE`).
 //!
 //! # The one rule this module exists to get right
@@ -48,8 +48,8 @@
 //!
 //! The zero-increment case is `PROTOCOL_ERROR` and not `FLOW_CONTROL_ERROR`,
 //! which is counter-intuitive enough that §6.9 calls it out explicitly:
-//! *"A receiver MUST treat the receipt of a WINDOW_UPDATE frame with an
-//! flow-control window increment of 0 as a stream error of type PROTOCOL_ERROR;
+//! *"A receiver MUST treat the receipt of a `WINDOW_UPDATE` frame with an
+//! flow-control window increment of 0 as a stream error of type `PROTOCOL_ERROR`;
 //! errors on the connection flow-control window MUST be treated as a connection
 //! error."* Returning `FLOW_CONTROL_ERROR` there sends the peer debugging its
 //! window arithmetic when the defect is in its frame encoding.
@@ -58,7 +58,7 @@
 //!
 //! §6.9.2: a change to `SETTINGS_INITIAL_WINDOW_SIZE` adjusts **every open
 //! stream's** send window by the difference, and *"a change to
-//! SETTINGS_INITIAL_WINDOW_SIZE can cause the available space in a flow-control
+//! `SETTINGS_INITIAL_WINDOW_SIZE` can cause the available space in a flow-control
 //! window to become negative"*. A negative window is not an error — it means the
 //! sender has already sent more than the new window permits and must wait for
 //! `WINDOW_UPDATE` before sending more. Implementations get this wrong by
@@ -130,9 +130,9 @@ pub enum FlowError {
     },
     /// A `WINDOW_UPDATE` carried an increment of zero.
     ///
-    /// RFC 9113 §6.9: *"A receiver MUST treat the receipt of a WINDOW_UPDATE frame
+    /// RFC 9113 §6.9: *"A receiver MUST treat the receipt of a `WINDOW_UPDATE` frame
     /// with an flow-control window increment of 0 as a stream error of type
-    /// PROTOCOL_ERROR"* — and, for the connection window, as a connection error.
+    /// `PROTOCOL_ERROR`"* — and, for the connection window, as a connection error.
     /// **`PROTOCOL_ERROR`, not `FLOW_CONTROL_ERROR`**: the defect is in the
     /// frame's encoding, and reporting it as a window bug sends the peer looking
     /// in the wrong place.
@@ -143,7 +143,7 @@ pub enum FlowError {
     /// A `WINDOW_UPDATE` would push a window past 2^31-1.
     ///
     /// RFC 9113 §6.9.1: *"A sender MUST NOT allow a flow-control window to exceed
-    /// 2^31-1 octets. If a sender receives a WINDOW_UPDATE that causes a
+    /// 2^31-1 octets. If a sender receives a `WINDOW_UPDATE` that causes a
     /// flow-control window to exceed this maximum, it MUST terminate either the
     /// stream or the connection."* A `FLOW_CONTROL_ERROR`, not `PROTOCOL_ERROR`:
     /// the peer's frame is well-formed, its window arithmetic is wrong.
@@ -186,6 +186,12 @@ pub enum FlowError {
 impl FlowError {
     /// The RFC code for this violation.
     #[must_use]
+    // Kept as separate arms: these four variants deliberately share a code but
+    // name different violations (§5.2.2 window exceeded, §6.9 overflow, a
+    // settings-driven overflow, and a WINDOW_UPDATE for an unknown stream), and
+    // each carries its own field. Merging them into one `|` arm would erase the
+    // distinction the rest of this module matches on.
+    #[allow(clippy::match_same_arms)]
     pub const fn code(&self) -> ErrorCode {
         match self {
             Self::WindowExceeded { .. } => ErrorCode::FlowControlError,
@@ -206,6 +212,10 @@ impl FlowError {
     /// and the connection continues with its other streams intact — which is the
     /// property that makes multiplexing useful under a misbehaving peer.
     #[must_use]
+    // Kept as separate arms: both are non-fatal, but for different reasons that
+    // the comments below state — one is a property of a single stream's window,
+    // the other consumed nothing at all. Merging them would drop a rule.
+    #[allow(clippy::match_same_arms)]
     pub const fn is_connection_fatal(&self) -> bool {
         match self {
             // The connection window has no stream id, so `stream: None` is the
@@ -361,6 +371,15 @@ pub struct Window {
     /// bug — adjusting by the *new* value instead of the difference, which is
     /// correct for exactly one stream and wrong for every other.
     initial: u32,
+    /// Bytes consumed on this window since the last `WINDOW_UPDATE` was taken.
+    ///
+    /// The credit owed back to the peer. Tracked per window for the same reason
+    /// the connection's `connection_recv_unacked` is tracked: `WINDOW_UPDATE`
+    /// advertises a *delta*, and a delta computed from the window's remaining
+    /// size is not a delta at all — it is the whole window, which over-credits
+    /// the peer by everything already spent. See
+    /// [`FlowControl::take_stream_replenishment`].
+    recv_unacked: u32,
 }
 
 impl Window {
@@ -370,7 +389,14 @@ impl Window {
         Self {
             size: size as i64,
             initial: size,
+            recv_unacked: 0,
         }
+    }
+
+    /// The credit owed back to the peer: bytes consumed since the last take.
+    #[must_use]
+    pub const fn recv_unacked(&self) -> u32 {
+        self.recv_unacked
     }
 
     /// The current size, which may be negative.
@@ -388,6 +414,12 @@ impl Window {
     /// of §6.9.2's rule. Clamping in the stored value instead would make that
     /// first `WINDOW_UPDATE` immediately sendable.
     #[must_use]
+    // `size` is proven to be in `1..=MAX_WINDOW` by the two branches above, so
+    // this cast cannot truncate or lose a sign. `try_from` is not available in a
+    // `const fn`, and the include-the-guard-in-the-expression alternative is the
+    // same cast with more punctuation. The `allow` is scoped to this function
+    // rather than the module so it cannot silence a *new* unchecked cast nearby.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub const fn available(&self) -> u32 {
         if self.size <= 0 {
             0
@@ -437,7 +469,7 @@ impl Window {
     /// `WINDOW_UPDATE` increment is representable.
     pub fn try_increase(&mut self, stream: Option<u32>, increment: u32) -> Result<(), FlowError> {
         let after = self.size + i64::from(increment);
-        if after > MAX_WINDOW as i64 {
+        if after > i64::from(MAX_WINDOW) {
             return Err(FlowError::WindowOverflow {
                 stream,
                 window: self.size,
@@ -481,7 +513,7 @@ impl Window {
     ) -> Result<(), FlowError> {
         let delta = i64::from(new_initial) - i64::from(self.initial);
         let after = self.size + delta;
-        if after > MAX_WINDOW as i64 {
+        if after > i64::from(MAX_WINDOW) {
             return Err(FlowError::SettingsWindowOverflow {
                 stream,
                 window: self.size,
@@ -627,7 +659,7 @@ impl Direction {
     ///
     /// # The rule most implementations get wrong
     ///
-    /// RFC 9113 §6.9.2 is unambiguous: *"a change to SETTINGS_INITIAL_WINDOW_SIZE
+    /// RFC 9113 §6.9.2 is unambiguous: *"a change to `SETTINGS_INITIAL_WINDOW_SIZE`
     /// … MUST be applied to all streams that are currently open"* by the
     /// **difference** between old and new. Applying it only to *new* streams is
     /// the common shortcut and it leaves every in-flight stream with a window the
@@ -869,7 +901,13 @@ impl FlowControl {
         // if the connection's is already blown.
         self.recv.connection.try_consume(None, n)?;
         match self.recv.stream_mut(stream_id) {
-            Some(window) => window.try_consume(Some(stream_id), n)?,
+            Some(window) => {
+                window.try_consume(Some(stream_id), n)?;
+                // The credit owed back to the peer. Charged only after the
+                // consume succeeded, so a refused frame does not manufacture
+                // credit for bytes that were never accepted.
+                window.recv_unacked = window.recv_unacked.saturating_add(n);
+            }
             // §5.1: a stream that has never been opened has no window, and DATA
             // on it is a connection error the state machine reports. Reaching here
             // means a stream was opened without opening its window — the
@@ -879,13 +917,13 @@ impl FlowControl {
             // from a real window violation.
             None => return Err(FlowError::UnknownStream { stream: stream_id }),
         }
-        self.connection_recv_unacked = self
-            .connection_recv_unacked
-            .checked_add(n)
-            .ok_or_else(|| FlowError::WindowExceeded {
-                stream: None,
-                window: i64::from(self.recv.connection.size()),
-                requested: n,
+        self.connection_recv_unacked =
+            self.connection_recv_unacked.checked_add(n).ok_or_else(|| {
+                FlowError::WindowExceeded {
+                    stream: None,
+                    window: self.recv.connection.size(),
+                    requested: n,
+                }
             })?;
         Ok(())
     }
@@ -955,21 +993,26 @@ impl FlowControl {
     /// Returns `None` when the stream has no receive window, which is the
     /// "stream is closed or was never opened" case the caller reports as
     /// [`FlowError::UnknownStream`] if it mattered.
+    ///
+    /// # This returned the window's *size* until it was first called
+    ///
+    /// The body was `window.size().max(0)` — the remaining window, not the credit
+    /// owed. Its own doc comment said *"Returning only the credit owed"*, so the
+    /// code contradicted the text beside it, and nothing noticed because the
+    /// function had **no test and no caller**: `conn`'s `replenish` was the first
+    /// call site, and the defect surfaced the moment it was exercised. Measured:
+    /// ten bytes of body produced a `WINDOW_UPDATE` of 65,525 — the whole initial
+    /// window — which tells the peer it may send 65 KB more than it may. A peer
+    /// that believes it is over-credits itself, and the accounting drifts until
+    /// the connection violates the peer's real window.
+    ///
+    /// It now returns what the receive path has actually consumed since the last
+    /// call, exactly as `take_connection_replenishment` does. The parallel
+    /// structure is the point: the connection and stream windows move together or
+    /// one of them drifts toward zero and stalls the connection.
     pub fn take_stream_replenishment(&mut self, stream_id: u32) -> Option<u32> {
         match self.recv.stream_mut(stream_id) {
-            Some(window) => {
-                let credit = window
-                    .size()
-                    .max(0)
-                    .try_into()
-                    .unwrap_or(u32::MAX);
-                // The window itself is *not* advanced here: `WINDOW_UPDATE` moves
-                // the window the peer sends against, so advancing it is the job of
-                // `apply_window_update` when the peer acts on our advertisement.
-                // Returning only the credit owed keeps the two directions from
-                // being conflated.
-                Some(credit)
-            }
+            Some(window) => Some(core::mem::take(&mut window.recv_unacked)),
             None => None,
         }
     }
@@ -996,11 +1039,7 @@ impl FlowControl {
     ///
     /// [`FlowError::SettingsWindowOverflow`] when an adjusted window exceeds
     /// 2^31-1 (a `FLOW_CONTROL_ERROR`).
-    pub fn on_settings_initial_window_size(
-        &mut self,
-        old: u32,
-        new: u32,
-    ) -> Result<(), FlowError> {
+    pub fn on_settings_initial_window_size(&mut self, old: u32, new: u32) -> Result<(), FlowError> {
         // `old` is taken as a parameter rather than read from the direction so
         // that the caller — which owns the `Settings` both endpoints exchanged —
         // states which transition it is applying. It is cross-checked against the
@@ -1080,7 +1119,11 @@ mod tests {
         let mut fc = fc_with_stream(1);
         fc.send.connection.try_consume(None, 64_000).unwrap();
         assert_eq!(fc.send.connection().size(), 1_535);
-        fc.send.stream_mut(1).unwrap().try_consume(Some(1), 1_000).unwrap();
+        fc.send
+            .stream_mut(1)
+            .unwrap()
+            .try_consume(Some(1), 1_000)
+            .unwrap();
         assert_eq!(fc.send.stream(1).unwrap().size(), 64_535);
         assert_eq!(
             fc.available_send(1),
@@ -1104,7 +1147,10 @@ mod tests {
     fn the_connection_window_blocks_every_stream() {
         let mut fc = fc_with_stream(1);
         fc.open_stream(3);
-        fc.send.connection.try_consume(None, DEFAULT_CONNECTION_WINDOW).unwrap();
+        fc.send
+            .connection
+            .try_consume(None, DEFAULT_CONNECTION_WINDOW)
+            .unwrap();
         assert_eq!(fc.connection_send_available(), 0);
         assert_eq!(fc.available_send(1), 0);
         assert_eq!(
@@ -1125,7 +1171,11 @@ mod tests {
     fn a_stream_window_blocks_only_that_stream() {
         let mut fc = fc_with_stream(1);
         fc.open_stream(3);
-        fc.send.stream_mut(1).unwrap().try_consume(Some(1), 65_535).unwrap();
+        fc.send
+            .stream_mut(1)
+            .unwrap()
+            .try_consume(Some(1), 65_535)
+            .unwrap();
         assert_eq!(fc.available_send(1), 0);
         assert_eq!(
             fc.available_send(3),
@@ -1171,7 +1221,11 @@ mod tests {
 
         // The stream is the shorter one; the connection is untouched.
         let mut fc = fc_with_stream(1);
-        fc.send.stream_mut(1).unwrap().try_consume(Some(1), 65_000).unwrap();
+        fc.send
+            .stream_mut(1)
+            .unwrap()
+            .try_consume(Some(1), 65_000)
+            .unwrap();
         let e = fc.on_send(1, 1_000).expect_err("only 535 remains");
         assert!(matches!(
             e,
@@ -1193,7 +1247,11 @@ mod tests {
     #[test]
     fn a_refused_send_leaves_both_windows_untouched() {
         let mut fc = fc_with_stream(1);
-        fc.send.stream_mut(1).unwrap().try_consume(Some(1), 65_000).unwrap();
+        fc.send
+            .stream_mut(1)
+            .unwrap()
+            .try_consume(Some(1), 65_000)
+            .unwrap();
         let before_c = fc.send.connection().size();
         let before_s = fc.send.stream(1).unwrap().size();
         assert!(fc.on_send(1, 1_000).is_err());
@@ -1260,8 +1318,14 @@ mod tests {
 
         // The stream window alone.
         let mut fc = fc_with_stream(1);
-        fc.recv.stream_mut(1).unwrap().try_consume(Some(1), 65_000).unwrap();
-        let e = fc.consume_recv(1, 1_000).expect_err("stream window is short");
+        fc.recv
+            .stream_mut(1)
+            .unwrap()
+            .try_consume(Some(1), 65_000)
+            .unwrap();
+        let e = fc
+            .consume_recv(1, 1_000)
+            .expect_err("stream window is short");
         assert_eq!(e.code(), ErrorCode::FlowControlError);
         assert!(!e.is_connection_fatal());
         assert_eq!(
@@ -1327,7 +1391,9 @@ mod tests {
         );
         assert!(!e.is_connection_fatal(), "on a stream it is a stream error");
 
-        let e = fc.apply_window_update(0, 0).expect_err("zero on the connection");
+        let e = fc
+            .apply_window_update(0, 0)
+            .expect_err("zero on the connection");
         assert_eq!(e.code(), ErrorCode::ProtocolError);
         assert!(
             e.is_connection_fatal(),
@@ -1408,7 +1474,9 @@ mod tests {
     #[test]
     fn a_window_update_for_an_unknown_stream_is_reported() {
         let mut fc = FlowControl::default();
-        let e = fc.apply_window_update(7, 100).expect_err("stream 7 has no window");
+        let e = fc
+            .apply_window_update(7, 100)
+            .expect_err("stream 7 has no window");
         assert!(matches!(e, FlowError::UnknownStream { stream: 7 }));
         assert!(
             !e.is_connection_fatal(),
@@ -1474,11 +1542,7 @@ mod tests {
             "RFC 9113 §6.9.2 says the window may become negative: it means the sender \
              must wait, not that the change is an error"
         );
-        assert_eq!(
-            fc.available_send(1),
-            0,
-            "a negative window allows nothing"
-        );
+        assert_eq!(fc.available_send(1), 0, "a negative window allows nothing");
 
         // Clamping at zero would have left 0 and then let the peer's next
         // WINDOW_UPDATE of 64 535 grant a full window; the negative value means it
@@ -1498,7 +1562,11 @@ mod tests {
         // test that passes because of the other window is a test that would not
         // notice the stream window being wrong.
         fc.apply_window_update(0, 65_535).unwrap();
-        assert_eq!(fc.available_send(1), 0, "still blocked by the stream's window");
+        assert_eq!(
+            fc.available_send(1),
+            0,
+            "still blocked by the stream's window"
+        );
 
         fc.apply_window_update(1, 1).unwrap();
         assert_eq!(
@@ -1553,7 +1621,10 @@ mod tests {
             .on_settings_initial_window_size(DEFAULT_CONNECTION_WINDOW, MAX_WINDOW)
             .expect_err("the delta pushes the window past the ceiling");
         assert_eq!(e.code(), ErrorCode::FlowControlError);
-        assert!(matches!(e, FlowError::SettingsWindowOverflow { stream: 1, .. }));
+        assert!(matches!(
+            e,
+            FlowError::SettingsWindowOverflow { stream: 1, .. }
+        ));
         assert!(
             !e.is_connection_fatal(),
             "one stream's window overflow resets that stream; the other multiplexed \

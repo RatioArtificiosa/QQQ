@@ -405,21 +405,35 @@ impl FrameHeader {
     /// Serialise the header.
     ///
     /// The reserved bit is written as zero, as RFC 9113 §4.1 requires.
+    ///
+    /// # Why `to_be_bytes` rather than shifts and casts
+    ///
+    /// This was `[(len >> 16) as u8, (len >> 8) as u8, len as u8, …]`, which
+    /// clippy correctly flags four times per call as a truncating cast. The
+    /// truncation is intentional — splitting a `u32` into four bytes *is*
+    /// discarding the high bits, in order — so the lint was a true statement
+    /// about the code and a false alarm about the intent.
+    ///
+    /// `to_be_bytes` says the same thing without a cast, so the compiler proves
+    /// the byte order instead of a reviewer reading a shift chain. The one place
+    /// a mask is still needed is the reserved bit, and that is written out.
     #[must_use]
     pub fn write(&self) -> [u8; FRAME_HEADER_LEN] {
-        let len = self.length;
-        let id = self.stream_id;
+        // 24-bit length: the type guarantees `length <= MAX_FRAME_PAYLOAD`, so
+        // the top byte is dropped deliberately rather than accidentally.
+        let [_, l2, l1, l0] = self.length.to_be_bytes();
+        let [i3, i2, i1, i0] = self.stream_id.to_be_bytes();
         [
-            (len >> 16) as u8,
-            (len >> 8) as u8,
-            len as u8,
+            l2,
+            l1,
+            l0,
             self.frame_type.as_u8(),
             self.flags.bits(),
             // 0x7f, not 0xff: the top bit is the reserved bit.
-            ((id >> 24) & 0x7f) as u8,
-            (id >> 16) as u8,
-            (id >> 8) as u8,
-            id as u8,
+            i3 & 0x7f,
+            i2,
+            i1,
+            i0,
         ]
     }
 
@@ -608,14 +622,17 @@ impl PrioritySpec {
     }
 
     /// Serialise.
+    ///
+    /// `to_be_bytes` for the same reason as [`FrameHeader::write`]: the byte
+    /// split is the intent, and a shift-and-cast chain states it as an accident.
     #[must_use]
     pub fn write(self) -> [u8; Self::LEN] {
-        let d = self.depends_on;
+        let [d3, d2, d1, d0] = self.depends_on.to_be_bytes();
         [
-            ((d >> 24) & 0x7f) as u8 | if self.exclusive { 0x80 } else { 0 },
-            (d >> 16) as u8,
-            (d >> 8) as u8,
-            d as u8,
+            (d3 & 0x7f) | if self.exclusive { 0x80 } else { 0 },
+            d2,
+            d1,
+            d0,
             self.weight,
         ]
     }
@@ -623,7 +640,7 @@ impl PrioritySpec {
     /// Whether the specification is self-referential.
     ///
     /// RFC 9113 §5.3.1: *"A stream cannot depend on itself. An endpoint MUST
-    /// treat this as a stream error of type PROTOCOL_ERROR."* A **stream** error,
+    /// treat this as a stream error of type `PROTOCOL_ERROR`."* A **stream** error,
     /// not a connection error — the distinction is why this is a predicate on
     /// the stream's own frame rather than a connection-level check.
     #[must_use]
@@ -763,7 +780,7 @@ pub enum FrameError {
     ///
     /// RFC 9113 §6.1: *"If the length of the padding is the length of the frame
     /// payload or greater, the recipient MUST treat this as a connection error of
-    /// type PROTOCOL_ERROR."* The check exists because the alternative is a
+    /// type `PROTOCOL_ERROR`."* The check exists because the alternative is a
     /// slice index computed by subtracting a peer-controlled number, which is a
     /// panic in safe code and a memory-safety bug anywhere else.
     BadPadding {
@@ -775,7 +792,7 @@ pub enum FrameError {
     /// A `WINDOW_UPDATE` carried a zero increment.
     ///
     /// RFC 9113 §6.9: a zero increment *"MUST be treated as a stream error of
-    /// type PROTOCOL_ERROR"* when the frame names a stream, and as a connection
+    /// type `PROTOCOL_ERROR`"* when the frame names a stream, and as a connection
     /// error when it names the connection. The distinction is the caller's, so
     /// the raw values are carried.
     ZeroWindowIncrement {
@@ -802,6 +819,11 @@ impl FrameError {
     /// [`FrameError::Truncated`] has no code: it is not the peer's violation.
     /// Returning one anyway would send a `GOAWAY` for a partial read.
     #[must_use]
+    // Kept as separate arms: these variants share PROTOCOL_ERROR but each names
+    // a different RFC 9113 violation (§4.2 length, §5.1.1 stream id, §6.1
+    // padding, §6.10 interleaving), and the arm below them carries a comment
+    // about why a zero increment is *not* grouped with the rest.
+    #[allow(clippy::match_same_arms)]
     pub const fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Truncated { .. } => None,
@@ -896,6 +918,10 @@ pub fn parse_frame(bytes: &[u8]) -> Result<(Frame<'_>, usize), FrameError> {
 /// # Errors
 ///
 /// Any [`FrameError`], as [`parse_frame`].
+// An exhaustive match over the frame-type enum: every arm is one frame type's
+// decode, and splitting them would separate a frame's parse from its siblings'
+// while adding no abstraction — the arm bodies share no logic.
+#[allow(clippy::too_many_lines)]
 pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameError> {
     let FrameHeader {
         length,
@@ -916,7 +942,7 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
     match frame_type {
         FrameType::Data => {
             require_nonzero(frame_type, stream_id)?;
-            let (data, padding) = strip_padding(frame_type, flags, payload)?;
+            let (data, padding) = strip_padding(flags, payload)?;
             Ok(Frame::Data {
                 stream_id,
                 flags,
@@ -954,7 +980,11 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
         }
         FrameType::Priority => {
             require_nonzero(frame_type, stream_id)?;
-            if length != PrioritySpec::LEN as u32 {
+            // Compare on the `usize` side, as the length check at the top of this
+            // function does: `PrioritySpec::LEN` is a `usize`, and widening the
+            // frame's `u32` length cannot lose a value, whereas narrowing the
+            // constant with `as u32` is a cast that only happens to be exact.
+            if usize::try_from(length) != Ok(PrioritySpec::LEN) {
                 return Err(FrameError::BadLength {
                     frame_type,
                     length,
@@ -975,9 +1005,7 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "exactly 4 bytes",
                 });
             }
-            let raw = u32::from_be_bytes([
-                payload[0], payload[1], payload[2], payload[3],
-            ]);
+            let raw = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
             // An unassigned code is not a violation (RFC 9113 §7). A `RST_STREAM`
             // carrying one is still a reset, so it must not be dropped.
             Ok(Frame::RstStream {
@@ -1061,12 +1089,8 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "exactly 4 bytes",
                 });
             }
-            let increment = u32::from_be_bytes([
-                payload[0] & 0x7f,
-                payload[1],
-                payload[2],
-                payload[3],
-            ]);
+            let increment =
+                u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
             if increment == 0 {
                 return Err(FrameError::ZeroWindowIncrement { stream_id });
             }
@@ -1118,10 +1142,7 @@ fn require_zero(frame_type: FrameType, stream_id: u32) -> Result<(), FrameError>
 /// Read the pad-length octet, validating it (RFC 9113 §6.1).
 fn take_pad_len(payload: &[u8], length: u32) -> Result<(u8, &[u8]), FrameError> {
     let Some((&pad_len, rest)) = payload.split_first() else {
-        return Err(FrameError::Truncated {
-            need: 1,
-            got: 0,
-        });
+        return Err(FrameError::Truncated { need: 1, got: 0 });
     };
     // The comparison is against the *whole* payload length, not the remainder:
     // RFC 9113 §6.1 requires the pad length to be strictly less than the frame
@@ -1136,11 +1157,11 @@ fn take_pad_len(payload: &[u8], length: u32) -> Result<(u8, &[u8]), FrameError> 
 }
 
 /// Remove a leading pad-length octet and trailing padding from a `DATA` payload.
-fn strip_padding(
-    frame_type: FrameType,
-    flags: Flags,
-    payload: &[u8],
-) -> Result<(&[u8], u8), FrameError> {
+///
+/// Takes no frame type: padding is a property of the `PADDED` flag and the
+/// payload layout, identical for `DATA` and `HEADERS`. The parameter was carried
+/// unused until the module was compiled again.
+fn strip_padding(flags: Flags, payload: &[u8]) -> Result<(&[u8], u8), FrameError> {
     if !flags.padded() {
         return Ok((payload, 0));
     }
@@ -1151,11 +1172,7 @@ fn strip_padding(
 }
 
 /// Trim `pad_len` bytes from the end.
-fn strip_trailing_padding(
-    rest: &[u8],
-    pad_len: u8,
-    length: u32,
-) -> Result<&[u8], FrameError> {
+fn strip_trailing_padding(rest: &[u8], pad_len: u8, length: u32) -> Result<&[u8], FrameError> {
     let pad = usize::from(pad_len);
     if rest.len() < pad {
         return Err(FrameError::BadPadding { pad_len, length });
@@ -1177,6 +1194,10 @@ fn strip_trailing_padding(
 /// [`header_for`] clamps. The assertion is kept rather than replaced by silent
 /// truncation, because a truncated length field desynchronises the connection
 /// and a debug assertion names the bug at its source.
+// An exhaustive match over the frame-type enum, mirroring `decode`: each arm is
+// one frame type's serialisation, and splitting them would separate a frame's
+// write from its sibling's.
+#[allow(clippy::too_many_lines)]
 pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
     match frame {
         Frame::Data {
@@ -1189,8 +1210,7 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
             // The pad-length octet is present **iff** PADDED was set, not iff
             // the padding is non-zero: `PADDED` with a zero pad length is legal
             // and still costs one byte in the payload.
-            let mut payload =
-                Vec::with_capacity(data.len() + pad + usize::from(flags.padded()));
+            let mut payload = Vec::with_capacity(data.len() + pad + usize::from(flags.padded()));
             if flags.padded() {
                 payload.push(*padding);
             }
@@ -1210,8 +1230,9 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
             priority,
         } => {
             let pad = padding.map_or(0, usize::from);
-            let mut payload =
-                Vec::with_capacity(fragment.len() + PrioritySpec::LEN + usize::from(flags.padded()));
+            let mut payload = Vec::with_capacity(
+                fragment.len() + PrioritySpec::LEN + usize::from(flags.padded()),
+            );
             if flags.padded() {
                 payload.push(padding.unwrap_or(0));
             }
@@ -1352,8 +1373,12 @@ fn header_for(length: usize, frame_type: FrameType, flags: Flags, stream_id: u32
     // oversized payload, and on that path the frame is better refused than
     // truncated — `MAX_FRAME_PAYLOAD` is what the format permits.
     let length = u32::try_from(length).unwrap_or(u32::MAX);
+    // `u32::try_from` for the ceiling too, for the same reason as the line above:
+    // `MAX_FRAME_PAYLOAD` is `0xFF_FFFF` and therefore in range, but the fallback
+    // states that fact instead of a bare `as u32` implying it might not be.
+    let ceiling = u32::try_from(MAX_FRAME_PAYLOAD).unwrap_or(u32::MAX);
     FrameHeader {
-        length: length.min(MAX_FRAME_PAYLOAD as u32),
+        length: length.min(ceiling),
         frame_type,
         flags,
         stream_id,
@@ -1386,8 +1411,8 @@ mod tests {
     /// RFC 9113 §4.1 rather than against this implementation's own writer.
     #[test]
     fn a_frame_header_parses_the_rfc_layout() {
-        // length = 0x000102 (258), type = HEADERS (0x1), flags = END_HEADERS,
-        // stream = 0x00000005
+        // length = 0x00_0102 (258), type = HEADERS (0x1), flags = END_HEADERS,
+        // stream = 0x0000_0005
         let bytes = [0x00, 0x01, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x05];
         let h = FrameHeader::parse(&bytes).expect("parses");
         assert_eq!(h.length, 258);
@@ -1417,7 +1442,11 @@ mod tests {
             stream_id: u32::MAX,
         }
         .write();
-        assert_eq!(written[5] & 0x80, 0, "the reserved bit must be sent as zero");
+        assert_eq!(
+            written[5] & 0x80,
+            0,
+            "the reserved bit must be sent as zero"
+        );
         assert_eq!(
             FrameHeader::parse(&written).expect("parses").stream_id,
             0x7fff_ffff,
@@ -1534,7 +1563,13 @@ mod tests {
         // pad length 5, payload length 5: not strictly less, so refused.
         let bytes = [0, 0, 5, 0x0, 0x8, 0, 0, 0, 1, 5, 0, 0, 0, 0];
         let e = parse_frame(&bytes).unwrap_err();
-        assert_eq!(e, FrameError::BadPadding { pad_len: 5, length: 5 });
+        assert_eq!(
+            e,
+            FrameError::BadPadding {
+                pad_len: 5,
+                length: 5
+            }
+        );
         assert_eq!(e.code(), Some(ErrorCode::ProtocolError));
 
         // And exactly one less is accepted.
@@ -1580,7 +1615,10 @@ mod tests {
             Frame::Headers {
                 fragment, priority, ..
             } => {
-                assert_eq!(fragment, b"\x82", "the fragment must start after the 5 bytes");
+                assert_eq!(
+                    fragment, b"\x82",
+                    "the fragment must start after the 5 bytes"
+                );
                 assert_eq!(priority.expect("present").depends_on, 3);
             }
             other => panic!("expected HEADERS, got {other:?}"),
@@ -1793,10 +1831,14 @@ mod tests {
             (0x8, 5, "WINDOW_UPDATE", 1),
         ];
         for (type_byte, length, name, stream_id) in cases {
-            let mut bytes = vec![0u8; 9 + length as usize];
-            bytes[0] = (length >> 16) as u8;
-            bytes[1] = (length >> 8) as u8;
-            bytes[2] = length as u8;
+            let mut bytes = vec![0u8; 9 + usize::try_from(length).expect("a small length")];
+            // The 24-bit length field, split by `to_be_bytes` rather than a
+            // shift-and-cast chain: the top byte is dropped deliberately, which
+            // is exactly the 24-bit truncation RFC 9113 §4.1 specifies.
+            let [_, l2, l1, l0] = length.to_be_bytes();
+            bytes[0] = l2;
+            bytes[1] = l1;
+            bytes[2] = l0;
             bytes[3] = type_byte;
             bytes[4..8].copy_from_slice(&stream_id.to_be_bytes());
             let e = parse_frame(&bytes).unwrap_err();
@@ -1833,8 +1875,10 @@ mod tests {
     #[test]
     fn a_connection_frame_with_a_stream_id_is_refused() {
         for (type_byte, length) in [(0x4u8, 0u32), (0x6, 8), (0x7, 8)] {
-            let mut bytes = vec![0u8; 9 + length as usize];
-            bytes[2] = length as u8;
+            let mut bytes = vec![0u8; 9 + usize::try_from(length).expect("a small length")];
+            // The low octet of the 24-bit length field: these test lengths are
+            // all below 256, so the top two octets stay zero.
+            bytes[2] = length.to_be_bytes()[3];
             bytes[3] = type_byte;
             bytes[8] = 1; // non-zero stream id
             let e = parse_frame(&bytes).unwrap_err();
@@ -1911,7 +1955,10 @@ mod tests {
     fn the_payload_limit_is_the_24_bit_maximum() {
         assert_eq!(MAX_FRAME_PAYLOAD, 16_777_215);
         assert_eq!(MAX_FRAME_PAYLOAD, (1 << 24) - 1);
-        assert!(DEFAULT_MAX_FRAME_SIZE < MAX_FRAME_PAYLOAD as u32);
+        // Compared on the `usize` side: both are constants, and widening the
+        // `u32` setting cannot lose a value where `as u32` on the limit only
+        // happens to be exact.
+        assert!(usize::try_from(DEFAULT_MAX_FRAME_SIZE).expect("fits usize") < MAX_FRAME_PAYLOAD);
     }
 
     /// A large frame round-trips through the three length octets.
@@ -1926,7 +1973,7 @@ mod tests {
         };
         let bytes = to_bytes(&original);
         assert_eq!(bytes.len(), 9 + 70_000);
-        assert_eq!(&bytes[0..3], &[0x01, 0x11, 0x70], "70000 = 0x011170");
+        assert_eq!(&bytes[0..3], &[0x01, 0x11, 0x70], "70000 = 0x01_1170");
         let (parsed, used) = parse_frame(&bytes).expect("parses");
         assert_eq!(used, bytes.len());
         assert_eq!(parsed, original);

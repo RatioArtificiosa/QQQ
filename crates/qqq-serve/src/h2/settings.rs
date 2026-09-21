@@ -38,7 +38,7 @@
 //!
 //! Note the one trap in that table: `ENABLE_PUSH` is a boolean taking exactly
 //! `0` or `1`. *"Any value other than 0 or 1 MUST be treated as a connection
-//! error of type PROTOCOL_ERROR."* Accepting `2` as "true" is the natural
+//! error of type `PROTOCOL_ERROR`."* Accepting `2` as "true" is the natural
 //! mistake.
 
 use std::fmt;
@@ -159,7 +159,12 @@ impl Settings {
             max_concurrent_streams: Some(DEFAULT_MAX_CONCURRENT_STREAMS),
             initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-            max_header_list_size: Some(super::hpack::MAX_HEADER_LIST_SIZE as u32),
+            // `u32::try_from` rather than `as u32`: `MAX_HEADER_LIST_SIZE` is
+            // 64 KiB and so always fits, and the fallback states that instead of
+            // a cast that would silently wrap if the constant grew past 4 GiB.
+            max_header_list_size: Some(
+                u32::try_from(super::hpack::MAX_HEADER_LIST_SIZE).unwrap_or(u32::MAX),
+            ),
         }
     }
 
@@ -263,10 +268,7 @@ impl Settings {
     /// of the initial exchange is on the critical path of every connection.
     #[must_use]
     pub fn to_params(&self, server: bool) -> Vec<(SettingId, u32)> {
-        let mut params = vec![(
-            SettingId::HeaderTableSize,
-            self.header_table_size,
-        )];
+        let mut params = vec![(SettingId::HeaderTableSize, self.header_table_size)];
         // §8.4: a server must not send ENABLE_PUSH. `server` is a parameter
         // rather than a field because it is a property of the *role*, not of the
         // settings, and getting it wrong is a connection error a peer will
@@ -347,7 +349,7 @@ pub enum SettingsError {
     /// A client sent `ENABLE_PUSH` (RFC 9113 §6.5.2).
     ///
     /// *"A server MUST NOT explicitly set this value to 1. … A client MUST treat
-    /// receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to any value
+    /// receipt of a SETTINGS frame with `SETTINGS_ENABLE_PUSH` set to any value
     /// other than 0 or 1 as a connection error."* The direction that is easy to
     /// miss is this one: **33.5% of real servers were found to reject it**, so
     /// the rule is enforced in both directions here rather than only the popular
@@ -373,9 +375,9 @@ impl SettingsError {
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ServerSentEnablePush => f.write_str(
-                "a server must not send SETTINGS_ENABLE_PUSH (RFC 9113 §8.4)",
-            ),
+            Self::ServerSentEnablePush => {
+                f.write_str("a server must not send SETTINGS_ENABLE_PUSH (RFC 9113 §8.4)")
+            }
             Self::OutOfRange { id, value } => {
                 write!(f, "{id} value {value} is outside its permitted range")
             }
@@ -406,7 +408,10 @@ mod tests {
         assert_eq!(s.initial_window_size, 65_535);
         assert_eq!(s.max_frame_size, 16_384);
         assert_eq!(s.enable_push, None, "unset, not false");
-        assert_eq!(s.max_concurrent_streams, None, "unset is unlimited, not zero");
+        assert_eq!(
+            s.max_concurrent_streams, None,
+            "unset is unlimited, not zero"
+        );
         assert_eq!(s.max_header_list_size, None);
     }
 
@@ -505,12 +510,22 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{good} is in range: {e}"));
             assert_eq!(s.max_frame_size, good);
         }
-        for bad in [0u32, 1, MIN_MAX_FRAME_SIZE - 1, MAX_MAX_FRAME_SIZE + 1, u32::MAX] {
+        for bad in [
+            0u32,
+            1,
+            MIN_MAX_FRAME_SIZE - 1,
+            MAX_MAX_FRAME_SIZE + 1,
+            u32::MAX,
+        ] {
             let mut s = Settings::default();
             let e = s
                 .apply(&settings_frame(vec![(SettingId::MaxFrameSize, bad)]))
                 .expect_err("out of range");
-            assert_eq!(e.code(), ErrorCode::ProtocolError, "{bad} should be refused");
+            assert_eq!(
+                e.code(),
+                ErrorCode::ProtocolError,
+                "{bad} should be refused"
+            );
         }
     }
 
@@ -546,7 +561,8 @@ mod tests {
     fn an_unset_enable_push_permits_push() {
         assert!(Settings::default().push_enabled());
         let mut s = Settings::default();
-        s.apply(&settings_frame(vec![(SettingId::EnablePush, 0)])).unwrap();
+        s.apply(&settings_frame(vec![(SettingId::EnablePush, 0)]))
+            .unwrap();
         assert!(!s.push_enabled());
     }
 

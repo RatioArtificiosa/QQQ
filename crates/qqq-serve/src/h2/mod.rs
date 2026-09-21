@@ -51,11 +51,11 @@
 //!
 //! | Area | State |
 //! |---|---|
-//! | Frame layer: header, SETTINGS, HEADERS, DATA, WINDOW_UPDATE, RST_STREAM, PING, GOAWAY, PRIORITY, CONTINUATION | **implemented** |
+//! | Frame layer: header, SETTINGS, HEADERS, DATA, `WINDOW_UPDATE`, `RST_STREAM`, PING, GOAWAY, PRIORITY, CONTINUATION | **implemented** |
 //! | HPACK: static table, dynamic table with eviction, integer, Huffman | **implemented** |
 //! | Header validation: pseudo-header ordering, connection-specific headers | **implemented** |
 //! | Stream states and frame legality | **implemented** |
-//! | Flow control: both windows, WINDOW_UPDATE, `SETTINGS_INITIAL_WINDOW_SIZE` | **implemented** |
+//! | Flow control: both windows, `WINDOW_UPDATE`, `SETTINGS_INITIAL_WINDOW_SIZE` | **implemented** |
 //! | Multiplexing, stream-id monotonicity, `MAX_CONCURRENT_STREAMS` | **implemented** |
 //! | Preface and the initial SETTINGS exchange | **implemented** |
 //! | Server push (`PUSH_PROMISE` sending) | **not implemented** — received frames are refused |
@@ -79,6 +79,7 @@
 //! them into `qqq-core` would need a code outside this module rather than a
 //! guess inside it.
 
+pub mod conn;
 pub mod error;
 pub mod flow;
 pub mod frame;
@@ -86,6 +87,7 @@ pub mod hpack;
 pub mod settings;
 pub mod stream;
 
+pub use conn::{Connection, Event, State, MAX_CONTINUATIONS, MAX_HEADER_BLOCK_BYTES};
 pub use error::{ConnectionError, ErrorCode, StreamError};
 pub use flow::{FlowControl, FlowError};
 pub use frame::{
@@ -93,7 +95,10 @@ pub use frame::{
     PrioritySpec, SettingId, CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN,
     MAX_FRAME_PAYLOAD,
 };
-pub use hpack::{Decoder, Encoder, HeaderField, HpackError, DEFAULT_HEADER_TABLE_SIZE,
-    MAX_HEADER_LIST_SIZE};
-pub use settings::{Settings, SettingsError, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS};
+pub use hpack::{
+    Decoder, Encoder, HeaderField, HpackError, DEFAULT_HEADER_TABLE_SIZE, MAX_HEADER_LIST_SIZE,
+};
+pub use settings::{
+    Settings, SettingsError, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS,
+};
 pub use stream::{FrameKind, Stream, StreamId, StreamState};

@@ -51,7 +51,7 @@
 
 use std::fmt;
 
-use super::error::{ErrorCode, StreamError};
+use super::error::{ConnectionError, ErrorCode, StreamError};
 
 // ---------------------------------------------------------------------------
 // Stream ids
@@ -154,7 +154,7 @@ impl StreamId {
     ///
     /// RFC 9113 §5.1.1 is explicit that the parity violation is **fatal**:
     /// *"An endpoint that receives an unexpected stream identifier MUST respond
-    /// with a connection error of type PROTOCOL_ERROR."* The rule cannot be
+    /// with a connection error of type `PROTOCOL_ERROR`."* The rule cannot be
     /// enforced as a stream error, because a stream error is reported with a
     /// `RST_STREAM` **on the stream** — and the id that needs resetting is
     /// exactly the id that is not a legal stream. So a frame carrying an even id
@@ -604,7 +604,7 @@ impl Stream {
     ///    because one request was cancelled.
     /// 2. **`DATA` in `idle` is a *connection* error** (§5.1: *"Receiving any
     ///    frame other than HEADERS or PRIORITY on a stream in this state MUST be
-    ///    treated as a connection error of type PROTOCOL_ERROR"*), while
+    ///    treated as a connection error of type `PROTOCOL_ERROR`"*), while
     ///    **`HEADERS` on a closed stream is a *stream* error** (`STREAM_CLOSED`).
     ///    Swapping the two is the failure this function is tested against, in
     ///    both directions.
@@ -631,9 +631,9 @@ impl Stream {
     /// §5.1's two half-closed rows are direction-dependent, and the state name
     /// says which direction is *closed*, not which direction the frame travels:
     ///
-    /// * `half-closed (local)` — we sent END_STREAM, so a frame **from the peer**
+    /// * `half-closed (local)` — we sent `END_STREAM`, so a frame **from the peer**
     ///   is refused and our own is fine.
-    /// * `half-closed (remote)` — the peer sent END_STREAM, so a frame **from the
+    /// * `half-closed (remote)` — the peer sent `END_STREAM`, so a frame **from the
     ///   peer** is refused and **our own response is legal**.
     ///
     /// The second is the normal state of a request being served. A check that
@@ -644,11 +644,19 @@ impl Stream {
     /// the RFC's table is written to describe.
     ///
     /// `incoming` is `true` for a frame the peer sent.
-    pub fn accepts_direction(
-        &self,
-        kind: FrameKind,
-        incoming: bool,
-    ) -> Result<(), StreamError> {
+    ///
+    /// # Errors
+    ///
+    /// [`StreamError::Closed`] for a peer frame on a half-closed or closed
+    /// stream, and [`StreamError::protocol`] for a refusal carrying an RFC code
+    /// — an illegal frame for this state, `RST_STREAM` on idle, or any
+    /// `PUSH_PROMISE` (§8.4). Fatal-vs-stream is
+    /// [`Stream::refusal_is_fatal_direction`]'s answer, not this one's.
+    // The body is the RFC 9113 §5.1 state table itself, one arm per row. Every
+    // comment inside states a protocol rule, so extracting sub-matches would
+    // split the table from the rules that explain it. The length is the table's.
+    #[allow(clippy::too_many_lines)]
+    pub fn accepts_direction(&self, kind: FrameKind, incoming: bool) -> Result<(), StreamError> {
         // -- Frames legal in nearly every state, checked first --------------
         //
         // PRIORITY, WINDOW_UPDATE and RST_STREAM are the three §5.1 exempts for
@@ -656,6 +664,8 @@ impl Stream {
         // the per-state arms about the frames that *are* state-sensitive, and it
         // makes "a late RST_STREAM on a closed stream is fine" a single fact
         // instead of seven.
+        // Separate arms: same result, different §5.1 exemptions, each documented.
+        #[allow(clippy::match_same_arms)]
         match kind {
             // §5.3.1 deprecates priority signalling, and §5.1 permits the frame in
             // every state including idle and closed. Ignoring it is the RFC's own
@@ -720,6 +730,8 @@ impl Stream {
             return Ok(());
         }
 
+        // Separate arms: the two §5.1 half-closed rows have the same answer here.
+        #[allow(clippy::match_same_arms)]
         match self.state {
             // §5.1, `idle`: *"Receiving any frame other than HEADERS or PRIORITY
             // on a stream in this state MUST be treated as a connection error of
@@ -792,24 +804,20 @@ impl Stream {
             // perfectly legal — and that is the normal request state, so a check
             // that ignored direction would refuse the server's own response on
             // every request that ends with a body.
-            StreamState::HalfClosedLocal => match incoming {
-                // The peer must not send more: a stream error, `STREAM_CLOSED`,
-                // because it means one request raced our response rather than that
-                // the connection is corrupt.
-                true => Err(StreamError::Closed),
-                // Nothing about our own send is restricted: if the peer has not
-                // also finished, we are still the ones who can send.
-                false => Ok(()),
-            },
-            StreamState::HalfClosedRemote => match incoming {
-                // §5.1: the peer has already sent END_STREAM, so DATA and HEADERS
-                // from it are a stream error. This is the state a normal GET sits
-                // in while the response is built, so getting it backwards fails
-                // every request.
-                true => Err(StreamError::Closed),
-                // We have not finished, so our own DATA and HEADERS are legal.
-                false => Ok(()),
-            },
+            StreamState::HalfClosedLocal => {
+                if incoming {
+                    Err(StreamError::Closed)
+                } else {
+                    Ok(())
+                }
+            }
+            StreamState::HalfClosedRemote => {
+                if incoming {
+                    Err(StreamError::Closed)
+                } else {
+                    Ok(())
+                }
+            }
 
             // §5.1, `closed`: the row with two different error kinds in it. The
             // RFC states both explicitly, and both are about frames **arriving**:
@@ -889,6 +897,10 @@ impl Stream {
         if kind == FrameKind::PushPromise {
             return true;
         }
+        // Kept as separate arms, matching the §5.1 table row by row: the two
+        // half-closed rows have the same answer but are distinct rows with
+        // their own comments, and the reserved pair is stated separately above.
+        #[allow(clippy::match_same_arms)]
         match self.state {
             // Idle: every remaining refusal is the §5.1 connection error, except
             // the RST_STREAM case, which is also a connection-level rule (the peer
@@ -923,6 +935,10 @@ impl Stream {
     /// is far cheaper to catch here.
     pub fn on_send(&mut self, kind: FrameKind, end_stream: bool) -> Result<(), StreamError> {
         self.accepts_direction(kind, false)?;
+        // Kept as separate arms: each edge is a distinct row of §5.1 Figure 2,
+        // and the comments on them state which edge and why. Collapsing the
+        // pairs that happen to share a target state would erase those rules.
+        #[allow(clippy::match_same_arms)]
         match (self.state, kind, end_stream) {
             // Opening: only HEADERS can move `idle` on the send side, and only
             // from `reserved (local)` in practice (a server does not open a
@@ -964,6 +980,10 @@ impl Stream {
     /// [`StreamError`] when the frame is not legal in the current state.
     pub fn on_recv(&mut self, kind: FrameKind, end_stream: bool) -> Result<(), StreamError> {
         self.accepts(kind)?;
+        // Kept as separate arms, as in `on_send`: each is a distinct §5.1
+        // Figure 2 edge with its own comment, and the pairs that share a target
+        // state are different rows of the table.
+        #[allow(clippy::match_same_arms)]
         match (self.state, kind, end_stream) {
             (StreamState::Idle, FrameKind::Headers, true) => {
                 self.state = StreamState::HalfClosedRemote;
@@ -996,7 +1016,7 @@ impl Stream {
     /// Used for `RST_STREAM` and for the connection teardown path, where every
     /// open stream finishes because the connection did. Naming it separately from
     /// the transition functions keeps "the stream is over" from being spelled as
-    /// a fake END_STREAM on one side, which would leave the wrong half-closed bit
+    /// a fake `END_STREAM` on one side, which would leave the wrong half-closed bit
     /// set for anything that observed the state.
     pub fn close(&mut self) {
         self.state = StreamState::Closed;
@@ -1022,7 +1042,7 @@ pub enum AdmissionError {
     /// RFC 9113 §5.1.1: *"The identifier of a newly established stream MUST be
     /// numerically greater than all streams that the initiating endpoint has
     /// opened. … An endpoint that receives an unexpected stream identifier MUST
-    /// respond with a connection error of type PROTOCOL_ERROR."*
+    /// respond with a connection error of type `PROTOCOL_ERROR`."*
     ///
     /// The rule is what makes a stream id a **cursor** rather than a key: a
     /// server can forget closed streams' payloads and still know that anything at
@@ -1037,11 +1057,11 @@ pub enum AdmissionError {
     /// The peer opened more streams than its own advertised ceiling allows.
     ///
     /// RFC 9113 §5.1.2: exceeding `SETTINGS_MAX_CONCURRENT_STREAMS` *"MUST be
-    /// treated as a stream error of type PROTOCOL_ERROR or REFUSED_STREAM"*. It is
-    /// REFUSED_STREAM here, and that choice is load-bearing: §8.7 says a client
-    /// may retry a REFUSED_STREAM request elsewhere, while PROTOCOL_ERROR implies
+    /// treated as a stream error of type `PROTOCOL_ERROR` or `REFUSED_STREAM`"*. It is
+    /// `REFUSED_STREAM` here, and that choice is load-bearing: §8.7 says a client
+    /// may retry a `REFUSED_STREAM` request elsewhere, while `PROTOCOL_ERROR` implies
     /// the request was malformed and must not be retried. Answering a load-shed
-    /// with PROTOCOL_ERROR makes clients give up on requests that would have
+    /// with `PROTOCOL_ERROR` makes clients give up on requests that would have
     /// succeeded on another connection.
     TooManyStreams {
         /// The ceiling that was in force.
@@ -1228,7 +1248,7 @@ impl StreamRegistry {
     /// [`AdmissionError`], whose [`AdmissionError::is_fatal`] says whether the
     /// connection survives. The order matters: monotonicity is checked before the
     /// ceiling because a reused id is a corruption the ceiling would hide — a
-    /// full connection would report REFUSED_STREAM for an id the peer already
+    /// full connection would report `REFUSED_STREAM` for an id the peer already
     /// finished, and the peer would retry it on a *new* connection where it
     /// succeeds, masking a real violation.
     pub fn admit(&mut self, raw_id: u32, end_stream: bool) -> Result<StreamId, AdmissionError> {
@@ -1294,12 +1314,12 @@ impl StreamRegistry {
     ) -> Result<StreamId, RecvAdmissionError> {
         let id = StreamId::client_from_frame(raw_id).map_err(RecvAdmissionError::fatal)?;
         if self.contains(id) {
-            let stream = self
-                .get_mut(id)
-                .ok_or_else(|| RecvAdmissionError::fatal(StreamError::protocol(
+            let stream = self.get_mut(id).ok_or_else(|| {
+                RecvAdmissionError::fatal(StreamError::protocol(
                     ErrorCode::InternalError,
                     "stream vanished between contains() and get_mut()",
-                )))?;
+                ))
+            })?;
             // The scope is computed **before** the transition attempt, while the
             // stream's pre-refusal state is still readable: §5.1's classification
             // depends on that state (`DATA` on `idle` is fatal, `HEADERS` on
@@ -1429,10 +1449,7 @@ impl RecvAdmissionError {
     /// Build a fatal refusal from an existing stream.
     #[must_use]
     pub const fn fatal(error: StreamError) -> Self {
-        Self::Stream {
-            error,
-            fatal: true,
-        }
+        Self::Stream { error, fatal: true }
     }
 
     /// Build a stream-scoped refusal from an existing stream.
@@ -1532,8 +1549,14 @@ mod tests {
         use super::super::frame::FrameType;
         assert_eq!(FrameKind::of(FrameType::Data), FrameKind::Data);
         assert_eq!(FrameKind::of(FrameType::Headers), FrameKind::Headers);
-        assert_eq!(FrameKind::of(FrameType::WindowUpdate), FrameKind::WindowUpdate);
-        assert_eq!(FrameKind::of(FrameType::Continuation), FrameKind::Continuation);
+        assert_eq!(
+            FrameKind::of(FrameType::WindowUpdate),
+            FrameKind::WindowUpdate
+        );
+        assert_eq!(
+            FrameKind::of(FrameType::Continuation),
+            FrameKind::Continuation
+        );
         assert_eq!(FrameKind::of(FrameType::Unknown(0x2f)), FrameKind::Unknown);
         assert_eq!(FrameKind::of(FrameType::Unknown(0xff)), FrameKind::Unknown);
         assert_eq!(FrameKind::of(FrameType::Ping), FrameKind::Ping);
@@ -1585,7 +1608,9 @@ mod tests {
         );
 
         let closed = Stream::new(sid(1), StreamState::Closed);
-        let e = closed.accepts(FrameKind::Headers).expect_err("HEADERS on closed");
+        let e = closed
+            .accepts(FrameKind::Headers)
+            .expect_err("HEADERS on closed");
         assert_eq!(e.code(), ErrorCode::StreamClosed);
         assert!(
             !closed.refusal_is_fatal(FrameKind::Headers),
@@ -1745,7 +1770,7 @@ mod tests {
 
     // -- Transitions -------------------------------------------------------
 
-    /// §5.1 Figure 2, receive side: a HEADERS with END_STREAM goes straight to
+    /// §5.1 Figure 2, receive side: a HEADERS with `END_STREAM` goes straight to
     /// `half-closed (remote)`, without ever being `open`.
     #[test]
     fn recv_headers_transitions_follow_figure_2() {
@@ -1763,7 +1788,7 @@ mod tests {
         assert_eq!(s.state(), StreamState::HalfClosedRemote);
     }
 
-    /// §5.1: the **second** END_STREAM closes the stream. Collapsing the first
+    /// §5.1: the **second** `END_STREAM` closes the stream. Collapsing the first
     /// one to `closed` would refuse the peer's own end and the server's response.
     #[test]
     fn the_second_end_stream_closes_the_stream() {
@@ -1774,13 +1799,31 @@ mod tests {
         s.on_send(FrameKind::Headers, true).unwrap();
         assert_eq!(s.state(), StreamState::Closed);
 
-        // We end first, then the peer does. Once we are `half-closed (local)`,
-        // §5.1 permits the peer only PRIORITY, WINDOW_UPDATE and RST_STREAM — so
-        // a peer DATA frame carrying END_STREAM is **not** a legal way to reach
-        // `closed`, and the transition to `closed` on this path is reached by the
-        // peer resetting. That is a real property of the protocol, not a gap: the
-        // RFC's Figure 2 shows the same edge, and an implementation that allowed
-        // peer DATA here would accept a body on a stream it had already answered.
+        // We end first, then the peer does — the other order, which must reach
+        // the same place.
+        //
+        // This half of the test asserted `HalfClosedLocal` after our own
+        // END_STREAM from `HalfClosedRemote`, and that assertion was simply
+        // wrong. RFC 9113 §5.1 Figure 2 has **one** edge out of
+        // `half-closed (remote)` on our END_STREAM, and it goes to `closed`:
+        // both directions have now finished, so the second END_STREAM is the one
+        // that closes the stream, whichever peer sent it first. The
+        // implementation had this right (`on_send`'s
+        // `(HalfClosedRemote, _, true) => Closed`) and the test disagreed with
+        // it. Nobody noticed because `h2` was not compiled for months --- the
+        // module was excluded from `lib.rs` and these tests never ran
+        // (`§O-120`).
+        let mut s = Stream::new(sid(3), StreamState::Idle);
+        s.on_recv(FrameKind::Headers, false).unwrap();
+        assert_eq!(s.state(), StreamState::Open);
+        s.on_send(FrameKind::Headers, true).unwrap();
+        assert_eq!(s.state(), StreamState::HalfClosedLocal);
+        // §5.1: from `half-closed (local)` the peer may only send PRIORITY,
+        // WINDOW_UPDATE and RST_STREAM. A peer DATA frame carrying END_STREAM is
+        // therefore **not** a legal way to reach `closed` --- the transition comes
+        // from the peer resetting. That is a real property of the protocol, not a
+        // gap: an implementation that allowed peer DATA here would accept a body
+        // on a stream it had already answered.
         s.on_recv(FrameKind::Data, true)
             .expect_err("the peer may not send DATA once we have ended");
         assert_eq!(
@@ -1794,8 +1837,8 @@ mod tests {
         assert_eq!(s.state(), StreamState::Closed);
     }
 
-    /// §5.1: the peer's END_STREAM on an **open** stream closes out its half, and
-    /// our END_STREAM on top of that closes the stream. This is the normal
+    /// §5.1: the peer's `END_STREAM` on an **open** stream closes out its half, and
+    /// our `END_STREAM` on top of that closes the stream. This is the normal
     /// request-then-response lifetime, walked end to end.
     #[test]
     fn the_normal_request_lifetime_reaches_closed() {
@@ -1985,7 +2028,10 @@ mod tests {
         r.admit(1, false).unwrap();
         r.admit(3, false).unwrap();
         r.set_limit(Some(2));
-        assert!(r.admit(5, false).is_err(), "the new ceiling applies at once");
+        assert!(
+            r.admit(5, false).is_err(),
+            "the new ceiling applies at once"
+        );
         r.set_limit(None);
         assert!(r.admit(5, false).is_ok(), "clearing the ceiling reopens it");
     }
@@ -2008,7 +2054,10 @@ mod tests {
 
         // A HEADERS on the same id now works, because nothing was registered.
         assert!(r.on_recv(1, FrameKind::Headers, true).is_ok());
-        assert_eq!(r.get(sid(1)).unwrap().state(), StreamState::HalfClosedRemote);
+        assert_eq!(
+            r.get(sid(1)).unwrap().state(),
+            StreamState::HalfClosedRemote
+        );
     }
 
     /// The registry's receive path applies the state machine for an existing
@@ -2018,7 +2067,9 @@ mod tests {
         let mut r = StreamRegistry::new();
         r.on_recv(1, FrameKind::Headers, true).unwrap();
         // The stream is half-closed (remote); more DATA is a stream error.
-        let e = r.on_recv(1, FrameKind::Data, false).expect_err("DATA after END");
+        let e = r
+            .on_recv(1, FrameKind::Data, false)
+            .expect_err("DATA after END");
         assert!(!e.is_fatal(), "STREAM_CLOSED is a stream error");
         assert_eq!(e.code(), ErrorCode::StreamClosed);
     }

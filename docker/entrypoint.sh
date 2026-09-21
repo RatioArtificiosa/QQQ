@@ -905,6 +905,8 @@ cmd_checks() {
     python3 tools/check_license_boundary.py --self-test
     python3 tools/check_tombstones.py
     python3 tools/check_tombstones.py --self-test
+    python3 tools/check_scope_table.py
+    python3 tools/check_scope_table.py --self-test
     python3 tools/self_test_schemas.py
 
     # The mutating one, then the validator that proves it restored everything.

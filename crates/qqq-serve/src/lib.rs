@@ -16,15 +16,30 @@
 //! | Header-bomb and framing limits | **implemented** (`SRV-020`) |
 //! | HTTP/1.1 responses, keep-alive, timeouts, connection limits | **implemented** (`SRV-001`) |
 //! | Accept loop, per-tenant ledger, graceful drain | **implemented** (`SRV-001`, `SRV-011`, `SRV-012`) |
-//! | HTTP/2, multiplexing, flow control | not implemented (`SRV-002`) |
-//! | Streaming bodies, backpressure | not implemented (`SRV-004`) |
-//! | `max_request_bytes` enforced during streaming | declared size checked; streaming is `SRV-005` |
-//! | TLS, mTLS | not implemented (`SRV-007`, `SRV-008`) |
+//! | HTTP/2 protocol: frames, HPACK, streams, flow control, multiplexing | **implemented** (`SRV-002`) |
+//! | HTTP/2 on a listener (TLS/ALPN negotiation of `h2`) | **not implemented** |
+//! | Streaming bodies, backpressure | **implemented** (`SRV-004`) |
+//! | `max_request_bytes` enforced during streaming | **implemented** (`SRV-005`) |
+//! | TLS, mTLS | **implemented** (`SRV-007`, `SRV-008`) |
 //! | `WebSockets`, SSE | not implemented (`SRV-009`, `SRV-010`) |
 //!
 //! Each of those is named rather than silently absent. A listener that accepted
 //! connections without the limits `SRV-005` and `SRV-011` require would be worse
 //! than no listener: it would look like a server.
+//!
+//! ## Why this table is a snapshot and not a promise
+//!
+//! It drifted once, badly: every row below the accept loop said "not
+//! implemented" while the code for it existed, because the entries were written
+//! when the crate was created and not revisited as items landed. The worst case
+//! was `h2`, which was **excluded from the module tree entirely** by a leftover
+//! debugging line for long enough that nobody noticed 9,370 lines and 201 tests
+//! were not being compiled (`§O-120`). A scope table that is not regenerated is
+//! a claim about the past wearing the tense of the present.
+//!
+//! The rows here are now checked against the module tree by
+//! `tools/check_scope_table.py`, which fails if a module listed as implemented is
+//! not reachable from this file.
 //!
 //! ## The one place this crate deliberately closes a connection
 //!
@@ -69,8 +84,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod body;
-// h2 temporarily excluded for isolated verification of tls (concurrent worker broke h2/stream.rs; restored below).
 pub mod conn;
+pub mod h2;
 pub mod http1;
 pub mod response;
 pub mod route;

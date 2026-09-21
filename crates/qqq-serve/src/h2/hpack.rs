@@ -224,14 +224,14 @@ fn static_name(name: &str) -> Option<usize> {
 /// entries would not.
 #[rustfmt::skip]
 const HUFFMAN: [(u32, u8); 257] = [
-    (0x1ff8, 13), (0x7fffd8, 23), (0xfffffe2, 28), (0xfffffe3, 28),
-    (0xfffffe4, 28), (0xfffffe5, 28), (0xfffffe6, 28), (0xfffffe7, 28),
-    (0xfffffe8, 28), (0xffffea, 24), (0x3ffffffc, 30), (0xfffffe9, 28),
-    (0xfffffea, 28), (0x3ffffffd, 30), (0xfffffeb, 28), (0xfffffec, 28),
-    (0xfffffed, 28), (0xfffffee, 28), (0xfffffef, 28), (0xffffff0, 28),
-    (0xffffff1, 28), (0xffffff2, 28), (0x3ffffffe, 30), (0xffffff3, 28),
-    (0xffffff4, 28), (0xffffff5, 28), (0xffffff6, 28), (0xffffff7, 28),
-    (0xffffff8, 28), (0xffffff9, 28), (0xffffffa, 28), (0xffffffb, 28),
+    (0x1ff8, 13), (0x7f_ffd8, 23), (0xfff_ffe2, 28), (0xfff_ffe3, 28),
+    (0xfff_ffe4, 28), (0xfff_ffe5, 28), (0xfff_ffe6, 28), (0xfff_ffe7, 28),
+    (0xfff_ffe8, 28), (0xff_ffea, 24), (0x3fff_fffc, 30), (0xfff_ffe9, 28),
+    (0xfff_ffea, 28), (0x3fff_fffd, 30), (0xfff_ffeb, 28), (0xfff_ffec, 28),
+    (0xfff_ffed, 28), (0xfff_ffee, 28), (0xfff_ffef, 28), (0xfff_fff0, 28),
+    (0xfff_fff1, 28), (0xfff_fff2, 28), (0x3fff_fffe, 30), (0xfff_fff3, 28),
+    (0xfff_fff4, 28), (0xfff_fff5, 28), (0xfff_fff6, 28), (0xfff_fff7, 28),
+    (0xfff_fff8, 28), (0xfff_fff9, 28), (0xfff_fffa, 28), (0xfff_fffb, 28),
     (0x14, 6), (0x3f8, 10), (0x3f9, 10), (0xffa, 12),
     (0x1ff9, 13), (0x15, 6), (0xf8, 8), (0x7fa, 11),
     (0x3fa, 10), (0x3fb, 10), (0xf9, 8), (0x7fb, 11),
@@ -247,7 +247,7 @@ const HUFFMAN: [(u32, u8); 257] = [
     (0x6b, 7), (0x6c, 7), (0x6d, 7), (0x6e, 7),
     (0x6f, 7), (0x70, 7), (0x71, 7), (0x72, 7),
     (0xfc, 8), (0x73, 7), (0xfd, 8), (0x1ffb, 13),
-    (0x7fff0, 19), (0x1ffc, 13), (0x3ffc, 14), (0x22, 6),
+    (0x7_fff0, 19), (0x1ffc, 13), (0x3ffc, 14), (0x22, 6),
     (0x7ffd, 15), (0x3, 5), (0x23, 6), (0x4, 5),
     (0x24, 6), (0x5, 5), (0x25, 6), (0x26, 6),
     (0x27, 6), (0x6, 5), (0x74, 7), (0x75, 7),
@@ -255,46 +255,50 @@ const HUFFMAN: [(u32, u8); 257] = [
     (0x2b, 6), (0x76, 7), (0x2c, 6), (0x8, 5),
     (0x9, 5), (0x2d, 6), (0x77, 7), (0x78, 7),
     (0x79, 7), (0x7a, 7), (0x7b, 7), (0x7ffe, 15),
-    (0x7fc, 11), (0x3ffd, 14), (0x1ffd, 13), (0xffffffc, 28),
-    (0xfffe6, 20), (0x3fffd2, 22), (0xfffe7, 20), (0xfffe8, 20),
-    (0x3fffd3, 22), (0x3fffd4, 22), (0x3fffd5, 22), (0x7fffd9, 23),
-    (0x3fffd6, 22), (0x7fffda, 23), (0x7fffdb, 23), (0x7fffdc, 23),
-    (0x7fffdd, 23), (0x7fffde, 23), (0xffffeb, 24), (0x7fffdf, 23),
-    (0xffffec, 24), (0xffffed, 24), (0x3fffd7, 22), (0x7fffe0, 23),
-    (0xffffee, 24), (0x7fffe1, 23), (0x7fffe2, 23), (0x7fffe3, 23),
-    (0x7fffe4, 23), (0x1fffdc, 21), (0x3fffd8, 22), (0x7fffe5, 23),
-    (0x3fffd9, 22), (0x7fffe6, 23), (0x7fffe7, 23), (0xffffef, 24),
-    (0x3fffda, 22), (0x1fffdd, 21), (0xfffe9, 20), (0x3fffdb, 22),
-    (0x3fffdc, 22), (0x7fffe8, 23), (0x7fffe9, 23), (0x1fffde, 21),
-    (0x7fffea, 23), (0x3fffdd, 22), (0x3fffde, 22), (0xfffff0, 24),
-    (0x1fffdf, 21), (0x3fffdf, 22), (0x7fffeb, 23), (0x7fffec, 23),
-    (0x1fffe0, 21), (0x1fffe1, 21), (0x3fffe0, 22), (0x1fffe2, 21),
-    (0x7fffed, 23), (0x3fffe1, 22), (0x7fffee, 23), (0x7fffef, 23),
-    (0xfffea, 20), (0x3fffe2, 22), (0x3fffe3, 22), (0x3fffe4, 22),
-    (0x7ffff0, 23), (0x3fffe5, 22), (0x3fffe6, 22), (0x7ffff1, 23),
-    (0x3ffffe0, 26), (0x3ffffe1, 26), (0xfffeb, 20), (0x7fff1, 19),
-    (0x3fffe7, 22), (0x7ffff2, 23), (0x3fffe8, 22), (0x1ffffec, 25),
-    (0x3ffffe2, 26), (0x3ffffe3, 26), (0x3ffffe4, 26), (0x7ffffde, 27),
-    (0x7ffffdf, 27), (0x3ffffe5, 26), (0xfffff1, 24), (0x1ffffed, 25),
-    (0x7fff2, 19), (0x1fffe3, 21), (0x3ffffe6, 26), (0x7ffffe0, 27),
-    (0x7ffffe1, 27), (0x3ffffe7, 26), (0x7ffffe2, 27), (0xfffff2, 24),
-    (0x1fffe4, 21), (0x1fffe5, 21), (0x3ffffe8, 26), (0x3ffffe9, 26),
-    (0xffffffd, 28), (0x7ffffe3, 27), (0x7ffffe4, 27), (0x7ffffe5, 27),
-    (0xfffec, 20), (0xfffff3, 24), (0xfffed, 20), (0x1fffe6, 21),
-    (0x3fffe9, 22), (0x1fffe7, 21), (0x1fffe8, 21), (0x7ffff3, 23),
-    (0x3fffea, 22), (0x3fffeb, 22), (0x1ffffee, 25), (0x1ffffef, 25),
-    (0xfffff4, 24), (0xfffff5, 24), (0x3ffffea, 26), (0x7ffff4, 23),
-    (0x3ffffeb, 26), (0x7ffffe6, 27), (0x3ffffec, 26), (0x3ffffed, 26),
-    (0x7ffffe7, 27), (0x7ffffe8, 27), (0x7ffffe9, 27), (0x7ffffea, 27),
-    (0x7ffffeb, 27), (0xffffffe, 28), (0x7ffffec, 27), (0x7ffffed, 27),
-    (0x7ffffee, 27), (0x7ffffef, 27), (0x7fffff0, 27), (0x3ffffee, 26),
-    (0x3fffffff, 30),
+    (0x7fc, 11), (0x3ffd, 14), (0x1ffd, 13), (0xfff_fffc, 28),
+    (0xf_ffe6, 20), (0x3f_ffd2, 22), (0xf_ffe7, 20), (0xf_ffe8, 20),
+    (0x3f_ffd3, 22), (0x3f_ffd4, 22), (0x3f_ffd5, 22), (0x7f_ffd9, 23),
+    (0x3f_ffd6, 22), (0x7f_ffda, 23), (0x7f_ffdb, 23), (0x7f_ffdc, 23),
+    (0x7f_ffdd, 23), (0x7f_ffde, 23), (0xff_ffeb, 24), (0x7f_ffdf, 23),
+    (0xff_ffec, 24), (0xff_ffed, 24), (0x3f_ffd7, 22), (0x7f_ffe0, 23),
+    (0xff_ffee, 24), (0x7f_ffe1, 23), (0x7f_ffe2, 23), (0x7f_ffe3, 23),
+    (0x7f_ffe4, 23), (0x1f_ffdc, 21), (0x3f_ffd8, 22), (0x7f_ffe5, 23),
+    (0x3f_ffd9, 22), (0x7f_ffe6, 23), (0x7f_ffe7, 23), (0xff_ffef, 24),
+    (0x3f_ffda, 22), (0x1f_ffdd, 21), (0xf_ffe9, 20), (0x3f_ffdb, 22),
+    (0x3f_ffdc, 22), (0x7f_ffe8, 23), (0x7f_ffe9, 23), (0x1f_ffde, 21),
+    (0x7f_ffea, 23), (0x3f_ffdd, 22), (0x3f_ffde, 22), (0xff_fff0, 24),
+    (0x1f_ffdf, 21), (0x3f_ffdf, 22), (0x7f_ffeb, 23), (0x7f_ffec, 23),
+    (0x1f_ffe0, 21), (0x1f_ffe1, 21), (0x3f_ffe0, 22), (0x1f_ffe2, 21),
+    (0x7f_ffed, 23), (0x3f_ffe1, 22), (0x7f_ffee, 23), (0x7f_ffef, 23),
+    (0xf_ffea, 20), (0x3f_ffe2, 22), (0x3f_ffe3, 22), (0x3f_ffe4, 22),
+    (0x7f_fff0, 23), (0x3f_ffe5, 22), (0x3f_ffe6, 22), (0x7f_fff1, 23),
+    (0x3ff_ffe0, 26), (0x3ff_ffe1, 26), (0xf_ffeb, 20), (0x7_fff1, 19),
+    (0x3f_ffe7, 22), (0x7f_fff2, 23), (0x3f_ffe8, 22), (0x1ff_ffec, 25),
+    (0x3ff_ffe2, 26), (0x3ff_ffe3, 26), (0x3ff_ffe4, 26), (0x7ff_ffde, 27),
+    (0x7ff_ffdf, 27), (0x3ff_ffe5, 26), (0xff_fff1, 24), (0x1ff_ffed, 25),
+    (0x7_fff2, 19), (0x1f_ffe3, 21), (0x3ff_ffe6, 26), (0x7ff_ffe0, 27),
+    (0x7ff_ffe1, 27), (0x3ff_ffe7, 26), (0x7ff_ffe2, 27), (0xff_fff2, 24),
+    (0x1f_ffe4, 21), (0x1f_ffe5, 21), (0x3ff_ffe8, 26), (0x3ff_ffe9, 26),
+    (0xfff_fffd, 28), (0x7ff_ffe3, 27), (0x7ff_ffe4, 27), (0x7ff_ffe5, 27),
+    (0xf_ffec, 20), (0xff_fff3, 24), (0xf_ffed, 20), (0x1f_ffe6, 21),
+    (0x3f_ffe9, 22), (0x1f_ffe7, 21), (0x1f_ffe8, 21), (0x7f_fff3, 23),
+    (0x3f_ffea, 22), (0x3f_ffeb, 22), (0x1ff_ffee, 25), (0x1ff_ffef, 25),
+    (0xff_fff4, 24), (0xff_fff5, 24), (0x3ff_ffea, 26), (0x7f_fff4, 23),
+    (0x3ff_ffeb, 26), (0x7ff_ffe6, 27), (0x3ff_ffec, 26), (0x3ff_ffed, 26),
+    (0x7ff_ffe7, 27), (0x7ff_ffe8, 27), (0x7ff_ffe9, 27), (0x7ff_ffea, 27),
+    (0x7ff_ffeb, 27), (0xfff_fffe, 28), (0x7ff_ffec, 27), (0x7ff_ffed, 27),
+    (0x7ff_ffee, 27), (0x7ff_ffef, 27), (0x7ff_fff0, 27), (0x3ff_ffee, 26),
+    (0x3fff_ffff, 30),
 ];
 
 /// The EOS symbol's index in [`HUFFMAN`].
 const EOS_SYMBOL: usize = 256;
 
 /// The number of symbols including EOS.
+///
+/// Used only by the test that pins [`HUFFMAN`]'s length, so it is test-gated: a
+/// non-test build has no use for it and `-D warnings` is right to say so.
+#[cfg(test)]
 const HUFFMAN_SYMBOLS: usize = 257;
 
 // ---------------------------------------------------------------------------
@@ -320,7 +324,7 @@ pub enum HpackError {
     /// An index named no entry in either table (RFC 7541 §6.1, §6.2).
     ///
     /// RFC 7541 §6.1 makes this a decoding error "that MUST be treated as a
-    /// connection error of type COMPRESSION_ERROR": the tables have desynchronised
+    /// connection error of type `COMPRESSION_ERROR"`: the tables have desynchronised
     /// and every subsequent index is untrustworthy.
     InvalidIndex {
         /// The index as decoded.
@@ -388,7 +392,7 @@ impl HpackError {
     /// Whether the compression context is still usable.
     ///
     /// RFC 7541 §4.1: *"A decoding error … MUST be treated as a connection error
-    /// of type COMPRESSION_ERROR."* A compression error is the one HTTP/2 error
+    /// of type `COMPRESSION_ERROR`."* A compression error is the one HTTP/2 error
     /// that is **always** connection-fatal, because the dynamic table is shared
     /// state that cannot be resynchronised — there is no way to say "your table
     /// is wrong" on one stream without both ends agreeing on a new table.
@@ -413,9 +417,9 @@ impl HpackError {
             | Self::StringOverrun { .. } => Some(super::error::ErrorCode::CompressionError),
             // An over-large list is the peer's declared limit being broken, which
             // is a protocol matter rather than a compression one.
-            Self::StringTooLong { .. } | Self::HeaderListTooLarge { .. } | Self::InvalidName { .. } => {
-                Some(super::error::ErrorCode::ProtocolError)
-            }
+            Self::StringTooLong { .. }
+            | Self::HeaderListTooLarge { .. }
+            | Self::InvalidName { .. } => Some(super::error::ErrorCode::ProtocolError),
         }
     }
 }
@@ -440,10 +444,16 @@ impl fmt::Display for HpackError {
                 "a string declares {declared} bytes but only {available} remain"
             ),
             Self::StringTooLong { declared, limit } => {
-                write!(f, "a string of {declared} bytes exceeds the {limit}-byte limit")
+                write!(
+                    f,
+                    "a string of {declared} bytes exceeds the {limit}-byte limit"
+                )
             }
             Self::HeaderListTooLarge { what, got, limit } => {
-                write!(f, "the header list {what} is {got}, over the limit of {limit}")
+                write!(
+                    f,
+                    "the header list {what} is {got}, over the limit of {limit}"
+                )
             }
             Self::InvalidName { name } => write!(f, "invalid header field name `{name}`"),
         }
@@ -546,7 +556,18 @@ pub fn encode_integer(value: u64, prefix_bits: u8, first_byte: u8) -> Vec<u8> {
 /// §5.1 forbids: *"An implementation MUST ensure that the value … does not
 /// overflow."* A decoder that wrapped would turn a malformed index into a valid
 /// one.
-pub fn decode_integer(input: &[u8], prefix_bits: u8, at: usize) -> Result<(u64, usize), HpackError> {
+///
+/// # Panics
+///
+/// If `prefix_bits` is not in `1..=8`. The prefix width is chosen by this
+/// module's own call sites — it is a property of the HPACK field type being
+/// decoded, never of the peer's bytes — so a value outside that range is a
+/// programming error, not a malformed input the decoder should report.
+pub fn decode_integer(
+    input: &[u8],
+    prefix_bits: u8,
+    at: usize,
+) -> Result<(u64, usize), HpackError> {
     assert!(
         (1..=8).contains(&prefix_bits),
         "an HPACK integer prefix is 1..=8 bits"
@@ -574,12 +595,10 @@ pub fn decode_integer(input: &[u8], prefix_bits: u8, at: usize) -> Result<(u64, 
                 index: u64::MAX,
                 table: "the integer encoding (the value overflows 64 bits)",
             })?;
-        value = value
-            .checked_add(add)
-            .ok_or(HpackError::InvalidIndex {
-                index: u64::MAX,
-                table: "the integer encoding (the value overflows 64 bits)",
-            })?;
+        value = value.checked_add(add).ok_or(HpackError::InvalidIndex {
+            index: u64::MAX,
+            table: "the integer encoding (the value overflows 64 bits)",
+        })?;
         if byte & 0x80 == 0 {
             return Ok((value, i));
         }
@@ -1392,7 +1411,13 @@ mod tests {
     use super::*;
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        // `fold` + `write!` rather than `map(format!).collect()`: the latter
+        // allocates one `String` per byte before joining them.
+        bytes.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
     }
 
     fn unhex(s: &str) -> Vec<u8> {
@@ -1450,8 +1475,8 @@ mod tests {
             (32, "cookie", None),
             (61, "www-authenticate", None),
         ] {
-            let got = static_entry(index)
-                .unwrap_or_else(|| panic!("no static entry at index {index}"));
+            let got =
+                static_entry(index).unwrap_or_else(|| panic!("no static entry at index {index}"));
             assert_eq!(got.0, name, "index {index} has the wrong name");
             assert_eq!(got.1, value, "index {index} has the wrong value");
         }
@@ -1516,7 +1541,10 @@ mod tests {
         assert_eq!(next, 2);
 
         // And encode_integer ORs the pattern in without disturbing the prefix.
-        assert_eq!(hex(&encode_integer(31, 5, 0x20))[..2].to_owned(), "3f".to_owned());
+        assert_eq!(
+            hex(&encode_integer(31, 5, 0x20))[..2].to_owned(),
+            "3f".to_owned()
+        );
         assert_eq!(hex(&encode_integer(1, 5, 0x20)), "21");
     }
 
@@ -1527,11 +1555,14 @@ mod tests {
     fn an_integer_that_overflows_is_refused() {
         // A saturated prefix followed by ten continuation bytes: 70 bits.
         let mut bytes = vec![0x3fu8];
-        bytes.extend(std::iter::repeat(0x80u8).take(10));
+        bytes.extend(std::iter::repeat_n(0x80u8, 10));
         bytes.push(0x00);
         let e = decode_integer(&bytes, 5, 0).expect_err("over 64 bits");
         assert!(matches!(e, HpackError::InvalidIndex { .. }));
-        assert_eq!(e.code(), Some(super::super::error::ErrorCode::CompressionError));
+        assert_eq!(
+            e.code(),
+            Some(super::super::error::ErrorCode::CompressionError)
+        );
     }
 
     /// A continuation that runs off the end is [`HpackError::Truncated`], not a
@@ -1552,7 +1583,10 @@ mod tests {
     /// specification rather than this implementation.
     #[test]
     fn rfc7541_c_4_1_huffman_www_example_com() {
-        assert_eq!(hex(&huffman_encode(b"www.example.com")), "f1e3c2e5f23a6ba0ab90f4ff");
+        assert_eq!(
+            hex(&huffman_encode(b"www.example.com")),
+            "f1e3c2e5f23a6ba0ab90f4ff"
+        );
         assert_eq!(
             huffman_decode(&unhex("f1e3c2e5f23a6ba0ab90f4ff")).expect("decodes"),
             b"www.example.com"
@@ -1563,7 +1597,10 @@ mod tests {
     #[test]
     fn rfc7541_c_4_2_huffman_no_cache() {
         assert_eq!(hex(&huffman_encode(b"no-cache")), "a8eb10649cbf");
-        assert_eq!(huffman_decode(&unhex("a8eb10649cbf")).expect("decodes"), b"no-cache");
+        assert_eq!(
+            huffman_decode(&unhex("a8eb10649cbf")).expect("decodes"),
+            b"no-cache"
+        );
     }
 
     /// **RFC 7541 Appendix C.4.3** — the Huffman encoding of `custom-key` and
@@ -1601,8 +1638,14 @@ mod tests {
         for (plain, coded) in [
             ("302", "6402"),
             ("private", "aec3771a4b"),
-            ("Mon, 21 Oct 2013 20:13:21 GMT", "d07abe941054d444a8200595040b8166e082a62d1bff"),
-            ("https://www.example.com", "9d29ad171863c78f0b97c8e9ae82ae43d3"),
+            (
+                "Mon, 21 Oct 2013 20:13:21 GMT",
+                "d07abe941054d444a8200595040b8166e082a62d1bff",
+            ),
+            (
+                "https://www.example.com",
+                "9d29ad171863c78f0b97c8e9ae82ae43d3",
+            ),
         ] {
             assert_eq!(
                 huffman_decode(&unhex(coded)).expect("decodes"),
@@ -1719,7 +1762,7 @@ mod tests {
     /// EOS entry in its match table accepts it silently.
     #[test]
     fn an_explicit_eos_symbol_is_refused() {
-        // The EOS code is 0x3fffffff / 30 bits = 30 ones. Four bytes of 0xff is
+        // The EOS code is 0x3fff_ffff / 30 bits = 30 ones. Four bytes of 0xff is
         // 32 bits, of which the first 30 are EOS; the remaining two are padding
         // and the padding check would not reach them, because EOS is rejected
         // first.
@@ -1780,7 +1823,9 @@ mod tests {
     /// project has already paid for that lesson more than once.
     #[test]
     fn a_long_string_round_trips_through_huffman() {
-        let all: Vec<u8> = (0u16..=255).map(|b| u8::try_from(b).expect("0..=255")).collect();
+        let all: Vec<u8> = (0u16..=255)
+            .map(|b| u8::try_from(b).expect("0..=255"))
+            .collect();
         let encoded = huffman_encode(&all);
         assert_eq!(huffman_decode(&encoded).expect("decodes"), all);
 
@@ -1801,7 +1846,9 @@ mod tests {
     #[test]
     fn every_padding_length_round_trips() {
         for n in 0..40usize {
-            let s: Vec<u8> = (0..n).map(|i| b'a' + u8::try_from(i % 26).unwrap_or(0)).collect();
+            let s: Vec<u8> = (0..n)
+                .map(|i| b'a' + u8::try_from(i % 26).unwrap_or(0))
+                .collect();
             let encoded = huffman_encode(&s);
             assert_eq!(
                 huffman_decode(&encoded).expect("decodes"),
@@ -1851,7 +1898,11 @@ mod tests {
     #[test]
     fn rfc7541_c_2_2_leaves_the_dynamic_table_empty() {
         let mut d = Decoder::new();
-        assert_decode_with(&mut d, "040c2f73616d706c652f70617468", &[(":path", "/sample/path")]);
+        assert_decode_with(
+            &mut d,
+            "040c2f73616d706c652f70617468",
+            &[(":path", "/sample/path")],
+        );
         assert_eq!(d.table().len(), 0, "without indexing must not insert");
         assert_eq!(d.table().size(), 0);
     }
@@ -1860,7 +1911,10 @@ mod tests {
     /// `password: secret`.
     #[test]
     fn rfc7541_c_2_3_literal_never_indexed() {
-        assert_decode("100870617373776f726406736563726574", &[("password", "secret")]);
+        assert_decode(
+            "100870617373776f726406736563726574",
+            &[("password", "secret")],
+        );
     }
 
     /// Never-indexed must not enter the dynamic table either.
@@ -2282,7 +2336,10 @@ mod tests {
     #[test]
     fn the_entry_size_includes_the_thirty_two_byte_overhead() {
         assert_eq!(DynamicTable::entry_size("custom-key", "custom-header"), 55);
-        assert_eq!(DynamicTable::entry_size(":authority", "www.example.com"), 57);
+        assert_eq!(
+            DynamicTable::entry_size(":authority", "www.example.com"),
+            57
+        );
         // 13 + 8 + 32 = 53. This literal was written as 54 and was simply
         // miscounted by hand — the implementation was right. Kept as four cases
         // because three of them matching is what caught the fourth: a single
@@ -2373,8 +2430,10 @@ mod tests {
     fn a_size_update_evicts_to_fit() {
         let mut d = Decoder::new();
         // Fill with a couple of entries.
-        d.decode(&unhex("400a637573746f6d2d6b65790d637573746f6d2d686561646572"))
-            .expect("decodes");
+        d.decode(&unhex(
+            "400a637573746f6d2d6b65790d637573746f6d2d686561646572",
+        ))
+        .expect("decodes");
         assert_eq!(d.table().size(), 55);
 
         // Shrink to 40: nothing fits, so the table empties.
@@ -2417,9 +2476,9 @@ mod tests {
         let mut block = Vec::new();
         for _ in 0..10 {
             block.extend_from_slice(&encode_integer(32, 6, 0x40)); // indexed name: cookie
-            // 16384 bytes of value, literal.
+                                                                   // 16384 bytes of value, literal.
             block.extend_from_slice(&encode_integer(16_384, 7, 0x00));
-            block.extend(std::iter::repeat(b'x').take(16_384));
+            block.extend(std::iter::repeat_n(b'x', 16_384));
         }
         let e = d.decode(&block).expect_err("the list exceeds the budget");
         match e {
@@ -2471,7 +2530,13 @@ mod tests {
     fn a_string_running_past_the_block_is_refused() {
         let block = [0x05, b'a', b'b'];
         let e = decode_string(&block, 0).expect_err("declares five, has two");
-        assert!(matches!(e, HpackError::StringOverrun { declared: 5, available: 2 }));
+        assert!(matches!(
+            e,
+            HpackError::StringOverrun {
+                declared: 5,
+                available: 2
+            }
+        ));
     }
 
     // -- name validation ----------------------------------------------------
@@ -2483,7 +2548,9 @@ mod tests {
         let mut block = vec![0x40, 0x00]; // indexed-literal with a literal name, length 0
         block.extend_from_slice(&encode_integer(1, 7, 0x00));
         block.push(b'v');
-        let e = Decoder::new().decode(&block).expect_err("an empty name is malformed");
+        let e = Decoder::new()
+            .decode(&block)
+            .expect_err("an empty name is malformed");
         assert!(matches!(e, HpackError::InvalidName { .. }));
     }
 
@@ -2497,7 +2564,9 @@ mod tests {
         block.extend_from_slice(b"Foo");
         block.extend_from_slice(&encode_integer(1, 7, 0x00));
         block.push(b'v');
-        let e = Decoder::new().decode(&block).expect_err("uppercase is malformed");
+        let e = Decoder::new()
+            .decode(&block)
+            .expect_err("uppercase is malformed");
         assert!(matches!(e, HpackError::InvalidName { .. }));
     }
 
@@ -2612,7 +2681,10 @@ mod tests {
         );
         assert_eq!(dec.decode(&block).expect("decodes"), fields);
         assert!(enc.table().is_empty(), "the encoder must not index it");
-        assert!(dec.table().is_empty(), "the decoder must not index it either");
+        assert!(
+            dec.table().is_empty(),
+            "the decoder must not index it either"
+        );
     }
 
     /// The static table is used for exact matches: `:method: GET` is index 2,
@@ -2687,13 +2759,17 @@ mod tests {
     fn the_encoder_reproduces_the_rfc_third_request_block() {
         let mut enc = Encoder::new();
         for _ in 0..2 {
-            enc.encode(&[
+            // The encoded bytes are discarded on purpose: these two calls exist
+            // to drive the encoder's dynamic table into the state the RFC's
+            // third request starts from, and only the *last* block's bytes are
+            // asserted below.
+            let _ = enc.encode(&[
                 HeaderField::new(":method", "GET"),
                 HeaderField::new(":scheme", "http"),
                 HeaderField::new(":path", "/"),
                 HeaderField::new(":authority", "www.example.com"),
             ]);
-            enc.encode(&[
+            let _ = enc.encode(&[
                 HeaderField::new(":method", "GET"),
                 HeaderField::new(":scheme", "http"),
                 HeaderField::new(":path", "/"),

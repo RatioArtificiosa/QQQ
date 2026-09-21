@@ -257,6 +257,19 @@ jobs:
       - name: Prove the anchor-stability check catches a deletion
         run: python tools/check_tombstones.py --self-test
 
+      # A crate's documented scope table claimed "not implemented" for HTTP/2,
+      # TLS, streaming and backpressure long after all four landed -- and the
+      # `h2` module itself was **excluded from the module tree** by a leftover
+      # debugging line, so 9,370 lines and 201 tests silently stopped being
+      # compiled. Hand-written prose about the crate's state was the only thing
+      # claiming otherwise and nothing read it. This checker walks `mod`
+      # declarations and fails when a file under `src/` is unreachable, which is
+      # precisely the defect that shipped. See Observations §O-120.
+      - name: Verify each crate's scope table against its module tree
+        run: python tools/check_scope_table.py
+      - name: Prove the scope-table check detects an orphaned module
+        run: python tools/check_scope_table.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

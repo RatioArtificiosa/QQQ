@@ -314,7 +314,10 @@ impl fmt::Display for ConnectionError {
                 last_stream_id,
                 error,
             } => match error {
-                Some(e) => write!(f, "the peer sent GOAWAY ({e}) after stream {last_stream_id}"),
+                Some(e) => write!(
+                    f,
+                    "the peer sent GOAWAY ({e}) after stream {last_stream_id}"
+                ),
                 None => write!(f, "the peer sent GOAWAY after stream {last_stream_id}"),
             },
             Self::LocalGoAway {
@@ -482,7 +485,7 @@ mod tests {
 
     /// RFC 9113 §7: *"Unknown or unsupported error codes MUST NOT trigger any
     /// special behavior. These MAY be treated by an implementation as being
-    /// equivalent to INTERNAL_ERROR."*
+    /// equivalent to `INTERNAL_ERROR`."*
     ///
     /// So an unassigned number is `None`, **not** an error — a peer extending the
     /// space must not be punished for it.
@@ -501,10 +504,7 @@ mod tests {
         assert_eq!(ErrorCode::FlowControlError.as_str(), "FLOW_CONTROL_ERROR");
         assert_eq!(ErrorCode::EnhanceYourCalm.as_str(), "ENHANCE_YOUR_CALM");
         assert_eq!(ErrorCode::Http11Required.as_str(), "HTTP_1_1_REQUIRED");
-        assert_eq!(
-            ErrorCode::ProtocolError.to_string(),
-            "PROTOCOL_ERROR (0x1)"
-        );
+        assert_eq!(ErrorCode::ProtocolError.to_string(), "PROTOCOL_ERROR (0x1)");
     }
 
     /// Answering a clean peer shutdown with an error code tells the peer it did

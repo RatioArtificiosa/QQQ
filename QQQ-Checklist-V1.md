@@ -565,7 +565,48 @@ Items are grouped below by **phase**, because dependency order matters more than
     real `impl GrantSet` blocks, so a green result means "checked and clean"
     rather than "checked nothing".
   → §4.1 The layer cake
-- [ ] **ARCH-003** Implement the compile-time rule that a host function without a WIT definition cannot enter a release build.
+- [x] **ARCH-003** Implement the compile-time rule that a host function without a WIT definition cannot enter a release build.
+  → Done: `crates/qqq-host/src/arch003.rs` — `registered_from_sources`,
+    `wit_defines`, `wit_declares_function`, `dissenting_functions`,
+    `Indeterminate`, `EXPECTED_REGISTRATIONS`. **10 tests**, all green.
+  → **Measured before implementing**: all 8 host functions *do* appear in a WIT
+    file, and **nothing enforced that**. The two mechanisms that looked like
+    coverage check different things — `qqq-abi`'s
+    `every_interface_has_wit_source` checks **interfaces** (a function inside one
+    can still be undefined), and `SEC-011`'s boundary table is about input
+    boundaries, not WIT presence. A ninth host function with no WIT definition
+    would have compiled into a release build.
+  → **Honest statement of the mechanism: this is a test, not a `const`
+    assertion.** Five attempts at the compile-time form are recorded in
+    `§O-111`, and the fourth **nearly shipped a rule that always passes** — a
+    comment-skip off-by-one made the scanner return an empty list, whereupon
+    "every registered function has a WIT definition" was **vacuously true** and
+    the assertion *passed*. That is `§M-006`'s defect and it is worse than no
+    check, because it gets cited as evidence. The rule is therefore enforced by a
+    test in CI, which is where the workspace enforces every other invariant of
+    this shape (`tools/audit_requirements.py` is the single gate).
+  → **The anti-vacuity design is the substance of the item.** Three changes make
+    this check unable to pass by finding nothing: `EXPECTED_REGISTRATIONS` is
+    asserted **before** any WIT question; `Indeterminate` distinguishes *"the
+    scan found no violations"* from *"the scan could not run"* as different
+    return values, because a `usize` of dissenters cannot express the second; and
+    `the_scan_is_not_vacuous` proves the scan found all 8 and includes `now` and
+    `digest` by name.
+  → **The registration scan is delegated to `arch012::scan`, not re-implemented.**
+    The fourth failure's root cause was structural: **`func_wrap(` and its name
+    literal are on different lines**, so a per-line scan can never see a name and
+    a scan that refuses to cross a newline returns `None` for every real
+    registration. `arch012::scan` slices from one `func_wrap(` to the *next*, so
+    its window spans the break. `the_scanners_agree` pins the two together, and
+    `the_expected_count_agrees_with_audited` pins `EXPECTED_REGISTRATIONS` to
+    `arch012::AUDITED`, which is itself checked against the source in both
+    directions.
+  → Fault injection: `a_name_in_a_wit_doc_comment_is_not_a_definition` (a WIT
+    doc comment mentioning `digest` is not a declaration),
+    `every_declaration_form_is_recognised` (`func`, `async func`, `static func`,
+    and a near-miss `nowhere` that must not match `now`), and
+    `the_comment_and_test_skips_work` driven on a **fabricated** source containing
+    a prose mention, a real registration and a test-only one.
   → §4.1 The layer cake
 - [x] **ARCH-004** Add an architecture test that no crate depends on a crate above it in the topology.
   → Done: `no_crate_depends_on_a_crate_above_it` in

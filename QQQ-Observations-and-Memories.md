@@ -9481,4 +9481,105 @@ the module).
 
 ---
 
+### §O-111 — Five attempts at one check, and the fourth nearly shipped a rule that always passes
+
+**The invariant.** §4.1, invariant 3:
+
+> Every L6 host function is **defined in WIT before it is implemented in Rust**.
+> A host function without a WIT definition **does not compile into a release
+> build**.
+
+**What was measured, before writing anything.** All eight host functions *do*
+appear in a WIT file — and **nothing enforced that**. Two mechanisms looked like
+coverage and were not:
+
+| Mechanism | Checks | Why it is not invariant 3 |
+|---|---|---|
+| `qqq-abi`'s `every_interface_has_wit_source` | Every **interface** in the registry has WIT source | An interface having *some* WIT says nothing about whether a given **function** inside it does |
+| `SEC-011`'s boundary table | Every `func_wrap` declares its input boundaries | That is about *boundaries*, not WIT presence at all |
+
+So a ninth host function added tomorrow with no WIT definition would compile into
+a release build, which is exactly what the invariant forbids. Same shape as
+`ARCH-012` the round before: the property held by care, not by construction.
+
+**Then it took five attempts to write the check, and each failure was a different
+kind of wrong.**
+
+**Attempt 1: parse Rust in a `const fn`.** The invariant says *"does not compile"*,
+so a `const` assertion is the faithful mechanism. It needed `hay[start..i]` and
+`core::str::from_utf8(..).ok()` — **neither is const-stable**. Redesigned around
+`(offset, length)` runs so every comparison is a byte comparison.
+
+**Attempt 2: the const evaluation was too slow.** The compiler said so:
+*"constant evaluation is taking a long time."* The scan tested `func_wrap(` at
+every byte offset of every WIT source — ~150,000 offsets per registration, times
+eight, and const evaluation is **interpreted**, so a loop that costs microseconds
+at run time costs seconds in a build. Fixed with two early-outs, and the lesson
+recorded in the code: **a build-time check has a cost budget a test does not. A
+check that makes builds slow is a check somebody deletes.**
+
+**Attempt 3: the scanner returned doc-comment prose.** Measured output:
+
+```
+["name", "digest", "name", "digest", "digest", "digest", "other", "get"]
+```
+
+Eight slots filled with fragments of comments, and **none** of the three real
+clock registrations. The "refuse to cross a newline while searching for the quote"
+guard does nothing, because this workspace's prose puts the quote on the same
+line: ``/// Whether `source` contains `func_wrap("name"`, ignoring whitespace.``
+This is `§O-071`'s name-extractor bug for the **third time this session** —
+recorded once, avoided by construction in `arch012`, and then repeated anyway
+because this scanner was written as a *const-capable variant* rather than reusing
+the one that already worked.
+
+**Attempt 4: the fix for attempt 3 made the scanner return an empty list — and the
+check passed.** The comment-skip had an off-by-one: the inner loop stops *on* the
+newline, and `continue` skipped the loop's own `i += 1`, so `i` never advanced
+past it. `host_clock.rs` begins with two SPDX comment lines, so the scan
+terminated immediately.
+
+**And here is the part worth the whole record.** *"Every registered host function
+has a WIT definition"* was then **vacuously true** — zero findings among zero
+registrations — and the const assertion **passed**. I was one `i += 1` away from
+shipping a rule whose failure mode is *always reports success*.
+
+That is `§M-006`'s defect, and it is **strictly worse than having no check**: an
+absent check is a known gap, whereas this one would have been cited as evidence.
+The workspace has recorded this class four times, and this is the first time it
+nearly arrived inside the very check being written to prevent that class.
+
+**Attempt 5, and the design that works.** Two changes, both about *not trusting a
+scanner*:
+
+1. **The count is asserted first.** `EXPECTED_REGISTRATIONS` and an
+   `Indeterminate` return type mean *"the scan found nothing"* is a **loud
+   failure**, distinct from *"the scan found no violations"*. The two are
+   different answers and a `usize` of dissenters cannot express the second. This
+   is what turned attempt 4 from a silent pass into
+   `the ARCH-003 check could not be completed: the scanner found no host
+   registrations at all, so the WIT rule was vacuously satisfied.`
+2. **The registration scan is delegated to `arch012::scan`, not re-implemented.**
+   The fourth failure's root cause turned out to be structural: **`func_wrap(`
+   and its name literal are on different lines.** A per-line scan can never see
+   the name; a scan that refuses to cross a newline returns `None` for every real
+   registration. `arch012::scan` slices from one `func_wrap(` to the *next*, so
+   its window spans the break — and its tests already prove it finds all eight.
+   **The duplication was the error, not the implementation.**
+
+**The generalisable rules, three of them.**
+
+* **A check that can silently find nothing is worse than no check.** Assert the
+  input set is non-trivial *before* asserting anything about its members.
+* **Distinguish "no violations" from "could not check" in the type.** `Ok(vec![])`
+  and `Err(Indeterminate)` are different answers, and a count cannot say which.
+* **Do not write a second scanner for a question the first one already answers.**
+  Four attempts died on the same bug that an existing, tested function had already
+  solved; the reuse was available the whole time and it was rejected because the
+  new context felt different enough to justify a fresh implementation. It did not.
+
+→ `crates/qqq-host/src/arch003.rs` (10 tests), reusing `arch012::scan`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

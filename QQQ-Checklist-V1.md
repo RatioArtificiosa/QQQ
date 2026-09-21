@@ -1890,7 +1890,13 @@ Items are grouped below by **phase**, because dependency order matters more than
     exempted anything matching `#![cfg_attr` — a broader exemption than the thing
     it was guarding against — and that only ever ran in CI (`§O-055`'s failure).
   → §4.3 Crate topology. New: `docs/unsafe-audit.md`, `tools/audit_unsafe.py`.
-- [ ] **SEC-021** Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in, with a standards-watch task.
+- [x] **SEC-021** Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in, with a standards-watch task.
+  → Done: `SERVER_KX_GROUPS` in `qqq-serve::tls` names X25519MLKEM768 **first**, and
+    `provider.kx_groups` is set explicitly instead of inheriting a library default.
+  → Reading the pinned dependency inverted the item: rustls 0.23.31+ already defaults
+    to X25519MLKEM768 and `Cargo.lock` resolves 0.23.45, so the hybrid was ON by
+    inheritance. The real risk was it being silently removed, not enabled.
+  → 3 tests + a bridge injection (4/4 now caught) prove the policy is load-bearing.
   → §7.4 Cryptographic posture
 - [ ] **SEC-022** Implement the optional egress proxy with per-tenant policy.
   → §7.5 Hardening beyond Wasm
@@ -2869,7 +2875,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OQ-011** Decide whether `qqq:ai` ships inside the V1 line or moves to V2.
   → §6.9 `qqq:ai` — local inference as a capability
-- [ ] **OQ-012** Decide the deprecation window: two minor versions, or a fixed time period.
+- [ ] **OQ-099** Decide the deprecation window: two minor versions, or a fixed time period.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
 
 ### AI — Inference capability (staged behind `OQ-011`)

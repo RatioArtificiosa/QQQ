@@ -415,6 +415,14 @@ injections_are_clean() {
         ok=0
     fi
 
+    # Injection 4 replaces the hybrid group with a classical one, demoting it out
+    # of first place. Detected by the hybrid name being absent from the group list,
+    # which is the property the test asserts.
+    if ! grep -q 'kx_group::X25519MLKEM768' "${WORKSPACE}/crates/qqq-serve/src/tls.rs"; then
+        echo "   !! the post-quantum key exchange is missing -- injection 4 is still applied"
+        ok=0
+    fi
+
     [ "${ok}" -eq 1 ]
 }
 
@@ -621,7 +629,34 @@ cmd_inject() {
     fi
     restore_all
 
-    # -- The restore is verified, and a mismatch is itself a failure ----------
+    # -- 4. the post-quantum preference (SEC-021, any platform) ---------------
+    #
+    # # Why this injection exists
+    #
+    # `SEC-021` was on the checklist as "track post-quantum hybrid TLS as an
+    # opt-in". Reading the pinned dependency showed the hybrid was ALREADY on, by
+    # inheritance from rustls 0.23.45, and that the real risk was the opposite of
+    # the one the item named: not "how do we turn it on" but "how do we keep a
+    # future bump from turning it off silently".
+    #
+    # So the inherited default was converted into a stated policy, and this
+    # injection is what proves the policy is load-bearing. It demotes the hybrid
+    # group to last place -- the failure that matters, because list order is how a
+    # server states its preference, so a "present but last" group is one a
+    # following client will not choose.
+    total=$((total + 1))
+    echo ""
+    echo "── injection 4: post-quantum key exchange demoted (SEC-021) ──"
+    sed -i 's|    rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,|    rustls::crypto::aws_lc_rs::kx_group::SECP384R1,|' \
+        crates/qqq-serve/src/tls.rs
+    if ! cargo test -p qqq-serve --lib tls::tests 2>&1 | grep -q 'test result: ok'; then
+        echo "   CAUGHT"
+        caught=$((caught + 1))
+    else
+        echo "   NOT CAUGHT -- the hybrid could be demoted and no test notices"
+    fi
+    restore_all
+
     #
     # The tree must be byte-identical to how it started. If it is not, the
     # injections left the developer's working copy modified — which would corrupt

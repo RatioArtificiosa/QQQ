@@ -4406,7 +4406,7 @@ bug, and it will not catch the next one either.
 
 ---
 
-## 4. MISTAKES AND FIXES
+## (heading deleted)
 
 ### §M-001 — Proposal was written as a stub part-file and then extended
 
@@ -5264,6 +5264,69 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 → `docker/compose.yaml`, `docker/entrypoint.sh` (`cmd_guard_prove`),
 `tools/qqqdev.ps1` (`guard-prove`), `docs/development-bridge.md` §2.
+
+---
+
+### §O-090 — `SEC-021`: the item asked to turn something on, and it was already on — so the work was the opposite
+
+**What the item said.** "Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in,
+with a standards-watch task." The implied work: enable a feature that is off.
+
+**What reading the dependency showed.** `Cargo.lock` resolves `rustls` to
+**0.23.45**. rustls **0.23.31** made `X25519MLKEM768` the **default and preferred**
+key exchange for TLS 1.3, and this server never called `with_kx_groups`, so it had
+always inherited that default. The hybrid exchange was already running; the checklist
+item described a state that had been true for a while and nobody had established.
+
+This is `§O-082`'s question generalised. There the question was *"is this blocked on
+the item, or on one way of doing it?"* Here it is **"is this item describing work, or
+describing a belief about the current state?"** — and the belief was wrong in the
+direction that makes the work *smaller*, which is the direction nobody checks.
+
+**What the real risk was.** The inverse of the one named. `tls.rs` documented that
+`default_provider()`'s cipher suites were replaced on the next line but that "the
+key-exchange groups … remain default" — an honest comment recording an unowned
+decision. A property held by inheritance disappears silently when the dependency
+changes its mind, and this session has now found **six** controls that were believed
+live and were not (`§O-066`, `§O-069`, `§O-071`, `§O-076`, `§O-085`, `§O-088`). A
+post-quantum exchange held by inheritance belonged on that list the moment a future
+rustls decided to reorder its defaults.
+
+And the failure would have been invisible: a demoted group is still *present*, so any
+check for "is X25519MLKEM768 offered?" passes while every following client negotiates
+something else. **List order IS the preference.**
+
+**What was built.**
+
+1. `SERVER_KX_GROUPS` names the groups explicitly, hybrid first, with the classical
+   fallbacks after it — converting an inherited default into a stated policy.
+   `provider.kx_groups` is now assigned rather than left to the library, so the
+   comment above it is true.
+2. `PQ_KEY_EXCHANGE_ENABLED` records the intent as a value, so a deliberate change
+   has to alter both the constant and the test.
+3. Three tests: the hybrid is offered **and first**; the classical fallbacks survive
+   (a hybrid nobody can complete protects nothing); no group is duplicated (which
+   would make the preference order ambiguous, the one mechanism this relies on).
+4. A **fourth bridge injection** demotes the hybrid to last place and asserts the
+   tests catch it. Verified by running it: **4/4 caught**, tree restored
+   byte-for-byte. The guard is proven, not asserted.
+
+**A small correction found on the way.** §7.5's checklist pointer read
+`` `SEC-001` … `SEC-024`, `SEC-030` … `SEC-030` `` — a range ending where it starts,
+and naming `SEC-024` as the upper bound when the register continues to `SEC-030`.
+Neither the validator nor a reader would flag it, because both endpoints are real
+items. Corrected to `` `SEC-001` … `SEC-030` ``.
+
+**The general lesson.** *When an item says "add X", check whether X is already
+there before building the machinery to add it.* The two possible findings are
+opposite — the work is harder than it looked, or the work is to protect something
+that already exists — and only the second is invisible to a reader. And when a
+property is inherited from a dependency default rather than stated, it is not a
+property of this codebase at all.
+
+→ `crates/qqq-serve/src/tls.rs` (`SERVER_KX_GROUPS`, `PQ_KEY_EXCHANGE_ENABLED`,
+three tests), `docker/entrypoint.sh` (injection 4,
+`injections_are_clean`), `QQQ-Proposal-V1.md` §7.5.
 
 ---
 

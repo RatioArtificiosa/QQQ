@@ -1260,7 +1260,7 @@ Wasm is the primary boundary but not the only layer:
 
 **Design rule:** none of these are *required* for QQQ's security claim. The capability engine is the boundary; these are depth. A host without seccomp is still safe against a malicious guest, and that is the property that makes QQQ deployable anywhere.
 
-→ **Checklist:** `SEC-001` … `SEC-024`, `SEC-030` … `SEC-030`
+→ **Checklist:** `SEC-001` … `SEC-030`
 
 ---
 

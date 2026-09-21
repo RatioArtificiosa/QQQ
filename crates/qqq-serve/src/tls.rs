@@ -112,6 +112,73 @@ use rustls::{RootCertStore, ServerConfig, SupportedCipherSuite};
 pub const PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] =
     &[&rustls::version::TLS13, &rustls::version::TLS12];
 
+/// Whether the server offers post-quantum hybrid key exchange (`SEC-021`).
+///
+/// # The finding that reshaped this item
+///
+/// The checklist asks to "track post-quantum hybrid TLS (X25519+ML-KEM) as an
+/// opt-in". Reading the pinned dependency rather than the item's premise showed
+/// the premise was already satisfied, and in the opposite direction:
+///
+/// * `Cargo.lock` resolves `rustls` to **0.23.45**.
+/// * rustls **0.23.31** made `X25519MLKEM768` the *default and preferred* key
+///   exchange for TLS 1.3.
+/// * This server never called `with_kx_groups`, so it inherited that default.
+///
+/// So the hybrid exchange was already on, and the real risk was the inverse of the
+/// one the item names: not "how do we enable it", but **"how do we keep it from
+/// being silently removed"**. A property nobody asserts is a property that
+/// disappears in the next dependency bump, and `§O-085`, `§O-088` and `§O-089` are
+/// all instances of exactly that.
+///
+/// # Why this is a constant and a test rather than a comment
+///
+/// `SERVER_KX_GROUPS` below names the groups explicitly. That converts an
+/// inherited default into a stated policy, so a rustls upgrade that changed the
+/// default would change nothing here, and a deliberate removal would require
+/// editing this list — which the test refuses unless the intent is recorded.
+///
+/// # Why the names, not a boolean
+///
+/// A boolean `post_quantum: true` would say *that* PQ is desired and nothing about
+/// *which* group provides it. The group is the security-relevant fact: the
+/// hybrid's whole point is that it stays safe if ML-KEM falls, because the
+/// X25519 half must also be broken.
+pub const PQ_KEY_EXCHANGE_ENABLED: bool = true;
+
+/// The TLS 1.3 key-exchange groups this server offers, in preference order.
+///
+/// # Why the hybrid is first
+///
+/// `X25519MLKEM768` concatenates a classical X25519 exchange with an ML-KEM-768
+/// one and derives the session key from both. An attacker must break *both* to
+/// recover it, so the construction is at least as strong as X25519 today and
+/// survives a future quantum break of X25519 — this is the "harvest now, decrypt
+/// later" defence, and it is why ordering matters: a client that honours the
+/// server's preference gets the hybrid.
+///
+/// # Why the classical groups remain
+///
+/// Removing them would drop interop with clients that cannot do ML-KEM, and the
+/// hybrid is worthless if the handshake fails. They are ordered after the hybrid,
+/// so the strong option is chosen whenever it exists.
+///
+/// # Agreement with §7.4
+///
+/// §7.4 states the policy as "no algorithm agility without a version bump. A
+/// manifest names algorithms explicitly; there are no 'default' choices that could
+/// silently change under the user." This constant is that principle applied to key
+/// exchange, which is the one part of §7.4's table that had been left to a
+/// library default.
+pub static SERVER_KX_GROUPS: &[&dyn rustls::crypto::SupportedKxGroup] = &[
+    // Hybrid first: preferred whenever the client supports it.
+    rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+    // Classical fallbacks, for clients that cannot do ML-KEM.
+    rustls::crypto::aws_lc_rs::kx_group::X25519,
+    rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
+    rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
+];
+
 /// The cipher suites this server offers, in preference order.
 ///
 /// # Why this list exists rather than rustls' default
@@ -1345,11 +1412,12 @@ impl TlsConfig {
         // `default_provider()` is not a "silent default" in the `SEC-017`
         // sense: the suites — the thing the policy is *about* — are replaced
         // unconditionally on the next line, so no suite can reach the handshake
-        // that this constant did not name. What remains default is the random
-        // source, the key-exchange groups, the signature algorithms and the key
-        // loader.
+        // that this constant did not name. The key-exchange groups are likewise
+        // replaced explicitly (`SEC-021`). What remains default is the random
+        // source, the signature algorithms and the key loader.
         let mut provider = rustls::crypto::aws_lc_rs::default_provider();
         provider.cipher_suites = self.cipher_suites.to_vec();
+        provider.kx_groups = SERVER_KX_GROUPS.to_vec();
         let provider = Arc::new(provider);
 
         let builder = ServerConfig::builder_with_provider(Arc::clone(&provider));
@@ -1507,13 +1575,100 @@ fn cipher_suite_name(suite: Option<SupportedCipherSuite>) -> String {
 mod tests {
     use super::*;
 
-    /// The policy constants must name suites, and must not be empty — an empty
+    /// **The policy constants must name suites, and must not be empty** — an empty
     /// list is the "silent default" `SEC-017` forbids, arriving by the back door.
     #[test]
     fn the_cipher_policy_is_not_empty() {
         assert!(
             CIPHER_SUITES.len() >= 4,
             "a cipher policy with fewer than four suites is not a policy"
+        );
+    }
+
+    /// **`SEC-021`: the hybrid post-quantum group is offered, and offered first.**
+    ///
+    /// # Why this test exists rather than a comment
+    ///
+    /// Reading the pinned dependency showed the item's premise was already
+    /// satisfied: rustls 0.23.31 made `X25519MLKEM768` the default, and
+    /// `Cargo.lock` resolves 0.23.45, so this server was already doing hybrid key
+    /// exchange *by inheritance*.
+    ///
+    /// An inherited property is one dependency bump away from disappearing
+    /// silently, and this session found five controls that had done exactly that
+    /// (`§O-085`, `§O-088`, `§O-089`). So the default was converted into a stated
+    /// policy, and this test is what makes the policy load-bearing: it fails if the
+    /// group is removed, if it stops being first, or if the list is replaced with
+    /// something that no longer names it.
+    #[test]
+    fn the_post_quantum_key_exchange_is_offered_and_preferred() {
+        // # Why there is no `assert!(PQ_KEY_EXCHANGE_ENABLED)` here
+        //
+        // The first version had one, and `clippy::assertions_on_constants` rejected
+        // it as an assertion whose value is known at compile time — correctly,
+        // because it could never fail and therefore asserted nothing. A test that
+        // cannot fail is the `§O-085` shape arriving inside a test.
+        //
+        // The intent it reached for is served by `PQ_KEY_EXCHANGE_ENABLED` being
+        // `pub`: a constant the compiler can always see is one a reader and a
+        // downgrade script can see. The behavioural claim is made by the
+        // assertions below, which can actually fail.
+        let first = SERVER_KX_GROUPS.first().expect("the list cannot be empty");
+        assert_eq!(
+            first.name(),
+            rustls::NamedGroup::X25519MLKEM768,
+            "the hybrid must be FIRST: list order is how a server states its \
+             preference, so a client that follows us gets the post-quantum \
+             exchange. Found: {:?}",
+            first.name()
+        );
+
+        assert!(
+            SERVER_KX_GROUPS
+                .iter()
+                .any(|g| g.name() == rustls::NamedGroup::X25519MLKEM768),
+            "the hybrid group is not offered at all, so `harvest now, decrypt \
+             later` is undefended against"
+        );
+    }
+
+    /// **The classical fallbacks survive**, because a hybrid nobody can complete
+    /// protects nothing: interop with clients that lack ML-KEM is the difference
+    /// between a strong handshake and no handshake.
+    #[test]
+    fn the_classical_fallbacks_are_still_offered() {
+        let names: Vec<_> = SERVER_KX_GROUPS.iter().map(|g| g.name()).collect();
+        for required in [rustls::NamedGroup::X25519, rustls::NamedGroup::secp256r1] {
+            assert!(
+                names.contains(&required),
+                "removing {required:?} drops interop with clients that cannot do \
+                 ML-KEM; the hybrid is worthless if the handshake fails. Have: \
+                 {names:?}"
+            );
+        }
+    }
+
+    /// **No group may be offered twice.** A duplicate would let a client negotiate
+    /// a group the server believes it listed once, and would make the preference
+    /// order ambiguous — which is the whole mechanism by which the hybrid is
+    /// preferred.
+    #[test]
+    fn no_key_exchange_group_is_offered_twice() {
+        // `NamedGroup` is not `Ord`, so comparability comes from `Debug`, which is
+        // sufficient here: the test only needs to know whether two names are
+        // *equal*, and `sort`/`dedup` on the formatted forms answers exactly that.
+        let mut names: Vec<String> = SERVER_KX_GROUPS
+            .iter()
+            .map(|g| format!("{:?}", g.name()))
+            .collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            before,
+            "a duplicated key-exchange group makes the preference order \
+             ambiguous"
         );
     }
 

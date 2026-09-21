@@ -10307,4 +10307,65 @@ corrected, and now says what the code does.
 
 ---
 
+### §O-121 — A green local `clippy -D warnings` that CI rejected, because `stable` is not a version
+
+**The failure.** `cargo clippy --workspace --all-targets -- -D warnings` passed
+locally, three commits were pushed, and CI failed on **all three Rust platforms**
+with:
+
+```
+error: using `chunks_exact` with a constant chunk size
+  --> crates/qqq-serve/src/h2/frame.rs:1038:34
+```
+
+**The cause was a version skew I had never checked.**
+
+| | Version |
+|---|---|
+| This machine's `stable` | **1.97.1** |
+| GitHub Actions' `stable` (`dtolnay/rust-toolchain@stable`) | **1.98.0** |
+
+`chunks_exact` with a constant chunk size is a lint **added in 1.98**. The local
+toolchain could not emit it, so a local `-D warnings` pass was not evidence about
+CI. The repo has no `rust-toolchain.toml`, and CI pins `stable` — a **moving
+target** — so the two were always going to diverge, and nothing here would have
+noticed which direction.
+
+**This is `§O-116`'s shape with the polarity reversed.** That entry is about a check
+that passes while measuring nothing. This is a check that **passes in the
+environment it was run in and fails in the environment it was written for** — and
+the gap is not a bug in either toolchain but an unstated assumption: *"local stable
+is CI's stable"*. It was never true; it was true on the days it happened to hold.
+**An unpinned toolchain in CI plus a differently-pinned one locally is a
+verification gap that silently opens and closes.**
+
+**The fix, in both directions.**
+
+1. `rustup update stable` → **1.98.1**, so local and CI agree today.
+2. `payload.chunks_exact(6)` → `payload.as_chunks::<6>()`, which is also the better
+   code: `as_chunks` proves the chunking is total at the type level, and
+   `length % 6 == 0` was already checked two lines above, so the empty remainder is
+   guaranteed rather than assumed.
+
+**The lasting rule, and it is the second of its kind in this file.** The first was
+*"reproduce the exact command CI runs"* (`§O-116`: `--check` alone while CI also
+ran `--self-test`). This adds the other half:
+
+> **Reproduce the exact command CI runs, in the environment CI runs it in.** A
+> command is not the whole specification — the toolchain version is part of it, and
+> `stable` names a moving target rather than a version.
+
+**What would catch it structurally.** A `rust-toolchain.toml` pinning the version,
+so `stable` is never a variable in either place. Until that exists,
+`rustup update stable` before a verification pass is the manual substitute.
+
+The useful part of the mistake: CI caught it in **one run on three platforms at
+once**, because the workflow exists and gates on it. A project without `-D warnings`
+in CI would have carried this lint for months — and the code was already correct,
+since `chunks_exact` is not wrong, only newly discouraged.
+
+→ `crates/qqq-serve/src/h2/frame.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

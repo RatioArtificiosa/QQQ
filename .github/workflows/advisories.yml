@@ -48,7 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Reads `rust-toolchain.toml`: see the note in ci.yml's Rust job for why
+      # `@stable` was a moving target that cost three red runs (§O-121).
+      - uses: dtolnay/rust-toolchain@master
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny

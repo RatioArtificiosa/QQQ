@@ -1,0 +1,42 @@
+# The toolchain every build uses.
+#
+# # Why this file exists
+#
+# CI pins `stable` (`dtolnay/rust-toolchain@stable`), which is a **moving target**:
+# it names whatever `stable` is on the day the job runs. A developer's machine
+# pins whatever they last installed. Those two are not the same version, and
+# nothing in the repository said so — so `cargo clippy -- -D warnings` could pass
+# locally and fail in CI on a lint that one toolchain has and the other does not.
+#
+# That is exactly what happened: `chunks_exact` with a constant chunk size is a
+# lint added in **1.98**, this machine had **1.97.1**, and CI rejected a commit
+# that was clean for three local verification passes (§O-121). The code was
+# correct; the *verification* was not, because a command is not the whole
+# specification — the toolchain version is part of it.
+#
+# Pinning the version here makes `stable` a value rather than a variable, and
+# `rustup` fetches exactly this version for anyone who runs `cargo` in the repo.
+# CI reads the same file through `dtolnay/rust-toolchain@master` with no `toolchain:`
+# input, so the workflow and the developer agree by construction rather than by
+# coincidence.
+#
+# # Why 1.98 and not the MSRV
+#
+# `Cargo.toml` declares `rust-version = "1.97"` (the MSRV — the oldest toolchain
+# that can build this workspace). This file pins the toolchain the workspace is
+# **built and linted** with, which is deliberately newer: clippy gains lints over
+# time, and a project that lints with its own MSRV cannot adopt a lint until it
+# raises the MSRV. Both numbers are stated, and they differ on purpose — the MSRV
+# is a compatibility promise to users, this is a reproducibility promise to
+# contributors.
+#
+# **The MSRV itself is not currently verified by CI.** No workflow builds with
+# 1.97, so `rust-version = "1.97"` is an unverified claim; raising it would go
+# unnoticed and lowering it could break users without any signal. Adding that job
+# is recorded as outstanding work rather than silently implied here.
+
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-wasip2"]
+profile = "minimal"

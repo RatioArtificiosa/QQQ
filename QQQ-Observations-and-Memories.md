@@ -5267,6 +5267,61 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-100 — Two WIT files were published, validated, documented, and invisible to the runtime
+
+**What `ABI-015`'s audit found, before the check existed to find it.**
+
+`wit/` held **15** files. `qqq-abi` embedded **13**:
+
+```text
+wit/qqq-test.wit     authored, validated by 3 checkers, rendered into docs/  -> NOT embedded
+wit/qqq-agent.wit    authored, validated by 3 checkers, rendered into docs/  -> NOT embedded
+```
+
+Both files were correct. They parsed, they satisfied the versioning policy and the
+typed-error rule, they appeared in the generated reference — and **no host could serve
+them and no binding could be generated from them**, because nothing had added them to the
+crate that publishes interfaces.
+
+**Why every existing check missed it.** Each one looked at `wit/` and found it healthy.
+None looked at the *relationship* between the directory and the crate that embeds it. So
+the corpus was green, the tests were green, the reference documentation was green, and
+two interfaces were unusable.
+
+That is `§O-085` and `§O-088` again — a control that covers what it was pointed at and
+not what it was supposed to guarantee — and it is now the **ninth** instance in this
+session. What is different here is the *scale*: the earlier ones were single functions or
+files, and this one silently excluded an eighth of the public interface.
+
+**Why it happened, and why that is the interesting part.** The two files were written in
+the same round as the audit (`§O-099`). They were validated by three checkers, which is
+exactly why nobody looked further: *three green checks create the impression that a thing
+is wired up*. The validation checks answer "is this WIT file well formed?" and nothing
+answers "is this WIT file reachable?" — and a question nobody asks does not get a check.
+
+**The check, and the property it enforces.** `tools/check_wit_bindings.py` asserts that
+every `wit/*.wit` is embedded, that every `include_str!` names a real file, that `ALL_WIT`
+registers the package each file declares, and that the registry is **sorted**.
+
+The sorting rule is not style. An unsorted registry makes an *absent* entry invisible in a
+diff: the eye cannot tell which name is missing from an arbitrary order, which is how the
+original two omissions survived review. Sorted, a gap shows as a name out of place.
+
+**The tooling then caught a mistake in the fix.** Adding the two constants placed them
+inside the `ALL_WIT` doc comment, orphaning it — and the workspace's
+missing-documentation lint rejected the build. A repair defended by an existing check,
+found by that check rather than by reading.
+
+**The generalisable rule.** *Three passing checkers on an artifact say nothing about
+whether anything references it.* Every "is this correct?" check needs an accompanying
+"is this connected?" check, and the second is the one people forget to write, because the
+artifact looks finished from the inside.
+
+→ `tools/check_wit_bindings.py`, `crates/qqq-abi/src/wit.rs`,
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+---
+
 ### §O-099 — Auditing thirteen items instead of ticking them: eleven were done, and two were not
 
 **What happened.** The P3 section listed `ABI-001` … `ABI-013` as unchecked: thirteen

@@ -897,6 +897,8 @@ cmd_checks() {
     python3 tools/check_wit_bindings.py --self-test
     python3 tools/check_spdx.py
     python3 tools/check_spdx.py --self-test
+    python3 tools/check_license_boundary.py
+    python3 tools/check_license_boundary.py --self-test
 
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py

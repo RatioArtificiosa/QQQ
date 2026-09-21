@@ -232,6 +232,15 @@ jobs:
       - name: Prove the SPDX check rejects a missing or wrong header
         run: python tools/check_spdx.py --self-test
 
+      # `LIC-012`. §13.2 resolves the licence conflict with a one-way wall, and both
+      # directions fail differently: runtime → Fabric breaks the Apache-2.0 grant itself,
+      # while Fabric → runtime breaks the promise that Fabric is optional. The check
+      # reports them separately because the remedies differ.
+      - name: Validate the runtime/Fabric licence boundary
+        run: python tools/check_license_boundary.py
+      - name: Prove the boundary check classifies every crate
+        run: python tools/check_license_boundary.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the

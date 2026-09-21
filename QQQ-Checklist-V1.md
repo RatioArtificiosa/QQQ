@@ -348,7 +348,25 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
 - [ ] **LIC-011** Reserve the fallback licence plan (fair-source with a change date) in writing, so it is never chosen under pressure.
   → §13.2 The licence model, and why NN-8 still holds
-- [ ] **LIC-012** Add a CI check that the runtime crates never depend on Fabric-licensed code in either direction.
+- [x] **LIC-012** Add a CI check that the runtime crates never depend on Fabric-licensed code in either direction.
+  → Done: `tools/check_license_boundary.py` — classifies every crate by the licence its own
+    manifest **declares** (Fabric credits or Apache-2.0), then asserts no dependency
+    crosses the wall either way, with a distinct message per direction because the
+    remedies differ: runtime → Fabric breaks the Apache-2.0 grant itself, while
+    Fabric → runtime breaks §13.2's promise that Fabric is optional.
+  → The classification is **derived, not listed**, so a new crate is classified
+    automatically — and an **unclassifiable licence is reported** rather than assumed to
+    be runtime, because "assume the safe kind" is how a commercial crate would slip
+    through.
+  → **Both directions proven, not asserted.** The repository has no Fabric crate yet, so a
+    green run would only mean one side of the wall does not exist. A synthetic Fabric crate
+    was created, wired in each direction, and the check caught both — then the workspace
+    was restored and re-verified clean.
+  → The check states the gap rather than hiding it: with no Fabric crate, it prints that it
+    is verifying the direction that *can* fail today and cannot exercise the other. A green
+    result that means "the other side does not exist yet" must say so.
+  → 10/10 self-test cases, covering the commercial and open licence spellings a manifest
+    might use (`LicenseRef-Fabric`, `Proprietary`, `MIT OR Apache-2.0`).
   → §4.3 Crate topology
 
 ### GOV — Governance

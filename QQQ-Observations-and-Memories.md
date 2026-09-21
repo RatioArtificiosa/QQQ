@@ -5267,6 +5267,67 @@ tree restored byte-for-byte, verified by re-hashing every tracked file.
 
 ---
 
+### §O-096 — The documentation system: three generated artifacts, and three self-tests that were wrong before the code was
+
+**What was built.** Five `DOC-` items, and the notable thing is that four of them landed
+as **checked artifacts** rather than as prose. A document cannot fail a build when it
+drifts from its source; a generator plus a checker can.
+
+* `docs/README.md` — the three-document system, the verification graph, change recipes.
+* `docs/contributing/anchors.md` — the anchor derivation and stability rules.
+* `docs/glossary.md` — **generated** from the Proposal's §0.6 table (18 terms).
+* `docs/reconciliation.md` — **generated** from Appendix A (6 corrections).
+* `docs/contributing/claims-policy.md` — the four claim kinds and their requirements.
+
+**Three self-tests found bugs, and in two cases the test was the broken thing.**
+
+1. **`docs/README.md` overstated the validator.** The first draft listed twelve
+   cross-reference checks, taken from `check_xrefs.py`'s module docstring. The
+   self-test actually drives **nine**. The docstring describes the checks as originally
+   written; the harness is what exercises them. *A claim about coverage should come
+   from the thing that exercises it, not from the thing that implements it* — the
+   implementer's list is a statement of intent, and intent drifts.
+2. **`check_reconciliation.py`'s hand-edit case appended outside the generated region.**
+   The markers delimit what the generator owns, so an addition after `GENERATED:END` is
+   prose and `--check` was right to ignore it. The self-test reported `DEAD` and the
+   *test* was wrong. Same shape as the identifier case in `check_advisories.py`'s
+   self-test (`§O-092`), which also fired on the title rather than the section.
+3. **`claims-policy.md`'s own example cited a command that does not exist.** The page
+   illustrates a well-formed measured claim with
+   `cargo bench --bench instantiate`, and no such benchmark exists — instantiation
+   timing is `PERF-*` work not yet done. Found by running it. The example is kept and
+   annotated rather than replaced, because a policy document demonstrating the failure
+   it warns about is more instructive than a clean one.
+
+The third is the one worth dwelling on. A document about evidentiary standards
+contained an unevidenced example, and **the only reason it was caught is that the
+project's rule is to run the command rather than to reread the sentence.** Reading it
+again would have confirmed it looked right; it looked right the first time too.
+
+**The pattern across all three.** Each was a claim in a document about the code, and
+each was wrong in the direction of *sounding more complete than it was*: twelve checks
+instead of nine, a corruption that was really outside the checked region, a benchmark
+that was really a plan. None was caught by review, because review checks whether a
+statement is plausible, and all three were.
+
+That is the same failure this repository records in code (`§O-085`, `§O-088`, `§O-092`,
+`§O-094`) arriving in documentation, and the mitigation is the same: make the claim
+checkable and check it. Which is why four of these five items produced a tool.
+
+**A note on `verify` versus `validate`.** `claims-policy.md` separates them — *verify*
+is "the author ran something", *validate* is "an adversary tried to break it" — and
+records that this project says the capability model is **verified** and never
+**validated**. That distinction is enforced rather than trusted:
+`check_threat_model.py` fails the build if a claim of external validation appears while
+`SEC-024` and `SEC-025` are open (`§O-095`).
+
+→ `docs/README.md`, `docs/glossary.md`, `docs/reconciliation.md`,
+`docs/contributing/anchors.md`, `docs/contributing/claims-policy.md`,
+`tools/gen_glossary.py`, `tools/check_glossary.py`, `tools/gen_reconciliation.py`,
+`tools/check_reconciliation.py`, `.github/workflows/ci.yml`.
+
+---
+
 ### §O-095 — `SEC-001`/`SEC-024`: the threat model that had to say what it was not, and the first honest block
 
 **Two items, one document.**

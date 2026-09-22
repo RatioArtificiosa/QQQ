@@ -67,6 +67,11 @@ const _: () = assert!(
      nothing, so a yielding guest would yield forever without making progress"
 );
 
+/// The canonical ABI types for `qqq:http`.
+///
+/// Added alongside `invoke`: calling a guest needs the request and response to
+/// exist as Rust types whose `Lower`/`Lift` layout matches the WIT exactly.
+pub mod abi;
 pub mod admission;
 pub mod ambient;
 pub mod arch003;

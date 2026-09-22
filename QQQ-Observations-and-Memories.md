@@ -12740,6 +12740,35 @@ tests: **2249 passed**, unchanged from the baseline. Guest tests: **57 passed**.
 `.scratch/{srv018_e2e,fix_guest_clippy,add_reference_app_job,check_ci_yaml,verify_reference_app_job,inject_reference_app_guard,verify_guard_cargo_only,verify_guard_step}.py`;
 §O-120 and §O-147 for the two prior entries in this family.
 
+**Verified outcome.** Committed as `eeba589` (8 files, +482/-52) and pushed; `git
+status -sb` confirms `main` is not ahead of `origin/main`. No dependency changed, so
+`Cargo.lock` is correctly untouched.
+
+GitHub Actions on `eeba589`, read from the run rather than assumed:
+
+| Job | Result |
+|---|---|
+| MSRV (1.97) | success |
+| Production image (SEC-029) | success |
+| Supply chain | success |
+| Cross-reference integrity | success |
+| Line endings | success |
+| WIT interface validation | success |
+| **Reference application (SRV-018)** | **success** — the new job, green on its first run |
+| Rust (macos-latest) | success |
+| Rust (ubuntu-latest) | success |
+| Rust (windows-latest) | success |
+| Fuzz targets compile | success |
+| DCO | skipped (by design, sole maintainer) |
+
+**11/11 green.** The count stays 11 because the new job replaced nothing and was added
+to the ten that existed; the `dco` job is skipped rather than failing.
+
+Worth stating plainly: the new job passing is the *second* thing that had to be true.
+The first was that the crate is now clean, and that took fixing 11 lint errors and
+formatting 5 files. A job added over a dirty crate would have gone red immediately and
+taught nothing.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

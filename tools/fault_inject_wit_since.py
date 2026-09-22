@@ -31,9 +31,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TARGET = Path('wit/qqq-clock.wit')
 
-# (label, find, replace, expected fragment in the checker's output)
+# (label, target file, find, replace, expected fragment in the checker's output)
 #
 # The `find` strings are copied from the real file rather than composed from
 # memory: the first version of this harness guessed at them and three of four
@@ -42,6 +41,7 @@ TARGET = Path('wit/qqq-clock.wit')
 INJECTIONS = [
     (
         'missing @since',
+        'wit/qqq-clock.wit',
         '  @since(version = 1.0.0)\n  timezone: func() -> string;',
         '  timezone: func() -> string;',
         'function `timezone` has no `@since',
@@ -55,6 +55,7 @@ INJECTIONS = [
         # the harness reported MISSED -- a harness defect reported as a checker
         # defect. Moving rather than adding is what makes it an injection at all.
         'misplaced @since (still parses)',
+        'wit/qqq-clock.wit',
         '  @since(version = 1.0.0)\n'
         '  now: func() -> duration-ns;',
         '  now: func() -> duration-ns;',
@@ -80,6 +81,7 @@ INJECTIONS = [
         # parser's. But it is honestly *redundant* with the parser today, and
         # saying so stops a future reader believing this harness exercises it.
         '@since below 1.0.0',
+        'wit/qqq-clock.wit',
         '  /// The smallest difference the clock can report.\n'
         '  @since(version = 1.0.0)\n'
         '  resolution: func() -> duration-ns;\n}',
@@ -87,6 +89,17 @@ INJECTIONS = [
         '  @since(version = 0.9.0)\n'
         '  resolution: func() -> duration-ns;\n}',
         'below 1.0.0',
+    ),
+    (
+        # The world rule, added when `wit/qqq-app.wit` became the first world in
+        # this repository. Removing the export leaves a world that parses, is
+        # versioned correctly, and could never be called -- the check exists
+        # because a world with no export is a contract with nothing in it.
+        'world with no export',
+        'wit/app/app.wit',
+        '  export qqq:http/incoming-handler@1.0.0;',
+        '  // export removed by fault injection',
+        'world declares no `export',
     ),
 ]
 
@@ -110,9 +123,6 @@ def parses(path: Path) -> bool:
 
 
 def main() -> int:
-    full = ROOT / TARGET
-    original = io.open(full, encoding='utf-8').read()
-
     # Sanity: the checker passes on the pristine tree, or the injections below
     # would be measuring a pre-existing failure.
     baseline = run_checker()
@@ -124,9 +134,23 @@ def main() -> int:
     if shutil.which('wasm-tools') is None:
         print('  NOTE  wasm-tools is absent, so parseability is not verified')
 
+    # Each injection names its own target: the world rule can only be exercised
+    # against a world, and the `@since` rules only against an interface.
+    originals: dict[str, str] = {}
+    for _label, rel, _find, _replace, _expect in INJECTIONS:
+        path = ROOT / rel
+        if rel not in originals:
+            if not path.is_file():
+                print(f'  SKIP      target {rel} does not exist')
+                return 2
+            originals[rel] = io.open(path, encoding='utf-8').read()
+
     failures = []
 
-    for label, find, replace, expect in INJECTIONS:
+    for label, rel, find, replace, expect in INJECTIONS:
+        full = ROOT / rel
+        original = originals[rel]
+
         if find not in original:
             print(f'  SKIP      {label}: injection point moved')
             failures.append(label)
@@ -158,6 +182,12 @@ def main() -> int:
             if io.open(full, encoding='utf-8').read() != original:
                 print(f'  RESTORE FAILED for {label}')
                 return 3
+
+    # And every touched file must be back to its original bytes.
+    for rel, original in originals.items():
+        if io.open(ROOT / rel, encoding='utf-8').read() != original:
+            print(f'  RESTORE FAILED for {rel}')
+            return 3
 
     # And the tree must be back to passing.
     final = run_checker()

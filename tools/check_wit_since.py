@@ -69,6 +69,12 @@ FUNC_RE = re.compile(r"^\s*([a-z][a-z0-9-]*)\s*:\s*(?:async\s+)?func\b")
 # `@since(version = 1.0.0)`
 SINCE_RE = re.compile(r"^\s*@since\s*\(\s*version\s*=\s*(\d+)\.(\d+)\.(\d+)\s*\)")
 
+# `world app {`
+WORLD_RE = re.compile(r"^\s*world\s+([a-z][a-z0-9-]*)\s*\{")
+
+# `export qqq:http/incoming-handler@1.0.0;`
+WORLD_EXPORT_RE = re.compile(r"^\s*export\s+\S+\s*;")
+
 
 def parse_version(text: str) -> tuple[int, int, int]:
     parts = text.split(".")
@@ -153,6 +159,38 @@ def check_file(path: Path) -> list[str]:
                                 "package ")):
             pending_since = None
 
+    # A **world** is not an interface. `@since` annotates types and functions, and
+    # a world declares neither -- so the versioning policy has nothing to say about
+    # one. What it *can* say is that a world must export something: a world that
+    # exports nothing is a component contract with no contract in it, and a guest
+    # built against it could not be called.
+    #
+    # This branch exists because the first world in this repository
+    # (`wit/qqq-app.wit`, added with `SRV-018`) made the interface rule fire:
+    #
+    #     FAIL  qqq-app.wit
+    #       no exported functions found; if that is true this interface should not
+    #       be checked, and if it is not, this checker is broken
+    #
+    # That guard was doing its job -- it caught a file it did not understand rather
+    # than passing it silently, which is the right instinct. The fix is to teach it
+    # what a world is, not to exempt the file.
+    if any(WORLD_RE.match(line) for line in lines):
+        if not any(WORLD_EXPORT_RE.match(line) for line in lines):
+            problems.append(
+                "world declares no `export`; a world with no export is a contract "
+                "with nothing to implement, so no guest could be called through it"
+            )
+        if any(FUNC_RE.match(line) for line in lines):
+            problems.append(
+                "world declares a bare `func` outside an interface; WIT places "
+                "functions in interfaces, and a stray one here would be invisible "
+                "to every other checker"
+            )
+        # Package versioning still applies -- `CON-007` requires it of every
+        # package, world or interface.
+        return problems
+
     if seen_functions == 0:
         problems.append(
             "no exported functions found; if that is true this interface should "
@@ -163,20 +201,43 @@ def check_file(path: Path) -> list[str]:
 
 
 def main() -> int:
+    # Interfaces in `wit/*.wit`, and each **world package** in its own
+    # `wit/<name>/` directory. A world has to live in a package directory because
+    # it references `qqq:http`, which WIT resolves only from a sibling `deps/`
+    # (see `tools/check_wit.py`).
+    #
+    # This glob was `wit/*.wit` alone, which silently stopped covering the world
+    # the moment it moved into `wit/app/` -- and the world rule below became dead
+    # code that could never fire. The fault-injection harness caught it:
+    #
+    #     MISSED  world with no export: expected `world declares no `export``
+    #
+    # A checker that no longer reaches its own subject is the failure this whole
+    # file exists to prevent, so the harness earns its place again.
     files = sorted(WIT_DIR.glob("*.wit"))
+    files += sorted(
+        p
+        for d in sorted(WIT_DIR.iterdir())
+        if d.is_dir() and not d.name == "deps"
+        for p in sorted(d.glob("*.wit"))
+    )
     if not files:
         print(f"no .wit files found under {WIT_DIR}")
         return 1
 
     total_functions = 0
+    world_count = 0
     all_problems: list[tuple[str, list[str]]] = []
 
     for f in files:
         problems = check_file(f)
         # Count functions regardless, for an honest summary.
-        for line in f.read_text(encoding="utf-8").splitlines():
+        text = f.read_text(encoding="utf-8")
+        for line in text.splitlines():
             if FUNC_RE.match(line):
                 total_functions += 1
+        if any(WORLD_RE.match(line) for line in text.splitlines()):
+            world_count += 1
         if problems:
             print(f"  FAIL  {f.name}")
             for p in problems:
@@ -186,8 +247,9 @@ def main() -> int:
             print(f"  OK    {f.name}")
 
     print(
-        f"\n{len(files) - len(all_problems)}/{len(files)} interface(s) satisfy the "
-        f"versioning policy ({total_functions} exported function(s) checked)"
+        f"\n{len(files) - len(all_problems)}/{len(files)} file(s) satisfy the "
+        f"versioning policy ({total_functions} exported function(s) checked; "
+        f"{world_count} world(s))"
     )
 
     if all_problems:

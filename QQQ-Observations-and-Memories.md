@@ -11739,6 +11739,105 @@ the answer is "nothing yet", build the caller first.**
 ---
 
 
+## §O-146 — `qqqai serve` needs a guest-invocation path that also does not exist
+
+`§O-145` found that `serve` has no dispatch arm (`CLI-011`). Investigating what implementing it
+would take found a **second** missing layer, so the critical path is longer than the checklist
+suggests:
+
+    grep "get_typed_func" crates/qqq-host/src   -> 15 hits, ALL inside #[cfg(test)]
+
+No production code path calls a guest's `http.incoming-handler.handle`. Wasmtime's `get_typed_func`
+is exercised in `instance.rs` and `linker.rs` tests and nowhere else. The host has the engine, the
+pooling allocator, fuel, epochs, the linker, per-instance grants and the handle tables —
+**everything except the call that enters the guest, and the marshalling that carries a request in
+and a response out.**
+
+So `CLI-011` cannot be completed by wiring pieces that already exist. The chain is:
+
+1. **Guest invocation** — resolve `incoming-handler.handle` in a component instance, lift a
+   request into the canonical ABI, lower the response back. **Not present.**
+2. **CLI-011** — `qqqai serve --workers --tls --config`, which binds and dispatches to (1).
+3. **SRV-018** — the orders reference app, which needs (2) to be servable.
+4. **PERF-\*** — ~25 items and `DOD-002`'s 72-hour soak, which need (3) to be measurable.
+
+The checklist has no item for layer 1. It names `http.incoming-handler.handle` exactly once, inside a
+`CON-012` note about batch-first rules, as an example of an *inherently singular* function — so
+the interface is known and referenced, and the code that would call it was never scheduled.
+
+**This is the third layer in a row that "looks done and is not", and the pattern is the finding.**
+Each crate is genuinely complete in isolation; what is missing are the **edges between the layers**,
+which no item owns because every item is scoped to one crate. `§O-130` found four features with
+no caller. This is that shape one level up: a whole *chain* with no caller, where every link was
+checked off.
+
+**The lesson for planning:** "what calls this?" must be asked of the **chain**, not the node. An item
+can be genuinely complete and the path can still end in nothing.
+
+The honest next move is to build layer 1 (guest invocation), because it is the only layer nothing
+else can substitute for. It is also the layer the Proposal's §4.4 request lifecycle describes and no
+checklist item claims — a gap in the checklist, not just in the code.
+
+---
+
+
+## §O-147 — The world contract is real, and building it corrected two of my assumptions
+
+Created `wit/qqq-app.wit`: the first **world** in this repository. Every other `.wit` file defines an
+interface; none declared what "a QQQ app" *is*, so there was no agreed export for the host to call
+(`§O-146`). Measured end to end:
+
+    wasm-tools component wit wit/qqq-app.wit   (with qqq-http.wit in deps/)
+      world app {
+        export qqq:http/incoming-handler@1.0.0;
+      }
+
+    # a real guest built against it
+    cargo build --release --target wasm32-wasip2   -> success
+    wasm-tools component wit .../guest_real.wasm
+      export qqq:http/incoming-handler@1.0.0       <- the export the host will resolve
+
+**Assumption 1, wrong: the world does not wrap `wasi:http`.** I wrote
+`export wasi:http/incoming-handler@0.2.0`, reasoning that QQQ builds "over `wasi:http`" as the
+Proposal says. `wasm-tools` refused it immediately:
+
+    error: package 'wasi:http@0.2.0' not found
+
+No `.wit` file in this repository references a `wasi:` package. `qqq-http.wit` is
+`package qqq:http@1.0.0` and defines its **own** `incoming-handler` over its own `request`/`response`.
+The entire dependency I had assumed did not exist. Reading the directory took ten seconds; assuming
+cost two build cycles.
+
+**Assumption 2, wrong: a world can declare imports freely.** I added `import qqq:http/http@1.0.0` so
+a guest could name the interface's types. `wit-bindgen` then refused to generate anything:
+
+    error: missing one of:
+      * `generate_all` option
+      * `with: { "qqq:http/http@1.0.0": path::to::bindings, }`
+      * `with: { "qqq:http/http@1.0.0": generate, }`
+    Caused by: missing `with` mapping for the key `qqq:http/http@1.0.0`
+
+Removing the import did **not** fix it: the *export* references that interface's types, so the
+mapping is needed regardless. The world now exports the handler and imports nothing, and a guest
+passes `generate_all`. The principle holds and is now enforced by the toolchain rather than by
+convention — **a guest's imports are its capability grant**, which the host's linker supplies, not
+something its world declares.
+
+**Three tooling conventions established, each of which cost a cycle:**
+
+| Fact | Evidence |
+|---|---|
+| A world and its dependencies cannot share a directory | `package identifier qqq:http@1.0.0 does not match previous package name of qqq:app@1.0.0` — external packages go in `deps/` |
+| A world referencing another package must version it | `import qqq:http/http` failed; `import qqq:http/http@1.0.0` resolved |
+| `wit-bindgen` needs the `macros` feature for `generate!`/`export!` | without it: `use of unresolved module or unlinked crate exports` |
+
+The WIT layout is therefore: the world in the project's `wit/`, its QQQ dependencies in
+`wit/deps/`, and `generate_all` in the guest. That is the shape `SRV-018` and every language
+template will use.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -2,26 +2,48 @@
 
 //! Order state and the workloads that read it.
 //!
-//! # Why the store is a `static` rather than a host capability
+//! # The store is **per-request**, measured rather than assumed
 //!
-//! `lib.rs` argues this at length. The short version: `§5.3`'s `[capabilities.sql]`
-//! is the right long-term home for order state, and the host side of it does not
-//! exist yet. A `db` benchmark that measured a *missing* host feature would
-//! measure nothing, so the state is in-guest until the capability lands.
+//! §4.2 creates one store and one instance **per request**, and that is the isolation
+//! model working as designed. The consequence, observed on the first real end-to-end run:
 //!
-//! **What that means for the number `db` produces** — stated here, next to the
-//! code, because it must travel with any published figure: this measures *the ABI
-//! cost of a stateful read-modify-write*, not a Postgres round trip. When
-//! `capabilities.sql` lands, the route's body changes and the number becomes
-//! comparable with the other runtimes' `db` rows.
+//! ```text
+//! $ curl -s -X POST -d "id=a1" http://127.0.0.1:18110/orders
+//! {"id":"a1","total_cents":0,"created_seq":1}
+//! $ curl -s -X POST -d "id=a2" http://127.0.0.1:18110/orders
+//! {"id":"a2","total_cents":0,"created_seq":1}
+//! $ curl -s -X POST -d "id=a3" http://127.0.0.1:18110/orders
+//! {"id":"a3","total_cents":0,"created_seq":1}
+//! ```
 //!
-//! # Why `Mutex` and not a thread-local
+//! Three distinct ids, three `created_seq: 1`: the counter never advanced, so every
+//! request began with an empty map. A `GET` of a just-created order therefore returns a
+//! **synthesised placeholder**, not the stored one — not because the store is broken, but
+//! because it no longer exists by the time the next request arrives.
+//!
+//! This module previously claimed the store was "shared across requests". **That claim
+//! was false, and the unit tests could not have caught it**: they run in one process and
+//! therefore share one `static`, so a property that fails in production held perfectly
+//! under test. It is `§O-149`'s shape again — a fixture that cannot exhibit the defect.
+//!
+//! # Why `Mutex` is still the right type
 //!
 //! `§D-006` sets the default guest concurrency to async-single-threaded, so a
-//! thread-local would work today. It is a `Mutex` anyway because the store's
-//! *contract* is "shared across requests", and a `Mutex` states that in the type.
-//! The cost is one uncontended lock, which is free at this concurrency — and if
-//! the concurrency model ever changes, the correct code is already written.
+//! thread-local would suffice today. The `Mutex` stays because it is what makes the
+//! per-instance sharing correct **within** a request, and because if the concurrency
+//! model ever changes the correct code is already written. The lock is uncontended.
+//!
+//! # What durable state needs, named rather than implied
+//!
+//! `§5.3`'s `[[capabilities.sql]]`: the host holds the credential and the pool, and the
+//! guest sees a connection rather than a password. `qqq:sql` has no host implementation,
+//! so the `db` row **cannot** measure a Postgres round trip yet — and a benchmark that
+//! measured a missing host feature would measure nothing.
+//!
+//! Until it lands, the `db` route measures the ABI cost of a validated write — body
+//! parsing, bounds checks, refusal paths — which is a real and useful number, and the
+//! one thing it is **not** is a database round trip. That sentence must travel with any
+//! published figure.
 //!
 //! # Why the store cannot grow without bound
 //!

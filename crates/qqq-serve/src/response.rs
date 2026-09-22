@@ -199,7 +199,12 @@ impl Response {
 /// 3. **A body is suppressed for statuses that forbid one.** See
 ///    [`forbids_body`]: emitting one desynchronises the stream.
 #[must_use]
-pub fn write_response(resp: &Response, version: Version, keep_alive: bool) -> Vec<u8> {
+pub fn write_response(
+    resp: &Response,
+    version: Version,
+    keep_alive: bool,
+    head_request: bool,
+) -> Vec<u8> {
     // The body is measured, not the declared header, so a caller cannot
     // desynchronise the stream by setting a `Content-Length` that disagrees
     // with what it passes in.
@@ -207,6 +212,15 @@ pub fn write_response(resp: &Response, version: Version, keep_alive: bool) -> Ve
     if forbids_body(resp.status) {
         body = &[];
     }
+
+    // `Content-Length` must describe the representation a **GET** would return, even
+    // though the bytes are omitted (`RFC 9110` §9.3.2). So the length is taken from the
+    // handler's real body and only the emission is skipped -- measuring after clearing
+    // would tell a client the representation was empty, which for a HEAD used to decide
+    // whether to fetch is actively misleading. Measured: this returned
+    // `Content-Length: 0` for `/healthz`, whose GET reports `2`.
+    let content_length = body.len();
+    let emit_body = !head_request;
 
     let mut out = String::with_capacity(128 + resp.headers.len() * 32 + body.len());
     // `write!` into a String cannot fail, so the result is intentionally
@@ -232,7 +246,7 @@ pub fn write_response(resp: &Response, version: Version, keep_alive: bool) -> Ve
         let _ = write!(out, "{name}: {value}\r\n");
     }
 
-    let _ = write!(out, "Content-Length: {}\r\n", body.len());
+    let _ = write!(out, "Content-Length: {content_length}\r\n");
     // HTTP/1.0 defaults to close, so an explicit `keep-alive` is required to
     // persist; HTTP/1.1 defaults to keep-alive, so only `close` needs sending.
     // Emitting the token unconditionally would be harmless but noisy, and
@@ -245,7 +259,13 @@ pub fn write_response(resp: &Response, version: Version, keep_alive: bool) -> Ve
     out.push_str("\r\n");
 
     let mut bytes = out.into_bytes();
-    bytes.extend_from_slice(body);
+    // The headers are complete; the body is withheld for a HEAD. `content_length` above
+    // was taken from the real body, so the client is told the representation's size while
+    // receiving none of it -- which is exactly what `RFC 9110` §9.3.2 specifies, and what
+    // lets a client use a HEAD to decide whether a GET is worth making.
+    if emit_body {
+        bytes.extend_from_slice(body);
+    }
     bytes
 }
 
@@ -760,7 +780,7 @@ mod tests {
     #[test]
     fn a_basic_response_has_the_right_status_line() {
         let r = Response::text(200, "hello\n");
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let (status, headers, body) = parse_response(&bytes);
         assert_eq!(status, "HTTP/1.1 200 OK");
         assert_eq!(header(&headers, "Content-Length"), Some("6"));
@@ -773,7 +793,7 @@ mod tests {
     #[test]
     fn content_length_is_always_present_even_when_empty() {
         let r = Response::status(204);
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let (_, headers, _) = parse_response(&bytes);
         assert_eq!(
             header(&headers, "Content-Length"),
@@ -789,7 +809,7 @@ mod tests {
     fn a_caller_supplied_content_length_cannot_contradict_the_body() {
         let mut r = Response::text(200, "abc");
         r.set_header("Content-Length", "9999");
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let (_, headers, body) = parse_response(&bytes);
         assert_eq!(header(&headers, "Content-Length"), Some("3"));
         assert_eq!(body, b"abc");
@@ -809,7 +829,7 @@ mod tests {
         for status in [204, 304, 100] {
             assert!(forbids_body(status), "{status} must forbid a body");
             let r = Response::text(status, "this must not appear");
-            let bytes = write_response(&r, Version::Http11, true);
+            let bytes = write_response(&r, Version::Http11, true, false);
             let (_, headers, body) = parse_response(&bytes);
             assert!(body.is_empty(), "{status} emitted a body: {body:?}");
             assert_eq!(header(&headers, "Content-Length"), Some("0"));
@@ -832,24 +852,24 @@ mod tests {
     fn the_connection_header_follows_the_version() {
         let r = Response::text(200, "x");
 
-        let (_, h11_keep, _) = parse_response(&write_response(&r, Version::Http11, true));
+        let (_, h11_keep, _) = parse_response(&write_response(&r, Version::Http11, true, false));
         assert_eq!(
             header(&h11_keep, "Connection"),
             None,
             "HTTP/1.1 keep-alive is the default and needs no header"
         );
 
-        let (_, h11_close, _) = parse_response(&write_response(&r, Version::Http11, false));
+        let (_, h11_close, _) = parse_response(&write_response(&r, Version::Http11, false, false));
         assert_eq!(header(&h11_close, "Connection"), Some("close"));
 
-        let (_, h10_keep, _) = parse_response(&write_response(&r, Version::Http10, true));
+        let (_, h10_keep, _) = parse_response(&write_response(&r, Version::Http10, true, false));
         assert_eq!(
             header(&h10_keep, "Connection"),
             Some("keep-alive"),
             "HTTP/1.0 must say so explicitly"
         );
 
-        let (_, h10_close, _) = parse_response(&write_response(&r, Version::Http10, false));
+        let (_, h10_close, _) = parse_response(&write_response(&r, Version::Http10, false, false));
         assert_eq!(header(&h10_close, "Connection"), Some("close"));
     }
 
@@ -857,7 +877,7 @@ mod tests {
     fn a_caller_cannot_override_the_connection_header() {
         let mut r = Response::text(200, "x");
         r.set_header("Connection", "keep-alive");
-        let bytes = write_response(&r, Version::Http11, false);
+        let bytes = write_response(&r, Version::Http11, false, false);
         let (_, headers, _) = parse_response(&bytes);
         assert_eq!(
             header(&headers, "Connection"),
@@ -870,7 +890,7 @@ mod tests {
     fn a_caller_cannot_smuggle_a_transfer_encoding() {
         let mut r = Response::text(200, "x");
         r.set_header("Transfer-Encoding", "chunked");
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let (_, headers, _) = parse_response(&bytes);
         assert_eq!(
             header(&headers, "Transfer-Encoding"),
@@ -886,7 +906,7 @@ mod tests {
         let mut r = Response::status(200);
         r.set_header("X-First", "1");
         r.set_header("X-Second", "2");
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let text = String::from_utf8_lossy(&bytes);
         let first = text.find("X-First").expect("present");
         let second = text.find("X-Second").expect("present");
@@ -899,7 +919,7 @@ mod tests {
         r.set_header("X-V", "1");
         r.set_header("x-v", "2");
         assert_eq!(r.header("X-V"), Some("2"));
-        let bytes = write_response(&r, Version::Http11, true);
+        let bytes = write_response(&r, Version::Http11, true, false);
         let (_, headers, _) = parse_response(&bytes);
         let count = headers
             .iter()
@@ -1385,7 +1405,7 @@ mod tests {
     fn a_written_error_response_is_well_framed() {
         let e = error_response(&err(ErrorCode::InstancePoolExhausted), false);
         let r = from_error(&e);
-        let bytes = write_response(&r, Version::Http11, !e.close);
+        let bytes = write_response(&r, Version::Http11, !e.close, false);
         let (status, headers, body) = parse_response(&bytes);
 
         assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
@@ -1610,5 +1630,103 @@ mod tests {
             out.extend_from_slice(&body[..len]);
             body = &body[len + 2..];
         }
+    }
+    // -----------------------------------------------------------------------
+    // `HEAD` — the same headers as GET, and no body (RFC 9110 §9.3.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_head_response_carries_the_get_length_and_no_body() {
+        // Both halves of the conjunction, because either one alone is satisfiable by the
+        // broken implementation: omitting the body is trivial if you also lie about the
+        // length, and this test exists precisely because the original code did.
+        let r = Response::text(200, "hello");
+        let wire = write_response(&r, Version::Http11, true, true);
+        let (_, headers, body) = parse_response(&wire);
+
+        assert_eq!(
+            header(&headers, "Content-Length"),
+            Some("5"),
+            "a HEAD must report the length a GET would -- the client uses it to decide \
+             whether to fetch"
+        );
+        assert_eq!(body, b"", "a HEAD must carry no body");
+    }
+
+    #[test]
+    fn the_head_headers_match_the_get_headers_exactly() {
+        // The stronger statement, and the one §9.3.2 actually makes: *the same header
+        // fields*. Comparing whole header lists catches a change that fixes the length but
+        // drops, say, `Content-Type`.
+        let r = Response::text(200, "hello");
+        let get = write_response(&r, Version::Http11, true, false);
+        let head = write_response(&r, Version::Http11, true, true);
+
+        let (get_status, get_headers, _) = parse_response(&get);
+        let (head_status, head_headers, _) = parse_response(&head);
+
+        assert_eq!(get_status, head_status);
+        assert_eq!(
+            get_headers, head_headers,
+            "a HEAD must send the same header fields as the GET it stands in for"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_response_is_unaffected_by_the_head_flag() {
+        // The control: `head_request: false` must produce byte-identical output to the
+        // behaviour before the parameter existed, or every existing route has changed.
+        let r = Response::text(200, "hello");
+        let wire = write_response(&r, Version::Http11, true, false);
+        let (_, headers, body) = parse_response(&wire);
+
+        assert_eq!(header(&headers, "Content-Length"), Some("5"));
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn a_head_on_an_empty_body_reports_zero_and_no_body() {
+        // The degenerate case: `Content-Length: 0` is correct here, and it is correct for
+        // the *same reason* as the non-empty case -- the length describes the
+        // representation. Without this, "reports 0" would look like the bug it is not.
+        let r = Response::text(200, "");
+        let wire = write_response(&r, Version::Http11, true, true);
+        let (_, headers, body) = parse_response(&wire);
+
+        assert_eq!(header(&headers, "Content-Length"), Some("0"));
+        assert_eq!(body, b"");
+    }
+
+    #[test]
+    fn a_head_on_a_bodyless_status_is_still_framed_correctly() {
+        // 204 has no body by definition, so the interaction of `forbids_body` with
+        // `head_request` must not produce a contradictory framing.
+        let r = Response::status(204);
+        let wire = write_response(&r, Version::Http11, true, true);
+        let (status, headers, body) = parse_response(&wire);
+
+        assert!(status.starts_with("HTTP/1.1 204"));
+        assert_eq!(header(&headers, "Content-Length"), Some("0"));
+        assert_eq!(body, b"");
+    }
+
+    #[test]
+    fn a_head_keeps_the_connection_alive() {
+        // A HEAD with no body and no framing would leave a client unable to tell where the
+        // response ends -- the framing rule `write_response` exists to enforce. So the
+        // HEAD path must emit a length even though it emits no bytes, which is what makes
+        // keep-alive safe on a HEAD.
+        let r = Response::text(200, "hello");
+        let wire = write_response(&r, Version::Http11, true, true);
+        let (_, headers, _) = parse_response(&wire);
+
+        assert!(
+            header(&headers, "Content-Length").is_some(),
+            "a HEAD still needs a Content-Length so the client knows where the response ends"
+        );
+        assert!(
+            header(&headers, "Connection").is_none(),
+            "HTTP/1.1 keep-alive needs no explicit Connection header"
+        );
     }
 }

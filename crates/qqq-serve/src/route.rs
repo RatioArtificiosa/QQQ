@@ -694,6 +694,21 @@ impl RouteTable {
     /// A path that matches a *pattern* under a different method is not reported
     /// separately here: doing so would need a second traversal, and the caller
     /// that wants a 405 must ask for it explicitly via [`Self::allows`].
+    ///
+    /// # `HEAD` falls back to `GET`, because RFC 9110 requires it
+    ///
+    /// > A server MUST support the `HEAD` method for any resource it supports for
+    /// > `GET`. (`RFC 9110` §9.3.2)
+    ///
+    /// So a `HEAD` request to a `GET`-only route is answered by that route, and the
+    /// caller strips the body. Measured before this: `HEAD /healthz` returned
+    /// **405** with `Allow: GET` on the reference application, while the guest's own
+    /// HEAD handling was correct and therefore unreachable — the host refused the
+    /// request before the guest was consulted.
+    ///
+    /// An **explicit** `HEAD` route wins when one is registered: an app is entitled to
+    /// answer HEAD differently, and substituting the GET handler would take that away.
+    /// Only a missing HEAD route falls back.
     #[must_use]
     pub fn match_route(&self, method: Method, path: &str) -> Option<Match> {
         let segments: Vec<&str> = if path == "/" {
@@ -703,8 +718,17 @@ impl RouteTable {
         };
 
         let mut captures = Vec::new();
-        let route = walk(&self.root, &segments, 0, method, &mut captures)?;
-        Some(bind(&route, captures))
+        if let Some(route) = walk(&self.root, &segments, 0, method, &mut captures) {
+            return Some(bind(&route, captures));
+        }
+
+        // The RFC 9110 §9.3.2 fallback, and only for HEAD.
+        if method == Method::Head {
+            let mut captures = Vec::new();
+            let route = walk(&self.root, &segments, 0, Method::Get, &mut captures)?;
+            return Some(bind(&route, captures));
+        }
+        None
     }
 
     /// Whether any pattern matches this path, under any method.
@@ -713,6 +737,14 @@ impl RouteTable {
     /// say so, and RFC 9110 §15.5.6 requires an `Allow` header listing what is
     /// permitted. Returning the methods makes that possible without a second
     /// table.
+    ///
+    /// # Why `GET` implies `HEAD` here too
+    ///
+    /// [`Self::match_route`] accepts `HEAD` wherever `GET` is routed (RFC 9110 §9.3.2),
+    /// so `allows` must report it or the two disagree: a client refused for, say,
+    /// `POST` would be told the resource permits `GET` only — while a `HEAD` to the same
+    /// path would in fact have been served. The `Allow` header is a claim about what
+    /// works, and a claim the router contradicts is worse than a shorter list.
     #[must_use]
     pub fn allows(&self, path: &str) -> Vec<Method> {
         let segments: Vec<&str> = if path == "/" {
@@ -722,6 +754,10 @@ impl RouteTable {
         };
         let mut out = Vec::new();
         collect_methods(&self.root, &segments, 0, &mut out);
+        // `GET` implies `HEAD`. Added before the sort so ordering stays canonical.
+        if out.contains(&Method::Get) && !out.contains(&Method::Head) {
+            out.push(Method::Head);
+        }
         out.sort_unstable();
         out.dedup();
         out
@@ -1208,9 +1244,15 @@ mod tests {
         ])
         .expect("must build");
 
+        // `Head` is included because `match_route` serves a HEAD wherever it serves a
+        // GET (`RFC 9110` §9.3.2), and the `Allow` header is a claim about what works.
+        // A list that omitted it would contradict the router.
         let mut methods = t.allows("/orders");
         methods.sort_unstable();
-        assert_eq!(methods, vec![Method::Get, Method::Post]);
+        assert_eq!(methods, vec![Method::Get, Method::Head, Method::Post]);
+
+        // The controls: a method-only path gains no HEAD, because there is no
+        // representation for a HEAD to describe, and an unrouted path stays empty.
         assert_eq!(t.allows("/orders/42"), vec![Method::Delete]);
         assert!(t.allows("/nope").is_empty());
     }
@@ -1373,5 +1415,131 @@ mod tests {
             assert!(!err.message.is_empty());
             assert_eq!(err.code, ErrorCode::ManifestSchemaViolation);
         }
+    }
+    // -----------------------------------------------------------------------
+    // `HEAD` falls back to `GET` — RFC 9110 §9.3.2
+    // -----------------------------------------------------------------------
+
+    /// A table with one `GET` route, for the HEAD tests.
+    fn get_only() -> RouteTable {
+        table(&[("/healthz", "health")])
+    }
+
+    #[test]
+    fn a_head_request_matches_a_get_route() {
+        // The RFC requirement, and the defect measured on the reference application:
+        // `HEAD /healthz` returned **405** with `Allow: GET`, while the guest's own HEAD
+        // handling was correct and unreachable -- the host refused the request before the
+        // guest was consulted.
+        let t = get_only();
+        let m = t.match_route(Method::Head, "/healthz");
+        assert!(
+            m.is_some(),
+            "RFC 9110 §9.3.2: a server MUST support HEAD for any resource it supports for GET"
+        );
+        assert_eq!(m.unwrap().handler, "health");
+    }
+
+    #[test]
+    fn the_head_fallback_does_not_leak_to_other_methods() {
+        // The control, and the reason the fallback is scoped to `Head` alone: if the
+        // lookup fell back for every method, a `DELETE` would reach a `GET` handler and the
+        // app would be asked to delete something through a route that only reads.
+        let t = get_only();
+        for method in [
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+            Method::Options,
+            Method::Trace,
+            Method::Connect,
+        ] {
+            assert!(
+                t.match_route(method, "/healthz").is_none(),
+                "{method} must not match a GET-only route"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_head_route_wins_over_the_get_fallback() {
+        // An app is entitled to answer HEAD differently -- a cheaper existence check, say
+        // -- and silently substituting the GET handler would take that away.
+        let mut t = RouteTable::new();
+        t.insert(Route::new(Method::Get, "/thing", "get-handler").unwrap())
+            .unwrap();
+        t.insert(Route::new(Method::Head, "/thing", "head-handler").unwrap())
+            .unwrap();
+
+        let m = t
+            .match_route(Method::Head, "/thing")
+            .expect("a HEAD route exists");
+        assert_eq!(
+            m.handler, "head-handler",
+            "the explicit HEAD route must be used, not the GET one"
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_get_route_acquires_no_head_route() {
+        // The fallback must not invent a match. A `POST`-only endpoint has no
+        // representation to describe, so a HEAD for it is a 405 -- which is correct and is
+        // what `allows` will report.
+        let mut t = RouteTable::new();
+        t.insert(Route::new(Method::Post, "/orders", "create").unwrap())
+            .unwrap();
+
+        assert!(
+            t.match_route(Method::Head, "/orders").is_none(),
+            "a POST-only path has no representation for HEAD to describe"
+        );
+    }
+
+    #[test]
+    fn allows_reports_head_wherever_it_reports_get() {
+        // The property that keeps the `Allow` header honest. `match_route` serves a HEAD to
+        // a GET route, so a 405 that listed only `GET` would tell a client that a HEAD to
+        // the same path is not permitted -- while the router would in fact serve it.
+        let t = get_only();
+        let allowed = t.allows("/healthz");
+
+        assert!(allowed.contains(&Method::Get), "GET is routed");
+        assert!(
+            allowed.contains(&Method::Head),
+            "`match_route` serves HEAD here, so `Allow` must say so; got {allowed:?}"
+        );
+    }
+
+    #[test]
+    fn allows_does_not_add_head_to_a_path_with_no_get() {
+        // The control for the test above: if `allows` added HEAD unconditionally, that
+        // test would pass while proving nothing.
+        let mut t = RouteTable::new();
+        t.insert(Route::new(Method::Post, "/orders", "create").unwrap())
+            .unwrap();
+
+        let allowed = t.allows("/orders");
+        assert!(allowed.contains(&Method::Post));
+        assert!(
+            !allowed.contains(&Method::Head),
+            "a POST-only path acquires no HEAD; got {allowed:?}"
+        );
+    }
+
+    #[test]
+    fn allows_is_deterministic_with_the_added_head() {
+        // `§10.5` requires identical output for identical input, and the `Allow` header is
+        // observable. The added method must not depend on iteration order, so the result is
+        // canonical and stable across calls.
+        let t = get_only();
+        let first = t.allows("/healthz");
+        for _ in 0..8 {
+            assert_eq!(t.allows("/healthz"), first, "`allows` must be stable");
+        }
+
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        assert_eq!(first, sorted, "the result must be sorted");
     }
 }

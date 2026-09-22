@@ -195,6 +195,13 @@ impl GuestApp {
     /// A guest failure is **the upstream failing**, which is what 502 means, and a
     /// trap is a guest that misbehaved rather than the server being broken. A 500
     /// would tell an operator to look at QQQ; a 502 tells them to look at the app.
+    ///
+    /// # Why this ignores the body, and what to use instead
+    ///
+    /// A flat handler has nowhere to put a body, so this passes `None`. It remains
+    /// correct for a route that declares no body and for the tests that only exercise
+    /// the head path -- and it is what the type system permits, not an oversight.
+    /// [`Self::dispatch_with_body`] is the one a write route needs.
     #[must_use]
     pub fn dispatch(self: &Arc<Self>) -> qqq_serve::Handler {
         let app = Arc::clone(self);
@@ -206,6 +213,42 @@ impl GuestApp {
                 Err(e) => failure_response(&e),
             },
         )
+    }
+
+    /// Build a **body-aware** `Dispatch` handler that calls this guest.
+    ///
+    /// # Why this is separate from [`Self::dispatch`]
+    ///
+    /// Because `qqq-serve` keeps the two kinds apart for the same reason it separates
+    /// flat, streaming and WebSocket handlers: they are registered by name, and a route
+    /// with no entry falls back. A caller that wants bodies registers this one.
+    ///
+    /// # Which body the guest sees
+    ///
+    /// [`qqq_serve::BodyBytes::Absent`] becomes `None` on the guest's `request.body`;
+    /// every other variant becomes `Some(bytes)`. That preserves the distinction the
+    /// guest's own routing relies on -- a `POST` with no body and a `POST` with an empty
+    /// body are different requests -- so the bridge does not quietly collapse a fact the
+    /// application can act on.
+    ///
+    /// `TooLarge` carries no bytes by construction, so a guest cannot receive a body it
+    /// believes is complete when it is not: it sees `Some([])`, which its own required-
+    /// field checks then reject. That is the right outcome -- `SRV-005` already refuses
+    /// an over-cap body before a handler runs, so this path is reachable only through a
+    /// per-tenant cap stricter than the global one, and refusing beats truncating.
+    #[must_use]
+    pub fn dispatch_with_body(self: &Arc<Self>) -> qqq_serve::BodyHandler {
+        let app = Arc::clone(self);
+        Arc::new(move |head: &RequestHead, body: &qqq_serve::BodyBytes| {
+            let carried = match body {
+                qqq_serve::BodyBytes::Absent => None,
+                other => Some(other.as_slice().to_vec()),
+            };
+            match app.handle_request(head, carried) {
+                Ok(response) => response,
+                Err(e) => failure_response(&e),
+            }
+        })
     }
 }
 

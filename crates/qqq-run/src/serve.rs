@@ -316,7 +316,26 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<(Dispa
 
     let app = GuestApp::new(engine, &bytes, grants, limits, opts.listen.clone())?;
     let app = Arc::new(app);
-    Ok((Dispatch::flat(app.dispatch()), true))
+
+    // The flat handler stays the default, so a route with no entry behaves as it did.
+    let mut dispatch = Dispatch::flat(app.dispatch());
+
+    // The body-aware handler is registered for **every** declared route name.
+    //
+    // `Dispatch` resolves a handler by the route's `handler` name, and two rows can
+    // share a name across methods, so gating on the method would make one of them
+    // unreachable depending on table order. One entry per name removes the question, and
+    // the guest decides what to do with the body -- `orders::create` reads it while
+    // `orders::health` ignores it, so the host does not need to know which routes write.
+    //
+    // Without this the reference application answered every `POST` as though its body
+    // were empty: `serve_connection` drained the bytes for the `body_bytes` metric and
+    // then dispatched without them.
+    for route in &loaded.manifest.server.routes {
+        dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
+    }
+
+    Ok((dispatch, true))
 }
 
 /// The directory a project lives in — the manifest's parent.

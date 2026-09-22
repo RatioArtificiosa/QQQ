@@ -171,6 +171,27 @@ pub struct Dispatch {
     /// falls through to whichever kind it does have.
     pub websocket:
         Arc<std::collections::BTreeMap<String, Arc<dyn crate::ws_conn::WebSocketHandler>>>,
+    /// Body-aware handlers, by the route's `handler` name.
+    ///
+    /// # Why a fourth kind
+    ///
+    /// `flat` cannot stream and this one cannot either, so why not widen `flat`? Because
+    /// `Handler`'s signature is `Fn(&RequestHead, &RouteMatch) -> Response` and twelve
+    /// call sites -- six integration tests plus the guest bridge -- are written against
+    /// it. Widening it breaks `qqq-serve`'s public API for callers with no interest in
+    /// the body, and makes "I ignore bodies" invisible in the type.
+    ///
+    /// So the kinds differ and the type says which is in use, exactly as for streaming
+    /// and WebSocket handlers. A route with no entry here uses `flat`, so every existing
+    /// caller's behaviour is unchanged.
+    ///
+    /// # Why this exists at all, stated plainly
+    ///
+    /// `serve_connection` drained the body, counted it for the `body_bytes` metric, and
+    /// then dispatched without it. `POST /orders` with a form body answered
+    /// ``the `id` field is required`` -- the bytes had crossed the socket and been
+    /// thrown away. A handler that cannot see the body cannot serve any write request.
+    pub body: Arc<std::collections::BTreeMap<String, crate::body_bytes::BodyHandler>>,
 }
 
 impl Dispatch {
@@ -181,6 +202,7 @@ impl Dispatch {
             flat: handler,
             streaming: Arc::new(std::collections::BTreeMap::new()),
             websocket: Arc::new(std::collections::BTreeMap::new()),
+            body: Arc::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -218,6 +240,24 @@ impl Dispatch {
     #[must_use]
     pub fn websocket_for(&self, name: &str) -> Option<&Arc<dyn crate::ws_conn::WebSocketHandler>> {
         self.websocket.get(name)
+    }
+
+    /// Register a body-aware handler for a route's handler name.
+    #[must_use]
+    pub fn with_body(
+        mut self,
+        name: impl Into<String>,
+        handler: crate::body_bytes::BodyHandler,
+    ) -> Self {
+        let body = Arc::make_mut(&mut self.body);
+        body.insert(name.into(), handler);
+        self
+    }
+
+    /// The body-aware handler for a name, if one is registered.
+    #[must_use]
+    pub fn body_for(&self, name: &str) -> Option<&crate::body_bytes::BodyHandler> {
+        self.body.get(name)
     }
 }
 
@@ -640,7 +680,7 @@ async fn write_flat_response(
     response: &Response,
 ) -> Option<Served> {
     let keep_alive = conn.will_keep_alive(false);
-    let bytes = response::write_response(response, head.version, keep_alive);
+    let bytes = response::write_response(response, head.version, keep_alive, is_head(head));
     if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
         // A write failure is the client's problem, not the server's: it disconnected
         // before reading the response.
@@ -706,6 +746,19 @@ fn begin_drain_if_signalled(conn: &mut Connection, shutdown: &Shutdown) -> Optio
     }
 }
 
+/// Whether this request used `HEAD`.
+///
+/// # Why a named function rather than an inline comparison
+///
+/// Four call sites need it, and a HEAD response has a specific contract
+/// (`RFC 9110` §9.3.2: the same header fields as GET, no body). Naming it means the rule
+/// has a name a test can state, and a fifth caller cannot quietly pass `false` because
+/// the expression looked obvious.
+#[must_use]
+fn is_head(head: &RequestHead) -> bool {
+    head.method == crate::route::Method::Head
+}
+
 /// Answer a request whose body was malformed or over the cap, and close.
 ///
 /// # Why this is a named function
@@ -732,7 +785,12 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
         ),
         false,
     );
-    let bytes = response::write_response(&response::from_error(&resp), head.version, false);
+    let bytes = response::write_response(
+        &response::from_error(&resp),
+        head.version,
+        false,
+        is_head(head),
+    );
     let _ = stream.write_all(&bytes).await;
     let _ = stream.flush().await;
     let _ = stream.shutdown().await;
@@ -813,9 +871,13 @@ async fn reject_parse_error(
     err: &ParseError,
 ) -> Served {
     conn.on_parse_error(err);
+    // `false`, and the reason is structural rather than incidental: this runs when the
+    // head could **not be parsed**, so there is no method to inspect. A request whose head
+    // is unreadable cannot be a well-formed HEAD, so the question does not arise.
     let body = response::write_response(
         &response::from_error(&response::parse_error_response(&err.to_string())),
         Version::Http11,
+        false,
         false,
     );
     let _ = stream.write_all(&body).await;
@@ -864,14 +926,36 @@ fn route_match_of(m: &crate::route::Match) -> RouteMatch {
 /// Extracted because `serve_connection` is the connection's life cycle — reading heads,
 /// tracking deadlines, deciding keep-alive — and *choosing a response* is a different job
 /// that happens to occur in the middle of it.
+/// Route a request and answer it with a flat or body-aware handler.
+///
+/// # Why the handler name decides, not a field on the route
+///
+/// The route's `handler` is a name the dispatcher resolves, which is the same rule
+/// `Dispatch`'s own docs give for streaming and WebSocket handlers: the router is not
+/// the authority on how a guest is invoked. It also means a route whose name has no
+/// body-aware entry falls through to `flat`, so a server that registers none behaves
+/// exactly as it did before this parameter existed.
+///
+/// # Why the body is passed by reference
+///
+/// A `Response` is produced synchronously and the body is not consumed, so borrowing it
+/// avoids a copy on every request. The lifetime is the caller's stack frame, which is
+/// exactly the handler's duration.
 fn dispatch_flat(
     table: &RouteTable,
     dispatch: &Dispatch,
     head: &RequestHead,
     path: &str,
+    body: &crate::body_bytes::BodyBytes,
 ) -> Response {
     if let Some(m) = table.match_route(head.method, path) {
-        return (dispatch.flat)(head, &route_match_of(&m));
+        let matched = route_match_of(&m);
+        // A body-aware handler wins when one is registered for this name; otherwise the
+        // flat handler answers, which is every caller that predates this distinction.
+        if let Some(handler) = dispatch.body_for(&matched.handler) {
+            return handler(head, body);
+        }
+        return (dispatch.flat)(head, &matched);
     }
     let allowed = table.allows(path);
     if allowed.is_empty() {
@@ -961,7 +1045,7 @@ async fn serve_preflight(
     );
 
     let keep_alive = false;
-    let bytes = response::write_response(&response, head.version, keep_alive);
+    let bytes = response::write_response(&response, head.version, keep_alive, is_head(head));
     if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
         return Served::ClientClosed;
     }
@@ -1345,7 +1429,7 @@ async fn serve_connection(
             }
         }
 
-        let Some(body_bytes) = drain_body(&mut stream, &mut buf, &head).await else {
+        let Some((body, body_bytes)) = drain_body(&mut stream, &mut buf, &head).await else {
             if let Some(m) = ctx.metrics {
                 // The refusal is counted because a body over the cap is exactly the case
                 // `SRV-020` asks about, and no `record_request` runs for it: the connection
@@ -1378,7 +1462,7 @@ async fn serve_connection(
             return served;
         }
 
-        let response = dispatch_flat(table, dispatch, &head, path);
+        let response = dispatch_flat(table, dispatch, &head, path, &body);
 
         let response = apply_cors(response, &head, ctx.cors);
 
@@ -1570,7 +1654,7 @@ async fn refuse_limits(
         access_record(head, path, &response, tenant, ctx.id.trace, span),
     );
 
-    let bytes = response::write_response(&response, head.version, false);
+    let bytes = response::write_response(&response, head.version, false, is_head(head));
     if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
         return Served::ClientClosed;
     }
@@ -1839,12 +1923,42 @@ async fn read_head(
 /// a cursor over the buffer first, then the socket. That is the whole trick —
 /// the decoder sees one continuous stream, and the buffer is empty afterwards,
 /// so the connection's framing offset is exactly right.
-async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHead) -> Option<u64> {
+/// Returns the body's bytes and the count that crossed the socket, or `None` when the
+/// framing is no longer trustworthy.
+///
+/// # Why it returns both
+///
+/// The count is what the `body_bytes` metric must report -- the bytes that actually
+/// arrived, not the head's declared length, which disagree for a truncated request. The
+/// bytes are what a handler must receive. Returning one and reading the other from
+/// `reader` afterwards would work too, but a single return value cannot be partially
+/// ignored by mistake.
+///
+/// # Why collecting here does not weaken `SRV-004`
+///
+/// A route with a `StreamingHandler` is dispatched **before** this function runs, so a
+/// streaming route never buffers. This path serves a flat or body-aware handler, and both
+/// produce one `Response` -- which requires the whole body in memory by construction.
+/// The cap is enforced by `BodyReader` *during* the read either way, so collecting cannot
+/// be used to exhaust memory.
+async fn drain_body(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    head: &RequestHead,
+) -> Option<(crate::body_bytes::BodyBytes, u64)> {
     // No body declared: anything buffered is the start of the **next** request —
     // a pipelined one. It must be preserved, not cleared, or a client that
     // pipelines loses its second request.
     if !head.chunked && head.content_length.is_none_or(|n| n == 0) {
-        return Some(0);
+        // No framing header at all is `Absent`; an explicit `Content-Length: 0` is an
+        // empty body. The two are distinguishable on the wire and mean different things
+        // to an application, so they are not collapsed here.
+        let body = if head.content_length == Some(0) {
+            crate::body_bytes::BodyBytes::Buffered(Vec::new())
+        } else {
+            crate::body_bytes::BodyBytes::Absent
+        };
+        return Some((body, 0));
     }
 
     let Ok(mut reader) = crate::body::BodyReader::from_head(head, config_max_request_bytes())
@@ -1860,16 +1974,33 @@ async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHea
     let mut combined = std::io::Cursor::new(prefix).chain(stream);
 
     // A malformed body or one past the cap both mean the framing offset is no
-    // longer trustworthy, so the connection closes — and the caller's `false`
+    // longer trustworthy, so the connection closes — and the caller's `None`
     // is what expresses that. The two cases are not distinguished *here*
     // because the caller's action is identical either way; the reason is
     // reported by `BodyReader` to a caller that wants it.
-    // `discard` returns the count, and returning it rather than discarding the value is the
-    // point: the metric must record the bytes that **actually crossed the socket**. The
-    // declared length and the received count agree for a well-formed request and disagree
-    // for a truncated one, and a metric reporting the declaration would claim bytes that
-    // never arrived.
-    crate::body::discard(&mut reader, &mut combined).await.ok()
+    //
+    // The bytes are **collected** rather than discarded. `discard` read them and threw
+    // them away, which is why every write route in the reference application answered
+    // as though its body were empty: the bytes had crossed the socket and been dropped.
+    //
+    // The count comes from the reader's own accounting rather than from summing here,
+    // so the metric and the reader cannot drift: the declared length and the received
+    // count agree for a well-formed request and disagree for a truncated one, and a
+    // metric reporting the declaration would claim bytes that never arrived.
+    let mut body = Vec::new();
+    loop {
+        match reader.poll_chunk(&mut combined, 8 * 1024).await {
+            Ok(crate::body::BodyChunk::Data(chunk)) => body.extend_from_slice(&chunk),
+            Ok(crate::body::BodyChunk::End) => {
+                let received = reader.bytes_read();
+                return Some((crate::body_bytes::BodyBytes::Buffered(body), received));
+            }
+            // Malformed or over the cap. The connection closes, and the body is
+            // deliberately **not** returned: a handler must never see a truncated body
+            // it believes is complete.
+            Err(_) => return None,
+        }
+    }
 }
 
 /// The `max_request_bytes` a drained body is held to.

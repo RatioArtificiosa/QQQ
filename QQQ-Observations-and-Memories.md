@@ -12348,4 +12348,179 @@ that cannot run locally by design.
 
 ---
 
+## §O-155 — The request body never reached the guest, and the store was per-request all along
+
+End-to-end testing found two defects that no unit test could see, because both live in the
+*wiring* rather than in any one module.
+
+### Defect 1: the body was read, counted, and thrown away
+
+```console
+$ curl -s -X POST -d "id=live-1&quantity=3&unit_cents=250" http://127.0.0.1:18100/orders
+HTTP/1.1 400 Bad Request
+
+the `id` field is required
+```
+
+The request carried an id. `serve_connection` called `drain_body`, which **did** read every
+byte -- to enforce the cap during streaming (`SRV-005`) and to report `body_bytes` in the
+metric -- and then ended with `crate::body::discard(...)`, which returns a count and drops
+the content. `dispatch_flat(table, dispatch, &head, path)` then had nowhere to put a body,
+because `Handler` is:
+
+```rust
+pub type Handler = Arc<dyn Fn(&RequestHead, &RouteMatch) -> Response + Send + Sync>;
+```
+
+So no handler could ever see a body, and every write route in the reference application
+answered as though its body were empty. **The `None` in `GuestApp::dispatch` was not a
+forgotten placeholder** -- there was no parameter to pass it to.
+
+The fix is additive rather than a signature change, for the same reason `Dispatch` already
+separates flat, streaming and WebSocket handlers: those kinds differ, so the type says which
+is in use. `Dispatch` gained an optional body-aware handler keyed by the route's `handler`
+name, and a route with no entry falls back to `flat`, so all twelve existing call sites --
+six integration tests plus the guest bridge -- behave exactly as before.
+
+`BodyBytes` is a three-variant type rather than `Option<Vec<u8>>`, and each variant earns its
+place:
+
+| Variant | Meaning | Why it is distinct |
+|---|---|---|
+| `Absent` | the request declared no body | `Content-Length: 0` and no framing header mean different things on the wire |
+| `Buffered(Vec<u8>)` | the body, in memory | the ordinary case |
+| `TooLarge` | the cap was reached; bytes deliberately absent | a truncated body a handler believed was complete would produce a confidently wrong answer |
+
+### Defect 2: the store was never shared across requests, and the docs said it was
+
+```console
+$ curl -s -X POST -d "id=a1" http://127.0.0.1:18110/orders
+{"id":"a1","total_cents":0,"created_seq":1}
+$ curl -s -X POST -d "id=a2" http://127.0.0.1:18110/orders
+{"id":"a2","total_cents":0,"created_seq":1}
+$ curl -s -X POST -d "id=a3" http://127.0.0.1:18110/orders
+{"id":"a3","total_cents":0,"created_seq":1}
+```
+
+Three distinct ids, three `created_seq: 1`. The counter never advanced, so **every request
+began with an empty map**. A `GET` of a just-created order returned a synthesised
+placeholder, and a duplicate `POST` returned `201` instead of `409`.
+
+That is §4.2 working exactly as designed -- one store and one instance **per request** is
+what makes per-request isolation real, and it is why a guest cannot hold state in a
+`static`. The defect was in the *claim*: `orders.rs`'s module documentation said the store
+was "shared across requests", and **the unit tests could not have caught it**, because they
+run in one process and therefore share one `static`. A property that fails in production
+held perfectly under test -- `§O-149`'s shape once more, a fixture that cannot exhibit the
+defect.
+
+The fix is a documentation correction plus an honest statement of what the `db` row
+measures: a validated write, **not** a Postgres round trip. Durable state needs
+`§5.3`'s `[[capabilities.sql]]`, and `qqq:sql` has no host implementation -- so the module
+says so rather than implying more.
+
+### The generalisable rule
+
+**End-to-end testing finds what unit tests structurally cannot: the edges.** Both defects
+are in the seam between two correct components. `GuestApp` correctly called
+`handle_request(head, None)` for the API it was given; `drain_body` correctly counted and
+discarded. Each was right; the join was wrong. `§O-146` said "ask *what calls this?* of the
+chain, not the node"; this is its complement -- **run the chain, because the seam is not
+covered by any node's tests.**
+
+→ `crates/qqq-serve/src/body_bytes.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/src/guest_handler.rs`, `crates/qqq-run/src/serve.rs`,
+`examples/orders-api/src/orders.rs`
+
+---
+
+## §O-156 — The HEAD contract, and a fault-injection harness that reported its own defect
+
+### The defect
+
+```console
+$ curl -s -I http://127.0.0.1:18100/healthz
+HTTP/1.1 405 Method Not Allowed
+Allow: GET
+```
+
+The reference application declares `/healthz` for `GET`, and the guest's `router` maps HEAD
+to GET correctly -- so the guest's HEAD handling was **correct and unreachable**, because
+the host's route table refused the request before the guest was consulted. `§O-130`'s shape
+again, one layer above where it was last found.
+
+Two independent bugs, and fixing one exposed the other:
+
+1. **The router had no HEAD fallback.** RFC 9110 §9.3.2: *"A server MUST support the `HEAD`
+   method for any resource it supports for `GET`."* This is a conformance requirement, not
+   a configuration option, so it belongs in `RouteTable::match_route` rather than in every
+   user's manifest. `allows` had to change in the same commit, because the `Allow` header is
+   a claim about what works -- and a claim the router contradicts (by serving a HEAD it says
+   is not permitted) is worse than a shorter list.
+
+2. **The response reported `Content-Length: 0` for a HEAD.** The guest cleared the body
+   before returning, which destroyed the only source of the representation's length, so
+   `write_response` measured zero. A client using HEAD to decide whether a fetch is worth
+   making would be told the resource was empty.
+
+The second fix is the instructive one, because the **ownership** was wrong rather than the
+arithmetic. Stripping a HEAD body must be the server's job -- it has to be, because a
+handler that forgot would emit a body on a HEAD and desynchronise the stream for every
+pipelined request. So `write_response` now measures the body for `Content-Length` and then
+withholds the bytes, and the guest returns the representation a GET would return. One rule,
+one owner.
+
+```console
+$ curl -s -I http://127.0.0.1:18130/healthz
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 2
+```
+
+### The harness that lied, twice
+
+Fault injection found four of five injections, and the fifth was reported **MISSED** -- the
+guest-strips-the-body injection appeared not to be caught. Two structural hypotheses were
+tested and refuted first (the anchor was unique; `dispatch` is the function `route()` calls),
+and then the injection was applied by hand with no auto-restore. It was caught, cleanly:
+
+```text
+test router::tests::a_head_produces_the_same_representation_as_a_get ... FAILED
+assertion `left == right` failed: the guest returns the same
+representation; the server withholds the bytes
+```
+
+So the **harness** was wrong, not the test. Two separate harness defects, both worth
+recording:
+
+* **The first harness aborted on a hash assertion** because it performed two injections
+  into the *same file* in sequence: it recorded a baseline hash, injected, restored, then
+  took the *second* injection's baseline from the already-modified file. A restore compared
+  against a hash from a different state. **One injection per file per run.**
+* **The second harness reported a false MISSED** because injection #5's `replace(.., 1)`
+  operated on text the *previous* injection in the same run had already altered, so the
+  second replacement never matched and the file was restored without the fault ever being
+  applied.
+
+Both are the same defect shape this document records about code, one level up: **a control
+believed live that is not.** A harness that reports MISSED is read as "the test is weak" --
+the opposite of the truth here. The remedy is the rule `§O-149` established for fixtures,
+applied to harnesses: *when an injection reports MISSED, first prove the fault was actually
+present in the file before concluding the test is blind.*
+
+### The fix in the harness, and what it now does
+
+`fault_inject_head2.py` verifies each injection by hash on both sides, requires the file to
+have **changed** before running the test, requires byte-identical restore, touches the mtime
+so cargo cannot reuse a stale artifact, and re-runs the test to confirm green afterwards.
+The two same-file injections are still batched; the durable fix is one file per process,
+which is recorded as the rule rather than applied retroactively, because the injections that
+matter all passed and re-running everything to prove a harness quirk would cost more than it
+teaches.
+
+→ `crates/qqq-serve/src/route.rs`, `crates/qqq-serve/src/response.rs`,
+`examples/orders-api/src/router.rs`, `.scratch/fault_inject_head2.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

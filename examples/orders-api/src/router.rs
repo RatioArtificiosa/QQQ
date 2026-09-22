@@ -203,10 +203,17 @@ fn dispatch(
 ) -> Response {
     let first = params.first().copied().unwrap_or("");
 
-    // A HEAD carries every header the GET would, and no body. Applied once, after
-    // the workload has produced the real answer, so a workload cannot forget it.
-    let strip_body = method == "HEAD";
-
+    // # Why the guest does **not** strip the body for a HEAD
+    //
+    // It used to, and that was a defect measured end to end: clearing the body destroyed
+    // the representation's length, so the server computed `Content-Length: 0` for
+    // `/healthz` while its `GET` reports `2`. `RFC 9110` §9.3.2 requires a HEAD to send the
+    // same header fields as a GET.
+    //
+    // The server owns the stripping because it must own it anyway -- a handler that forgot
+    // would emit a body on a HEAD and desynchronise the stream. So this returns the
+    // representation a GET would return, and `qqq_serve::write_response` writes the true
+    // length and withholds the bytes.
     let mut response = match benchmark {
         "hello" => orders::health(),
         "json" => orders::by_id(first),
@@ -231,9 +238,6 @@ fn dispatch(
         other => unreachable_response(other),
     };
 
-    if strip_body {
-        response.body.clear();
-    }
     response
 }
 
@@ -560,27 +564,35 @@ mod tests {
     }
 
     #[test]
-    fn a_head_is_answered_like_a_get_without_a_body() {
+    fn a_head_produces_the_same_representation_as_a_get() {
+        // # What this asserts, and what it deliberately does not
+        //
+        // The guest's job is to produce the **representation**; withholding the bytes is
+        // `qqq_serve::write_response`'s job, and it needs the real body to compute a
+        // truthful `Content-Length` (`RFC 9110` §9.3.2).
+        //
+        // So this test asserts identity: HEAD and GET return the same status, the same
+        // headers and the same body, and the *server* strips. The previous version
+        // asserted the guest stripped the body -- which was the defect, because it left the
+        // server unable to report the length. It measured `Content-Length: 0` for a
+        // resource whose GET reports `2`.
         let mut head = get("https://x.test/healthz");
         head.method = Method::Head;
         let by_head = route(&head);
         let by_get = route(&get("https://x.test/healthz"));
 
         assert_eq!(by_head.status, by_get.status);
-        assert!(
-            by_head.body.is_empty(),
-            "a HEAD response must carry no body"
-        );
-        // Compare the rendered pairs, not the structs: the generated `Header`
-        // record derives no `PartialEq`, and the pairs are also the closer match to
-        // what the contract actually says -- the same headers, in the same order.
         assert_eq!(
             render_headers(&by_head),
             render_headers(&by_get),
             "a HEAD must carry every header the GET would"
         );
-        // The control: the GET really does have a body, so the emptiness above is
-        // caused by HEAD and not by healthz returning nothing.
+        assert_eq!(
+            by_head.body, by_get.body,
+            "the guest returns the same representation; the server withholds the bytes"
+        );
+        // The control: the body is non-empty, so the equality above is a real statement
+        // rather than two empty vectors matching.
         assert!(!by_get.body.is_empty(), "control: the GET has a body");
     }
 

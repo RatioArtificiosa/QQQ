@@ -85,6 +85,9 @@
 
 pub mod access_log;
 pub mod body;
+pub mod body_bytes;
+
+pub use body_bytes::{BodyBytes, BodyHandler};
 pub mod conn;
 pub mod cors;
 pub mod h2;

@@ -11518,12 +11518,30 @@ instrument is mine and the cost is asymmetric: a false **green** hides a defect,
 **red** trains me to distrust the check and eventually to wave one through. A verifier that
 over-reports is a verifier that gets ignored.
 
-Fixed by giving "not yet decided" its own state instead of folding it into the verdict: `None`
-prints `...` with `(in progress)`, and the run as a whole returns exit **3** — a distinct code
-meaning *ask again*, not *failed*. Verified by reading the same commit again after it completed:
-`FAILING: none`, exit 0.
+First fix: give "not yet decided" its own state instead of folding it into the verdict — `None`
+prints `...` with `(in progress)`, and the run as a whole returns exit **3**, a distinct code
+meaning *ask again*, not *failed*.
 
-**The rule:** a tri-state must not be collapsed into a boolean by an `or`. `null` is not `false`.
+**That fix was half a fix, and the next commit proved it.** Checking `415e2e7` while it was still
+running, the script printed:
+
+    BAD  Rust (windows-latest)
+    RUN STILL IN PROGRESS (in_progress) -- not a verdict
+
+The guard was on the **summary line**, not on the **labels**. Every per-job `BAD` was still printed
+from a run that had not finished, and a reader sees the label long before the caveat underneath it.
+The old guard only covered `conclusion is null`; it did not cover a run that is incomplete for any
+other reason. The retry cost me a wrong red for the second time in one session.
+
+Second fix: gate the **labels themselves** on `run.status == "completed"`, so an unsettled run renders
+every job as `...  (in progress)` and cannot produce a `BAD` line at all. Verified afterwards on the
+same commit: all 11 `ok`, `FAILING: none`, exit 0.
+
+This is the *"a repair that was half a fix"* shape from `§O-139`, committed by me, in the tool I built
+to stop exactly this. Fixing the branch I had in mind is not fixing the problem.
+
+**The rule:** a tri-state must not be collapsed into a boolean by an `or` — and when the output has a
+summary *and* per-item labels, the guard must gate the labels, because the summary is read last.
 
 ---
 

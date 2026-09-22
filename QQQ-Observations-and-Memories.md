@@ -11838,6 +11838,60 @@ template will use.
 ---
 
 
+## §O-148 — The guest call exists now, and the export name was the whole difficulty
+
+Built `qqq-host::invoke`, the layer `§O-146` identified as missing: nothing in production
+resolved a guest's handler, so `qqqai serve` had no way to dispatch to one.
+
+**A component-model export is looked up in two steps, and the name is not the one on the tin.**
+`wasm-tools print` on a real guest gives:
+
+    (export "qqq:http/incoming-handler@1.0.0#handle" (func ...))
+
+So the interface is `qqq:http/incoming-handler@1.0.0` and the method is `handle` -- the `#handle`
+suffix in the core-module name is *not* how the component export is addressed. A single-step lookup
+for `"qqq:http/incoming-handler@1.0.0#handle"` fails, and the failure is `None`, which a careless
+caller serves as an empty response. Both strings are now public constants, and an injection drops
+the `@1.0.0` suffix to prove a test notices.
+
+**Why the handle holds export indices and not a `Func`.** A `wasmtime::component::Func` is bound to
+a store, and QQQ creates one store **per request** (§4.2). A `Func` resolved against request N's
+store cannot be called against request N+1's, so what travels is the export index -- a property of
+the compiled component, valid in every store built from it. The two probes happen once per
+component rather than once per request.
+
+**`ComponentItem` is not re-exported by `wasmtime::component`.** It is `pub` in `types.rs` and
+absent from the module's `pub use` list, so an export's kind cannot be matched on. Rather than guess
+at a variant name -- which cost two compile cycles in this session alone -- the check became the
+authoritative one: `Instance::get_func` returns `Some` only for an export that is a **lifted
+function**, which is the actual property. Asking Wasmtime the real question beats pattern-matching
+on a variant that has to be looked up.
+
+**`Instance::run` classifies every closure error as a trap, and that hid my own errors.** The first
+version of the test mapped a resolution failure into `wasmtime::Error::msg`, and every assertion
+failed with:
+
+    the message must say what the component is not: the guest trapped
+
+The real message was discarded. That is *correct* for the production path -- a failure inside a
+guest call is a trap -- but it means a host-side lookup error cannot be observed through that
+channel. The test now writes the error to a captured slot and returns `Ok` at the Wasmtime level.
+Worth recording because the shape recurs: **a channel that classifies everything into one category
+cannot carry a distinction**, and the fix is a second channel, not a better message.
+
+**Measured:** 5 unit + 5 integration tests over real compiled components. Three injections caught
+(dropping the version suffix, reporting a missing application as a missing method, renaming the
+error context key), source restored byte-for-byte. 2158 tests pass (was 2148); clippy and fmt clean.
+
+**What this unblocks and what it does not.** The call exists and is tested, but nothing calls *it*
+yet either -- `CLI-011` (`qqqai serve`) is still the next layer up, and the chain is
+`invoke → CLI-011 → SRV-018 → PERF-*`. Building this did not shorten the chain; it built its
+first link, which was the one with no checklist item and therefore the one most likely to be
+skipped entirely.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

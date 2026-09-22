@@ -913,6 +913,11 @@ cmd_checks() {
     python3 tools/check_coderabbit_config.py --self-test
     python3 tools/check_checklist_citations.py
     python3 tools/check_checklist_citations.py --self-test
+    # §9.2's budget table against the Proposal and the checklist. Kept here as
+    # well as in ci.yml on purpose: the image must be able to prove the same
+    # things CI does, or the two drift and the image certifies less than it looks.
+    python3 tools/check_bench_contract.py
+    python3 tools/check_bench_contract.py --self-test
     python3 tools/self_test_schemas.py
 
     # The mutating one, then the validator that proves it restored everything.

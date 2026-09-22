@@ -12930,4 +12930,171 @@ skill makes about why this step exists, confirmed on a new artifact.
 
 ---
 
+## §O-160 — The benchmark harness is a typed contract, because §9.1 is a contract
+
+**The item.** `PERF-001`: *"Build the benchmark harness with the full published
+methodology."* `§9.1` then lists nine things that must be published with every result:
+pinned hardware, pinned OS and kernel, pinned toolchain versions, warmup procedure,
+**percentiles not averages**, concurrency levels disclosed, three repetitions with
+variance, the harness open source, and a "what this does not measure" section — closing
+with the sentence that decides the design: *"A benchmark without these is marketing, and
+we should not publish it."*
+
+### The decision
+
+**The methodology is a type, not a paragraph.** A `BenchmarkResult` cannot be
+constructed unless all nine elements are present, and the type system is what enforces
+it. This is the same move `SRV-020` made for metric cardinality — *"the compiler is the
+lint"* — applied to the methodology instead of the labels.
+
+**Why, and what was rejected.** The obvious implementation is a `bench/` directory of
+scripts that print numbers, plus a Markdown page restating §9.1's list. It was rejected
+for three reasons:
+
+1. **Prose cannot fail.** A methodology page that drifts from what the harness actually
+   does is the repository's signature defect shape — *a control believed live that is
+   not* — and it is undetectable, because nothing executes the prose. A type that
+   refuses to construct is a check that fires.
+2. **The requirement is per-result, not per-document.** §9.1 says "published with every
+   result". A single methodology page satisfies the letter and not the requirement: the
+   fifth report can omit its warmup procedure and the page still exists. Making the
+   elements fields of the result makes omission a compile error rather than an
+   editorial slip.
+3. **`§9.2` says each budget row "has a measurement method in `bench/`."** That is a
+   claim about a mapping — twelve rows to twelve methods — and a mapping is data. It
+   should be checkable, not asserted.
+
+**Percentiles, not averages, is a type-level decision too.** `Distribution` stores raw
+samples and computes `p50`/`p99` from them; there is no `mean()` accessor, deliberately.
+A mean of latencies is the single most misleading number a benchmark can publish, and
+the cheapest way to prevent publishing one is for the type not to have it. If a future
+item genuinely needs a mean, adding it is a deliberate act with a name, which is the
+right amount of friction.
+
+### What is explicitly out of scope for `PERF-001`, and why that is honest
+
+`PERF-001` is the **harness**: the types, the methodology capture, the statistics, the
+repetition and variance handling, the report format, and the checkers that keep them
+true. It does **not** run the ten workloads — that is `PERF-002` — and it does not meet
+any §9.2 budget — those are `PERF-003`…`PERF-013`.
+
+The tempting shortcut is to write the numbers into the checklist now. That would be the
+first fabricated measurement in a document whose entire value is that its numbers were
+produced by commands. **A budget item is met by a harness that produces the number and a
+recorded comparison against the target, not by asserting the target is achievable.**
+
+### The `db` caveat, recorded where it cannot be lost
+
+`§O-155` and this round's checklist entry both flag that the `db` workload measures a
+validated write and an in-guest map lookup, **not** a Postgres round trip, because
+`[[capabilities.sql]]` has no host implementation and §4.2 creates one store per request.
+
+The user asked what is best here, and the answer is **not** to implement `qqq:sql` this
+round: a database capability is a `CAP-*`/`HOST-*` item with its own host implementation,
+credential handling, and pool management, and building it to rescue one benchmark row
+would be a large piece of unplanned work whose own gates would be skipped. It is also
+**not** to drop the row: `§9.1` names ten benchmarks and one of them is `db`.
+
+The honest answer is to make the caveat **structural**. §9.1's ninth requirement *is*
+"what this does not measure" — so the harness's `NonClaims` field is exactly where this
+belongs, and it is a **required** field. A `db` result cannot be constructed without
+stating that it did not touch a database. That turns the caveat from a sentence in a
+checklist, which a future agent may not read, into a build error if it is omitted.
+
+→ `bench/` (to be built this round); `§9.1`, `§9.2`; `§O-155` for the `db` finding;
+`§O-158`/`§O-159` for the two rounds of verification bugs this work must not repeat.
+
+---
+
+## §O-161 — A checker's self-test found three bugs in the checker, on its first run
+
+`tools/check_bench_contract.py` was written this round to hold `§9.2`'s budget table
+to the Proposal. Its `--self-test` injects the four defects it exists to catch and
+requires each to fire. On its first run, **three of the four reported MISSED** — and
+every one was a bug in the checker rather than in the source it examines.
+
+This is the third consecutive round in which verifying a thing found the fault in
+the verification: `§O-158` (a CI guard that counted `"name"` in `cargo metadata`
+output and would have failed every healthy run), `§O-159` (a verifier that counted
+occurrences of a token instead of commands). The pattern is stable enough to state
+as a rule: **a new control is more likely to be wrong than the thing it controls**,
+because the thing was written with attention and the control was written to be
+simple.
+
+### Bug 1 — `metric()` is not a row
+
+The injection removed `Perf002`'s entry from `Budget::ALL`. The checker stayed
+silent, because it read "which rows exist" from `Item::metric()` — and
+`Item::Perf002 => "Routed request overhead (empty handler)"` was still in that
+lookup table.
+
+`metric()` is a *name for an enum variant*, not evidence that a budget row exists.
+The property that matters is "a row exists for this `§9.2` metric", and the source of
+truth is the `item:` field of each `Budget::ALL` entry. `metric()` is used only to
+turn that item into a readable name. **A check aimed at a nearby property that is
+easy to read instead of the property that matters** — the shape this repository has
+now recorded more than twenty times.
+
+### Bug 2 — the numbers that actually run were never compared
+
+`analyse`, the function the self-test drives, compared `EXPECTED_ROWS` against the
+**Proposal** and never against the **Rust table**. So injecting `target: 100.0` →
+`target: 999.0` into `budget.rs` reported PASS. The Rust table is what executes; a
+target that drifted from `§9.2` still compares, still prints a verdict, and reports
+MEETS against a number nobody agreed to.
+
+The underlying cause is worth naming: `main` and `analyse` were **two
+implementations of one rule**, and they had already diverged. The fix is structural
+— the rule lives in `analyse`, and `main` calls it. One implementation cannot
+disagree with itself, which is the same argument `§4.4` makes about a second path to
+a capability being a second policy.
+
+### Bug 3 — an `UnboundLocalError` in the fix for bug 2
+
+The first attempt at bug 2 referenced `metric_names` above its assignment. Python
+does not hoist, so `analyse` crashed rather than failing a case. The self-test caught
+it by exception, which is a worse outcome than a wrong verdict only because it is
+louder — and it is the reason the fixed version puts the shared extraction **before**
+both consumers.
+
+### What the checker found in the source, which is the point
+
+With the checker working, its first real run found a genuine omission in the crate it
+was written to guard: **`§9.2`'s `Routed request overhead (empty handler) | ≤ 60 µs
+p99 | Host-side, excluding guest work`** had no `Budget` row and no exclusion. It was
+in neither list, which is precisely the state the "every `§9.2` row has a decision"
+rule exists to detect.
+
+It is now `Item::Perf002` — the one `§9.2` row that is *purely* the host's, since the
+measurement excludes all guest work. Of the ten `§9.1` benchmarks it is closest to
+`hello`, and it is the number that says whether the runtime's own overhead is where
+`§9.2` claims.
+
+**A parser bug was caught at the same time, and it was worse.** The first version of
+`parse_target` read `≥ 60k RPS` as **60.0** — it took the digits and ignored the `k`.
+Every throughput verdict would then have compared a real system against sixty requests
+per second instead of sixty thousand, reporting a 1000× pass. The number is plausible,
+the comparison succeeds, and nothing about the output looks wrong. `parse_target` now
+applies the multiplier explicitly, and `EXPECTED_ROWS` states `60_000.0` with a comment
+saying why.
+
+### The generalisable rules
+
+1. **Extract the rule, then drive it from both the checker and its self-test.** Two
+   implementations of one rule will diverge, and the divergence is invisible because
+   each is individually correct.
+2. **A parser needs its own tests.** Every bug above was in parsing or accounting, not
+   in the policy. `60k` → `60` is the kind of mistake that produces a *passing*
+   checker.
+3. **A lookup table is not a record.** `metric()` enumerates names; whether a row
+   exists is a different fact in a different place.
+4. **Three rounds in a row, the control was the broken thing.** Budget for it: write
+   the self-test before trusting the checker.
+
+→ `tools/check_bench_contract.py`, `crates/qqq-bench/src/budget.rs`;
+`§O-158`, `§O-159` for the two previous instances; `§O-126` for the invented
+citation this checker's citation rule defends against.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

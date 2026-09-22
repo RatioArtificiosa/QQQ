@@ -304,6 +304,23 @@ jobs:
       - name: Prove the citation check catches a fabricated identifier
         run: python tools/check_checklist_citations.py --self-test
 
+      # §9.2 is a contract with twelve stated budgets. `Budget::ALL` in
+      # `crates/qqq-bench/src/budget.rs` is its machine-readable copy, and this
+      # compares the Proposal, that table and the checklist against each other.
+      #
+      # The failure it prevents is silent in both directions: a budget whose target
+      # drifted from §9.2 still compares, still prints a verdict, and still says
+      # MEETS -- against a number nobody agreed to.
+      #
+      # Writing this checker found three bugs in ITSELF on the first run (its
+      # `--self-test` reported three of four injections as MISSED), including a
+      # parser that read "60k RPS" as 60.0 and would have passed a system doing
+      # sixty requests per second. Recorded in Observations §O-161.
+      - name: Verify the §9.2 budget table against the Proposal and the checklist
+        run: python tools/check_bench_contract.py
+      - name: Prove the bench-contract check catches a drifted budget
+        run: python tools/check_bench_contract.py --self-test
+
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
       # enforced by nothing but attention. Two violations had accumulated: the
@@ -799,12 +816,12 @@ jobs:
           case "$COUNT" in
             ''|*[!0-9]*) echo "the crate count is not a number: '$COUNT'"; exit 1 ;;
           esac
-          # The workspace has 10 members. Asserting the exact number means a crate
+          # The workspace has 11 members. Asserting the exact number means a crate
           # that stops being picked up -- the failure this guard exists for -- is a
           # failure rather than a smaller success.
           echo "MSRV checked $COUNT crate(s)"
-          if [ "$COUNT" -ne 10 ]; then
-            echo "expected 10 workspace crates, examined $COUNT"
+          if [ "$COUNT" -ne 11 ]; then
+            echo "expected 11 workspace crates, examined $COUNT"
             echo "if you added or removed a crate, update this number deliberately"
             exit 1
           fi

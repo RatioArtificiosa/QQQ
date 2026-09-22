@@ -1,0 +1,24 @@
+[package]
+name = "qqq-bench"
+description = "QQQ benchmark harness: the §9.1 methodology as a type, percentile statistics, repetition and variance, and the §9.2 budget contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords = ["qqq", "benchmark", "performance", "methodology"]
+categories = ["development-tools"]
+
+[lints]
+workspace = true
+
+[dependencies]
+qqq-core = { path = "../qqq-core", version = "0.0.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1367,6 +1367,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qqq-bench"
+version = "0.0.0"
+dependencies = [
+ "qqq-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qqq-cap"
 version = "0.0.0"
 dependencies = [

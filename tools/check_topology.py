@@ -44,6 +44,14 @@ ROOT = Path(__file__).resolve().parent.parent
 # the code — a distinction this check is what surfaced.
 ORDER = [
     "qqq-core",
+    # The benchmark harness (`PERF-001`). It sits directly above `qqq-core`
+    # because that is its only dependency: it defines what a *measurement* is --
+    # the §9.1 methodology as a type and the §9.2 budgets as data -- and it
+    # measures other crates from outside rather than being part of their
+    # dependency chain. Siting it as low as possible is what keeps it able to
+    # measure everything: a harness that depended on the server could not be used
+    # to time the server's own startup.
+    "qqq-bench",
     "qqq-cap",
     "qqq-abi",
     "qqq-host",

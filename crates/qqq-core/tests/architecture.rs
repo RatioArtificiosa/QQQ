@@ -103,6 +103,17 @@ fn package_name(crate_dir: &Path) -> String {
 /// `§O-044`.
 const ORDER: &[&str] = &[
     "qqq-core",
+    // The benchmark harness (`PERF-001`). Second because `qqq-core` is its only
+    // dependency: it defines the §9.1 methodology as a type and the §9.2 budgets
+    // as data, and measures other crates from outside their dependency chain.
+    // Siting it as low as possible is what keeps it able to measure everything --
+    // a harness that depended on the server could not time the server's startup.
+    //
+    // Adding it required updating **two** lists: this one and
+    // `tools/check_topology.py`'s. Both failed loudly until they were corrected,
+    // which is the duplication working as the doc comment above intends -- but it
+    // is worth knowing that a new crate is a two-file change.
+    "qqq-bench",
     "qqq-cap",
     "qqq-abi",
     "qqq-host",

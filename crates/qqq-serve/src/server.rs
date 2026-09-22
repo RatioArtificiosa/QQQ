@@ -85,6 +85,14 @@ pub struct ServerConfig {
     /// connection would give each connection its own counters, which is exactly what a
     /// shared registry exists to avoid and which looks like "the metric is always 1".
     pub metrics: Option<Arc<crate::metrics::HttpMetrics>>,
+    /// The per-tenant request limits, or `None` for none (`SRV-020`).
+    ///
+    /// **`Arc` for a reason the registry's does not share**: the rate windows are mutable
+    /// state that must be shared across connections. A per-connection copy would give every
+    /// connection its own allowance, so a tenant with a limit of 100 could make 100 requests
+    /// *per connection* — the limit would exist, be tested, and enforce nothing. That is the
+    /// failure this type's `Arc` prevents by construction.
+    pub limits: Option<Arc<crate::limits::TenantLimits>>,
     /// The cross-origin policy, or `None` for no CORS at all.
     ///
     /// # Why the default is `None` and not a permissive policy
@@ -115,6 +123,10 @@ impl ServerConfig {
             // server pay for a feature it was not asked for; the recording sites are
             // `Option`-checked precisely so that absence is free.
             metrics: None,
+            // Likewise: a server whose manifest declared no `[server.limits]` applies none.
+            // A built-in cap here would be a number this crate invented, silently changing
+            // behaviour on upgrade -- see `qqq_cap::manifest::RequestLimits`.
+            limits: None,
         }
     }
 }
@@ -246,6 +258,17 @@ pub enum Served {
     /// much — the diagnosis this project has repeatedly found harder than the
     /// bug (`§O-043b`).
     BodyRejected,
+    /// A per-tenant **rate** limit refused the request.
+    ///
+    /// Distinct from [`Self::BodyRejected`], which is about *how much* one request carried;
+    /// this is about *how many* the tenant has sent. An operator reading a log where the two
+    /// were merged would look for a large payload when the answer is a busy client — the
+    /// same "diagnosis is harder than the bug" argument `BodyRejected`'s own doc makes.
+    ///
+    /// The body was **not** read, so the connection cannot be reused: the framing offset is
+    /// unknown. That is why this is an outcome rather than a response the loop could continue
+    /// from.
+    Refused,
     /// The server is draining and closed it.
     Drained,
     /// The handler asked to close.
@@ -278,6 +301,10 @@ pub async fn serve(
     // *registry* would give each connection its own counters, and the metric would read 1
     // forever. The `Arc` is what makes "one registry, many connections" structural.
     let metrics: Option<Arc<crate::metrics::HttpMetrics>> = config.metrics.clone();
+    // Cloned into every connection task, which clones the `Arc`. The rate windows are shared
+    // **mutable** state, so this is not merely an optimisation: a per-connection copy would
+    // give each connection its own allowance and the limit would enforce nothing.
+    let limits: Option<Arc<crate::limits::TenantLimits>> = config.limits.clone();
     // Bounded tenant labels, shared for the same reason the registry is: a per-connection
     // copy would let each connection disagree about which tenants are named and which are
     // collapsed, so the same tenant could appear under two labels depending on which
@@ -345,6 +372,8 @@ pub async fn serve(
             // itself stays one value. See `ServerConfig::metrics` for why that distinction
             // is the whole point.
             let metrics = metrics.clone();
+            // Cloned per task, which clones the `Arc` -- one limiter, many connections.
+            let limits = limits.clone();
             // Cloned per task, which clones the `Arc`: the label set must be **one** value,
             // or two connections could disagree about whether a tenant is named.
             let tenant_labels = Arc::clone(&tenant_labels);
@@ -384,6 +413,7 @@ pub async fn serve(
                     // default is what applies here.
                     idle_timeout: Some(connection_config.idle_timeout),
                     metrics: metrics.as_ref(),
+                    limits: limits.as_ref(),
                     tenant_labels: &tenant_labels,
                 };
                 let served = serve_connection(
@@ -1074,6 +1104,12 @@ pub struct ConnectionContext<'a> {
     /// registry. A test asserting "one request was recorded" owns its registry, so two
     /// servers in one process cannot see each other's counts.
     pub metrics: Option<&'a Arc<crate::metrics::HttpMetrics>>,
+    /// The per-tenant limits, or `None` when the manifest declared none.
+    ///
+    /// Borrowed rather than cloned, like every other field here: one `Arc` shared by every
+    /// connection is what makes a tenant's allowance **per tenant** rather than per
+    /// connection.
+    pub limits: Option<&'a Arc<crate::limits::TenantLimits>>,
     /// The bounded set of tenant labels that may appear in a metric.
     ///
     /// # Why this is not optional even when metrics are off
@@ -1271,6 +1307,44 @@ async fn serve_connection(
         // socket, not the head's declared length. `reject_body` records the refusal itself,
         // because a body over the cap is precisely the case `SRV-020` wants counted and no
         // response is produced for it here.
+        // --- Per-tenant limits, before anything is read ---------------------
+        //
+        // Both checked **here**, before the body is consumed and before a handler runs, so a
+        // refused request costs the server as little as possible. A check after the body was
+        // read would have already paid for the thing the cap exists to prevent.
+        //
+        // The rate check is `check_and_record`, which consumes the allowance as a side
+        // effect: a separate `check` and `record` would let a caller check without recording,
+        // which is a limiter that never limits. The refusal is recorded as a metric so an
+        // operator can see it, and answered with 429 -- the status that means "you are
+        // sending too often", distinct from 413 for "you are sending too much".
+        if let Some(limits) = ctx.limits {
+            // The **declared** length first. A client understating it is caught by the
+            // streaming count below; a client stating it honestly pays nothing to find out.
+            if let Some(declared) = head.content_length {
+                if limits.check_body(&tenant, declared).is_err() {
+                    if let Some(m) = ctx.metrics {
+                        let label = ctx.tenant_labels.label(&tenant);
+                        m.record_body_limit(label.as_str());
+                    }
+                    return refuse_limits(
+                        &mut stream,
+                        &head,
+                        path,
+                        &tenant,
+                        ctx,
+                        span_seq + 1,
+                        false,
+                    )
+                    .await;
+                }
+            }
+            if limits.check_and_record(&tenant, Instant::now()).is_err() {
+                span_seq += 1;
+                return refuse_limits(&mut stream, &head, path, &tenant, ctx, span_seq, true).await;
+            }
+        }
+
         let Some(body_bytes) = drain_body(&mut stream, &mut buf, &head).await else {
             if let Some(m) = ctx.metrics {
                 // The refusal is counted because a body over the cap is exactly the case
@@ -1448,6 +1522,69 @@ async fn serve_special_route(
     None
 }
 
+/// Answer a request that a per-tenant limit refused.
+///
+/// # Why the two refusals have different statuses
+///
+/// `413 Content Too Large` and `429 Too Many Requests` are different facts with different
+/// remedies: the first says "this payload is too big", the second says "you are sending too
+/// often, come back later". A client that received one status for both would retry a body it
+/// can never send, or shrink a payload when it should have waited. The distinction costs one
+/// `bool` and saves a support ticket.
+///
+/// # Why the access record is emitted here
+///
+/// Every other early return in `serve_connection` emits one, and a refusal an operator cannot
+/// see in the log is indistinguishable from a request that vanished. The record carries the
+/// status the client actually received, so a denial and a success are told apart by the same
+/// field a successful request uses.
+///
+/// # Why `Connection: close`
+///
+/// The body was **not** consumed -- that is the point of checking first -- so the connection
+/// is positioned mid-request and the framing offset is unknowable. Keeping it alive would
+/// mean the next request is read as this one's body.
+async fn refuse_limits(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    tenant: &str,
+    ctx: &ConnectionContext<'_>,
+    span: u64,
+    rate: bool,
+) -> Served {
+    let (status, reason) = if rate {
+        (429u16, "Too Many Requests")
+    } else {
+        (413, "Content Too Large")
+    };
+    let body = if rate {
+        "this tenant has exceeded its request limit"
+    } else {
+        "this tenant's request body exceeded its limit"
+    };
+    let response = crate::response::Response::text(status, body);
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let bytes = response::write_response(&response, head.version, false);
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    let _ = reason;
+    // Two variants, not one: the consequence for the *connection* is identical -- the body was
+    // not read, so it cannot be reused -- but an operator reading the log needs to know which
+    // limit fired, and the status alone requires them to remember the mapping.
+    if rate {
+        Served::Refused
+    } else {
+        Served::BodyRejected
+    }
+}
+
 /// Record one completed request, from the same facts the access record uses.
 ///
 /// # Why it lives beside the access record rather than somewhere of its own
@@ -1519,7 +1656,9 @@ fn metric_outcome_of(served: Served) -> crate::metrics::Outcome {
         Served::IdleTimeout | Served::HeaderTimeout => Outcome::Timeout,
         // The server refused to continue — a request ceiling or a graceful drain. Neither
         // is the client's fault and neither is a protocol error.
-        Served::RequestLimit | Served::Drained => Outcome::Refused,
+        // The server refused to continue -- a request ceiling, a graceful drain, or a
+        // per-tenant limit. None is the client's protocol mistake and none is a success.
+        Served::RequestLimit | Served::Drained | Served::Refused => Outcome::Refused,
         // The two client mistakes collapse into one series. See this function's
         // documentation for why the distinction lives in the log rather than the metric.
         Served::BadRequest | Served::BodyRejected => Outcome::ProtocolError,

@@ -12893,6 +12893,41 @@ byte-identical to its pre-injection state.
 `skills/coderabbit/SKILL.md`, `C:\Users\Usuario\.dsh\timer-agent\jobs.json`;
 `§O-158` for the previous round's instance of the same verification bugs.
 
+**Verified outcome.** Committed as `ab1d815` (2 files, +135/-3) and pushed;
+`main` is in sync with `origin/main`. No dependency changed, so `Cargo.lock` is
+correctly untouched.
+
+GitHub Actions on `ab1d815`, read from the run:
+
+| Job | Result |
+|---|---|
+| WIT interface validation | success |
+| Production image (SEC-029) | success |
+| Supply chain | success |
+| Line endings | success |
+| MSRV (1.97) | success |
+| Cross-reference integrity | success |
+| Rust (macos-latest) | success |
+| Rust (ubuntu-latest) | success |
+| Rust (windows-latest) | success |
+| **Reference application (SRV-018)** | **success** — with `--locked` now on all three resolving steps |
+| Fuzz targets compile | success |
+| DCO | skipped (by design, sole maintainer) |
+
+**11/11 green.** Local gate before the commit: workspace **2249 passed**, guest
+**57 passed** under `--locked`, both clippy scopes clean, formatting clean, every
+`tools/*.py` checker green except the two that legitimately cannot run locally
+(`audit_requirements.py` needs a clean tree by design; `check_sbom.py sbom` needs a CI
+artifact).
+
+**One review round, one finding, and it was correct.** Worth recording as a datum: the
+external reviewer's hit rate on a change I had already gated, tested and fault-injected
+was 1 for 1 on the CI file, and 0 for 5 on the Rust source files. The finding it made
+was about *reproducibility*, which is exactly the class an internal test suite cannot
+see — the tests do not care which version of a dependency they ran against, and the
+lockfile's whole purpose is that they should not have to. That is the same argument the
+skill makes about why this step exists, confirmed on a new artifact.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

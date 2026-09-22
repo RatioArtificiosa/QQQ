@@ -40,6 +40,9 @@ pub mod dev;
 /// `qqq-run` is the only crate above all three, so it is the only place a
 /// `RequestHead` can meet an `abi::Request`. Same argument as `serve_routes`.
 pub mod guest_bridge;
+/// The guest handler a `Dispatch` can call: `guest_bridge` + `qqq_host::call`,
+/// composed into the shape `qqq-serve` wants.
+pub mod guest_handler;
 pub mod install;
 pub mod manifest_loader;
 /// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.

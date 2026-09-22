@@ -11369,4 +11369,77 @@ client throttling everybody.
 
 ---
 
+### §O-138 — CodeRabbit on the limits work: a permissive bug, a frozen map, and two docs that overstated the code
+
+**Run:** `coderabbit review --agent --light --committed --base-commit 3654850`. Five findings.
+Three were real; two were documentation claiming more than the code did. Four fixed, one
+declined with a reason.
+
+**A zero window allowed every request (major, and the most dangerous shape of bug here).**
+
+```rust
+Limits::rate(10, Duration::ZERO)
+```
+
+The rollover test is `elapsed >= window`, which is **true for any elapsed value** when the
+window is zero. So every call reset the count to zero and the cap became unreachable: the
+limiter looks configured, counts nothing, and allows everything.
+
+The reason this matters more than a normal bug is the **direction** it fails. It is
+permissive, and nothing reports it — an operator sets a limit and gets no enforcement, with no
+error and no log line. `§O-128` recorded the same shape for defaults ("safe defaults must
+deny"); this is the limit-that-does-not-limit version of it.
+
+Fixed with `Limits::is_coherent`, refused at **construction**, so a bad manifest fails at
+startup where someone is watching rather than under load where nobody is. Fault-injected by
+making `is_coherent` always return `true`: two tests fail, including the `should_panic`.
+
+**A full window map disabled rate limiting permanently (major, real).**
+
+Past `max_tracked`, a new tenant was admitted **untracked** — deliberate, and documented as
+failing open on rate while the body cap still applied. The part that was wrong: nothing
+reclaimed *expired* entries. Once the map filled, every slot was held by a tenant whose window
+expired minutes ago, so every new tenant was admitted without a rate limit **for the life of
+the process**. An attacker filling the map once would have disabled rate limiting permanently
+— strictly worse than the memory the ceiling exists to protect, because a leak is visible and
+this is not.
+
+Fixed by sweeping expired entries before admitting an untracked tenant, using the same
+`elapsed >= window` test as the rollover so there is **one definition rather than two that
+could drift**. The sweep runs only when the map is full, so it costs nothing on the hot path.
+Fault-injected by removing it: the reclaim test fails with "the new tenant must be limited".
+
+*The generalisable rule:* **a bound that stops accepting new entries must still be able to
+evict old ones.** A capacity ceiling without a reclaim path is not a bounded structure, it is
+a structure that becomes read-only — and "read-only" in a rate limiter means "off".
+
+**Two documentation claims that overstated the code.** Both are `§O-124`'s shape — a doc
+comment stating an invariant nothing checks.
+
+1. The module doc said the limits and the metrics "are updated at the same site, so they
+   cannot disagree". They are separate values and **neither knows about the other**; nothing
+   calls both at one site yet. Consistency is a requirement on the request path, not a
+   property of these types.
+2. The checklist said `Some(0)` "refuses everything". The two fields differ: a zero **body**
+   cap accepts an empty body and rejects any non-empty one, while a zero **request** cap
+   rejects every request. Both are per-field statements now.
+
+**One declined, with the reason.** The `u64::MAX` fuel budget in the epoch control test was
+flagged as unbounded. It is deliberate: the test's subject is the **epoch** trap, a finite
+budget races the ticker and made the test flaky under load (`§O-137`), and `u64::MAX` removes
+the race rather than narrowing it. `StoreLimits::fuel` is a plain `u64` with no unlimited
+spelling, so it is also the only way to express it. If the epoch machinery were broken the
+test would hang rather than pass, which is the right failure for a control.
+
+**The hit rate, across two reviews.** Twelve findings so far: five already fixed when reviewed
+(a reviewer sees the diff, not the file), four real and serious, three documentation or
+declined. That ratio is worth spending checks on — the four real ones included a coalesced
+frame being discarded, a graceful restart that would hang, a limit that allowed everything,
+and a rate limiter that switched itself off. **None of the four was visible in a green test
+suite**, which is the argument for the review existing at all.
+
+→ `crates/qqq-serve/src/limits.rs`, `QQQ-Checklist-V1.md`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -14,8 +14,12 @@
 //! changing what the server allows — and because §10.2's cardinality discipline applies only
 //! to the metric, while enforcement needs the exact per-tenant figure.
 //!
-//! The two are updated at the same site, so they cannot disagree about what happened; they
-//! are simply not the same value.
+//! **Keeping them consistent is a requirement on the request path, not a property of these
+//! types.** They are separate values and neither knows about the other, so a caller that
+//! updates one and not the other gets two answers to one question — and nothing here can
+//! prevent that. The requirement is that the site applying a limit also records the outcome,
+//! and it is stated as a requirement because a first version of this comment claimed the two
+//! "cannot disagree", which was a promise the code did not keep (`§O-124`).
 //!
 //! # Why the limits are a table and not a single number
 //!
@@ -125,6 +129,34 @@ impl Limits {
         self.window = window;
         self
     }
+
+    /// Whether these limits are coherent.
+    ///
+    /// # The one incoherent combination, and why it is a bug rather than a preference
+    ///
+    /// A **zero window** with a request cap makes the limiter never refuse. The rollover
+    /// test is `elapsed >= window`, which is true for any elapsed value when the window is
+    /// zero — so every call resets the count to zero and the cap is unreachable. The
+    /// limiter would look configured, count nothing and allow everything.
+    ///
+    /// That is the worst kind of misconfiguration to leave silent, because the failure is
+    /// **in the permissive direction** and nothing reports it: an operator sets a limit and
+    /// gets no enforcement, with no error and no log line. It is the same shape as
+    /// `§O-128`'s "safe defaults must deny" — a limit that does not limit.
+    ///
+    /// Refused at construction rather than at the first request, so a bad manifest fails at
+    /// startup where someone is watching rather than under load where nobody is.
+    #[must_use]
+    pub fn is_coherent(&self) -> bool {
+        match self.max_requests_per_window {
+            // A window is only meaningful with a cap...
+            Some(_) => self.window > Duration::ZERO,
+            // ...and a cap with no window is caught by the same reasoning from the other
+            // side: `None` means no rate limit, so the window is unused and any value is
+            // coherent.
+            None => true,
+        }
+    }
 }
 
 /// Why a request was refused.
@@ -205,13 +237,33 @@ impl TenantLimits {
     pub const DEFAULT_MAX_TRACKED: usize = 4096;
 
     /// Build a limiter from a table and a fallback.
+    ///
+    /// # Panics
+    ///
+    /// If any entry is incoherent — see [`Limits::is_coherent`]. A zero window with a
+    /// request cap makes the limiter allow **everything**, which is a misconfiguration that
+    /// must not start a server. Panicking at construction means a bad manifest fails at
+    /// startup where someone is watching, rather than under load where nobody is.
     #[must_use]
     pub fn new<I>(limits: I, fallback: Limits) -> Self
     where
         I: IntoIterator<Item = (String, Limits)>,
     {
+        let limits: BTreeMap<String, Limits> = limits.into_iter().collect();
+        assert!(
+            fallback.is_coherent(),
+            "the fallback limits are incoherent: a zero window with a request cap would \
+             allow every request"
+        );
+        for (tenant, l) in &limits {
+            assert!(
+                l.is_coherent(),
+                "the limits for tenant `{tenant}` are incoherent: a zero window with a \
+                 request cap would allow every request"
+            );
+        }
         Self {
-            limits: Arc::new(limits.into_iter().collect()),
+            limits: Arc::new(limits),
             fallback,
             windows: std::sync::Mutex::new(BTreeMap::new()),
             max_tracked: Self::DEFAULT_MAX_TRACKED,
@@ -275,12 +327,24 @@ impl TenantLimits {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        // A full map admits no new tenants. Failing open on *rate* is deliberate: the body
-        // cap is what protects memory and needs no state, so a new tenant still cannot send
-        // an unbounded body. Refusing instead would let an attacker lock out every
-        // legitimate new tenant by filling the map.
+        // A full map admits no new tenants — but only after **reclaiming expired entries**,
+        // which is the part a first version got wrong. Without the sweep the map freezes
+        // forever once it fills: every slot is held by a tenant whose window expired minutes
+        // ago, and every *new* tenant is admitted without a rate limit for the life of the
+        // process. An attacker filling the map once would have disabled rate limiting
+        // permanently, which is worse than the memory the ceiling protects.
+        //
+        // The sweep is lazy and only runs when the map is full, so it costs nothing on the
+        // hot path. Expiry is `elapsed >= window`, the same test the rollover uses — a
+        // single definition rather than two that could drift.
         if !windows.contains_key(tenant) && windows.len() >= self.max_tracked {
-            return Ok(());
+            windows.retain(|_, w| now.saturating_duration_since(w.started) < limits.window);
+            // Still full after reclaiming: every tracked tenant is inside its window. Only
+            // now does a new tenant go untracked, and the body cap — which needs no state —
+            // still applies to it.
+            if windows.len() >= self.max_tracked {
+                return Ok(());
+            }
         }
 
         let entry = windows.entry(tenant.to_owned()).or_insert(Window {
@@ -465,6 +529,37 @@ mod tests {
         );
     }
 
+    /// **A zero window is refused at construction, because it allows everything.**
+    ///
+    /// The rollover test is `elapsed >= window`, which is true for any elapsed value when
+    /// the window is zero — so every call resets the count and the cap becomes unreachable.
+    /// A limiter configured this way counts nothing and allows everything, and **nothing
+    /// reports it**: the failure is in the permissive direction.
+    ///
+    /// This is the check that makes the failure land at startup rather than under load.
+    /// The test would catch a regression that removed `is_coherent`, because construction
+    /// would succeed and the cap would stop being enforced.
+    #[test]
+    #[should_panic(expected = "incoherent")]
+    fn a_zero_window_is_refused() {
+        let bad = Limits::none().rate(10, Duration::ZERO);
+        assert!(!bad.is_coherent());
+        // Constructing must panic rather than build a limiter that never refuses.
+        let _ = TenantLimits::uniform(bad);
+    }
+
+    /// The coherence rule is exactly "a cap needs a window", and nothing else is refused.
+    #[test]
+    fn coherence_refuses_only_a_cap_with_no_window() {
+        // No cap: the window is unused, so any value is coherent.
+        assert!(Limits::none().is_coherent());
+        assert!(Limits::none().body(100).is_coherent());
+        // A cap with a real window.
+        assert!(Limits::with_rate(10, Duration::from_secs(1)).is_coherent());
+        // A cap with a zero window: refused.
+        assert!(!Limits::with_rate(10, Duration::ZERO).is_coherent());
+    }
+
     /// A tenant with no rate limit is never refused and tracks no window.
     #[test]
     fn no_rate_limit_never_refuses_and_tracks_nothing() {
@@ -562,6 +657,40 @@ mod tests {
             "a tenant past the ceiling fails open on rate"
         );
         assert_eq!(l.tracked(), 8, "and must not grow the map");
+    }
+
+    /// **Expired entries are reclaimed, so a filled map does not disable rate limiting
+    /// permanently.**
+    ///
+    /// The defect this measures: without the sweep, the map freezes once full and every
+    /// *new* tenant is admitted without a rate limit for the life of the process. An
+    /// attacker filling the map once would have disabled rate limiting permanently — worse
+    /// than the memory the ceiling exists to protect, because a leak is visible and this is
+    /// not.
+    #[test]
+    fn expired_windows_are_reclaimed_when_the_map_is_full() {
+        let mut l = TenantLimits::uniform(Limits::with_rate(1, Duration::from_secs(10)));
+        l.max_tracked = 4;
+        let t0 = Instant::now();
+
+        // Fill the map with tenants whose windows will expire.
+        for i in 0..4 {
+            assert!(l.check_and_record(&format!("old{i}"), t0).is_ok());
+        }
+        assert_eq!(l.tracked(), 4);
+
+        // Past the window, a new tenant must get **tracked and limited**, not admitted
+        // untracked. `t0 + 11s` is past the 10-second window.
+        let later = t0 + Duration::from_secs(11);
+        assert!(
+            l.check_and_record("new", later).is_ok(),
+            "the first request fits"
+        );
+        assert!(
+            l.check_and_record("new", later).is_err(),
+            "the new tenant must be **limited**: its window must have been tracked rather \
+             than skipped because the map was full"
+        );
     }
 
     /// **A tenant already tracked keeps being limited past the ceiling.**

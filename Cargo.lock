@@ -1223,6 +1223,7 @@ dependencies = [
  "qqq-cap",
  "qqq-core",
  "qqq-host",
+ "qqq-io",
  "qqq-pkg",
  "qqq-serve",
  "serde",

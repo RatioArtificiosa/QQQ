@@ -152,6 +152,23 @@ pub struct StoreData {
     /// rather than a wiring omission -- the same reasoning the `tenant` field
     /// documents for refusing a `None` that means "any tenant".
     ///
+    /// The authority (host and port) this instance's requests arrive on, if it is
+    /// serving.
+    ///
+    /// # Why the store carries it rather than the request
+    ///
+    /// `qqq:http/http`'s `incoming-authority` reports it to the guest, and the guest
+    /// must not derive it from the `Host` header: that header is **client-controlled**,
+    /// so trusting it lets a client decide what the guest believes it is serving.
+    /// `GuestApp`'s module docs make the same argument for the URL it builds. The
+    /// authority the server bound is configuration, and configuration lives here.
+    ///
+    /// Empty for a store that is not serving — the `qqqai run` path and every unit
+    /// test — which is the honest value. A guest that asks without the `http.server`
+    /// grant gets a visible sentinel rather than this empty string, so "not serving"
+    /// and "not permitted oh" stay distinguishable (`crate::host_http`).
+    pub incoming_authority: String,
+
     /// Every store has a context; the **grants** decide what it permits. See
     /// [`crate::host_wasi`] for the mapping, which registers no filesystem and no
     /// sockets at all.
@@ -238,6 +255,7 @@ impl Default for StoreData {
             wasi: crate::host_wasi::context(&GrantSet::empty(), &[])
                 .expect("an empty grant set and empty environment always build"),
             wasi_table: wasmtime_wasi::ResourceTable::new(),
+            incoming_authority: String::new(),
         }
     }
 }
@@ -274,6 +292,7 @@ impl StoreData {
             // what the grant set says -- no more, and no less.
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
+            incoming_authority: String::new(),
         }
     }
 
@@ -369,6 +388,7 @@ impl StoreData {
             tenant: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
+            incoming_authority: String::new(),
         }
     }
 
@@ -829,6 +849,21 @@ pub fn build_linker<'a>(
             }
             "qqq:crypto@1.0.0" => {
                 crate::host_crypto::register(&mut linker, grants)?;
+            }
+            // `qqq:http` is the interface a guest both **imports** and **exports**
+            // (see `host_http`'s module docs for why the import exists even when the
+            // guest never calls `send`). Registering it here is what turns a granted
+            // `http.server`/`http.client` into an instantiable guest; without the arm,
+            // the module would exist and be unreachable, and `qqqai serve` would answer
+            // `QQQ-6004` for every real app.
+            //
+            // `register` returns whether it bound anything, and the arm ignores it
+            // deliberately: the interface name is already in `interfaces` above, which
+            // is what `BoundInterfaces` reports. A `false` here would mean the grant set
+            // and `required_interfaces` disagreed, and `every_capability_maps_to_an_
+            // interface` is the test that covers that.
+            "qqq:http@1.0.0" => {
+                let _bound = crate::host_http::register(&mut linker, grants)?;
             }
             // QQQ-STUB(CON-009): `qqq:fs`, `qqq:http`, `qqq:sql` and the rest
             // have no registered interface yet. `qqq:clock` and `qqq:crypto`

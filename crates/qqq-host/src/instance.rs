@@ -714,6 +714,40 @@ struct ReadyStore {
     linker: Linker<StoreData>,
 }
 
+/// The instance ceiling one **instantiation** may create.
+///
+/// # Why this exists, and why it is not `limits.max_instances`
+///
+/// A component is not one instance. Instantiating it instantiates its inner core
+/// modules and any shim components, so a component's instantiation count is a property
+/// of the **artifact**, not of the manifest. Measured on the reference application
+/// (`SRV-018`):
+///
+/// ```text
+/// $ wasm-tools print target/qqq/orders-api.component.wasm | grep -c '(core module'
+/// 3
+/// $ wasm-tools print target/qqq/orders-api.component.wasm | grep -c 'instantiate'
+/// 4
+/// ```
+///
+/// The store's limit was `.instances(1)`, which is correct for a bare core module and
+/// wrong for every component that does anything: the first real guest anyone ran
+/// failed with `resource limit exceeded: instance count too high at 2`.
+///
+/// # Why 64
+///
+/// Large enough for a heavily composed artifact -- the reference app needs 4, and a
+/// guest with several composed dependencies would need more -- while still finite, so a
+/// pathological component cannot exhaust the host's address space through inner
+/// instantiations. This is a ceiling on **one instantiation**, not a concurrency
+/// budget: 64 concurrent requests make 64 independent stores, each with its own
+/// counter.
+///
+/// A limit that is too low fails loudly at instantiation (`QQQ-6003`, naming the
+/// count). One that is too high costs nothing here, because the pooling allocator's
+/// reservation is sized from the *pool* configuration rather than from this number.
+pub const MAX_INNER_INSTANCES: usize = 64;
+
 impl ReadyStore {
     /// Apply grants, limits, fuel and the epoch policy to a fresh store.
     ///
@@ -735,9 +769,45 @@ impl ReadyStore {
         // distinct from the pooling config which reserves for the worst case.
         // Both are needed: the pool bound prevents over-reservation at
         // startup, this bound is what actually traps a runaway guest.
+        // `instances` is the manifest's concurrency ceiling, **not** 1.
+        //
+        // # Why 1 was wrong, measured
+        //
+        // For a core module, one instantiation creates one instance, so `1` looked
+        // right. For a **component** it is not: instantiating one instantiates its
+        // inner core modules and any shim components too. The reference application
+        // contains three core modules and four instantiation sites:
+        //
+        //     $ wasm-tools print target/qqq/orders-api.component.wasm | grep -c '(core module'
+        //     3
+        //     $ wasm-tools print target/qqq/orders-api.component.wasm | grep -c 'instantiate'
+        //     4
+        //
+        // so with `instances(1)` the first real guest anyone ran failed with
+        // `resource limit exceeded: instance count too high at 2`.
+        //
+        // # Why nothing caught it
+        //
+        // Every guest that had instantiated before was `qqqai new`'s scaffold, whose
+        // artifact declares an **empty world** and therefore contains no core module.
+        // A limit of 1 is sufficient for a component that instantiates nothing.
+        //
+        // # Why the bound is a named constant and not `limits.max_instances`
+        //
+        // The two are different quantities, and conflating them was the first fix's
+        // mistake -- `config::StoreLimits` does not even carry `max_instances`, which
+        // is what the compiler said. `limits.max_instances` is a **concurrency**
+        // ceiling: how many guest instances may be live at once, enforced by the
+        // pooling allocator's `total_memories`/`total_tables` in `build_pooling`.
+        // Wasmtime's store-level `instances` counter instead bounds how many instances
+        // **one instantiation** may create, which for a component is its inner core
+        // modules plus any shims.
+        //
+        // So this is [`MAX_INNER_INSTANCES`], sized from the measured artifact shape,
+        // and its own docs carry the reasoning.
         let wasm_limits = StoreLimitsBuilder::new()
             .memory_size(usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX))
-            .instances(1)
+            .instances(MAX_INNER_INSTANCES)
             .tables(16)
             .build();
         store.data_mut().set_limits(wasm_limits.clone(), limits);

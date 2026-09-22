@@ -88,6 +88,7 @@ pub mod guard;
 pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
+mod host_http;
 pub mod host_secrets;
 mod host_wasi;
 pub mod instance;
@@ -123,6 +124,10 @@ pub use config::{
 };
 pub use guard::{guard, guard_reporting, PanicReport};
 pub use handles::{Handle, HandleStats, HandleTable};
+pub use host_http::{
+    describe_ungranted as describe_http_ungranted, register as register_http,
+    INTERFACE as HTTP_INTERFACE,
+};
 pub use host_secrets::{
     PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore, MAX_SECRET_INPUT,
 };

@@ -12210,4 +12210,142 @@ green for the same reason an empty file compiles.
 
 ---
 
+## §O-154 — The guest chain reaches a real application, and `.instances(1)` was why it never had
+
+`§O-146` found a chain with no caller. `§O-153` found two host layers missing. This entry
+closes it: **`qqqai serve` now runs the reference application**, and the first request
+that came back over a real socket was:
+
+```console
+$ qqqai serve --listen 127.0.0.1:18100 &
+$ curl -s -i http://127.0.0.1:18100/healthz
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 2
+
+ok
+```
+
+Getting there took three more fixes, and one of them is the kind of defect this project
+exists to catch.
+
+### The bug: `.instances(1)`
+
+`Instance::create` built its Wasmtime `StoreLimits` with `.instances(1)`. For a **core
+module** that is correct — one instantiation, one instance. For a **component** it is
+not, because instantiating a component instantiates its inner core modules and any shim
+components. Measured on the reference app:
+
+```console
+$ wasm-tools print target/qqq/orders-api.component.wasm | grep -c '(core module'
+3
+$ wasm-tools print target/qqq/orders-api.component.wasm | grep -c 'instantiate'
+4
+```
+
+So the first real guest anyone ran died with `resource limit exceeded: instance count too
+high at 2`. The limit was being hit while instantiating a component that needs at least
+three.
+
+**Why nothing caught it is the point.** Every guest that had ever instantiated was
+`qqqai new`'s scaffold, whose artifact declares an **empty world** and contains no core
+module at all. A limit of 1 is sufficient for a component that instantiates nothing — so
+the constant was right for the only input it ever saw. `§O-153` said "the only guest that
+had ever run was one that could not fail"; this is that sentence as a number.
+
+The fix is `MAX_INNER_INSTANCES = 64`, documented with the measurement above, and the
+distinction it encodes: `limits.max_instances` is a **concurrency** ceiling (enforced by
+the pooling allocator), while the store's `instances` counter bounds **one
+instantiation**. Conflating them was my first fix's mistake, and the compiler caught it
+(`config::StoreLimits` has no `max_instances` field at all).
+
+### The interface: `bindgen!` on a WIT with no world
+
+`qqq:http/http` is what a guest imports *and* exports. The import exists so the guest can
+alias the interface's types; the component model has no way to say "I need your type
+names but not your functions". So the host must supply an instance even for a guest that
+never calls `send`, and `func_wrap` cannot express records.
+
+Four facts, each probed rather than assumed:
+
+| Fact | Verified value |
+|---|---|
+| Invocation | `bindgen!({ path: "../../wit/qqq-http.wit", interfaces: "import qqq:http/http@1.0.0;" })` |
+| Module path | `qqq::http::http` |
+| Trait | `Host`, methods `send` and `incoming_authority` |
+| Signatures | `fn send(&mut self, Request) -> Result<Response, HttpError>`; `fn incoming_authority(&mut self) -> (String, u16)` |
+| Registration | `add_to_linker::<StoreData, HasSelf<StoreData>>(linker, \|s\| s)` |
+
+Three of these were wrong on the first guess and are worth recording:
+
+* **There is no `world`.** `qqq-http.wit` declares two interfaces and no world, so
+  `world:` fails with `World 'http' not found in package qqq:http@1.0.0`. The
+  `interfaces:` option synthesizes one, and its value must be **WIT items** — each
+  terminated by `;` — because it is substituted verbatim into `world interfaces { … }`.
+* **`path:` resolves against `CARGO_MANIFEST_DIR`**, not the source file, so the value is
+  `../../wit/qqq-http.wit` rather than the `../../../wit/…` that `include_str!` needs in
+  the same crate.
+* **The directory cannot be bound.** `wit/` holds sixteen standalone packages, and WIT
+  reads a directory of `.wit` files as *one* package: `package identifier
+  'qqq:ai@1.0.0' does not match previous package name of 'qqq:agent@1.0.0'`. This is
+  `§O-147`'s rule from the guest side, arriving on the host side.
+
+And one signature that is different from every other host module here: the generated trait
+takes **`&mut self`**, not the `StoreContextMut` that `host_clock` and `host_crypto` use.
+Copying the habit would not compile, and the compiler said so plainly once asked.
+
+### Probe discipline: three of the failures were mine, not the macro's
+
+The probe took more attempts than the code, and every wasted attempt was a probe measuring
+its own mistake:
+
+1. `default-features = false, features = ["component-model"]` does **not** expose
+   `wasmtime::component`, so all three candidates failed identically with `cannot find
+   component in wasmtime`. A probe whose every candidate fails the same way is not a probe.
+2. A stray `pub use`, then a stray `;`, each produced a syntax error that masked the
+   macro's real answer. `bindgen!` expands to items, so the terminator is required when
+   items follow and rejected when none do — measured in both directions.
+3. The probe crate's `wit/` held one file, so `path: "wit"` worked there and told me
+   nothing about a crate whose WIT is two levels up.
+
+**The rule: a probe must reproduce the real thing's geometry, not just its invocation.**
+`§O-116` says reproduce the exact command CI runs; this is that rule one level down, and
+it cost four build cycles.
+
+### What end-to-end testing then found, unprompted
+
+Two defects that no unit test could have seen, because both are in the *wiring*:
+
+* **The request body never reaches the guest.** `GuestApp::dispatch` calls
+  `handle_request(head, None)` — the `None` is the body. `POST /orders` therefore answers
+  `the 'id' field is required` for a request that carried an id. Confirmed by `curl -d`.
+* **`HEAD` returns 405 on a `GET` route.** The guest maps HEAD to GET, but the host's
+  route table is built from `§5.3`'s manifest, which declares only `GET`, so the request
+  is refused before the guest is consulted. The guest's HEAD handling is correct and
+  unreachable — `§O-130`'s shape again, in the layer above.
+
+Both are recorded rather than fixed here, because this commit's scope is the chain; they
+are the next two items.
+
+### What is verified
+
+```console
+$ curl -s http://127.0.0.1:18100/orders/42
+{"id":"42","status":"pending","total_cents":2646,...,"created_seq":3077295582}   (917 bytes)
+$ curl -s http://127.0.0.1:18100/compute/1000
+{"mode":"sieve","primes":168}
+$ curl -s http://127.0.0.1:18100/r/hello-slug
+{"slug":"hello-slug"}
+```
+
+`primes: 168` is π(1000), so the guest's arithmetic is correct through the ABI; the
+`json` payload is 917 bytes, near the 1 KB `§9.1` specifies. `cargo test --workspace`:
+**2232 passed, 0 failed**. Clippy clean, fmt clean, all CI checkers green except the two
+that cannot run locally by design.
+
+→ `crates/qqq-host/src/host_http.rs`, `crates/qqq-host/src/instance.rs`,
+`crates/qqq-host/src/linker.rs`, `examples/orders-api/`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

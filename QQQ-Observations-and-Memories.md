@@ -12771,4 +12771,128 @@ taught nothing.
 
 ---
 
+## §O-159 — The tooling inventory, verified; and CodeRabbit's one real finding on the CI gate
+
+The user asked for the plugins, skills, CodeRabbit and Context7 to be checked and for
+every finding to be recorded. What follows is what a command returned, not what was
+believed.
+
+### What is actually available, and what is not
+
+| Tool | State | How it was verified |
+|---|---|---|
+| **CodeRabbit CLI** | installed, `0.7.8` | version command returned `0.7.8` |
+| CodeRabbit auth | `RatioArtificiosa`, GitHub, US region | auth status printed the account and org |
+| CodeRabbit health | **9 passed, 0 warnings, 0 failed** | doctor: runtime, storage, service URLs, auth, git, update policy, backend, WebSocket |
+| CodeRabbit budget | 5 reviews used this period, resets 2026-10-21 | usage output |
+| **Context7** | working | resolved `wasmtime` to `/websites/rs_wasmtime` and returned current pooling-allocator API docs |
+| **dsh timer-agent** | installed, one job | `jobs.json` read directly |
+| Repo skills | `skills/coderabbit`, `skills/find-docs` | both read from the tree |
+| **Session skill catalog** | `coderabbit` is **NOT** registered | the skill tool returned "unknown or no longer available"; the file in the repo is the authority, and it was read directly |
+
+**The skill-catalog finding is worth stating plainly.** The session's skill list offers
+`find-docs` but **not** `coderabbit`, so the skill tool could not load it. The
+repository's `skills/coderabbit/SKILL.md` is the real source and reading it directly is
+the correct move — but it means an agent that only trusts the catalog will silently
+never run the external review. A skill present in the tree and absent from the catalog
+is a capability that looks available and is not.
+
+**The timer job is for a different project.** `jobs.json` holds one job, `keep-working`,
+pinned to workdir `G:\RobinHorde` and a RobinHorde session, on a `*/5 * * * *` cron. It
+is **not** driving QQQ. Its execution log also shows six consecutive failures with
+`pi-ai stream idle timeout after 300000ms`, then recovery — worth knowing, since a
+watchdog silently failing is the same "control believed live" shape this document keeps
+recording.
+
+### The stash is dead work, and saying so is the point
+
+`git stash list` held `stash@{0}: wip-async-path` — 119 lines in
+`crates/qqq-host/src/instance.rs`. A stash is the easiest thing in a repository to
+believe is still needed.
+
+It is not. The stashed work implements `epoch_deadline_async_yield_and_update` for
+`HOST-016` and an async `run` for `HOST-015`; **both items are ticked and committed**,
+with a more evolved implementation (`ReadyStore::prepare`, `EPOCH_YIELD_TICKS`,
+`create_async`, `run_async_measured`). The stash is an earlier approach that was
+superseded. Recorded rather than popped so a future agent does not re-litigate it.
+
+### CodeRabbit's finding on the new CI job: real, reproduced, fixed
+
+Scoped review of `.github/workflows/ci.yml` (`--dir .github`, base `a7c6c53`) returned
+exactly one finding, severity `minor`:
+
+> Add `--locked` to the `cargo clippy`, `cargo test`, and `cargo build` commands in the
+> guest workflow steps, using the committed `examples/orders-api/Cargo.lock`.
+
+**Reproduced before fixing**, per the standing rule that a finding is an input and not
+an authority:
+
+| Check | Result |
+|---|---|
+| `examples/orders-api/Cargo.lock` exists | yes |
+| it is tracked by git | yes |
+| `cargo clippy … --locked` | exit 0 |
+| `cargo test --locked` | 57 passed |
+| `cargo build … --locked` | exit 0 |
+
+Real, and the fix is safe. **Why it matters more here than in the host job:** the guest
+is the *reference application* — the artifact every `§9.1` benchmark measures and every
+`§9.2` budget is set against. Without `--locked`, a runner with a cold cache can resolve
+a dependency to a newer compatible version than the one committed, so **two CI runs of
+the same commit can measure different code.** For a measurement instrument that is the
+worst possible property.
+
+`rustfmt` deliberately does **not** take the flag: formatting performs no dependency
+resolution, so `--locked` there would be noise rather than rigour. The fix states that in
+a comment, because the next reader will wonder.
+
+### Two harness bugs found while verifying my own fix
+
+The same pattern as `§O-158`, one round later, which is why it is recorded again.
+
+1. **The double-apply guard was whole-file.** It refused to run because `--locked`
+   already appeared elsewhere in `ci.yml` — in the `msrv` job, legitimately. A guard
+   scoped to the whole file when the *job* is the unit of work is a check aimed at a
+   nearby property. Fixed by scoping to the job's text.
+2. **The verification counted the token, not the command.** After the fix it asserted
+   three occurrences of `--locked` and found four — because the explanatory comment
+   mentions the flag. Counting occurrences of a string is not counting commands. The
+   verifier now extracts `run:` lines and asserts the property that matters: **every
+   command that resolves dependencies carries the flag, and the one that cannot resolve
+   dependencies does not.** That formulation catches a *future* step added without the
+   flag, which the three-string version would not.
+
+### Verification
+
+The `--locked` verifier was fault-injected, one mutation per process with the file
+restored byte-for-byte between them:
+
+| Injection | Verifier |
+|---|---|
+| Drop `--locked` from the `test` command | **REJECTS** (exit 1) |
+| Drop `--locked` from the `build` command | **REJECTS** (exit 1) |
+| Control: rewrite the file unchanged | **stays green** — proves the two rejections were specific, not "fails on any change" |
+
+12/12 checks passed, `ci.yml` parses as valid YAML with all 10 jobs, and the file is
+byte-identical to its pre-injection state.
+
+### The generalisable rules
+
+1. **A skill in the tree is not a skill in the catalog.** Verify capability by invoking
+   it, not by listing files.
+2. **A stash is a claim that work is unsaved.** Check it against the checklist before
+   trusting it; this one was superseded and would have wasted a round.
+3. **Count commands, not tokens.** A verification that greps for a string passes and
+   fails for reasons unrelated to the property.
+4. **The most valuable finding on a CI change is a reproducibility one.** A lint gate
+   that can resolve different dependencies per run measures nothing reliably — and the
+   artifact under it here is the benchmark instrument itself.
+
+→ `.github/workflows/ci.yml` (`--locked` on the three resolving commands);
+`.scratch/{add_locked_flag,verify_locked_fix,inject_locked_fix}.py`;
+`skills/coderabbit/SKILL.md`, `C:\Users\Usuario\.dsh\timer-agent\jobs.json`;
+`§O-158` for the previous round's instance of the same verification bugs.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -945,23 +945,31 @@ jobs:
         working-directory: examples/orders-api
         run: cargo fmt -- --check
 
+      # `--locked` on every step that resolves dependencies, because this crate
+      # is the *measurement instrument*: without it, two CI runs of the same
+      # commit can resolve different dependency versions and therefore measure
+      # different code. `Cargo.lock` is committed and tracked (verified), so the
+      # flag is enforceable rather than aspirational.
+      #
+      # `rustfmt` above deliberately does NOT take it -- formatting performs no
+      # dependency resolution, so the flag there would be noise, not rigour.
       - name: clippy (warnings are errors)
         working-directory: examples/orders-api
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       # The guest's own tests. `cargo test --workspace` cannot reach them: that is
       # the whole reason this job exists (`§O-147`, and the handbook's note that a
       # green `--workspace` says nothing about the reference application).
       - name: test
         working-directory: examples/orders-api
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features --locked --verbose
 
       # The point of the app is that it COMPILES TO A COMPONENT. A lint-clean
       # crate that no longer builds for `wasm32-wasip2` would pass every step
       # above, so the guest target is exercised explicitly.
       - name: build for wasm32-wasip2
         working-directory: examples/orders-api
-        run: cargo build --release --target wasm32-wasip2
+        run: cargo build --release --target wasm32-wasip2 --locked
 
       - name: Install wasm-tools
         # The same action the WIT job uses, rather than `cargo install`: it is

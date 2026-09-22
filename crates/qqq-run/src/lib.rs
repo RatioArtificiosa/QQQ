@@ -56,6 +56,8 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+/// `qqqai serve` — the production server (`CLI-011`).
+pub mod serve;
 /// Building a router from a manifest: the join between `qqq-cap` and `qqq-serve`.
 pub mod serve_routes;
 /// `qqqai test` — the built-in test runner.

@@ -34,6 +34,12 @@ qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
 # only place in this workspace where a manifest can be turned into a router -- and the
 # right place, because converting intent into a running server is orchestration.
 qqq-serve = { path = "../qqq-serve", version = "0.0.0" }
+# The transport primitives `qqqai serve` binds with: `ListenAddr` and `Shutdown`.
+#
+# `qqq-serve` does not re-export them, so the CLI needs its own edge. The direction
+# is legal: `qqq-io` is position 4 in §4.3's order and `qqq-run` is position 7, so
+# the edge points downward.
+qqq-io = { path = "../qqq-io", version = "0.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasmtime = { workspace = true }

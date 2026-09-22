@@ -11701,6 +11701,44 @@ project keeps recording.
 ---
 
 
+## §O-145 — SRV-018 is blocked behind CLI-011, and asking "what calls this?" is what found it
+
+I set out to build `SRV-018` (the orders reference app every §9.1 benchmark needs) and had already
+verified the guest toolchain end to end — a real `wasm32-wasip2` component builds, `qqqai build`
+stages the correct artifact, and `wasm-tools` confirms it exports the handler. So the app itself was
+buildable.
+
+Then I asked the question this project keeps teaching me to ask, and it paid for itself again:
+
+    grep "Dispatch::|Dispatch \{" crates/qqq-run/src   -> no matches
+
+`Dispatch` — the struct that carries the flat handler, the streaming handlers and the WebSocket
+handlers — **is never constructed anywhere in `qqq-run`.** `serve_routes.rs` builds the router, the
+auth modes and the limits, and nothing consumes them. Measured:
+
+    $ qqqai serve
+    error[QQQ-6004]: `serve` is not implemented yet
+      -> this command is tracked by the checklist; see QQQ-Checklist-V1.md for `serve`
+
+So `CommandName::Serve` exists in the enum, in `as_str`, in `summary`, in the `schema` output and in
+the help grouping — and `run_command` has **no arm for it**. `CLI-011` is unchecked.
+
+**A stub is a declared gap, not a defect, and the distinction matters.** The command answers
+`QQQ-6004` with a checklist pointer rather than pretending to work, which is the honest form. The
+defect would have been a `serve` that bound a port and answered 404 to everything.
+
+**Why this reorders the work.** The reference app cannot be served, so it cannot be benchmarked, so
+about 25 unchecked `PERF-*` items and `DOD-002` (72-hour soak) have no way to run. Building the app
+first would produce an artifact nothing can execute — exactly the "four features complete and
+unreachable" failure of `§O-130`, except manufactured on purpose. `CLI-011` is the keystone; the app
+is the next layer.
+
+This is `§O-130`'s rule applied *before* building rather than after: **ask what calls this, and if
+the answer is "nothing yet", build the caller first.**
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

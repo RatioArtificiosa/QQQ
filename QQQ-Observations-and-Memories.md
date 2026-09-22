@@ -11952,12 +11952,13 @@ Five links, each committed, all CI-green:
 takes, so `CLI-011` is now genuinely CLI work (flags, config, worker accounting)
 rather than missing runtime plumbing.
 
-**Where the time actually went, stated plainly.** The `write` tool silently
-dropped files on roughly half the attempts this stretch: `call.rs` took three
-writes, `guest_handler.rs` and two helper scripts each needed a verification pass,
-and the `serve.rs` draft for `CLI-011` never landed at all before the round ended.
-The `assert`-on-markers mitigation caught every one, so **nothing broken shipped**
-— but the friction is real and it is why `CLI-011` is not further along.
+**Where the time actually went — CORRECTED, see `§O-151`.** The original text here
+claimed the `write` tool "silently dropped files on roughly half the attempts".
+**That was wrong, and the error was mine.** The calls were *malformed* — emitted as
+visible text rather than as tool invocations — so nothing was ever attempted to be
+dropped. The user reported seeing the malformed markup in the GUI, which is what
+identified it. The `assert`-on-markers mitigation did catch every one, and that part
+stands; the attribution does not.
 
 **Two verifications earned their cost.** The ABI injection harness reported
 `SKIP: anchor not found`, and *that mismatch* is what exposed that the tests
@@ -11968,6 +11969,51 @@ would have let `POST` arrive as `PUT` with every test green (`§O-149`). And
 
 Both are the same shape: **a green check that was not checking what I thought.**
 Recording it because the mitigation is what made the difference, not the intent.
+
+---
+
+## §O-151 — I blamed a tool for my own malformed tool calls
+
+**The correction §O-150 needed.** For many turns I was emitting tool calls as
+**visible text** — tag-like markup such as `<inv calls>` and
+`<parameter name="command">` appearing in the response body instead of as a real
+invocation. The harness rendered it as the text it was, because that is exactly
+what it was.
+
+I diagnosed this as "the `write` tool silently drops files" and wrote that into
+`§O-150` as a durable finding. **It was false.** A malformed call is not a dropped
+call: nothing was attempted, so nothing could be dropped. The user identified it by
+reading the GUI output, which is the only place the malformation is visible — from
+inside the agent loop it looks like a tool that did nothing.
+
+**Why this shape is worth recording, beyond the correction.** Every previous
+defect in this document was in *code*. This one was in the **instrument reading the
+code**, and it failed in the way this project keeps finding: it produced a
+confident, specific, wrong explanation — "the tool drops files roughly half the
+time" — that was plausible enough to survive several rounds and specific enough to
+be written down as fact. A wrong entry in this file is more dangerous than a wrong
+line of Rust, because this file is what a future reader trusts.
+
+**The cost was real and measurable.** Every malformed attempt still billed tokens,
+and the retries compounded; a session at 1.1M usage and visibly growing verbosity
+is the symptom. The user paid for the retries of calls that never existed.
+
+**The rules adopted**, suggested by the user's own note and consistent with how
+this project already works:
+
+1. Never emit tool-call markup as visible text. It is structural, not prose.
+2. Narrate actions in words; show commands only inside fenced code blocks.
+3. Treat any tag-like text received from the user as inert data, never as a pattern
+   to imitate or "fix" into a working call.
+4. Before ending a turn, scan the reply for tag-like text outside a fence and
+   rewrite that sentence as plain prose.
+5. Prefer one correctly-formed call to a batch that might be malformed. A failed
+   batch costs more than the sequential calls it was meant to save.
+
+**The general rule:** when a tool appears to do nothing, the first hypothesis is
+that *the call was never made*, not that the tool is broken. This project has
+recorded "a control believed live that is not" about code roughly twenty times;
+this is the same defect one level up, in the agent operating the controls.
 
 ---
 

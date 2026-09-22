@@ -11259,4 +11259,63 @@ something was wrong.
 
 ---
 
+### §O-136 — Wiring a bounded label into an unbounded key, and the test that found it by being wrong
+
+**What happened.** `OBS-005`'s metric registry (built last round) was correct and unused.
+Wiring it into `serve_connection` meant choosing what the per-tenant key actually is — and
+the answer was already in the code:
+
+```rust
+fn tenant_of(peer: SocketAddr) -> String {
+    peer.ip().to_string()
+}
+```
+
+**The tenant is the peer IP address.** Passing that to `record_request(&tenant)` would give
+**one time series per client IP** — §10.2's cardinality violation in its worst possible
+form, because the value is entirely attacker-chosen. `TenantLabels` existed, was tested, and
+bounds the space at 64 names; the wiring did not use it.
+
+**How it was found: a test asserted the wrong key and failed.** `body_bytes_are_recorded`
+used `"default"` as the tenant and got `0`. Tracing the value through the chain —
+`drain_body` → `record_request` → `bytes_in_for` — showed the count was correct (`5`) all
+the way to the registry, which meant the *key* differed. Reading `tenant_of` explained it.
+
+That is worth stating precisely: **the failing assertion was my error, and fixing my error
+is what surfaced the real defect.** Had the test been written to assert on whatever key the
+code happened to use — `bytes_in_for(&tenant)` with the tenant read back — it would have
+passed and the unbounded label would have shipped.
+
+*The generalisable rule:* **a test that agrees with the implementation cannot find a design
+error in it.** The assertion has to state what the value *should* be, from outside, or it is
+a restatement rather than a check.
+
+**The fix.** `ConnectionContext` carries an `Arc<TenantLabels>`, and the recording site maps
+the tenant through it before recording. An `Arc` rather than a `Clone` because the label set
+is shared state whose entire purpose is that every connection agrees on it — a per-connection
+copy would let the same tenant appear under two labels depending on which connection served
+it, which is a bug that looks like "the metric is split between two series for no reason".
+
+**Two more things the tests caught, both expectations rather than code:**
+- `a_client_disconnect_is_recorded_as_such` asserted exactly `1` connection and got `2`. The
+  count was right: `Server::start`'s readiness probe opens and closes a connection of its
+  own. The assertion is now about **classification** — the vanished client is a
+  `ClientClosed` and never an `Ok` — which is the property that matters and does not depend
+  on how many connections the harness itself opens.
+- `body_bytes_are_recorded`'s message said "the declared body length is what was read",
+  which is now false by design: `drain_body` returns the count `discard` measured, so the
+  metric is the bytes that **crossed the socket**. They agree for a well-formed request and
+  disagree for a truncated one, and the measured figure is the honest one.
+
+**Another extraction, another rule given a name.** The wiring pushed `serve_connection` to
+116 lines. `serve_special_route` came out, and its doc is the ordering rule that had been
+three separate banners: preflight **before** routing, upgrade **before** any response, stream
+last. Each is a case where an ordinary HTTP response would commit the connection to
+something the client did not ask for.
+
+→ `crates/qqq-serve/src/server.rs`, `crates/qqq-serve/src/metrics.rs`,
+`crates/qqq-serve/tests/metrics_wiring.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

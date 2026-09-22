@@ -77,6 +77,14 @@ pub struct ServerConfig {
     /// explicit value is for testing and for deployments that have measured a
     /// different number.
     pub shards: Option<usize>,
+    /// Where per-request counters go, or `None` to record nothing.
+    ///
+    /// On the config rather than on the listener because it is a property of the server's
+    /// *behaviour*, not of where it listens. `Arc` because the accept loop clones it into
+    /// every connection task and the registry must be **one** value — an owned clone per
+    /// connection would give each connection its own counters, which is exactly what a
+    /// shared registry exists to avoid and which looks like "the metric is always 1".
+    pub metrics: Option<Arc<crate::metrics::HttpMetrics>>,
     /// The cross-origin policy, or `None` for no CORS at all.
     ///
     /// # Why the default is `None` and not a permissive policy
@@ -103,6 +111,10 @@ impl ServerConfig {
             connections_per_tenant: 10_000,
             shards: None,
             cors: None,
+            // Off by default. A registry that always allocated would make the default
+            // server pay for a feature it was not asked for; the recording sites are
+            // `Option`-checked precisely so that absence is free.
+            metrics: None,
         }
     }
 }
@@ -262,6 +274,15 @@ pub async fn serve(
     // `None` when the manifest declared no `[server.cors]`, which is the common case and
     // costs nothing to carry.
     let cors: Option<Arc<crate::cors::Cors>> = config.cors.clone().map(Arc::new);
+    // Cloned into every connection task rather than one clone per connection: a copy of the
+    // *registry* would give each connection its own counters, and the metric would read 1
+    // forever. The `Arc` is what makes "one registry, many connections" structural.
+    let metrics: Option<Arc<crate::metrics::HttpMetrics>> = config.metrics.clone();
+    // Bounded tenant labels, shared for the same reason the registry is: a per-connection
+    // copy would let each connection disagree about which tenants are named and which are
+    // collapsed, so the same tenant could appear under two labels depending on which
+    // connection served it.
+    let tenant_labels = Arc::new(crate::metrics::TenantLabels::new());
     // Shared into each connection task. An `Arc` rather than a per-connection
     // clone: the logger is one configuration every connection reads, and a copy
     // per connection would be a value that could drift from the others.
@@ -320,6 +341,13 @@ pub async fn serve(
             let logger = Arc::clone(&logger);
             let trace_counter = Arc::clone(&trace_counter);
             let cors = cors.clone();
+            // Cloned per connection task, which clones only the `Arc` — the registry
+            // itself stays one value. See `ServerConfig::metrics` for why that distinction
+            // is the whole point.
+            let metrics = metrics.clone();
+            // Cloned per task, which clones the `Arc`: the label set must be **one** value,
+            // or two connections could disagree about whether a tenant is named.
+            let tenant_labels = Arc::clone(&tenant_labels);
 
             // Allocated here, on the acceptor, so the id is fixed before the task
             // starts and two connections can never share one — not even if the
@@ -340,6 +368,10 @@ pub async fn serve(
                     }
                 }
 
+                if let Some(m) = metrics.as_deref() {
+                    m.connection_opened();
+                }
+
                 let ctx = ConnectionContext {
                     id: &id,
                     shutdown: &local_shutdown,
@@ -351,6 +383,8 @@ pub async fn serve(
                     // should not be closed by a deadline the server invented. The HTTP
                     // default is what applies here.
                     idle_timeout: Some(connection_config.idle_timeout),
+                    metrics: metrics.as_ref(),
+                    tenant_labels: &tenant_labels,
                 };
                 let served = serve_connection(
                     stream,
@@ -364,9 +398,17 @@ pub async fn serve(
                 )
                 .await;
 
+                // --- One close, with how it ended -------------------------
+                //
+                // Reported **after** the ledger releases, so the open count and the close
+                // count describe the same windows. A close recorded before the release
+                // would briefly show one more connection open than the ledger admits.
+                if let Some(m) = metrics.as_deref() {
+                    m.connection_closed(metric_outcome_of(served));
+                }
+
                 let mut l = ledger.lock().await;
                 l.release(&id.tenant);
-                let _ = served;
             });
         })
         .await;
@@ -1024,6 +1066,27 @@ pub struct ConnectionContext<'a> {
     /// idle deadline is the only thing that reclaims a half-open one. Without it a
     /// client that vanishes without a FIN holds a connection for the process's life.
     pub idle_timeout: Option<std::time::Duration>,
+    /// Where per-request counters go, or `None` to record nothing.
+    ///
+    /// `None` rather than an always-present registry: a caller that does not want metrics
+    /// should not pay three mutex operations per request, and making absence expressible
+    /// keeps each recording site one `if let` rather than a flag consulted inside the
+    /// registry. A test asserting "one request was recorded" owns its registry, so two
+    /// servers in one process cannot see each other's counts.
+    pub metrics: Option<&'a Arc<crate::metrics::HttpMetrics>>,
+    /// The bounded set of tenant labels that may appear in a metric.
+    ///
+    /// # Why this is not optional even when metrics are off
+    ///
+    /// The tenant today is the **peer IP address** (`tenant_of`), so recording it directly
+    /// would create one time series per client — the §10.2 cardinality violation in its
+    /// worst form, because an attacker chooses the value. `TenantLabels` bounds it at 64
+    /// distinct names and collapses the rest into one `other` series.
+    ///
+    /// Carried even when `metrics` is `None`, because the mapping is a property of the
+    /// metric label space rather than of whether metrics are recorded, and threading it
+    /// conditionally would make the recording site depend on two options agreeing.
+    pub tenant_labels: &'a Arc<crate::metrics::TenantLabels>,
 }
 
 /// Allocates a trace id per accepted connection.
@@ -1186,6 +1249,13 @@ async fn serve_connection(
         let client_wants_keep_alive = wants_keep_alive(&head);
         conn.on_request_parsed(client_wants_keep_alive);
 
+        // The instant the head finished parsing, which is where the service-time clock
+        // starts. **After** the head, deliberately: the time spent waiting for a slow
+        // client to send its request line is the client's, and folding it into the
+        // latency histogram would make the metric measure the network and call it the
+        // handler. The idle deadline already governs that wait — see `act_on_poll`.
+        let request_started = Instant::now();
+
         // --- Route and respond --------------------------------------------
         //
         // The idle clock starts **after** the head is read, not before it: the
@@ -1196,83 +1266,42 @@ async fn serve_connection(
 
         // **Consume the body before dispatching.** `reject_body` states why the ordering
         // is the rule rather than a preference.
-        if !drain_body(&mut stream, &mut buf, &head).await {
+        //
+        // The count is kept for the metric: `body_bytes` must be the bytes that crossed the
+        // socket, not the head's declared length. `reject_body` records the refusal itself,
+        // because a body over the cap is precisely the case `SRV-020` wants counted and no
+        // response is produced for it here.
+        let Some(body_bytes) = drain_body(&mut stream, &mut buf, &head).await else {
+            if let Some(m) = ctx.metrics {
+                // The refusal is counted because a body over the cap is exactly the case
+                // `SRV-020` asks about, and no `record_request` runs for it: the connection
+                // closes without a completed request.
+                let label = ctx.tenant_labels.label(&tenant);
+                m.record_body_limit(label.as_str());
+            }
             return reject_body(&mut stream, &head).await;
-        }
+        };
 
-        // --- A CORS preflight is answered here, not by a handler ------------
+        // --- Preflight, WebSocket, or streaming: three ways off the HTTP path ----
         //
-        // `serve_preflight` holds the reasoning: why the dispatcher answers rather than a
-        // handler, and why this runs **before** routing.
-        if head.method == crate::route::Method::Options {
-            if let Some(requested) = head.header("access-control-request-method") {
-                if let Some(cors) = ctx.cors {
-                    span_seq += 1;
-                    return serve_preflight(
-                        &mut stream,
-                        &head,
-                        path,
-                        PreflightRequest {
-                            cors,
-                            requested_method: requested,
-                            requested_headers: head.header("access-control-request-headers"),
-                        },
-                        ctx,
-                        &tenant,
-                        span_seq,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // --- A WebSocket route leaves HTTP entirely -------------------------
-        //
-        // `serve_ws_route` owns the whole exchange. Checked **first**, before streaming
-        // and before the flat handler, because an upgrade request is not a request for a
-        // response: answering it with a body commits the connection to HTTP and makes the
-        // upgrade impossible.
-        if let Some(m) = table.match_route(head.method, path) {
-            if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
-                span_seq += 1;
-                // The buffer may hold **more than the head**: a client is entitled to
-                // coalesce its first frame with the handshake, and discarding the
-                // remainder would silently drop that frame. Taken by value because the
-                // WebSocket loop owns the connection's read buffer from here on.
-                let leftover = std::mem::take(&mut buf);
-                return serve_ws_route(
-                    &mut stream,
-                    &head,
-                    ws_handler.as_ref(),
-                    ctx,
-                    &tenant,
-                    span_seq,
-                    leftover,
-                )
-                .await;
-            }
-        }
-
-        // --- A streaming route takes a different path entirely --------------
-        //
-        // `serve_streaming` owns the whole exchange, including why the connection closes
-        // afterwards rather than returning to this loop.
-        if let Some(m) = table.match_route(head.method, path) {
-            if let Some(stream_handler) = dispatch.streaming_for(&m.handler) {
-                let matched = route_match_of(&m);
-                span_seq += 1;
-                return serve_streaming(
-                    &mut stream,
-                    stream_handler,
-                    &head,
-                    path,
-                    &matched,
-                    ctx,
-                    &tenant,
-                    span_seq,
-                )
-                .await;
-            }
+        // `serve_special_route` owns all three, and the ordering inside it is the rule:
+        // a preflight before routing, then an upgrade before a response, then a stream.
+        // Each is a case where answering with an ordinary HTTP response would commit the
+        // connection to something the client did not ask for.
+        if let Some(served) = serve_special_route(
+            &mut stream,
+            &head,
+            path,
+            table,
+            dispatch,
+            ctx,
+            &tenant,
+            &mut buf,
+            &mut span_seq,
+        )
+        .await
+        {
+            return served;
         }
 
         let response = dispatch_flat(table, dispatch, &head, path);
@@ -1291,6 +1320,22 @@ async fn serve_connection(
             access_record(&head, path, &response, &tenant, ctx.id.trace, span_seq),
         );
 
+        // --- The same request, as a metric --------------------------------
+        //
+        // `record_metrics` holds the reasoning: why it sits beside the access record, and
+        // why the label is bounded rather than the tenant itself.
+        if let Some(metrics) = ctx.metrics {
+            record_metrics(
+                metrics,
+                ctx.tenant_labels,
+                &head,
+                &response,
+                request_started,
+                &tenant,
+                body_bytes,
+            );
+        }
+
         // `None` means the connection may be reused, so the loop reads the next
         // request. The body was consumed **before** the handler ran, so the connection
         // is already positioned at it — there is deliberately no drain here, because a
@@ -1299,6 +1344,185 @@ async fn serve_connection(
         if let Some(served) = write_flat_response(&mut stream, &mut conn, &head, &response).await {
             return served;
         }
+    }
+}
+
+/// Serve a request that is not an ordinary HTTP request, if it is one of the three.
+///
+/// Returns `None` when the request is ordinary, which is the common case: the caller then
+/// dispatches it normally. `Some` means the connection has left the HTTP path entirely and
+/// the caller must return the outcome.
+///
+/// # The ordering, which is the whole content of this function
+///
+/// 1. **A CORS preflight first**, and **before routing**, because it names a path the route
+///    table may have no `OPTIONS` handler for — the browser is asking *about* the path, not
+///    calling it. A 404 here would make the browser refuse a request the server would serve.
+/// 2. **A WebSocket upgrade next**, before any response is produced, because a `101` cannot
+///    be sent after a body: answering an upgrade with an ordinary response commits the
+///    connection to HTTP and makes the upgrade impossible.
+/// 3. **A streaming route last**, because it *does* produce a response — it just writes the
+///    body in pieces afterwards, so it needs the routing decision but not the buffered
+///    writer.
+///
+/// `span_seq` is passed by reference rather than read and returned: every branch consumes a
+/// span number, and a caller that had to thread the value back through an `Option` would be
+/// able to forget.
+#[allow(clippy::too_many_arguments)]
+async fn serve_special_route(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    table: &RouteTable,
+    dispatch: &Dispatch,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    buf: &mut Vec<u8>,
+    span_seq: &mut u64,
+) -> Option<Served> {
+    if head.method == crate::route::Method::Options {
+        if let Some(requested) = head.header("access-control-request-method") {
+            if let Some(cors) = ctx.cors {
+                *span_seq += 1;
+                return Some(
+                    serve_preflight(
+                        stream,
+                        head,
+                        path,
+                        PreflightRequest {
+                            cors,
+                            requested_method: requested,
+                            requested_headers: head.header("access-control-request-headers"),
+                        },
+                        ctx,
+                        tenant,
+                        *span_seq,
+                    )
+                    .await,
+                );
+            }
+        }
+    }
+
+    let m = table.match_route(head.method, path)?;
+
+    if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
+        *span_seq += 1;
+        // The buffer may hold **more than the head**: a client is entitled to coalesce its
+        // first frame with the handshake, and discarding the remainder would silently drop
+        // that frame. Taken by value because the WebSocket loop owns the read buffer from
+        // here on.
+        let leftover = std::mem::take(buf);
+        return Some(
+            serve_ws_route(
+                stream,
+                head,
+                ws_handler.as_ref(),
+                ctx,
+                tenant,
+                *span_seq,
+                leftover,
+            )
+            .await,
+        );
+    }
+
+    if let Some(stream_handler) = dispatch.streaming_for(&m.handler) {
+        *span_seq += 1;
+        let matched = route_match_of(&m);
+        return Some(
+            serve_streaming(
+                stream,
+                stream_handler,
+                head,
+                path,
+                &matched,
+                ctx,
+                tenant,
+                *span_seq,
+            )
+            .await,
+        );
+    }
+
+    None
+}
+
+/// Record one completed request, from the same facts the access record uses.
+///
+/// # Why it lives beside the access record rather than somewhere of its own
+///
+/// The two answer the same question, and a divergence between them is undetectable from
+/// the outside: a log line saying `200` next to a counter saying `5xx` would be read as two
+/// facts rather than as one bug. Emitting them from one place with one set of inputs is
+/// what makes that impossible rather than merely unlikely.
+///
+/// # Why the label is bounded and not the tenant
+///
+/// The tenant is the **peer IP address** (`tenant_of`), so recording it directly creates
+/// one time series per client — §10.2's cardinality violation in its worst form, because
+/// the value is entirely attacker-chosen. `TenantLabels` bounds it at 64 distinct names and
+/// collapses the rest into one `other` series, and the exact per-tenant facts stay in the
+/// access record, which is not aggregated.
+///
+/// # Why the latency excludes the request line
+///
+/// `started` is taken **after** the head is parsed, so the histogram measures the server's
+/// own service time. Folding in the time spent waiting for a slow client would make the
+/// metric measure the network and call it the handler.
+fn record_metrics(
+    metrics: &crate::metrics::HttpMetrics,
+    tenant_labels: &crate::metrics::TenantLabels,
+    head: &RequestHead,
+    response: &crate::response::Response,
+    started: Instant,
+    tenant: &str,
+    body_bytes: u64,
+) {
+    let label = tenant_labels.label(tenant);
+    // Saturating rather than a raw cast: `as_micros` returns `u128`, and a saturating
+    // conversion states that the ceiling is unreachable rather than silently truncating a
+    // value that a overflowed `Instant` difference could in principle produce.
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    metrics.record_request(
+        crate::metrics::Method::parse(head.method.as_str()),
+        response.status,
+        micros,
+        label.as_str(),
+        body_bytes,
+        response.body.len() as u64,
+    );
+}
+
+/// Map a connection's ending to its metric label.
+///
+/// # Why this is a mapping and not a `From` impl
+///
+/// [`Served`] has more variants than the metric's closed set, and the excess is the point:
+/// the metric label space is bounded by §10.2's cardinality discipline, so `BadRequest`,
+/// `BodyTooLarge` and `ProtocolError` all collapse into one `ProtocolError` series. The
+/// distinction is not lost — the **access log** keeps the exact outcome per connection, and
+/// a log is not aggregated. A metric that grew a series per failure mode would be the
+/// failure §10.2's rule exists to prevent.
+///
+/// Written as an exhaustive match rather than a `matches!` chain so that adding a `Served`
+/// variant is a **compile error** here. A `_ =>` arm would silently classify the new
+/// variant as whatever the fallback is, and the person adding it would have no reason to
+/// look.
+fn metric_outcome_of(served: Served) -> crate::metrics::Outcome {
+    use crate::metrics::Outcome;
+    match served {
+        Served::HandlerClosed => Outcome::Ok,
+        Served::ClientClosed => Outcome::ClientClosed,
+        // Both deadlines: the *server* ended the connection on a timer, which is a
+        // different operational fact from the peer violating the protocol.
+        Served::IdleTimeout | Served::HeaderTimeout => Outcome::Timeout,
+        // The server refused to continue — a request ceiling or a graceful drain. Neither
+        // is the client's fault and neither is a protocol error.
+        Served::RequestLimit | Served::Drained => Outcome::Refused,
+        // The two client mistakes collapse into one series. See this function's
+        // documentation for why the distinction lives in the log rather than the metric.
+        Served::BadRequest | Served::BodyRejected => Outcome::ProtocolError,
     }
 }
 
@@ -1476,12 +1700,12 @@ async fn read_head(
 /// a cursor over the buffer first, then the socket. That is the whole trick —
 /// the decoder sees one continuous stream, and the buffer is empty afterwards,
 /// so the connection's framing offset is exactly right.
-async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHead) -> bool {
+async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHead) -> Option<u64> {
     // No body declared: anything buffered is the start of the **next** request —
     // a pipelined one. It must be preserved, not cleared, or a client that
     // pipelines loses its second request.
     if !head.chunked && head.content_length.is_none_or(|n| n == 0) {
-        return true;
+        return Some(0);
     }
 
     let Ok(mut reader) = crate::body::BodyReader::from_head(head, config_max_request_bytes())
@@ -1489,7 +1713,7 @@ async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHea
         // `from_head` refuses a head declaring both framings. `http1` already
         // rejects that at parse time, so reaching here means the two disagree,
         // and the connection is not trustworthy.
-        return false;
+        return None;
     };
 
     // Take the buffered prefix out, leaving `buf` empty for the next request.
@@ -1501,9 +1725,12 @@ async fn drain_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &RequestHea
     // is what expresses that. The two cases are not distinguished *here*
     // because the caller's action is identical either way; the reason is
     // reported by `BodyReader` to a caller that wants it.
-    crate::body::discard(&mut reader, &mut combined)
-        .await
-        .is_ok()
+    // `discard` returns the count, and returning it rather than discarding the value is the
+    // point: the metric must record the bytes that **actually crossed the socket**. The
+    // declared length and the received count agree for a well-formed request and disagree
+    // for a truncated one, and a metric reporting the declaration would claim bytes that
+    // never arrived.
+    crate::body::discard(&mut reader, &mut combined).await.ok()
 }
 
 /// The `max_request_bytes` a drained body is held to.

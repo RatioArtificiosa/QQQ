@@ -29,21 +29,65 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// Bind a listener on an ephemeral loopback port.
+///
+/// # Why this retries, and why it does not merely pick a port
+///
+/// The obvious implementation binds port 0, reads the address back, **drops the
+/// probe socket**, and then binds that address for real. The drop exists only
+/// because `Listener::bind` takes an explicit `ListenAddr` and cannot be asked
+/// for port 0 — so between the drop and the real bind the port is owned by
+/// nobody, and anything on the machine may take it.
+///
+/// That window is the whole defect. Measured on Linux (CI `ubuntu-latest`, run
+/// 35690936055):
+///
+/// ```text
+///   crates/qqq-io/tests/listener.rs:46:10
+///   the address we just bound must be bindable:
+///     Error { code: ListenerBindFailed, message: "could not bind `127.0.0.1:36265`",
+///             cause: ["Address already in use (os error 98)"] }
+/// ```
+///
+/// Line 46 was the *helper's* own expect, so this was a whole-file flake source
+/// rather than one bad test — every test in this file calls it.
+///
+/// A retry is the honest fix: the losing side of a race has no way to win it,
+/// and a fresh port is always available. Widening a wait would not help, because
+/// nothing here is waiting for a condition — the port is simply gone. This is
+/// the same repair, for the same reason, as the one in `qqq-serve`'s route tests.
+///
+/// In Linux the failing bind is `EADDRINUSE` (98) on a port the kernel had just
+/// handed out; on Windows the same sequence does not fail, which is why the
+/// defect only ever appeared on one platform.
 async fn ephemeral_listener() -> Listener {
     // Port 0 is not expressible through `ListenAddr` — that is the point of the
     // validation — so the test builds the `SocketAddr` directly.
-    let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port must be available");
-    let local = socket
-        .local_addr()
-        .expect("bound socket has a local address");
-    drop(socket);
+    let mut last = String::from("no attempt was made");
 
-    let addr = qqq_io::ListenAddr::parse(&local.to_string()).expect("the bound address must parse");
-    Listener::bind(ListenerConfig::for_addr(addr))
-        .await
-        .expect("the address we just bound must be bindable")
+    for _ in 0..16 {
+        let socket = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                last = format!("could not reserve a probe port: {e}");
+                continue;
+            }
+        };
+        let Ok(local) = socket.local_addr() else {
+            "bound socket has no local address".clone_into(&mut last);
+            continue;
+        };
+        drop(socket);
+
+        let addr =
+            qqq_io::ListenAddr::parse(&local.to_string()).expect("the bound address must parse");
+        match Listener::bind(ListenerConfig::for_addr(addr)).await {
+            Ok(listener) => return listener,
+            // `local` was taken between the drop and the bind. Try another.
+            Err(e) => last = e.to_string(),
+        }
+    }
+
+    panic!("no ephemeral loopback port could be bound in 16 attempts; last: {last}")
 }
 
 #[tokio::test]

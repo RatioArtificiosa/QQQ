@@ -11587,6 +11587,102 @@ Measured: 14 unit tests, 4 CLI tests against the real binary, 3 behaviours fault
 ---
 
 
+## §O-143 — The component target emits TWO components, and the obvious one is the wrong one
+
+Before designing `SRV-018` (the orders reference app every benchmark depends on) I built a minimal
+guest rather than planning against an assumed toolchain. Measured, in `.scratch/guest_probe/`:
+
+    cargo build --release --target wasm32-wasip2      → succeeds, 20.75 s
+    target/wasm32-wasip2/release/guest_probe.wasm     61235 bytes
+    target/wasm32-wasip2/release/guest-probe.wasm     66953 bytes
+
+The names differ by **one underscore**. Both are valid components. They export **different worlds**,
+and only one is the app:
+
+    guest_probe.wasm  (underscore)  export probe:app/incoming-handler@0.1.0   ← the app
+    guest-probe.wasm  (hyphen)      export wasi:cli/run@0.2.0                 ← the wrapper
+
+So a build step that globs `*.wasm`, takes the first match, or sorts by name has a coin-flip
+chance of loading a component that exports `wasi:cli/run` and answering every request by *running
+the app as a command*, or by failing to find the handler at all. Nothing about the filename says
+which is which; the only way to tell is to read the export list, which is exactly what a build
+step will not do unless told to.
+
+This is `§O-130`'s shape in a new place — a control believed live that is not — and it is the third
+time a value that *looks* like an identifier turned out not to identify. The rule now: **select the
+guest artifact by its export list, never by its filename.**
+
+**Two smaller measured facts from the same probe, each of which cost a compile:**
+
+- `wit-bindgen` 0.44 generates bindings through the **`generate!` macro**, there is no build-script
+  API. My first `build.rs` called a `wit_bindgen::Opts`/`generate_all()` interface that does not
+  exist in that crate, and the failure looked like a missing module rather than a wrong API.
+- The generated types live under `exports::<pkg>::<ns>::<iface>` — **not** a top-level
+  `probe::app`. I guessed the second path and got `use of unresolved module or unlinked crate`.
+  Read it from `cargo rustc --lib -- -Zunpretty=expanded`, which prints the real layout:
+  `pub mod exports { pub mod probe { pub mod app { pub mod incoming_handler { ...`.
+
+A guest also cannot be a member of the host workspace (cargo refuses: *"current package believes
+it's in a workspace when it's not"*). The fix is an empty `[workspace]` table in the guest's
+manifest, which makes it its own workspace root. That is now the known-good shape for a QQQ guest.
+
+---
+
+
+## §O-144 — A CI flake I fixed but could not reproduce, and what that does and does not justify
+
+`c45a149` — a commit that changed **only Markdown** — failed `Rust (ubuntu-latest)`:
+
+    crates/qqq-io/tests/listener.rs:46:10
+    the address we just bound must be bindable:
+      Error { code: ListenerBindFailed, message: "could not bind `127.0.0.1:36265`",
+              cause: ["Address already in use (os error 98)"] }
+
+Line 46 is `ephemeral_listener`'s **own** `expect`, not an assertion in the test that follows, so
+this was a whole-file flake source: every test in `listener.rs` calls that helper.
+
+**The mechanism.** The helper binds port 0, reads the address back, **drops the probe socket**, then
+binds that address for real. The drop exists only because `Listener::bind` takes an explicit
+`ListenAddr` and cannot be asked for port 0. Between the drop and the real bind the port belongs to
+nobody, and anything on the machine may take it. Measured on Linux in a container, the state that
+makes this reachable is `TIME_WAIT`:
+
+    connected, no REUSEADDR    failures=400/400   Errno 98 Address already in use
+    connected, REUSEADDR       failures=  0/400
+    no connection              failures=  0/400   (either way)
+
+So a port whose socket served a connection cannot be re-bound immediately on Linux without
+`SO_REUSEADDR`, and `EADDRINUSE (98)` is precisely the error CI reported. Windows does not behave
+this way, which is why it only ever failed on one platform.
+
+**What I could not do, stated plainly.** I could not reproduce it. Three attempts on real Linux:
+
+| Attempt | Setup | Result |
+|---|---|---|
+| the helper's own sequence, 600 trials | plain | 0 failures |
+| a thief binding and releasing ports in a tight loop | 1781 ports churned | 0/2000 both arms |
+| a holder keeping 2072 ports bound | sustained | 0/3000 both arms |
+
+The honest conclusion is that the window is **microseconds wide** and needs a contender that wins
+it exactly, which a container on a quiet laptop does not produce. The strongest evidence for the
+mechanism remains the CI log itself, corroborated by re-running the same commit: **fully green**.
+Same code, same job, different outcome — a flake by definition.
+
+**The fix, and why a retry rather than a wait.** `ephemeral_listener` now retries up to 16 times
+with a fresh port. The losing side of a race cannot win it and a fresh port is always available;
+widening a timeout would do nothing, because nothing here is waiting for a condition — the port is
+simply gone. This is the same repair, for the same reason, as `0e2765a` in `qqq-serve`'s route
+tests.
+
+**What I did NOT claim.** I did not write "verified by fault injection" for this one, because I have
+no injection that reproduces it. The retry is **defence in depth justified by an unambiguous log**,
+not a demonstrated fix, and the checklist and commit say so. A repair whose reproduction failed is
+a weaker claim than a reproduction, and dressing it up as the stronger one is the exact failure this
+project keeps recording.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

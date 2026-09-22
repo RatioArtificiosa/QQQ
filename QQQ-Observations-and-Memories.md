@@ -13193,6 +13193,48 @@ of claim this repository exists to keep true.
 `.scratch/verify_docker_stub_loop.sh`; `§O-152` (the silent lockfile failure),
 `§O-161` (the same round's checker findings).
 
+**Verified outcome.** Both failures were fixed in `b80da72` and pushed; the run was
+read rather than assumed:
+
+| Job | Before | After |
+|---|---|---|
+| Supply chain (`cargo-machete`) | **failure** | success |
+| Production image (SEC-029) | **failure** | success |
+| the other nine | success | success |
+
+**11/11 green.** The Docker job passing is the meaningful one: it means the derived
+stub loop really does cover a crate the Dockerfile never names, which is the property
+the enumeration could not have.
+
+Local gate before the commit: workspace **2305 passed, 0 failed**, guest **57
+passed**, clippy clean in both scopes, fmt clean, `cargo-machete` reporting no unused
+dependencies, `STUB LOOP OK`, and every `tools/*.py` checker green except the two
+that cannot run locally by design.
+
+**The count of stale lists this round, which is the lesson.** Adding one crate
+required touching **six** places, and five of them were enumerations that had to be
+found by failing:
+
+| Place | How it was found |
+|---|---|
+| `tools/check_topology.py` | I knew to look |
+| `crates/qqq-core/tests/architecture.rs`'s `ORDER` | a failing test |
+| the MSRV job's `-ne 10` | I knew to look, from reading the job |
+| `docker/Dockerfile.prod`'s stub loop | **CI, after pushing** |
+| `qqq-bench/Cargo.toml`'s unused dependency | **CI, after pushing** |
+| `Cargo.lock` | I knew to look — and it is the one that would have stayed silent (`§O-152`) |
+
+Four of the six were knowable in advance by asking one question: *what else names
+these crates?* Two were found only by a red build. The durable improvement is not a
+better list — it is that the Dockerfile now derives its list, so that entry is gone
+from the set of things that can go stale. The MSRV count and the two `ORDER`s remain
+deliberate duplicates; `§O-044` records why the two `ORDER`s are kept separate (they
+read the resolved graph and the declared graph respectively, and a shared list would
+make one silently inherit the other's blind spot).
+
+**Standing at 180/586** (30.7%). `PERF-001` is done; `PERF-002` and the budget items are
+next.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

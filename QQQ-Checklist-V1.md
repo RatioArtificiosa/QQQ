@@ -3583,6 +3583,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OBS-005** Implement the default metric set.
   → §10.2 Metrics that ship by default
+  → **Wired**: `serve_connection` records into the registry, and the wiring found a real defect. `ConnectionContext` carries `metrics` and an `Arc<TenantLabels>`; `record_metrics` and `serve_special_route` are the extracted sites.
+  → **The cardinality violation the wiring exposed**: `tenant_of` returns the **peer IP address**, so recording the tenant directly gives one time series per client — §10.2's violation in its worst form, because an attacker chooses the value. `TenantLabels` existed and bounds the space at 64 names; the wiring did not use it. Found by a test asserting the wrong key: tracing the value showed the count was correct (`5`) all the way to the registry, so the *key* differed. See `§O-136`.
+  → **A test that agrees with the implementation cannot find a design error in it** — the failing assertion was my error, and fixing it is what surfaced the real defect. A test that read the key back from the code would have passed and shipped the unbounded label.
+  → **`drain_body` now returns `Option<u64>`** rather than discarding the count `discard` already produces, so `body_bytes` is the bytes that **crossed the socket** rather than the head's declaration. They agree for a well-formed request and disagree for a truncated one.
+  → **Measured**: 25 registry tests + **9 integration tests over the real accept loop** (recorded at all; the server's *chosen* status is what gets counted, so a router 404 and a handler 201 land in different series; three requests on one keep-alive connection are three; bytes; latency; one open and one close; a disconnect classified as such; the peer IP is a bounded label; a server with no registry still serves). Workspace **2098 passed, 0 failed**.
+  → **Still open, and named**: only the **HTTP row** of §10.2's table is implemented — the instance, execution, memory, capability, supply-chain and cost rows are not. Per-tenant *enforcement* (as opposed to accounting) is not done, and the registry is not exposed on any endpoint. `OBS-005` stays unticked until the set is complete.
 - [ ] **OBS-006** Implement the cardinality lint on metric definitions.
   → §10.2 Metrics that ship by default
 - [ ] **OBS-007** Implement structured JSON logging with trace and tenant correlation.

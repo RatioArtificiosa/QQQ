@@ -78,6 +78,11 @@ pub mod arch003;
 pub mod arch012;
 pub mod audit;
 pub mod boundary;
+/// Calling a guest's handler: the request in, the response out.
+///
+/// `invoke` resolves *which* function to call; this performs the call, converting
+/// between the typed ABI and the dynamic `Val` form Wasmtime wants.
+pub mod call;
 pub mod config;
 pub mod guard;
 pub mod handles;

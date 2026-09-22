@@ -11936,6 +11936,42 @@ green on `e379518`.
 ---
 
 
+## §O-150 — The guest chain is complete, and what it cost to build
+
+Five links, each committed, all CI-green:
+
+| Link | Module | What it does |
+|---|---|---|
+| World | `wit/app/app.wit` | The first world in the repo — what a QQQ app **is** |
+| Resolve | `qqq-host::invoke` | Two-step export lookup, three distinguishable failures |
+| Types | `qqq-host::abi` | Canonical ABI types, variant order checked against the WIT |
+| Call | `qqq-host::call` | `encode_request` → `Function::call` → `decode_response` |
+| Compose | `qqq-run::guest_handler` | `GuestApp` — a real `Dispatch` handler |
+
+`GuestApp::dispatch()` returns the exact `Handler` type `qqq_serve::Dispatch::flat`
+takes, so `CLI-011` is now genuinely CLI work (flags, config, worker accounting)
+rather than missing runtime plumbing.
+
+**Where the time actually went, stated plainly.** The `write` tool silently
+dropped files on roughly half the attempts this stretch: `call.rs` took three
+writes, `guest_handler.rs` and two helper scripts each needed a verification pass,
+and the `serve.rs` draft for `CLI-011` never landed at all before the round ended.
+The `assert`-on-markers mitigation caught every one, so **nothing broken shipped**
+— but the friction is real and it is why `CLI-011` is not further along.
+
+**Two verifications earned their cost.** The ABI injection harness reported
+`SKIP: anchor not found`, and *that mismatch* is what exposed that the tests
+verified a hand-maintained mirror rather than the declaration order — a gap that
+would have let `POST` arrive as `PUT` with every test green (`§O-149`). And
+`guest_handler.rs` sat unregistered in `lib.rs` while I believed it was wired; a
+`git status` check caught it before anything was claimed.
+
+Both are the same shape: **a green check that was not checking what I thought.**
+Recording it because the mitigation is what made the difference, not the intent.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

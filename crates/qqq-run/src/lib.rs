@@ -34,6 +34,12 @@ pub mod build;
 pub mod commands;
 pub mod deps;
 pub mod dev;
+/// The bridge from a served request to a guest call: `qqq-serve` + `qqq-abi` +
+/// `qqq-host`, joined.
+///
+/// `qqq-run` is the only crate above all three, so it is the only place a
+/// `RequestHead` can meet an `abi::Request`. Same argument as `serve_routes`.
+pub mod guest_bridge;
 pub mod install;
 pub mod manifest_loader;
 /// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.

@@ -11892,6 +11892,50 @@ skipped entirely.
 ---
 
 
+## §O-149 — Fault injection found two gaps in tests I had just called done
+
+The `qqq:http` canonical ABI types (`qqq-host::abi`) are checked four ways, because a WIT `enum`
+lowers to a **case index** and reordering a variant renumbers the wire without any type checker
+noticing:
+
+    WIT  →  declaration order  →  ALL  →  #[component(name)]
+
+**Gap 1: the declaration order was never checked.** My harness anchored an injection on the enum
+declaration and reported SKIP — the anchor did not match, because doc comments sit between the
+variants. That mismatch was worth more than the injection would have been: it revealed the tests
+compared `Method::ALL`, which is a **hand-written array**, i.e. a third description of the same fact.
+Nothing compared the declaration — the order the compiler actually numbers. Swapping two variants
+in the enum would have shipped, and every test would have stayed green while `post` arrived as `put`.
+
+Fixed by adding `the_all_array_matches_the_declaration_order`, which reads `src/abi.rs` itself. The
+injection now catches it.
+
+**Gap 2: the `#[component(name = ...)]` attribute was never checked.** A third injection renamed
+`patch` to `patched` on the wire and reported MISSED. Two separate things were wrong:
+
+- The wire name really was unchecked. `as_wit_str` is a hand-written `match`, and the attribute is
+  what the canonical ABI actually encodes — so the name could change on one side only, and the
+  crate would send `patched` while believing it sent `patch`.
+- The harness was watching the *wrong test*. The renamed attribute WAS caught, by the new
+  `the_all_array_matches_the_declaration_order` rather than by `the_method_order_matches_the_wit`. A
+  harness defect reported as a code defect — the exact shape `fault_inject_wit_since.py` documents
+  about its own first version, now repeated by me in a new file.
+
+Both are fixed: the attribute is checked per variant, and the harness names the test that actually
+covers the behaviour.
+
+**Why this is worth recording rather than just fixing.** I had run the tests, seen six green, and
+written in the commit message that the variant order was "checked four ways". Three of those four
+links were real; one was a check on a copy of the data rather than the data. **A test that verifies a
+hand-maintained mirror verifies the mirror**, and the mirror is the thing most likely to be wrong.
+The injection is what separated the two.
+
+**Measured:** 3 injections caught, source restored byte-for-byte. 2171 tests pass. All 11 CI jobs
+green on `e379518`.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

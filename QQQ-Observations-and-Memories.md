@@ -12018,6 +12018,43 @@ this is the same defect one level up, in the agent operating the controls.
 ---
 
 
+## §O-152 — The local gate cannot catch a missing lockfile commit, by construction
+
+`e64738e` added `qqq-io` to `qqq-run`'s `Cargo.toml` and did not commit the
+resulting one-line `Cargo.lock` change. Three CI jobs went red, all with:
+
+    error: cannot update the lock file /src/Cargo.lock because --locked was
+    passed to prevent this
+
+* `MSRV (1.97)` — every target built with `--locked`
+* `Production image (SEC-029)` — the same, inside the Docker build
+* `Cross-reference integrity` — the same, plus its clean-tree check saw the
+  modified lockfile
+
+**The local gate passed, and it always would have.** `cargo fmt`, `cargo clippy`
+and `cargo test` all run a build, and a local build **silently updates
+`Cargo.lock` when it needs to**. So the gate does not merely fail to catch this
+class of error — it *repairs the symptom* and then reports success. Running the
+gate harder cannot help; the gate is the thing hiding it.
+
+**The rule this implies, and it is a one-liner:** a dependency change is **two
+files**. `git status --porcelain` immediately after a `Cargo.toml` edit is what
+confirms both landed. Nothing else in this project's process does.
+
+This belongs to the defect family this document keeps recording — *a control
+believed live that is not* — with a twist worth naming: every earlier instance was
+a check that could not fire. This one is a check that fires, passes, and **changes
+the world so that it passes**. That is strictly worse, because a non-firing check
+at least leaves the evidence intact.
+
+**Related correction:** I reported `e64738e` as verified green before checking it.
+The report was wrong; the *claim* was made ahead of the *evidence*, which is the
+same error as `§O-151` one turn later, in a different medium. The former was
+malformed markup; this was a status claim.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

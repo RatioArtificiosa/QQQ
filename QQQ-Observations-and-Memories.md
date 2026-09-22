@@ -11318,4 +11318,55 @@ something the client did not ask for.
 
 ---
 
+### §O-137 — A flaky test, and why widening its window was the wrong fix
+
+**What happened.** `an_epoch_expiry_traps_on_the_synchronous_path` failed **once** in a
+full-workspace run and passed in isolation and on every retry. Three consecutive full runs
+afterwards were clean, and four before that, so the reproducer is a loaded machine rather
+than a sequence.
+
+**The mechanism, which the test's own documentation contained.** The test gives an infinite
+spinning guest a **finite** fuel budget of 200 M, and its measured table two hundred lines
+above says the synchronous path burns **~100 M fuel in the ~2.1 ms** it takes the ticker to
+fire twice. Under load those two race. If the ticker thread is starved for a few
+milliseconds, fuel wins and the trap is `FuelExhausted` instead of `EpochDeadlineExceeded`.
+
+**This is not a host bug.** Both traps are correct answers to "why did this stop?"; the host
+is forbidden from resuming a synchronous call, so either is a legal terminal state. Only the
+epoch one is what the test is about — the test is a *control* for the async twin, proving the
+two entry points differ.
+
+**The fix, and the fix I did not take.** The budget is now `u64::MAX`, so the epoch is the
+only thing that can end the call. The obvious alternative — a larger finite number — would
+have made the flake **rarer instead of absent**, and that is strictly worse than either
+fixing it or leaving it failing:
+
+> A test that fails one run in twenty is a test whose failures get ignored, and an ignored
+> failure is how a real one ships.
+
+That sentence is the reason to prefer a structural change to a timing-based one. "It only
+fails under load" is an argument that it will fail precisely when the load is real.
+
+**The generalisable rule.** *A test that races two independent limits is testing whichever
+wins.* Where a test is about one of them, the other must be made unreachable rather than
+unlikely — the same shape as `§O-128`'s "safe defaults must deny" and `§O-134`'s width check,
+which are all cases of a check whose *subject* was not quite the thing it measured.
+
+**Why the failure being rare is itself a finding.** The first instinct on a rare flake is to
+re-run and move on, and that is exactly what makes it expensive: this one surfaced only
+because the gate happened to run while the machine was busy, and the gate will run while the
+machine is busy in CI too — where a re-run costs a whole pipeline and the flake would have
+been attributed to infrastructure.
+
+**Also in the same round: per-tenant limits.** `crates/qqq-serve/src/limits.rs` adds the body
+and rate caps `SRV-020` names, enforced rather than counted, with `None` (unlimited) and
+`Some(0)` (refuse everything) deliberately distinct values. Fault-injected twice: an off-by-one
+in the rate comparison (`>` for `>=`) fails five tests; a single shared window instead of one
+per tenant fails exactly the isolation tests and would present in production as one busy
+client throttling everybody.
+
+→ `crates/qqq-serve/src/limits.rs`, `crates/qqq-host/src/instance.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

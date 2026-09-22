@@ -145,6 +145,22 @@ impl Server {
             validate_cors(cors)?;
         }
 
+        // `[server.limits]` — `SRV-020`'s per-tenant request caps.
+        //
+        // Validated here, at the same point as everything else in the section, so a manifest
+        // with an incoherent limit is refused by `qqqai check` rather than at startup. The
+        // one incoherence is a zero window with a request cap, which makes the limiter allow
+        // **everything** — see `qqq_serve::limits::Limits::is_coherent` for why that
+        // particular mistake is worth a startup failure rather than a log line.
+        if let Some(limits) = &self.limits {
+            limits
+                .validate()
+                .map_err(|reason| ManifestError::InvalidField {
+                    field: "server.limits".to_owned(),
+                    reason,
+                })?;
+        }
+
         Ok(())
     }
 
@@ -315,6 +331,7 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{RequestLimits, TenantLimit};
 
     fn route(path: &str, methods: &[&str]) -> Route {
         Route {
@@ -382,6 +399,7 @@ mod tests {
             routes: vec![open, route("/orders", &["GET"])],
             default_auth: AuthMode::Deny,
             cors: None,
+            limits: None,
         };
         let open_routes = s.unauthenticated_routes();
         assert_eq!(open_routes.len(), 1);
@@ -715,6 +733,24 @@ allow_origins = ["https://app.example.com"]
                 allow_headers: vec!["content-type".to_owned()],
                 expose_headers: vec!["x-request-id".to_owned()],
                 max_age: Some(600),
+            }),
+            // Populated rather than `None`, because the point of a round-trip test is that
+            // every field survives. A `None` here would let a serialization bug in the limits
+            // shape pass unnoticed.
+            limits: Some(RequestLimits {
+                default: Some(TenantLimit {
+                    max_body_bytes: Some(1_048_576),
+                    max_requests_per_window: Some(1_000),
+                    window_seconds: Some(60),
+                }),
+                per_tenant: std::collections::BTreeMap::from([(
+                    "big".to_owned(),
+                    TenantLimit {
+                        max_body_bytes: Some(16_777_216),
+                        max_requests_per_window: None,
+                        window_seconds: None,
+                    },
+                )]),
             }),
         };
         let text = toml::to_string(&s).expect("serializes");

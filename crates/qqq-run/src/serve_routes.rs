@@ -70,6 +70,18 @@ pub struct ServerRoutes {
     /// auditor asks and the one a manifest change most often gets wrong. See
     /// [`Server::unauthenticated_routes`].
     pub unauthenticated: Vec<String>,
+    /// The per-tenant request limits, built from `[server.limits]`.
+    ///
+    /// `None` when the manifest declared none, which is the common case and means no
+    /// enforcement — deliberately, rather than a built-in cap this crate invented. See
+    /// `qqq_cap::manifest::RequestLimits` for why the default is "no limits" and why that is
+    /// different from the *connection* ceiling's default.
+    ///
+    /// Built **here** rather than in `qqq-serve`, because `qqq-cap` may not depend on
+    /// `qqq-serve` in either direction: in §4.3's order `qqq-cap` sits above it, so an edge
+    /// would point upward. `qqq-run` is the only crate that sees both, which is the same
+    /// reason [`routes_from_manifest`] exists.
+    pub limits: Option<std::sync::Arc<qqq_serve::limits::TenantLimits>>,
 }
 
 impl ServerRoutes {
@@ -166,7 +178,52 @@ pub fn routes_from_manifest(server: &Server, manifest_path: &str) -> Result<Serv
         table,
         auth,
         unauthenticated,
+        limits: build_limits(server.limits.as_ref()),
     })
+}
+
+/// Build the runtime limiter from the manifest's `[server.limits]` table.
+///
+/// # Why the conversion is a function and not a `From` impl
+///
+/// A `From` would put the *reasoning* somewhere a reader looks for mechanics. The two
+/// decisions here are both worth stating, and neither is obvious:
+///
+/// 1. **The manifest's `window_seconds` defaults to 60** when a request cap is set and no
+///    window is given, because a cap with no window has no meaning. A manifest author who
+///    writes `max_requests_per_window = 100` and stops has a complete thought.
+/// 2. **`None` for a field means unlimited**, which is why every field is an `Option` on both
+///    sides rather than a `u64` defaulting to zero. A zero body cap refuses every non-empty
+///    body, and a manifest author writing `0` almost never meant that.
+///
+/// The manifest was already validated by `Server::validate`, so a zero window with a request
+/// cap cannot reach here — but `TenantLimits::new` asserts it anyway, because this function
+/// should not be the only thing standing between a bad table and a limiter that allows
+/// everything.
+fn build_limits(
+    declared: Option<&qqq_cap::manifest::RequestLimits>,
+) -> Option<std::sync::Arc<qqq_serve::limits::TenantLimits>> {
+    let declared = declared?;
+
+    let convert = |l: &qqq_cap::manifest::TenantLimit| qqq_serve::limits::Limits {
+        max_body_bytes: l.max_body_bytes,
+        max_requests_per_window: l.max_requests_per_window,
+        window: l.window(),
+    };
+
+    let fallback = declared
+        .default
+        .as_ref()
+        .map_or_else(qqq_serve::limits::Limits::none, &convert);
+
+    let per_tenant = declared
+        .per_tenant
+        .iter()
+        .map(|(tenant, limit)| (tenant.clone(), convert(limit)));
+
+    Some(std::sync::Arc::new(qqq_serve::limits::TenantLimits::new(
+        per_tenant, fallback,
+    )))
 }
 
 /// `qqq-serve`'s `Method` for a manifest spelling.
@@ -356,5 +413,164 @@ default_auth = "deny"
     fn an_unknown_method_does_not_map() {
         assert_eq!(method_from_str("PROPFIND"), None);
         assert_eq!(method_from_str(""), None);
+    }
+
+    // -- limits ------------------------------------------------------------
+
+    /// **A manifest with no `[server.limits]` produces no limiter.**
+    ///
+    /// The control for everything below: the conversion must not invent enforcement for a
+    /// manifest that asked for none. A built-in cap would silently change behaviour on
+    /// upgrade, which is why every field on both sides is an `Option`.
+    #[test]
+    fn no_declared_limits_means_no_limiter() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+"#,
+        );
+        let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
+        assert!(
+            routes.limits.is_none(),
+            "a manifest that declared no limits must get no limiter"
+        );
+    }
+
+    /// A declared body cap travels into the runtime limiter.
+    #[test]
+    fn a_declared_body_cap_is_built() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.default]
+max_body_bytes = 1024
+"#,
+        );
+        let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
+        let limits = routes.limits.expect("a limiter");
+
+        assert!(limits.check_body("anyone", 1024).is_ok(), "at the cap");
+        assert!(limits.check_body("anyone", 1025).is_err(), "over the cap");
+    }
+
+    /// **Per-tenant entries override the fallback.**
+    #[test]
+    fn per_tenant_limits_override_the_fallback() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.default]
+max_body_bytes = 100
+
+[server.limits.per_tenant.big]
+max_body_bytes = 100_000
+"#,
+        );
+        let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
+        let limits = routes.limits.expect("a limiter");
+
+        assert!(
+            limits.check_body("other", 101).is_err(),
+            "the fallback applies"
+        );
+        assert!(
+            limits.check_body("big", 50_000).is_ok(),
+            "the named tenant gets its own cap"
+        );
+    }
+
+    /// **The window defaults to 60 seconds when a request cap is declared without one.**
+    ///
+    /// A cap with no window has no meaning, so the manifest's natural shorthand must work:
+    /// writing `max_requests_per_window = 2` and stopping is a complete thought.
+    #[test]
+    fn a_request_cap_without_a_window_defaults_to_sixty_seconds() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.default]
+max_requests_per_window = 2
+"#,
+        );
+        let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
+        let limits = routes.limits.expect("a limiter");
+        let now = std::time::Instant::now();
+
+        assert!(limits.check_and_record("t", now).is_ok());
+        assert!(limits.check_and_record("t", now).is_ok());
+        assert!(
+            limits.check_and_record("t", now).is_err(),
+            "the cap of 2 applies"
+        );
+        assert!(
+            limits
+                .check_and_record("t", now + std::time::Duration::from_secs(60))
+                .is_ok(),
+            "and the window is 60 seconds, the documented default"
+        );
+    }
+
+    /// The declared window is honoured when given.
+    #[test]
+    fn a_declared_window_is_honoured() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.default]
+max_requests_per_window = 1
+window_seconds = 5
+"#,
+        );
+        let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
+        let limits = routes.limits.expect("a limiter");
+        let now = std::time::Instant::now();
+
+        assert!(limits.check_and_record("t", now).is_ok());
+        assert!(limits.check_and_record("t", now).is_err(), "spent");
+        assert!(
+            limits
+                .check_and_record("t", now + std::time::Duration::from_secs(5))
+                .is_ok(),
+            "5 seconds, not 60"
+        );
+    }
+
+    /// **A zero window with a request cap is refused by the manifest, not by the limiter.**
+    ///
+    /// The incoherence that makes a limiter allow everything. It must be caught at
+    /// validation, where the failure names the tenant, rather than at construction where the
+    /// message can only say that something is wrong.
+    #[test]
+    fn a_zero_window_is_refused_at_validation() {
+        // A full manifest, and the assertion is on **`Manifest::parse` failing** rather
+        // than on a validation method returning an error. That is the stronger claim: the
+        // manifest cannot be loaded at all, so no path reaches a limiter that would allow
+        // everything. `parse` validates internally -- see `manifest.rs`, which does the
+        // serde pass and then `validate()` before returning.
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "acme"
+version = "0.1.0"
+
+[server]
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.per_tenant.sneaky]
+max_requests_per_window = 1
+window_seconds = 0
+"#,
+        )
+        .expect_err("a zero window with a cap must be refused at parse time");
+        let text = format!("{err}");
+        assert!(text.contains("sneaky"), "the tenant must be named: {text}");
+        assert!(
+            text.contains("zero window"),
+            "and the rule must be named: {text}"
+        );
     }
 }

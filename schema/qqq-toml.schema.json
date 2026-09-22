@@ -453,6 +453,31 @@
       "title": "qqq-toml#Package",
       "type": "object"
     },
+    "RequestLimits": {
+      "$id": "https://qqq.codes/schema/qqq-toml#RequestLimits",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `RequestLimits` table.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TenantLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cap applied to a tenant with no entry in `per_tenant`. Absent means **no limits** for such a tenant, which is the same as declaring no `[server.limits]` at all — so a manifest that lists only named tenants does not accidentally constrain everybody else."
+        },
+        "per_tenant": {
+          "additionalProperties": true,
+          "description": "Per-tenant overrides, keyed by tenant name.",
+          "type": "object"
+        }
+      },
+      "title": "qqq-toml#RequestLimits",
+      "type": "object"
+    },
     "Route": {
       "$id": "https://qqq.codes/schema/qqq-toml#Route",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -526,6 +551,17 @@
           ],
           "type": "string"
         },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[server.limits]` — the per-tenant request limits, absent meaning none. # Why the default is \"no limits\" rather than a built-in number `SRV-020` asks for per-tenant limits, and the tempting default is a safe-looking body cap invented here. That would be wrong twice over: the number would be a guess "
+        },
         "routes": {
           "description": "The route table. Empty means the project serves nothing.",
           "items": {
@@ -535,6 +571,51 @@
         }
       },
       "title": "qqq-toml#Server",
+      "type": "object"
+    },
+    "TenantLimit": {
+      "$id": "https://qqq.codes/schema/qqq-toml#TenantLimit",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `TenantLimit` table.",
+      "properties": {
+        "max_body_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The largest request body accepted, in bytes."
+        },
+        "max_requests_per_window": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The largest number of requests allowed per window."
+        },
+        "window_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The window, in seconds. Defaults to 60 when a request cap is set. **A zero window with a request cap is rejected**, because it makes the limiter allow everything — see `qqq_serve::limits::Limits::is_coherent`."
+        }
+      },
+      "title": "qqq-toml#TenantLimit",
       "type": "object"
     }
   },

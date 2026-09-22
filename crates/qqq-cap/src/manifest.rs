@@ -1349,6 +1349,122 @@ pub struct Server {
     /// `[server.cors]` — the cross-origin policy, absent meaning no CORS at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<Cors>,
+    /// `[server.limits]` — the per-tenant request limits, absent meaning none.
+    ///
+    /// # Why the default is "no limits" rather than a built-in number
+    ///
+    /// `SRV-020` asks for per-tenant limits, and the tempting default is a safe-looking
+    /// body cap invented here. That would be wrong twice over: the number would be a guess
+    /// this crate has no basis for, and it would silently apply to deployments that never
+    /// asked for one — changing behaviour on upgrade. A deployment that wants limits
+    /// declares them, and a deployment that does not gets the behaviour it had.
+    ///
+    /// The *connection* ceiling is different and already defaults to 10 000: it bounds a
+    /// resource this crate owns (sockets), while a body cap bounds a resource the
+    /// application's design decides (what a legitimate payload looks like).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<RequestLimits>,
+}
+
+/// `[server.limits]` — the per-tenant **request** limits.
+///
+/// # Why this is not called `Limits`
+///
+/// [`Limits`] already exists in this module and means something else entirely: the
+/// **sandbox** limits — memory, fuel per request, the epoch deadline. Those bound what a
+/// guest may consume; these bound what a *client* may send. Two unrelated concepts under one
+/// name would be confused by every future reader, and the compiler caught the collision
+/// immediately when this type was first written, which is the argument for distinct names
+/// even where a prefix is clumsy.
+///
+/// # Why the fallback is a separate field and not a fourth key
+///
+/// A table of per-tenant caps needs an answer for a tenant that is not in it, and the two
+/// plausible answers are "no limits" and "some default". Making that an explicit field means
+/// the manifest author chooses and a reader sees the choice, rather than it being an implicit
+/// property of how the table happened to be written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestLimits {
+    /// The cap applied to a tenant with no entry in `per_tenant`.
+    ///
+    /// Absent means **no limits** for such a tenant, which is the same as declaring no
+    /// `[server.limits]` at all — so a manifest that lists only named tenants does not
+    /// accidentally constrain everybody else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<TenantLimit>,
+    /// Per-tenant overrides, keyed by tenant name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_tenant: BTreeMap<String, TenantLimit>,
+}
+
+/// One tenant's limits.
+///
+/// # Why every field is optional
+///
+/// `None` means **unlimited** and is different from `Some(0)`, which is the smallest
+/// possible limit. A manifest author who writes `max_body_bytes = 0` meant "refuse
+/// everything" or made a mistake; either way the two spellings must differ, or a typo
+/// silently becomes non-enforcement. See `qqq_serve::limits::Limits` for why that
+/// distinction is load-bearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLimit {
+    /// The largest request body accepted, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
+    /// The largest number of requests allowed per window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_requests_per_window: Option<u32>,
+    /// The window, in seconds.
+    ///
+    /// Defaults to 60 when a request cap is set. **A zero window with a request cap is
+    /// rejected**, because it makes the limiter allow everything — see
+    /// `qqq_serve::limits::Limits::is_coherent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<u64>,
+}
+
+impl RequestLimits {
+    /// Whether this table is coherent, and why not when it is not.
+    ///
+    /// # Errors
+    ///
+    /// The first incoherent entry, named. A manifest is written by a human and validated
+    /// before a server binds, so the failure names the **tenant** as well as the rule: "one
+    /// of your limits is wrong" is not actionable in a table.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(d) = &self.default {
+            d.validate("`default`")?;
+        }
+        for (tenant, limit) in &self.per_tenant {
+            limit.validate(&format!("`{tenant}`"))?;
+        }
+        Ok(())
+    }
+}
+
+impl TenantLimit {
+    /// Validate one entry.
+    fn validate(&self, who: &str) -> Result<(), String> {
+        if self.max_requests_per_window.is_some() && self.window_seconds == Some(0) {
+            return Err(format!(
+                "the limits for {who} set a request cap with a zero window, which would \
+                 allow every request: the window is always considered elapsed, so the \
+                 count resets on every call"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The window as a duration, applying the documented default.
+    #[must_use]
+    pub const fn window(&self) -> std::time::Duration {
+        match self.window_seconds {
+            Some(s) => std::time::Duration::from_secs(s),
+            None => std::time::Duration::from_secs(60),
+        }
+    }
 }
 
 /// One entry in `[server] routes`.

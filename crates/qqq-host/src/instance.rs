@@ -1658,11 +1658,31 @@ mod tests {
         let engine = engine();
         let prepared = PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
 
-        // The same finite budget the async test uses, so the two are comparable
-        // and the difference between them is the entry point rather than the
-        // arithmetic.
+        // **A fuel budget that cannot run out**, so the epoch is the only thing that can end
+        // this call.
+        //
+        // A finite budget made this test flaky under parallel load, and the reason is worth
+        // stating: ~100 M fuel is what the synchronous path burns in the ~2.1 ms it takes
+        // the ticker to fire twice (see the measured table above). With a 200 M budget the
+        // two are in a **race**, and if the ticker thread is starved for a few milliseconds
+        // by a loaded machine, fuel wins and the trap is `FuelExhausted` instead of
+        // `EpochDeadlineExceeded`.
+        //
+        // That is a race in the *test*, not in the host: the host is forbidden from resuming
+        // a synchronous call, so both traps are correct answers to "why did this stop?" —
+        // only the epoch one is what this test is about. Removing the fuel ceiling removes
+        // the race rather than widening its window. A larger finite number would only make
+        // the flake rarer, which is worse than fixing or failing it.
+        //
+        // `u64::MAX` rather than a hypothetical "off" because `StoreLimits::fuel` is a plain
+        // `u64` and has no unlimited spelling. The guest is an infinite spin, so the epoch
+        // deadline is what ends it — and if the epoch machinery were broken, this test would
+        // hang rather than pass, which is the right failure for a control.
+        //
+        // The async twin keeps the finite budget, because there the comparison *is* the
+        // point: it must survive two dozen epoch expiries before fuel runs out.
         let mut budgets = limits();
-        budgets.fuel = EPOCH_TEST_FUEL;
+        budgets.fuel = u64::MAX;
 
         // `create`, not `create_async`: this is the control, and the whole
         // point is that the two constructors produce stores with different

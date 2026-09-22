@@ -40,6 +40,38 @@ qqq-serve = { path = "../qqq-serve", version = "0.0.0" }
 # is legal: `qqq-io` is position 4 in §4.3's order and `qqq-run` is position 7, so
 # the edge points downward.
 qqq-io = { path = "../qqq-io", version = "0.0.0" }
+# The benchmark harness (`CLI-013`). `qqq-bench` sits at position 1 in §4.3's
+# order, immediately above `qqq-core`, so an edge from `qqq-run` is downward and
+# legal.
+#
+# # Why the CLI depends on the harness rather than the reverse
+#
+# `PERF-002` alone would be a library that measures something nothing calls -- the
+# defect `§O-130` records four times over. `CLI-013` is what makes the ten
+# benchmarks reachable, and the two items are one piece of work. Keeping the
+# *command* in `qqq-run` and the *measurement* in `qqq-bench` leaves the harness
+# usable without a CLI, which is what `§9.1` means when it requires the benchmark
+# harness be open source and independently runnable.
+qqq-bench = { path = "../qqq-bench", version = "0.0.0" }
+# # Why the CLI needs a runtime of its own
+#
+# `qqqai bench` (CLI-013) drives qqq_bench::loadgen, which is async because the
+# Proposal's §9.1 requires the concurrency level be *disclosed per result* --
+# that is what holding a stated number of connections in flight means. `main` is
+# synchronous, so the command builds a runtime, runs the load generator on it,
+# and drops it.
+#
+# The alternative considered and rejected: making the whole CLI async. That would
+# be a large change to every command to serve one, and the commands that measure
+# nothing gain nothing from it.
+#
+# `qqq-io` already depends on Tokio, so this adds no crate to the graph and no
+# supply-chain surface -- only a direct edge, because a transitive dependency is
+# not nameable in Rust. `rt-multi-thread` is required rather than the
+# single-threaded runtime: a single-threaded *client* would become the bottleneck
+# at high concurrency, and the reported throughput would be the harness's ceiling
+# rather than the server's.
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasmtime = { workspace = true }

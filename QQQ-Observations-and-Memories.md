@@ -13237,4 +13237,196 @@ next.
 
 ---
 
+## §O-163 — The ten benchmarks are driven over a real socket, from the CLI
+
+`PERF-002` ("Implement the ten benchmarks listed in §9.1") and `CLI-013`
+("Implement `qqqai bench`") are **the same work**. That is not a coincidence to
+exploit; it is a requirement. `PERF-002` alone would be a library that measures
+something nothing calls — the defect shape `§O-130` records four times over, and
+the reason `CLI-013` and `PERF-002` must land together.
+
+### What `§9.1` and `§9.2` jointly force
+
+`§9.2` states several budgets **about a running server**:
+
+| Row | §9.2's own measurement method |
+|---|---|
+| Throughput, reference app, 8 cores | "`json` benchmark, 1 KB payload" |
+| p99 request latency, reference app, 10k RPS | "`tailp99`" |
+| Routed request overhead | "Host-side, excluding guest work" |
+
+None of those is observable in-process. So the harness **drives a listening
+socket**, and `qqqai bench` is therefore a *load generator*, not a microbenchmark
+runner. `Criterion` was already rejected for `PERF-001` on exactly this ground:
+it measures in-process function calls and has no concurrency concept, while `§9.1`
+requires the concurrency level be **disclosed** per result.
+
+### The three decisions, and what each rejects
+
+**1. The benchmark-to-route mapping is read from the guest, not invented by the
+harness.** `examples/orders-api/src/router.rs` already carries a `benchmark` field
+on every route, spelling each `§9.1` row exactly. The harness holds the ten names;
+the app says which path reaches each. A harness that hard-coded `/orders/42` would
+be a second copy of a fact the app owns, and the two would drift — the shape this
+round has already recorded twice (`§O-161`, `§O-162`).
+
+**2. Concurrency is per-benchmark, because the rows demand different shapes.**
+`§9.1`'s `multi` row is literally "saturate 8 cores", while `cold` is
+"instantiate and serve once" and is *meaningless* under load. A single global
+concurrency flag would either ruin `cold` or under-drive `multi`. Each workload
+declares its own, and the result carries it as `Concurrency`, which `PERF-001`
+already made a required field of `Methodology`.
+
+**3. `cold` measures what its row says, not what is easy.** The row is
+"instantiate and serve once". Measuring a warm connection would be measuring
+`hello` twice. So `cold` is `Warmup::None` with a stated justification — the case
+`PERF-001` already models explicitly, precisely so that "we deliberately did not
+warm up" cannot be confused with "we forgot to record it".
+
+### What is deliberately NOT claimed
+
+`PERF-010` (≥ 60k RPS) and `PERF-011` (≤ 2 ms p99 at 10k RPS) are stated against
+pinned hardware under sustained load. **A number produced on a developer machine
+over loopback is not that claim.** The harness will produce a measurement, compare
+it to the budget, and print the comparison — and `PERF-022`'s "what this does not
+measure" field will carry the environment caveat on every run, because that field
+is required and cannot be omitted.
+
+This is the honest reading of `§9.1`'s own warning that a benchmark without its
+methodology "is marketing". The methodology includes the machine, and the machine
+is in the result.
+
+### Why no `criterion` dependency
+
+Rejected for the same reason `PERF-001` rejected it, plus one specific to `PERF-002`:
+a load generator needs a **stated connection count and duration**, and it must
+report **percentiles over requests**, not samples over function calls. Adding
+`criterion` would mean adding a dependency whose abstraction does not match the
+thing being measured. The standard library plus `std::net` is sufficient and keeps
+`qqq-bench` free of a runtime.
+
+→ `crates/qqq-bench/src/workload.rs`, `crates/qqq-run/src/bench.rs`;
+`§9.1`, `§9.2`, `§O-160` (the harness contract), `§O-130` (unreachable features).
+
+---
+
+## §O-164 — One field, three types, and every failure was a real constraint
+
+Making `Workload::ALL` a `const` array forced `Warmup::None`'s `justification`
+field through three types in about ten minutes. Each fix was correct, and each
+exposed a constraint the previous type had been hiding. The sequence is worth
+recording because the temptation at every step was to reach for `#[allow]` or to
+give up on the `const` and use a `String`.
+
+| Type | Failure | What it actually taught |
+|---|---|---|
+| `String` | `String::from` is **not const-callable** | verified with a standalone probe: rustc rejects `<String as From<&str>>::from` in a const context with *"cannot call non-const associated function"*. A `const` table cannot hold owned data built by a non-const constructor. |
+| `&'static str` | `#[derive(Deserialize)]` requires `'de: 'static` | **This one is a soundness boundary, not an inconvenience.** A type that could fabricate a `'static` borrow out of parsed bytes would let a caller parse a short-lived buffer and hand out references that outlive it. Rust refused correctly. |
+| `Cow<'static, str>` | neither | The type that is true in both directions: a literal in the source stays `Borrowed` with no allocation, and a value that genuinely came from deserialization is `Owned`. |
+
+**The generalisable rule.** When a type change produces a *cascade* of errors, the
+cascade is usually the compiler walking you toward the one type that satisfies
+every constraint. The wrong response is to stop the cascade early with an
+`#[allow]`, or to abandon the requirement that started it (`const`) — both leave a
+type that compiles while stating something untrue about its data. `Cow` was not
+the first guess and was obviously correct once the second failure named the
+lifetime relationship.
+
+A second, smaller lesson from the same edit: `Workload` could not derive `Copy`,
+because `BenchmarkName::Other` owns a `String`. That is also correct rather than
+annoying — §9.1's ten rows are a closed set, but `PERF-002` deliberately allows an
+extension workload, and an extension's name cannot be a `&'static str`. `Clone` is
+the right bound, and taking it means the extension case stays supported.
+
+**And a third:** `Workload::find` returning `&'static Self` failed with *"cannot
+return value referencing temporary value"*, because a `const`'s value is a
+temporary at each use site. The fix was to promote the array to a **module-scope
+`static`** — an associated `static` in an `impl` block is not allowed, which was
+the next error in the same edit. The `const` remains (it is what makes
+`SPECIFICATION_COUNT` a compile-time fact), so there are now two names for one
+array, and a test asserts they are equal **element-wise** rather than only in
+length. Two names for one array is a duplication risk; the test is what makes it a
+checked one.
+
+→ `crates/qqq-bench/src/workload.rs`, `crates/qqq-bench/src/methodology.rs`;
+`.scratch/const_string_probe.rs` (the probe that settled the first failure);
+`§O-163` for the design these types serve.
+
+---
+
+## §O-165 — The function reported the head as the body, and the signature was the cause
+
+`parse_response` returned `io::Result<(u16, usize)>`. Its first real caller read it
+as `(status, head_len)` and computed `body_bytes = buf.len() - head_len`. The second
+element was the **body** length, so the harness subtracted the body from the total
+and reported the head as the body:
+
+```text
+thread 'one_request_against_a_real_listener_returns_a_sample' panicked:
+assertion `left == right` failed: the body is `ok`
+  left: 38
+ right: 2
+```
+
+38 is exactly the size of `HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n`. The
+server was correct, the parser was correct, and the arithmetic at the call site was
+nonsense.
+
+### Why the tests caught it, and why that is the transferable part
+
+The assertions were **exact byte counts**, not `> 0`:
+
+> `assert_eq!(sample.body_bytes, 2, "the body is \`ok\`");`
+
+A `> 0` assertion would have passed. Every `§9.1` workload would then have reported
+a body the size of its response head — a plausible-looking four-figure byte count
+for the `json` row that claims a 1 KB serialization, and the same number for the
+`hello` row that claims an empty response. Nothing else in the pipeline would have
+noticed, because a byte count is not compared against anything until a human reads
+the report.
+
+This is the second time this round that an exact-value assertion found a defect a
+threshold would have hidden, and it is the same argument `PERF-001` records for
+`Distribution::percentile` returning observed samples rather than interpolations:
+**the test must be able to state the property, not a proxy for it.**
+
+### The fix was in the signature, not the call site
+
+Correcting the arithmetic would have fixed this caller and left the next one to
+rediscover it. The return type became a named struct:
+
+```rust
+pub struct ResponseHead {
+    pub status: u16,
+    pub body_bytes: usize,
+}
+```
+
+Two adjacent `usize`-shaped facts with no names are what invited the swap; a
+compiler and a reviewer are equally blind to it, because both types are integers.
+The struct makes the mistake unrepresentable: there is no longer a second element to
+misread.
+
+This is the rule the session's invariants state as *an error reported at a call site
+is usually a mistake in the signature* — and the honest reading is that the rule is
+about **ambiguity**, not about blame. The signature was not "wrong"; it was
+*under-specified*, and the caller was the first to discover that by writing a bug
+the type system could not see.
+
+### The generalisable rules
+
+1. **A tuple of same-typed values is a naming failure wearing a type.** `(u16,
+   usize)` here, `(String, String)` in a hundred other places: if two fields could be
+   swapped and still compile, one of them needs a name.
+2. **Assert exact values in a parser test.** `> 0` and `is_some()` are proxies, and a
+   proxy passes for a wrong answer as readily as a right one.
+3. **When a call-site bug is found, ask whether the signature permitted it.** If it
+   did, the fix belongs there. Correcting only the caller leaves the trap armed.
+
+→ `crates/qqq-bench/src/loadgen.rs`, `crates/qqq-bench/tests/loadgen_socket.rs`;
+`.scratch/{probe_parse,diag_framing,fix_response_head_calls}.py`;
+`§O-164` for the same round's earlier type-driven failures.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

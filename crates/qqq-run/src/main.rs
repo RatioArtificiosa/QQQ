@@ -527,6 +527,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Init => dispatch_init(name, args, &mut out),
         CommandName::Dev => dispatch_dev(name, args, &mut out),
         CommandName::Serve => dispatch_serve(name, args, &mut out),
+        CommandName::Bench => dispatch_bench(name, args, &mut out),
         CommandName::Add => dispatch_add(name, args, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
@@ -1446,6 +1447,92 @@ fn dispatch_serve(
 /// This is also the only place the real grammar can be checked: `qqq-cap`
 /// cannot reach `qqq-pkg::semver::Requirement` because `qqq-pkg` depends on
 /// `qqq-cap`, so the manifest layer only shape-checks (`§O-033c`).
+/// Dispatch `qqqai bench`.
+///
+/// # Why this command needs no manifest
+///
+/// Every other lifecycle command loads `qqq.toml` because it operates *on* a
+/// project. `bench` operates on a *running server*: the target is an address, and
+/// the ten `§9.1` rows are a property of the runtime rather than of one app's
+/// configuration. Requiring a manifest would mean `qqqai bench --listen host:port`
+/// failed from a directory without one, which is exactly the case a user measuring
+/// a deployed service is in.
+///
+/// # Why the async runtime is built here rather than reused
+///
+/// The load generator is async because it holds a stated number of connections in
+/// flight, which is `§9.1`'s disclosure requirement. `main` is synchronous, so a
+/// runtime is constructed for this command and dropped at the end. It is
+/// multi-threaded and sized to the default, because a single-threaded runtime
+/// would make the *client* the bottleneck at high concurrency and the reported
+/// throughput would be the harness's ceiling rather than the server's.
+///
+/// # Why a missing target is a usage error and not a guess
+///
+/// The tempting default is `127.0.0.1:8080`. It was rejected: a benchmark that
+/// silently measured whatever happened to be listening would produce a *wrong
+/// number* for a *right-looking command*, and `§9.1`'s whole subject is that a
+/// benchmark without its methodology is marketing. Naming the target is the
+/// least a caller can do to make the result mean something.
+fn dispatch_bench(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match qqq_run::bench::options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let Some(target) = opts.target else {
+        let err = qqq_core::error::Error::new(
+            qqq_core::error::ErrorCode::McpArgumentInvalid,
+            "`qqqai bench` needs a target to measure",
+        )
+        .with_remediation(
+            "start the app with `qqqai serve --listen 127.0.0.1:8080`, then run \
+             `qqqai bench --listen 127.0.0.1:8080`",
+        );
+        let _ = out.emit_error(name, &err);
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let err = qqq_core::error::Error::new(
+                qqq_core::error::ErrorCode::InternalInvariantViolated,
+                format!("could not start the async runtime: {e}"),
+            )
+            .with_remediation("this is a QQQ bug; please report it");
+            let _ = out.emit_error(name, &err);
+            return ExitCode::from(exit::INTERNAL);
+        }
+    };
+
+    let outcome = runtime.block_on(qqq_run::bench::run(&opts, target));
+    match outcome {
+        Ok(document) => {
+            let _ = out.emit(&document);
+            if qqq_run::bench::should_fail(&document, opts.fail_on_miss) {
+                ExitCode::from(exit::FAILURE)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
 fn dispatch_add(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
     let parsed = match add_options(args) {
         Ok(p) => p,

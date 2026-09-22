@@ -88,15 +88,19 @@
 #![warn(missing_docs)]
 
 pub mod budget;
+pub mod loadgen;
 pub mod methodology;
 pub mod stats;
+pub mod workload;
 
 pub use budget::{Budget, BudgetError, Direction, Item, Measurement, Unit, Verdict};
+pub use loadgen::{Plan, RunResult, Sample};
 pub use methodology::{
     BenchmarkName, Concurrency, Environment, Methodology, MethodologyError, NonClaims, Pinning,
     Warmup,
 };
 pub use stats::{Distribution, Repetitions};
+pub use workload::{Shape, Workload};
 
 /// The URL `§9.1` requires be published with every result, so a reader can audit
 /// the harness rather than trust it.

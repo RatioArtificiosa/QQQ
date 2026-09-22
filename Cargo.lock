@@ -1372,6 +1372,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1444,6 +1445,7 @@ name = "qqq-run"
 version = "0.0.0"
 dependencies = [
  "qqq-abi",
+ "qqq-bench",
  "qqq-cap",
  "qqq-core",
  "qqq-host",
@@ -1452,6 +1454,7 @@ dependencies = [
  "qqq-serve",
  "serde",
  "serde_json",
+ "tokio",
  "wasmtime",
 ]
 

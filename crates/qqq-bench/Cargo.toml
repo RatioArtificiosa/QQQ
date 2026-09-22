@@ -31,11 +31,32 @@ workspace = true
 # graph, it slows every build of this crate, and `check_topology.py` would have
 # accepted an edge that does not exist.
 #
-# The consequence is that `qqq-bench` depends only on `serde`, so it can be used
-# to measure anything, including a future non-QQQ comparison (PERF-*) without
-# dragging in this project's internals.
+# The consequence is that `qqq-bench` depends only on `serde` and Tokio, so it can
+# be used to measure anything, including a future non-QQQ comparison (`PERF-*`)
+# without dragging in this project's internals.
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# # Why Tokio, and why this is not a new crate in the graph
+#
+# `PERF-002`'s workloads are driven over a **real socket** (`§O-163`): `§9.2`
+# states several budgets "at 10k RPS" against a running server, and none of those
+# is observable in-process. A load generator needs asynchronous connection handling
+# with a *stated* number of connections in flight, which is exactly what an async
+# runtime provides.
+#
+# Tokio is already a workspace dependency and is already in `Cargo.lock`, so this
+# adds no crate to the graph and no risk to the supply chain. `net` is the only
+# feature needed beyond what the workspace default carries.
+#
+# `criterion` was considered and rejected twice -- once in `PERF-001` for measuring
+# in-process calls with no concurrency concept, and again here because `§9.1`
+# requires the concurrency level be *disclosed per result*, which is a concept
+# Criterion does not have.
+tokio = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
+# A test needs to run the driver against a listener it controls, so the runtime
+# has to be constructible inside a `#[tokio::test]`.
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros"] }

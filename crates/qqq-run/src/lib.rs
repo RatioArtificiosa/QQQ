@@ -30,6 +30,8 @@
 
 pub mod audit;
 pub use audit::{AuditOutput, FindingOutput};
+pub mod bench;
+pub mod bench_output;
 pub mod build;
 pub mod commands;
 pub mod deps;

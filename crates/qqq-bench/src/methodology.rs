@@ -314,7 +314,41 @@ pub enum Warmup {
     None {
         /// Why no warmup. A cold-start row explains itself here; anything else
         /// needs a reason.
-        justification: String,
+        ///
+        /// # Why `&'static str` and not `String`
+        ///
+        /// It was a `String`, and making `Workload::ALL` a `const` array exposed
+        /// the cost: `String::from` is **not const-callable** — verified with a
+        /// standalone probe, which rustc rejects in a const context with *"cannot
+        /// call non-const associated function"*. So a `const` table of workloads
+        /// could not carry an owned justification.
+        ///
+        /// `&'static str` is also the more honest type. This is explanatory text a
+        /// programmer writes in the source; it is never assembled at run time from
+        /// user input, and a dynamically built justification would be a strange
+        /// thing to store in a benchmark's methodology. The borrow makes `Warmup`
+        /// cheaper to copy and lets the whole specification live in read-only
+        /// # Why `Cow<'static, str>` and not `String` or `&'static str`
+        ///
+        /// It was a `String`, and making `Workload::ALL` a `const` array exposed
+        /// the cost: `String::from` is **not const-callable** — verified with a
+        /// standalone probe, which rustc rejects in a const context with *"cannot
+        /// call non-const associated function"*. So a `const` table of workloads
+        /// could not carry an owned justification.
+        ///
+        /// A bare `&'static str` then failed a *different* way, and the failure is
+        /// worth recording because it is a real constraint rather than a
+        /// workaround: `#[derive(Deserialize)]` **cannot** produce a `&'static str`
+        /// from arbitrary input, because the borrowed data would have to outlive
+        /// the deserializer. Rust rejected the derive with *"requires that `'de`
+        /// must outlive `'static`"* — correctly. A type able to fabricate a
+        /// `'static` borrow from parsed bytes would be unsound.
+        ///
+        /// `Cow<'static, str>` is the type that is true in both directions: a
+        /// literal written in the source stays borrowed with no allocation, and a
+        /// value that genuinely came from deserialization is owned. That is exactly
+        /// the distinction the two failures were drawing, so the type now states it.
+        justification: std::borrow::Cow<'static, str>,
     },
     /// A fixed number of iterations were discarded before sampling began.
     Discard {
@@ -895,7 +929,7 @@ mod tests {
         let err = Methodology::new(
             env(),
             Warmup::None {
-                justification: "   ".to_owned(),
+                justification: std::borrow::Cow::Borrowed("   "),
             },
             Concurrency::Sequential,
             3,
@@ -911,7 +945,9 @@ mod tests {
         assert!(Methodology::new(
             env(),
             Warmup::None {
-                justification: "cold start: warming would measure the opposite".to_owned(),
+                justification: std::borrow::Cow::Borrowed(
+                    "cold start: warming would measure the opposite",
+                ),
             },
             Concurrency::Sequential,
             3,

@@ -89,6 +89,8 @@ pub mod conn;
 pub mod cors;
 pub mod h2;
 pub mod http1;
+/// The default metric set, per Proposal §10.2.
+pub mod metrics;
 pub mod response;
 pub mod route;
 pub mod server;

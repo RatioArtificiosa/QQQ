@@ -80,6 +80,12 @@ pub mod host_clock;
 pub mod host_crypto;
 pub mod host_secrets;
 pub mod instance;
+/// Calling a guest: the edge between the host and an application component.
+///
+/// Added with `§O-146`: nothing in production resolved a guest's
+/// `qqq:http/incoming-handler.handle`, so `qqqai serve` had no way to dispatch to a
+/// guest and every benchmark depended on a call nobody had scheduled.
+pub mod invoke;
 pub mod linker;
 pub mod metrics;
 pub mod pool;

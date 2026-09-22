@@ -11499,6 +11499,94 @@ and both now say so.
 
 → `crates/qqq-serve/src/limits.rs`, `tools/gen_schemas.py`, `schema/qqq-toml.schema.json`.
 
+## §O-140 — My own CI status script reported a failure that had not happened
+
+`ci_one.py` computed a job's state as `j['conclusion'] or j['status']` and treated anything that
+was not `success`/`skipped`/`neutral` as `BAD`. A still-running job has **`conclusion: null`**
+and `status: "in_progress"`, so the expression selected the string `"in_progress"` and the script
+printed:
+
+    BAD Rust (windows-latest)
+    FAILING: Rust (windows-latest)
+
+**Twenty seconds later the same run finished and all 11 jobs were green.** There was no failure.
+The script — the instrument built specifically to stop me trusting a green suite without checking
+— manufactured a red out of a job that had not finished deciding.
+
+This is `§O-129`/`§O-124`'s shape once more, and the more uncomfortable version of it because the
+instrument is mine and the cost is asymmetric: a false **green** hides a defect, but a false
+**red** trains me to distrust the check and eventually to wave one through. A verifier that
+over-reports is a verifier that gets ignored.
+
+Fixed by giving "not yet decided" its own state instead of folding it into the verdict: `None`
+prints `...` with `(in progress)`, and the run as a whole returns exit **3** — a distinct code
+meaning *ask again*, not *failed*. Verified by reading the same commit again after it completed:
+`FAILING: none`, exit 0.
+
+**The rule:** a tri-state must not be collapsed into a boolean by an `or`. `null` is not `false`.
+
+---
+
+## §O-141 — I wrote a gap into the checklist that was not true, and checked it one step later
+
+Ticking `SRV-017` I wrote:
+
+> `SRV-015` (gRPC) and `SRV-014` (HTTP/3) remain unimplemented, so a manifest declaring those
+> transports would produce a document that does not mention them — the command reports the
+> missing transport rather than silently emitting an incomplete one.
+
+There is no transport to declare: a grep for `grpc|http3|h3|transport` in `crates/qqq-cap/src/manifest.rs`
+returns **nothing**. The manifest has no transport field. So the sentence invented a feature, and
+then claimed the command handled its absence — a citation that looked like evidence.
+
+Checked immediately after writing it, because writing it is what made me want to check. The
+corrected entry says the manifest has no transport field, dates the claim to a grep, and states
+the real risk: *when* a transport is added, this command must learn about it or it will describe a
+subset without saying so.
+
+I also verified the accompanying `auth` claim the same way (`grep auth|security openapi.rs` — the
+only two hits are the words inside prose), because the first false statement was in the same
+sentence as a true one, and sharing a paragraph is not sharing a warrant.
+
+**The rule:** a "Gap named" line is a factual claim about the code, not a disclaimer. It needs the
+same grep as any other claim. Prose in a checklist entry is still evidence-shaped.
+
+---
+
+## §O-142 — The OpenAPI document is generated from the manifest, and that is a correctness argument
+
+`qqqai openapi` (`SRV-017`) reads `Manifest::server.routes` rather than starting a server and
+introspecting it, even though §5.2 says "of a running app".
+
+The reason is that two descriptions of the same thing drift, and the one produced from the live
+process is the one that drifts **silently**: it describes whatever that process is serving —
+a stale build, a route behind a flag, a half-written manifest — and a client generated from it
+fails at runtime in a way nobody can trace to the document.
+
+Generating from the route table the server binds makes the document and the serving **the same
+fact**. It also runs in CI with no port, no build and no network, which is what makes the tests
+deterministic rather than flaky.
+
+**Two deliberate refusals to be useful:**
+
+- **No schemas.** The manifest declares no request or response types — the handler is a guest
+  whose interface is a WIT world. Every operation carries a generic 200 and `x-qqq-handler`.
+  An invented schema would serve code generators better and be wrong.
+- **`CONNECT` is an error, not an omission.** It is in the manifest's method set and has no
+  OpenAPI operation object. Dropping it would make the document say the app does not answer
+  `CONNECT`, which is false about a route that is exposed. Refusing understates nothing.
+
+`path_template` transforms each segment and rejoins. The first version accumulated into a String
+and pushed a separator for the empty leading segment *and* for the prefix check, so `/orders`
+became `//orders` — 10 tests failed on a key that looked almost right. There is no accumulator to
+get wrong now, which is a stronger statement than "it is correct".
+
+Measured: 14 unit tests, 4 CLI tests against the real binary, 3 behaviours fault-injected
+(placeholder rewrite, `CONNECT` refusal, version constant) and all three observed red.
+
+---
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

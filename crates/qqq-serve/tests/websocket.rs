@@ -57,33 +57,50 @@ struct Server {
 
 impl Server {
     async fn start(ws: Arc<dyn WebSocketHandler>) -> Self {
-        let addr = free_addr();
-        let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
-        let shutdown = Shutdown::new();
-        let config = ServerConfig::for_addr(listen);
-        let local = shutdown.clone();
-        tokio::spawn(async move {
-            if let Err(e) = serve(
-                config,
-                table(),
-                Dispatch::flat(flat_handler()).with_websocket("ws", ws),
-                local,
-                Logger::new(Format::Json, Level::Error),
-            )
-            .await
-            {
-                eprintln!("server stopped early: {}", e.render());
-            }
-        });
+        // Retried, because between `free_addr` dropping its listener and `serve` binding the
+        // port, another test in this process -- or another process on the runner -- can take
+        // it. That happened in CI: `could not bind 127.0.0.1:57009`, after 405 seconds of
+        // waiting on a port someone else owned. Waiting cannot help; a **fresh port** can.
+        for _ in 0..16 {
+            let addr = free_addr();
+            let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
+            let shutdown = Shutdown::new();
+            let config = ServerConfig::for_addr(listen);
+            let local = shutdown.clone();
+            // Cloned per attempt: the task takes ownership, and a retry needs another one.
+            let ws = Arc::clone(&ws);
+            let probe = tokio::spawn(async move {
+                if let Err(e) = serve(
+                    config,
+                    table(),
+                    Dispatch::flat(flat_handler()).with_websocket("ws", ws),
+                    local,
+                    Logger::new(Format::Json, Level::Error),
+                )
+                .await
+                {
+                    eprintln!("server stopped early: {}", e.render());
+                }
+            });
 
-        let s = Self { addr, shutdown };
-        for _ in 0..200 {
-            if TcpStream::connect(s.addr).await.is_ok() {
-                return s;
+            let s = Self { addr, shutdown };
+            for _ in 0..200 {
+                if TcpStream::connect(s.addr).await.is_ok() {
+                    return s;
+                }
+                // The task finishing means the bind failed, so waiting is pointless.
+                if probe.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            s.shutdown.signal();
+            let _ = probe.await;
         }
-        panic!("the server never accepted a connection on {}", s.addr);
+        // Every attempt lost the port race, which means something is badly wrong: 16 fresh
+        // ephemeral ports in a row is not bad luck. `bind_free` explains the race this
+        // retries around.
+        panic!("could not bind a server after 16 attempts on 16 different ports");
     }
 
     /// Connect and send a WebSocket upgrade request, returning the live stream.

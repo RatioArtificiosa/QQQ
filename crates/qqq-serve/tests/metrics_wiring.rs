@@ -66,40 +66,53 @@ struct Server {
 
 impl Server {
     async fn start() -> Self {
-        let addr = free_addr();
-        let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
-        let shutdown = Shutdown::new();
-        let mut config = ServerConfig::for_addr(listen);
-        let metrics = Arc::new(HttpMetrics::new());
-        config.metrics = Some(Arc::clone(&metrics));
-        let local = shutdown.clone();
+        // Retried, because between `free_addr` dropping its listener and `serve` binding the
+        // port, another test in this process -- or another process on the runner -- can take
+        // it. That happened in CI: `could not bind 127.0.0.1:57009`, after 405 seconds of
+        // waiting on a port someone else owned. Waiting cannot help; a **fresh port** can.
+        for _ in 0..16 {
+            let addr = free_addr();
+            let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
+            let shutdown = Shutdown::new();
+            let mut config = ServerConfig::for_addr(listen);
+            let metrics = Arc::new(HttpMetrics::new());
+            config.metrics = Some(Arc::clone(&metrics));
+            let local = shutdown.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = serve(
-                config,
-                table(),
-                Dispatch::flat(handler()),
-                local,
-                Logger::new(Format::Json, Level::Error),
-            )
-            .await
-            {
-                eprintln!("server stopped early: {}", e.render());
-            }
-        });
+            let probe = tokio::spawn(async move {
+                if let Err(e) = serve(
+                    config,
+                    table(),
+                    Dispatch::flat(handler()),
+                    local,
+                    Logger::new(Format::Json, Level::Error),
+                )
+                .await
+                {
+                    eprintln!("server stopped early: {}", e.render());
+                }
+            });
 
-        let s = Self {
-            addr,
-            shutdown,
-            metrics,
-        };
-        for _ in 0..200 {
-            if TcpStream::connect(s.addr).await.is_ok() {
-                return s;
+            let s = Self {
+                addr,
+                shutdown,
+                metrics,
+            };
+            for _ in 0..200 {
+                if TcpStream::connect(s.addr).await.is_ok() {
+                    return s;
+                }
+                // The task finishing early means the bind failed; waiting cannot help.
+                if probe.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            s.shutdown.signal();
+            let _ = probe.await;
         }
-        panic!("the server never accepted a connection on {}", s.addr);
+        // Sixteen fresh ephemeral ports in a row is not bad luck.
+        panic!("could not bind a server after 16 attempts on 16 different ports");
     }
 
     /// Send one raw request on its own connection and read the whole response.

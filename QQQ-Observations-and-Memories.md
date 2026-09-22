@@ -11442,4 +11442,63 @@ suite**, which is the argument for the review existing at all.
 
 ---
 
+### §O-139 — The defect was in the repair: a sweep that judged every tenant by the wrong window
+
+**What happened.** Last round's fix for "a full window map disables rate limiting permanently"
+added a reclaim sweep. CodeRabbit found that the sweep is wrong:
+
+```rust
+windows.retain(|_, w| now.saturating_duration_since(w.started) < limits.window);
+```
+
+`limits` is the limits of the tenant that happened to **arrive**, not of the entry being judged.
+With one uniform window that is invisible. With per-tenant windows it is wrong in both
+directions: a tenant on a 5-second window whose entry is 10 seconds stale is **kept** whenever
+the arriving tenant has a 60-second window — so the reclamation this exists for does not happen,
+and the map stays full, which is exactly the failure the sweep was added to prevent.
+
+**So the previous fix was half a fix.** That is the part worth recording: the defect was in the
+*repair*, one round after recording the original. The original was found by a test; this one by
+a reviewer; and the reason the test missed it is that the test's tenants all shared one window.
+A test written for the failure mode it was written against cannot see a second failure mode in
+the same code.
+
+*The generalisable rule:* **when a value is looked up per-key, the lookup must be inside the
+per-key scope.** `retain(|_, w| ...)` discards the key, so anything it needs *about that entry*
+has to be resolved through the closure's key parameter — and writing `|_|` is the moment the
+question should be asked. The fix resolves each entry's own limits and passes the key through.
+
+**The same fix also merged two definitions of "expired".** The sweep and the rollover both asked
+"has this window elapsed?", written twice. Two copies of a comparison like that drift, and here
+the drift is severe: if the sweep thinks an entry is live while the rollover thinks it expired, a
+tenant is evicted and immediately re-created with a full allowance — **a rate limiter that resets
+itself**. Both now call `window_is_active`, for the same reason `act_on_poll` is the only
+authority on connection deadlines.
+
+**Fault-injected:** restoring the arriving-window version fails the new per-tenant-window test
+with "the arriving tenant must be tracked and then limited".
+
+**A schema that agreed with everything (major, real).** `gen_schemas.py` emitted
+`{"additionalProperties": true}` for every `BTreeMap`, so `per_tenant.acme = "nonsense"`
+validated — as did `dependencies.serde = 42`, which had been true since those fields were
+written. The keys must stay dynamic; the **values** have a type. Fixed in the generator by
+splitting the map's type parameters at the **top-level** comma (the key and value can each
+contain one: `BTreeMap<String, Vec<u8>>`) and recursing into the value.
+
+That surfaced a second thing: `Dependency` is an untagged enum the generator does not collect,
+so there is no `$def` and a `$ref` to it would be a schema no validator can use — worse than a
+permissive one, because it fails on a **correct** manifest. So `UnknownType` is now a named
+exception and the map branch falls back to permissive **only for the types it cannot describe**,
+while constraining the ones it can. Verified in the output: `per_tenant` now refs `TenantLimit`;
+`dependencies` stays permissive, and honestly so rather than by accident.
+
+**Two documentation findings, both `§O-124`'s shape again.** The manifest docs and the
+observations entry said `Some(0)` "refuses everything". The fields differ — a zero *body* cap
+accepts an empty body and rejects any non-empty one; a zero *request* cap refuses every request —
+and both now say so.
+
+→ `crates/qqq-serve/src/limits.rs`, `tools/gen_schemas.py`, `schema/qqq-toml.schema.json`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

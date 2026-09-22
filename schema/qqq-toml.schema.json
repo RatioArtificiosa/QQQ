@@ -470,7 +470,9 @@
           "description": "The cap applied to a tenant with no entry in `per_tenant`. Absent means **no limits** for such a tenant, which is the same as declaring no `[server.limits]` at all — so a manifest that lists only named tenants does not accidentally constrain everybody else."
         },
         "per_tenant": {
-          "additionalProperties": true,
+          "additionalProperties": {
+            "$ref": "#/$defs/TenantLimit"
+          },
           "description": "Per-tenant overrides, keyed by tenant name.",
           "type": "object"
         }

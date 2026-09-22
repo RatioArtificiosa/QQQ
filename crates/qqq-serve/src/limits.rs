@@ -208,6 +208,22 @@ struct Window {
     count: u32,
 }
 
+/// Whether a window that began at `started` is still running.
+///
+/// # Why this is one function rather than two comparisons
+///
+/// The sweep and the rollover both ask "has this window expired?", and they **must** answer
+/// identically: if the sweep considers an entry live while the rollover considers it expired,
+/// a tenant is evicted and immediately re-created with a full allowance, which is a rate
+/// limiter that resets itself. Writing the comparison twice is how those two answers drift
+/// apart — the same argument `act_on_poll` makes for being the only authority on the
+/// connection's deadlines.
+///
+/// `>=` rather than `>`: a window of exactly N seconds has elapsed at N seconds.
+fn window_is_active(started: Instant, window: Duration, now: Instant) -> bool {
+    now.saturating_duration_since(started) < window
+}
+
 /// Per-tenant limits and their accounting.
 ///
 /// Interior mutability behind a `Mutex` rather than atomics: the window is a **pair** of
@@ -338,7 +354,17 @@ impl TenantLimits {
         // hot path. Expiry is `elapsed >= window`, the same test the rollover uses — a
         // single definition rather than two that could drift.
         if !windows.contains_key(tenant) && windows.len() >= self.max_tracked {
-            windows.retain(|_, w| now.saturating_duration_since(w.started) < limits.window);
+            // Each tracked tenant expires against **its own** window, which a first version got
+            // wrong: the sweep used the *incoming* tenant's window for every entry. With
+            // per-tenant windows that is meaningless -- a 5-second tenant's stale entry was
+            // kept whenever the arriving tenant happened to have a 60-second one, so the
+            // reclamation this exists for did not happen and the map stayed full.
+            let limits_of = &self.limits;
+            let fallback = self.fallback;
+            windows.retain(|name, w| {
+                let window = limits_of.get(name).copied().unwrap_or(fallback).window;
+                window_is_active(w.started, window, now)
+            });
             // Still full after reclaiming: every tracked tenant is inside its window. Only
             // now does a new tenant go untracked, and the body cap — which needs no state —
             // still applies to it.
@@ -355,7 +381,7 @@ impl TenantLimits {
         // The rollover is **lazy**: a window expires when the next request arrives rather
         // than on a timer. A timer would be a second authority on time, and an expired window
         // for a tenant that has gone away is state worth reclaiming only when next touched.
-        if now.saturating_duration_since(entry.started) >= limits.window {
+        if !window_is_active(entry.started, limits.window, now) {
             entry.started = now;
             entry.count = 0;
         }
@@ -691,6 +717,76 @@ mod tests {
             "the new tenant must be **limited**: its window must have been tracked rather \
              than skipped because the map was full"
         );
+    }
+
+    /// **Each tracked tenant expires against its own window, not the arriving tenant's.**
+    ///
+    /// The defect this measures: the reclaim sweep used the **incoming** tenant's window for
+    /// every tracked entry. With per-tenant windows that is meaningless — a short-window
+    /// tenant's stale entry was kept whenever the arriving tenant happened to have a long
+    /// window, so the reclamation never happened and the map stayed full.
+    ///
+    /// The setup is the one that exposes it: a tenant with a **short** window fills the map,
+    /// and a tenant with a **long** window then arrives and triggers the sweep. If the sweep
+    /// uses the arriving tenant's window, nothing is reclaimed.
+    #[test]
+    fn each_tenant_expires_against_its_own_window() {
+        let short = Limits::with_rate(1, Duration::from_secs(5));
+        let mut l = TenantLimits::uniform(short);
+        l.max_tracked = 2;
+        let t0 = Instant::now();
+
+        // Two tenants with the 5-second window fill the map.
+        assert!(l.check_and_record("a", t0).is_ok());
+        assert!(l.check_and_record("b", t0).is_ok());
+        assert_eq!(l.tracked(), 2, "the map is full");
+
+        // A third tenant with a **60-second** window arrives 10 seconds later. The two
+        // tracked entries expired at 5 seconds, so both must be reclaimed — but only if the
+        // sweep consults *their* window rather than the arriving tenant's.
+        let long = Limits::with_rate(1, Duration::from_secs(60));
+        let mut l2 = TenantLimits::new(
+            [("long".to_owned(), long)],
+            short, // the fallback remains the short window
+        );
+        l2.max_tracked = 2;
+        let t1 = t0;
+        assert!(l2.check_and_record("a", t1).is_ok());
+        assert!(l2.check_and_record("b", t1).is_ok());
+        assert_eq!(l2.tracked(), 2);
+
+        let later = t1 + Duration::from_secs(10);
+        assert!(l2.check_and_record("long", later).is_ok());
+
+        // `long` must be tracked and limited: the sweep reclaimed the two expired entries,
+        // which it can only do by asking *their* limits.
+        assert!(
+            l2.check_and_record("long", later).is_err(),
+            "the arriving tenant must be tracked and then limited -- which requires the \
+             sweep to have reclaimed the expired entries against their own 5-second window"
+        );
+    }
+
+    /// **The sweep and the rollover agree on what "expired" means.**
+    ///
+    /// They must, or a tenant is evicted and immediately re-created with a full allowance:
+    /// a rate limiter that resets itself. Both now call `window_is_active`, and this asserts
+    /// the boundary they share.
+    #[test]
+    fn the_sweep_and_the_rollover_agree() {
+        let w = Duration::from_secs(10);
+        let t0 = Instant::now();
+
+        assert!(window_is_active(t0, w, t0), "a fresh window is active");
+        assert!(
+            window_is_active(t0, w, t0 + Duration::from_secs(9)),
+            "one second short is still active"
+        );
+        assert!(
+            !window_is_active(t0, w, t0 + Duration::from_secs(10)),
+            "exactly the window is expired -- `>=`, not `>`"
+        );
+        assert!(!window_is_active(t0, w, t0 + Duration::from_secs(11)));
     }
 
     /// **A tenant already tracked keeps being limited past the ceiling.**

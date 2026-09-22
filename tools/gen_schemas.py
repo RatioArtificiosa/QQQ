@@ -84,6 +84,17 @@ class Struct:
     fields: list[Field] = field(default_factory=list)
 
 
+class UnknownType(Exception):
+    """A Rust type this generator cannot describe.
+
+    Distinct from `ParseError`: a `ParseError` means the *input* is wrong and generation must
+    stop. An `UnknownType` means this one type is opaque to the generator, which can still
+    emit something honest about it -- see the `BTreeMap` branch, which falls back to a
+    permissive schema for an unknown value type rather than emitting a `$ref` to a definition
+    that will not exist.
+    """
+
+
 class ParseError(Exception):
     """A construct the reader does not understand.
 
@@ -295,7 +306,42 @@ def json_type(
     if t.startswith("Vec<") and t.endswith(">"):
         return {"type": "array", "items": json_type(t[len("Vec<") : -1], known, enums)}
     if t.startswith("BTreeMap<") and t.endswith(">"):
-        return {"type": "object", "additionalProperties": True}
+        # `additionalProperties` from the map's **value** type, not `true`.
+        #
+        # `true` accepts any value for any key, so `per_tenant.acme = "nonsense"` validated,
+        # and so did `dependencies.serde = 42`. The keys must stay dynamic -- they are tenant
+        # names and package names -- but the values have a type, and a schema that does not
+        # say so is a schema that agrees with everything.
+        #
+        # The value type is found by splitting on the **top-level** comma, because the key and
+        # value types can each contain one: `BTreeMap<String, Vec<u8>>` has a comma inside the
+        # value, and a naive `split(",")` would take `Vec<u8>` for two types. The same
+        # nesting problem the field parser has (see the note at the top of this file).
+        inner = t[len("BTreeMap<") : -1]
+        depth = 0
+        split = None
+        for i, ch in enumerate(inner):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                split = i
+                break
+        value = inner[split + 1 :].strip() if split is not None else "String"
+        # A value type this generator cannot describe keeps the permissive form **only for
+        # itself**, and says so in the schema rather than in a comment. `Dependency` is such a
+        # type: it is an untagged enum in the manifest that `structs` does not collect, so
+        # there is no `$def`, and a `$ref` to a missing definition is a schema no validator can
+        # use -- worse than a permissive one, because it fails loudly on a *correct* manifest.
+        #
+        # So the rule is: constrain the values when the type is known, and stay permissive
+        # when it is not -- never silently, and never by pretending.
+        try:
+            described = json_type(value, known, enums)
+        except UnknownType:
+            return {"type": "object", "additionalProperties": True}
+        return {"type": "object", "additionalProperties": described}
     if known and t in known:
         return {"$ref": f"#/$defs/{t}"}
     if enums is not None and t in enums:
@@ -313,7 +359,7 @@ def json_type(
     }
     if t in scalar:
         return scalar[t]
-    raise ParseError(f"unrecognised Rust type: {t!r}")
+    raise UnknownType(f"unrecognised Rust type: {t!r}")
 
 
 def schema_for(

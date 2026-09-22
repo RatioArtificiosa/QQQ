@@ -76,6 +76,8 @@ pub enum CommandName {
     Lint,
     /// Static capability report.
     Inspect,
+    /// An `OpenAPI` 3.0 description of the app's routes.
+    Openapi,
     /// Full security posture.
     Audit,
     /// Verify signature and attestation.
@@ -120,6 +122,7 @@ impl CommandName {
             Self::Fmt,
             Self::Lint,
             Self::Inspect,
+            Self::Openapi,
             Self::Audit,
             Self::Verify,
             Self::Caps,
@@ -153,6 +156,7 @@ impl CommandName {
             Self::Fmt => "fmt",
             Self::Lint => "lint",
             Self::Inspect => "inspect",
+            Self::Openapi => "openapi",
             Self::Audit => "audit",
             Self::Verify => "verify",
             Self::Caps => "caps",
@@ -195,6 +199,7 @@ impl CommandName {
             Self::Trace => "Stream live traces from a running application",
             Self::Doctor => "Diagnose the environment and suggest fixes",
             Self::Mcp => "Run as a Model Context Protocol server for AI agents",
+            Self::Openapi => "Emit an OpenAPI 3.0 description of the app's routes",
             Self::Schema => "Emit JSON Schema for every machine-readable surface",
             Self::Migrate => "Analyse a Node, Bun or Deno project and produce a migration plan",
             Self::Version => "Print the version and exit",
@@ -609,6 +614,35 @@ static SCHEMA_FOR_DOCTOR: std::sync::LazyLock<serde_json::Value> = std::sync::La
     })
 });
 
+/// The payload schema for `qqqai openapi`.
+///
+/// # Why `document` is an object and not a string
+///
+/// The command can either print the document or write it to a file. When it prints, the
+/// document is in `document` as a nested JSON value -- **not** as a string containing JSON.
+/// A string would force every consumer to parse twice, and a consumer that forgot would see a
+/// quoted blob where it expected an object.
+///
+/// `out` is `null` when nothing was written, which is a different fact from an empty path.
+static SCHEMA_FOR_OPENAPI: std::sync::LazyLock<serde_json::Value> =
+    std::sync::LazyLock::new(|| {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "openapi": {"type": "string"},
+                "title": {"type": "string"},
+                "version": {"type": "string"},
+                "path_count": {"type": "integer", "minimum": 0},
+                "operation_count": {"type": "integer", "minimum": 0},
+                "out": {"type": ["string", "null"]},
+                "document": {"type": "object"}
+            },
+            "required": [
+                "openapi", "title", "version", "path_count", "operation_count", "document"
+            ]
+        })
+    });
+
 /// Build the schema registry.
 ///
 /// # Exhaustiveness
@@ -654,6 +688,11 @@ pub fn command_schemas() -> Vec<CommandSchema> {
             | CommandName::Help => serde_json::json!({"type": "object"}),
             CommandName::Schema => SCHEMA_FOR_SCHEMA.clone(),
             CommandName::Doctor => SCHEMA_FOR_DOCTOR.clone(),
+            // Described rather than permissive: this command's payload is settled -- the
+            // OpenAPI document and where it went -- and a consumer reading the envelope needs
+            // both. Joining the permissive group would say "we have not decided" about a shape
+            // that is decided.
+            CommandName::Openapi => SCHEMA_FOR_OPENAPI.clone(),
         }
     }
 

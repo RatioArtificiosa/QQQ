@@ -36,6 +36,8 @@ pub mod deps;
 pub mod dev;
 pub mod install;
 pub mod manifest_loader;
+/// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.
+pub mod openapi;
 pub mod output;
 pub mod run;
 /// `qqqai new` — the scaffold generator.

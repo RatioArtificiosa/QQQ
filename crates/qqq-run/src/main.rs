@@ -287,6 +287,7 @@ const HELP_GROUPS: [(&str, &[CommandName]); 5] = [
         "Inspect and trust",
         &[
             CommandName::Inspect,
+            CommandName::Openapi,
             CommandName::Audit,
             CommandName::Verify,
             CommandName::Caps,
@@ -517,6 +518,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Caps => with_manifest(name, &mut out, args, |loaded| {
             Ok(qqq_run::commands::caps(loaded))
         }),
+        CommandName::Openapi => dispatch_openapi(name, args, &mut out),
         CommandName::Inspect => dispatch_inspect(name, args, &mut out),
         CommandName::Audit => dispatch_audit(name, args, &mut out),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
@@ -940,6 +942,125 @@ fn dispatch_new(name: CommandName, args: &[String], out: &mut Output<std::io::St
             ExitCode::from(code)
         }
     }
+}
+
+/// `qqqai openapi [--out <file>]`.
+///
+/// # Why `--out` writes the **document**, not the envelope
+///
+/// The file is meant to be read by an `OpenAPI` tool — a client generator, a mock server, an API
+/// browser. A tool handed the QQQ envelope would find `{"openapi": ..., "document": {...}}` and
+/// no `paths` at the top level, and would reject it. So the file gets the document and stdout
+/// gets the envelope, and the two are **different by design**.
+///
+/// A user who pipes the command gets the envelope, which carries the document under
+/// `document`; a user who passes `--out` gets a file their `OpenAPI` tool can open.
+fn dispatch_openapi(
+    name: qqq_run::CommandName,
+    args: &[String],
+    out: &mut qqq_run::output::Output<std::io::Stdout>,
+) -> ExitCode {
+    // `--out <file>` and `--out=<file>`, the two spellings every CLI accepts. A bare `--out`
+    // with nothing after it is a usage error rather than a silent write to a file named `--`,
+    // which is the mistake this shape prevents.
+    let mut target: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(v) = a.strip_prefix("--out=") {
+            target = Some(v.to_owned());
+        } else if a == "--out" || a == "-o" {
+            // `let ... else`, not a `match` with one meaningful arm: a bare `--out` is a
+            // usage error rather than a silent write to a file named `--`, and the shape says
+            // so in one line instead of seven.
+            let Some(v) = args.get(i + 1) else {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`--out` needs a file path".to_owned(),
+                )
+                .with_remediation("write `--out openapi.json`");
+                let _ = out.emit_error(name, &err);
+                return ExitCode::from(exit::USAGE);
+            };
+            target = Some(v.clone());
+            i += 1;
+        } else {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("unknown argument `{a}` for `openapi`"),
+            )
+            .with_remediation("`openapi` accepts --out <file> and nothing else");
+            let _ = out.emit_error(name, &err);
+            return ExitCode::from(exit::USAGE);
+        }
+        i += 1;
+    }
+
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::HostResourceExhausted,
+                "could not determine the working directory".to_owned(),
+            )
+            .with_cause(e.to_string());
+            let _ = out.emit_error(name, &err);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, None) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    let mut payload = match qqq_run::commands::openapi(&loaded) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    if let Some(path) = &target {
+        // Rendered from the **document**, not from the envelope -- see this function's
+        // documentation for why the two differ.
+        //
+        // Serialized from `payload.document` rather than by round-tripping back through
+        // `Document`: that would need `Deserialize` on a type that is deliberately write-only,
+        // and a failed round-trip would have written an **empty** file and reported success.
+        let mut rendered = match serde_json::to_string_pretty(&payload.document) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::InternalInvariantViolated,
+                    "the OpenAPI document could not be rendered".to_owned(),
+                )
+                .with_cause(e.to_string());
+                let _ = out.emit_error(name, &err);
+                return ExitCode::from(exit::INTERNAL);
+            }
+        };
+        rendered.push('\n');
+        if let Err(e) = std::fs::write(path, rendered) {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::HostResourceExhausted,
+                format!("could not write `{path}`"),
+            )
+            .with_cause(e.to_string());
+            let _ = out.emit_error(name, &err);
+            return ExitCode::from(exit::USAGE);
+        }
+        payload.out = Some(path.clone());
+    }
+
+    // `emit` takes only the value: the command name is derived from `CommandOutput::command`,
+    // so the envelope and the payload cannot disagree about which command produced them.
+    let _ = out.emit(&payload);
+    ExitCode::from(exit::OK)
 }
 
 /// Decode `qqqai new`'s own flags.

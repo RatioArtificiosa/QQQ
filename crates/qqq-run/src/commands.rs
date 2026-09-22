@@ -331,6 +331,128 @@ pub fn caps(loaded: &LoadedManifest) -> CapsOutput {
 }
 
 // ---------------------------------------------------------------------------
+// openapi
+// ---------------------------------------------------------------------------
+
+/// The result of `qqqai openapi`.
+///
+/// # Why the document is embedded and not just counted
+///
+/// The JSON envelope is what an agent or a front-end consumes, and the answer to "give me the
+/// `OpenAPI` description" is **the description**. A payload of counts and a path would force
+/// every consumer to read the file back, and one that could not — a sandboxed agent, a pipe
+/// with no filesystem — would have been handed a receipt instead of the thing.
+///
+/// `document` is the parsed value, not a string of JSON: a string would make each consumer
+/// parse twice and the one that forgot would find a quoted blob.
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenapiOutput {
+    /// The spec version emitted.
+    pub openapi: String,
+    /// The project name.
+    pub title: String,
+    /// The project version.
+    pub version: String,
+    /// How many paths the document describes.
+    pub path_count: usize,
+    /// How many operations it describes.
+    pub operation_count: usize,
+    /// Where the document was written, or `None` when it was only printed.
+    ///
+    /// `None` and an empty string are different facts: the first means nothing was written, the
+    /// second would mean something tried to write to nowhere.
+    pub out: Option<String>,
+    /// The document itself.
+    pub document: serde_json::Value,
+}
+
+impl CommandOutput for OpenapiOutput {
+    fn command(&self) -> CommandName {
+        CommandName::Openapi
+    }
+
+    fn summary(&self) -> String {
+        // As with `caps` and `inspect`: in human format this function *is* the output. It
+        // therefore carries the **routes**, because a description of an app whose paths the
+        // reader cannot see is a receipt, and the user ran the command to see the surface.
+        let mut out = format!(
+            "{} {}: {} path{}, {} operation{}, OpenAPI {}\n",
+            self.title,
+            self.version,
+            self.path_count,
+            if self.path_count == 1 { "" } else { "s" },
+            self.operation_count,
+            if self.operation_count == 1 { "" } else { "s" },
+            self.openapi
+        );
+        if let Some(paths) = self.document.get("paths").and_then(|p| p.as_object()) {
+            for (path, item) in paths {
+                let methods: Vec<&str> = [
+                    "get", "post", "put", "patch", "delete", "head", "options", "trace",
+                ]
+                .into_iter()
+                .filter(|m| item.get(*m).is_some())
+                .collect();
+                let _ = writeln!(out, "  {:<7} {}", methods.join(",").to_uppercase(), path);
+            }
+        }
+        match &self.out {
+            Some(p) => {
+                let _ = write!(out, "\nWritten to {p}\n");
+            }
+            None => {
+                let _ = write!(out, "\nNothing written; pass --out <file> to save it.\n");
+            }
+        }
+        out
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        // Serialized from `self`, so the envelope and the struct cannot drift. The schema in
+        // `output.rs` describes exactly these fields.
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
+/// Generate the `OpenAPI` document for a loaded manifest.
+///
+/// # Errors
+///
+/// Propagated from [`crate::openapi::document`] — a route the spec cannot express, or a
+/// pattern with a brace. Both are named in the error rather than skipped.
+pub fn openapi(loaded: &crate::manifest_loader::LoadedManifest) -> Result<OpenapiOutput> {
+    let doc = crate::openapi::document(
+        &loaded.manifest.package.name,
+        &loaded.manifest.package.version,
+        &loaded.manifest.server,
+    )?;
+
+    // Counted from the generated document rather than from the manifest, so the numbers and
+    // the payload cannot disagree. Counting the manifest's routes would give a different
+    // `path_count` whenever two routes share a path -- which is ordinary, and would make the
+    // summary wrong in exactly the case a user checks it.
+    let path_count = doc.paths.len();
+    let operation_count = doc.paths.values().filter(|i| !i.is_empty()).count();
+    let document = serde_json::to_value(&doc).map_err(|e| {
+        Error::new(
+            ErrorCode::InternalInvariantViolated,
+            "the OpenAPI document could not be serialized".to_owned(),
+        )
+        .with_cause(e.to_string())
+    })?;
+
+    Ok(OpenapiOutput {
+        openapi: crate::openapi::OPENAPI_VERSION.to_owned(),
+        title: loaded.manifest.package.name.clone(),
+        version: loaded.manifest.package.version.clone(),
+        path_count,
+        operation_count,
+        out: None,
+        document,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // inspect
 // ---------------------------------------------------------------------------
 

@@ -1762,3 +1762,97 @@ fn audit_json_reports_the_threshold_decision() {
         clean.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// openapi — the document must describe the routes the server actually serves
+// ---------------------------------------------------------------------------
+
+/// A manifest exercising the route shapes `openapi` has to handle: a single
+/// method, several methods on one path, and a route parameter.
+const SERVING: &str = "[package]\nname = \"app\"\nversion = \"1.2.3\"\n\
+                       [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"h\"\n\
+                       [[server.routes]]\npath = \"/orders\"\nmethods = [\"GET\", \"POST\"]\nhandler = \"list\"\n\
+                       [[server.routes]]\npath = \"/orders/:id\"\nmethods = [\"GET\", \"DELETE\"]\nhandler = \"one\"\n";
+
+/// `openapi` prints one line per path and exits zero.
+#[test]
+fn openapi_summarises_the_routes() {
+    let s = Sandbox::new("openapi-summary");
+    s.write("qqq.toml", SERVING);
+
+    let run = s.run(&["openapi"]);
+    run.assert_ok().assert_contains("3 paths");
+    assert!(
+        run.stdout.contains("OpenAPI 3.0.3"),
+        "the human output must name the version it emits:\n{}",
+        run.stdout
+    );
+}
+
+/// `:id` is a **route** placeholder; `OpenAPI` spells parameters `{id}`.
+///
+/// Emitting the path verbatim would produce a document whose paths do not
+/// match the URLs the server serves, which is worse than no document.
+#[test]
+fn openapi_rewrites_route_placeholders() {
+    let s = Sandbox::new("openapi-params");
+    s.write("qqq.toml", SERVING);
+
+    let run = s.run(&["openapi", "--out", "openapi.json"]);
+    run.assert_ok();
+
+    let doc = s.read("openapi.json");
+    assert!(
+        doc.contains("\"/orders/{id}\""),
+        "the parameter must be rewritten to OpenAPI syntax:\n{doc}"
+    );
+    assert!(
+        !doc.contains(":id"),
+        "the route syntax must not survive into the document:\n{doc}"
+    );
+}
+
+/// The document must be rejected, not half-written, when a route is unservable.
+///
+/// `CONNECT` has no `OpenAPI` operation object. Silently dropping it would
+/// understate the surface the manifest exposes — the document would say the
+/// route does not exist. The whole command must fail instead.
+#[test]
+fn openapi_refuses_an_unservable_method() {
+    let s = Sandbox::new("openapi-connect");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [[server.routes]]\npath = \"/tunnel\"\nmethods = [\"CONNECT\"]\nhandler = \"t\"\n",
+    );
+
+    let run = s.run(&["openapi"]);
+    run.assert_failed();
+    assert!(
+        run.stderr.contains("CONNECT") || run.stdout.contains("CONNECT"),
+        "the refusal must name the offending method:\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// `--out` writes the document, and stdout stays the envelope.
+#[test]
+fn openapi_out_keeps_stdout_clean() {
+    let s = Sandbox::new("openapi-out");
+    s.write("qqq.toml", SERVING);
+
+    let run = s.run(&["openapi", "--out", "api.json"]);
+    run.assert_ok();
+
+    let doc = s.read("api.json");
+    assert!(
+        doc.trim_start().starts_with('{'),
+        "the written document must be JSON, not a report:\n{doc}"
+    );
+    assert!(
+        !run.stdout.contains("\"openapi\""),
+        "the document must not also land on stdout:\n{}",
+        run.stdout
+    );
+}

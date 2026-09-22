@@ -12523,4 +12523,223 @@ teaches.
 
 ---
 
+## §O-157 — Instrumentation leak: a prompt full of command fragments primed command-shaped text
+
+**The symptom.** Across several rounds, tool invocations silently produced **no output at
+all**. Not an error, not a partial run — the call simply did not execute and the turn
+continued as though it had. The user identified it from the GUI, where the calls rendered
+as visible text:
+
+```text
+<parameter name="pwsh">cd E:\QQQ; $env:PYTHONIOENCODING='utf-8'; python -c "
+from pathlib import Path
+t = Path('crates/qqq-serve/src/route.rs').read_text(encoding='utf-8')
+print('fallback present:', ...)"
+```
+
+There is no opening angle bracket before `parameter`. The call was **malformed markup**, so
+nothing was ever attempted.
+
+**The diagnosis, and it is not "random failure".** The failures were not uniformly
+distributed. They correlated exactly with call shape:
+
+| Call shape | Result |
+|---|---|
+| A single short command (`git status -sb`, `git log --oneline -1`) | always worked |
+| A long chain: `cd …; cmd > file 2>&1; cmd; python -c "multi-line"` | produced nothing |
+| Anything containing `Start-Sleep` plus a following command | produced nothing |
+
+So the trigger was **long, chained, inline-multi-line commands** — precisely the shape the
+rules warned against, and precisely the shape the prompt kept modelling.
+
+**The mechanism: the prompt was priming the failure.** The same-session goal carried twelve
+numbered rules, and those rules were written as *runnable command fragments in backticks* —
+the gate sequence, the picker that touches a file's timestamp, the flag that lists failing
+CI jobs, the lockfile check, and even the bad tag-shaped example itself, quoted verbatim as a
+caution. The goal text is re-injected on **every round**, at high salience.
+
+The effect is a priming loop with three compounding parts:
+
+1. **Density.** Roughly forty backticked shell and PowerShell fragments in a single prompt
+   taught "this is a document made of commands", so the model's own output drifted toward the
+   same register — including the tag syntax that delimits an invocation.
+2. **The example rule made it worse.** The rule that said *never write a tag-shaped
+   invocation* quoted `<parameter name="...">` *as a string*. An instruction not to produce a
+   token, which contains the token, is a net negative for a model that pattern-completes: it
+   supplies the shape while asking for its absence.
+3. **Length.** A long imperative block of command text competes with the user's actual
+   request for the model's formatting prior, and the path of least resistance was to emit
+   more command text — sometimes without the delimiter that makes it an invocation.
+
+**Why this is `§O-151` again, one level up.** That entry recorded the *conclusion* ("the call
+was never made") and a set of behavioural rules. What it did not record is that **the rules
+themselves were part of the cause**. A prompt that describes correct behaviour by quoting
+incorrect behaviour reproduces the incorrect behaviour. This is the same defect shape this
+project records about code roughly twenty times: *a control believed live that is not* — here
+the control is a prompt, and it was actively generating the fault it forbade.
+
+**The correction, applied to the goal itself.** The objective was rewritten at revision 7
+from command fragments into **prose invariants**:
+
+  * every rule kept, with its reasoning and its `§O-` citation;
+  * **no** backticked command sequences and **no** tag-shaped examples anywhere in the text;
+  * rules phrased as statements about what must be true ("the gate must run as a single
+    sequence after the final edit"), not as strings to be executed;
+  * an explicit exemption stating that single simple *observational* commands are fine and
+    that multi-step diagnostics belong in one script file.
+
+The first malformed call after the rewrite still occurred — priming is not undone instantly —
+but short single-purpose calls returned to working immediately, and the correction is durable
+because it changes the text that is re-injected every round rather than relying on vigilance.
+
+**The generalisable rules, for the code and for the agent operating on it.**
+
+1. **When a tool appears to do nothing, the first hypothesis is that the call was never
+   made.** Check the markup before suspecting the tool.
+2. **An instruction not to produce a token must not contain that token.** Describe the shape
+   in prose ("invocation tags") rather than quoting it.
+3. **Do not embed runnable command fragments in a prompt that is re-injected at high
+   salience.** State invariants as prose; keep the literal commands in the repository, where
+   they belong and where they can be versioned.
+4. **Prefer one correctly formed call to a batch.** A malformed batch costs more than the
+   sequential calls it was meant to save.
+5. **Multi-step diagnostics belong in one script file**, because a script is a single
+   well-formed argument rather than several fragments that can lose their delimiters.
+
+The parallel to `§O-152` is exact and worth stating: that entry found a local gate that
+**repairs the symptom it was supposed to detect** — running the build silently updates the
+lockfile, so the check passes. This entry finds a prompt that **generates the fault it was
+supposed to prevent**. Both are worse than a check that merely fails to fire, because both
+actively destroy the information a reader needs to see the problem.
+
+→ the session goal (rewritten at revision 7); `.scratch/msg_body_head.txt` (a commit message
+written to a file, which is the shape that never failed); §O-151, §O-152 for the prior
+entries in this family.
+
+---
+
+## §O-158 — The reference application was outside every gate the repository has
+
+**The finding.** `examples/orders-api` declares its own empty `[workspace]` table, and
+that is *correct* — a guest must be compiled by the guest toolchain against its own
+`wit/`, not as a member of the host workspace (`§O-147`, and the handbook's note in §15).
+What nobody noticed is the other half: **nothing replaced the coverage the exclusion
+removed.** `cargo fmt/clippy/test --workspace` cannot see the crate, and neither could
+`.github/workflows/ci.yml`, because no job referenced `examples/` at all.
+
+Measured on `a7c6c53`, before anything was changed:
+
+| Command, run in `examples/orders-api` | Result |
+|---|---|
+| `cargo clippy --all-targets -- -D warnings` | **11 errors** |
+| `cargo fmt -- --check` | drift in **4 of 5** source files |
+| `cargo test --lib` | 57 passed — the one thing that *was* green |
+| `grep -rn "examples" .github/workflows/ci.yml` | **no matches** |
+
+The 11 errors included two `chunks_exact`-with-constant-chunk-size lints — the exact
+lint class whose 1.98 introduction caused the three red runs recorded in `§O-121`. The
+`rust` job's own comment still explains that history, three screens above the point
+where the job stops looking.
+
+**Why this is the repository's signature defect, not a new one.** The handbook's §11
+names it: *a control believed live that is not*. Here it is in its purest form. There is
+a lint gate; the artifact every `§9.1` benchmark measures and every `§9.2` budget is
+stated against is not behind it; and no output ever said so. `check_scope_table.py` was
+written after 9,370 lines of HTTP/2 were excluded from the module tree by a stale
+comment (`§O-120`) — that checker walks `crates/*/src`, so it did not catch a whole
+*crate* that no gate walked.
+
+**Why the numbers matter more than the lint.** The reference app is the measurement
+instrument. `§9.1` claims QQQ is "far ahead" on `crypto` and `cpu`; those claims are
+made about *this* crate. A crate that has never been formatted, never linted, and never
+built by CI is an instrument nobody has calibrated. The 57 green tests were real and
+they hid the gap, because a test suite passing is exactly what makes a crate look
+covered.
+
+**The fix, in three parts.**
+
+1. **The 11 errors were fixed, not suppressed.** Each got the remedy clippy asked for;
+   no `#[allow]` was added. Two are worth naming because they are improvements rather
+   than appeasement: `sha256`'s two loops copied each chunk into a shared `[u8; 64]`
+   buffer before compressing it, and `as_chunks::<64>()` yields `&[u8; 64]` directly —
+   so the copy is gone. The pinned NIST vectors (`"abc"`, the 56-byte two-block
+   vector, and the 55/56/64 padding boundary) all still pass, which is what proves the
+   rewrite is byte-for-byte correct rather than merely compiling.
+2. **The workspace was formatted** (drift in 4 of 5 files, all pre-existing).
+3. **A twelfth CI job, `reference-app`, now gates the crate**: fmt, clippy, test, a
+   `wasm32-wasip2` build, and a check that the artifact is a real component exporting
+   `qqq:http/incoming-handler`.
+
+**The new guard was itself wrong twice, and verification caught both.** This is the
+part worth recording, because a guard added to fix an ungated artifact is the worst
+possible place to add an unverified one.
+
+*First wrong version* — the count was computed as
+`cargo metadata | python3 -c '...len(packages)...'`, and it piped through `python3`
+for no reason. Reproducing it locally produced an **empty count**, because this
+machine's `bash` is WSL and WSL cannot see the Windows `.cargo/bin/cargo.exe`. The
+guard then compared `"" -ne 1`, which is not true on many shells — so **it reported
+success on a tree where the measurement had failed entirely.** Only an anti-vacuity
+clause (`case "$COUNT" in ''|*[!0-9]*) ... exit 1`) turned that into a red build.
+The clause is now in the shipped step, and the step needs only `cargo`, `grep` and
+`test`.
+
+*Second wrong version* — the decoupled guard counted packages with
+`grep -o '"name":"[^"]*"' | wc -l`. Measured against the real tree: **3, not 1**.
+`cargo metadata --no-deps` emits `"name"` once for the package and again inside its
+`targets` array (the lib target and the generated `wit-bindgen` target). Shipped as
+written, the guard would have failed on **every healthy run** and turned CI
+permanently red. It now counts `"manifest_path"`, measured at exactly one occurrence
+per package.
+
+Both are the same shape as the defect being fixed, one level down: *a check aimed at
+a nearby property that is easy to assert instead of the property that matters.*
+`"name"` is nearby; "the number of packages" is the property.
+
+**Proof, not assertion.** The guard was fault-injected twice, one injection per file
+per process:
+
+| Injection | Verified present first | Guard result | Restored |
+|---|---|---|---|
+| Remove the `[workspace]` **table** (not the token) | yes — table gone, 2 prose mentions remain | **REJECTS**, with cargo's own *"current package believes it's in a workspace when it's not"* | byte-for-byte, sha equal |
+| Move `wit/app.wit` aside | yes — `exists=False` | **REJECTS**: `wit/app.wit is missing` | byte-for-byte, sha equal |
+
+15/15 checks passed, and a final pass confirms the `[workspace]` table is back, the
+file hash equals the original, and no backup remains.
+
+The first injection attempt also taught the `§O-156` rule again, from the other side:
+the initial harness asserted "is the string `[workspace]` still in the file?", which is
+**true because of the surviving prose explaining why the table exists**. The property
+had to be restated as *a line that is exactly `[workspace]`* before the check meant
+anything.
+
+**Verification of the whole chain.** On the final tree: reference application builds,
+stages to `<guest>/target/qqq/orders-api.component.wasm` (167 789 bytes), and `qqqai
+serve` answers **19/19** end-to-end checks — every `§5.3` route, all ten `§9.1`
+workloads (`/compute/1000` → `{"mode":"sieve","primes":168}`, π(1000)=168 through the
+canonical ABI), HEAD matching GET's `Content-Length` with no body, 404 on an unknown
+path, and 405 with a truthful `Allow: GET, HEAD` on an undeclared method. Workspace
+tests: **2249 passed**, unchanged from the baseline. Guest tests: **57 passed**.
+
+**The generalisable rules.**
+
+1. **An exclusion is half a decision.** When a crate is deliberately kept out of the
+   workspace — or out of any build, or out of a checker — the other half is naming what
+   covers it instead. `§O-147` recorded the exclusion correctly; this entry records the
+   coverage it silently removed.
+2. **A green test suite is not coverage.** The guest's 57 tests passed throughout, and
+   that is precisely what made the crate look gated.
+3. **A new guard must be fault-injected harder than the code it guards.** It is the
+   thing that is supposed to fail when everything else is wrong, so its own failure
+   modes are the most expensive to ship.
+4. **Ask of a measurement: "can this be empty, and what happens if it is?"** An empty
+   `COUNT` compared with `-ne` is a check that passes when it measured nothing.
+
+→ `.github/workflows/ci.yml` (the new `reference-app` job),
+`examples/orders-api/src/{hash,orders,router,lib,compute}.rs`,
+`.scratch/{srv018_e2e,fix_guest_clippy,add_reference_app_job,check_ci_yaml,verify_reference_app_job,inject_reference_app_guard,verify_guard_cargo_only,verify_guard_step}.py`;
+§O-120 and §O-147 for the two prior entries in this family.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

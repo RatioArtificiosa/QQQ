@@ -121,16 +121,12 @@ pub fn sha256(message: &[u8]) -> [u8; 32] {
     // zero padding and the length field as their own blocks, which avoids
     // allocating a padded copy of the message — the whole reason this is written
     // over the input rather than over a `Vec`.
-    let mut block = [0u8; 64];
-    let mut chunks = message.chunks_exact(64);
+    let (chunks, rest) = message.as_chunks::<64>();
 
-    for chunk in &mut chunks {
-        block.copy_from_slice(chunk);
-        compress(&mut h, &block);
+    for chunk in chunks {
+        compress(&mut h, chunk);
     }
 
-    // The remainder needs the terminator appended.
-    let rest = chunks.remainder();
     let total = rest.len();
     let mut tail = [0u8; 128];
     tail[..total].copy_from_slice(rest);
@@ -141,9 +137,9 @@ pub fn sha256(message: &[u8]) -> [u8; 32] {
     let tail_len = if total + 1 + 8 <= 64 { 64 } else { 128 };
     tail[tail_len - 8..tail_len].copy_from_slice(&bit_len.to_be_bytes());
 
-    for half in tail[..tail_len].chunks_exact(64) {
-        block.copy_from_slice(half);
-        compress(&mut h, &block);
+    let (halves, _) = tail[..tail_len].as_chunks::<64>();
+    for half in halves {
+        compress(&mut h, half);
     }
 
     let mut out = [0u8; 32];
@@ -250,7 +246,9 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(
-            hex(&sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex(&sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
         // 896 bits, exactly two blocks, which is the case that exercises the
@@ -287,15 +285,15 @@ mod tests {
         // the same transform and pinned here as regression values: they exercise
         // the branch that decides on 64 versus 128 tail bytes.
         assert_eq!(
-            hex(&sha256(&vec![b'x'; 55])),
+            hex(&sha256(&[b'x'; 55])),
             "d5e285683cd4efc02d021a5c62014694958901005d6f71e89e0989fac77e4072"
         );
         assert_eq!(
-            hex(&sha256(&vec![b'x'; 56])),
+            hex(&sha256(&[b'x'; 56])),
             "04c26261370ee7541549d16dee320c723e3fd14671e66a099afe0a377c16888e"
         );
         assert_eq!(
-            hex(&sha256(&vec![b'x'; 64])),
+            hex(&sha256(&[b'x'; 64])),
             "7ce100971f64e7001e8fe5a51973ecdfe1ced42befe7ee8d5fd6219506b5393c"
         );
     }

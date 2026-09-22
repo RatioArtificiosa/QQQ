@@ -137,7 +137,9 @@ impl Store {
 /// checked by its own accessors, and refusing every subsequent request because one
 /// panicked once would turn a single failure into an outage.
 fn lock() -> std::sync::MutexGuard<'static, Store> {
-    store().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    store()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Reset the store.
@@ -261,7 +263,11 @@ pub fn table(query: &str) -> Response {
         html.push_str("</td><td>");
         html.push_str(&order.items.len().to_string());
         html.push_str("</td><td>");
-        html.push_str(&format!("{}.{:02}", order.total_cents / 100, order.total_cents % 100));
+        html.push_str(&format!(
+            "{}.{:02}",
+            order.total_cents / 100,
+            order.total_cents % 100
+        ));
         html.push_str("</td></tr>");
     }
     html.push_str("</tbody></table></body></html>");
@@ -306,7 +312,10 @@ pub fn items(id: &str) -> Response {
     json::object(&[
         ("id", json::string(id)),
         ("items", json::number(count as u64)),
-        ("known", json::string(if order.is_some() { "true" } else { "false" })),
+        (
+            "known",
+            json::string(if order.is_some() { "true" } else { "false" }),
+        ),
     ])
 }
 
@@ -360,7 +369,10 @@ pub fn multi(query: &str) -> Response {
 
     json::object(&[
         ("worker", json::string(worker)),
-        ("primes", json::number(u64::from(crate::compute::count_primes(n.min(5_000_000))))),
+        (
+            "primes",
+            json::number(u64::from(crate::compute::count_primes(n.min(5_000_000)))),
+        ),
     ])
 }
 
@@ -392,7 +404,7 @@ pub fn create(body: &[u8]) -> Response {
     for pair in form.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = match pair.split_once('=') {
             Some(kv) => kv,
-            None => return text(400, &format!("field `{pair}` has no `=`")),
+            None => return text(400, format!("field `{pair}` has no `=`")),
         };
         match key {
             "id" => {
@@ -417,7 +429,7 @@ pub fn create(body: &[u8]) -> Response {
             other => {
                 return text(
                     400,
-                    &format!("unknown field `{other}`; expected id, quantity or unit_cents"),
+                    format!("unknown field `{other}`; expected id, quantity or unit_cents"),
                 )
             }
         }
@@ -536,7 +548,10 @@ fn items_json(order: &Order) -> Vec<json::Raw> {
         .items
         .iter()
         .map(|(name, qty)| {
-            json::object(&[("name", json::string(name)), ("quantity", json::number(u64::from(*qty)))])
+            json::object(&[
+                ("name", json::string(name)),
+                ("quantity", json::number(u64::from(*qty))),
+            ])
         })
         .map(|r| {
             // `object` returns a Response; take its body as a raw document.
@@ -550,8 +565,18 @@ fn customer_json(order: &Order) -> [(&'static str, json::Raw); 3] {
     let digest = crate::hash::sha256(order.id.as_bytes());
     [
         ("name", json::string(&format!("Customer {}", digest[0]))),
-        ("email", json::string(&format!("c{}@example.test", digest[1]))),
-        ("tier", json::string(if digest[2] % 2 == 0 { "standard" } else { "pro" })),
+        (
+            "email",
+            json::string(&format!("c{}@example.test", digest[1])),
+        ),
+        (
+            "tier",
+            json::string(if digest[2].is_multiple_of(2) {
+                "standard"
+            } else {
+                "pro"
+            }),
+        ),
     ]
 }
 
@@ -560,10 +585,17 @@ fn shipping_json(order: &Order) -> [(&'static str, json::Raw); 3] {
     let digest = crate::hash::sha256(order.id.as_bytes());
     [
         ("country", json::string("US")),
-        ("postal", json::string(&format!("{:05}", u32::from(digest[3]) * 3 + 10000))),
+        (
+            "postal",
+            json::string(&format!("{:05}", u32::from(digest[3]) * 3 + 10000)),
+        ),
         (
             "method",
-            json::string(if digest[4] % 3 == 0 { "express" } else { "ground" }),
+            json::string(if digest[4].is_multiple_of(3) {
+                "express"
+            } else {
+                "ground"
+            }),
         ),
     ]
 }
@@ -691,7 +723,10 @@ mod tests {
 
         let got = by_id("ord-7");
         assert!(body(&got).contains("\"total_cents\":750"));
-        assert!(body(&got).contains("confirmed"), "seq 1 is the confirmed state");
+        assert!(
+            body(&got).contains("confirmed"),
+            "seq 1 is the confirmed state"
+        );
     }
 
     #[test]
@@ -718,8 +753,7 @@ mod tests {
             "the refusal must name the field; got `{text}`"
         );
         assert!(
-            !body(&by_id("x")).contains("\"created_seq\":0")
-                || !lock().orders.contains_key("x"),
+            !body(&by_id("x")).contains("\"created_seq\":0") || !lock().orders.contains_key("x"),
             "a refused request must not have created the order"
         );
     }
@@ -853,10 +887,7 @@ mod tests {
         assert!(!html.contains("<script>"));
         let mut out = String::new();
         push_html_escaped(&mut out, "<script>alert('x')</script>");
-        assert_eq!(
-            out,
-            "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"
-        );
+        assert_eq!(out, "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;");
     }
 
     #[test]

@@ -810,6 +810,184 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Reference application: `examples/orders-api` (`SRV-018`).
+  #
+  # # Why this job exists, and why it is separate
+  #
+  # The guest crate declares its own empty `[workspace]` **deliberately** -- a
+  # QQQ app must be compiled by the guest toolchain against the guest's own
+  # `wit/`, not as a member of the host workspace (`§O-147`). The cost of that
+  # correctness is that `cargo fmt/clippy/test --workspace` cannot see it, so for
+  # a long time nothing did.
+  #
+  # Measured when this job was added: `cargo clippy --all-targets -- -D warnings`
+  # in `examples/orders-api` reported **11 errors** -- including two
+  # `chunks_exact`-with-constant-chunk-size lints, the exact lint class that
+  # caused the three red runs recorded in `§O-121` -- and `cargo fmt -- --check`
+  # reported drift in 4 of the 5 source files. Every one of those had been in the
+  # tree for an unknown number of commits, in the artifact that `§9.1` measures
+  # and `§9.2` sets numeric budgets against.
+  #
+  # This is the repository's most-recorded defect shape: *a control believed live
+  # that is not*. The fix is not "run the workspace commands harder" -- they are
+  # working correctly. The fix is a second gate over the artifact they cannot
+  # reach.
+  #
+  # Linux only, for the same reason the MSRV job is: a lint and a formatting
+  # answer are properties of the source, not of the host platform, and the
+  # three-platform matrix would triple the cost of an identical result.
+  # ---------------------------------------------------------------------------
+  reference-app:
+    name: Reference application (SRV-018)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The guest has its own `target/`, so the default workspace key would
+          # miss it entirely and every run would rebuild from scratch.
+          workspaces: "examples/orders-api -> target"
+
+      # Anti-vacuity, and it is the important step in this job.
+      #
+      # `cargo clippy` exits 0 on a directory that contains no package it can
+      # see, so a job that quietly stopped finding the crate would report
+      # success forever -- which is precisely the failure mode this job exists to
+      # end. The guard asserts the crate is present by name and that it really is
+      # outside the host workspace, so an accidental `[workspace]` removal (which
+      # would silently move the guest *into* the gate above) is caught here too.
+      - name: Prove the crate is present and is not a workspace member
+        working-directory: examples/orders-api
+        run: |
+          set -eu
+
+          # # Why this step uses only `cargo`, `grep` and `test`
+          #
+          # The first version of this guard piped `cargo metadata` into
+          # `python3 -c '...'`. It works on a GitHub runner, where python3 is
+          # native -- but it silently couples the step to a second tool, and the
+          # local reproduction showed exactly how that fails: this machine's
+          # `bash` is WSL, which has python3 but CANNOT SEE cargo, so the
+          # pipeline yielded an empty count. The guard then reported a *failed
+          # measurement* rather than a failed tree, and only its anti-vacuity
+          # clause below turned that into a red build instead of a green one.
+          #
+          # Everything below needs only tools a Rust runner is guaranteed to
+          # have. `--no-deps` emits exactly one object per package, so counting
+          # `"name":` occurrences is an exact package count.
+          test -f Cargo.toml || { echo "::error::no Cargo.toml in examples/orders-api"; exit 1; }
+
+          META="$(cargo metadata --no-deps --format-version 1)"
+
+          # # Why the count uses `manifest_path` and NOT `"name"`
+          #
+          # The first version of this guard counted `"name":"..."` occurrences.
+          # Measured against the real tree: **3, not 1** -- `--no-deps` emits a
+          # `name` for the package AND for each of its targets (the lib target
+          # and the generated `wit-bindgen` target). Shipped as written, this
+          # guard would have failed on every healthy run: a check aimed at a
+          # nearby property that is easy to assert rather than the one that
+          # matters.
+          #
+          # `manifest_path` appears exactly once per package in `--no-deps`
+          # output and never in nested data. Measured: 1 occurrence, 1 package.
+          COUNT="$(printf '%s' "$META" | grep -o '"manifest_path":"[^"]*"' | wc -l | tr -d ' ')"
+          NAME="$(printf '%s' "$META" \
+            | grep -o '"packages":\[{"name":"[^"]*"' | cut -d'"' -f6)"
+          echo "reference application package: $NAME"
+          if [ "$NAME" != "orders-api" ]; then
+            echo "::error::expected package 'orders-api', found '$NAME'"
+            exit 1
+          fi
+
+          # `cargo metadata` run from the guest reports ONLY the guest when the
+          # empty [workspace] table is present. More than one package means the
+          # guest was absorbed into the host workspace, which would make this job
+          # redundant and the build wrong.
+
+          # Anti-vacuity FIRST: an unreadable measurement must not be able to
+          # satisfy the comparison below. A non-numeric COUNT would make
+          # `[ "$COUNT" -ne 1 ]` fail-open on some shells, and an empty COUNT
+          # already did exactly that once while this guard was being built.
+          case "$COUNT" in
+            ''|*[!0-9]*)
+              echo "::error::the package count is not a number: '$COUNT'"
+              echo "::error::the guard would have compared against nothing"
+              exit 1
+              ;;
+          esac
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::expected 1 package in the guest workspace, found $COUNT"
+            echo "the empty [workspace] table that keeps the guest separate is gone"
+            exit 1
+          fi
+
+          # The `wit/` tree is what makes it a QQQ application rather than a bare
+          # wasm module; `qqqai new` scaffolded one WITHOUT it for a long time.
+          test -f wit/app.wit || { echo "::error::wit/app.wit is missing"; exit 1; }
+          test -f wit/deps/qqq-http/qqq-http.wit || {
+            echo "::error::wit/deps/qqq-http/qqq-http.wit is missing"
+            exit 1
+          }
+          echo "OK: orders-api is present, separate, and carries its WIT tree ($COUNT package)"
+
+      - name: rustfmt
+        working-directory: examples/orders-api
+        run: cargo fmt -- --check
+
+      - name: clippy (warnings are errors)
+        working-directory: examples/orders-api
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # The guest's own tests. `cargo test --workspace` cannot reach them: that is
+      # the whole reason this job exists (`§O-147`, and the handbook's note that a
+      # green `--workspace` says nothing about the reference application).
+      - name: test
+        working-directory: examples/orders-api
+        run: cargo test --all-features --verbose
+
+      # The point of the app is that it COMPILES TO A COMPONENT. A lint-clean
+      # crate that no longer builds for `wasm32-wasip2` would pass every step
+      # above, so the guest target is exercised explicitly.
+      - name: build for wasm32-wasip2
+        working-directory: examples/orders-api
+        run: cargo build --release --target wasm32-wasip2
+
+      - name: Install wasm-tools
+        # The same action the WIT job uses, rather than `cargo install`: it is
+        # pinned, cached, and -- the part that matters -- it FAILS when the tool
+        # cannot be obtained. A `cargo install ... || true` would make the
+        # component check below skip silently, which is the vacuity failure this
+        # repository records more often than any other.
+        uses: taiki-e/install-action@wasm-tools
+
+      - name: Prove the artifact is a real component exporting the HTTP handler
+        working-directory: examples/orders-api
+        run: |
+          set -eu
+          WASM="target/wasm32-wasip2/release/orders_api.wasm"
+          test -f "$WASM" || { echo "::error::$WASM was not produced"; exit 1; }
+          echo "artifact: $WASM ($(wc -c < "$WASM") bytes)"
+
+          WIT="$(wasm-tools component wit "$WASM")"
+          echo "$WIT" | grep -q 'export qqq:http/incoming-handler' || {
+            echo "::error::the artifact does not export qqq:http/incoming-handler"
+            echo "$WIT"
+            exit 1
+          }
+          echo "OK: the artifact is a component exporting the qqq:http handler"
+
+  # ---------------------------------------------------------------------------
   # Supply chain: licences, advisories, unused dependencies.
   # ---------------------------------------------------------------------------
   supply-chain:

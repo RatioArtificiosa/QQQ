@@ -106,12 +106,12 @@ pub mod root_http {
     pub use crate::qqq::http::http::{Header, Method, Request, Response};
 }
 
+/// The `qqq:http` error type. A `variant` in WIT, so one Rust enum of cases.
+pub use exports_ih::incoming_handler::HttpError as GuestHttpError;
 /// The `qqq:http` request type, as the exported handler receives it.
 pub use exports_ih::incoming_handler::Request as GuestRequest;
 /// The `qqq:http` response type, as the exported handler returns it.
 pub use exports_ih::incoming_handler::Response as GuestResponse;
-/// The `qqq:http` error type. A `variant` in WIT, so one Rust enum of cases.
-pub use exports_ih::incoming_handler::HttpError as GuestHttpError;
 
 /// The application component.
 ///
@@ -119,7 +119,6 @@ pub use exports_ih::incoming_handler::HttpError as GuestHttpError;
 /// below it is a workload implementation. Keeping the dispatch in one function is
 /// what lets the route table and the benchmark list stay verifiably the same set —
 /// see `router`'s docs, and its test that reads §9.1.
-
 struct Component;
 
 impl Guest for Component {

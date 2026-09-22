@@ -127,7 +127,9 @@ fn fill(n: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(n * n);
     let mut state = 2_463_534_242u64;
     for _ in 0..n * n {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         // Values in [0, 1): the top 24 bits scaled down.
         out.push(((state >> 40) as f64) / 16_777_216.0);
     }

@@ -128,16 +128,7 @@ pub const ROUTES: &[Route] = &[
 /// re-deriving them from the route table.
 #[allow(dead_code)]
 pub const BENCHMARKS: [&str; 10] = [
-    "hello",
-    "json",
-    "route",
-    "db",
-    "crypto",
-    "template",
-    "cpu",
-    "multi",
-    "tailp99",
-    "cold",
+    "hello", "json", "route", "db", "crypto", "template", "cpu", "multi", "tailp99", "cold",
 ];
 
 /// Dispatch one request.
@@ -214,7 +205,7 @@ fn dispatch(
     // would emit a body on a HEAD and desynchronise the stream. So this returns the
     // representation a GET would return, and `qqq_serve::write_response` writes the true
     // length and withholds the bytes.
-    let mut response = match benchmark {
+    let response = match benchmark {
         "hello" => orders::health(),
         "json" => orders::by_id(first),
         "route" => orders::route_echo(first),
@@ -320,7 +311,8 @@ fn unreachable_response(benchmark: &str) -> Response {
         500,
         format!("the route table names `{benchmark}` but no workload implements it"),
     );
-    resp.headers.push(header("X-QQQ-Defect", "unimplemented-route"));
+    resp.headers
+        .push(header("X-QQQ-Defect", "unimplemented-route"));
     resp
 }
 
@@ -527,7 +519,9 @@ mod tests {
         //       `{ path = "/orders/:id", methods = ["GET","DELETE"], handler = "order-by-id" }`
         //       `{ path = "/healthz", methods = ["GET"], handler = "health" }`
         assert!(
-            ROUTES.iter().any(|r| r.path == "/orders" && r.method == "GET"),
+            ROUTES
+                .iter()
+                .any(|r| r.path == "/orders" && r.method == "GET"),
             "§5.3 declares an `/orders` route; the template workload must serve it"
         );
         assert!(
@@ -670,7 +664,6 @@ mod tests {
         // A bare `*`, sent by OPTIONS. Must not panic.
         assert_eq!(split_target("*"), ("*", ""));
     }
-
 
     #[test]
     fn every_route_in_the_table_actually_dispatches() {

@@ -20,6 +20,29 @@ qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
 qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
 wasmtime = { workspace = true }
+# The WASI host implementation (`HOST-017`).
+#
+# # Why this is not optional
+#
+# A guest built by `cargo build --target wasm32-wasip2` imports fifteen WASI
+# interfaces even when its own source never calls one, because `std` for that target
+# is implemented over them. Without a `WasiCtx` in the store and a linker
+# registration, **no real guest can instantiate** -- measured:
+#
+#     error[QQQ-6003]: the component could not be instantiated
+#       component imports instance `wasi:io/poll@0.2.9`, but a matching
+#       implementation was not found in the linker
+#
+# Before this dependency the only guests that ran were `qqqai new`'s scaffold, whose
+# artifact declares an *empty world* and therefore imports nothing.
+#
+# # Why the version must track Wasmtime exactly
+#
+# `wasmtime-wasi` is versioned in lockstep with `wasmtime`. A 49 dependency against
+# a 48 engine would put two copies of the component model in one build, and they
+# would disagree about the canonical ABI. `§D-003` pins the engine to 48; this pin
+# follows it, and `tools/check_toolchain.py`'s neighbours keep such pins honest.
+wasmtime-wasi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

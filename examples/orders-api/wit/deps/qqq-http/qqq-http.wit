@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// QQQ HTTP interface.
+//
+// Built over `wasi:http`, adding the routing and headers an application
+// actually needs while keeping the guest's view of a body a **stream** rather
+// than a buffer.
+package qqq:http@1.0.0;
+
+/// HTTP client and server types.
+interface http {
+  /// An HTTP method.
+  enum method {
+    get,
+    head,
+    post,
+    put,
+    delete,
+    connect,
+    options,
+    trace,
+    patch,
+  }
+
+  /// A header name/value pair.
+  record header {
+    name: string,
+    value: list<u8>,
+  }
+
+  /// Why an HTTP operation failed.
+  variant http-error {
+    /// The host is not on the manifest's egress allowlist.
+    ///
+    /// **Distinct from a network failure on purpose.** A guest that cannot
+    /// distinguish "I am not allowed to reach that host" from "that host is
+    /// down" will retry forever against a policy denial.
+    host-not-allowed,
+    /// The connection failed or timed out.
+    connection-failed,
+    /// The request exceeded the manifest's size cap.
+    request-too-large,
+    /// The response exceeded the manifest's size cap.
+    response-too-large,
+    /// The URL was malformed.
+    invalid-url,
+    /// The per-instance subrequest budget is exhausted.
+    subrequest-limit-exceeded,
+  }
+
+  /// An outgoing request.
+  record request {
+    method: method,
+    /// The full URL. The host parses it; a guest cannot smuggle a different
+    /// host past the allowlist by crafting the authority section.
+    url: string,
+    headers: list<header>,
+    /// The body as bytes.
+    ///
+    /// For a body that may exceed a comfortable size, use `send-streaming`.
+    body: option<list<u8>>,
+  }
+
+  /// An incoming response.
+  record response {
+    status: u16,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  /// Send a request and read the full response.
+  ///
+  /// # Errors
+  ///
+  /// `host-not-allowed` when the destination is outside the manifest's
+  /// allowlist. The host checks the **resolved** authority, so a redirect
+  /// cannot be used to escape the allowlist.
+  /// A function and a record cannot share a name in one interface, so
+  /// the verb is `send` and the noun is `request`.
+  @since(version = 1.0.0)
+  send: func(req: request) -> result<response, http-error>;
+
+  /// The hostname and port an incoming request arrived on.
+  ///
+  /// Provided so a guest can adapt to virtual hosts without parsing headers it
+  /// has already been given in a trusted form.
+  @since(version = 1.0.0)
+  incoming-authority: func() -> tuple<string, u16>;
+}
+
+/// HTTP server types, for components that receive requests.
+interface incoming-handler {
+  use http.{request, response, http-error};
+
+  /// Handle one inbound request.
+  ///
+  /// # Why this returns a single response rather than streaming
+  ///
+  /// The streaming form is `qqq:http@1.0.0/incoming-streaming`, which exists for
+  /// bodies that can exceed memory. This interface is the simple case, and
+  /// keeping it separate means a guest that does not need streaming does not
+  /// have to reason about it.
+  @since(version = 1.0.0)
+  handle: func(req: request) -> result<response, http-error>;
+}

@@ -526,6 +526,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::New => dispatch_new(name, args, &mut out),
         CommandName::Init => dispatch_init(name, args, &mut out),
         CommandName::Dev => dispatch_dev(name, args, &mut out),
+        CommandName::Serve => dispatch_serve(name, args, &mut out),
         CommandName::Add => dispatch_add(name, args, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
@@ -1393,6 +1394,44 @@ fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::St
         }
     };
     with_manifest(name, out, args, |loaded| qqq_run::dev::run(loaded, &opts))
+}
+
+/// Dispatch `qqqai serve`.
+///
+/// # Why this function exists at all
+///
+/// `CommandName::Serve` was parsed and never dispatched, so `serve` fell through to
+/// the catch-all arm and answered `QQQ-6004: not implemented yet` while
+/// `crates/qqq-run/src/serve.rs` held a complete, tested implementation. The module
+/// had no caller from the CLI — the defect shape `QQQ-Observations-and-Memories.md`
+/// `§O-130` records four times over, and the reason `CLI-011` was marked complete
+/// while the command did not work.
+///
+/// # Why the options are parsed before the manifest is loaded
+///
+/// The same ordering `dispatch_dev` uses, for the same reason: `qqqai serve
+/// --listenn 0.0.0.0:80` is a typo, and the moment to say so is while the user is
+/// looking at the command they typed. Loading the manifest first would move the
+/// diagnosis behind a file read and a parse for no benefit.
+fn dispatch_serve(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match qqq_run::serve::options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    // `--config <path>` names an alternate manifest; `with_manifest` finds the
+    // default (`qqq.toml`) otherwise. Both paths go through the same loader, so a
+    // served project is validated exactly as a built one is.
+    with_manifest(name, out, args, |loaded| {
+        qqq_run::serve::run_blocking(loaded, &opts)
+    })
 }
 
 /// Dispatch `qqqai add`.

@@ -79,6 +79,19 @@ docs/AGENT-HANDBOOK.md
 # truth*, the failure `§O-072` records from the other direction.
 fuzz/target/
 
+# The reference application's build output — `SRV-018`.
+#
+# `examples/orders-api` is a **guest** crate, so it is not a member of the host
+# workspace and the anchored `/target/` rule above does not reach it. The same
+# reasoning as `fuzz/target/`: `git add -A` would stage hundreds of megabytes of
+# build output, and — worse than the size — a committed `target/` is
+# **stale artifacts stored as truth**, which is the failure `§O-072` records.
+#
+# Note that `examples/orders-api/Cargo.lock` IS committed. That is deliberate and
+# different: a lockfile is a resolved dependency decision, which is exactly what a
+# reference app should pin, while `target/` is the output of applying it.
+examples/orders-api/target/
+
 # Crash artifacts. These are deliberately NOT committed: libFuzzer names them
 # `crash-<hash>` and their content is the bug, so the correct destination is a
 # **corpus entry** in `crates/*/tests/fuzz_corpus.rs` — which is the promotion

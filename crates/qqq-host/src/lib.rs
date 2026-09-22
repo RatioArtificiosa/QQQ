@@ -89,6 +89,7 @@ pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
 pub mod host_secrets;
+mod host_wasi;
 pub mod instance;
 /// Calling a guest: the edge between the host and an application component.
 ///
@@ -124,6 +125,10 @@ pub use guard::{guard, guard_reporting, PanicReport};
 pub use handles::{Handle, HandleStats, HandleTable};
 pub use host_secrets::{
     PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore, MAX_SECRET_INPUT,
+};
+pub use host_wasi::{
+    context as wasi_context, describe_missing_env as describe_missing_wasi_env,
+    register as register_wasi, DeniedClock, Registered as WasiRegistered,
 };
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,

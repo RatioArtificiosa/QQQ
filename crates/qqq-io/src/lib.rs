@@ -57,9 +57,11 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod blocking;
 pub mod listener;
 pub mod shard;
 
+pub use blocking::block_on;
 pub use listener::{
     parse_listen_addr, AcceptError, ListenAddr, Listener, ListenerConfig, Shutdown,
 };

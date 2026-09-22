@@ -98,7 +98,12 @@ impl Default for ServeOptions {
 }
 
 /// What a serve run reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` is not decoration: every `qqqai` command emits stable
+/// machine-readable JSON, and `--json` is part of the CLI's contract. This type
+/// carried no derive until `serve` was made reachable, because nothing had ever
+/// tried to render it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ServeOutput {
     /// The address served on.
     pub listen: String,
@@ -368,6 +373,59 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
         tls: opts.tls,
         guest_loaded,
     })
+}
+
+/// Serve a project until shutdown, from a synchronous caller.
+///
+/// # Why this exists as well as [`run`]
+///
+/// `qqqai serve`'s `main` is synchronous: it parses arguments, loads a manifest and
+/// returns an `ExitCode`. The server is asynchronous. This function is the bridge,
+/// and it exists so that `qqq-run` **does not depend on the async runtime**.
+///
+/// `qqq-io`'s documentation states that it is "the only crate in the workspace that
+/// depends on the async runtime". A direct `tokio` edge here would make that
+/// sentence false and give the workspace two answers to "which runtime is this
+/// program built on". The bridge lives in `qqq-io` for exactly that reason, and this
+/// function is a one-line call through it.
+///
+/// # Errors
+///
+/// As [`run`], plus `QQQ-6004` when the runtime cannot be constructed.
+pub fn run_blocking(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOutput> {
+    qqq_io::block_on(run(loaded, opts))?
+}
+
+impl crate::output::CommandOutput for ServeOutput {
+    fn command(&self) -> crate::output::CommandName {
+        crate::output::CommandName::Serve
+    }
+
+    /// The one-line summary, in `dev`'s register.
+    ///
+    /// # Why the guest's state is in the summary
+    ///
+    /// "listening on 127.0.0.1:3000" alone is the summary of a server that will
+    /// answer 503 to every request, which is a fact an operator needs in the first
+    /// line rather than in the JSON. `dev` puts its reload count there for the same
+    /// reason.
+    fn summary(&self) -> String {
+        format!(
+            "{}: {} route(s), {} worker(s), guest {}",
+            self.listen,
+            self.routes,
+            self.workers,
+            if self.guest_loaded {
+                "loaded"
+            } else {
+                "not built (run `qqqai build`)"
+            }
+        )
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
 }
 
 /// Render a serve result for a human.

@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# qqq.toml — the orders reference application (`SRV-018`).
+#
+# This file is §5.3's annotated example made real: the same package name, the same
+# three routes, and the same capability shape. It is deliberately a *clean* manifest
+# rather than a maximal one — a reference app that needed every capability would
+# make the benchmark's own configuration part of what it measures.
+#
+# What it does declare is what the §9.1 workloads need, and nothing else. That is
+# the deny-by-default rule being exercised by the reference implementation rather
+# than merely documented: every stanza below is load-bearing, and a reader can check
+# that claim by deleting one and watching a route fail.
+#
+# # Where this differs from §5.3, and why
+#
+# The Proposal's §5.3 listing is aspirational in several places. The generated JSON
+# Schema (`schema/qqq-toml.schema.json`, produced from the Rust types by
+# `gen_schemas.py`) is the contract. Measured differences:
+#
+#   * `[capabilities.http]` is `{ server, client }` only. §5.3 also shows `methods`,
+#     `max_request_bytes` and `max_response_bytes`; those are not implemented fields,
+#     and `Manifest::parse` refuses them by name — `unknown field
+#     'max_request_bytes', expected 'server' or 'client'`.
+#   * `[limits]` has no `max_response_time` or `shared_memory` in the schema.
+#   * `[package]` requires `name` and `version` only; there is no `entrypoint`,
+#     `authors` or `edition` field yet.
+#
+# Writing the aspirational form first and letting the parser teach me the real one is
+# recorded in `§O-153`: the error named the field *and* the expected alternatives,
+# which is exactly what makes a strict parser worth having.
+
+[package]
+name        = "orders-api"
+version     = "0.1.0"
+description = "Order intake and fulfilment API — the QQQ reference application"
+license     = "Apache-2.0"
+
+[build]
+language     = "rust"
+target       = "wasm32-wasip2"
+profile      = "release"
+reproducible = true
+
+[capabilities]
+# HTTP as a server, and only as a server. `client` is absent, which means the guest
+# cannot make outbound requests — so the `db` workload's stateful read-modify-write
+# cannot be outsourced to a real database through the guest's own HTTP client. That
+# keeps the benchmark honest: what it measures is QQQ.
+[capabilities.http]
+server = true
+
+# The `json`, `crypto` and `tailp99` workloads hash caller-supplied bytes, so the app
+# needs SHA-256 and nothing else. `random` is off: a benchmark that used a random
+# source would produce a different trace every run, and §10.5 requires identical
+# output for identical input.
+[capabilities.crypto]
+hash = ["sha256"]
+
+# The `cold` workload is defined by instantiation cost. A wall clock is not needed by
+# any of the ten, and granting one would let a workload read time and become
+# non-deterministic.
+[capabilities.clock]
+monotonic = true
+wall      = false
+
+[limits]
+memory            = "128MiB"
+fuel              = 50_000_000
+epoch_deadline_ms = 5000
+max_instances     = 200
+max_open_handles  = 256
+max_subrequests   = 32
+
+[server]
+# §5.3's route table, plus the §9.1 benchmark routes. Every path here must be
+# servable by `src/router.rs`, which is what that module's test
+# `the_route_passwords_match_the_manifest_in_the_proposal` checks.
+#
+# The benchmark routes are declared rather than left implicit because "nothing is
+# discovered implicitly" (NN-5): a route the guest can serve but the manifest does not
+# declare is unreachable, and a benchmark harness would see a 404 and report it as a
+# slow runtime.
+routes = [
+  { path = "/orders",            methods = ["POST"],          handler = "create-order" },
+  { path = "/orders",            methods = ["GET"],           handler = "list-orders" },
+  { path = "/orders/:id",        methods = ["GET", "DELETE"], handler = "order-by-id" },
+  { path = "/healthz",           methods = ["GET"],           handler = "health", auth = "none" },
+  # The §9.1 workload routes.
+  { path = "/r/:slug",           methods = ["GET"],  handler = "route" },
+  { path = "/orders/:id/items",  methods = ["GET"],  handler = "order-items" },
+  { path = "/orders/:id/status", methods = ["GET"],  handler = "order-status" },
+  { path = "/crypto/:rounds",    methods = ["POST"], handler = "crypto" },
+  { path = "/compute/:n",        methods = ["GET"],  handler = "compute" },
+  { path = "/multi",             methods = ["GET"],  handler = "multi" },
+  { path = "/cold",              methods = ["GET"],  handler = "cold" },
+]
+# `none`, not `deny`: the benchmarks must be drivable by a harness with no token. A
+# reference app that only answered an authenticated request could not be measured by
+# the tools §9.1 requires be open source. `deny` is the safer default and is what an
+# application handling real data should choose — this one holds no real data, and the
+# choice is stated rather than left implicit.
+default_auth = "none"

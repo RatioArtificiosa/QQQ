@@ -67,7 +67,17 @@
 /// module added to the tree without being added here is caught by
 /// [`every_host_module_is_scanned`], so the rule cannot silently apply to three
 /// files out of four.
-pub const HOST_MODULES: [&str; 3] = ["host_clock.rs", "host_crypto.rs", "host_secrets.rs"];
+pub const HOST_MODULES: [&str; 4] = [
+    "host_clock.rs",
+    "host_crypto.rs",
+    "host_secrets.rs",
+    // WASI. Registered by `add_to_linker_sync` rather than by `func_wrap`, so it
+    // contributes no [`Registration`] and does not change
+    // [`EXPECTED_REGISTRATIONS`]. It is listed because the invariant this module
+    // enforces starts with "every host module is scanned" -- an unlisted module
+    // would escape the rule whether or not it happens to contain registrations.
+    "host_wasi.rs",
+];
 
 /// How many host functions the tree registers.
 ///
@@ -151,10 +161,13 @@ impl std::error::Error for Indeterminate {}
 /// Because `include_str!` is the compiler reading the file, so the content is
 /// baked into the crate and cannot change between a check and the code it is
 /// checking. It also means the scanner needs no I/O and can run anywhere.
-pub const HOST_SOURCES: [(&str, &str); 3] = [
+pub const HOST_SOURCES: [(&str, &str); 4] = [
     ("host_clock.rs", include_str!("host_clock.rs")),
     ("host_crypto.rs", include_str!("host_crypto.rs")),
     ("host_secrets.rs", include_str!("host_secrets.rs")),
+    // Read so the "every host module is scanned" test can see it, even though it
+    // registers no `func_wrap` of its own.
+    ("host_wasi.rs", include_str!("host_wasi.rs")),
 ];
 
 /// A `func_wrap` registration found in a host module.

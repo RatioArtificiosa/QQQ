@@ -12057,4 +12057,157 @@ malformed markup; this was a status claim.
 
 ---
 
+## §O-153 — The guest chain had two missing host layers, and every "serve works" signal was vacuous
+
+Built `SRV-018`, the orders reference application, and it exposed that `qqqai serve`
+could not serve **any real guest**. Two independent host layers were missing, and
+neither was owned by a checklist item — `§O-146`'s finding, one level down.
+
+### The measurement that started it
+
+`examples/orders-api` builds cleanly and exports exactly the right thing:
+
+```console
+$ qqqai build
+orders-api: target/qqq/orders-api.component.wasm (167911 bytes) for wasm32-wasip2
+
+$ wasm-tools component wit target/qqq/orders-api.component.wasm
+  import qqq:http/http@1.0.0
+  export qqq:http/incoming-handler@1.0.0
+```
+
+Then:
+
+```console
+$ qqqai serve --listen 127.0.0.1:18080
+error[QQQ-6004]: capability `http.server` is granted but `qqq:http@1.0.0` has no
+                 host implementation
+```
+
+### Missing layer 1: `qqqai serve` was never dispatched
+
+`CommandName::Serve` was **parsed** and never **wired**. `main.rs`'s match had no
+`Serve` arm, so it fell through to the catch-all:
+
+```rust
+_ => { /* "`{name}` is not implemented yet" */ }
+```
+
+Meanwhile `crates/qqq-run/src/serve.rs` held a complete implementation —
+`options`, `prepare`, `run`, `render`, including the `GuestApp` dispatch. `CLI-011`
+was ticked while the command answered *not implemented yet*.
+
+`ServeOutput` had no `Serialize` and no `CommandOutput` impl either, and both gaps
+existed for the same reason: **nothing had ever tried to render one**. A type that
+is never used does not exercise its own interface, so the interface's holes stay
+invisible.
+
+### Missing layer 2: the host had no WASI at all
+
+Removing the `http.server` grant revealed the next failure:
+
+```console
+error[QQQ-6003]: the component could not be instantiated
+  component imports instance `wasi:io/poll@0.2.9`, but a matching implementation
+  was not found in the linker
+```
+
+A guest built by `cargo build --target wasm32-wasip2` imports **fifteen** `wasi:*`
+interfaces even when its own source never calls one, because `std` for that target
+is implemented over them. And:
+
+```console
+$ grep -r "wasmtime_wasi|WasiCtx|wasmtime-wasi" crates/
+(no output)
+```
+
+The host had no WASI support **at all**, and `wasmtime-wasi` was not a dependency
+anywhere in the workspace. So no real guest could ever instantiate.
+
+### Why every prior signal said "serve works"
+
+This is the part worth recording, because it is a defect one level above the code.
+
+`qqqai new` scaffolds a Rust source file with **no `wit/` directory and no
+`wit-bindgen`**. Its `handle` is a pure function over its *own* local
+`Request`/`Response` structs. The artifact it produces declares an empty world:
+
+```console
+$ wasm-tools component wit target/qqq/serve_probe.component.wasm
+package root:component;
+world root {
+}
+```
+
+It imports nothing and exports nothing, so it instantiates trivially — and
+`qqqai run` reports success against it in 74 µs. Every "the guest path works" test
+in this repository was, unknowingly, testing a component that does nothing.
+
+That is `§O-149`'s lesson in a new medium: **a test whose fixture cannot exhibit
+the defect certifies nothing.** Here the fixture was the *only* guest anyone had
+ever run, and it was structurally incapable of exercising WASI, the capability
+linker or the `qqq:http` import.
+
+### The three guards that fired, and all three were right
+
+1. `arch003::every_host_module_is_scanned` refused `host_wasi.rs` until it was
+   registered. The rule's *"every host module"* clause is load-bearing, and it
+   caught a module added without one.
+2. **`check_no_ambient.py` rejected my own design error.** I wrote
+   `std::env::var` inside `StoreData::from_manifest`, and the checker said exactly
+   what `§2.5` says: ambient configuration is forbidden; take it as a parameter.
+   The irony is worth stating plainly — I added WASI (ambient authority) while
+   arguing in the module docs that QQQ derives every decision from the grant set,
+   and then read the host environment *implicitly* in the same file. The fix is
+   `from_manifest_with_env`: the edge reads the environment, the runtime receives
+   it as data.
+3. `clippy::missing_panics_doc` on two `.expect()` calls in store constructors.
+   Documented, not suppressed.
+
+### What is now correct, and what is still broken
+
+Fixed and measured:
+
+  * `wasmtime-wasi` 48.0.2, pinned to the engine's major so the two cannot
+    disagree about the canonical ABI.
+  * The WASI context is derived from the grant set: no preopens, the preview-1
+    filesystem and socket ABI **not compiled in** (`default-features = false`), an
+    environment allowlist rather than `inherit_env`, a closed stdin, and a
+    **trapping clock** when no clock is granted. Because `add_to_linker_sync` links
+    `wasi:clocks` unconditionally, a denial cannot be an absent registration; it is
+    a clock whose value carries no information. Stated as the weaker guarantee it
+    is, rather than dressed up as a trap.
+  * `qqqai serve` is dispatched, and `ServeOutput` renders.
+  * `cargo test --workspace`: **2216 passed** (was 2203), 0 failed.
+
+Still broken, and isolated:
+
+  * `qqq:http@1.0.0` has no host implementation. The guest imports it **only to
+    alias its types** — `wasm-tools print` shows no call into it — but the
+    component model requires the import instance regardless. Implementing it needs
+    `bindgen!`-generated bindings for the interface's records, which `func_wrap`
+    cannot express, and `qqq-abi` holds only the WIT registry today.
+  * `qqqai new` still scaffolds a guest with no WIT and an empty world. That is a
+    real defect in its own right: the template is what a new user's *first*
+    experience consists of, and it does not produce a QQQ application.
+
+`SRV-018` is therefore **not ticked**. Its app exists, builds and passes 57 tests,
+but the item's definition of done — a guest that `qqqai serve` serves — is not met.
+A half-met item stays unticked, and saying so is the point of this entry.
+
+### The generalisable rule
+
+**"What calls this?" must be asked of every layer, and a green signal from a
+trivial fixture is not a green signal.** `§O-130` found four features with no
+caller; `§O-146` found a chain with no caller; this is both again, in the layer
+that makes a guest *exist* at all. And the sharpest version: the only guest that
+had ever run was one that could not fail, so every test of the guest path was
+green for the same reason an empty file compiles.
+
+→ `crates/qqq-host/src/host_wasi.rs`, `crates/qqq-host/src/linker.rs`,
+`crates/qqq-io/src/blocking.rs`, `crates/qqq-run/src/serve.rs`,
+`crates/qqq-run/src/main.rs`, `examples/orders-api/`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

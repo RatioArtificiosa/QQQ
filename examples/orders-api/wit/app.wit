@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// QQQ application world.
+//
+// # Why this file did not exist until now
+//
+// Every `qqq-*.wit` file in this directory defines an *interface*. None of them
+// defines a **world**, so a guest component had nothing to declare itself against
+// and the host had no agreed export to call. `qqqai serve` could not dispatch to a
+// guest because there was no contract saying what "a QQQ app" exports.
+//
+// This is the missing edge, recorded in `QQQ-Observations-and-Memories.md §O-146`:
+// the host had an engine, a pooling allocator, fuel, epochs, a per-grant linker and
+// handle tables — and no way to *call the guest*. The world is half of that answer;
+// `qqq-host::invoke` is the other half.
+//
+// # Why the world exports `qqq:http/incoming-handler`
+//
+// The Proposal's §4.4 lifecycle is *accept → route → dispatch → guest*. `SRV-006`
+// resolved open question `OQ-007`, and the answer is visible in this directory:
+// `wit/qqq-http.wit` is `package qqq:http@1.0.0` and defines its **own**
+// `incoming-handler` over its own `request`/`response` records. No `.wit` file here
+// references a `wasi:` package, so the world exports `qqq:http/incoming-handler` and
+// nothing else.
+//
+// The first version of this file declared `export wasi:http/incoming-handler@0.2.0`
+// on the assumption that QQQ wrapped WASI's interface. `wasm-tools` refused it
+// outright — `package 'wasi:http@0.2.0' not found` — which is why a world gets
+// validated with the real tool rather than reasoned about: the entire dependency
+// did not exist.
+//
+// # What a guest may import
+//
+// Deliberately **nothing**. A guest's imports are its capability grant, and the
+// host builds its linker from the grant set alone (`linker.rs`) so an ungranted
+// capability is *absent* rather than denied. Declaring imports here would make
+// every guest require them and turn a policy decision into a link-time error.
+//
+// This is not a stylistic preference — it is enforced by the guest toolchain.
+// The first version of this world wrote `import qqq:http/http@1.0.0` so a guest
+// could name the interface's types, and `wit-bindgen` refused to generate
+// anything:
+//
+//     error: missing one of:
+//       * `generate_all` option
+//       * `with: { "qqq:http/http@1.0.0": path::to::bindings, }`
+//       * `with: { "qqq:http/http@1.0.0": generate, }`
+//     Caused by: missing `with` mapping for the key `qqq:http/http@1.0.0`
+//
+// Every guest would have had to carry that mapping. The world exports the
+// handler and imports nothing, and a guest's own WIT adds whatever imports its
+// grants justify.
+package qqq:app@1.0.0;
+
+/// The world a QQQ application component declares.
+world app {
+  /// The handler the host calls for every routed request.
+  ///
+  /// `qqq:http`'s own incoming-handler — the interface `qqq-host::invoke`
+  /// resolves and calls. Exporting it is the entire contract: a QQQ app is a
+  /// component that answers a request with a response.
+  export qqq:http/incoming-handler@1.0.0;
+}

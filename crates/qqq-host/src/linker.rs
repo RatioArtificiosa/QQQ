@@ -55,7 +55,6 @@ use wasmtime::StoreLimits;
 /// Deliberately minimal. `qqq-host`'s fuller store data (resource tables, quota
 /// counters, tenant identity) is layered on this in later work; keeping the
 /// security-critical path free of unnecessary state makes it auditable.
-#[derive(Debug)]
 pub struct StoreData {
     /// The grants this instance was created with.
     ///
@@ -131,6 +130,85 @@ pub struct StoreData {
     /// `None` that meant "any tenant" would be the failure this field exists to
     /// prevent.
     pub tenant: Option<crate::tenant::TenantScope>,
+
+    /// The WASI context, derived from the grants.
+    ///
+    /// # Why a store cannot exist without one
+    ///
+    /// A guest built by `cargo build --target wasm32-wasip2` imports fifteen WASI
+    /// interfaces even when its own source never calls one, because `std` for that
+    /// target is implemented over them. `wasmtime_wasi::p2::add_to_linker_sync`
+    /// takes the context from the **store**, so a store without one cannot
+    /// instantiate such a guest at all:
+    ///
+    /// ```text
+    /// error[QQQ-6003]: the component could not be instantiated
+    ///   component imports instance `wasi:io/poll@0.2.9`, but a matching
+    ///   implementation was not found in the linker
+    /// ```
+    ///
+    /// It is a plain field rather than an `Option` because an `Option` would let a
+    /// store be built without one, and that failure reads like a guest defect
+    /// rather than a wiring omission -- the same reasoning the `tenant` field
+    /// documents for refusing a `None` that means "any tenant".
+    ///
+    /// Every store has a context; the **grants** decide what it permits. See
+    /// [`crate::host_wasi`] for the mapping, which registers no filesystem and no
+    /// sockets at all.
+    pub wasi: wasmtime_wasi::WasiCtx,
+
+    /// The WASI resource table: where guest-side handles live.
+    ///
+    /// # Why it belongs to the store
+    ///
+    /// A `pollable` or an output stream is created *by* the guest and owned *by* the
+    /// instance. Keeping the table in the store means those handles are dropped with
+    /// the instance, so §4.2's per-request isolation extends to WASI resources --
+    /// there is no table that outlives its store and could be reached by the next
+    /// request.
+    pub wasi_table: wasmtime_wasi::ResourceTable,
+}
+
+/// The `WasiView` implementation the WASI linker requires.
+///
+/// # Why this must exist for the store to be usable at all
+///
+/// `wasmtime_wasi::p2::add_to_linker_sync` is generic over `T: WasiView`, and it
+/// calls `ctx()` on every WASI host function to find the context and the resource
+/// table. Without this impl `StoreData` cannot be used as a store for a
+/// WASI-importing component, so **no real guest instantiates** -- the exact failure
+/// `host_wasi`'s module documentation records.
+///
+/// Returning `&mut` references straight out of the store is the intended shape: the
+/// table and the context are per-store state, and the borrow checker enforces that
+/// no host call can hold one while the guest is running.
+impl wasmtime_wasi::WasiView for StoreData {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.wasi_table,
+        }
+    }
+}
+
+/// A `Debug` that names the WASI fields without printing them.
+///
+/// `WasiCtx` and `ResourceTable` are not `Debug`, and a derive would not compile.
+/// That is a fortunate constraint rather than an obstacle: a guest's resource table
+/// lists the handles it holds, and printing one into a shared log is how a
+/// per-instance fact becomes a cross-instance leak. The field is named so a reader
+/// knows it exists; its contents are not a log's business.
+impl fmt::Debug for StoreData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoreData")
+            .field("grants", &self.grants)
+            .field("limits", &self.limits)
+            .field("allowed_hashes", &self.allowed_hashes)
+            .field("ambient", &self.ambient)
+            .field("has_wasi_ctx", &true)
+            .field("tenant", &self.tenant)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for StoreData {
@@ -153,14 +231,36 @@ impl Default for StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            // An empty environment and no wall clock: the deny-by-default answer
+            // for a store that was not built from a manifest. The `expect` is
+            // unreachable -- an empty grant set and an empty environment always
+            // produce a context.
+            wasi: crate::host_wasi::context(&GrantSet::empty(), &[])
+                .expect("an empty grant set and empty environment always build"),
+            wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
     }
 }
 
 impl StoreData {
     /// Build store data from a grant set, with no explicit resource limits.
+    ///
+    /// # Panics
+    ///
+    /// The WASI context construction is documented as infallible for an empty
+    /// environment, and this call passes an empty environment. The `expect` is
+    /// therefore unreachable **as long as that guarantee holds** — it is there to
+    /// turn a future change that makes context construction fallible into a loud
+    /// failure at one obvious site rather than a silently wrong grant set.
     #[must_use]
     pub fn new(grants: GrantSet) -> Self {
+        // The context borrows `grants` before the struct literal moves it. Ordering
+        // matters: calling `context(&grants, ..)` inside a `Self { grants, .. }`
+        // literal would borrow after the move, and the compiler rejects it. Computing
+        // the value first is the fix — not cloning the grant set, which would leave
+        // two copies to keep in step.
+        let wasi = crate::host_wasi::context(&grants, &[])
+            .expect("an empty environment cannot fail to build");
         Self {
             grants,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
@@ -170,6 +270,10 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            // Derived from the grants so a store built this way permits exactly
+            // what the grant set says -- no more, and no less.
+            wasi,
+            wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
     }
 
@@ -182,8 +286,55 @@ impl StoreData {
     /// says *which algorithms*. A host that enforced only the grant would let a
     /// guest use any algorithm the host links, which is not what the developer
     /// declared.
+    ///
+    /// # Panics
+    ///
+    /// As [`StoreData::new`]: the WASI context construction is infallible, and the
+    /// `expect` exists so a future change to that guarantee fails here — at the one
+    /// place a store is built from a manifest — rather than producing a store whose
+    /// environment allowlist silently did not apply.
     #[must_use]
     pub fn from_manifest(manifest: &qqq_cap::manifest::Manifest) -> Self {
+        Self::from_manifest_with_env(manifest, &[])
+    }
+
+    /// Build store data from a manifest, with the environment **injected**.
+    ///
+    /// # Why the environment is a parameter and not read here
+    ///
+    /// Because reading it would be ambient configuration, which `§2.5` forbids and
+    /// `tools/check_no_ambient.py` enforces. A `std::env::var` call inside this
+    /// constructor made the runtime's behaviour depend on hidden global state: two
+    /// identical manifests under two environments would produce two different
+    /// guests, and nothing in the manifest or the ledger would record it. The
+    /// checker caught exactly that, on the change that added WASI.
+    ///
+    /// So the *edge* reads the environment — `qqq-run`, which is a CLI and is
+    /// entitled to inspect its own process — and the runtime receives the result.
+    /// The benefit beyond compilance is testability: a test passes a fixed map
+    /// rather than mutating the real environment, which would race every other test
+    /// in the binary.
+    ///
+    /// # Why a missing variable is dropped rather than passed as empty
+    ///
+    /// `env` carries only the pairs the caller resolved. A name the manifest lists
+    /// but the caller did not supply is **absent** from the guest's environment,
+    /// which is the safe direction: a guest reading `REGION` gets nothing and takes
+    /// its own default, rather than receiving an empty string that looks like a real
+    /// value. `host_wasi::describe_missing_env` is the diagnostic for the caller that
+    /// wants to refuse instead.
+    ///
+    /// # Panics
+    ///
+    /// As [`StoreData::new`]: the WASI context construction is infallible, and the
+    /// `expect` exists so a future change to that guarantee fails here — at the one
+    /// place a store is built from a manifest — rather than producing a store whose
+    /// environment allowlist silently did not apply.
+    #[must_use]
+    pub fn from_manifest_with_env(
+        manifest: &qqq_cap::manifest::Manifest,
+        env: &[(String, String)],
+    ) -> Self {
         let grants = GrantSet::from_manifest(manifest);
 
         let allowed_hashes = manifest
@@ -198,6 +349,12 @@ impl StoreData {
             })
             .unwrap_or_default();
 
+        // Built before the struct literal, for the reason `StoreData::new`
+        // documents: the context borrows `grants`, and a borrow inside a literal that
+        // also moves it is rejected.
+        let wasi = crate::host_wasi::context(&grants, env)
+            .expect("building a context from an injected environment cannot fail");
+
         Self {
             grants,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
@@ -210,6 +367,8 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(manifest.limits.max_subrequests),
             handles: crate::quota::HandleQuota::new(manifest.limits.max_open_handles),
             tenant: None,
+            wasi,
+            wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
     }
 
@@ -640,6 +799,24 @@ pub fn build_linker<'a>(
     // linker is never populated speculatively and then filtered: building it
     // from the grants alone is what makes an ungranted import absent rather than
     // denied, and that property is the whole security argument.
+    // WASI is registered **unconditionally**, before the capability loop, and the
+    // reason is worth stating where the loop is:
+    //
+    // The loop below adds a `qqq:*` interface only when a grant unlocks it. WASI is
+    // different because it is not an interface a guest *chooses* to import -- it is
+    // how the guest's own `std` is implemented on `wasm32-wasip2`. A real guest
+    // imports fifteen `wasi:*` interfaces even when its source calls none of them.
+    // Requiring a grant for them would not be a stricter policy; it would mean no
+    // app built by the normal toolchain can run at all.
+    //
+    // The authority that matters is withheld by the **context**, which is derived
+    // from the same grant set everything else reads (`StoreData::wasi`,
+    // `crate::host_wasi`): no preopens, no filesystem interface, no sockets, an
+    // environment allowlist rather than an inherit, and no wall clock unless
+    // `clock.wall` is granted. So this is not a hole in deny-by-default; it is where
+    // the deny is enforced.
+    crate::host_wasi::register(&mut linker)?;
+
     let required = required_interfaces(grants);
     let mut interfaces: Vec<String> = Vec::with_capacity(required.len());
     let mut unimplemented = Vec::new();

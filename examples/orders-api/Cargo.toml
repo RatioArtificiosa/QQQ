@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The orders reference application — `SRV-018`.
+#
+# # Why this file declares an empty `[workspace]`
+#
+# `examples/` sits inside the QQQ repository, and the repository root has a
+# `[workspace]` table. Cargo therefore walks upward, finds that workspace, and
+# refuses this package unless it is a declared member:
+#
+#     error: current package believes it's in a workspace when it's not
+#
+# This app deliberately does **not** join the host workspace. Two reasons, and
+# the second is the load-bearing one:
+#
+# 1. It targets `wasm32-wasip2` while the host targets the native triple, so
+#    joining would make every `cargo build` in the repo also try to build a wasm
+#    artifact — or fail to, without the target installed.
+# 2. It is a **guest**, so it must be built by the *guest* toolchain through
+#    `qqqai build`, exactly as a user's project would be. If it were a workspace
+#    member it would be built by the host's CI in a way no user's project is, and
+#    the reference app would stop being a reference for anything.
+#
+# The empty table terminates the upward search. This is the documented recipe
+# (`§O-147`) and it is not optional.
+[workspace]
+
+[package]
+name = "orders-api"
+version = "0.1.0"
+edition = "2021"
+description = "The QQQ reference application: order intake and fulfilment API."
+license = "Apache-2.0"
+publish = false
+
+# The manifest's `[build] language = "rust"` selects this path. `cdylib` is what
+# produces a `.wasm`; without it cargo emits only an `.rlib` and there is no
+# artifact for `qqqai build` to stage.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# `macros` is required for the `generate!`/`export!` pair. Without it the error is
+# `use of unresolved module or unlinked crate exports`, which names neither the
+# feature nor the macro — recorded in `§O-147`.
+wit-bindgen = { version = "0.44", features = ["macros"] }
+
+# The benchmark workloads need JSON, SHA-256 and a prime sieve. All three are
+# implemented in-tree (`src/json.rs`, `src/hash.rs`, `src/compute.rs`) rather
+# than pulled from crates.io, because a reference app that depends on the
+# ecosystem is measuring the ecosystem. See `src/lib.rs` for the full argument.

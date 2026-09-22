@@ -75,6 +75,33 @@ categories = ["wasm", "development-tools", "network-programming"]
 # The execution engine. Pinned deliberately — see Proposal §D-003 and RISK-003.
 # Implements: HOST-020, PLAN-012
 wasmtime = "48"
+# The WASI host implementation, pinned to the SAME major as the engine.
+#
+# # Why this must track `wasmtime` exactly
+#
+# `wasmtime-wasi` is released in lockstep with `wasmtime` and links against its
+# component model. A 49 `wasmtime-wasi` beside a 48 `wasmtime` would put two copies
+# of the component model in one build, and the canonical ABI they agree on *is* the
+# wire format a guest is compiled against -- so a mismatch is a silent
+# misinterpretation of every value crossing the boundary, not a clean build error.
+#
+# # Why it is needed at all
+#
+# A guest built with `cargo build --target wasm32-wasip2` imports fifteen WASI
+# interfaces even when its own source never calls one, because `std` for that target
+# is implemented over them. Without a host implementation, instantiation fails:
+#
+#     error[QQQ-6003]: the component could not be instantiated
+#       component imports instance `wasi:io/poll@0.2.9`, but a matching
+#       implementation was not found in the linker
+#
+# # Why `default-features = false` with only `p2`
+#
+# `p1` pulls `wiggle` and the preview-1 file/socket ABI, neither of which QQQ
+# exposes. A guest reaches files and sockets through `qqq:fs` and `qqq:http`, which
+# are capability-gated; letting WASI's ambient versions in would grant authority the
+# capability model does not know about, which is the failure `§4.4` forbids.
+wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
 
 anyhow = "1"
 thiserror = "2"

@@ -45,12 +45,17 @@ ROOT = Path(__file__).resolve().parent.parent
 ORDER = [
     "qqq-core",
     # The benchmark harness (`PERF-001`). It sits directly above `qqq-core`
-    # because that is its only dependency: it defines what a *measurement* is --
-    # the §9.1 methodology as a type and the §9.2 budgets as data -- and it
-    # measures other crates from outside rather than being part of their
-    # dependency chain. Siting it as low as possible is what keeps it able to
+    # because it has **no workspace dependency at all**: it defines what a
+    # *measurement* is -- the §9.1 methodology as a type and the §9.2 budgets as
+    # data -- and measures other crates from outside rather than being part of
+    # their dependency chain. Having no internal edge is what keeps it able to
     # measure everything: a harness that depended on the server could not be used
     # to time the server's own startup.
+    #
+    # It declared a `qqq-core` dependency in its first manifest and never used it;
+    # `cargo-machete` rejected the unused edge in CI and it was removed. An unused
+    # declaration is not harmless -- it is a false statement about the dependency
+    # graph, and this checker would have accepted an edge that does not exist.
     "qqq-bench",
     "qqq-cap",
     "qqq-abi",

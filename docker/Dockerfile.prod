@@ -87,12 +87,39 @@ COPY wit/ wit/
 RUN find crates -mindepth 2 -maxdepth 2 -not -name Cargo.toml -not -name README.md -exec rm -rf {} + \
     && echo "manifests retained: $(find crates -maxdepth 2 -name Cargo.toml | wc -l)"
 
-# A stub `main.rs` for every crate, so the dependency graph compiles and caches
+# A stub source for every crate, so the dependency graph compiles and caches
 # before the real sources arrive. `touch` then invalidates only the real ones.
-RUN for c in qqq-core qqq-cap qqq-abi qqq-host qqq-io qqq-serve qqq-pkg qqq-debug qqq-sys; do \
-        mkdir -p "crates/$c/src" && echo "" > "crates/$c/src/lib.rs"; \
+#
+# # Why this DERIVES the crate list instead of enumerating it
+#
+# The list used to be written out: nine names, then `qqq-run` handled specially.
+# Adding `qqq-bench` broke the build with
+#
+#     error: failed to load manifest for workspace member `/src/crates/qqq-bench`
+#       failed to parse manifest at `/src/crates/qqq-bench/Cargo.toml`
+#
+# — because `find` at the step above had already deleted every `src/` directory,
+# so the new crate had a manifest and no source, which `cargo metadata` refuses.
+#
+# The comment on the `COPY` above already recorded that "an allowlist of files that
+# must exist is a list that goes stale silently, and this is the second time in
+# this file's short life that enumerating was the mistake." This was the third. So
+# the enumeration is gone: the loop walks the manifests that are actually present
+# and creates whatever stub each one needs, which cannot go stale because it is
+# derived from the thing it must agree with.
+#
+# Every crate is stubbed as a **library** first, and `main.rs` is added only where
+# a `[[bin]]` actually needs it. A crate that is both gets both, so no present or
+# future crate needs to be named here.
+RUN for manifest in $(find crates -maxdepth 2 -name Cargo.toml | sort); do \
+        c="$(dirname "$manifest")"; \
+        mkdir -p "$c/src"; \
+        echo "" > "$c/src/lib.rs"; \
+        if grep -qE '^\[\[bin\]\]|^name *= *"qqqai"' "$manifest"; then \
+            echo 'fn main() {}' > "$c/src/main.rs"; \
+        fi; \
     done \
-    && mkdir -p crates/qqq-run/src && echo 'fn main() {}' > crates/qqq-run/src/main.rs \
+    && echo "stubbed $(find crates -maxdepth 2 -name Cargo.toml | wc -l) crate(s)" \
     && cargo build --release --locked --target x86_64-unknown-linux-musl -p qqq-run \
     && rm -rf crates/*/src
 

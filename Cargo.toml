@@ -17,10 +17,11 @@ members = [
     # Implements: PERF-001, PERF-002, PERF-005, PERF-020, PERF-022
     # Proposal: §9.1 The honest benchmark position, §9.2 The performance budget
     #
-    # Depends on `qqq-core` and nothing else, which is the point: it defines the
-    # *methodology* (a type, not a document) and the *budgets* (data, not a table
-    # in prose), and everything that measures a running system is built on top of
-    # it. Sited as low as possible so it can measure any crate above it.
+    # Depends on `serde` and nothing else -- not even `qqq-core`, which the first
+    # version declared until `cargo-machete` rejected the unused edge in CI. It
+    # defines the *methodology* (a type, not a document) and the *budgets* (data,
+    # not a table in prose), and having no internal dependencies is what lets it
+    # measure anything without dragging in this project's internals.
     "crates/qqq-bench",
 
     # Tier: stable — the capability engine. The reason this project exists.

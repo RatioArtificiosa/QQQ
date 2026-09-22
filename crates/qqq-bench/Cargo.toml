@@ -16,7 +16,24 @@ categories = ["development-tools"]
 workspace = true
 
 [dependencies]
-qqq-core = { path = "../qqq-core", version = "0.0.0" }
+# # Why there is no `qqq-core` dependency, though one was declared first
+#
+# The first version of this manifest declared `qqq-core`, on the reasoning that a
+# workspace crate should build on the shared error model. `cargo-machete` rejected
+# it in CI: the crate never uses it. Verified locally -- a search for `qqq_core`
+# across `src/` returns nothing.
+#
+# The finding is correct and the fix is to **remove the edge**, not to whitelist
+# it. A harness that defines what a measurement is needs no shared error type: its
+# failures are `MethodologyError` and `BudgetError`, both of which carry their own
+# `§9.1`/`§9.2` citations and implement `std::error::Error` directly. An unused
+# declaration is not harmless -- it is a false statement about the dependency
+# graph, it slows every build of this crate, and `check_topology.py` would have
+# accepted an edge that does not exist.
+#
+# The consequence is that `qqq-bench` depends only on `serde`, so it can be used
+# to measure anything, including a future non-QQQ comparison (PERF-*) without
+# dragging in this project's internals.
 serde = { workspace = true }
 serde_json = { workspace = true }
 

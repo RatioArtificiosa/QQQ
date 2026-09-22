@@ -13097,4 +13097,102 @@ citation this checker's citation rule defends against.
 
 ---
 
+## §O-162 — Two red CI jobs, and both were enumerations that went stale
+
+Adding `crates/qqq-bench` turned two jobs red. Neither was a bug in the new code.
+Both were **lists, maintained by hand, that nobody had cause to update** — and the
+third and fourth instances of that shape in this round alone.
+
+Read from the log, not guessed: `gh run view <id> --log-failed` named the file and
+the exact error in both cases.
+
+### Failure 1: `docker/Dockerfile.prod` enumerated the crate names
+
+```text
+error: failed to load manifest for workspace member `/src/crates/qqq-bench`
+  failed to parse manifest at `/src/crates/qqq-bench/Cargo.toml`
+```
+
+The image builds a dependency-cache layer by stubbing every crate's source, and
+the stub loop named nine crates explicitly plus `qqq-run` as a special case. The
+step above it deletes every `crates/*/src/`, so `qqq-bench` ended up with a
+manifest and no source — which `cargo metadata` refuses.
+
+**The file already knew.** Three lines above the failing loop, its own comment
+reads: *"an allowlist of files that must exist is a list that goes stale silently,
+and this is the second time in this file's short life that enumerating was the
+mistake."* This was the third. A comment that names a defect shape without removing
+the defect is not a control — it is `§O-124`'s finding (*a doc comment that stated
+an invariant and did not enforce it*) with a two-failure head start.
+
+**The fix removes the enumeration rather than extending it.** The loop now walks
+`find crates -maxdepth 2 -name Cargo.toml`, derives each crate's directory, writes
+a `lib.rs`, and adds a `main.rs` only where the manifest actually declares a
+binary. It cannot go stale because it is derived from the thing it must agree with.
+Verified without Docker by running the same predicates over the real tree: 11
+manifests found, `qqq-run` correctly detected as a binary crate, and no `RUN` line
+names any crate at all.
+
+There is a refinement worth recording in the detection rule: the check is
+`grep -qE '^\[\[bin\]\]|^name *= *"qqqai"'`. `[[bin]]` alone would catch it, but
+the `name` alternative covers a crate that declares its binary through
+`Cargo.toml` defaults, and matching both is what makes the rule survive a
+manifest style change.
+
+### Failure 2: `cargo-machete` found a dependency that does not exist
+
+```text
+qqq-bench -- ./crates/qqq-bench/Cargo.toml:
+        qqq-core
+```
+
+The crate declared `qqq-core` and **never used it**. Verified: a search for
+`qqq_core` across `src/` returns nothing.
+
+**The tempting fix was the wrong one.** `cargo-machete`'s output suggests
+`[package.metadata.cargo-machete] ignored = ["qqq-core"]`, which would have made CI
+green while leaving a false statement in the manifest. The right fix is to remove
+the edge, and the reason is that an unused declaration is not harmless:
+
+* it is a **false claim about the dependency graph**, which is the artifact
+  `check_topology.py` reasons about — that checker would have accepted an edge that
+  does not exist;
+* it **slows every build** of the crate for no benefit;
+* and it **contradicts the crate's own design argument**, which is that having no
+  internal dependencies is what lets it measure anything.
+
+The consequence is that `qqq-bench` now depends only on `serde`. Its failures are
+`MethodologyError` and `BudgetError`, both of which carry their own `§9.1`/`§9.2`
+citations and implement `std::error::Error` directly — a shared error type was
+never needed.
+
+**Four places described the old shape** and were all corrected: the workspace
+comment, the topology checker's rationale, the handbook's crate list, and the
+checklist entry. A stale statement about the dependency graph is exactly the kind
+of claim this repository exists to keep true.
+
+### The generalisable rules
+
+1. **A new crate is a multi-file change, and the files are not where you expect.**
+   This round needed: `Cargo.toml`, `Cargo.lock`, `tools/check_topology.py`,
+   `crates/qqq-core/tests/architecture.rs` (its own independent `ORDER`), the MSRV
+   job's `-ne 10` count, and `docker/Dockerfile.prod`. Five of the six failed
+   loudly; the sixth — the lockfile — is the one that fails *silently* locally
+   (`§O-152`).
+2. **When a comment names a defect shape, remove the defect.** A warning beside an
+   enumeration is a note that the enumeration will break, not a fix.
+3. **A linter's suggested whitelist is a suggestion, not a verdict.**
+   `cargo-machete` offers an ignore list; taking it would have converted a true
+   finding into a permanent false claim.
+4. **Read the log.** Both failures named their file and their reason. Guessing
+   would have sent me to the Rust sources, which were correct.
+
+→ `docker/Dockerfile.prod`, `crates/qqq-bench/Cargo.toml`, `Cargo.toml`,
+`Cargo.lock`, `tools/check_topology.py`, `crates/qqq-core/tests/architecture.rs`,
+`.github/workflows/ci.yml` (MSRV count), `docs/AGENT-HANDBOOK.md`;
+`.scratch/verify_docker_stub_loop.sh`; `§O-152` (the silent lockfile failure),
+`§O-161` (the same round's checker findings).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

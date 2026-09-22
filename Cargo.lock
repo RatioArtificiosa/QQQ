@@ -1370,7 +1370,6 @@ dependencies = [
 name = "qqq-bench"
 version = "0.0.0"
 dependencies = [
- "qqq-core",
  "serde",
  "serde_json",
 ]

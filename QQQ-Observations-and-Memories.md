@@ -13955,6 +13955,65 @@ without error.
 → recorded because a future agent will hit this and needs to know the first
 hypothesis is "the write did not happen", not "my code is wrong".
 
+### O-174: the tool-call-repair plugin — what is verified, and what is not
+
+The user asked, twice, whether the plugin actually works. The honest answer
+requires separating three claims that are easy to run together.
+
+**Verified working:**
+
+* The module imports and has the right shape. `import(file:///…/lib/index.js)`
+  succeeds and exports `apply`, `inject`, `name` — cordis's plugin contract.
+* Its own suite passes: `node test/verify.mjs` → **11 passed, 0 failed**, covering
+  numeric-string coercion, boolean-string coercion, whole-object unwrapping, two
+  *negative* cases (a leading-zero string and a non-JSON brace string are left
+  alone), and that every repair is recorded with the original value preserved.
+* The config row is **enabled and correct**. Read from disk, not from a summary:
+  a plain scalar `name: file:///C:/Users/Usuario/.dsh/plugins/dsh-tool-call-repair/lib/index.js`
+  under `- insert:`.
+* `node --check lib/index.js` is clean, and the `file:` URL resolves.
+* The design cannot break a working call: the wrapper always ends in `next()`,
+  and the log write is wrapped in a `try/catch` that only emits to stderr. A
+  plugin whose failure mode is "the call proceeds unchanged" is safe to leave
+  installed.
+
+**NOT verified: that the running harness loaded it this boot.**
+
+Two live probes were made, clearing `repairs.jsonl` first, and **neither
+recreated the log**. That is not evidence of absence, and I want the reasoning
+recorded because the first reading of it was wrong:
+
+* The plugin records **only when it changes something** (`if (changed.length > 0)`).
+  A probe whose arguments the harness had already normalised correctly would log
+  nothing. Probe A passed `timeoutMs: 8000`; probe B passed
+  `run_in_background: true`. Both are what the *harness* accepts, so by the time
+  the plugin saw them there may have been nothing to repair — the malformation
+  this plugin targets is one that reaches the seam, and my two probes may simply
+  not have reached it in damaged form.
+* The three log lines that *did* exist were written by `verify.mjs` itself, which
+  deletes and rewrites the real log file at line 65. Reading those as proof of a
+  live repair was my error, corrected before drawing a conclusion.
+
+So: **the plugin is correctly built, tested, wired and safe — and whether this
+boot loaded it is still unconfirmed.** Confirming it needs a malformed call that
+actually reaches the seam, which cannot be produced on demand from inside a
+session; it will show up as a log line the next time the model emits a damaged
+call, or as its absence if the loader rejected the row.
+
+**One more mistake worth naming.** While checking this I quoted `!!js \`new
+URL(...).href\`` as the live config, and inferred the plugin might not load. That
+text came from `~/.dsh/plugins/diag.txt`, a **stale diagnostic snapshot** written
+before the wiring was simplified to a plain scalar. Reading a stale artifact as
+current state is the same class of error as `O-166` ("a fact recalled rather than
+read"), one level up: this time the stale thing was a *file*, not a memory. The
+remedy is the same and is now habit — read the artefact the system actually
+consumes, not a report about it.
+
+*Rollback, unchanged:* `python C:\Users\Usuario\.dsh\plugins\wire.py --revert`,
+or uncomment `disabled: true` in the row. A pre-change copy sits at
+`cordis.patch.yml.bak-toolcallrepair`.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

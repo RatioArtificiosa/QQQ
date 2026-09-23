@@ -76,6 +76,10 @@ async fn spawn_server(
 fn plan_for(addr: SocketAddr, concurrency: Concurrency) -> Plan {
     let mut plan = Plan::get(addr, "/healthz", concurrency);
     plan.timeout = Duration::from_secs(5);
+    // Set explicitly rather than relying on `Plan::get`'s default: a test that
+    // inherited a longer connect deadline would pass while making every failing
+    // request slow, which is the property the early-exit tests depend on.
+    plan.connect_timeout = Duration::from_millis(500);
     plan
 }
 

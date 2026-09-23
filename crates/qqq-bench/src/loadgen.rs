@@ -392,7 +392,11 @@ pub fn framing_of(head: &[u8]) -> Framing {
     for line in lower.lines() {
         if let Some(rest) = line.strip_prefix("content-length:") {
             if let Ok(n) = rest.trim().parse::<usize>() {
-                return if n == 0 { Framing::None } else { Framing::Length(n) };
+                return if n == 0 {
+                    Framing::None
+                } else {
+                    Framing::Length(n)
+                };
             }
         }
     }
@@ -406,12 +410,7 @@ pub fn framing_of(head: &[u8]) -> Framing {
 /// The status code from a head, if the status line parses.
 #[must_use]
 pub fn status_of(head: &str) -> Option<u16> {
-    head.lines()
-        .next()?
-        .split(' ')
-        .nth(1)?
-        .parse::<u16>()
-        .ok()
+    head.lines().next()?.split(' ').nth(1)?.parse::<u16>().ok()
 }
 
 /// A parsed response head.

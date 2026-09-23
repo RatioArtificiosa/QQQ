@@ -119,17 +119,17 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 let v = value_of(args, i, arg)?;
                 let name = BenchmarkName::parse(&v);
                 if !name.is_specification_benchmark() {
-                    return Err(usage(format!(
-                        "`{v}` is not one of the ten §9.1 benchmarks"
-                    ))
-                    .with_remediation(format!(
-                        "the ten are: {}",
-                        BenchmarkName::all_specified()
-                            .iter()
-                            .map(|n| n.as_str().into_owned())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
+                    return Err(
+                        usage(format!("`{v}` is not one of the ten §9.1 benchmarks"))
+                            .with_remediation(format!(
+                                "the ten are: {}",
+                                BenchmarkName::all_specified()
+                                    .iter()
+                                    .map(|n| n.as_str().into_owned())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                    );
                 }
                 opts.only.push(name);
                 i += 2;
@@ -158,7 +158,9 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 })?;
                 if n == 0 {
                     return Err(usage("`--connections 0` would send no requests")
-                        .with_remediation("pass at least 1, or omit the flag to use the workload's own level"));
+                        .with_remediation(
+                            "pass at least 1, or omit the flag to use the workload's own level",
+                        ));
                 }
                 opts.connections = Some(n);
                 i += 2;
@@ -210,10 +212,8 @@ pub fn parse_target(raw: &str) -> Result<SocketAddr, Error> {
                 .with_remediation("pass a full address, for example `--listen 127.0.0.1:8080`")
         });
     }
-    Err(
-        usage(format!("`{raw}` is not an address"))
-            .with_remediation("pass `host:port`, for example `--listen 127.0.0.1:8080`"),
-    )
+    Err(usage(format!("`{raw}` is not an address"))
+        .with_remediation("pass `host:port`, for example `--listen 127.0.0.1:8080`"))
 }
 
 /// One workload's outcome, ready to render.
@@ -277,10 +277,7 @@ pub struct BudgetVerdict {
 pub fn read_environment() -> Environment {
     let mut toolchains = BTreeMap::new();
     toolchains.insert("rustc".to_owned(), rustc_version());
-    toolchains.insert(
-        "qqqai".to_owned(),
-        env!("CARGO_PKG_VERSION").to_owned(),
-    );
+    toolchains.insert("qqqai".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
 
     Environment::new(
         cpu_model(),
@@ -373,10 +370,7 @@ fn kernel_version() -> String {
 ///
 /// Returns a usage error if a flag contradicts the workload's shape — for example
 /// `--seconds` on a row that is not sustained.
-pub fn methodology_for(
-    workload: &Workload,
-    opts: &BenchOptions,
-) -> Result<Methodology, Error> {
+pub fn methodology_for(workload: &Workload, opts: &BenchOptions) -> Result<Methodology, Error> {
     let concurrency = match opts.connections {
         Some(n) => Concurrency::Fixed { connections: n },
         None => workload.concurrency,
@@ -478,7 +472,11 @@ pub fn verdict_for(
         BenchmarkName::Json => {
             // `§9.2` states throughput against the `json` workload.
             let b = Budget::for_item(Item::Perf010)?;
-            (b, b.meets(&Measurement::new(rps?, Unit::RequestsPerSecond)).ok()?)
+            (
+                b,
+                b.meets(&Measurement::new(rps?, Unit::RequestsPerSecond))
+                    .ok()?,
+            )
         }
         BenchmarkName::TailP99 => {
             let b = Budget::for_item(Item::Perf011)?;
@@ -486,7 +484,11 @@ pub fn verdict_for(
         }
         BenchmarkName::Multi => {
             let b = Budget::for_item(Item::Perf010)?;
-            (b, b.meets(&Measurement::new(rps?, Unit::RequestsPerSecond)).ok()?)
+            (
+                b,
+                b.meets(&Measurement::new(rps?, Unit::RequestsPerSecond))
+                    .ok()?,
+            )
         }
         _ => return None,
     };
@@ -663,6 +665,13 @@ pub fn bench_plan(
         concurrency,
         limit,
         timeout: timeout(opts),
+        // Derived from `--timeout` but capped, because connecting and responding
+        // are different operations with different reasonable budgets. Without the
+        // cap, a caller who raised `--timeout` for a slow workload would also make
+        // a *wrong* target take minutes to diagnose -- the defect the early-exit
+        // and connect-timeout changes exist to prevent. Two seconds is generous
+        // for a TCP handshake and short enough that the diagnosis is quick.
+        connect_timeout: timeout(opts).min(Duration::from_secs(2)),
         // Overwritten by the caller from the methodology, so the performed warmup
         // and the published one are the same number.
         warmup: 0,
@@ -1013,7 +1022,10 @@ mod tests {
     fn a_fixed_row_takes_a_request_count_and_a_sustained_row_takes_seconds() {
         let hello = Workload::find(&BenchmarkName::Hello).expect("hello exists");
         let opts = options(&args(&["--requests", "250"])).expect("parses");
-        assert_eq!(shape_for(hello, &opts).expect("valid"), Shape::Fixed { requests: 250 });
+        assert_eq!(
+            shape_for(hello, &opts).expect("valid"),
+            Shape::Fixed { requests: 250 }
+        );
 
         let multi = Workload::find(&BenchmarkName::Multi).expect("multi exists");
         let opts = options(&args(&["--seconds", "30"])).expect("parses");
@@ -1057,7 +1069,10 @@ mod tests {
         // §9.1 requires the machine be published. The constructor refuses a blank
         // field, so a returned `Environment` is evidence that nine facts were read.
         let env = read_environment();
-        assert!(!env.cpu_model.trim().is_empty(), "cpu_model must be populated");
+        assert!(
+            !env.cpu_model.trim().is_empty(),
+            "cpu_model must be populated"
+        );
         assert!(!env.os.trim().is_empty());
         assert!(!env.kernel.trim().is_empty());
         assert!(env.physical_cores > 0);
@@ -1089,23 +1104,45 @@ mod tests {
         }
     }
 
+    /// Build the document `should_fail` now takes.
+    ///
+    /// `should_fail` reads the *rendered* document rather than the bare results,
+    /// because the document is what carries the budgets a verdict is derived from.
+    /// These tests therefore go through the same constructor the command does,
+    /// which is the stronger check: a document that dropped its verdicts would fail
+    /// here rather than passing on a `Vec` the command never builds.
+    /// Build the document `should_fail` takes.
+    ///
+    /// `should_fail` reads a `BenchOutput` rather than bare results, because the
+    /// document is what carries the budgets a verdict comes from. Building one
+    /// through the same path the command uses is the stronger check: a document
+    /// that dropped its verdicts fails here rather than passing on a `Vec` the
+    /// command never constructs.
+    fn document(rows: Vec<BenchResult>) -> BenchOutput {
+        let opts = BenchOptions::default();
+        let workload = Workload::find(&BenchmarkName::Hello).expect("hello is in the table");
+        let methodology =
+            methodology_for(workload, &opts).expect("the hello methodology is constructible");
+        BenchOutput::new(&rows, &methodology)
+    }
+
     #[test]
     fn a_missed_budget_only_fails_when_asked_to() {
-        let results = vec![result_with(false)];
+        let doc = document(vec![result_with(false)]);
         assert!(
-            !should_fail(&results, false),
+            !should_fail(&doc, false),
             "without --fail-on-miss a miss is reported, not failed"
         );
         assert!(
-            should_fail(&results, true),
+            should_fail(&doc, true),
             "with --fail-on-miss a miss must be reported as a failure"
         );
     }
 
     #[test]
     fn a_met_budget_succeeds_even_with_fail_on_miss() {
-        let results = vec![result_with(true)];
-        assert!(!should_fail(&results, true));
+        let doc = document(vec![result_with(true)]);
+        assert!(!should_fail(&doc, true));
     }
 
     #[test]
@@ -1116,14 +1153,18 @@ mod tests {
         // `--only cpu`.
         let mut r = result_with(true);
         r.verdict = None;
-        assert!(!should_fail(&[r], true));
+        assert!(!should_fail(&document(vec![r]), true));
     }
 
     #[test]
     fn one_missed_budget_among_many_fails_the_run() {
         // The control for the tests above: a `should_fail` that always returned
         // false would pass all of them.
-        let results = vec![result_with(true), result_with(false), result_with(true)];
-        assert!(should_fail(&results, true));
+        let doc = document(vec![
+            result_with(true),
+            result_with(false),
+            result_with(true),
+        ]);
+        assert!(should_fail(&doc, true));
     }
 }

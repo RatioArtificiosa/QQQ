@@ -273,6 +273,13 @@ pub struct BudgetVerdict {
 /// crate takes none for it. An `"unknown"` is a **named** gap a reader can see,
 /// which is `§10.3`'s rule for the access log's `manifest_rev` — not a silent
 /// omission dressed as a value.
+///
+/// # Panics
+///
+/// In principle never: every probe below degrades to a named fallback, and the
+/// only `Result`-returning construction is handled explicitly. The panic the
+/// lint sees is on the formatting path of that fallback. It is documented rather
+/// than asserted away because a caller deserves to know the claim.
 #[must_use]
 pub fn read_environment() -> Environment {
     let mut toolchains = BTreeMap::new();
@@ -281,9 +288,12 @@ pub fn read_environment() -> Environment {
 
     Environment::new(
         cpu_model(),
-        std::thread::available_parallelism()
-            .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
-            .unwrap_or(1),
+        std::thread::available_parallelism().map_or(1, |n| {
+            // A machine with more logical CPUs than `u32` can hold is not a thing
+            // today; saturating rather than truncating keeps the published number
+            // from silently under-reporting the machine the result came from.
+            u32::try_from(n.get()).unwrap_or(u32::MAX)
+        }),
         total_memory_bytes(),
         std::env::consts::OS.to_owned() + " " + std::env::consts::ARCH,
         kernel_version(),
@@ -393,7 +403,7 @@ pub fn methodology_for(workload: &Workload, opts: &BenchOptions) -> Result<Metho
          Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
             .to_owned(),
     ])
-    .map_err(|e| usage(e))?;
+    .map_err(usage)?;
 
     Methodology::new(
         environment,
@@ -575,6 +585,13 @@ pub fn warmup_requests(warmup: &Warmup) -> u32 {
 ///
 /// Returns a usage error if a workload's plan cannot be built, or if driving it
 /// fails to start.
+///
+/// # Panics
+///
+/// In principle never. The lint sees the infallible formatting on this path; every
+/// fallible step here returns an `Error` to the caller instead of panicking, which
+/// is what lets `main` report a failed run with its exit code rather than a
+/// backtrace.
 pub async fn run(opts: &BenchOptions, target: SocketAddr) -> Result<BenchOutput, Error> {
     let mut results = Vec::new();
     // The methodology of the last workload built, kept for the document's
@@ -1118,17 +1135,17 @@ mod tests {
     /// through the same path the command uses is the stronger check: a document
     /// that dropped its verdicts fails here rather than passing on a `Vec` the
     /// command never constructs.
-    fn document(rows: Vec<BenchResult>) -> BenchOutput {
+    fn document(rows: &[BenchResult]) -> BenchOutput {
         let opts = BenchOptions::default();
         let workload = Workload::find(&BenchmarkName::Hello).expect("hello is in the table");
         let methodology =
             methodology_for(workload, &opts).expect("the hello methodology is constructible");
-        BenchOutput::new(&rows, &methodology)
+        BenchOutput::new(rows, &methodology)
     }
 
     #[test]
     fn a_missed_budget_only_fails_when_asked_to() {
-        let doc = document(vec![result_with(false)]);
+        let doc = document(&[result_with(false)]);
         assert!(
             !should_fail(&doc, false),
             "without --fail-on-miss a miss is reported, not failed"
@@ -1141,7 +1158,7 @@ mod tests {
 
     #[test]
     fn a_met_budget_succeeds_even_with_fail_on_miss() {
-        let doc = document(vec![result_with(true)]);
+        let doc = document(&[result_with(true)]);
         assert!(!should_fail(&doc, true));
     }
 
@@ -1153,18 +1170,14 @@ mod tests {
         // `--only cpu`.
         let mut r = result_with(true);
         r.verdict = None;
-        assert!(!should_fail(&document(vec![r]), true));
+        assert!(!should_fail(&document(&[r]), true));
     }
 
     #[test]
     fn one_missed_budget_among_many_fails_the_run() {
         // The control for the tests above: a `should_fail` that always returned
         // false would pass all of them.
-        let doc = document(vec![
-            result_with(true),
-            result_with(false),
-            result_with(true),
-        ]);
+        let doc = document(&[result_with(true), result_with(false), result_with(true)]);
         assert!(should_fail(&doc, true));
     }
 }

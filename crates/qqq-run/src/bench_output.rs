@@ -86,23 +86,40 @@ mod tests {
 
     /// Build an output document with the given rows, using a real methodology so
     /// the environment section is populated as it will be in a live run.
-    pub(crate) fn document(rows: Vec<BenchResult>) -> BenchOutput {
+    ///
+    /// # Why this takes `&[BenchResult]` and not `Vec<BenchResult>`
+    ///
+    /// It took a `Vec` by value and only read it, which CI rejected under
+    /// `-D warnings` with `needless_pass_by_value`:
+    ///
+    /// ```text
+    /// error: this argument is passed by value, but not consumed in the function body
+    ///   --> crates/qqq-run/src/bench_output.rs:89:34
+    ///    |  pub(crate) fn document(rows: Vec<BenchResult>) -> BenchOutput {
+    ///    |  help: consider changing the type to: `&[BenchResult]`
+    /// ```
+    ///
+    /// A `Vec` by value is an allocation-shaped promise the function does not keep:
+    /// the caller gives up ownership for nothing. `&[BenchResult]` states what
+    /// actually happens, and it is what [`BenchOutput::new`] already takes, so the
+    /// helper now matches the thing it wraps — which is the point of a helper.
+    pub(crate) fn document(rows: &[BenchResult]) -> BenchOutput {
         let opts = BenchOptions::default();
         let workload = qqq_bench::workload::Workload::find(&BenchmarkName::Hello)
             .expect("hello is in the table");
         let methodology = crate::bench::methodology_for(workload, &opts)
             .expect("the hello methodology is constructible");
-        BenchOutput::new(&rows, &methodology)
+        BenchOutput::new(rows, &methodology)
     }
 
     #[test]
     fn the_command_name_is_bench() {
-        assert_eq!(document(vec![]).command(), CommandName::Bench);
+        assert_eq!(document(&[]).command(), CommandName::Bench);
     }
 
     #[test]
     fn the_summary_counts_met_budgets_and_names_the_denominator() {
-        let doc = document(vec![
+        let doc = document(&[
             result(BenchmarkName::Hello, Some(verdict(true)), 0),
             result(BenchmarkName::Json, Some(verdict(false)), 0),
         ]);
@@ -115,7 +132,7 @@ mod tests {
     fn a_run_with_no_budgets_says_so_rather_than_reporting_zero_of_zero() {
         // Nine of the ten rows have no §9.2 budget. `0/0 budgets met` would read
         // as total failure; the honest statement is that no row carried a target.
-        let doc = document(vec![result(BenchmarkName::Cpu, None, 0)]);
+        let doc = document(&[result(BenchmarkName::Cpu, None, 0)]);
         let summary = doc.summary();
         assert!(summary.contains("none with a"), "got {summary}");
         assert!(!summary.contains("0/0"), "got {summary}");
@@ -124,7 +141,7 @@ mod tests {
     #[test]
     fn failed_requests_are_visible_in_the_summary() {
         // A run where every request was refused must not read as a clean pass.
-        let doc = document(vec![result(BenchmarkName::Hello, Some(verdict(true)), 42)]);
+        let doc = document(&[result(BenchmarkName::Hello, Some(verdict(true)), 42)]);
         let summary = doc.summary();
         assert!(summary.contains("42"), "got {summary}");
         assert!(summary.contains("no response"), "got {summary}");
@@ -134,7 +151,7 @@ mod tests {
     fn a_clean_run_does_not_mention_failures() {
         // The control for the test above: the failure note must be absent when
         // there is nothing to report, or every summary would carry it.
-        let doc = document(vec![result(BenchmarkName::Hello, Some(verdict(true)), 0)]);
+        let doc = document(&[result(BenchmarkName::Hello, Some(verdict(true)), 0)]);
         assert!(
             !doc.summary().contains("no response"),
             "got {}",
@@ -144,7 +161,7 @@ mod tests {
 
     #[test]
     fn the_json_carries_every_result_and_the_methodology() {
-        let doc = document(vec![
+        let doc = document(&[
             result(BenchmarkName::Hello, Some(verdict(true)), 0),
             result(BenchmarkName::Cpu, None, 0),
         ]);
@@ -177,7 +194,7 @@ mod tests {
     fn the_json_omits_a_budget_for_a_row_that_has_none() {
         // `null` rather than an invented target: a row with no §9.2 budget is not
         // a row that failed one.
-        let doc = document(vec![result(BenchmarkName::Cpu, None, 0)]);
+        let doc = document(&[result(BenchmarkName::Cpu, None, 0)]);
         let value = doc.to_json();
         assert!(
             value["results"][0]["budget"].is_null(),
@@ -191,7 +208,7 @@ mod tests {
         // The direction is what makes a verdict readable: `≥ 60k RPS met at 75k`
         // and `≤ 60k met at 75k` are opposite claims, and only the symbol tells
         // them apart.
-        let doc = document(vec![result(BenchmarkName::Json, Some(verdict(true)), 0)]);
+        let doc = document(&[result(BenchmarkName::Json, Some(verdict(true)), 0)]);
         let value = doc.to_json();
         let budget = &value["results"][0]["budget"];
         assert_eq!(budget["item"], "PERF-010");
@@ -205,7 +222,7 @@ mod tests {
         // §9.1 forbids averages and requires percentiles. A JSON shape that
         // carried only `requests_per_second` would make the percentiles
         // unrenderable for an agent even though the human path showed them.
-        let doc = document(vec![result(BenchmarkName::TailP99, None, 0)]);
+        let doc = document(&[result(BenchmarkName::TailP99, None, 0)]);
         let value = doc.to_json();
         let row = &value["results"][0];
         assert_eq!(row["p50_nanos"], 1_000);
@@ -231,7 +248,7 @@ mod tests {
         row.measures = workload.measures.to_owned();
         row.expected = workload.expected.to_owned();
 
-        let doc = document(vec![row]);
+        let doc = document(&[row]);
         let value = doc.to_json();
         assert_eq!(value["results"][0]["measures"], workload.measures);
         assert_eq!(value["results"][0]["expected"], workload.expected);
@@ -250,7 +267,7 @@ mod tests {
         // command computes and `BenchResultOutput` is what it publishes, and a
         // field added to one and not the other would silently stop being reported.
         let rows = vec![result(BenchmarkName::Cold, Some(verdict(true)), 3)];
-        let doc = document(rows);
+        let doc = document(&rows);
         let serialized: Vec<BenchResultOutput> = doc.results.clone();
         assert_eq!(serialized.len(), 1);
         assert_eq!(serialized[0].benchmark, "cold");

@@ -930,6 +930,42 @@ cmd_checks() {
     # a throwaway copy, so it can be checked here without mutating the bind mount.
     python3 tools/check_corpus_repair.py
     python3 tools/check_corpus_repair.py --self-test
+
+    # # Why the line-ending guard runs LAST, and why the scratch copy is deliberate
+    #
+    # Ten of the steps above inject a defect into a *generated* tracked document and
+    # restore it. Each of those read-modify-write cycles used `Path.write_text`, which
+    # translates `\n` to `os.linesep`. On Windows that is `\r\n`, so the checkers left
+    # every generated document CRLF -- and `normalize_eol.py --check` fails the moment
+    # a tracked text file reads CRLF. No CI job ran both, which is why the defect was
+    # latent; this environment now runs both, so the guard below is the one that would
+    # have caught it. The writers are byte-faithful now.
+    #
+    # It copies the tree to a scratch directory rather than pointing the checkers at
+    # `/workspace`. The bind mount is owned by Windows' user id, which this container
+    # cannot match, so a rewrite could fail part-way. A copied tree can be written
+    # freely, and `normalize_eol.py` asks Git rather than walking a directory.
+    _eol_guard_dir="$(mktemp -d)"
+    git -c safe.directory="${WORKSPACE}" -C "${WORKSPACE}" archive --format=tar HEAD \
+        | tar -x -C "${_eol_guard_dir}"
+    for _t in check_error_catalogue check_glossary check_reconciliation check_wit_reference \
+              check_tombstones check_checklist_counts check_advisories check_verified_facts; do
+        ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/${_t}.py" --self-test >/dev/null )
+    done
+    if ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/normalize_eol.py" --check ); then
+        echo "   the self-tests leave the tree with LF, in a scratch copy of HEAD"
+    else
+        echo "" >&2
+        echo "!! a self-test wrote a tracked file with CRLF." >&2
+        echo "   A checker's inject/restore went through a newline-translating write." >&2
+        rm -rf "${_eol_guard_dir}"
+        return 1
+    fi
+    rm -rf "${_eol_guard_dir}"
+
+    # Final word: the corpus is intact after everything that mutated it.
+    python3 tools/self_test_xrefs.py --check-clean
+    python3 tools/normalize_eol.py --check
 }
 
 # Run clippy with the toolchain version CI actually uses.

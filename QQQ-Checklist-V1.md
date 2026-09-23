@@ -2879,7 +2879,20 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §10.2 Metrics that ship by default
   → Partial: header-count and header-size caps, and a declared-body cap, are enforced
     in `qqq-serve::http1`.
-  → **Partial — the metric set exists and nothing records into it, and this entry says so rather than ticking.** `crates/qqq-serve/src/metrics.rs` implements §10.2's HTTP row: per-(method, status-class) request counters, **per-tenant** body bytes in and out, per-tenant body-limit refusals, connection count by outcome, and a fixed-bucket latency histogram. 25 tests.
+  → **Partial, and the reason is narrower than it was.** The metric set exists
+    (`crates/qqq-serve/src/metrics.rs` implements §10.2's HTTP row) and it is now
+    **recorded into from the served path** — this clause read *"and nothing records into
+    it"* until 2026-09-23, which was true when written and stopped being true when the
+    limits were wired. Measured: `server.rs`'s `record_metrics` calls `record_request`
+    with the method, status, latency, tenant label and both body-byte counts on the
+    completed-request path (`server.rs:1966`), and `record_body_limit` runs on both
+    body-refusal paths (`server.rs:1554`, `:1794`), with `config.metrics` and
+    `config.limits` shared per connection as `Arc`s (`server.rs:390-394`). Proved through
+    `serve` on a real socket by `crates/qqq-serve/tests/metrics_wiring.rs` (9 tests:
+    `a_request_is_recorded_through_serve`, `body_bytes_are_recorded`,
+    `latency_is_recorded`). The remaining
+    gap is the item's own scope, not the recording -- see the tail of this entry. What
+    follows is §10.2's HTTP row as implemented: per-(method, status-class) request counters, **per-tenant** body bytes in and out, per-tenant body-limit refusals, connection count by outcome, and a fixed-bucket latency histogram. 25 tests.
   → **§10.2's cardinality discipline is enforced by the type system, not by a convention.** Every label is an enum — `Method`, `StatusClass`, `Outcome` — so the compiler is the lint `OBS-006` asks for. Measured, not argued: **1,000 invented methods produce exactly 1 series**, and 500 distinct status codes produce **5**. A registry with `&str` labels works in development and destroys the monitoring system in production, because every distinct value is a new time series.
   → **The tenant ceiling is bounded and the trade is stated**: past 64 distinct tenants, further ones collapse to `Tenant::Other`, so the series count stays finite however many tenants exist and the overflow is **visible in one series**. A name seen before the ceiling keeps its own label afterwards, or a deployment's history would change retroactively as it grew. Per-tenant facts survive in the audit log (§10.1), which is not aggregated.
   → **`Latency` compares with `<=`** because `le` means "less than or equal"; an exclusive comparison shifts a whole bucket and makes every quantile *plausibly* wrong. `mean_micros` returns `None` with no observations rather than `0`, because `0` reads as "instant" rather than "unmeasured".

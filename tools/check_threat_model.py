@@ -38,6 +38,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "threat-model.md"
 CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
@@ -305,12 +313,12 @@ def self_test() -> int:
         global DOC
         original = DOC
         DOC = tmp / "threat-model.md"
-        (tmp / "out-of-scope.md").write_text("x", encoding="utf-8")
+        write_text_lf((tmp / "out-of-scope.md"),"x", encoding="utf-8")
         doc = VALID_FIXTURE.replace(
             "Not defended; see the out-of-scope list.",
             "Not defended; see [out-of-scope](out-of-scope.md) and [gone](missing.md).",
         )
-        DOC.write_text(doc, encoding="utf-8")
+        write_text_lf(DOC,doc, encoding="utf-8")
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

@@ -688,6 +688,36 @@ def _write_corpus(root: Path, *, proposal: str, checklist: str, observations: st
         p.write_text(text, encoding="utf-8")
 
 
+def write_text_lf(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` without translating newlines.
+
+    # Why not `path.write_text`
+
+    `Path.write_text` passes `newline=None` to `open`, which translates every
+    `\n` to `os.linesep` -- `\r\n` on Windows. This repository pins `eol=lf`
+    for tracked text (`.gitattributes`), so a read-modify-write cycle through it
+    leaves a tracked file that `git status` reports as modified, that
+    `git diff --numstat` reports with an empty diff, and that
+    `tools/normalize_eol.py --check` rejects. Writing bytes keeps the
+    transformation and drops the translation.
+
+    `newline=""` is the other candidate and it is wrong here: it means *translate
+    `\n` to the platform terminator*, which is the same behaviour. Only bytes are
+    exact.
+
+    The counterpart of this is `Path.read_text`: reads here are already exact,
+    because the default newline handling translates `\r\n` *back* to `\n` and
+    therefore round-trips. The asymmetry is the whole trap.
+
+    `encoding` is accepted and defaults to UTF-8, so a converted call site keeps
+    the keyword it already passed. Anything but UTF-8 is refused: a tracked file
+    in this repository is UTF-8 or it is binary.
+    """
+    if encoding.lower().replace("-", "") != "utf8":
+        raise ValueError(f"write_text_lf writes UTF-8, not {encoding!r}")
+    path.write_bytes(text.encode("utf-8"))
+
+
 def _run(root: Path) -> tuple[int, str]:
     import subprocess
 

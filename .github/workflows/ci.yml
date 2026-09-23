@@ -110,6 +110,28 @@ jobs:
       - name: Prove the line-ending tool detects and repairs correctly
         run: python tools/normalize_eol.py --self-test
 
+      # The four checkers below inject a defect into a *generated* tracked
+      # document, run the generator, and restore it. Every one of those
+      # read-modify-write cycles went through `Path.write_text`, which translates
+      # `\n` to `os.linesep` -- `\r\n` on Windows -- so each left a tracked file
+      # that this job's line-ending check rejects. No job ran both, which is why
+      # the defect was latent rather than caught; the writers are byte-faithful
+      # now, and this step is the regression guard that would have found it.
+      - name: Prove the self-tests do not leave the tree with the wrong endings
+        run: |
+          python tools/check_error_catalogue.py --self-test
+          python tools/check_glossary.py --self-test
+          python tools/check_reconciliation.py --self-test
+          python tools/check_wit_reference.py --self-test
+          python tools/check_tombstones.py --self-test
+          python tools/check_checklist_counts.py --self-test
+          python tools/check_advisories.py --self-test
+          python tools/check_verified_facts.py --self-test
+          python tools/check_corpus_repair.py --self-test
+          python tools/check_xrefs.py --self-test
+          python tools/self_test_xrefs.py --check-clean
+          python tools/normalize_eol.py --check
+
   # ---------------------------------------------------------------------------
   # The cross-reference graph is the thing that keeps three documents honest.
   # If it breaks, nothing else matters. Run it first and cheaply.

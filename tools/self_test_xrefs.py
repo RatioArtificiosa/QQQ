@@ -34,6 +34,7 @@ fabricated marker added later would be missed.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import signal
 import subprocess
@@ -312,27 +313,13 @@ REVERSALS = {
 }
 
 
-def _write_text_lf(path: Path, text: str) -> None:
-    """Write `text` without translating newlines.
-
-    # Why not `path.write_text`
-
-    Because on Windows it converts `\n` to `\r\n`, so a read-modify-write cycle
-    through it is not byte-faithful -- demonstrated:
-
-        p.write_bytes(b'a\nb\n'); p.write_text(p.read_text(encoding='utf-8'), encoding='utf-8')
-        p.read_bytes()  ->  b'a\r\nb\r\n'
-
-    This file's own documentation says its restore is byte-for-byte and that the
-    repair is surgical, and this session found the three documents reported as
-    modified after every run with an empty content diff (`§O-189`, `§O-190`).
-    Reading and writing bytes keeps the transformation and drops the translation.
-
-    `newline=""` is the other candidate and it is wrong here: `Path.write_text` passes
-    `newline` through to `open`, where `""` means *translate `\n` to the platform
-    terminator*, which is the same behaviour. Only bytes are exact.
-    """
-    path.write_bytes(text.encode("utf-8"))
+# The byte-faithful writer lives with the other corpus writers, in `check_xrefs.py`.
+# Loading it as a module rather than copying the function keeps one definition, so
+# the rule cannot drift between the two files.
+_spec = importlib.util.spec_from_file_location("check_xrefs", CHECK)
+check_xrefs = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_xrefs)
+_write_text_lf = check_xrefs.write_text_lf
 
 
 def assert_clean_corpus(autofix: bool = True) -> bool:

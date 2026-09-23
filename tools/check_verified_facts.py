@@ -36,6 +36,14 @@ PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
 sys.path.insert(0, str(ROOT / "tools"))
 import gen_verified_facts as gen  # noqa: E402
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 
 def run_check() -> tuple[int, str]:
     p = subprocess.run(
@@ -127,12 +135,12 @@ def self_test() -> int:
     original = text
     try:
         if original:
-            TARGET.write_text(original + "\n### `B-99` — invented\n", encoding="utf-8")
+            write_text_lf(TARGET,original + "\n### `B-99` — invented\n", encoding="utf-8")
             code, out = run_check()
             case("a hand-edit to the register", code != 0, out.strip())
     finally:
         if original:
-            TARGET.write_text(original, encoding="utf-8")
+            write_text_lf(TARGET,original, encoding="utf-8")
 
     total = len(samples) + 8
     print("")

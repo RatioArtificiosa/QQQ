@@ -141,7 +141,7 @@ def save_baseline(anchors: set[str]) -> None:
         "# Regenerate with: python tools/check_tombstones.py --update\n"
     )
     body = "\n".join(sorted(anchors))
-    BASELINE.write_text(f"{header}\n{body}\n", encoding="utf-8")
+    write_text_lf(BASELINE,f"{header}\n{body}\n", encoding="utf-8")
 
 
 def check() -> list[str]:

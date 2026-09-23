@@ -181,7 +181,7 @@ def main() -> int:
         if fixed == text:
             print("nothing to fix: the checklist already agrees with itself")
             return 0
-        CHECKLIST.write_text(fixed, encoding="utf-8")
+        write_text_lf(CHECKLIST,fixed, encoding="utf-8")
         print("rewrote the §1 area table and the §14 phase table from the items")
         problems = analyse(fixed)
         if problems:

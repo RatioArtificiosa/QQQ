@@ -15873,6 +15873,150 @@ proven to pass on the good state is as suspect as a test never proven to fail on
 
 ---
 
+## §O-195 The bridge's mutating phase is about twenty times slower in the container, so a one-hour deadline cannot finish `checks`
+
+**Measured, on this machine, for the same phase.**
+
+| Where | Command | `self_test_xrefs.py` | Full `checks` |
+|---|---|---|---|
+| Windows, native | `python tools/self_test_xrefs.py` | **125 s** | n/a |
+| Container | `cmd_checks`'s final step | **41 min and still running** when the run was stopped | did not finish in 60 min |
+
+The container's `cmd_checks` reaches `self_test_xrefs.py` with everything before it green --
+`check_topology`, `gen_schemas`, `gen_llms_txt`, `normalize_eol`, `audit_unsafe`, the
+glossary/catalogue/reconciliation/verified-facts/SBOM/SPDX/licence-boundary/tombstone/scope
+checkers, `check_toolchain`, the CodeRabbit config check, the checklist citation checker, the
+§9.2 budget table, and `self_test_schemas` with 7/7 injections detected -- and then spends
+over forty minutes in the in-place harness, which runs the whole validator once per case.
+
+**Why it matters.** Twice in this session I gave the bridge a one-hour deadline and the
+deadline killed it inside `self_test_xrefs.py`, which is the phase that mutates the three real
+documents. `SIGKILL` and a container stop cannot run a signal handler, so each kill left an
+injection behind (`§O-191`: `§REMOVED` in the Proposal; `§O-193`: `### REMOVED` in the
+Observations, read as document drift by a later audit). The kills were mine, and the reason
+they happened is this timing gap, not a defect in the bridge.
+
+**What to do instead.**
+
+* **Give the bridge a generous deadline.** `compose run linux checks` needs well over an hour
+  here. A deadline shorter than the run converts a verification into a corpus mutation.
+* **Do not run it concurrently with anything that reads or writes those files**, including a
+  second `checks`, a repair, an editor, or a Python script that opens the checklist. `§O-194`'s
+  lock enforces this between harness *runs*; it cannot see an editor.
+* **`--check-clean` afterwards, always**, and treat it as the authority rather than
+  `git status`: it names the marker and the check that injected it, while `git status` shows
+  three modified documents that look like real edits.
+* **A native run is the faster verification** for the parts that are not platform-specific.
+  The container exists to cover what Windows cannot -- the Linux half of CI, the source guard,
+  the bind-mount topology -- not to be the default way to run the corpus harness.
+
+**What this is not.** It is not a claim that the bridge is broken. Every step before the
+harness passed on Linux, and the harness itself passes natively in 125 s with 9/9 injections
+detected. It is a claim about a deadline being shorter than the thing it bounds, which is a
+mistake I made twice.
+
+**Files:** none -- a measurement and a caution.
+
+---
+
+## §O-196 Every checker that injected a defect into a generated document left it CRLF, and no job ran both halves
+
+**Found by running the gate, not by reading it.** The full local gate's
+`check_error_catalogue.py --self-test` writes and restores `docs/errors.md`, and after the gate the
+working tree showed `docs/errors.md` and four siblings modified while `git diff --numstat` reported
+**empty** diffs -- the `0 0` signature of a line-ending-only difference. `tools/normalize_eol.py
+--check` then listed 16 CRLF files across `docs/`, `schema/` and `crates/`.
+
+**Cause, reproduced directly.** `Path.write_text` passes `newline=None` to `open`, which translates
+every `\n` to `os.linesep`. On Windows that is `\r\n`. Ten checkers inject a defect into a tracked
+generated document to prove their rule is live and then restore it through `write_text`, so each one
+leaks CRLF into the tree:
+
+    python tools/check_error_catalogue.py --self-test   # writes + restores docs/errors.md
+    python tools/normalize_eol.py --check               # fails on any tracked text that is CRLF
+
+**Why it was latent rather than a red build.** No CI job runs both. `Line endings` runs
+`normalize_eol.py --check` and `normalize_eol.py --self-test` and nothing else; `Cross-reference
+integrity` runs the checkers and their self-tests and never checks line endings. Each job was clean
+and the pair was broken -- the `§O-195` family, two green halves with an untested seam.
+
+**Fixed at the root, once, in the shared place.** `tools/check_xrefs.py` now carries
+`write_text_lf(path, text, encoding="utf-8")`, which writes `path.write_bytes(text.encode("utf-8"))`.
+It accepts the `encoding` keyword so a converted call site keeps the argument it already passed, and
+**refuses any encoding but UTF-8**, because a tracked file in this repository is UTF-8 or it is
+binary. Twenty-nine call sites across ten checkers now call it. `tools/self_test_xrefs.py`, which had
+its own private `_write_text_lf` from `§O-192`, now binds `_write_text_lf = check_xrefs.write_text_lf`
+at its four call sites rather than carrying a second copy: two copies of a byte-faithfulness rule is
+how the two copies drift.
+
+**The seam is closed, not just the symptom.** `docker/entrypoint.sh`'s `cmd_checks` now runs the
+guard itself, on a *copy* of the tree:
+
+    _eol_guard_dir="$(mktemp -d)"
+    git archive HEAD | tar -x -C "${_eol_guard_dir}"
+    ( cd "${_eol_guard_dir}" && python3 tools/check_error_catalogue.py --self-test >/dev/null )
+    ...
+    ( cd "${_eol_guard_dir}" && python3 tools/normalize_eol.py --check )
+
+The scratch copy is deliberate: the bind mount is owned by Windows' user id, which the container
+cannot match, so an in-place rewrite could fail part-way through the very check meant to prove writes
+are safe. The artificial order -- self-tests **then** the line-ending check, in one shell -- is the
+point, because that ordering's absence is what hid the defect. `cmd_checks` already ends with
+`self_test_xrefs.py --check-clean` and `normalize_eol.py --check`, so the scratch guard follows and
+the tail step is the second layer.
+
+**Cost of getting here.** `write_text_lf` was inserted as a *call* while its definition went only
+into `check_xrefs.py`, so seven checkers raised `NameError: name 'write_text_lf' is not defined`, and
+after the import was added, `TypeError: write_text_lf() got an unexpected keyword argument
+'encoding'`. Running the chain caught both in under a minute. The lesson is `§O-193`'s: a mechanical
+rewrite across files needs a checker that *runs* the result, not a parser that reads it.
+`ast.parse` accepted all ten files while seven of them could not execute.
+
+**A claim corrected before it shipped.** The first version of the `self_test_xrefs.py` comment said
+the module "already loads `check_xrefs` through `importlib` to reuse its parser". It does not -- it
+shells out to the script. The comment now describes the loader that was actually added.
+
+**Owed.** Reading `git ls-files --eol` in the `Line endings` job is not done; the guard lives in the
+container command, where it has not yet been executed (no Docker run happened after the edit). Three
+files that were CRLF in the working tree from earlier sessions are normalized by this round; their
+committed bytes were already LF, so nothing was lost, and the tree reads LF now.
+
+**Files:** `tools/check_xrefs.py` (`write_text_lf`), the ten converted checkers,
+`tools/self_test_xrefs.py`, `docker/entrypoint.sh`, `.github/workflows/ci.yml`, and this round's
+`QQQ-Checklist-V1.md` correction.
+
+---
+
+## §O-197 The linker's stub note names a check the code does not perform
+
+**Found by cross-checking `CON-009`'s three citations against each other**, which is the
+`§O-193` method: the doc comment, the implementation, and the checklist entry.
+
+| Where | What it says |
+|---|---|
+| `crates/qqq-host/src/linker.rs`, the `QQQ-STUB(CON-009)` doc comment | the check is "`GrantSet::allows` at call time" |
+| `crates/qqq-host/src/linker.rs`, the implementation | `CHECK_DEPTH` plus `HOST-021`'s defence-in-depth check |
+| `QQQ-Checklist-V1.md`, `CON-009` | ticked, with the witness named as the `calls == 1` note on `note_first_call` |
+
+Two of the three agree; the doc comment is the sentence that was never updated. The
+mismatch is in a comment and not in behaviour, so nothing is unsafe: `HOST-021` is the
+check that runs, and the checklist names it. It is recorded rather than fixed because the
+fix is a sentence in `linker.rs` plus its citation, and this round's edits are in the
+tooling chain.
+
+**Why it is worth recording rather than shrugging at.** A doc comment that names a
+*check that does not exist* is worse than no comment, because the next reader searching for
+`GrantSet::allows` in the invocation path finds nothing and concludes the defence is
+missing. `§O-181` is the same shape at a larger scale: a claim the code stopped supporting.
+
+**Method that found it, worth reusing.** For each ticked item that cites two or more
+places, read all of them together and ask whether they describe one mechanism. Points where
+they diverge are cheap to find this way and expensive to find by reading the code alone.
+
+**Files:** none -- a correction to be made in `crates/qqq-host/src/linker.rs`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

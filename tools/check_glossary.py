@@ -30,6 +30,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 ROOT = Path(__file__).resolve().parent.parent
 GEN = ROOT / "tools" / "gen_glossary.py"
 
@@ -76,7 +84,7 @@ def self_test() -> int:
     # Corruption: append a line to the generated file.
     original = (ROOT / "docs" / "glossary.md").read_text(encoding="utf-8")
     try:
-        (ROOT / "docs" / "glossary.md").write_text(
+        write_text_lf((ROOT / "docs" / "glossary.md"),
             original + "\n## Hand added\n\nA line a human typed.\n", encoding="utf-8"
         )
         code, out = run_check()
@@ -86,7 +94,7 @@ def self_test() -> int:
             failures += 1
             print(f"        exit {code}: {out.strip()[:200]}")
     finally:
-        (ROOT / "docs" / "glossary.md").write_text(original, encoding="utf-8")
+        write_text_lf((ROOT / "docs" / "glossary.md"),original, encoding="utf-8")
 
     # **Source drift**: the Proposal's table gains a term the glossary lacks. This is
     # the direction that actually happens in practice, and the first version of a
@@ -101,7 +109,7 @@ def self_test() -> int:
         if patched == proposal:
             print("  SKIP  source-drift case: the anchor row `**Fuel**` was not found")
         else:
-            (ROOT / "QQQ-Proposal-V1.md").write_text(patched, encoding="utf-8")
+            write_text_lf((ROOT / "QQQ-Proposal-V1.md"),patched, encoding="utf-8")
             code, out = run_check()
             ok = code != 0
             print(f"  {'OK  ' if ok else 'DEAD'}  a new term in the Proposal's table")
@@ -109,7 +117,7 @@ def self_test() -> int:
                 failures += 1
                 print(f"        exit {code}: {out.strip()[:200]}")
     finally:
-        (ROOT / "QQQ-Proposal-V1.md").write_text(proposal, encoding="utf-8")
+        write_text_lf((ROOT / "QQQ-Proposal-V1.md"),proposal, encoding="utf-8")
 
     # A missing generated file must be reported, not silently regenerated.
     glossary = ROOT / "docs" / "glossary.md"
@@ -123,7 +131,7 @@ def self_test() -> int:
             failures += 1
             print(f"        exit {code}: {out.strip()[:200]}")
     finally:
-        glossary.write_text(backup, encoding="utf-8")
+        write_text_lf(glossary,backup, encoding="utf-8")
 
     total = 4
     print("")

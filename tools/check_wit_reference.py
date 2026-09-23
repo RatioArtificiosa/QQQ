@@ -43,6 +43,14 @@ TARGET = ROOT / "docs" / "wit-reference.md"
 sys.path.insert(0, str(ROOT / "tools"))
 import gen_wit_reference as gen  # noqa: E402
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 # A synthetic WIT source exercising the structures that broke the parser: a nested
 # record inside an interface, a resource with methods, and an `@since` attribute.
 FIXTURE_WIT = """\
@@ -162,7 +170,7 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / "fixture.wit"
-        tmp.write_text(FIXTURE_WIT, encoding="utf-8")
+        write_text_lf(tmp,FIXTURE_WIT, encoding="utf-8")
         record = gen.parse_wit(tmp)
         ifaces = record["interfaces"]
         case(
@@ -239,14 +247,14 @@ def self_test() -> int:
     original = target.read_text(encoding="utf-8") if target.exists() else None
     try:
         if original is not None:
-            target.write_text(
+            write_text_lf(target,
                 original + "\n### `invented-interface`\n", encoding="utf-8"
             )
             code, out = run_check()
             case("a hand-edit to the reference", code != 0, out.strip())
     finally:
         if original is not None:
-            target.write_text(original, encoding="utf-8")
+            write_text_lf(target,original, encoding="utf-8")
 
     # A completely empty WIT directory must fail rather than generate nothing.
     case(

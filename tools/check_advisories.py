@@ -30,6 +30,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 ROOT = Path(__file__).resolve().parent.parent
 ADVISORY_DIR = ROOT / "docs" / "advisories"
 INDEX = ADVISORY_DIR / "INDEX.md"
@@ -467,8 +475,8 @@ The technical narrative, including what we got wrong.
         tmp = Path(tempfile.mkdtemp(prefix="qqq-advisory-selftest-"))
         try:
             (tmp / "docs" / "advisories").mkdir(parents=True)
-            (tmp / "docs" / "advisories" / filename).write_text(advisory, encoding="utf-8")
-            (tmp / "docs" / "advisories" / "INDEX.md").write_text(index, encoding="utf-8")
+            write_text_lf((tmp / "docs" / "advisories" / filename),advisory, encoding="utf-8")
+            write_text_lf((tmp / "docs" / "advisories" / "INDEX.md"),index, encoding="utf-8")
 
             ROOT = tmp
             ADVISORY_DIR = tmp / "docs" / "advisories"

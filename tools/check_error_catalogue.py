@@ -44,6 +44,14 @@ GEN = ROOT / "tools" / "gen_error_catalogue.py"
 sys.path.insert(0, str(ROOT / "tools"))
 import gen_error_catalogue as gen  # noqa: E402
 
+import sys as _sys
+
+# The byte-faithful writer is shared with the other corpus checkers rather than
+# copied, because two copies of a newline rule is how the two copies drift.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
+
 GOOD_ENUM = """\
 pub enum ErrorCode {
     // -- 1xxx: build ---------------------------------------------------------
@@ -128,7 +136,7 @@ def self_test() -> int:
     original = target.read_text(encoding="utf-8") if target.exists() else None
     try:
         if original is not None:
-            target.write_text(original + "\n### `QQQ-9999` — invented\n", encoding="utf-8")
+            write_text_lf(target,original + "\n### `QQQ-9999` — invented\n", encoding="utf-8")
             code, out = run_check()
             ok = code != 0
             print(f"  {'OK  ' if ok else 'DEAD'}  a hand-edit to the generated catalogue")
@@ -137,7 +145,7 @@ def self_test() -> int:
                 print(f"        exit {code}: {out.strip()[:220]}")
     finally:
         if original is not None:
-            target.write_text(original, encoding="utf-8")
+            write_text_lf(target,original, encoding="utf-8")
 
     total = 8
     print("")

@@ -638,7 +638,7 @@
       "description": "`[dependencies]` — packages this project links against. Modelled explicitly rather than left to be ignored. Before this field existed, a manifest containing `[dependencies]` parsed **successfully** and the dependencies were silently dropped: `qqqai` reported no capabilities from a dependency it had ",
       "type": "object"
     },
-    "dev_dependencies": {
+    "dev-dependencies": {
       "additionalProperties": true,
       "description": "`[dev-dependencies]` — packages needed only for tests and benchmarks. Kept separate because a dev-dependency's capabilities must **not** be granted to the shipped component. Merging the two tables would let a test-only package widen the production authority surface, which is precisely the supply-cha",
       "type": "object"
@@ -657,7 +657,6 @@
     }
   },
   "required": [
-    "dev_dependencies",
     "package"
   ],
   "title": "qqq-toml",

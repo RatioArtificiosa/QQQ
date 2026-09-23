@@ -40,11 +40,11 @@ regenerated — is caught by the same commit that introduced it.
 
 Reading Rust with a regex is a compromise, and it is stated rather than hidden:
 the parser understands `pub struct X { ... }`, `#[serde(rename = "...")]`,
-`#[serde(default)]`, `Option<T>`, `Vec<T>`, `bool`, `String`, integers, and
-enums. Anything it does not understand is **reported as an error**, never
-skipped — a generator that silently omits a field it could not parse produces a
-schema that looks complete and is not, which is the failure mode this whole
-file exists to prevent.
+`#[serde(default)]`, `#[serde(skip_serializing_if = "...")]`, `Option<T>`,
+`Vec<T>`, `bool`, `String`, integers, and enums. Anything it does not understand
+is **reported as an error**, never skipped — a generator that silently omits a
+field it could not parse produces a schema that looks complete and is not, which
+is the failure mode this whole file exists to prevent.
 """
 
 from __future__ import annotations
@@ -73,6 +73,9 @@ class Field:
     optional: bool
     defaulted: bool
     is_list: bool
+    # `#[serde(skip_serializing_if = "...")]`: the field can be absent from a
+    # document this code wrote, so it cannot be required of a reader.
+    skipped: bool
     doc: str = ""
 
 
@@ -165,6 +168,24 @@ def read_structs(source: str) -> dict[str, Struct]:
         current = Struct(name=name)
         pending: dict[str, object] = {"json": None, "default": False, "skip": False, "doc": ""}
         depth = 1
+        # An attribute may be written across several lines:
+        #
+        #     #[serde(
+        #         default,
+        #         rename = "dev-dependencies",
+        #         skip_serializing_if = "BTreeMap::is_empty"
+        #     )]
+        #
+        # `SERDE_RENAME`, `SERDE_DEFAULT` and `SERDE_SKIP` each anchor on
+        # `#[serde(` and continue across newlines, so searching them against one
+        # line at a time can never match a multi-line attribute. That is the bug
+        # this buffer fixes, and its consequence was worse than a wrong `required`
+        # list: `dev_dependencies` kept its Rust name instead of the declared
+        # `"dev-dependencies"`, so the published schema documented a **key that
+        # does not exist** while the real key was unconstrained (`§O-205`).
+        #
+        # The block is accumulated from the `#[serde(` line until the closing `)]`,
+        # then the three patterns are searched against it once.
         while i < len(lines) and depth > 0:
             line = lines[i]
             depth += line.count("{") - line.count("}")
@@ -175,19 +196,24 @@ def read_structs(source: str) -> dict[str, Struct]:
                 pending["doc"] = (str(pending["doc"]) + " " + doc.group(1).strip()).strip()
                 i += 1
                 continue
-            ren = SERDE_RENAME.search(line)
-            if ren:
-                pending["json"] = ren.group(1)
-                i += 1
+
+            # An attribute block: gather it whole, then read it once.
+            if "#[serde(" in line:
+                block = line
+                j = i
+                while ")]" not in lines[j]:
+                    j += 1
+                    block += "\n" + lines[j]
+                ren = SERDE_RENAME.search(block)
+                if ren:
+                    pending["json"] = ren.group(1)
+                if SERDE_DEFAULT.search(block):
+                    pending["default"] = True
+                if SERDE_SKIP.search(block):
+                    pending["skip"] = True
+                i = j + 1
                 continue
-            if SERDE_DEFAULT.search(line):
-                pending["default"] = True
-                i += 1
-                continue
-            if SERDE_SKIP.search(line):
-                pending["skip"] = True
-                i += 1
-                continue
+
             f = FIELD.match(line)
             if f:
                 fname, ftype = f.group(1), f.group(2).strip()
@@ -201,6 +227,7 @@ def read_structs(source: str) -> dict[str, Struct]:
                         optional=optional,
                         defaulted=bool(pending["default"]) or optional,
                         is_list=is_list,
+                        skipped=bool(pending["skip"]),
                         doc=str(pending["doc"]),
                     )
                 )
@@ -378,10 +405,30 @@ def schema_for(
         if f.doc:
             body = {"description": f.doc[:300], **body}
         props[f.json_name] = body
-        # `skip_serializing_if` without `default` means the field may be absent
-        # on output, so it is not required for a reader. A field that is neither
-        # optional nor defaulted is required.
-        if not f.optional and not f.defaulted:
+        # A field is required only when it must be present on **input**.
+        #
+        # Three things make it optional, and all three are read from the source:
+        #
+        #   * `Option<T>` -- an absent key and an explicit null are the same.
+        #   * `#[serde(default)]` -- serde substitutes the default on absence.
+        #   * `#[serde(skip_serializing_if = "...")]` -- the field may be absent
+        #     from a document this code wrote, so a reader must accept its
+        #     absence. This is the case that was missing, and it published a
+        #     schema that **rejected a minimal manifest the parser accepts**:
+        #     `dev-dependencies` carries
+        #     `skip_serializing_if = "BTreeMap::is_empty"`, so it disappears from
+        #     every manifest with no dev dependencies, and the schema's
+        #     `required` still demanded it (`§O-205`).
+        #
+        # The distinction the two serde attributes draw is real and worth keeping
+        # straight: `skip_serializing_if` alone says nothing about *deserialization*
+        # in general. It is honoured here because the workspace pairs it with a
+        # container type that is empty by default, so absence and empty coincide,
+        # and because the parser was _measured_ accepting the absent form rather
+        # than assumed to. `check_schema_conformance.py` is what keeps that
+        # assumption honest: it drives the real parser and the published schema
+        # over one corpus and fails if the two disagree.
+        if not f.optional and not f.defaulted and not f.skipped:
             required.append(f.json_name)
     out: dict = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

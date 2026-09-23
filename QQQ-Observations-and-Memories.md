@@ -16491,6 +16491,112 @@ leaves a window, and an index captured inside that window is a commit of
 something nobody reviewed. **Take the index snapshot from a tree you have proven
 is at rest, not from a tree a harness is currently editing.**
 
+## §O-205 — The published schema documented four keys that do not exist, and the drift check could not see it
+
+**What was wrong.** `schema/qqq-toml.schema.json` and `schema/qqq-lock.schema.json`
+are generated from the Rust types and drift-checked in CI. Four of the keys they
+published were not the keys the code declares:
+
+| Published as | Declared in the source | Where |
+|---|---|---|
+| `dev_dependencies` | `dev-dependencies` | `Manifest` |
+| `generated_by` | `generated-by` | `lockfile::Metadata` |
+| `lockfile_hash` | `lockfile-hash` | `lockfile::Metadata` |
+| — | `package` **required** | `Lockfile` |
+
+The first three are worse than cosmetic. `qqq.toml` is the surface a person writes
+by hand and an agent generates; a schema naming `dev_dependencies` describes a
+document that **cannot exist**, because `deny_unknown_fields` rejects it. The
+fourth is the same defect in the other direction: `Lockfile.packages` carries
+`#[serde(rename = "package", default)]`, so a lockfile with no packages is legal —
+`Lockfile::parse` has a test for exactly that, at `lock.rs:1098` — and the
+published schema rejected it.
+
+**The root cause, found by measurement rather than by reading.** `read_structs`
+searches three patterns per line:
+
+```python
+ren = SERDE_RENAME.search(line)
+if ren: ...
+if SERDE_DEFAULT.search(line): ...
+if SERDE_SKIP.search(line): ...
+```
+
+but each pattern is written to anchor on `#[serde(` and continue across newlines:
+
+```python
+SERDE_DEFAULT = re.compile(r"#[serde\([^)]*default")
+```
+
+and the real attributes in this workspace are multi-line:
+
+```rust
+#[serde(
+    default,
+    rename = "dev-dependencies",
+    skip_serializing_if = "BTreeMap::is_empty"
+)]
+```
+
+A pattern that requires `#[serde(` can never match a single line that does not
+contain `#[serde(`. All three attributes were therefore **silently ignored**, and
+the generator fell back to the Rust field name and to "no default", which is what
+produced all four of the wrong facts at once.
+
+**Why `--check` was blind to it.** `--check` compares the committed schema against
+the *generator's own output*. Both sides carried the same misreading, so they
+agreed, and CI was green. Drift-checking proves the document matches the
+generator; it says nothing about whether the generator read the source correctly.
+That is the general shape of this whole class: **a check that compares an artifact
+against its own producer cannot detect a producer bug.**
+
+**The fix.** The reader accumulates an attribute block — from the `#[serde(` line
+to its closing `)]` — and searches the three patterns against the block once. A
+`skipped` flag was added to `Field`, and the `required` rule now honours all three
+optionality markers, matching what the generator's own comment already claimed.
+
+**Proof that the fix is the fix.** With the line-oriented reader restored in a
+copy of the generator, and the `dev-dependencies` attribute removed, the output is
+*unchanged*: still `dev_dependencies`, still required. With the fixed reader and
+the same removal, the attribute is honoured. So the injection discriminates the
+two readings, and it is the injected fault that the case catches.
+
+**The new guard, and why a drift check was not enough.** `--check` cannot see this
+class at all, so a second checker compares **two independent sources**: the schema
+document against the `#[serde(...)]` attributes in the Rust source. Every
+documented key must be declared; every declared key must be documented; and
+requiredness must match the source's own optionality markers. It walks `$defs` as
+well as the root.
+
+`tools/check_schema_conformance.py`, 14 self-test cases, all passing — including
+*an empty schema*, which is the anti-vacuity case: an empty document describes
+every possible file, so a checker that accepts one checks nothing.
+
+**Two mistakes made and fixed while building it.**
+
+1. The self-test's nested-definition mutation first reported MISSED, and the
+   verdict was the harness's fault, not the checker's: the mutation renamed a key
+   inside `$defs.Metadata` while the checker read only the root `properties`. The
+   fault was real, the checker's coverage was thin, and extending it to `$defs`
+   found that `Metadata` is exactly where two of the three renames lived. This is
+   the third time in this session that a MISSED verdict was a tooling defect
+   (see `§O-202`), which is why invariant TWO says to prove the fault was present
+   first.
+2. Extending the checker to `$defs` immediately produced four **false positives**
+   on `FsCapability.path`, `Route.path` and `DependencyDetail.source`. The root
+   struct's `source`/`path` exclusion had been applied to every struct; those are
+   private bookkeeping fields on `Manifest` and ordinary declared fields
+   everywhere else. The exclusion is now scoped to the root. A checker that would
+   have "fixed" three correct documents is worse than the gap it closed.
+3. The generator's own self-test gained injection 7 for this defect. Its **first**
+   version collapsed the multi-line attribute to one line and asserted DRIFT; it
+   reported MISSED, and the fault was shown absent — the reader handles both
+   spellings identically, so the collapse changes nothing and the case tested
+   nothing. Replaced with one that removes the attribute outright, which the old
+   reader cannot notice and the fixed reader must. `8/8` injections now, and every
+   one of them was checked for the same property: *does it fail when the defect is
+   present?*
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -257,6 +257,76 @@ def main() -> int:
         finally:
             shutil.rmtree(tree, ignore_errors=True)
 
+    # ---- Injection 7: the attribute block must be read as a WHOLE --------
+    #
+    # The bug this pins, `§O-205`: the reader searched its three serde patterns
+    # against ONE LINE at a time, while each pattern anchors on `#[serde(` and
+    # continues across newlines. So the attribute written as
+    #
+    #     #[serde(
+    #         default,
+    #         rename = "dev-dependencies",
+    #         skip_serializing_if = "BTreeMap::is_empty"
+    #     )]
+    #
+    # matched nothing, and the generator published `dev_dependencies` (the Rust
+    # name, a key that does not exist), listed it as REQUIRED, and did the same to
+    # `generated_by` and `lockfile_hash`. Every one of those passed `--check`.
+    #
+    # # Why the injection rewrites the ATTRIBUTE rather than a schema
+    #
+    # The first attempt at this case collapsed the multi-line attribute into one
+    # line and asserted DRIFT. It reported MISSED, and the fault was shown to be
+    # absent: the reader now handles both spellings identically, so the collapse
+    # changes no output and the case tested nothing. A bad test, not a blind
+    # generator -- invariant TWO's exact warning.
+    #
+    # So the injection attacks the thing that actually distinguishes the two
+    # readings: **a multi-line attribute whose lines carry no key at all**. The
+    # only place `default` appears is on the line after `#[serde(`. A reader that
+    # only sees one line per search finds no `default`, so it marks the field
+    # required, and the schema it writes differs from the committed one -- which
+    # `--check` must report as DRIFT.
+    print("\ninjection 7: a multi-line serde attribute must be read as a whole")
+    with tempfile.TemporaryDirectory() as td:
+        tree = snapshot()
+        try:
+            path = tree / MANIFEST
+            text = path.read_text(encoding="utf-8")
+            marker = "pub dev_dependencies: BTreeMap<String, Dependency>,"
+            assert marker in text, "the injection's anchor moved; update the test"
+            # Remove the attribute entirely. A reader that understands attributes
+            # must then mark the field required, so the generated schema changes
+            # and `--check` says DRIFT. This is the direction that cannot be
+            # faked by an equivalent rewrite.
+            replaced = text
+            start = text.index('    #[serde(\n        default,\n        rename = "dev-dependencies",')
+            end = text.index("    )]\n", start) + len("    )]\n")
+            replaced = text[:start] + text[end:]
+            # The attribute must be gone and the field must remain, so the
+            # injection is a *missing attribute* rather than a maimed file. The
+            # doc comment above the field still mentions `[dev-dependencies]`,
+            # which is why this checks the attribute rather than the word.
+            assert "#[serde(" not in replaced[start - 40 : start + 80], (
+                "the attribute was not removed; the injection did not apply"
+            )
+            assert "pub dev_dependencies: BTreeMap<String, Dependency>," in replaced, (
+                "the field was removed as well; the injection over-reached"
+            )
+            path.write_text(replaced, encoding="utf-8")
+            code, out = run_generator(tree, check=True)
+            results.append(
+                expect(
+                    "removing the dev-dependencies attribute is reported as DRIFT",
+                    code == 1 and "DRIFT" in out,
+                    f"exit {code}; if this passes, the reader is not applying the "
+                    f"attribute and the published schema documents `dev_dependencies` "
+                    f"as required\n{out[:400]}",
+                )
+            )
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+
     detected = sum(1 for r in results if r)
     print(f"\n{detected}/{len(results)} fault injections detected")
     if detected != len(results):

@@ -1229,9 +1229,41 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### CON — Contracts
 
-- [ ] **CON-001** Finalize and publish the `qqq.toml` JSON Schema.
-  → Partial: the manifest parses and validates, but no JSON Schema document is published.
-  → Partial: the manifest parses and validates, but no JSON Schema document is published.
+- [x] **CON-001** Finalize and publish the `qqq.toml` JSON Schema.
+  → Done: `schema/qqq-toml.schema.json`, generated from
+    `qqq_cap::manifest::Manifest` by `tools/gen_schemas.py` and enforced in CI by
+    `python tools/gen_schemas.py --check`, which reports DRIFT when a field is
+    added to the Rust type and the document is not regenerated.
+  → **The document was published but wrong, and the drift check could not see it**
+    (`§O-205`). Three keys were published under names the code does not declare:
+    `dev_dependencies` for the declared `dev-dependencies`, and `generated_by` /
+    `lockfile_hash` for `generated-by` / `lockfile-hash` in the lockfile's
+    `Metadata`. `dev-dependencies` was also listed **required**, so the schema
+    rejected a minimal manifest the parser accepts - and `Lockfile.packages`
+    carries `#[serde(rename = "package", default)]`, so the lock schema rejected
+    a package-less lockfile that `Lockfile::parse` has a test for.
+  → `--check` was structurally incapable of catching any of it, because it compares
+    the document against the *generator's own output*; both sides carried the same
+    misreading, so they agreed and CI was green.
+  → The cause was `read_structs` searching its three serde patterns **one line at a
+    time** while each pattern anchors on `#[serde(` and continues across newlines,
+    so every multi-line attribute was silently ignored. Fixed by gathering the
+    attribute block from `#[serde(` to its closing `)]` and searching it once, and
+    by adding a `skipped` flag so the `required` rule honours
+    `skip_serializing_if` as well as `Option<T>` and `#[serde(default)]` - which
+    is what the generator's own comment had always claimed.
+  → **The guard is a second, independent check rather than a tighter first one**:
+    `tools/check_schema_conformance.py` compares the published document against the
+    `#[serde(...)]` attributes in the Rust source - every documented key declared,
+    every declared key documented, requiredness matching the source's optionality
+    markers - walking `$defs` as well as the root. 14 self-test cases, including an
+    empty schema, which is the anti-vacuity case because an empty document
+    describes every possible file.
+  → `tools/self_test_schemas.py` now carries **8/8** injections, the eighth being
+    the multi-line attribute: with the line-oriented reader restored and the
+    `dev-dependencies` attribute removed, the output is unchanged, and with the
+    fixed reader the removal is honoured - so the case discriminates the two
+    readings rather than merely exercising the code.
   → §5.3 The manifest — `qqq.toml`
 - [x] **CON-002** Implement manifest parsing with schema-validated diagnostics naming the exact line.
   → Done: `Manifest::parse` produces field-named diagnostics with a line reference.

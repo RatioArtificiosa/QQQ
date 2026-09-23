@@ -261,7 +261,7 @@
           ],
           "description": "The build configuration the hash covers — `CON-005`. Absent for a lockfile written before this field existed, and an absent config contributes nothing to the hash so an old lockfile's digest is unchanged. See [`BuildConfig`]."
         },
-        "generated_by": {
+        "generated-by": {
           "anyOf": [
             {
               "type": "string"
@@ -272,7 +272,7 @@
           ],
           "description": "What wrote it, so a bug report can name the version."
         },
-        "lockfile_hash": {
+        "lockfile-hash": {
           "anyOf": [
             {
               "type": "string"
@@ -310,7 +310,6 @@
     }
   },
   "required": [
-    "package",
     "version"
   ],
   "title": "qqq-lock",

@@ -89,7 +89,7 @@ def expect_failure(name: str, target: Path, mutate) -> bool:
     # Register the restore so a signal during a slow validator run unwinds it.
     pending.append((target, original))
     try:
-        target.write_text(mutated, encoding="utf-8")
+        _write_text_lf(target, mutated)
         code, out = run_validator()
         detected = code != 0 and "FAIL" in out
         marker = "\n".join(l for l in out.splitlines() if "FAIL" in l)[:200]
@@ -101,7 +101,7 @@ def expect_failure(name: str, target: Path, mutate) -> bool:
         print(f"  DEAD  {name}: validator did NOT detect this fault")
         return False
     finally:
-        target.write_text(original, encoding="utf-8")
+        _write_text_lf(target, original)
         pending.remove((target, original))
 
 
@@ -118,7 +118,7 @@ def restore_all(*_args) -> None:
     """
     for target, original in list(pending):
         try:
-            target.write_text(original, encoding="utf-8")
+            _write_text_lf(target, original)
         except OSError:
             pass
     pending.clear()
@@ -310,6 +310,29 @@ REVERSALS = {
 }
 
 
+def _write_text_lf(path: Path, text: str) -> None:
+    """Write `text` without translating newlines.
+
+    # Why not `path.write_text`
+
+    Because on Windows it converts `\n` to `\r\n`, so a read-modify-write cycle
+    through it is not byte-faithful -- demonstrated:
+
+        p.write_bytes(b'a\nb\n'); p.write_text(p.read_text(encoding='utf-8'), encoding='utf-8')
+        p.read_bytes()  ->  b'a\r\nb\r\n'
+
+    This file's own documentation says its restore is byte-for-byte and that the
+    repair is surgical, and this session found the three documents reported as
+    modified after every run with an empty content diff (`§O-189`, `§O-190`).
+    Reading and writing bytes keeps the transformation and drops the translation.
+
+    `newline=""` is the other candidate and it is wrong here: `Path.write_text` passes
+    `newline` through to `open`, where `""` means *translate `\n` to the platform
+    terminator*, which is the same behaviour. Only bytes are exact.
+    """
+    path.write_bytes(text.encode("utf-8"))
+
+
 def assert_clean_corpus(autofix: bool = True) -> bool:
     """Fail loudly if a previous run left an injection applied.
 
@@ -398,14 +421,27 @@ def assert_clean_corpus(autofix: bool = True) -> bool:
                 file=sys.stderr,
             )
             return False
-        path.write_text(text.replace(injected, original, 1), encoding="utf-8")
+        _write_text_lf(path, text.replace(injected, original, 1))
         repaired_paths.append(path.name)
 
     print("  repaired:", ", ".join(sorted(set(repaired_paths))) or "(nothing)", file=sys.stderr)
 
     # **Verify the repair.** A restore that is assumed to have worked is the very
     # failure mode this file exists to catch, so the markers are re-checked.
-    for path in targets:
+    #
+    # Only the paths this function actually repaired. `repaired_paths` holds the
+    # names it wrote, so the set is the repair's own record rather than a
+    # re-derivation that could disagree with it.
+    #
+    # This loop read `for path in targets:` and `targets` was never assigned anywhere
+    # in the file, so the self-healing path repaired the corpus and then died with
+    # `NameError: name 'targets' is not defined` on a corpus it had just made clean.
+    # The harness exited 1 and the Linux bridge's `checks` command failed for a
+    # reason unrelated to the corpus. Found by using it: a killed bridge run left
+    # `§REMOVED` in the Proposal and this path was what handled it (`§O-191`).
+    for path, _marker, _source in dirty:
+        if path.name not in repaired_paths:
+            continue
         for marker, marker_path, source, line_start in INJECTION_MARKERS:
             if marker_path == path and marker_is_present(path, marker, line_start):
                 print(

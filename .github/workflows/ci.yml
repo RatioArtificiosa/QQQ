@@ -143,6 +143,26 @@ jobs:
       - name: Refuse a corpus carrying a left-over fault injection
         run: python tools/self_test_xrefs.py --check-clean
 
+      # The **repair** path, which is what handles the case above once it happens.
+      #
+      # `--check-clean` refuses; `assert_clean_corpus` in the same file repairs. That
+      # repair is the program a person runs after a killed harness, and it had a
+      # `NameError` in its verification loop — so it restored the file, printed
+      # `repaired: ...`, and then died with exit 1 on a corpus it had just made clean
+      # (§O-191). Nothing caught it, because no test drove the function: every path it
+      # touches is a real document, so a test meant mutating the repository.
+      #
+      # `tools/check_corpus_repair.py` copies the corpus to a temporary directory,
+      # re-points the harness's own path constants at the copy, and calls the real
+      # function — then asserts the real documents are byte-identical afterwards,
+      # which is the property the basename-only transcript cannot show. Found by using
+      # it; wired here so the next regression is caught by the gate rather than by a
+      # developer reading a traceback.
+      - name: Prove the corpus repair path works
+        run: python tools/check_corpus_repair.py
+      - name: Prove the repair check catches a broken repair
+        run: python tools/check_corpus_repair.py --self-test
+
       # `SEC-023`. The advisory register is the artifact a user consults *during an
       # incident*, so an index that has drifted from the files beside it is worse
       # than no index: it says "not affected" while the file next to it says

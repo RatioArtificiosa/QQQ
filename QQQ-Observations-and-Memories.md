@@ -15612,6 +15612,154 @@ left alone. Both files were left byte-for-byte as found.
 
 ---
 
+## §O-191 The corpus guard repaired the damage and then died on a name it never assigned
+
+**Found:** by using it. A one-hour deadline killed the Linux bridge mid-`checks`, which killed
+`self_test_xrefs.py` while it was mutating the corpus on purpose, which left the mutation in
+the working tree. Running the harness to repair it produced:
+
+```
+WARNING: the corpus contains left-over fault injections from a killed run.
+  QQQ-Proposal-V1.md: contains '§REMOVED'  (left by check [10b]: a decision's citations stripped from the Proposal)
+  repaired: QQQ-Proposal-V1.md
+Traceback (most recent call last):
+  File "tools/self_test_xrefs.py", line 408, in assert_clean_corpus
+    for path in targets:
+        ^^^^^^^
+NameError: name 'targets' is not defined
+```
+
+**The defect.** `assert_clean_corpus` repairs left-over injections, then verifies the repair --
+and the verification loop read a name that is never assigned anywhere in the file:
+
+```python
+    for path in targets:
+        for marker, marker_path, source, line_start in INJECTION_MARKERS:
+            if marker_path == path and marker_is_present(path, marker, line_start):
+```
+
+`targets` appears nowhere else in `self_test_xrefs.py`; `grep targets` matches the loop and one
+comment. The function's own variables are `dirty`, the list of `(path, marker, source)` tuples
+it repairs, and `repaired_paths`, the names it wrote. So the repair **worked** -- the file was
+restored and `repaired: QQQ-Proposal-V1.md` was printed -- and then the verify step crashed and
+the harness exited 1.
+
+**Why this matters more than a crash.** The failure is in the last stage of the recovery path,
+which is the one place a repository relies on to get back to a clean state. An operator who
+kills the bridge, sees the repair message, and then sees exit 1 has been told two contradictory
+things, and the honest reading -- "the corpus may still be dirty" -- is the wrong one. The
+bridge's `checks` command propagates the exit code (`Invoke-Checks` throws on non-zero), so a
+repaired-and-then-crashed corpus fails the bridge for a reason unrelated to the corpus.
+
+**How the corpus was actually left, measured.** After the failed repair the file was restored
+correctly regardless of the crash: the Proposal was byte-identical to `HEAD` at **138082** bytes,
+and `self_test_xrefs.py --check-clean` reported `corpus is clean: no fault injection is applied`
+with exit 0. So the defect is the crash and the false exit code, not data loss.
+
+**The fix.** Verify only the paths the function actually repaired, taking the set from the
+repair's own record rather than re-deriving it:
+
+```python
+    for path, _marker, _source in dirty:
+        if path.name not in repaired_paths:
+            continue
+```
+
+**The guard that caught my own edit.** The fix script asserted the broken loop was absent after
+writing, with the substring `for path in targets:` -- which also matched the **comment** the fix
+adds, since the comment quotes the buggy line to explain it. The script reported
+`FAILED: the broken loop is still present` on a correct edit. That is invariant TWO in miniature,
+the same shape as the two wrong assertions in `§O-190`: a guard's own text is part of its
+input, and a prose quotation of a defect is indistinguishable from the defect to a substring
+search. The fix is correct and was confirmed by reading the code back, not by the guard.
+
+**Recorded because it is the trap that produced this entry.** Killing the bridge container during
+`checks` is destructive: `cmd_checks` ends with `self_test_xrefs.py`, which mutates the three
+real documents in the bind mount. There is no opt-out on that path, and the phase's own
+documentation says it "can leave a defect behind if it is killed". The safe order is to let
+`checks` finish, or to wait for it, and to treat `--check-clean` plus `git diff` as the
+authority afterwards -- never `git checkout HEAD -- <file>`, which the harness's own comment
+records as having nearly destroyed a 269-line uncommitted entry.
+
+**Files:** `tools/self_test_xrefs.py` (the verification loop).
+
+---
+
+## §O-192 The corpus harness rewrote the three documents with CRLF on every run, so its "byte-for-byte restore" was not
+
+**Found:** writing the repair-path test for `§O-191`, when a case asserting the repaired file was
+byte-identical failed with `the file is 144016 bytes; the original was 140060`. The difference was
+3956 bytes, and 3956 is the line count: every `\n` had become `\r\n`.
+
+**The defect.** Every write in `tools/self_test_xrefs.py` used text-mode:
+
+```python
+target.write_text(mutated, encoding="utf-8")      # mutation
+target.write_text(original, encoding="utf-8")     # restore
+target.write_text(original, encoding="utf-8")     # restore_all (signal handler)
+path.write_text(text.replace(injected, original, 1), encoding="utf-8")   # repair
+```
+
+On Windows `Path.write_text` opens in text mode, which translates `\n` to `\r\n`. So a
+read-modify-write cycle through it is not byte-faithful, demonstrated directly:
+
+```
+orig = b'line one\nline two\n'
+p.write_bytes(orig)
+p.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+p.read_bytes()  ->  b'line one\r\nline two\r\n'      # not orig
+```
+
+**Why this one matters three times over.**
+
+1. **The restore was not the restore the file claims.** Its own comments say the repair is
+   "surgical: it edits the mutated bytes back to their original text and nothing more" and that
+   `git checkout HEAD -- <file>` was rejected because it "discards every uncommitted change".
+   Newline translation is precisely that collateral, from the other direction — the content
+   returns and the bytes do not.
+2. **It produced a symptom I misattributed twice.** `git status` reported `M
+   QQQ-Proposal-V1.md` and `M QQQ-Checklist-V1.md` after every harness run while `git diff
+   --numstat` was empty. `§O-189` recorded this as a stat-cache artefact and `§O-190` repeated
+   that reading. The stat cache is real -- `git update-index --refresh` does report `needs
+   update` and does not clear it -- but the *changed bytes* came from here. The proof: after the
+   fix, one full harness run leaves all three documents at **zero CRLF**, and the two files no
+   longer appear in `git status` at all.
+3. **It was invisible on Linux, which is where the bridge runs.** The container is Linux, so
+   `write_text` translates nothing there and the bridge's `checks` never saw it. On Windows --
+   where the developer and the harness both run -- every invocation rewrote three tracked files.
+   A green bridge said nothing about it, which is the same shape as `§O-189`'s two Docker
+   defects: the platform that can observe the fault is not the platform the check runs on.
+
+**The fix.** Read and write bytes, so the text transformation is kept and the encoding
+round-trip is dropped:
+
+```python
+def _write_text_lf(path: Path, text: str) -> None:
+    path.write_bytes(text.encode("utf-8"))
+```
+
+`newline=""` was rejected: `Path.write_text` passes `newline` through to `open`, where `""`
+means *translate `\n` to the platform terminator* — the same behaviour with a more reassuring
+name. Only bytes are exact. All four sites now go through the helper, and the round-trip is
+verified byte-identical.
+
+**Found while writing the test for `§O-191`, in the test itself.** The new checker injected the
+NameError with `write_text` and restored with `write_text`, so its own self-test left the harness
+at **704 CRLF** -- the defect being reproduced by the reproducer. Caught by measuring the file
+after the run rather than assuming the restore worked, which is the rule this file keeps
+recording and keeps having to re-learn. Both writes are now `write_bytes`.
+
+**Files:** `tools/self_test_xrefs.py` (the helper and four call sites),
+`tools/check_corpus_repair.py` (its own injection and restore).
+
+**A caveat stated rather than buried.** `.gitattributes` pins `eol=lf`, so git normalised these
+writes at commit and nothing CRLF ever reached CI -- the `Line endings` job was green
+throughout. The defect's cost was developer-facing (`git status` lying after every run) and, more
+seriously, a documented guarantee that was not true on the platform where it was most often
+exercised.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

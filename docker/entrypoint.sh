@@ -923,6 +923,13 @@ cmd_checks() {
     # The mutating one, then the validator that proves it restored everything.
     python3 tools/self_test_xrefs.py
     python3 tools/check_xrefs.py
+
+    # The corpus guard's **repair** path -- what runs after a killed harness leaves an
+    # injection behind. It had a `NameError` in its verification loop, so it repaired
+    # the corpus and then died on it (`§O-191`). This drives the real function against
+    # a throwaway copy, so it can be checked here without mutating the bind mount.
+    python3 tools/check_corpus_repair.py
+    python3 tools/check_corpus_repair.py --self-test
 }
 
 # Run clippy with the toolchain version CI actually uses.

@@ -16203,6 +16203,62 @@ its colour.
 
 ---
 
+## §O-201 Six stale numbers in the ticked entries, and the extractor that found them
+
+**The pattern.** Three counts were corrected one at a time (`CON-009`'s 73/13, `CON-010`'s 40,
+`SRV-018`'s 2249) by reading entries and noticing. Noticing is not a method, and six findings
+means there were more, so the ticked entries were swept mechanically instead.
+
+**The extractor.** Every `**N <noun>**` claim inside a ticked entry, where the noun is one of
+a fixed list of countable things. A bare `\d+` would have matched section numbers, versions,
+ports and byte sizes, and a report that is mostly noise does not get read. Thirteen claims
+across twelve ticked items; each checkable one was then re-derived from the tool or file that
+produces it.
+
+**The findings, all measured against their source of truth.**
+
+| Item | The entry said | Measured | Where the truth is |
+|---|---|---|---|
+| `DOC-017` | 13 packages, 20 interfaces, 71 functions, 47 types | **15 / 22 / 80 / 53** | the generated page's own first line, and `check_wit_reference.py` |
+| `DX-013` | `--help` is 39 lines after the fix | **40** | `qqqai --help`; the item's own limit is `≤ 40`, so the item passes and the sentence was off by one |
+| `PERF-001` | 2305 passed | **2460** | the gate's `cargo test --workspace`, summed |
+| `SRV-018` | 2249 passed | **2460** | the same command |
+| `CON-009` | 73 functions, 13 interfaces | **82 / 15** | `check_wit_errors.py` |
+| `CON-010` | 40 source files | **73** | `check_no_ambient.py` |
+
+`PERF-001` and `SRV-018` disagreed with each other about the same measurement -- 2305 against
+2249 for one workspace -- and neither was right. Two entries quoting one number is the
+situation in which a stale count survives longest, because each looks corroborated by the
+other.
+
+**Why the entries were wrong in the first place, and why that is expected.** Every one was
+accurate when written. `DOC-017`'s counts were true of the `wit/` tree at the time; the
+interfaces were added afterwards. `PERF-001` and `SRV-018` counted a workspace that has since
+gained tests -- including 26 added by this goal. The failure is not the original number; it is
+that nothing re-derives a number printed beside a tool that re-derives it.
+
+**The durable fix is in how the entries are phrased.** Each corrected claim now names the
+command that produces it -- `check_wit_errors.py`, `check_no_ambient.py`, `qqqai --help`, the
+sum of the `test result:` lines, the generated page's first line -- so the next reader runs
+something rather than trusting a figure. A number with its command beside it survives an
+audit; a number alone does not.
+
+**Still unchecked, and named rather than implied.** The remaining claims in that set are test
+counts for individual modules (`ARCH-003`'s 10, `ARCH-012`'s 14, `CAP-011`'s 72, `CAP-015`'s
+34, `CON-005`'s 44, `SEC-008`'s 7, `SEC-017`'s 3, `DX-013`'s 6) and `LIC-006`'s 145 SPDX
+files. Each is checkable with a per-module test run, and none was checked here. They are
+listed in the observations rather than left as a silent gap.
+
+**Method worth keeping.** After any change to the tree, re-run the extractor and re-derive
+the checkable ones. A stale number in a ticked entry is a ledger lie even when the work is
+done, and it is invisible to every checker in the repository: `check_xrefs.py` validates
+citations, not arithmetic.
+
+**Files:** `QQQ-Checklist-V1.md` (six corrections across `CON-009`, `CON-010`, `SRV-018`,
+`PERF-001`, `DOC-017`, `DX-013`).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

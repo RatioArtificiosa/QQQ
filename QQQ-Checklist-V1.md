@@ -335,9 +335,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → 10/10 self-test cases.
   → §0.4 How to read the cross-references
 - [x] **DOC-017** Generate the WIT reference documentation from `wit/` into Markdown, with per-language examples.
-  → Done: `docs/wit-reference.md` — 13 packages, 20 interfaces, **71 functions** and
-    47 types, generated from `wit/` by `tools/gen_wit_reference.py` and verified by
-    `tools/check_wit_reference.py` in CI and in the bridge.
+  → Done: `docs/wit-reference.md` — 15 packages, 22 interfaces, **80 functions** and
+    53 types, generated from `wit/` by `tools/gen_wit_reference.py` and verified by
+    `tools/check_wit_reference.py` in CI and in the bridge. The page states its own
+    counts in its first line, so these are read from there rather than carried: this
+    entry said 13/20/71/47 until 2026-09-23, and only the entry was wrong.
   → **Per-language examples are deliberately NOT emitted**, and the page says so rather
     than showing plausible ones. A Rust or TypeScript example is only known correct once
     it compiles against the real bindings, and no `qqq-abi` consumer exists to compile
@@ -3094,7 +3096,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `HELP_MAX_LINES`, `HELP_GROUPS` and `render_help(verbose)` in
     `crates/qqq-run/src/main.rs` (**6 tests**), plus a CI step in
     `.github/workflows/ci.yml`.
-  → **Measured before: 53 lines. Measured after: 39.** §12.3's table is titled
+  → **Measured before: 53 lines. Measured after: 40** — which satisfies the item's own
+    `≤ 40` and is one off the 39 this entry claimed until 2026-09-23. `qqqai --help`
+    is the measurement; re-run it rather than trusting either number. §12.3's table is titled
     *"The DX commitments (measurable, in CI)"* and its row is
     `qqqai --help` for any command **≤ 40 lines, actionable** — so the commitment
     had a number on it and nothing counted. That is `§O-066`'s shape (a control
@@ -3640,7 +3644,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: **§9.2's budget table is data.** `Budget::ALL` holds the rows, each with an `Item` (a checklist id that cannot be invented — §O-126), a target, a `Direction`, a `Unit`, and the `method` under `bench/` that §9.2 says each row has. The direction is a property of the **row**, not of the call site, because half of §9.2 is ceilings (`≤ 100 µs`) and half is floors (`≥ 60k RPS`) and a comparison written the wrong way round makes a failing benchmark report success while looking identical in review. `Budget::meets` **refuses a unit mismatch** rather than comparing microseconds against milliseconds — a factor-of-1000 error that produces a plausible verdict.
   → Done: **the `db` caveat is structural, not a sentence.** `NonClaims` is a **required** field, and `NonClaims::qualified` refuses an empty list. §9.1's ninth requirement *is* "what this does not measure", so it is the honest home for the `db` caveat recorded in `§O-155` and `SRV-018`: a `db` result that omits "this did not touch a database" **does not compile**. A caveat that survives as a compile error cannot be lost by a reader who never opened an observation. That is the answer to the question this round was asked to settle, and it is better than both alternatives — dropping the row (it is one of §9.1's ten) or building `qqq:sql` to rescue it (a `CAP-*`/`HOST-*` item with its own credential handling and pooling, whose gates would have been skipped to serve one benchmark row).
   → **Measured — the crate.** `cargo test -p qqq-bench`: **55 unit tests + 1 doctest, all passing**. `cargo clippy -p qqq-bench --all-targets --all-features -- -D warnings`: **clean** (it found 10 pedantic violations on first run — lossy casts, a derivable `Default`, identical match arms, strict float comparisons — and every one was **fixed rather than suppressed**; only one `#[allow]` exists, on a documented `u64`→`f64` conversion with its reason stated once at the point of conversion). `cargo fmt --check`: clean.
-  → **Measured — the workspace.** **2305 passed, 0 failed** (was 2249; +56 from this crate). Guest crate run separately as always: **57 passed**. `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean. Topology OK with **11 crates**. SPDX OK across 199 files. Every `tools/*.py` checker green except the two that cannot run locally by design (`audit_requirements.py` needs a clean tree; `check_sbom.py sbom` needs a CI artifact).
+  → **Measured — the workspace.** **2460 passed, 0 failed** when re-summed from the
+    gate's `cargo test --workspace` on 2026-09-23 (this entry said 2305, and `SRV-018`
+    independently said 2249: two entries disagreeing about one number is how a stale
+    count survives). The workspace total is the sum of the `test result:` lines. Guest crate run separately as always: **57 passed**. `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean. Topology OK with **11 crates**. SPDX OK across 199 files. Every `tools/*.py` checker green except the two that cannot run locally by design (`audit_requirements.py` needs a clean tree; `check_sbom.py sbom` needs a CI artifact).
   → Done: **`tools/check_bench_contract.py`** — a new checker wired into CI **and** into `docker/entrypoint.sh`'s counterpart list, comparing §9.2, `Budget::ALL` and the checklist against each other. It refuses to pass when it finds nothing to compare (the `§M-006` vacuity failure), and it ships with a `--self-test` that injects the four defects it exists to catch.
   → **The checker found a real omission in the crate it guards, and three bugs in itself.** Real omission: `§9.2`'s *"Routed request overhead (empty handler) | ≤ 60 µs p99 | Host-side, excluding guest work"* had **no `Budget` row and no exclusion** — it was in neither list, which is precisely what the "every §9.2 row has a decision" rule detects. It is now `Item::Perf002`, the one §9.2 row that is *purely* the host's since the measurement excludes all guest work. Its `--self-test` found three bugs in the checker itself on first run (`§O-161`): **(a)** it read "which rows exist" from `Item::metric()`, which is a name lookup rather than evidence a row exists; **(b)** it compared targets against the Proposal but never against the Rust table — the numbers that actually execute — so a drifted target reported PASS; **(c)** its first `parse_target` read `≥ 60k RPS` as **60.0**, ignoring the `k`, which would have compared a real system against sixty requests per second instead of sixty thousand and reported a 1000× pass. All three fixed, and the rule now lives in one function the checker and its self-test both call.
   → **A fourth defect was found by a pre-existing checker, not by me.** `check_checklist_citations.py` rejected the new source because a doc comment quoted a non-existent identifier in the form `AREA-NNN`. It was a quotation of a historical defect, not a live citation — but a bare token is indistinguishable from one, which is exactly what that checker exists to catch (`§O-126`). Rewritten to describe the identifier rather than reproduce it.

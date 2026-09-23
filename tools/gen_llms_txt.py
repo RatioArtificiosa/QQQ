@@ -666,7 +666,13 @@ def generate(check: bool) -> int:
                 continue
             print(f"  OK    {name}")
         else:
-            path.write_text(text, encoding="utf-8")
+            # `write_bytes` rather than `write_text`, because `Path.write_text`
+            # translates `\n` to `os.linesep` -- `\r\n` on Windows -- while
+            # `.gitattributes` pins `* text=auto eol=lf`. The symptom is a git
+            # warning on every regeneration and a file that changes on each
+            # touch. Same root cause and same fix as `gen_schemas.generate` and
+            # `check_corpus_at_rest.record`.
+            path.write_bytes(text.encode("utf-8"))
             print(f"  wrote {name} ({len(text) // 1024} KB)")
 
     if ungenerated or drifted:

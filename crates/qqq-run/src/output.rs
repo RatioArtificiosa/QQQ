@@ -300,6 +300,18 @@ impl Format {
     }
 }
 
+/// The exit status a successful run returns.
+///
+/// Mirrored from `crates/qqq-run/src/main.rs`'s `mod exit`. The CLI owns the
+/// numbers; this crate names them so the envelope can be built without the two
+/// drifting. `check_exit_codes` asserts they agree.
+pub const EXIT_OK: u8 = 0;
+
+/// The exit status a command that ran and failed returns.
+///
+/// Mirrored from `mod exit` in the CLI for the same reason as [`EXIT_OK`].
+pub const EXIT_FAILURE: u8 = 1;
+
 /// The envelope every JSON response carries.
 ///
 /// # Why an envelope rather than a bare payload
@@ -324,7 +336,28 @@ pub struct Envelope<T> {
     /// The command that produced this.
     pub command: &'static str,
     /// Whether the command succeeded.
+    ///
+    /// **`ok` is not the exit status.** It says the command did what it was
+    /// asked and produced this payload; it is `true` even when the payload
+    /// reports a problem — `doctor` finding a missing manifest is a successful
+    /// diagnosis. Read [`Self::exit_code`] for the process's own verdict.
     pub ok: bool,
+    /// The exit status the process returns for this run.
+    ///
+    /// # Why this field exists
+    ///
+    /// Because `ok` and `$?` disagreed in the shipped binary.
+    /// `qqqai doctor --json` printed `"ok":true` and exited **69** while the
+    /// human form printed "1 of 3 checks need attention" — an agent that
+    /// trusted `ok` and an agent that trusted `$?` reached opposite conclusions
+    /// about the same run. Each was reading a real thing; the contract had two
+    /// answers to one question.
+    ///
+    /// Deriving the number here, from the same value the process returns,
+    /// makes the disagreement unrepresentable rather than merely documented.
+    /// The exit-status constants live in the CLI; this is the protocol's copy
+    /// of them, and [`EXIT_OK`] is the only value a success envelope carries.
+    pub exit_code: u8,
     /// A one-line human summary of the outcome.
     pub summary: String,
     /// The command's payload, when it succeeded.
@@ -441,29 +474,77 @@ impl<W: Write> Output<W> {
     /// stdout is common (`qqqai … | head`) and is reported rather than panicked
     /// on, so a pipeline terminates cleanly instead of printing a panic.
     pub fn emit<T: CommandOutput>(&mut self, value: &T) -> Result<()> {
+        self.emit_with_exit(value, EXIT_OK)
+    }
+
+    /// Emit a successful result that carries a non-zero exit status.
+    ///
+    /// # Why the exit status is an argument
+    ///
+    /// Because one command legitimately succeeds and still exits non-zero:
+    /// `qqqai doctor` diagnoses a broken environment correctly and returns
+    /// `UNAVAILABLE` so a CI step notices. The old signature forced that arm to
+    /// emit `ok: true` alongside exit 69, which is the contradiction this
+    /// parameter removes. Every other command keeps [`Self::emit`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `QQQ-6005` if the sink rejects the write.
+    pub fn emit_with_exit<T: CommandOutput>(&mut self, value: &T, exit_code: u8) -> Result<()> {
         let command = value.command();
         match self.format {
             Format::Human => self.write_line(&value.summary()),
             Format::Json | Format::JsonLines => {
-                let text = render_success(command, value)?;
+                let text = render_success(command, value, exit_code)?;
                 self.write_line(&text)
             }
         }
     }
 
-    /// Emit a failure.
+    /// Emit a failure with the generic failure status.
     ///
     /// The human form is the mandated error block from Proposal §12.2; the JSON
     /// form is the envelope with a populated `error` and `ok: false`.
+    ///
+    /// A caller that knows its own exit status must use
+    /// [`Self::emit_error_with_exit`] — the envelope reports the status, and a
+    /// constant here made the two disagree.
     ///
     /// # Errors
     ///
     /// Returns `QQQ-6005` if the sink rejects the write.
     pub fn emit_error(&mut self, command: CommandName, error: &Error) -> Result<()> {
+        self.emit_error_with_exit(command, error, EXIT_FAILURE)
+    }
+
+    /// Emit a failure whose process exit status is known at the call site.
+    ///
+    /// # Why the status is an argument
+    ///
+    /// Because the envelope carries it. `qqqai why --json` printed
+    /// `"exit_code":1` while the process returned `2` — the failure path used a
+    /// constant, so 38 of the 48 failure envelopes disagreed with their own
+    /// process, and an agent reading the envelope and an agent reading `$?`
+    /// reached opposite conclusions about the same run. The live probe in
+    /// `tools/check_schema_conformance.py` is what caught it, and that probe is
+    /// the reason the fix is verified rather than asserted.
+    ///
+    /// `EXIT_FAILURE` remains the default for [`Self::emit_error`], because a
+    /// caller that does not name a status means the generic failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QQQ-6005` if the sink rejects the write.
+    pub fn emit_error_with_exit(
+        &mut self,
+        command: CommandName,
+        error: &Error,
+        exit_code: u8,
+    ) -> Result<()> {
         match self.format {
             Format::Human => self.write_line(&error.render()),
             Format::Json | Format::JsonLines => {
-                let text = render_failure(command, error)?;
+                let text = render_failure(command, error, exit_code)?;
                 self.write_line(&text)
             }
         }
@@ -505,7 +586,7 @@ impl<W: Write> Output<W> {
                 if !backtrace.is_empty() {
                     payload.backtrace = Some(backtrace.clone());
                 }
-                let text = render_failure_payload(command, error, payload)?;
+                let text = render_failure_payload(command, error, payload, EXIT_FAILURE)?;
                 self.write_line(&text)
             }
         }
@@ -553,13 +634,18 @@ impl<W: Write> Output<W> {
 ///
 /// Extracted from [`Output::emit`] so the envelope construction is reviewable
 /// on its own — this is the machine contract an agent consumes.
-fn render_success<T: CommandOutput>(command: CommandName, value: &T) -> Result<String> {
+fn render_success<T: CommandOutput>(
+    command: CommandName,
+    value: &T,
+    exit_code: u8,
+) -> Result<String> {
     let envelope = Envelope {
         producer: "qqqai",
         version: qqq_core::VERSION,
         schema_version: qqq_core::SCHEMA_VERSION,
         command: command.as_str(),
         ok: true,
+        exit_code,
         summary: value.summary(),
         data: Some(value.to_json()),
         error: None::<ErrorPayload>,
@@ -568,8 +654,8 @@ fn render_success<T: CommandOutput>(command: CommandName, value: &T) -> Result<S
 }
 
 /// Serialize a failure envelope.
-fn render_failure(command: CommandName, error: &Error) -> Result<String> {
-    render_failure_payload(command, error, ErrorPayload::from(error))
+fn render_failure(command: CommandName, error: &Error, exit_code: u8) -> Result<String> {
+    render_failure_payload(command, error, ErrorPayload::from(error), exit_code)
 }
 
 /// Serialize a failure envelope from an already-built payload.
@@ -581,6 +667,7 @@ fn render_failure_payload(
     command: CommandName,
     error: &Error,
     payload: ErrorPayload,
+    exit_code: u8,
 ) -> Result<String> {
     let envelope = Envelope::<serde_json::Value> {
         producer: "qqqai",
@@ -588,6 +675,7 @@ fn render_failure_payload(
         schema_version: qqq_core::SCHEMA_VERSION,
         command: command.as_str(),
         ok: false,
+        exit_code,
         summary: error.message.clone(),
         data: None,
         error: Some(payload),

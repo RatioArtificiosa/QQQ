@@ -348,6 +348,27 @@ pub enum ErrorCode {
     /// The agent protocol version is not supported by this host.
     /// **Remediation:** the error reports both versions.
     ProtocolVersionUnsupported = 7003,
+    /// A command was given a flag it does not accept.
+    /// **Remediation:** the error names the flag; `qqqai <command> --help`
+    /// lists the ones the command takes.
+    ///
+    /// # Why this is distinct from `McpArgumentInvalid`
+    ///
+    /// `7001` is about *arguments* — a positional or a value that failed the
+    /// tool's schema. This is about an *unrecognised option*: the imperative
+    /// form of "the invocation is wrong", which a caller resolves by reading
+    /// the usage rather than by fixing a value. Folding the two together would
+    /// make `qqqai doctor --jsonn` indistinguishable from `qqqai serve --port
+    /// abc` in a log, and they need different remediation text.
+    ///
+    /// # Why it exists at all
+    ///
+    /// Because silently ignoring an unknown flag is the bug this code names.
+    /// `qqqai doctor --fix` behaved exactly like `qqqai doctor` before `--fix`
+    /// was implemented, and every command accepted a mistyped `--jsonn` the
+    /// same way — a user who believes an option took effect, and a *missing*
+    /// effect that reads as a mystery rather than an error.
+    CliFlagUnknown = 7004,
 }
 
 impl ErrorCode {
@@ -441,6 +462,7 @@ impl ErrorCode {
             Self::McpArgumentInvalid,
             Self::UnknownSchemaSurface,
             Self::ProtocolVersionUnsupported,
+            Self::CliFlagUnknown,
         ]
     }
 

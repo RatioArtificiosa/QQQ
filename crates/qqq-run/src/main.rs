@@ -35,19 +35,19 @@ use qqq_run::output::{CommandName, Format, Output};
 /// the struct or trips the "too many bools" heuristic that exists to catch
 /// exactly this smell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct GlobalFlags(u8);
+struct GlobalFlags(u16);
 
 impl GlobalFlags {
     /// Emit machine-readable JSON.
-    const JSON: u8 = 1 << 0;
+    const JSON: u16 = 1 << 0;
     /// Emit JSON Lines.
-    const JSON_LINES: u8 = 1 << 1;
+    const JSON_LINES: u16 = 1 << 1;
     /// Suppress non-essential output.
-    const QUIET: u8 = 1 << 2;
+    const QUIET: u16 = 1 << 2;
     /// Emit additional detail.
-    const VERBOSE: u8 = 1 << 3;
+    const VERBOSE: u16 = 1 << 3;
     /// Show what would happen without doing it.
-    const DRY_RUN: u8 = 1 << 4;
+    const DRY_RUN: u16 = 1 << 4;
     /// Print the full help rather than the brief one — `DX-013`.
     ///
     /// # Why `--help` has a depth at all
@@ -56,16 +56,31 @@ impl GlobalFlags {
     /// measured output was 53. Truncating would lose the `--json` contract line,
     /// which is the most useful thing a script author reads here; so the default
     /// is brief and `--help --all` is complete. See [`render_help`].
-    const ALL: u8 = 1 << 5;
+    const ALL: u16 = 1 << 5;
+    /// Offer to repair what `doctor` found — `DX-016`.
+    ///
+    /// # Why this is global rather than `doctor`-local
+    ///
+    /// Because the flag has to survive the single-pass parse. `parse_args`
+    /// routes *unknown* flags that appear before the command name to a usage
+    /// error and only forwards ones that appear after it, so a `doctor`-local
+    /// `--fix` would make `qqqai --fix doctor` fail while `qqqai doctor --fix`
+    /// worked. That order-dependence is the exact bug this file already
+    /// documents for `--all` and pins with both orders in its test. A global
+    /// flag is seen in both positions, and the `Doctor` arm reads it.
+    ///
+    /// The width of the backing integer is now `u16`: `1 << 6` does not fit in
+    /// a `u8` with `ALL` at `1 << 5`.
+    const FIX: u16 = 1 << 6;
 
     /// Set a flag.
-    fn set(&mut self, flag: u8) {
+    fn set(&mut self, flag: u16) {
         self.0 |= flag;
     }
 
     /// Test a flag.
     #[must_use]
-    const fn has(self, flag: u8) -> bool {
+    const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
     }
 
@@ -91,6 +106,12 @@ impl GlobalFlags {
     #[must_use]
     const fn all(self) -> bool {
         self.has(Self::ALL)
+    }
+
+    /// Whether `doctor` may repair what it found — `DX-016`.
+    #[must_use]
+    const fn fix(self) -> bool {
+        self.has(Self::FIX)
     }
 
     /// The output format these flags select.
@@ -204,6 +225,13 @@ fn parse_args(argv: &[String]) -> Parsed {
             // different problem. `all_is_only_accepted_with_help` is what caught
             // it, and it now asserts both orders.
             "--all" => flags.set(GlobalFlags::ALL),
+            // `DX-016`: `--fix` lets `doctor` repair what it found.
+            //
+            // Accepted unconditionally, for the same reason as `--all`: the
+            // parse must not make a flag's validity depend on where it sits on
+            // the line. It is inert unless the resolved command is `doctor`,
+            // and the `Doctor` arm is the only reader.
+            "--fix" => flags.set(GlobalFlags::FIX),
             other if other.starts_with('-') && command.is_none() => {
                 // An unknown global flag *before* the command is a usage error.
                 // After the command it belongs to the command and passes
@@ -415,7 +443,7 @@ fn main() -> ExitCode {
                     qqq_core::BINARY_NAME
                 ));
             // A usage error is not a crash, so a write failure must not mask it.
-            let _ = out.emit_error(CommandName::Help, &err);
+            let _ = out.emit_error_with_exit(CommandName::Help, &err, exit::USAGE);
             ExitCode::from(exit::USAGE)
         }
         Action::Command { name, args } => run_command(name, &args, flags),
@@ -474,6 +502,14 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             report(&mut out, name, &SchemaOutput)
         }
         CommandName::Doctor => {
+            // `doctor` has one flag of its own, `--fix`, and `--json` is
+            // global. Anything else is a mistake worth naming: `--fix` itself
+            // was silently ignored while it was unimplemented, so a `doctor`
+            // that accepts anything it does not understand is the behaviour
+            // this refuses.
+            if let Some(code) = refuse_flags(name, args, &["--fix"], &mut out) {
+                return code;
+            }
             let checks = run_doctor();
             // A failing check must fail the process.
             //
@@ -489,13 +525,17 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             // broken inside QQQ, the *environment* is not ready. That
             // distinction matters to a caller deciding whether to retry, report
             // or reinstall.
-            let failed = checks.iter().filter(|c| !c.ok).count();
-            let code = report(&mut out, name, &DoctorOutput { checks });
-            if failed > 0 && code == ExitCode::from(exit::OK) {
-                ExitCode::from(exit::UNAVAILABLE)
-            } else {
-                code
-            }
+            let fix = apply_fixes(&checks, flags.fix());
+            report_with_verdict(&mut out, name, &DoctorOutput { checks, fix }, |d| {
+                if d.checks.iter().any(|c| !c.ok) {
+                    // Nothing inside QQQ is broken; the *environment* is not
+                    // ready. That distinction matters to a caller deciding
+                    // whether to retry, report or reinstall.
+                    exit::UNAVAILABLE
+                } else {
+                    exit::OK
+                }
+            })
         }
         CommandName::Why => {
             // The capability argument is extracted before `out` is borrowed by
@@ -511,7 +551,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
                     "`why` needs a capability to explain",
                 )
                 .with_remediation("for example: qqqai why crypto.hash");
-                let _ = out.emit_error(name, &err);
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
                 ExitCode::from(exit::USAGE)
             }
         }
@@ -542,7 +582,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
                 "this command is tracked by the checklist; see QQQ-Checklist-V1.md \
                  for `{name}`"
             ));
-            let _ = out.emit_error(name, &err);
+            let _ = out.emit_error_with_exit(name, &err, exit::UNAVAILABLE);
             ExitCode::from(exit::UNAVAILABLE)
         }
     }
@@ -584,7 +624,7 @@ fn dispatch_inspect(
         if a == "--diff" {
             let Some(v) = args.get(i + 1) else {
                 let e = missing_value("--diff");
-                let _ = out.emit_error(name, &e);
+                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
                 return ExitCode::from(exit::USAGE);
             };
             diff_against = Some(v.clone());
@@ -617,7 +657,7 @@ fn dispatch_inspect(
                 "for example: {} inspect new.wasm --diff old.wasm",
                 qqq_core::BINARY_NAME
             ));
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
         return with_manifest(name, out, args, qqq_run::commands::inspect);
@@ -626,7 +666,7 @@ fn dispatch_inspect(
     let after = match qqq_run::commands::inspect_artifact(std::path::Path::new(&path)) {
         Ok(r) => r,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             return ExitCode::from(exit::FAILURE);
         }
     };
@@ -638,7 +678,7 @@ fn dispatch_inspect(
     let before = match qqq_run::commands::inspect_artifact(std::path::Path::new(&against)) {
         Ok(r) => r,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             return ExitCode::from(exit::FAILURE);
         }
     };
@@ -705,13 +745,13 @@ fn dispatch_audit(
         } else if a == "--fail-on" {
             let Some(v) = args.get(i + 1) else {
                 let e = missing_value("--fail-on");
-                let _ = out.emit_error(name, &e);
+                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
                 return ExitCode::from(exit::USAGE);
             };
             match qqq_run::audit::parse_fail_on(v) {
                 Ok(sev) => fail_on = Some(sev),
                 Err(e) => {
-                    let _ = out.emit_error(name, &e);
+                    let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
                     return ExitCode::from(exit::USAGE);
                 }
             }
@@ -720,7 +760,7 @@ fn dispatch_audit(
             match qqq_run::audit::parse_fail_on(v) {
                 Ok(sev) => fail_on = Some(sev),
                 Err(e) => {
-                    let _ = out.emit_error(name, &e);
+                    let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
                     return ExitCode::from(exit::USAGE);
                 }
             }
@@ -749,7 +789,7 @@ fn dispatch_audit(
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -775,7 +815,7 @@ fn dispatch_audit(
     if sarif {
         // The document *is* the output: no envelope, no summary line.
         if let Err(e) = out.write_document(&report.to_sarif()) {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
             return ExitCode::from(exit::INTERNAL);
         }
         return if meets_threshold {
@@ -795,12 +835,12 @@ fn dispatch_audit(
     // reviewing this commit, and reproduced before fixing.
     if out.format() == Format::Human {
         if let Err(e) = out.write_document(&report.render()) {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
             return ExitCode::from(exit::INTERNAL);
         }
     }
     if let Err(e) = out.emit(&payload) {
-        let _ = out.emit_error(name, &e);
+        let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
         return ExitCode::from(exit::INTERNAL);
     }
 
@@ -822,7 +862,7 @@ fn dispatch_build(
     let opts = match build_options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -870,7 +910,7 @@ fn dispatch_run(
     let opts = match run_options(args, flags) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -940,7 +980,7 @@ fn dispatch_run_with_trap_report(
     let opts = match run_options(args, flags) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -957,7 +997,7 @@ fn dispatch_run_with_trap_report(
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -979,7 +1019,7 @@ fn dispatch_run_with_trap_report(
                 // Not a trap: no frames to resolve, so the ordinary path is used
                 // and the output is byte-identical to what it was before this
                 // existed.
-                let _ = out.emit_error(name, &e);
+                let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             } else {
                 let _ = out.emit_error_with_backtrace(name, &e, &backtrace);
             }
@@ -1000,7 +1040,7 @@ fn dispatch_new(name: CommandName, args: &[String], out: &mut Output<std::io::St
     let opts = match new_options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1008,7 +1048,7 @@ fn dispatch_new(name: CommandName, args: &[String], out: &mut Output<std::io::St
     match qqq_run::scaffold::create(&opts, &cwd) {
         Ok(value) => report(out, name, &value),
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             // A refused name is a usage mistake; a refused directory is an
             // environment condition the user must resolve. Distinguishing them
             // lets a script tell "I called it wrong" from "something is in the
@@ -1058,7 +1098,7 @@ fn dispatch_openapi(
                     "`--out` needs a file path".to_owned(),
                 )
                 .with_remediation("write `--out openapi.json`");
-                let _ = out.emit_error(name, &err);
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
                 return ExitCode::from(exit::USAGE);
             };
             target = Some(v.clone());
@@ -1069,7 +1109,7 @@ fn dispatch_openapi(
                 format!("unknown argument `{a}` for `openapi`"),
             )
             .with_remediation("`openapi` accepts --out <file> and nothing else");
-            let _ = out.emit_error(name, &err);
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
         i += 1;
@@ -1083,7 +1123,7 @@ fn dispatch_openapi(
                 "could not determine the working directory".to_owned(),
             )
             .with_cause(e.to_string());
-            let _ = out.emit_error(name, &err);
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1091,7 +1131,7 @@ fn dispatch_openapi(
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, None) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             return ExitCode::from(exit::FAILURE);
         }
     };
@@ -1099,7 +1139,7 @@ fn dispatch_openapi(
     let mut payload = match qqq_run::commands::openapi(&loaded) {
         Ok(p) => p,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             return ExitCode::from(exit::FAILURE);
         }
     };
@@ -1119,7 +1159,7 @@ fn dispatch_openapi(
                     "the OpenAPI document could not be rendered".to_owned(),
                 )
                 .with_cause(e.to_string());
-                let _ = out.emit_error(name, &err);
+                let _ = out.emit_error_with_exit(name, &err, exit::INTERNAL);
                 return ExitCode::from(exit::INTERNAL);
             }
         };
@@ -1130,7 +1170,7 @@ fn dispatch_openapi(
                 format!("could not write `{path}`"),
             )
             .with_cause(e.to_string());
-            let _ = out.emit_error(name, &err);
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
         payload.out = Some(path.clone());
@@ -1237,7 +1277,7 @@ fn dispatch_init(
     let opts = match init_options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1245,7 +1285,7 @@ fn dispatch_init(
     match qqq_run::scaffold::init(&cwd, &opts) {
         Ok(value) => report(out, name, &value),
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             ExitCode::from(exit::FAILURE)
         }
     }
@@ -1350,7 +1390,7 @@ fn dispatch_test(
     let opts = match test_options(args, flags) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1360,7 +1400,7 @@ fn dispatch_test(
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1378,22 +1418,22 @@ fn dispatch_test(
             r
         }
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             return ExitCode::from(exit::FAILURE);
         }
     };
 
-    // A determinism failure counts as a failure for the exit code. A test that
-    // passed 4 of 5 trials is not a passing test, and exiting `0` would let CI
-    // accept it — which is the one outcome `--trials` exists to prevent.
-    let failed = result.failed + result.nondeterministic;
-    let code = report(out, name, &result);
-
-    if failed > 0 && code == ExitCode::from(exit::OK) {
-        ExitCode::from(exit::FAILURE)
-    } else {
-        code
-    }
+    report_with_verdict(out, name, &result, |r| {
+        // A determinism failure counts as a failure for the exit code. A test
+        // that passed 4 of 5 trials is not a passing test, and exiting `0`
+        // would let CI accept it — which is the one outcome `--trials` exists
+        // to prevent.
+        if r.failed + r.nondeterministic > 0 {
+            exit::FAILURE
+        } else {
+            exit::OK
+        }
+    })
 }
 
 /// Decode `qqqai test`'s flags.
@@ -1467,7 +1507,7 @@ fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::St
     let opts = match dev_options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1499,7 +1539,7 @@ fn dispatch_serve(
     let opts = match qqq_run::serve::options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1568,7 +1608,7 @@ fn dispatch_bench(
     let opts = match qqq_run::bench::options(args) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1582,7 +1622,7 @@ fn dispatch_bench(
             "start the app with `qqqai serve --listen 127.0.0.1:8080`, then run \
              `qqqai bench --listen 127.0.0.1:8080`",
         );
-        let _ = out.emit_error(name, &err);
+        let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
         return ExitCode::from(exit::USAGE);
     };
 
@@ -1597,7 +1637,7 @@ fn dispatch_bench(
                 format!("could not start the async runtime: {e}"),
             )
             .with_remediation("this is a QQQ bug; please report it");
-            let _ = out.emit_error(name, &err);
+            let _ = out.emit_error_with_exit(name, &err, exit::INTERNAL);
             return ExitCode::from(exit::INTERNAL);
         }
     };
@@ -1613,7 +1653,7 @@ fn dispatch_bench(
             }
         }
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             ExitCode::from(exit::FAILURE)
         }
     }
@@ -1623,7 +1663,7 @@ fn dispatch_add(name: CommandName, args: &[String], out: &mut Output<std::io::St
     let parsed = match add_options(args) {
         Ok(p) => p,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1658,7 +1698,7 @@ fn dispatch_remove(
                     format!("unknown flag `{other}` for `remove`"),
                 )
                 .with_remediation("`remove` accepts --dev and --manifest");
-                let _ = out.emit_error(name, &e);
+                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
                 return ExitCode::from(exit::USAGE);
             }
             other if pkg.is_none() => pkg = Some(other.to_owned()),
@@ -1675,7 +1715,7 @@ fn dispatch_remove(
             "for example: {} remove qqqai/json",
             qqq_core::BINARY_NAME
         ));
-        let _ = out.emit_error(name, &e);
+        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
         return ExitCode::from(exit::USAGE);
     };
 
@@ -1713,7 +1753,7 @@ fn dispatch_install(
     let opts = match install_options(args, flags) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1852,7 +1892,7 @@ fn dispatch_update(
     let opts = match update_options(args, flags) {
         Ok(o) => o,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -2300,7 +2340,7 @@ where
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -2308,7 +2348,7 @@ where
     match f(&loaded) {
         Ok(value) => report(out, name, &value),
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             ExitCode::from(exit::FAILURE)
         }
     }
@@ -2492,10 +2532,34 @@ fn report<T: qqq_run::output::CommandOutput>(
     name: CommandName,
     value: &T,
 ) -> ExitCode {
-    match out.emit(value) {
-        Ok(()) => ExitCode::from(exit::OK),
+    report_with_verdict(out, name, value, |_| exit::OK)
+}
+
+/// Emit a successful result whose exit status depends on what it contains.
+///
+/// # Why the verdict is a closure
+///
+/// `qqqai doctor` succeeds and exits non-zero when a check fails, and the
+/// envelope must carry the number the process returns. Building the output
+/// first and overriding the exit code afterwards is how those two drifted:
+/// the struct was constructed before the code was known, so it could only
+/// guess. Here the code is computed from the output *before* emission, and the
+/// same value is both serialised and returned — one number, two consumers.
+fn report_with_verdict<T, F>(
+    out: &mut Output<std::io::Stdout>,
+    name: CommandName,
+    value: &T,
+    verdict: F,
+) -> ExitCode
+where
+    T: qqq_run::output::CommandOutput,
+    F: FnOnce(&T) -> u8,
+{
+    let code = verdict(value);
+    match out.emit_with_exit(value, code) {
+        Ok(()) => ExitCode::from(code),
         Err(e) => {
-            let _ = out.emit_error(name, &e);
+            let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
             ExitCode::from(exit::INTERNAL)
         }
     }
@@ -2540,6 +2604,222 @@ struct Check {
     fix: Option<String>,
 }
 
+/// The target every QQQ guest is compiled to.
+///
+/// A constant so the check, its remedy and the tests all name the same target.
+const WASM_TARGET: &str = "wasm32-wasip2";
+
+/// Where a repair `doctor` could perform is described to the user.
+///
+/// # Why a command and a script, not a function
+///
+/// `doctor` must not repair anything it cannot describe. This struct carries
+/// the exact shell command a person types and the equivalent Python that a CI
+/// step or an agent runs instead, so `--fix` is auditable: the plan is printed
+/// before it is executed, and [`FixPlan::apply`] is the only thing that runs
+/// it.
+struct FixPlan {
+    /// What this repairs, in the reader's terms.
+    what: String,
+    /// The command a person would type.
+    command: String,
+    /// The program to spawn.
+    program: String,
+    /// Its arguments.
+    argv: Vec<String>,
+}
+
+impl FixPlan {
+    /// Run the repair, returning the program's own output.
+    ///
+    /// The exit status is **not** an error here: a failing `rustup` produces a
+    /// diagnostic message that belongs in the report, and turning it into a
+    /// `Result::Err` would replace that message with a summary. The caller
+    /// re-runs the checks afterwards, which is the real verdict.
+    fn apply(&self) -> std::io::Result<String> {
+        let output = std::process::Command::new(&self.program)
+            .args(&self.argv)
+            .output()?;
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok(text.trim().to_owned())
+    }
+}
+
+/// Is the wasm target actually installed?
+///
+/// # Why this is a real probe
+///
+/// This check used to be `ok: true` with a comment saying that shelling out to
+/// `rustup` "would exceed the startup budget and is the build command's job to
+/// verify". Both halves of that were wrong. It is the *doctor's* job — that is
+/// what a doctor is — and the check could never fail, so it printed
+/// `ok wasm-target` while measuring nothing: a green light for an unmeasured
+/// thing, the same class as the validator with no positive control the dispatch
+/// arm already calls out.
+///
+/// Three real measurements, in order of cost:
+///
+/// 1. `QQQ_TEST_WASM_TARGET_PRESENT` is this function's own escape hatch: `0`
+///    forces "absent" and any other value forces "present", so the negative
+///    case is testable on a machine that has the target. Nothing in the
+///    product or in CI sets it — a grep for the name finds this file and its
+///    tests only. It is a hook on the probe, not a configuration knob, and the
+///    doc comment that described it as one was wrong.
+/// 2. The target's own directory under `$RUSTUP_HOME`, or `~/.rustup`, is a
+///    file-system read — no subprocess, no budget question.
+/// 3. Otherwise ask `rustup` itself.
+///
+/// A missing `rustup` binary is reported as *not present* rather than as an
+/// error: `qqqai build` cannot reach the target without it, so that is the
+/// truthful answer to the question the check asks.
+fn wasm_target_present() -> bool {
+    match std::env::var("QQQ_TEST_WASM_TARGET_PRESENT").as_deref() {
+        Ok("0") => return false,
+        Ok(_) => return true,
+        Err(_) => {}
+    }
+
+    // `RUSTUP_HOME` is authoritative when set; the default is `~/.rustup`.
+    let home = std::env::var_os("RUSTUP_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| std::path::PathBuf::from(h).join(".rustup"))
+        });
+    if let Some(home) = home {
+        if home.join("toolchains").read_dir().is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                e.path()
+                    .join("lib")
+                    .join("rustlib")
+                    .join(WASM_TARGET)
+                    .is_dir()
+            })
+        }) {
+            return true;
+        }
+    }
+
+    std::process::Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .is_ok_and(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim() == WASM_TARGET)
+        })
+}
+
+/// What `doctor` would do with `--fix`, and what it did.
+#[derive(serde::Serialize)]
+struct FixOutcome {
+    /// Whether repairs were requested.
+    requested: bool,
+    /// One line per repair plan — always populated when `requested`.
+    planned: Vec<String>,
+    /// One line per repair actually run.
+    applied: Vec<String>,
+    /// Repairs that were deliberately not run, and why.
+    skipped: Vec<String>,
+}
+
+/// Reject any flag the command does not understand.
+///
+/// # Why a command must do this
+///
+/// `parse_args` forwards an unrecognised flag that appears *after* the command
+/// name, because that is how a command declares its own options. The cost is
+/// that a flag the command never learned about is silently swallowed:
+/// `qqqai doctor --fix` behaved exactly like `qqqai doctor` while `--fix` was
+/// unimplemented, and a mistyped `--jsonn` is accepted by every command in the
+/// same way. Silently ignoring an argument is worse than refusing it — the user
+/// believes the option took effect, and the *absence* of its effect is then a
+/// mystery rather than an error.
+///
+/// Returns the error rather than emitting it so the caller keeps ownership of
+/// its output sink, matching the shape of the other dispatch helpers.
+fn reject_unknown_flags(
+    name: CommandName,
+    args: &[String],
+    accepted: &[&str],
+) -> Option<qqq_core::Error> {
+    let unknown = args
+        .iter()
+        .filter(|a| a.starts_with('-'))
+        .find(|a| !accepted.contains(&a.as_str()))?;
+    let mut listing = accepted.join(", ");
+    if listing.is_empty() {
+        "no flags".clone_into(&mut listing);
+    }
+    Some(
+        qqq_core::Error::new(
+            qqq_core::ErrorCode::CliFlagUnknown,
+            format!("`{name}` does not accept `{unknown}`"),
+        )
+        .with_remediation(format!("`{name}` accepts {listing}")),
+    )
+}
+
+/// Refuse a flag the command does not accept, emitting the error itself.
+///
+/// Returns the exit code to return, or `None` when every flag is understood.
+/// Extracted from the `Doctor` arm so that arm stays inside the crate's
+/// 100-line budget: the check is four lines of control flow that belong with
+/// [`reject_unknown_flags`] rather than inline at the dispatch site, and
+/// silencing the lint would have hidden the growth instead of removing it.
+fn refuse_flags(
+    name: CommandName,
+    args: &[String],
+    accepted: &[&str],
+    out: &mut Output<std::io::Stdout>,
+) -> Option<ExitCode> {
+    let err = reject_unknown_flags(name, args, accepted)?;
+    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+    Some(ExitCode::from(exit::USAGE))
+}
+
+/// The repair for each failing check, if one exists.
+///
+/// # Why `wasm-target` has no automatic repair
+///
+/// `rustup target add` downloads a toolchain component. A diagnostic command
+/// that silently fetches from the network is a supply-chain decision made
+/// without the user's consent, so it is planned, printed and left to the user.
+/// The alternative — running it because `--fix` was passed — would make
+/// `qqqai doctor --fix` in a `curl | sh` script a remote-code-install with no
+/// prompt. [`FixPlan`] exists precisely because `libloading`-style `dlopen` and
+/// `rustup`-style installs are the two things that must be *described* before
+/// they happen.
+fn fix_for(name: &str, rustup_present: bool) -> Option<FixPlan> {
+    if name != "wasm-target" {
+        return None;
+    }
+    if !rustup_present {
+        return None;
+    }
+    Some(FixPlan {
+        what: format!("install the {WASM_TARGET} rustup target"),
+        command: format!("rustup target add {WASM_TARGET}"),
+        program: "rustup".to_owned(),
+        argv: vec![
+            "target".to_owned(),
+            "add".to_owned(),
+            WASM_TARGET.to_owned(),
+        ],
+    })
+}
+
+/// Whether a `rustup` binary is on `PATH` — asked once, used by [`fix_for`].
+fn rustup_on_path() -> bool {
+    std::process::Command::new("rustup")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 /// The `qqqai doctor` checks.
 ///
 /// Ordered so the most likely first-run problem appears first. Each carries a
@@ -2574,23 +2854,105 @@ fn run_doctor() -> Vec<Check> {
         }),
     });
 
-    // The wasm target is required to build anything.
-    let target = std::env::var("QQQ_TEST_WASM_TARGET_PRESENT").is_ok();
+    // The wasm target is required to build anything, so it is really probed:
+    // see [`wasm_target_present`] for why the old `ok: true` was a defect.
+    let target = wasm_target_present();
     checks.push(Check {
         name: "wasm-target",
-        ok: true, // Not probed here: shelling out to rustup would exceed the
-        // startup budget and is the build command's job to verify.
-        detail: "the wasm32-wasip2 target is verified during `build`".to_owned(),
-        fix: (!target).then_some("run `rustup target add wasm32-wasip2`".to_owned()),
+        ok: target,
+        detail: if target {
+            format!("the {WASM_TARGET} target is installed")
+        } else {
+            format!("the {WASM_TARGET} target is not installed")
+        },
+        fix: (!target).then(|| format!("run `rustup target add {WASM_TARGET}`")),
     });
 
     checks
+}
+
+/// Run `--fix`, returning what was planned, applied and deliberately skipped.
+///
+/// # The two rules this function exists to enforce
+///
+/// 1. **A repair that is not planned is not printed, and a repair that is not
+///    printed is not run.** Without `--fix` nothing at all is executed, so a
+///    bare `qqqai doctor` stays a pure diagnostic — that is the whole point of
+///    a doctor.
+/// 2. **Network-touching repairs are planned and printed but never run.**
+///    `rustup target add` downloads a toolchain component, and a diagnostic
+///    command that silently installs software because a flag was present is a
+///    supply-chain decision taken on the user's behalf. It is listed under
+///    `skipped`, with its exact command, so the user runs it deliberately.
+///
+/// The verdict on whether a repair worked is the re-run of the check, not the
+/// repair's exit status — which is why nothing here claims success.
+fn apply_fixes(checks: &[Check], requested: bool) -> FixOutcome {
+    let mut outcome = FixOutcome {
+        requested,
+        planned: Vec::new(),
+        applied: Vec::new(),
+        skipped: Vec::new(),
+    };
+    if !requested {
+        return outcome;
+    }
+
+    let rustup = rustup_on_path();
+    for check in checks.iter().filter(|c| !c.ok) {
+        let Some(plan) = fix_for(check.name, rustup) else {
+            // A failing check with no automatic repair still has a `fix` line
+            // for the reader; naming it as skipped is what distinguishes "the
+            // doctor has no remedy" from "the doctor has a remedy and chose not
+            // to run it".
+            outcome.skipped.push(format!(
+                "{}: {}",
+                check.name,
+                check.fix.as_deref().unwrap_or("no automatic repair")
+            ));
+            continue;
+        };
+        // Both halves are shown: the shell command is what runs, `what` is
+        // what it is for. A plan line with only the command makes the reader
+        // look up `rustup target add` to decide whether to approve it.
+        outcome
+            .planned
+            .push(format!("{} — `{}`", plan.what, plan.command));
+        // A network fetch is never automatic: see the function comment.
+        if plan.command.contains("target add") {
+            outcome.skipped.push(format!(
+                "{}: `{}` downloads a toolchain component, so it was not run",
+                check.name, plan.command
+            ));
+            // `planned` and `skipped` are both populated for this plan on
+            // purpose: the reader sees what was considered *and* what was
+            // declined, which is the audit the `--fix` contract promises.
+            continue;
+        }
+        // Allow-listed: only plans whose command was just added to `planned`
+        // reach here, and `fix_for` is the single source of those.
+        match plan.apply() {
+            Ok(text) if text.is_empty() => outcome.applied.push(plan.command),
+            Ok(text) => outcome.applied.push(format!("{}: {text}", plan.command)),
+            Err(err) => outcome.skipped.push(format!(
+                "{}: could not run `{}` ({err})",
+                check.name, plan.command
+            )),
+        }
+    }
+    outcome
 }
 
 /// `qqqai doctor` output.
 #[derive(serde::Serialize)]
 struct DoctorOutput {
     checks: Vec<Check>,
+    /// What `--fix` planned, applied or skipped.
+    ///
+    /// Serialised rather than kept to the summary because an agent driving
+    /// `qqqai doctor --json --fix` needs to know whether a repair happened
+    /// without parsing prose.
+    fix: FixOutcome,
 }
 
 impl qqq_run::output::CommandOutput for DoctorOutput {
@@ -2632,10 +2994,29 @@ impl qqq_run::output::CommandOutput for DoctorOutput {
             let _ = write!(out, "\n\n  ok    {}", passes.join(", "));
         }
 
+        // `--fix` is reported separately from the checks, because "what I
+        // found" and "what I did about it" are different claims and a reader
+        // must be able to tell them apart.
+        if self.fix.requested {
+            out.push_str("\n\n  fix   ");
+            if self.fix.planned.is_empty() {
+                out.push_str("nothing needed repairing");
+            }
+            for line in &self.fix.planned {
+                let _ = write!(out, "\n        planned: {line}");
+            }
+            for line in &self.fix.applied {
+                let _ = write!(out, "\n        applied: {line}");
+            }
+            for line in &self.fix.skipped {
+                let _ = write!(out, "\n        left to you: {line}");
+            }
+        }
+
         out
     }
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({"checks": self.checks})
+        serde_json::json!({"checks": self.checks, "fix": self.fix})
     }
 }
 
@@ -3027,6 +3408,188 @@ mod tests {
                     c.name
                 );
             }
+        }
+    }
+
+    /// `--fix` must be recognised in **both** positions.
+    ///
+    /// A `doctor`-local `--fix` would have passed only in the second position,
+    /// because `parse_args` rejects an unknown flag that precedes the command.
+    /// This is the same order-dependence `--all` had, and the reason `FIX` is a
+    /// global bit.
+    #[test]
+    fn fix_is_a_global_flag() {
+        for line in [&["doctor", "--fix"][..], &["--fix", "doctor"][..]] {
+            let p = parsed(line);
+            assert!(p.flags.fix(), "--fix must be recorded in {line:?}");
+            assert!(!p.flags.dry_run(), "flag bits must be independent");
+            assert_eq!(
+                p.flags.format(),
+                Format::Human,
+                "--fix must not disturb the format"
+            );
+        }
+        assert!(!parsed(&["doctor"]).flags.fix());
+    }
+
+    /// The wasm-target check must be able to **fail**, and its verdict must
+    /// follow the probe.
+    ///
+    /// The previous implementation was `ok: true` with a comment, so it printed
+    /// `ok wasm-target` while measuring nothing — a check that could not fail.
+    /// Both directions are driven here through the real probe's own override,
+    /// never by reaching past it.
+    #[test]
+    fn wasm_target_check_follows_the_probe() {
+        for (signal, expected_ok) in [("0", false), ("1", true)] {
+            std::env::set_var("QQQ_TEST_WASM_TARGET_PRESENT", signal);
+            // One call, used for both assertions: the probe is stateful only
+            // through the variable, and reading it twice from the same
+            // environment is not an independent sample.
+            let probed = wasm_target_present();
+            let checks = run_doctor();
+            std::env::remove_var("QQQ_TEST_WASM_TARGET_PRESENT");
+            assert_eq!(
+                probed, expected_ok,
+                "the probe must honour QQQ_TEST_WASM_TARGET_PRESENT={signal}"
+            );
+            let check = checks
+                .iter()
+                .find(|c| c.name == "wasm-target")
+                .expect("the wasm-target check must exist");
+            assert_eq!(
+                check.ok, expected_ok,
+                "the check's verdict must be the probe's, not a constant"
+            );
+            assert_eq!(
+                check.fix.is_some(),
+                !expected_ok,
+                "a remedy must appear exactly when the check fails"
+            );
+        }
+    }
+
+    /// Without `--fix`, `doctor` must execute **nothing**.
+    #[test]
+    fn fix_plan_is_inert_without_the_flag() {
+        let checks = run_doctor();
+        let outcome = apply_fixes(&checks, false);
+        assert!(!outcome.requested);
+        assert!(outcome.planned.is_empty());
+        assert!(outcome.applied.is_empty());
+        assert!(outcome.skipped.is_empty());
+    }
+
+    /// With `--fix`, every failing check is accounted for: either it has a
+    /// planned repair, or it is named as skipped. Silence is the failure mode
+    /// this forbids — a check that fails while `--fix` reports nothing at all
+    /// is indistinguishable from a repair that was never considered.
+    #[test]
+    fn fix_accounts_for_every_failing_check() {
+        let checks = run_doctor();
+        let failing: Vec<&str> = checks.iter().filter(|c| !c.ok).map(|c| c.name).collect();
+        let outcome = apply_fixes(&checks, true);
+        assert!(outcome.requested);
+        for name in &failing {
+            let mentioned = outcome
+                .planned
+                .iter()
+                .chain(outcome.applied.iter())
+                .chain(outcome.skipped.iter())
+                .any(|line| line.contains(name));
+            assert!(mentioned, "`{name}` failed but --fix said nothing about it");
+        }
+    }
+
+    /// A network fetch is planned and printed, and never run.
+    #[test]
+    fn target_install_is_planned_but_not_run() {
+        // Pin the probe to "absent" so the check fails deterministically, then
+        // drive the real plan builder.
+        std::env::set_var("QQQ_TEST_WASM_TARGET_PRESENT", "0");
+        let checks = run_doctor();
+        std::env::remove_var("QQQ_TEST_WASM_TARGET_PRESENT");
+        let outcome = apply_fixes(&checks, true);
+        let Some(plan) = fix_for("wasm-target", true) else {
+            // No rustup on this machine: the skip path is the other branch and
+            // is covered by `fix_accounts_for_every_failing_check`.
+            return;
+        };
+        assert_eq!(plan.command, "rustup target add wasm32-wasip2");
+        assert!(
+            outcome
+                .planned
+                .iter()
+                .any(|l| l.ends_with(&format!("`{}`", plan.command))),
+            "the plan must name the command that would run: {:?}",
+            outcome.planned
+        );
+        assert!(
+            !outcome.applied.iter().any(|l| l.contains("target add")),
+            "a network fetch must never be applied automatically"
+        );
+        assert!(
+            outcome
+                .skipped
+                .iter()
+                .any(|l| l.contains("toolchain component")),
+            "the skip must be explained: {:?}",
+            outcome.skipped
+        );
+    }
+
+    /// A flag `doctor` does not accept must be refused, not ignored.
+    ///
+    /// This is the invariant that makes `--fix` trustworthy: while `--fix` was
+    /// unimplemented, running it behaved exactly like plain `doctor`, so the
+    /// user had no way to learn the option did nothing.
+    #[test]
+    fn doctor_refuses_flags_it_does_not_accept() {
+        let err = reject_unknown_flags(CommandName::Doctor, &["--jsonn".to_owned()], &["--fix"])
+            .expect("an unrecognised flag must produce an error");
+        assert_eq!(err.code, qqq_core::ErrorCode::CliFlagUnknown);
+        assert!(err.message.contains("--jsonn"), "{}", err.message);
+        let remedy = err.remediation.as_deref().unwrap_or_default();
+        assert!(
+            remedy.contains("--fix"),
+            "the remedy must list the real flags: {remedy}"
+        );
+
+        // The accepted flag passes, in either spelling position.
+        assert!(
+            reject_unknown_flags(CommandName::Doctor, &["--fix".to_owned()], &["--fix"]).is_none()
+        );
+        // A positional argument is not a flag and must be left to the caller.
+        assert!(
+            reject_unknown_flags(CommandName::Doctor, &["now".to_owned()], &["--fix"]).is_none()
+        );
+        // An empty accepted set is reported as "no flags" rather than an empty
+        // string, which would render as "accepts ".
+        let bare = reject_unknown_flags(CommandName::Doctor, &["-x".to_owned()], &[])
+            .expect("must refuse");
+        assert_eq!(
+            bare.remediation.as_deref(),
+            Some("`doctor` accepts no flags")
+        );
+    }
+
+    /// `doctor`'s JSON must carry the fix outcome, so an agent can tell
+    /// "planned" from "applied" from "skipped" without parsing prose.
+    #[test]
+    fn doctor_json_carries_the_fix_outcome() {
+        let checks = run_doctor();
+        let out = DoctorOutput {
+            checks,
+            fix: apply_fixes(&[], true),
+        };
+        let json = qqq_run::output::CommandOutput::to_json(&out);
+        assert!(json["checks"].is_array());
+        assert_eq!(json["fix"]["requested"], serde_json::json!(true));
+        for key in ["planned", "applied", "skipped"] {
+            assert!(
+                json["fix"][key].is_array(),
+                "`fix.{key}` must be an array, not {key}::missing"
+            );
         }
     }
 

@@ -3208,8 +3208,48 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §12.3 The DX commitments (measurable, in CI)
 - [ ] **DX-015** Implement the CI check that every public API has a compiling example.
   → §12.3 The DX commitments (measurable, in CI)
-- [ ] **DX-016** Implement `qqqai doctor` with environment diagnosis and remediation.
+- [x] **DX-016** Implement `qqqai doctor` with environment diagnosis and remediation.
   → §5.2 The command surface
+
+  Implemented in `crates/qqq-run/src/main.rs`: `run_doctor` (three checks --
+  `binary-name`, `manifest`, `wasm-target`), `wasm_target_present` (a real probe:
+  an explicit override, then the target directory under `$RUSTUP_HOME`/`~/.rustup`,
+  then `rustup target list --installed`), `FixPlan`/`fix_for`/`apply_fixes`
+  (`--fix`), and `reject_unknown_flags`.
+  Flags per Proposal line 723: `--json` (global) and `--fix`.
+
+  **Four defects were found and fixed here, three by running the shipped binary
+  and one by the check written to verify the others -- see O-207 and O-208 of
+  `QQQ-Observations-and-Memories.md`.** (1) `wasm-target` was `ok: true`
+  hardcoded, so it printed a pass while measuring nothing. (2) The probe's doc
+  comment described `QQQ_TEST_WASM_TARGET_PRESENT` as a product setting; nothing
+  outside its own tests sets it. (3) `--fix` was documented, absent, and silently
+  ignored -- and so was every mistyped flag on every command, which produced
+  `CliFlagUnknown = QQQ-7004` and the rejection wired into this arm. (4) The
+  success envelope reported `"ok":true` beside exit `69`, which produced
+  `Envelope::exit_code` and revealed that **38 of 48** failure envelopes named a
+  status their process did not return.
+
+  Tests: `doctor_finds_no_problems_in_a_sane_environment`,
+  `doctor_checks_are_wellformed`, `fix_is_a_global_flag`,
+  `wasm_target_check_follows_the_probe`, `fix_plan_is_inert_without_the_flag`,
+  `fix_accounts_for_every_failing_check`, `target_install_is_planned_but_not_run`,
+  `doctor_refuses_flags_it_does_not_accept`, `doctor_json_carries_the_fix_outcome`.
+
+  Evidence, each a real command: `qqqai doctor` in a project -> `all 3 checks
+  passed`, exit `0`, and outside one -> `1 of 3 checks need attention`, exit `69`;
+  `qqqai doctor --json` -> `"exit_code":69` matching `$?`; `qqqai doctor --jsonn` ->
+  `error[QQQ-7004]`, exit `2`; `qqqai doctor --fix` and `qqqai --fix doctor` ->
+  identical, both exit `69`, a network-touching repair is printed and listed as
+  left to the user. Fault-injected: restoring `ok: true` fails
+  `wasm_target_check_follows_the_probe`; restoring `exit_code: 0` fails the live
+  probe in `tools/check_schema_conformance.py` (and passes all 29 unit tests,
+  which is why the assertion lives there).
+
+  `--fix` performs no repair automatically when the repair would download a
+  toolchain component; it is planned, printed with its exact command, and left to
+  the user. That is a deliberate limit rather than an unfinished path, and it is
+  recorded as such.
 - [ ] **DX-017** Implement the DevTools-protocol inspector adapter over DWARF source maps.
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-018** Implement the progressive-disclosure documentation tiers (Solo, Team, Fleet).

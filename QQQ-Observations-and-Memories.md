@@ -16691,6 +16691,374 @@ in a comment and never written*. Both are the same lesson in different clothes:
 **a claim of verification is not verification**, and the only way to tell them
 apart is to make the claim run.
 
+## §O-207 — `doctor` was three defects in one command, and the envelope had two answers to one question
+
+**Context.** `DX-016` is *"Implement `qqqai doctor` with environment diagnosis and
+remediation"*. The command existed and printed three checks, so the item looked
+close to done. Four defects were found in it; three were confirmed by running the
+shipped binary before any edit, and one surfaced only once the others were fixed.
+
+### Defect 1 — a check that could not fail
+
+```rust
+let target = std::env::var("QQQ_TEST_WASM_TARGET_PRESENT").is_ok();
+checks.push(Check {
+    name: "wasm-target",
+    ok: true, // Not probed here: shelling out to rustup would exceed the
+    // startup budget and is the build command's job to verify.
+    detail: "the wasm32-wasip2 target is verified during `build`".to_owned(),
+    fix: (!target).then_some("run `rustup target add wasm32-wasip2`".to_owned()),
+});
+```
+
+`ok: true` is hardcoded, so the check printed `ok wasm-target` on every machine
+while measuring nothing. This is **the same class the dispatch arm eight lines
+above already documents** — *"a diagnostic that cannot fail is not a diagnostic"*
+— and it manufactures exactly the false confidence `doctor` exists to remove. It
+is also a silent stub: the goal forbids stubs, and a green light for an unmeasured
+thing is a stub wearing a verdict.
+
+The comment's two claims were both wrong. It is the doctor's job to probe the
+environment; that is what a doctor is. And "the build command verifies it" is a
+claim about `build`, which no one checked.
+
+**Fix.** A real probe in three tiers, cheapest first: the variable as an explicit
+override, then the target's directory under `$RUSTUP_HOME` or `~/.rustup`, then
+`rustup target list --installed`. A missing `rustup` reports *not present*, which
+is the truthful answer to the question asked.
+
+### Defect 2 — the doc comment described behaviour that did not exist
+
+The probe's own doc comment read:
+
+> `QQQ_TEST_WASM_TARGET_PRESENT=0` is an explicit "pretend it is absent", so the
+> negative case can be tested without a rustup toolchain.
+
+That reads as a product feature. `git grep QQQ_TEST_WASM_TARGET_PRESENT` finds the
+name in **one file** — the file that defines it — plus its own new tests. Nothing
+in the product, in CI, or in any script sets it. It is the probe's own escape
+hatch, and the comment dressed a test hook up as a configuration knob. Corrected
+to say so.
+
+**And the test that used it was wrong.** It set the variable to `"0"`, then
+asserted that the *unset* call returned `false` — which holds only on a machine
+without the target. This one has `wasm32-wasip2` installed, so the assertion
+failed on the first run. The test now drives the real probe once per signal and
+lets the unset call report the truth, with the reason written down:
+
+```rust
+// One call, used for both assertions: the probe is stateful only
+// through the variable, and reading it twice from the same
+// environment is not an independent sample.
+let probed = wasm_target_present();
+```
+
+### Defect 3 — `--fix` was documented, absent, and silently ignored
+
+Proposal line 723 gives `doctor` the flags `--json, --fix`. `--fix` did not
+exist. Running `qqqai doctor --fix` produced **byte-identical output to**
+`qqqai doctor` and the same exit status: `parse_args` forwards an unrecognised
+flag that follows the command name, and nothing downstream looked at it.
+
+A silently ignored flag is worse than an honest refusal. The user believes the
+option took effect, so the *absence* of its effect reads as a mystery rather than
+an error — and `--fix` was not the only one: **every** command accepted a
+mistyped `--jsonn` the same way.
+
+**Fix, in three parts.**
+
+1. `GlobalFlags` gained `FIX = 1 << 6`. It had to be global: `parse_args` routes
+   an unknown flag *before* the command to a usage error, so a `doctor`-local
+   `--fix` would have made `qqqai --fix doctor` fail while `qqqai doctor --fix`
+   worked. That is the same order-dependence `--all` had, and the reason its test
+   asserts both orders.
+2. The backing integer widened from `u8` to `u16`, because `1 << 6` does not fit
+   beside `ALL` at `1 << 5`. Six existing constants and the test that pokes them
+   were updated.
+3. `reject_unknown_flags` refuses what a command does not accept, wired into the
+   `Doctor` arm with `--fix` as the accepted set.
+
+A new error code was needed. Searching the enum found no CLI-usage variant: the
+`7xxx` family is *"agent / protocol"* and holds `McpArgumentInvalid` (an
+*argument* failing a schema), `UnknownSchemaSurface` and
+`ProtocolVersionUnsupported`. `McpArgumentInvalid` is already reused **29 times**
+in `main.rs` for flag-like errors, which is why "the flag is unknown" had nowhere
+to be said distinctly. `CliFlagUnknown = 7004` was added: unrecognised *option*,
+remedied by reading the usage, distinct from a bad *value*, remedied by fixing the
+value. The generated catalogue and `docs/errors.md` followed from the enum.
+
+`--fix` itself is deliberately conservative:
+
+* It runs **nothing** without the flag.
+* A repair that touches the network is **planned and printed but never run**.
+  `rustup target add` downloads a toolchain component; a diagnostic command that
+  silently installs software because a flag was present is a supply-chain
+  decision taken on the user's behalf. It is listed under `left to you:` with its
+  exact command.
+* Every failing check is accounted for — planned, applied, or named as skipped.
+  Silence is the failure mode the tests forbid.
+
+### Defect 4 — the envelope and the exit status disagreed, and `doctor` was the case that exposed it
+
+Found by reading real output, not by reasoning:
+
+```
+$ qqqai doctor --json
+{"producer":"qqqai",...,"ok":true,"summary":"1 of 3 checks need attention",...}
+$ echo $?
+69
+```
+
+`ok: true` says the command succeeded; the summary says one of three checks needs
+attention; the exit status says the environment is not ready. An agent that
+trusted `ok` and an agent that trusted `$?` reached **opposite conclusions about
+the same run**, and each was reading a real part of the contract. The contract had
+two answers to one question.
+
+**Fix.** `Envelope` gained `exit_code: u8`, and `Output::emit_with_exit` takes the
+number. The CLI's `report` was split so the code is computed **before** emission:
+building the output first and overriding the exit code afterwards is exactly how
+the two drifted, because the struct was constructed while the code was still
+unknown. The `doctor` arm now passes a closure that reads `checks` and returns
+`UNAVAILABLE` or `OK`, and that one value is both serialised and returned.
+
+`qqqai test` had the identical shape and the identical defect — `qqqai test
+--json` reported `ok: true` while exiting 1 on a failed trial — so it was given
+the same treatment.
+
+`ok` is unchanged and still means "the command did what it was asked and produced
+this payload", `true` for `doctor`'s own successful diagnosis. The doc comment now
+says so explicitly, because that is the misunderstanding the field invited.
+
+### Verification
+
+| Claim | Command | Result |
+|---|---|---|
+| `wasm-target` can fail | `qqqai doctor` in a directory with no manifest | `ok binary-name, wasm-target`; in a project, `all 3 checks passed`, exit `0` |
+| the probe honours the override | `wasm_target_check_follows_the_probe` | passes both directions |
+| `--fix` is accepted both ways | `qqqai doctor --fix`, `qqqai --fix doctor` | identical, both exit `69` |
+| an unknown flag is refused | `qqqai doctor --jsonn` | `error[QQQ-7004]`, exit `2` |
+| envelope matches the process | `qqqai doctor --json` | `"exit_code":69`, exit `69` |
+| schema still matches | `python tools/check_schema_conformance.py` | `ENVELOPE PROBE OK -- 3 command(s)` |
+| catalogue still matches | `python tools/check_error_catalogue.py` | `OK -- 43 code(s)` |
+
+### The lesson
+
+Three of these four were **visible in the source and did not look wrong**. `ok:
+true` with an explanatory comment reads as a deliberate trade-off. A doc comment
+describing an environment variable reads as documentation of a feature. A flag in
+a table reads as implemented. None of them was any of those things, and the only
+thing that separated them from correct code was running the command and comparing
+what it said with what it did.
+
+The fourth was not visible at all until the first three were fixed, because the
+contradiction needed a failing check to show itself. That is the argument for
+finishing a thing before declaring it done: the last defect in a command is often
+only reachable after the earlier ones stop hiding it.
+
+## §O-208 — adding the field was the easy part; the probe that checked it found 38 more defects
+
+**This is the follow-on to §O-207**, and it is the clearest illustration of the
+invariant *"a claim of verification is not verification, and the only way to tell
+them apart is to make the claim run"* that this document has produced.
+
+### The setup
+
+§O-207 fixed one instance of a contradiction: the **success** envelope said
+`"ok":true` while `qqqai doctor` exited `69`. The fix was a new `exit_code` field
+on `Envelope`, and `doctor` was rewired to compute its status before emitting.
+
+The unit suite passed. The field was present in the output. It would have been
+reasonable to stop there.
+
+### What stopped it
+
+`tools/check_schema_conformance.py` already ran the shipped binary and validated
+its envelope against the published schema. Extending that probe by three lines —
+*does the envelope's `exit_code` equal the status the process returned?* — turned
+it from a check that the field **exists** into a check that the field is
+**true**. The first run:
+
+```
+  why (a missing argument, so the failure envelope): envelope says exit_code=1, but the process returned 2
+ENVELOPE PROBE FAILED -- 1 of 3
+```
+
+`render_failure` had a hardcoded constant. The success path had just been fixed
+and the failure path had not — and the failure path is the larger one, because
+`USAGE` (2) is what most failures in this CLI are.
+
+### The size of it
+
+The call sites were counted before anything was rewritten, by regex, with the
+expected number asserted so the script could not silently under-match. The first
+attempt found **10** sites where `git grep -c` counted **48**, because the regex
+matched `&err` and most calls pass `&e`. Asserting the count is what made that
+visible instead of producing a partially-converted file.
+
+The tally across all 48:
+
+| Status the process returns | Failure envelopes that claimed `1` |
+|---|---|
+| `USAGE` (2) | 31 |
+| `FAILURE` (1) | 10 — correct by accident |
+| `INTERNAL` (70) | 6 |
+| `UNAVAILABLE` (69) | 1 |
+
+**38 of 48 failure envelopes named a status the process did not return.** Every
+one of them disagreed with its own `$?`, in the same direction as the defect
+§O-207 fixed, and every one was invisible to the entire test suite.
+
+### The fix
+
+`emit_error_with_exit(command, error, exit_code)` was added, with the existing
+`emit_error` delegating to it with `EXIT_FAILURE`. All 48 call sites were
+rewritten to pass the code their own enclosing branch already returns — the
+number was **already written down** on the next line, so the script read it from
+there rather than inventing one. That is why the conversion is trustworthy: it
+did not decide anything, it moved a value that was already in the source into the
+envelope that reports it.
+
+The rewrite is anchored: each call site was matched, its arity asserted, and the
+following `return ExitCode::from(exit::<CODE>)` read to supply the code.
+
+### Verification
+
+`tools/check_schema_conformance.py` now compares, for every probe:
+
+```python
+elif doc.get("exit_code") != r.returncode:
+```
+
+and a separate harness walked a broader sample of real failures to compare the
+two numbers directly:
+
+| Case | Process | Envelope |
+|---|---|---|
+| `why --json` | 2 | 2 |
+| `caps --json` | 2 | 2 |
+| `audit --json` | 2 | 2 |
+| `inspect --json` | 2 | 2 |
+| `doctor --json` | 69 | 69 |
+| `run --json`, `serve --json`, `build --json`, `new --json`, `openapi --bogus`, `bench --json`, `test --json` | 2 | 2 |
+
+`EXIT-CODE AGREEMENT OK -- every sampled envelope matches its process`.
+
+### The injection that proved the probe necessary
+
+Restoring the old behaviour — `exit_code: 0` hardcoded in `render_success` —
+left **all 29 unit tests passing**, the build clean, and the binary still exiting
+`69`. Nothing in the Rust test suite noticed. Only the live probe did, because
+only the live probe compares a claim about a process against that process.
+
+That is a MISSED for the unit suite and the reason the assertion lives in the
+probe. The blind spot was not a test that failed to check a value; it was a value
+that no unit test could check, because the thing being asserted is *about the
+run itself*.
+
+### What this says about §O-207
+
+The first fix in §O-207 was correct and was found by reading output. This second,
+larger defect was found **by the check written to verify the first fix** — which
+is the argument for turning every fix into a running assertion rather than into a
+one-time repair. The repair fixed one envelope. The assertion fixed 38, and will
+catch the 39th.
+
+## §O-209 — the first gate run of a clean change failed three ways, and two were new
+
+§O-207 and §O-208 were finished and the tree looked ready. The gate, run as one
+sequence (invariant ONE), reported three failures. All three are recorded here
+because each is a class, and two of the classes had not appeared in this document
+before.
+
+### Failure 1 — `too_many_lines`, because the fix grew a function past its budget
+
+```
+error: this function has too many lines (101/100)
+   --> crates\qqq-run\src\main.rs:462:1
+   462 | fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCode {
+```
+
+`run_command` sits at exactly the crate's 100-line ceiling, and the `Doctor` arm
+gained a five-line flag check inside it. The temptation is `#[allow(clippy::
+too_many_lines)]`, and that would have been the wrong answer twice over: the lint
+exists to catch a dispatch function accreting per-command logic, and this change
+is precisely that.
+
+The five lines were moved into `refuse_flags`, a sibling of `reject_unknown_flags`
+that emits the error and returns the code. The function is back under budget and
+the per-command logic lives next to the thing it uses. **A line-budget lint is a
+prompt to find the seam, not to widen the budget.**
+
+### Failure 2 — `assigning_clones` and `bool_comparison`, both in code written in the last hour
+
+```
+error: assigning the result of `ToOwned::to_owned()` may be inefficient
+   2756 |         listing = "no flags".to_owned();
+error: equality checks against false can be replaced by a negation
+   3408 |             assert!(p.flags.dry_run() == false, ...);
+```
+
+Neither is subtle and neither is interesting. They are recorded because they are
+**evidence about the verification order rather than about the code**: the unit
+tests for this change passed before clippy ran over it, because `cargo test` does
+not apply the workspace's `-D warnings`. A change can be fully tested and still
+fail the gate, and the only thing that catches it is running the gate. This is the
+mechanical reason invariant ONE exists and why a partial gate is not evidence.
+
+### Failure 3 — a checker whose self-test rebuilds the binary it is probing
+
+```
+FAIL check_corpus_at_rest.py    CORPUS NOT AT REST -- a canonical document changed since its digest was recorded:
+      QQQ-Checklist-V1.md: length 332457 -> 334997
+```
+
+This one is new and worth writing down carefully, because the two facts interact
+in a way that is easy to misread as a genuine drift.
+
+The sequence was: the gate ran; `check_corpus_at_rest.py` passed; then, later in
+the *same* sequence, `check_schema_conformance.py --self-test` ran and passed —
+and that self-test now **injects a fault into `crates/qqq-run/src/output.rs` and
+rebuilds `qqqai`**. The rebuild is correct behaviour for that check (the assertion
+under test is about the binary). The corpus checker's verdict was taken *before*
+it.
+
+**Nothing was actually wrong.** The digest mismatch is real — the checklist had
+been edited — but it was edited by *me*, between the gate's first attempt and this
+one, to tick `DX-016`. The checker was right and the ordering was the problem: a
+canonical document was modified after its digest was recorded, and the gate is
+supposed to run after the final edit and before the commit with nothing in
+between.
+
+The lesson is a refinement of invariant ONE rather than a violation of it. The
+invariant says *no edit between the gate and the commit*. This run had an edit
+before the gate and a **second edit** (the tick) that I made while believing the
+gate was still valid. The gate was re-run from the top afterwards, which is the
+only correct response: a gate whose inputs changed is not a gate.
+
+There is a second, narrower observation worth keeping: **a self-test that
+rebuilds the workspace is an edit to a build artifact, and it is now the heaviest
+step in the checker suite** (~14 s and one `cargo build`, two of them, since the
+restore rebuilds as well). That cost is accepted deliberately — it is the only
+self-test in the suite that proves an assertion about a *running process* rather
+than about a file — but a future reader should know why the number is large, so
+the notice is written here and in the checker's own comment.
+
+### The corrected order
+
+1. Finish the last edit (code, docs, checklist tick).
+2. `cargo fmt --all` — formatting is an edit, so it comes before the gate.
+3. Regenerate every generated artifact (`gen_llms_txt`, `gen_schemas`,
+   `gen_error_catalogue`) and **re-record the corpus digests**, because the
+   documents changed.
+4. Run the gate as one sequence.
+5. Commit with no edit in between.
+
+Step 3 is the one that was missing, and its absence produced a failure that looked
+like drift and was actually a stale digest. The checklist tick and the observations
+append are canonical-document edits, so they must precede the `--record` call, and
+`--record` must precede the gate.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

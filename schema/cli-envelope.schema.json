@@ -113,8 +113,14 @@
       ],
       "description": "The error, when it failed."
     },
+    "exit_code": {
+      "description": "The exit status the process returns for this run. # Why this field exists Because `ok` and `$?` disagreed in the shipped binary. `qqqai doctor --json` printed `\"ok\":true` and exited **69** while the human form printed \"1 of 3 checks need attention\" — an agent that trusted `ok` and an agent that trus",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
     "ok": {
-      "description": "Whether the command succeeded.",
+      "description": "Whether the command succeeded. **`ok` is not the exit status.** It says the command did what it was asked and produced this payload; it is `true` even when the payload reports a problem — `doctor` finding a missing manifest is a successful diagnosis. Read [`Self::exit_code`] for the process's own ve",
       "type": "boolean"
     },
     "producer": {
@@ -136,6 +142,7 @@
   },
   "required": [
     "command",
+    "exit_code",
     "ok",
     "producer",
     "schema_version",

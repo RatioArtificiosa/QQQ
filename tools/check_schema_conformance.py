@@ -48,9 +48,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import re
+import subprocess
 import sys
+import time
 from dataclasses import replace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -341,8 +344,23 @@ def probe_envelope() -> int:
                 f"  {label}: envelope says ok={doc.get('ok')}, expected {expect_ok}",
                 file=sys.stderr,
             )
+        elif doc.get("exit_code") != r.returncode:
+            # The envelope's own `exit_code` must be the status the process
+            # returned. Checking it here rather than in a unit test is
+            # deliberate: the field is a claim *about this process*, and only a
+            # run of this process can falsify it. With the field hardcoded to
+            # `0`, every unit test still passed and the binary still exited 69;
+            # this comparison is what notices.
+            failures += 1
+            print(
+                f"  {label}: envelope says exit_code={doc.get('exit_code')!r}, "
+                f"but the process returned {r.returncode}",
+                file=sys.stderr,
+            )
         else:
-            print(f"  {label}: valid, ok={doc.get('ok')}")
+            print(
+                f"  {label}: valid, ok={doc.get('ok')}, exit_code={doc.get('exit_code')}"
+            )
 
     if failures:
         print(f"ENVELOPE PROBE FAILED -- {failures} of {len(ENVELOPE_PROBES)}", file=sys.stderr)
@@ -458,6 +476,65 @@ def self_test() -> int:
         path.write_bytes(original)
     check("caught: an empty schema", empty_caught)
     check("restored after the empty-schema case", path.read_bytes() == original)
+
+    # The live probe's exit_code assertion must be live too.
+    #
+    # The other cases mutate the *schema* and check the static comparison. This
+    # one mutates the *implementation* and checks the runtime comparison, because
+    # the defect it guards against -- an envelope whose `exit_code` is a constant
+    # rather than the process's status -- is invisible to a schema check: the
+    # field is present, well-typed and wrong. With `exit_code: 0` hardcoded,
+    # every unit test still passed and the binary still exited 69. Only the probe
+    # noticed.
+    if find_binary() is None:
+        print("  NOTICE: no built binary, so the exit_code injection was SKIPPED")
+    else:
+        src = ROOT / "crates/qqq-run/src/output.rs"
+        original_src = src.read_bytes()
+        text = original_src.decode("utf-8")
+        needle = """        command: command.as_str(),
+        ok: true,
+        exit_code,"""
+        if text.count(needle) != 1:
+            check("caught: a constant exit_code in the success envelope", False,
+                  "the anchor is gone from output.rs")
+        else:
+            try:
+                src.write_bytes(
+                    text.replace(
+                        needle,
+                        """        command: command.as_str(),
+        ok: true,
+        exit_code: 0, // injected by check_schema_conformance --self-test""",
+                        1,
+                    ).encode("utf-8")
+                )
+                rebuild = subprocess.run(
+                    ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
+                    capture_output=True, text=True, cwd=ROOT,
+                )
+                if rebuild.returncode != 0:
+                    check("caught: a constant exit_code in the success envelope", False,
+                          "the injected build failed")
+                else:
+                    check(
+                        "caught: a constant exit_code in the success envelope",
+                        probe_envelope() == 1,
+                    )
+            finally:
+                src.write_bytes(original_src)
+                # Touch, so the next build cannot reuse the injected artifact.
+                stamp = time.time()
+                os.utime(src, (stamp, stamp))
+                subprocess.run(
+                    ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
+                    capture_output=True, text=True, cwd=ROOT,
+                )
+            check(
+                "restored after the exit_code injection",
+                src.read_bytes() == original_src
+                and b"injected by check_schema_conformance" not in src.read_bytes(),
+            )
 
     # The tree is conformant again.
     check("the real tree still conforms", run() == 0)

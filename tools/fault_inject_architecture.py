@@ -29,19 +29,36 @@ ROOT = Path(__file__).resolve().parent.parent
 
 INJECTIONS = [
     (
-        # `qqq-cap` is position 1; `qqq-debug` is position 9. The edge points UP,
+        # `qqq-cap` is position 3; `qqq-io` is position 6. The edge points UP,
         # which is the violation. It is also ACYCLIC, and that matters: the first
         # version of this injection used `qqq-serve`, which created a dependency
         # cycle — `qqq-serve` already depends on `qqq-cap` — so Cargo refused the
         # manifest and the test never ran. That reported "BROKEN", not
         # "DETECTED", and a cycle is a *different* protection from the one under
         # test (§O-059c).
+        #
+        # **This target was `qqq-debug` until `qqq-debug` moved.** It was position
+        # 9, so the edge pointed up; `HOST-009` moved it to position 2 (its only
+        # dependency is `qqq-core` and nothing depended on it, so a position above
+        # the CLI asserted a layering the manifest never had). `qqq-cap` -> 
+        # `qqq-debug` then pointed DOWN and was legal, so the injection stopped
+        # being a fault and CI reported `MISSED topology (upward dependency)`.
+        #
+        # That is the injection harness working correctly and the *target* going
+        # stale: a fault-injection case is coupled to the fact it violates, so
+        # changing the fact invalidates the case. `qqq-io` is chosen because it is
+        # upward (3 -> 6) and acyclic — `qqq-cap` depends only on `qqq-core`, and
+        # `qqq-io` likewise, so neither can reach the other. Verified by
+        # enumerating the real graph, not by reasoning about it.
+        #
+        # `qqq-registry` is also legal but is in `NOT_YET_BUILT`, so an edge to it
+        # is skipped by the checker and would not exercise the rule at all.
         'topology (upward dependency)',
         Path('crates/qqq-cap/Cargo.toml'),
         '[dependencies]',
-        '[dependencies]\nqqq-debug = { path = "../qqq-debug", version = "0.0.0" }',
+        '[dependencies]\nqqq-io = { path = "../qqq-io", version = "0.0.0" }',
         'no_crate_depends_on_a_crate_above_it',
-        'depends on `qqq-debug`',
+        'depends on `qqq-io`',
     ),
     (
         'unsafe policy (bare allow)',

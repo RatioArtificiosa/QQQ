@@ -185,6 +185,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "machinery",
     ),
     (
+        "docs/wasmtime-upgrade-runbook.md",
+        "How a scheduled Wasmtime upgrade is taken: the steps, their evidence, "
+        "and the behaviours an upgrade can change without breaking the build.",
+        "human",
+        "machinery",
+    ),
+    (
         "docs/unsafe-audit.md",
         "The `unsafe` audit: what it covers and what it has found.",
         "human",

@@ -61,9 +61,11 @@ use wasmtime::{Config, Engine, Store};
 
 /// Build an engine with the features the taxonomy depends on.
 ///
-/// Fuel for `QQQ-3002`, epochs for `QQQ-3003`. Both are needed because the two
-/// classifiers key on different messages and a suite that enabled only one would
-/// leave the other's string unverified.
+/// **Fuel only.** `QQQ-3002` keys on a fuel message, so fuel must be on for the
+/// shared engine. The epoch row (`QQQ-3003`) builds its own engine through
+/// [`engine_with`] and arms a real deadline, and every other row deliberately
+/// runs with epochs **off** -- see [`EngineFeatures`] for why a shared engine
+/// with epochs enabled measured the wrong failure for all four rows.
 fn engine() -> Engine {
     engine_with(EngineFeatures {
         fuel: true,

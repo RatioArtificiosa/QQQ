@@ -61,17 +61,66 @@ def derive_topology_injection():
     source = 'qqq-cap'
     index = {name: i for i, name in enumerate(order)}
 
-    # Declared dependencies, from the manifests (the *declared* graph, matching
-    # what the architecture test reads).
+    # Declared RUNTIME dependencies, from the manifests.
+    #
+    # Deliberately a manifest reader rather than `cargo metadata`, even though
+    # metadata knows the answer directly: this injector must not inherit a
+    # reading bug from `check_topology.py`, which is what it exists to test. See
+    # the "BROKEN, not DETECTED" note in the entry comment.
+    #
+    # Three forms a naive `head = line.split('=')[0]` parser gets wrong, all of
+    # which would make the graph too SMALL and let the derivation pick a target it
+    # believes is acyclic:
+    #
+    #   * `[dependencies.qqq-io]`   -- table-style header, no `=` on the line
+    #   * `alias = { package = "qqq-io" }` -- renamed, so the key is not the crate
+    #   * dev/build sections -- `qqq-*` in `[dev-dependencies]` is not a runtime
+    #     edge, and counting it would make the graph too LARGE instead
+    #
+    # A wrong graph in either direction is silent: the derived target is injected,
+    # Cargo refuses or accepts the manifest, and the harness reports a verdict
+    # about the wrong thing.
     def declared(name):
         manifest = ROOT / 'crates' / name / 'Cargo.toml'
         if not manifest.is_file():
             return set()
+
         found = set()
-        for line in manifest.read_text(encoding='utf-8').splitlines():
-            head = line.split('=', 1)[0].strip().strip('"')
-            if head.startswith('qqq-') and head in index:
-                found.add(head)
+        section = ''
+        for raw_line in manifest.read_text(encoding='utf-8').splitlines():
+            line = raw_line.split('#', 1)[0].strip()
+            if not line:
+                continue
+
+            if line.startswith('['):
+                section = line.strip('[]').strip()
+                # `[dependencies.qqq-io]`: the name is IN the header.
+                head, _, tail = section.partition('.')
+                if head in ('dependencies',) or head.startswith('target'):
+                    leaf = tail.split('.', 1)[-1] if tail else ''
+                    if leaf.startswith('qqq-') and leaf in index:
+                        found.add(leaf)
+                continue
+
+            # Only runtime dependency sections count.
+            is_runtime = (
+                section == 'dependencies'
+                or (section.startswith('target') and section.endswith('.dependencies'))
+            )
+            if not is_runtime:
+                continue
+
+            key, _, value = line.partition('=')
+            key = key.strip().strip('"')
+            # A renamed dependency names the real crate in `package = "..."`.
+            if 'package' in value:
+                _, _, after = value.partition('package')
+                _, _, quoted = after.partition('"')
+                real, _, _ = quoted.partition('"')
+                if real:
+                    key = real
+            if key.startswith('qqq-') and key in index:
+                found.add(key)
         return found
 
     def reaches(start):

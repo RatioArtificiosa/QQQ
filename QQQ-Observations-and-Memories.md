@@ -16158,6 +16158,51 @@ that reason.
 
 ---
 
+## §O-200 DCO runs only on pull requests, so five signed-off-required commits reached `main` with a green summary
+
+**How it surfaced.** The line-ending guard was carried into the `Line endings` job and
+verified on a branch (`ci/eol-guard`), because a workflow change must not go straight to
+`main` untested. The workflow triggers on `push: branches: [main]` and `pull_request:
+branches: [main]` only, so a branch push produced **no run at all**; a pull request was
+opened to exercise it, and the pull-request run failed **DCO** while every other job passed.
+
+**What DCO said.** *"1 commit(s) are missing a Signed-off-by line"* -- for the branch commit.
+Checking further, **five** commits lacked it: `c3a89b8`, `36ec53f`, `4deebf1`, `19af449` and
+`01ce32d`. `CONTRIBUTING.md` is unambiguous: *"Every commit must carry a `Signed-off-by`
+line"*, *"Use `git commit -s`"*, *"The check runs in CI."*
+
+**Why nothing caught it before.** `DCO` is `if: github.event_name == 'pull_request'`. Every
+push run in this goal reported `conclusion: success` with DCO listed as **skipped**, and a
+skipped job in a green summary reads as "nothing to do". The gate that would fail was never
+in the push path, and every commit this goal made went in through the push path.
+
+**Fixed for the branch.** `git commit --amend -s --trailer "Signed-off-by=..."`, using the
+identity the repository's own recent commits use -- `Ratio Artificiosa
+<ratioartificiosa@proton.me>`, read from `git log` rather than invented. The re-run then
+passed all **12** jobs including DCO.
+
+**Still owed, and named rather than hidden.** The four commits already on `main` remain
+unsigned: amending them would rewrite published history, which is a shared-state change the
+goal has no authorisation to make. The honest state is that they are unsigned and that the
+`main` gate cannot detect it. Any *future* pull request will also include these commits, and
+DCO checks every non-merge commit in `BASE..HEAD`, so the next pull request from this history
+must either be based past them or the maintainer must record why, as `CONTRIBUTING.md` allows:
+*"Where it is absent — a merge commit, a revert — the maintainer records why in the pull
+request."* New commits from here carry the trailer.
+
+**The pattern, which is the reason this entry exists.** This is the third instance of the
+same shape in one session, and it is `§O-196`'s and `§O-193`'s: **two green halves with an
+untested seam.** A guard in a job that never runs; a checker whose writer translated
+newlines in a job that never checked; a signing requirement enforced only on a path not
+taken. The general lesson is to ask, of every check, *"which execution path runs this, and
+have I been on that path?"* -- and to read what a job's absence means rather than counting
+its colour.
+
+**Files:** `.github/workflows/ci.yml` (the guard, merged as `e64720d` through #1);
+`CONTRIBUTING.md` (the requirement, unchanged).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

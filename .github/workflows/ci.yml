@@ -117,6 +117,23 @@ jobs:
       # that this job's line-ending check rejects. No job ran both, which is why
       # the defect was latent rather than caught; the writers are byte-faithful
       # now, and this step is the regression guard that would have found it.
+      #
+      # # Why the job's own files are asserted LF first
+      #
+      # The guard is only meaningful if a CRLF result can be seen. On a runner
+      # whose core.autocrlf is true the checkout itself could be CRLF, the guard
+      # would report every file, and the noise would be read as the guard being
+      # broken rather than the checkout being misconfigured. Two lines of proof
+      # remove that ambiguity: `.gitattributes` must agree with `core.autocrlf`
+      # for this to be a line-ending test at all, and `git ls-files --eol` must
+      # see the tracked state as LF before any self-test runs.
+      - name: Prove the checkout is LF before judging anything else
+        run: |
+          echo "core.autocrlf=$(git config --get core.autocrlf || echo '(unset)')"
+          echo "--- tracked end-of-line state (must be i/lf) ---"
+          git ls-files --eol | grep -v '\.gitattributes' | awk '$1 != "i/lf" && $1 != "i/none" { print "NOT LF: " $0; bad=1 } END { exit bad ? 1 : 0 }'
+          echo "every tracked file is i/lf or i/none"
+
       - name: Prove the self-tests do not leave the tree with the wrong endings
         run: |
           python tools/check_error_catalogue.py --self-test

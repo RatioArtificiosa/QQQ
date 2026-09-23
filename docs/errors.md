@@ -42,7 +42,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A language toolchain failed to compile the project.
 
-**Remediation.** run the underlying compiler directly for full output; `qqqai build --verbose` shows the exact invocation.
+**Remediation.** Run the underlying compiler directly for full output; `qqqai build --verbose` shows the exact invocation.
 
 ```json
 { "code": "QQQ-1001" }
@@ -52,7 +52,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The build produced an artifact that is not a valid Wasm component.
 
-**Remediation.** confirm the toolchain targets the component model (`wasm32-wasip2` or later), not a core module.
+**Remediation.** Confirm the toolchain targets the component model (`wasm32-wasip2` or later), not a core module.
 
 ```json
 { "code": "QQQ-1002" }
@@ -72,7 +72,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The component's imports do not match the interfaces the host provides.
 
-**Remediation.** run `qqqai build` and fix the reported interface, or check that the manifest declares the right `entrypoint`.
+**Remediation.** Run `qqqai build` and fix the reported interface, or check that the manifest declares the right `entrypoint`.
 
 ```json
 { "code": "QQQ-1004" }
@@ -82,7 +82,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A reproducible build produced a different digest on a second run.
 
-**Remediation.** find the nondeterminism source; see Proposal §5.4.
+**Remediation.** Find the nondeterminism source; see Proposal §5.4.
 
 ```json
 { "code": "QQQ-1005" }
@@ -94,7 +94,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** `qqq.toml` is not valid TOML.
 
-**Remediation.** the error names the line and column.
+**Remediation.** The error names the line and column.
 
 ```json
 { "code": "QQQ-2001" }
@@ -104,7 +104,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** `qqq.toml` parsed but violates its JSON Schema.
 
-**Remediation.** the error names the offending field and the expected shape; `qqqai schema --command manifest` prints the schema.
+**Remediation.** The error names the offending field and the expected shape; `qqqai schema --command manifest` prints the schema.
 
 ```json
 { "code": "QQQ-2002" }
@@ -114,7 +114,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A `secret` reference names something the environment does not define.
 
-**Remediation.** set the named environment variable, or correct the reference. The value itself is never echoed.
+**Remediation.** Set the named environment variable, or correct the reference. The value itself is never echoed.
 
 ```json
 { "code": "QQQ-2003" }
@@ -124,7 +124,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A filesystem capability path does not exist or is not a directory where one is required.
 
-**Remediation.** create the path, or correct it in `qqq.toml`.
+**Remediation.** Create the path, or correct it in `qqq.toml`.
 
 ```json
 { "code": "QQQ-2004" }
@@ -134,7 +134,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A limit is outside the range the host can enforce — e.g. a memory cap larger than the configured maximum, or a zero fuel budget.
 
-**Remediation.** the error states the permitted range.
+**Remediation.** The error states the permitted range.
 
 ```json
 { "code": "QQQ-2005" }
@@ -144,7 +144,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The manifest requests something only QQQ Fabric can provide.
 
-**Remediation.** grant it locally, or install Fabric.
+**Remediation.** Grant it locally, or install Fabric.
 
 ```json
 { "code": "QQQ-2006" }
@@ -154,7 +154,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A capability stanza is syntactically valid but semantically wrong — e.g. a host glob that can never match, or a negative quota.
 
-**Remediation.** run `qqqai why <capability>` for the resolution chain.
+**Remediation.** Run `qqqai why <capability>` for the resolution chain.
 
 ```json
 { "code": "QQQ-2007" }
@@ -166,7 +166,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest exceeded its declared memory limit.
 
-**Remediation.** raise `limits.memory`, or fix the leak. The error reports the peak observed.
+**Remediation.** Raise `limits.memory`, or fix the leak. The error reports the peak observed.
 
 ```json
 { "code": "QQQ-3001" }
@@ -176,7 +176,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest exhausted its deterministic instruction budget.
 
-**Remediation.** raise `limits.fuel`, or optimise the hot path. The error reports fuel consumed and the operation in flight.
+**Remediation.** Raise `limits.fuel`, or optimise the hot path. The error reports fuel consumed and the operation in flight.
 
 ```json
 { "code": "QQQ-3002" }
@@ -186,7 +186,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest exceeded its wall-clock deadline and was preempted.
 
-**Remediation.** raise `limits.epoch_deadline_ms`. A guest that repeatedly hits this is usually blocked on I/O it was not granted.
+**Remediation.** Raise `limits.epoch_deadline_ms`. A guest that repeatedly hits this is usually blocked on I/O it was not granted.
 
 ```json
 { "code": "QQQ-3003" }
@@ -196,7 +196,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest trapped for a reason the host could not classify further.
 
-**Remediation.** the error carries the Wasm backtrace; run with `--debug` for source-mapped frames.
+**Remediation.** The error carries the Wasm backtrace; run with `--debug` for source-mapped frames.
 
 ```json
 { "code": "QQQ-3004" }
@@ -206,7 +206,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest attempted to use a resource handle that is invalid, already closed, or belongs to another instance.
 
-**Remediation.** this is almost always a guest bug; the error names the handle's expected type.
+**Remediation.** This is almost always a guest bug; the error names the handle's expected type.
 
 ```json
 { "code": "QQQ-3005" }
@@ -216,7 +216,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest panicked (Wasm `unreachable` from a panic path).
 
-**Remediation.** the backtrace names the panic site when DWARF debug info is present; build with debug info to get source lines.
+**Remediation.** The backtrace names the panic site when DWARF debug info is present; build with debug info to get source lines.
 
 ```json
 { "code": "QQQ-3006" }
@@ -224,9 +224,9 @@ logs and issue trackers reference them indefinitely.
 
 ### `QQQ-3007` — `GuestOutOfBounds`
 
-**Cause.** The guest accessed memory outside its own linear memory — a genuine buffer overrun or null dereference in guest code. **Distinct from [`Self::MemoryLimitExceeded`] on purpose.** That code means "the guest asked for more memory than it was allowed"; this one means "the guest has a bug". Conflating them would send a developer hunting for a limit to raise when the real fix is a code change.
+**Cause.** The guest accessed memory outside its own linear memory — a genuine buffer overrun or null dereference in guest code.
 
-**Remediation.** this is a guest bug — fix the indexing or pointer arithmetic. The backtrace names the faulting function.
+**Remediation.** This is a guest bug — fix the indexing or pointer arithmetic. The backtrace names the faulting function.
 
 ```json
 { "code": "QQQ-3007" }
@@ -234,9 +234,9 @@ logs and issue trackers reference them indefinitely.
 
 ### `QQQ-3008` — `SubrequestLimitExceeded`
 
-**Cause.** The guest exhausted its subrequest budget: it asked the host to make more outbound requests than `limits.max_subrequests` allows. **Distinct from [`Self::CapabilityQuotaExhausted`] on purpose**, and the distinction is a security one. That code means *"a capability's runtime quota ran out"* — a per-capability accounting question, retryable once the quota window resets, and answered with `4005`. This code means *"this guest tried to amplify one inbound request into N outbound ones"* — a property of the **guest's control flow**, not of a capability's usage, and not retryable, because retrying re-runs the loop. Conflating them would make the trap taxonomy recommend a backoff-and-retry to an operator whose actual problem is a guest that loops. The amplification counter (`SubrequestBudget::amplification_attempts`) is the signal that separates the two at telemetry time.
+**Cause.** The guest exhausted its subrequest budget: it asked the host to make more outbound requests than `limits.max_subrequests` allows.
 
-**Remediation.** raise `limits.max_subrequests` if the fan-out is intended, or fix the guest's loop if it is not.
+**Remediation.** Raise `limits.max_subrequests` if the fan-out is intended, or fix the guest's loop if it is not.
 
 ```json
 { "code": "QQQ-3008" }
@@ -248,7 +248,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A capability was granted, but not for the specific parameter requested — e.g. an HTTP client grant for a host not on the allowlist.
 
-**Remediation.** the error names the granted set and the requested value, so the diff is obvious.
+**Remediation.** The error names the granted set and the requested value, so the diff is obvious.
 
 ```json
 { "code": "QQQ-4001" }
@@ -258,7 +258,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** An overlay attempted to **widen** a grant. Overlays may only narrow.
 
-**Remediation.** this is a configuration error, not a user error. Move the grant into `qqq.toml`.
+**Remediation.** This is a configuration error, not a user error. Move the grant into `qqq.toml`.
 
 ```json
 { "code": "QQQ-4002" }
@@ -268,7 +268,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The requested capability is not granted by any configuration layer.
 
-**Remediation.** the error prints the exact stanza to add to `qqq.toml`, and `qqqai why <capability>` shows the full chain.
+**Remediation.** The error prints the exact stanza to add to `qqq.toml`, and `qqqai why <capability>` shows the full chain.
 
 ```json
 { "code": "QQQ-4003" }
@@ -278,7 +278,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The guest requested a secret it was granted, but the secret value could not be used for the requested operation.
 
-**Remediation.** check the secret's format and the operation's requirements. The value is never disclosed.
+**Remediation.** Check the secret's format and the operation's requirements. The value is never disclosed.
 
 ```json
 { "code": "QQQ-4004" }
@@ -288,7 +288,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A capability's runtime quota was exhausted (bytes written, requests made, tokens used).
 
-**Remediation.** raise the quota, or reduce usage. Retryable after the quota window resets.
+**Remediation.** Raise the quota, or reduce usage. Retryable after the quota window resets.
 
 ```json
 { "code": "QQQ-4005" }
@@ -300,7 +300,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The registry could not be reached.
 
-**Remediation.** retryable. Check connectivity or use `--offline`.
+**Remediation.** Retryable. Check connectivity or use `--offline`.
 
 ```json
 { "code": "QQQ-5001" }
@@ -310,7 +310,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** An artifact's signature did not verify against the configured trust policy.
 
-**Remediation.** do not bypass this. Verify the publisher, or update the trust policy if the signer is legitimately new.
+**Remediation.** Do not bypass this. Verify the publisher, or update the trust policy if the signer is legitimately new.
 
 ```json
 { "code": "QQQ-5002" }
@@ -320,7 +320,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The lockfile and the manifest disagree.
 
-**Remediation.** run `qqqai install` to re-resolve, or `--frozen` to fail rather than change anything.
+**Remediation.** Run `qqqai install` to re-resolve, or `--frozen` to fail rather than change anything.
 
 ```json
 { "code": "QQQ-5003" }
@@ -330,7 +330,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** No version satisfying the requirement exists.
 
-**Remediation.** the error lists available versions.
+**Remediation.** The error lists available versions.
 
 ```json
 { "code": "QQQ-5004" }
@@ -340,7 +340,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A package's declared capabilities exceed what the policy allows.
 
-**Remediation.** the error prints the capability diff, so the escalation is visible before it is accepted.
+**Remediation.** The error prints the capability diff, so the escalation is visible before it is accepted.
 
 ```json
 { "code": "QQQ-5005" }
@@ -360,7 +360,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A named dependency is not present in the manifest.
 
-**Remediation.** the error names the table searched; `qqqai inspect` lists what the project actually depends on. Distinct from `VersionUnsatisfiable`: that means a dependency exists and no version satisfies it, this means there is no such dependency at all. Conflating them would send a user with a typo to search the registry.
+**Remediation.** The error names the table searched; `qqqai inspect` lists what the project actually depends on. Distinct from `VersionUnsatisfiable`: that means a dependency exists and no version satisfies it, this means there is no such dependency at all. Conflating them would send a user with a typo to search the registry.
 
 ```json
 { "code": "QQQ-5007" }
@@ -372,7 +372,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The instance pool has no free slot and the request was shed.
 
-**Remediation.** retryable; back off. Raise `limits.max_instances` or add hosts. The error reports pool occupancy.
+**Remediation.** Retryable; back off. Raise `limits.max_instances` or add hosts. The error reports pool occupancy.
 
 ```json
 { "code": "QQQ-6001" }
@@ -382,7 +382,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The host could not bind its listener.
 
-**Remediation.** the error names the address and the OS error.
+**Remediation.** The error names the address and the OS error.
 
 ```json
 { "code": "QQQ-6002" }
@@ -392,7 +392,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A component could not be loaded from the AOT cache and fell back to compilation, which also failed.
 
-**Remediation.** the error names the cache key and the compile error.
+**Remediation.** The error names the cache key and the compile error.
 
 ```json
 { "code": "QQQ-6003" }
@@ -412,7 +412,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The host ran out of a system resource (file descriptors, memory).
 
-**Remediation.** retryable after backoff; otherwise raise OS limits.
+**Remediation.** Retryable after backoff; otherwise raise OS limits.
 
 ```json
 { "code": "QQQ-6005" }
@@ -420,9 +420,9 @@ logs and issue trackers reference them indefinitely.
 
 ### `QQQ-6006` — `RequestBodyTooLarge`
 
-**Cause.** A request body exceeded `max_request_bytes` **while** it was arriving. Distinct from [`Self::MemoryLimitExceeded`] on purpose, and the distinction is the one `SRV-005` exists to draw: this is a *client* that sent too much, and the remediation is on the caller's side. It is therefore the class that maps to a 4xx, not a 5xx — telling the client to fix its request rather than paging an operator about a host fault.
+**Cause.** A request body exceeded `max_request_bytes` **while** it was arriving.
 
-**Remediation.** send a smaller body, or raise `max_request_bytes` in `qqq.toml`.
+**Remediation.** Send a smaller body, or raise `max_request_bytes` in `qqq.toml`.
 
 ```json
 { "code": "QQQ-6006" }
@@ -430,7 +430,7 @@ logs and issue trackers reference them indefinitely.
 
 ### `QQQ-6007` — `HostPanicContained`
 
-**Cause.** A **host** function panicked and the host contained it. Deliberately a `6xxx` host fault rather than a `3xxx` guest trap, and the distinction is the point: **the guest did nothing wrong.** No host function should panic on any input, and its inputs are guest-controlled and therefore attacker-controlled — so a contained panic is always a QQQ defect, and reporting it as a guest trap would send an operator to inspect the wrong artifact. It would also make an attacker's successful panic read as misbehaving guest code rather than the host bug it is. The guest sees an ordinary trap; the panic message stays in the host log and is never echoed back, because it can contain host paths and internals.
+**Cause.** A **host** function panicked and the host contained it.
 
 **Remediation.** **please report this.** The trap names the interface; the log line `SEV1 host-panic-contained` carries the message.
 
@@ -444,7 +444,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** An MCP tool call had arguments that failed schema validation.
 
-**Remediation.** the error names the argument and the expected type; `qqqai schema --command <tool>` prints the schema.
+**Remediation.** The error names the argument and the expected type; `qqqai schema --command <tool>` prints the schema.
 
 ```json
 { "code": "QQQ-7001" }
@@ -464,7 +464,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** The agent protocol version is not supported by this host.
 
-**Remediation.** the error reports both versions.
+**Remediation.** The error reports both versions.
 
 ```json
 { "code": "QQQ-7003" }
@@ -474,7 +474,7 @@ logs and issue trackers reference them indefinitely.
 
 **Cause.** A command was given a flag it does not accept.
 
-**Remediation.** the error names the flag; `qqqai <command> --help` lists the ones the command takes. # Why this is distinct from `McpArgumentInvalid` `7001` is about *arguments* — a positional or a value that failed the tool's schema. This is about an *unrecognised option*: the imperative form of "the invocation is wrong", which a caller resolves by reading the usage rather than by fixing a value. Folding the two together would make `qqqai doctor --jsonn` indistinguishable from `qqqai serve --port abc` in a log, and they need different remediation text. # Why it exists at all Because silently ignoring an unknown flag is the bug this code names. `qqqai doctor --fix` behaved exactly like `qqqai doctor` before `--fix` was implemented, and every command accepted a mistyped `--jsonn` the same way — a user who believes an option took effect, and a *missing* effect that reads as a mystery rather than an error.
+**Remediation.** The error names the flag; `qqqai <command> --help` lists the ones the command takes.
 
 ```json
 { "code": "QQQ-7004" }

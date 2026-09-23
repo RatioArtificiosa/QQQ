@@ -486,9 +486,34 @@ def self_test() -> int:
     # field is present, well-typed and wrong. With `exit_code: 0` hardcoded,
     # every unit test still passed and the binary still exited 69. Only the probe
     # noticed.
-    if find_binary() is None:
-        print("  NOTICE: no built binary, so the exit_code injection was SKIPPED")
+    # The injection rebuilds the binary, so the binary must exist first.
+    #
+    # This used to be `if find_binary() is None: NOTICE ... else: <the real
+    # case>`, which meant a tree with no built binary reported SELF-TEST PASSED
+    # without exercising the assertion the case exists for -- a self-test that
+    # can silently skip its own subject. It now builds the binary when it is
+    # missing and records a FAILED case if it still is not there, so the
+    # self-test cannot pass without running the runtime comparison.
+    built = find_binary()
+    if built is None:
+        print("  build  qqqai, which the exit_code injection needs")
+        prep = subprocess.run(
+            ["cargo", "build", "-p", "qqq-run", "--bin", "qqqai"],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        built = find_binary()
+        if built is None or prep.returncode != 0:
+            check(
+                "built the binary the exit_code injection needs",
+                False,
+                "no binary after `cargo build`; the runtime assertion cannot run",
+            )
+            built = None
+
+    if built is None:
+        pass  # already reported as a failed case above
     else:
+        profile = built.parent.name  # `debug` or `release`
         src = ROOT / "crates/qqq-run/src/output.rs"
         original_src = src.read_bytes()
         text = original_src.decode("utf-8")
@@ -526,14 +551,26 @@ def self_test() -> int:
                 # Touch, so the next build cannot reuse the injected artifact.
                 stamp = time.time()
                 os.utime(src, (stamp, stamp))
-                subprocess.run(
-                    ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
-                    capture_output=True, text=True, cwd=ROOT,
+                # The restore build's status is checked, and it targets the same
+                # profile `find_binary` selected: a failed restore build would
+                # leave the injected artifact in place, and the test after this
+                # one would then probe the wrong binary and report a defect that
+                # is not in the tree.
+                restore_args = ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"]
+                if profile == "release":
+                    restore_args.append("--release")
+                restore = subprocess.run(
+                    restore_args, capture_output=True, text=True, cwd=ROOT
                 )
             check(
                 "restored after the exit_code injection",
                 src.read_bytes() == original_src
                 and b"injected by check_schema_conformance" not in src.read_bytes(),
+            )
+            check(
+                "the binary was rebuilt from the restored source",
+                restore.returncode == 0,
+                f"`cargo build` exited {restore.returncode} after the restore",
             )
 
     # The tree is conformant again.

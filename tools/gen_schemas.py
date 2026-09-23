@@ -193,7 +193,14 @@ def read_structs(source: str) -> dict[str, Struct]:
                 break
             doc = DOC_LINE.match(line)
             if doc:
-                pending["doc"] = (str(pending["doc"]) + " " + doc.group(1).strip()).strip()
+                # Newline-joined, not space-joined: `doc_summary` needs the
+                # line structure to find the end of the first paragraph, and a
+                # space-joined string has none -- so a `# ...` heading landed
+                # inside the summary and the whole doc became the description.
+                line = doc.group(1).strip()
+                pending["doc"] = (
+                    line if not pending["doc"] else f"{pending['doc']}\n{line}"
+                )
                 i += 1
                 continue
 
@@ -300,6 +307,50 @@ def read_enums(source: str) -> dict[str, list[str]]:
             enums[name] = [spelling[v] for v in variants if v in spelling]
         i += 1
     return enums
+
+
+def doc_summary(doc: str, limit: int = 160) -> str:
+    """The first paragraph of a doc comment, flattened for a schema consumer.
+
+    # Why not `doc[:300]`
+
+    Because a character cut lands mid-sentence, and because `doc` is the *whole*
+    comment: a `# Why this field exists` section and rustdoc link syntax both
+    went into the published description, which a schema consumer renders
+    verbatim. The first paragraph is the summary a doc comment is written to
+    lead with, and the rest is rationale that belongs in the source.
+
+    Two rustdoc constructs are flattened, because they appear in these comments
+    and neither is meaningful in JSON Schema:
+
+    * ``[`Self::exit_code`]`` -> `` `exit_code` `` -- the link target is dropped
+      and the code span kept.
+    * a line that opens a section (`# ...`) ends the summary.
+    """
+    text = doc.strip()
+    if not text:
+        return ""
+
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            break
+        if not stripped:
+            break
+        lines.append(stripped)
+    summary = " ".join(lines)
+
+    # `[`Foo::bar`]` -> `` `bar` ``; `[`Foo`]` -> `` `Foo` ``.
+    summary = re.sub(r"\[`([A-Za-z0-9_:<>]+)`\]", lambda m: f"`{m.group(1).split('::')[-1]}`", summary)
+    # A bare `[Self::field]` with no code span.
+    summary = re.sub(r"\[([A-Za-z0-9_:]+)\]", lambda m: f"`{m.group(1).split('::')[-1]}`", summary)
+
+    if len(summary) > limit:
+        # Cut on a word boundary and mark it, rather than mid-word.
+        cut = summary[:limit].rsplit(" ", 1)[0]
+        summary = f"{cut}…"
+    return summary
 
 
 def json_type(
@@ -417,7 +468,7 @@ def schema_for(
     for f in struct.fields:
         body = json_type(f.ty, known, enums)
         if f.doc:
-            body = {"description": f.doc[:300], **body}
+            body = {"description": doc_summary(f.doc), **body}
         props[f.json_name] = body
         # A field is required only when it must be present on **input**.
         #

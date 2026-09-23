@@ -239,7 +239,7 @@
       "description": "The `DependencyDetail` table.",
       "properties": {
         "caps": {
-          "description": "The capabilities this dependency **declares** it needs. # Why a dependency declares authority at all §5.4 states it as the feature that matters most about the lockfile: > **`caps` is recorded per dependency.** `qqqai install` prints a > **capability diff** — *\"this update adds `http.client` to > `qq",
+          "description": "The capabilities this dependency **declares** it needs.",
           "items": {
             "type": "string"
           },
@@ -265,7 +265,7 @@
               "type": "null"
             }
           ],
-          "description": "An alternative source: `path+…`, `git+…`, `registry+…`. Recorded because two packages with the same name and version from different sources are different packages."
+          "description": "An alternative source: `path+…`, `git+…`, `registry+…`."
         },
         "version": {
           "description": "The semver requirement, e.g. `1.2`, `^1.2.3`, `>=1.0, <2.0`.",
@@ -398,7 +398,7 @@
           "type": "integer"
         },
         "max_subrequests": {
-          "description": "Maximum outbound subrequests one instance may drive. # Why this is a limit about *caused* work rather than *performed* work Fuel bounds what the guest computes. It does not bound what the guest **causes**: a loop that calls `http.get` and ignores the result costs a handful of fuel units per iteratio",
+          "description": "Maximum outbound subrequests one instance may drive.",
           "minimum": 0,
           "type": "integer"
         },
@@ -467,13 +467,13 @@
               "type": "null"
             }
           ],
-          "description": "The cap applied to a tenant with no entry in `per_tenant`. Absent means **no limits** for such a tenant, which is the same as declaring no `[server.limits]` at all — so a manifest that lists only named tenants does not accidentally constrain everybody else."
+          "description": "The cap applied to a tenant with no entry in `per_tenant`."
         },
         "per_tenant": {
           "additionalProperties": {
             "$ref": "#/$defs/TenantLimit"
           },
-          "description": "Per-tenant overrides, keyed by the **client's IP address**. # Why an address and not a name A request's tenant is the peer address: `qqq_serve::server::tenant_of` returns `peer.ip().to_string()` and `TenantLimits::limits_for` looks the tenant up by that string. So a key that is not an address litera",
+          "description": "Per-tenant overrides, keyed by the **client's IP address**.",
           "type": "object"
         }
       },
@@ -543,7 +543,7 @@
           "description": "`[server.cors]` — the cross-origin policy, absent meaning no CORS at all."
         },
         "default_auth": {
-          "description": "The authentication mode applied to a route that does not name one. Defaults to [`AuthMode::Deny`], **not** to a real mode. A manifest that lists routes and forgets `default_auth` must fail closed: defaulting to `none` would publish every route unauthenticated because the author omitted a line, and d",
+          "description": "The authentication mode applied to a route that does not name one.",
           "enum": [
             "deny",
             "none",
@@ -562,7 +562,7 @@
               "type": "null"
             }
           ],
-          "description": "`[server.limits]` — the per-tenant request limits, absent meaning none. # Why the default is \"no limits\" rather than a built-in number `SRV-020` asks for per-tenant limits, and the tempting default is a safe-looking body cap invented here. That would be wrong twice over: the number would be a guess "
+          "description": "`[server.limits]` — the per-tenant request limits, absent meaning none."
         },
         "routes": {
           "description": "The route table. Empty means the project serves nothing.",
@@ -614,7 +614,7 @@
               "type": "null"
             }
           ],
-          "description": "The window, in seconds. Defaults to 60 when a request cap is set. **A zero window with a request cap is rejected**, because it makes the limiter allow everything — see `qqq_serve::limits::Limits::is_coherent`."
+          "description": "The window, in seconds."
         }
       },
       "title": "qqq-toml#TenantLimit",
@@ -627,33 +627,33 @@
   "properties": {
     "build": {
       "$ref": "#/$defs/Build",
-      "description": "`[build]` — how the project is compiled to a component."
+      "description": "``build`` — how the project is compiled to a component."
     },
     "capabilities": {
       "$ref": "#/$defs/Capabilities",
-      "description": "`[capabilities]` — the authority declaration. Absent means deny-all."
+      "description": "``capabilities`` — the authority declaration. Absent means deny-all."
     },
     "dependencies": {
       "additionalProperties": true,
-      "description": "`[dependencies]` — packages this project links against. Modelled explicitly rather than left to be ignored. Before this field existed, a manifest containing `[dependencies]` parsed **successfully** and the dependencies were silently dropped: `qqqai` reported no capabilities from a dependency it had ",
+      "description": "``dependencies`` — packages this project links against.",
       "type": "object"
     },
     "dev-dependencies": {
       "additionalProperties": true,
-      "description": "`[dev-dependencies]` — packages needed only for tests and benchmarks. Kept separate because a dev-dependency's capabilities must **not** be granted to the shipped component. Merging the two tables would let a test-only package widen the production authority surface, which is precisely the supply-cha",
+      "description": "`[dev-dependencies]` — packages needed only for tests and benchmarks.",
       "type": "object"
     },
     "limits": {
       "$ref": "#/$defs/Limits",
-      "description": "`[limits]` — enforceable resource bounds."
+      "description": "``limits`` — enforceable resource bounds."
     },
     "package": {
       "$ref": "#/$defs/Package",
-      "description": "`[package]` — identity."
+      "description": "``package`` — identity."
     },
     "server": {
       "$ref": "#/$defs/Server",
-      "description": "`[server]` — the network surface: routes, default auth, CORS. # Why this field had to exist before four other items could be finished Four other checklist items were each complete in `qqq-serve` and none was reachable, because this struct did not model `[server]` at all: a manifest declaring `routes"
+      "description": "``server`` — the network surface: routes, default auth, CORS."
     }
   },
   "required": [

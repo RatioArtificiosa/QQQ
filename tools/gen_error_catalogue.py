@@ -135,21 +135,41 @@ def parse_variants(text: str) -> list[dict[str, object]]:
         cause_lines: list[str] = []
         remediation_lines: list[str] = []
         in_remediation = False
+        in_rationale = False
         for doc in pending:
             if doc.startswith("**Remediation:**"):
                 in_remediation = True
                 remediation_lines.append(doc[len("**Remediation:**") :].strip())
             elif in_remediation:
                 remediation_lines.append(doc)
-            else:
+            elif doc.startswith("#"):
+                # A rationale heading ends the cause.
+                #
+                # The convention is: one line naming the cause, optional `# ...`
+                # sections explaining it, then `**Remediation:**`. Without this
+                # stop, `QQQ-7004`'s published cause read "A command was given a
+                # flag it does not accept. # Why this is distinct from
+                # `McpArgumentInvalid` 7001 is about *arguments* ..." -- a cause
+                # that carries the design rationale, rendered into docs/errors.md
+                # and into every `qqqai schema --all` payload.
+                in_rationale = True
+            elif not in_rationale:
                 cause_lines.append(doc)
 
         variants.append(
             {
                 "variant": variant,
                 "code": code,
-                "cause": " ".join(l for l in cause_lines if l).strip(),
-                "remediation": " ".join(l for l in remediation_lines if l).strip(),
+                "cause": truncate_rationale(" ".join(l for l in cause_lines if l).strip()),
+                # Capitalised on emit: the source writes the remediation as the
+                # continuation of `**Remediation:** ...`, which reads naturally
+                # there, while the published document renders it as its own
+                # sentence after `**Remediation.** `. 38 of 43 entries started
+                # lowercase before this, so the document read as a list of
+                # fragments.
+                "remediation": sentence_case(
+                    " ".join(l for l in remediation_lines if l).strip()
+                ),
                 "deprecated": deprecated,
             }
         )
@@ -245,8 +265,44 @@ def render(variants: list[dict[str, object]]) -> str:
     return "\n".join(parts)
 
 
-def main() -> int:
-    check_only = "--check" in sys.argv
+def sentence_case(text: str) -> str:
+    """Capitalise the first character, leaving the rest untouched.
+
+    Only the first character: `qqqai`, `max_subrequests` and `QQQ-6005` must
+    survive verbatim, and a `.capitalize()` would lowercase them.
+    """
+    if not text:
+        return text
+    return text[0].upper() + text[1:]
+
+
+def truncate_rationale(cause: str) -> str:
+    """Drop a trailing 'why this is distinct' paragraph from a cause.
+
+    # Why this is needed
+
+    The doc-comment convention is a one-line cause, optional rationale, then the
+    remediation. Most rationale sections use a `# ...` heading and are stopped by
+    the parser. Four do not: they open with an emphasised sentence such as
+    "**Distinct from `MemoryLimitExceeded` on purpose.**", so the rationale ran
+    into the published cause -- up to 875 characters of design argument rendered
+    into `docs/errors.md` and every `qqqai schema --all` payload.
+
+    The cut is on the phrase such a paragraph actually uses, and the cause's own
+    first sentence is always complete before it.
+    """
+    for marker in (" **Distinct from", " Distinct from", " It is deliberately", " Deliberately a"):
+        i = cause.find(marker)
+        if i > 0:
+            return cause[:i].strip()
+    return cause
+
+
+def main(argv: list[str]) -> int:
+    # `argv` is taken rather than read from `sys` inside, so the entry point is
+    # the only place that touches process state -- the same shape the other
+    # generators use, and it makes `main(["--check"])` callable from a test.
+    check_only = "--check" in argv
 
     if not SOURCE.exists():
         print(f"FATAL: {SOURCE} does not exist")
@@ -307,4 +363,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))

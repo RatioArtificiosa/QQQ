@@ -3382,8 +3382,14 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CLI-020** Implement `qqqai trace`.
   → §10.4 Distributed tracing
-- [ ] **CLI-021** Implement `qqqai doctor`.
+- [x] **CLI-021** Implement `qqqai doctor`.
   → §5.2 The command surface
+  → **Delivered by `DX-016`**, which describes the same command and carries the
+    evidence, the four defects found in it and the fault injections. This item is
+    the §5.2 command-surface entry for `doctor`; the two were written as one
+    deliverable in two areas of the checklist, and the evidence is recorded once
+    rather than restated in a second place that would drift. Same pattern as
+    `CON-004` pointing at `CON-016`.
 - [ ] **CLI-022** Implement `qqqai mcp`.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
 - [ ] **CLI-023** Implement `qqqai schema --all` and the per-command schema output.

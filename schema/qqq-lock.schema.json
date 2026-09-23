@@ -6,7 +6,7 @@
       "description": "The `BuildConfig` record.",
       "properties": {
         "caps": {
-          "description": "The declared capability names, sorted, as the manifest resolved them. # Why `Vec` and not a `BTreeSet` Because `serde` on a `BTreeSet` serialises to a TOML array in set order already, and hashing needs a *deterministic* order rather than an unordered container. The same reason `LockPackage::caps` is",
+          "description": "The declared capability names, sorted, as the manifest resolved them.",
           "items": {
             "type": "string"
           },
@@ -152,7 +152,7 @@
       "description": "The `LockDiff` record.",
       "properties": {
         "capability_changes": {
-          "description": "Only the packages whose **authority** changed. Derived from `changes` rather than computed separately, so the two cannot disagree — and a `caps_added` entry that did not appear here would be a supply-chain event nobody was shown.",
+          "description": "Only the packages whose **authority** changed.",
           "items": {
             "$ref": "#/$defs/CapabilityDelta"
           },
@@ -179,7 +179,7 @@
       "description": "The `LockPackage` record.",
       "properties": {
         "caps": {
-          "description": "The capabilities this package declares. **Sorted and deduplicated on read**, so two lockfiles that describe the same authority compare equal regardless of how the file was written. Without that, a diff would report spurious changes from a reordering.",
+          "description": "The capabilities this package declares.",
           "items": {
             "type": "string"
           },
@@ -220,7 +220,7 @@
               "type": "null"
             }
           ],
-          "description": "Where it came from. `registry+https://…`, `path+…`, or `git+…`. Recorded because two packages with the same name and version from different sources are different packages, and a lockfile that omitted the source could not tell them apart."
+          "description": "Where it came from."
         },
         "version": {
           "description": "The resolved version.",
@@ -235,7 +235,7 @@
               "type": "null"
             }
           ],
-          "description": "The digest of the generated WIT interface. Separate from `digest` because the artifact and its interface can change independently, and an interface change is what breaks composition."
+          "description": "The digest of the generated WIT interface."
         }
       },
       "required": [
@@ -259,7 +259,7 @@
               "type": "null"
             }
           ],
-          "description": "The build configuration the hash covers — `CON-005`. Absent for a lockfile written before this field existed, and an absent config contributes nothing to the hash so an old lockfile's digest is unchanged. See [`BuildConfig`]."
+          "description": "The build configuration the hash covers — `CON-005`."
         },
         "generated-by": {
           "anyOf": [

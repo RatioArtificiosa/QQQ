@@ -17059,6 +17059,161 @@ like drift and was actually a stale digest. The checklist tick and the observati
 append are canonical-document edits, so they must precede the `--record` call, and
 `--record` must precede the gate.
 
+## §O-210 — `DX-016` closed, and the ledger corrected behind it
+
+**Commits.** `2895284` — *"docs: doctor was three defects, and the envelope had
+two answers to one question"* — 12 files, 1291 insertions, 100 deletions.
+`4783cdb` — *"docs(checklist): CON-016's tick described a superseded state, so it
+now names all four"* — 2 files.
+
+**CI.** Run `35932587545` for `2895284`: **success**, all 11 push jobs green with
+DCO skipped (`WIT interface validation`, `Production image (SEC-029)`,
+`MSRV (1.97)`, `Rust` on ubuntu/macos/windows, `Cross-reference integrity`,
+`Supply chain`, `Reference application (SRV-018)`, `Fuzz targets compile`,
+`Line endings`). Read from the job list rather than inferred from the status,
+per invariant TWELVE.
+
+**`CON-016` was corrected in the same pass, and it is the clearest example of the
+ledger problem this document tracks.** Its tick still read *"7/7 fault injections
+detected"* — the tool reports 8/8 — and, more seriously, the text described the
+item as it stood **before** the three changes that made its deliverable honest:
+the schema-versus-source conformance checker (§O-205), the derived CLI envelope
+and its live probe (§O-206), and the `exit_code` field that the probe then found
+to be false in 38 of 48 places (§O-208). A tick is a claim, and this one had
+become a claim about a state the code had moved past.
+
+The rule applied: **the number is re-derived from the tool, not restated from
+memory.** `python tools/self_test_schemas.py` prints `8/8 fault injections
+detected`; that output is what the line now says, and the three omissions are
+named with their observation sections so a reader can follow them.
+
+**What this cost, honestly.** `DX-016` looked like a small item — one command,
+three checks, already written. It took: four defects, three fault injections, two
+gate runs, three clippy errors that appeared only under `-D warnings`, and one
+stale-digest cycle caused by editing a canonical document after its digest was
+recorded (§O-209). The pattern worth carrying forward is that the *last* defect in
+a command is usually only reachable once the earlier ones stop hiding it: the
+`exit_code` contradiction could not be seen while `--fix` was silently ignored and
+the wasm check could never fail.
+
+## §O-211 — nine CodeRabbit findings on the `DX-016` change, and what each one was worth
+
+Scoped at risk as the working rules require — this change is an output contract
+(`Envelope`), a parser's consumer (the error catalogue), and a CLI mode matrix
+(`doctor` with and without `--fix`, in both flag positions). The review covered
+**12 of 12 files** with `outcome: completed`. Each finding was reproduced against
+the code before anything was changed.
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| F1 | major | the probe's tests mutate process environment | **real, fixed** |
+| F2 | major | the probe scans every toolchain, not the active sysroot | **real, fixed** |
+| F3 | major | `FixPlan` docs claim a Python equivalent and a re-run | **real, fixed** |
+| F4 | major | policy read from display text (`contains("target add")`) | **real, fixed** |
+| F5 | major | the `exit_code` injection can be silently skipped | **real, fixed** |
+| F6 | minor | the restore rebuild's status is discarded | **real, fixed** |
+| F7 | minor | `CliFlagUnknown`'s remediation is not last | **real, fixed** |
+| F8 | minor | `CLI-021` duplicates `DX-016` | **real, fixed** |
+| F9 | minor | schema descriptions carry whole doc comments | **real, fixed** |
+
+### The two that mattered most
+
+**F5 — a self-test that could silently skip its own subject.** The new exit-code
+case was wrapped in `if find_binary() is None: NOTICE ... else: <the case>`. On a
+tree with no built binary the self-test printed **SELF-TEST PASSED** without
+exercising the assertion the case exists for. That is the exact defect class this
+document has recorded three times — §O-205 (a check compared an artifact to its
+own producer), §O-206 (a check asserted in a comment and never written), and now a
+self-test that skips itself. It now builds the binary and records a **failed case**
+if it still is not there, so passing requires running the comparison.
+
+**F8 — one deliverable, two checklist items, one of them unticked.** `CLI-021` says
+*"Implement `qqqai doctor`"* and `DX-016` says *"Implement `qqqai doctor` with
+environment diagnosis and remediation"*. They are the same command. Ticking only
+`DX-016` left `CLI-021` reading as outstanding work while the command is
+implemented, tested and in CI — a ledger that says two different things about one
+fact. This is the class of defect **no test can find**, because both items are
+individually well-formed and the contradiction is between documents.
+
+Resolved the way the tree already does it: `CLI-021` is ticked and points at
+`DX-016` for the evidence, the same pattern as `CON-004` pointing at `CON-016`,
+so the evidence is recorded once rather than restated in two places that drift
+apart.
+
+### F1 and F2 — the findings that corrected the fix, not the defect
+
+F1 and F2 are the most interesting because both are about the **repair** rather
+than the original defect.
+
+**F1.** The probe read `std::env` directly, so its tests called `set_var` and
+`remove_var`. In a test binary that is process-wide state shared across parallel
+test threads, and it is precisely why the first version of
+`wasm_target_check_follows_the_probe` failed on this machine: it asserted that an
+*unset* variable reported `false`, which holds only where the target is absent.
+The probe now takes a `WasmProbeInputs` value, the tests construct the directory
+trees each branch looks at, and **nothing touches the environment**. The tests got
+stronger as well as cleaner — every branch is now driven explicitly rather than
+through whichever global happened to be set.
+
+**F2.** The probe scanned `<rustup home>/toolchains/*/lib/rustlib/<target>` and
+returned true if **any** toolchain had the target. That answers a different
+question from the one the check asks: `rustc` resolves to *one* toolchain (pinned
+by `rust-toolchain.toml`, redirectable by `rustup override`) and `qqqai build`
+uses that one. A machine with the target on an unused toolchain would pass the
+check and fail the build — **the same false confidence the original `ok: true` had,
+reached by a different route**. The probe now asks `rustc --print sysroot` first
+and checks the target under it, keeping the scan as a fallback and `rustup` last.
+
+Both were found by an external reviewer, not by the test suite, and both were in
+code written the same day. That is the argument for spending the checks.
+
+### F4 — policy read out of display text
+
+```rust
+if plan.command.contains("target add") {
+```
+
+The decision "is this repair safe to run automatically" was being made by
+searching the *string shown to the user*. Reword the message, or add a repair
+whose command happens to mention "target add", and what the tool runs changes —
+the display text was load-bearing. `FixPlan` now carries `reaches_network: bool`,
+declared where the plan is built and read from the field.
+
+### F3, F6, F7, F9
+
+* **F3** — `FixPlan`'s doc claimed "the equivalent Python that a CI step or an
+  agent runs instead" and that `apply` re-runs the checks. Neither existed. Docs
+  corrected to the fields that are there.
+* **F6** — the restore rebuild's exit status was discarded, and it always rebuilt
+  `debug` while `find_binary` may have selected `release`. A failed restore would
+  leave the injected artifact in place and the *next* test would probe the wrong
+  binary. Status checked, profile matched.
+* **F7** — `CliFlagUnknown`'s `**Remediation:**` line was third, before two
+  rationale sections, and the generator reads the last paragraph as the remedy —
+  so the published entry carried a rationale paragraph as its fix.
+* **F9** — this one widened while being fixed, and the widening is the useful
+  part. The reported symptom was that `exit_code`'s description ran past 300
+  characters. The root cause was `pending["doc"] = (doc + " " + line).strip()`,
+  which joined every doc line into **one string**, destroying the paragraph
+  structure `doc_summary` needs. That same joined string feeds the error
+  catalogue, so fixing it revealed two catalogue-wide defects: **38 of 43
+  remediations started lowercase** (the source writes them as a continuation of
+  `**Remediation:** ...`), and **four causes carried a "Distinct from X on
+  purpose" rationale paragraph** because those use bold emphasis rather than a
+  `#` heading. Both fixed at the generator, on emit, so the source doc comments
+  keep reading naturally. `docs/errors.md` now has 43 sentence-case entries with
+  no headings and no cause over 200 characters.
+
+### One self-inflicted mistake worth recording
+
+While fixing F9 I spliced a helper block in front of an anchor chosen by trying
+candidate strings, and the anchor I asserted on was not the function I assumed:
+the file has `parse_variants`, not `extract_variants`, so the splice produced
+`def extract_variants) -> int:`. The script asserted *that an anchor existed*, not
+*that it was the right one*. Repaired, and the lesson is invariant TWO's in
+another costume: **an assertion that something is present is not an assertion that
+it is correct.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

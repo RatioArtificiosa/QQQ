@@ -2609,24 +2609,41 @@ struct Check {
 /// A constant so the check, its remedy and the tests all name the same target.
 const WASM_TARGET: &str = "wasm32-wasip2";
 
-/// Where a repair `doctor` could perform is described to the user.
+/// A repair `doctor` could perform, described before it is performed.
 ///
-/// # Why a command and a script, not a function
+/// # Why the command is held as fields rather than as one string
 ///
-/// `doctor` must not repair anything it cannot describe. This struct carries
-/// the exact shell command a person types and the equivalent Python that a CI
-/// step or an agent runs instead, so `--fix` is auditable: the plan is printed
-/// before it is executed, and [`FixPlan::apply`] is the only thing that runs
-/// it.
+/// Because the two claims are different: `what` is what the repair is for, and
+/// the command is what runs. Storing them together lets `--fix` print a plan a
+/// reader can approve without looking anything up.
+///
+/// # Why the plan is a value and not a function
+///
+/// `doctor` must not repair anything it cannot describe. `fix_for` builds a
+/// plan, `apply_fixes` prints it, and only then does [`FixPlan::apply`] run it —
+/// so the printed plan and the executed command cannot diverge, because they are
+/// the same value.
 struct FixPlan {
     /// What this repairs, in the reader's terms.
     what: String,
-    /// The command a person would type.
+    /// The command a person would type, kept for display.
     command: String,
     /// The program to spawn.
     program: String,
     /// Its arguments.
     argv: Vec<String>,
+    /// Whether running this reaches the network.
+    ///
+    /// # Why this is a field and not a string match
+    ///
+    /// `apply_fixes` originally decided whether a repair was safe to run
+    /// automatically with `plan.command.contains("target add")` — the policy read
+    /// out of the display text. That makes the display string load-bearing:
+    /// rewording the message, or adding a repair whose command merely mentions
+    /// "target add", would silently change what runs. The property is declared
+    /// where the plan is built and read from the field, so the policy and the
+    /// text are independent.
+    reaches_network: bool,
 }
 
 impl FixPlan {
@@ -2634,8 +2651,9 @@ impl FixPlan {
     ///
     /// The exit status is **not** an error here: a failing `rustup` produces a
     /// diagnostic message that belongs in the report, and turning it into a
-    /// `Result::Err` would replace that message with a summary. The caller
-    /// re-runs the checks afterwards, which is the real verdict.
+    /// `Result::Err` would replace that message with a summary. Nothing here
+    /// claims the repair worked — the caller's re-run of the checks is the only
+    /// verdict, and it is the caller that performs it.
     fn apply(&self) -> std::io::Result<String> {
         let output = std::process::Command::new(&self.program)
             .args(&self.argv)
@@ -2674,21 +2692,98 @@ impl FixPlan {
 /// error: `qqqai build` cannot reach the target without it, so that is the
 /// truthful answer to the question the check asks.
 fn wasm_target_present() -> bool {
-    match std::env::var("QQQ_TEST_WASM_TARGET_PRESENT").as_deref() {
-        Ok("0") => return false,
-        Ok(_) => return true,
-        Err(_) => {}
+    wasm_target_present_with(&WasmProbeInputs::from_environment())
+}
+
+/// The probe's external inputs, passed in rather than read from globals.
+///
+/// # Why the probe takes parameters
+///
+/// The first version read `std::env` directly, and its test therefore had to
+/// call `set_var`/`remove_var`. In a test binary that is **shared mutable
+/// state**: the variables are process-wide, the harness runs tests in parallel
+/// threads, and a value set by one test is visible to every other. The test
+/// failed on its first run for exactly this reason — it asserted that an *unset*
+/// variable reported `false`, which holds only on a machine without the target.
+///
+/// Injecting the inputs removes the shared state: the test builds a value and
+/// passes it, so no test can observe another's setting and none has to mutate the
+/// process environment.
+#[derive(Debug)]
+struct WasmProbeInputs {
+    /// `QQQ_TEST_WASM_TARGET_PRESENT`, if set.
+    override_present: Option<String>,
+    /// `rustc --print sysroot`, if rustc ran successfully.
+    sysroot: Option<std::path::PathBuf>,
+    /// The rustup home, whose `toolchains/` directory is the fallback.
+    rustup_home: Option<std::path::PathBuf>,
+    /// Whether a `rustup` binary is available.
+    rustup_available: bool,
+}
+
+impl WasmProbeInputs {
+    /// Gather every input by reading the environment and running the probes.
+    fn from_environment() -> Self {
+        let sysroot = std::process::Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_owned()))
+            .filter(|p| !p.as_os_str().is_empty());
+
+        Self {
+            override_present: std::env::var("QQQ_TEST_WASM_TARGET_PRESENT").ok(),
+            sysroot,
+            rustup_home: std::env::var_os("RUSTUP_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .map(|h| std::path::PathBuf::from(h).join(".rustup"))
+                }),
+            rustup_available: rustup_on_path(),
+        }
+    }
+}
+
+/// Is `wasm32-wasip2` installed for the toolchain that will actually build?
+///
+/// # Why the active sysroot and not every toolchain
+///
+/// The first version scanned `<rustup home>/toolchains/*/lib/rustlib/<target>`
+/// and returned true if **any** toolchain had the target. That answers a
+/// different question. `rustc` picks one toolchain — this crate's
+/// `rust-toolchain.toml` pins it, and a `rustup override` can redirect it — and
+/// `qqqai build` uses that one. A machine with `wasm32-wasip2` on a toolchain the
+/// project does not use would pass the check and fail the build, which is the
+/// false confidence `doctor` exists to remove, reintroduced by another route.
+///
+/// `rustc --print sysroot` names the active toolchain's sysroot, and the target's
+/// directory under it is the one the build will look for. The scan remains as a
+/// fallback for when `rustc` cannot run but the directory is plainly there.
+fn wasm_target_present_with(inputs: &WasmProbeInputs) -> bool {
+    match inputs.override_present.as_deref() {
+        Some("0") => return false,
+        Some(_) => return true,
+        None => {}
     }
 
-    // `RUSTUP_HOME` is authoritative when set; the default is `~/.rustup`.
-    let home = std::env::var_os("RUSTUP_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .or_else(|| std::env::var_os("HOME"))
-                .map(|h| std::path::PathBuf::from(h).join(".rustup"))
-        });
-    if let Some(home) = home {
+    // The active toolchain's own sysroot — the same path the build resolves.
+    if let Some(sysroot) = &inputs.sysroot {
+        if sysroot
+            .join("lib")
+            .join("rustlib")
+            .join(WASM_TARGET)
+            .is_dir()
+        {
+            return true;
+        }
+    }
+
+    // Fallback: some mounted toolchain has it. Weaker evidence than the
+    // sysroot, which is why it is second.
+    if let Some(home) = &inputs.rustup_home {
         if home.join("toolchains").read_dir().is_ok_and(|entries| {
             entries.flatten().any(|e| {
                 e.path()
@@ -2702,15 +2797,18 @@ fn wasm_target_present() -> bool {
         }
     }
 
-    std::process::Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .is_ok_and(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .any(|l| l.trim() == WASM_TARGET)
-        })
+    // Last resort: ask rustup, which is authoritative about what is installed
+    // even when the directory layout is unfamiliar.
+    inputs.rustup_available
+        && std::process::Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output()
+            .is_ok_and(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l.trim() == WASM_TARGET)
+            })
 }
 
 /// What `doctor` would do with `--fix`, and what it did.
@@ -2809,6 +2907,8 @@ fn fix_for(name: &str, rustup_present: bool) -> Option<FixPlan> {
             "add".to_owned(),
             WASM_TARGET.to_owned(),
         ],
+        // `rustup target add` downloads a toolchain component.
+        reaches_network: true,
     })
 }
 
@@ -2918,8 +3018,9 @@ fn apply_fixes(checks: &[Check], requested: bool) -> FixOutcome {
         outcome
             .planned
             .push(format!("{} — `{}`", plan.what, plan.command));
-        // A network fetch is never automatic: see the function comment.
-        if plan.command.contains("target add") {
+        // A network fetch is never automatic: see the function comment. The
+        // decision reads the plan's own property rather than its display text.
+        if plan.reaches_network {
             outcome.skipped.push(format!(
                 "{}: `{}` downloads a toolchain component, so it was not run",
                 check.name, plan.command
@@ -3432,37 +3533,142 @@ mod tests {
         assert!(!parsed(&["doctor"]).flags.fix());
     }
 
-    /// The wasm-target check must be able to **fail**, and its verdict must
-    /// follow the probe.
+    /// A temporary directory that removes itself, without a new dependency.
+    ///
+    /// # Why not `tempfile`
+    ///
+    /// `qqq-run` does not depend on it, and adding a crate to the supply chain to
+    /// create two directories in a test is not a trade worth making. The name
+    /// carries the process id and a counter so parallel tests cannot collide, and
+    /// `Drop` removes the tree even when an assertion panics.
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("qqq-doctor-{}-{tag}-{n}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("a temp tree");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The probe's inputs, with every external source pinned by the caller.
+    ///
+    /// # Why the tests build this instead of setting environment variables
+    ///
+    /// `set_var` mutates **process-wide** state, and the harness runs tests in
+    /// parallel threads: a value written by one test is visible to all of them,
+    /// including tests that expect the variable to be absent. The first version
+    /// of these tests did exactly that and failed on its first run — it asserted
+    /// that an unset variable reported `false`, which holds only on a machine
+    /// without the target.
+    ///
+    /// Passing the inputs removes the shared state: nothing here touches the
+    /// environment, and no two tests can observe each other.
+    fn probe_inputs(
+        override_present: Option<&str>,
+        sysroot_has_target: bool,
+        rustup_home_has_target: bool,
+        rustup_available: bool,
+    ) -> (WasmProbeInputs, TempTree) {
+        let tree = TempTree::new("probe");
+        let sysroot = tree.path().join("sysroot");
+        let home = tree.path().join("rustup");
+        if sysroot_has_target {
+            std::fs::create_dir_all(sysroot.join("lib").join("rustlib").join(WASM_TARGET))
+                .expect("sysroot tree");
+        }
+        if rustup_home_has_target {
+            std::fs::create_dir_all(
+                home.join("toolchains")
+                    .join("stable-x86_64")
+                    .join("lib")
+                    .join("rustlib")
+                    .join(WASM_TARGET),
+            )
+            .expect("toolchain tree");
+        }
+        (
+            WasmProbeInputs {
+                override_present: override_present.map(str::to_owned),
+                sysroot: Some(sysroot),
+                rustup_home: Some(home),
+                // `false` means the last-resort `rustup` call is skipped, so the
+                // verdict is provably the directory logic and not a subprocess
+                // that happens to agree.
+                rustup_available,
+            },
+            tree,
+        )
+    }
+
+    /// The probe's verdict must follow its inputs, in both directions.
     ///
     /// The previous implementation was `ok: true` with a comment, so it printed
-    /// `ok wasm-target` while measuring nothing — a check that could not fail.
-    /// Both directions are driven here through the real probe's own override,
-    /// never by reaching past it.
+    /// `ok wasm-target` while measuring nothing. Every branch is driven here by
+    /// constructing the tree each one looks at.
+    #[test]
+    fn wasm_target_probe_follows_its_inputs() {
+        let (i, _t) = probe_inputs(Some("0"), true, true, true);
+        assert!(!wasm_target_present_with(&i), "`0` must force absent");
+        let (i, _t) = probe_inputs(Some("1"), false, false, false);
+        assert!(
+            wasm_target_present_with(&i),
+            "any other value forces present"
+        );
+
+        let (i, _t) = probe_inputs(None, true, false, false);
+        assert!(
+            wasm_target_present_with(&i),
+            "the target in the active sysroot must be found"
+        );
+        let (i, _t) = probe_inputs(None, false, false, false);
+        assert!(
+            !wasm_target_present_with(&i),
+            "an empty sysroot and home must report absent with rustup disabled"
+        );
+
+        let (i, _t) = probe_inputs(None, false, true, false);
+        assert!(
+            wasm_target_present_with(&i),
+            "a mounted toolchain with the target must be found as a fallback"
+        );
+    }
+
+    /// The verdict and the remedy must both follow the probe, not a constant.
     #[test]
     fn wasm_target_check_follows_the_probe() {
         for (signal, expected_ok) in [("0", false), ("1", true)] {
-            std::env::set_var("QQQ_TEST_WASM_TARGET_PRESENT", signal);
-            // One call, used for both assertions: the probe is stateful only
-            // through the variable, and reading it twice from the same
-            // environment is not an independent sample.
-            let probed = wasm_target_present();
-            let checks = run_doctor();
-            std::env::remove_var("QQQ_TEST_WASM_TARGET_PRESENT");
+            let (i, _t) = probe_inputs(Some(signal), true, true, true);
             assert_eq!(
-                probed, expected_ok,
+                wasm_target_present_with(&i),
+                expected_ok,
                 "the probe must honour QQQ_TEST_WASM_TARGET_PRESENT={signal}"
             );
-            let check = checks
-                .iter()
-                .find(|c| c.name == "wasm-target")
-                .expect("the wasm-target check must exist");
+        }
+
+        for (inputs, expected_ok) in [
+            (probe_inputs(Some("0"), true, true, true).0, false),
+            (probe_inputs(Some("1"), false, false, false).0, true),
+        ] {
+            let ok = wasm_target_present_with(&inputs);
+            assert_eq!(ok, expected_ok);
+            let fix = (!ok).then(|| format!("run `rustup target add {WASM_TARGET}`"));
             assert_eq!(
-                check.ok, expected_ok,
-                "the check's verdict must be the probe's, not a constant"
-            );
-            assert_eq!(
-                check.fix.is_some(),
+                fix.is_some(),
                 !expected_ok,
                 "a remedy must appear exactly when the check fails"
             );
@@ -3502,40 +3708,70 @@ mod tests {
     }
 
     /// A network fetch is planned and printed, and never run.
+    ///
+    /// # Why the plan is fetched here rather than probed
+    ///
+    /// The earlier version called `fix_for("wasm-target", true)` and returned
+    /// early when it produced `None` — so on a machine without `rustup` the test
+    /// silently passed without exercising anything, which is the "test that
+    /// cannot fail" shape this section exists to avoid. The plan is built from
+    /// the branch under test and asserted non-`None` first, and the no-rustup
+    /// case asserts the *other* branch rather than returning.
+    /// A network fetch is planned and printed, and never run.
+    ///
+    /// # Why the plan is built here rather than probed
+    ///
+    /// The earlier version called `fix_for("wasm-target", true)` and returned
+    /// early when it produced `None` — so on a machine without `rustup` the test
+    /// silently passed without exercising anything, which is the "test that
+    /// cannot fail" shape this section exists to avoid. The plan is built from
+    /// the branch under test and asserted non-`None` first, and the no-rustup
+    /// case asserts the *other* branch rather than returning.
     #[test]
     fn target_install_is_planned_but_not_run() {
-        // Pin the probe to "absent" so the check fails deterministically, then
-        // drive the real plan builder.
-        std::env::set_var("QQQ_TEST_WASM_TARGET_PRESENT", "0");
-        let checks = run_doctor();
-        std::env::remove_var("QQQ_TEST_WASM_TARGET_PRESENT");
-        let outcome = apply_fixes(&checks, true);
-        let Some(plan) = fix_for("wasm-target", true) else {
-            // No rustup on this machine: the skip path is the other branch and
-            // is covered by `fix_accounts_for_every_failing_check`.
-            return;
-        };
+        let plan = fix_for("wasm-target", true).expect("rustup present must yield a plan");
         assert_eq!(plan.command, "rustup target add wasm32-wasip2");
         assert!(
-            outcome
-                .planned
-                .iter()
-                .any(|l| l.ends_with(&format!("`{}`", plan.command))),
-            "the plan must name the command that would run: {:?}",
-            outcome.planned
+            plan.reaches_network,
+            "installing a toolchain component reaches the network, and that is \
+             what makes it non-automatic"
         );
-        assert!(
-            !outcome.applied.iter().any(|l| l.contains("target add")),
-            "a network fetch must never be applied automatically"
-        );
-        assert!(
-            outcome
-                .skipped
-                .iter()
-                .any(|l| l.contains("toolchain component")),
-            "the skip must be explained: {:?}",
-            outcome.skipped
-        );
+
+        let checks = vec![Check {
+            name: "wasm-target",
+            ok: false,
+            detail: format!("the {WASM_TARGET} target is not installed"),
+            fix: Some(format!("run `rustup target add {WASM_TARGET}`")),
+        }];
+        let outcome = apply_fixes(&checks, true);
+        if rustup_on_path() {
+            assert!(
+                outcome
+                    .planned
+                    .iter()
+                    .any(|l| l.ends_with(&format!("`{}`", plan.command))),
+                "the plan must name the command that would run: {:?}",
+                outcome.planned
+            );
+            assert!(
+                !outcome.applied.iter().any(|l| l.contains("target add")),
+                "a network fetch must never be applied automatically"
+            );
+            assert!(
+                outcome
+                    .skipped
+                    .iter()
+                    .any(|l| l.contains("toolchain component")),
+                "the skip must be explained: {:?}",
+                outcome.skipped
+            );
+        } else {
+            assert!(
+                outcome.skipped.iter().any(|l| l.contains("wasm-target")),
+                "with no rustup the failing check must still be named: {:?}",
+                outcome.skipped
+            );
+        }
     }
 
     /// A flag `doctor` does not accept must be refused, not ignored.

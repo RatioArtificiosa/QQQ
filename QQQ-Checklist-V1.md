@@ -1046,7 +1046,14 @@ Items are grouped below by **phase**, because dependency order matters more than
     dropped), and an exposition-format test that checks every sample line is
     `name value` with exactly one space and every family has both HELP and TYPE.
   → §10.2 Metrics that ship by default
-- [ ] **HOST-020** Write the Wasmtime upgrade runbook and the compatibility-test suite.
+- [x] **HOST-020** Write the Wasmtime upgrade runbook and the compatibility-test suite.
+  → Done, both halves. **Runbook:** `docs/wasmtime-upgrade-runbook.md` — ten steps, each naming its evidence and what a failure looks like, scoped against `R-03`. It distinguishes the *planned* upgrade from the CVE path (`docs/wasmtime-advisory-process.md`, `SEC-014`), because a scheduled bump has no 72-hour clock and the dangerous upgrades are the ones that **pass**.
+  → **Suite:** `crates/qqq-host/tests/compatibility.rs`, 6 rows. It traps real components on a real engine, takes the **actual** message, and asserts both that `classify_trap` maps it to the documented code *and* that the message still contains the substring the classifier keys on. The second assertion is the load-bearing one: it fails naming the vanished key.
+  → **The gap it closes.** `classify_trap` matches substrings of Wasmtime's error text, so a reword silently drops a trap to its default code. Every existing unit test fed it a **hand-written** string, and `tests/engine.rs` asserted `contains("fuel") || contains("all fuel")` — a disjunction of known wordings, written to survive a reword and therefore unable to detect one.
+  → Rows: fuel (`QQQ-3002`), epoch (`QQQ-3003`, the sharpest — Wasmtime's epoch message is a bare `interrupt` with no domain word to anchor on), `unreachable` (`QQQ-3006`), out-of-bounds, the limit-versus-bug distinction, and a version tripwire.
+  → **Fault-injected**: changing the classifier's key to `trap: interruption` (what a reword looks like from this side) fails exactly 1 row; restored byte-for-byte with a hash check and a clean `git status`.
+  → **Verified**: all 6 rows execute under CI's exact `cargo test --workspace --all-features` — confirmed by listing the discovered tests, not assumed. Gate clean at `4eeab7d`: 2415 workspace tests (was 2409), 57 guest tests.
+  → **Limits stated, not implied**: the suite covers five failure modes, not every trap Wasmtime can produce, and a refused `memory.grow` is not a trap at all, so that row asserts a classification against a synthetic string rather than trapping a real engine. Both recorded in the runbook.
   → §15 — Risk Register
 - [x] **HOST-021** Implement the module-preloading strategy for scale-out (compile on deploy, not on first request).
   → Done: `crates/qqq-host/src/preload.rs` — `preload(items, limits, engine_config,

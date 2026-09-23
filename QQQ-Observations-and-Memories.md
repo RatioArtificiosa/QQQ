@@ -13812,9 +13812,153 @@ link is what lets a future reader disagree.
 
 → `QQQ-Checklist-V1.md` (`PERF-002`, `CLI-013`).
 
+### O-172: the compatibility suite found three bugs — two in my expectations, one in the shared test engine
+
+`HOST-020`'s suite exists to catch a **silent** Wasmtime reword. It caught three
+things on its first two runs, and none of them was upstream's fault. That is the
+good outcome: a test written to find a subtle class of bug found three, and all
+three were mine.
+
+#### Finding 1 — every row was measuring the epoch, not its own failure
+
+First run output, all four rows:
+
+```
+[fuel] the engine's message no longer contains any of ["fuel"]
+Actual message: ... 0: 0x2c - m!<wasm function 0>: wasm trap: interrupt
+```
+
+`wasm trap: interrupt` is the **epoch** trap. The shared `engine()` helper enabled
+`epoch_interruption(true)` and never armed a deadline, and
+`qqq-host::admission` states the consequence in one line:
+
+> A deadline of 0 traps at the first tick
+
+So the default deadline of 0 preempted every call *before* it could reach the
+failure each test was written to provoke. Four tests were measuring the same wrong
+thing.
+
+**What saved it** was that each row asserts the *message key* as well as the code.
+A suite that asserted only `classify_trap(msg) == expected` would have passed on
+the wrong failure for the epoch row and failed confusingly on the other three. The
+key assertion turned a design flaw into a precise diagnosis.
+
+Fix: an `EngineFeatures` struct with `fuel` and `epochs` as named, per-row flags.
+Epochs are opt-in; only the epoch row asks for them. The generalisable rule is
+worth stating plainly — **a shared test fixture that enables a feature nobody asked
+for is a silent change to what every test in the file measures.**
+
+#### Finding 2 — I asserted `GuestTrap` where the taxonomy says `GuestPanic`
+
+```
+[unreachable] the engine's real message mapped to the wrong code.
+left: GuestPanic
+right: GuestTrap
+```
+
+`trap.rs`'s own module table names this case on line 17 — *"Guest panic
+(`unreachable` from a panic path)"* — and its unit test
+`wasmtime_unreachable_classifies_as_guest_panic` already asserted it. I wrote
+`GuestTrap` from memory of what the category is called, not from reading the code.
+
+This is `§O-166` again, one round later and in a new place: **a fact recalled
+rather than read.** The difference is that this time a test caught it within
+seconds, because the assertion names the exact code instead of `is_err()`.
+
+#### Finding 3 — the helper documented to require a trap was given a non-trapping guest
+
+```
+this component exists to trap: (0,)
+```
+
+A refused `memory.grow` returns **-1 inside the guest**; it does not fault. My
+memory-hog component therefore returned `Ok` and the `expect_err` panicked.
+
+The row had a comment claiming the component "exists to trap". That comment was
+false, and the failure is the best kind: the helper's own documentation was the
+thing that disagreed with reality. The row now asserts the *real* outcome (no
+trap) and checks the classification of a limit message directly, and the runbook
+records that this row does not trap a real engine — because otherwise "the row
+passes" reads as "a real engine was trapped".
+
+### The fault injection, and why the second assertion is the load-bearing one
+
+Injected into `classify_trap`:
+
+```text
+if d.contains("trap: interrupt")   ->   if d.contains("trap: interruption")
+```
+
+That is precisely what an upstream reword looks like from this side: the
+classifier keeps the old text, the engine emits the new one, and the code falls
+through to a default.
+
+```
+1. baseline         ok. 6 passed
+2. injected         FAILED. 5 passed; 1 failed
+3. restore          hash match: True | git clean: True
+5. no marker        True
+```
+
+**One** row failed — the epoch row, which is the one whose key changed. A suite
+where a single edit failed every row would be proving nothing about the mapping.
+
+The design point worth keeping: the row asserts (a) the real message maps to the
+documented code, and (b) the real message still contains the key the classifier
+matches. Assertion (a) says *the taxonomy is right today*. Assertion (b) says
+**why** it is right, and fails naming the key that vanished. Without (b), an
+upgrade that reworded a message into something matching a *different* branch would
+silently reclassify — (a) would fail, but with no clue which side moved.
+
+→ `crates/qqq-host/tests/compatibility.rs`, `docs/wasmtime-upgrade-runbook.md`;
+`.scratch/{inject_host020,check_compat_discovery}.py`; commit `4eeab7d`.
+
+---
+
+### O-173: the write tool failed four times in one round, and each time the fix was the same
+
+Across this round the file-writing tool reported success and produced **no file**
+four separate times:
+
+| Attempt | Reported | Reality |
+|---|---|---|
+| `diag_version.py` | Created file | absent |
+| `fix_expectations.py` | Created file | absent (`FILE NOT WRITTEN` on the very next command) |
+| `docs/wasmtime-upgrade-runbook.md` | Created file | absent |
+| `.scratch/msg-host020.txt` | Created file | absent — `git commit -F` then failed on a missing path |
+
+Two of these were **only** caught because the next command tested for the file
+first (`Test-Path`) instead of assuming it existed. A `git commit -F` on a missing
+message file fails visibly, but a `python script.py` on a missing script fails with
+"can't open file", which reads like a path typo rather than a lost write.
+
+The pattern that works, applied every time:
+
+```text
+write the file  ->  Test-Path  ->  only then use it
+```
+
+This is invariant eight — *verify every file write by reading it back* — and the
+round is evidence for why it is a rule rather than a habit. Every one of these four
+would have been a silently missing deliverable in a commit: the runbook and the
+commit message are exactly the kind of artefact where "I wrote it" and "it is
+there" diverge.
+
+One more failure mode from the same round, worth separating: an **edit** to
+`fix_version_test.py` also silently did not land, so the script kept running its
+*old* guard and aborting with a stale message. A tool-level failure and a
+stale-artifact failure look identical from the outside — both present as "the
+logic I just changed had no effect". The remedy is the same in both cases: read
+the file back and check the *content* changed, not merely that the call returned
+without error.
+
+→ recorded because a future agent will hit this and needs to know the first
+hypothesis is "the write did not happen", not "my code is wrong".
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

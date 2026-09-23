@@ -16017,6 +16017,69 @@ they diverge are cheap to find this way and expensive to find by reading the cod
 
 ---
 
+## §O-198 The container guard ran, the commit is green on all eleven jobs, and reuse of the golden corpus is measured
+
+**`§O-196`'s owed item is closed.** The scratch-copy line-ending guard was added to
+`docker/entrypoint.sh` and had not been executed when it was committed. It has now run
+inside a full `cmd_checks`:
+
+    committed content is LF; working tree matches
+       the self-tests leave the tree with LF, in a scratch copy of HEAD
+    corpus is clean: no fault injection is applied
+    committed content is LF; working tree matches
+
+The run exited **0 in 5388 s** (about 90 minutes), bigger than the 5328 s `§O-195`
+measured, because the guard runs eight extra in-process self-tests plus a second
+`normalize_eol` pass over a copied tree. The window between the two steps is narrow: a
+line from `audit_requirements` ("13 ++++") appeared in a gate log with essentially no gap
+before it in the captured text, so anything added here must be justified by a defect it
+catches -- this one is, and the two `normalize_eol` passes are the first and last steps
+of the guard, which is the point of running it in one shell.
+
+**Afterwards, the tree is exactly the commit.** `git status --porcelain` empty,
+`git diff --numstat` empty, `normalize_eol.py --check` "committed content is LF",
+`self_test_xrefs.py --check-clean` "corpus is clean". The bridge mutates the corpus and
+the corpus is clean when it returns, which is the property `§O-193` and `§O-195` are
+about.
+
+**CI on `01ce32d` is green on every job** -- run **35882116361**, `success`:
+
+| Job | Result |
+|---|---|
+| Reference application (SRV-018) | success |
+| WIT interface validation | success |
+| Rust (ubuntu-latest) | success |
+| Rust (windows-latest) | success |
+| Rust (macos-latest) | success |
+| Supply chain | success |
+| Production image (SEC-029) | success |
+| Cross-reference integrity | success |
+| Line endings | success |
+| Fuzz targets compile | success |
+| MSRV (1.97) | success |
+| DCO | skipped (pull_request only, as designed) |
+
+`Line endings` green matters more than usual here: the commit converts twenty-nine
+`write_text` call sites to a byte-faithful writer, so a mistake in that conversion would
+have shown up as a CRLF file in the one job that checks for it.
+
+**Reuse of the golden corpus, measured rather than assumed.** The observation count moved
+15875 -> 15975 and the checklist's opening-marker total did not move, because `§O-196`,
+`§O-197` and this entry are *reuse* rather than extension: the commit adds no checklist
+item and cites the two implemented items `§O-196` compares (`SRV-020`, `CON-009`). If a
+later commit needs to add or close an item, the marker total must move with it -- that is
+the check to run, and `check_checklist_counts.py --self-test` is the one that proves the
+arithmetic.
+
+**One claim from `§O-197` is unverified and stays flagged.** The `qqq-host` linker's
+`QQQ-STUB(CON-009)` doc comment was reported as naming `GrantSet::allows` at call time.
+Recorded from a cross-check of the three citations, not from an executed read of the file
+in this round. Verify it before acting on it.
+
+**Files:** none -- a verification record.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

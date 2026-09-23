@@ -92,6 +92,19 @@ fuzz/target/
 # reference app should pin, while `target/` is the output of applying it.
 examples/orders-api/target/
 
+# The mutating corpus harness's exclusive lock (`tools/self_test_xrefs.py`).
+#
+# Ignored because it is a **transient claim on a running process**, not project
+# content: it is created at the start of `main()`, removed on every exit path, and it
+# names a PID that is meaningless in any other checkout. A `SIGKILL` or a container
+# stop can leave it behind, and the file is designed for exactly that — the next run
+# reads the PID, finds it gone, and reclaims the lock with a message.
+#
+# Committing it would be the `target/` mistake in miniature: a stale artifact stored as
+# truth, and one that would make the harness refuse to run for whoever pulled it. See
+# `§O-193` for the two overlapping mutators that made the lock necessary.
+.self_test_xrefs.lock
+
 # Crash artifacts. These are deliberately NOT committed: libFuzzer names them
 # `crash-<hash>` and their content is the bug, so the correct destination is a
 # **corpus entry** in `crates/*/tests/fuzz_corpus.rs` — which is the promotion

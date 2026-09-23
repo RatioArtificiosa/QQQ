@@ -15760,6 +15760,119 @@ exercised.
 
 ---
 
+## §O-193 The leftover repair was partial, and running two mutating harnesses at once added a second
+
+**Found:** running `check_xrefs.py` during the closing ledger audit, which reported
+
+```
+1 ERROR(S):
+  FAIL  [8] Appendix A row A-6 has no matching §C-006 entry in Observations
+```
+
+`§C-006` was gone. `git diff` showed an 11-line uncommitted change in the Observations
+document: `### §C-006 — The "Wasm is near-native" ...` had become
+`### REMOVED — The "Wasm is near-native" ...`.
+
+**That is the harness's own fault injection for check [8]**, and the document records this exact
+situation already -- line 6339 of this file: *"and had renamed `### §C-006 -` to `### REMOVED -` in
+this document. That last one [produced an] error reading 'Appendix A row A-6 has no matching
+`§C-006` entry', which looks like..."*. It had happened before and the entry says so.
+
+**Why the earlier repair missed it: there were two markers, not one.** `§O-191` records repairing
+`QQQ-Proposal-V1.md`, which carried `§REMOVED` (check [10b]). The Observations mutation uses a
+**different marker string** -- `### REMOVED — The "Wasm is near-native"` (check [8]) -- and at the
+time of that repair it was not present, because only one kill had happened. The second kill, from
+the bridge run started afterwards, added the second marker. So the repair was correct for what was
+there and the corpus accumulation continued independently.
+
+**The mistake that made it worse, and it is mine.** I started the bridge again while the earlier
+repair work was still in progress, and `cmd_checks` ends with `self_test_xrefs.py` -- which mutates
+the same three documents. Two mutating harnesses against one corpus is a race with no correct
+outcome, and the observable symptom is exactly what a leftover looks like. The bridge was stopped
+as soon as it was noticed, and the repair was then run alone.
+
+**The rule this establishes, which the bridge does not enforce.**
+`qqqdev checks` must not run concurrently with anything that touches the corpus -- including
+another `qqqdev checks`, another `self_test_xrefs.py`, or an editor writing those files. The
+harness installs `SIGTERM`/`SIGINT` handlers so a *graceful* kill restores; a `SIGKILL` or a
+container stop cannot be caught, which is why the guard exists and why it must be run alone.
+`--check-clean` is the detection half and never writes, so it is safe at any time.
+
+**The repair, and the proof it worked.** The harness reverses both substitutions from its own
+`REVERSALS` table. After it ran: `--check-clean` reports `corpus is clean: no fault injection is
+applied`; `git diff --numstat` for all three documents is **empty** -- no content change and, since
+`§O-192`, no line-ending churn either; and `check_xrefs.py` exits 0 with
+`validation PASSED — corpus is internally consistent`. The heading is `### §C-006 — The "Wasm is
+near-native"...` at line 4613 again.
+
+**A count discrepancy raised while auditing, and resolved.** A quick shell-invoked grep reported
+**184** checked items where the checker and a Python parse both reported **185** (with 399 not
+started and 2 blocked, summing to 586). The authoritative parse agrees with the checker; the
+discrepancy was in the throwaway probe, not in either artifact. Recorded because a one-item
+difference is exactly the kind of thing worth chasing to ground rather than explaining away, and
+here the chase ended in favour of the tool.
+
+**Files:** none -- this is a corpus repair, not a code change.
+
+---
+
+## §O-194 The mutating harness now refuses to run twice at once
+
+**What prompted it.** `§O-193`. A bridge run and a repair run overlapped on the same three
+documents, and the result was `§C-006` renamed to `REMOVED` in the Observations document --
+indistinguishable from document drift, and it cost an audit cycle to trace back to two mutators.
+Nothing in the harness or the bridge prevented it, and the bridge makes it easy: `cmd_checks`
+ends with `self_test_xrefs.py`, so any second `qqqdev checks`, any repair, and any editor writing
+those files is a potential overlap.
+
+**The change.** An exclusive lock taken at the top of `main()`, before anything is read or
+written, released on every exit path. `tools/self_test_xrefs.py` gains `_Lock` and the file
+`.self_test_xrefs.lock`; the second run refuses, naming the owning PID and start time and
+offering two remedies.
+
+**Four design choices, each against an alternative.**
+
+| Chosen | Rejected | Why |
+|---|---|---|
+| `O_CREAT \| O_EXCL` on a lock file | `fcntl.flock` | This harness runs under Linux (the bridge) *and* Windows (the developer). `O_EXCL` is identical on both; `flock` is POSIX-only and `msvcrt.locking` is Windows-only. |
+| The lock sits beside the corpus | The scratch directory | The thing protected is those three files, so the lock must be visible to every process that might edit them -- and the scratch directory is deleted when the goal ends. |
+| A stale lock is reclaimed, by PID | Obey it forever, or ignore it | A `SIGKILL` or a container stop cannot run a handler, so the file outlives its owner. Refusing forever makes the harness unusable; ignoring it is not a lock. The reclaim race is smaller than the corruption it prevents. |
+| `--check-clean` takes no lock | Locking every mode | That mode never writes, and CI calls it. A read-only check that can be blocked by a writer would fail the gate for a reason unrelated to the corpus. |
+
+**`--break-lock` exists** for the case the PID probe gets wrong (a reused PID, or a `tasklist`
+probe that cannot see the owner), so the escape hatch is named in the refusal message rather
+than left to be discovered.
+
+**Verified, and fault-injected.**
+
+* `tools/check_corpus_repair.py` grew four cases, all behavioural: the lock can be taken, the
+  file names the owning pid, a second acquisition is refused **with a message that explains why
+  and names `--break-lock`**, a lock whose pid is gone is reclaimed, and `--break-lock` removes
+  the file. 16/16 pass, including the pre-existing repair cases.
+* The cases exercise the lock at a **temporary path**, never `module.LOCK`, so running the
+  checker cannot disturb a real harness run in this repository -- which would be the `§O-193`
+  mistake reproduced by its own fix.
+* Fault-injected: `O_EXCL` was removed from the open, so the lock silently overwrites an
+  existing one -- the "not a lock at all" defect. The refusal case failed and the checker
+  exited non-zero. **DETECTED**, restored byte-for-byte, and the `O_EXCL` form confirmed back
+  at `self_test_xrefs.py:531`.
+* `.self_test_xrefs.lock` is added to `.gitignore`, with the reason: it is a transient claim on
+  a running process, it names a PID meaningless in another checkout, and committing it would be
+  the `target/` mistake in miniature -- and would make the harness refuse to run for whoever
+  pulled it.
+
+**One guard of mine was wrong while writing this, and it is the third time.** The injection
+script asserted `GOOD.count("") != 1` as a sanity check on the anchor count. `str.count("")`
+returns the string's *length*, so that clause was always true and the script refused on a clean
+baseline. The correct check was `text.count(GOOD)`. The same class as the two wrong assertions in
+`§O-190` and the self-matching comment in `§O-191`: **a guard is code, and a guard that is never
+proven to pass on the good state is as suspect as a test never proven to fail on the bad one.**
+
+**Files:** `tools/self_test_xrefs.py` (`_Lock`, `main()`'s prologue, `_run`),
+`tools/check_corpus_repair.py` (the four cases), `.gitignore`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

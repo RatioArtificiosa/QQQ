@@ -45,6 +45,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+import os
 
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "tools" / "self_test_xrefs.py"
@@ -236,6 +237,67 @@ def _run_cases() -> int:
             target.read_bytes() == dirty_bytes,
             "the commit gate must not edit the corpus",
         )
+
+    # --- the exclusive lock, which is what stops two mutators overlapping ------
+    #
+    # §O-193: a second harness run started while a repair was in progress, restored the
+    # first run's injection mid-flight, and left `§C-006` renamed to `REMOVED` in the
+    # Observations document -- which read as document drift and cost an audit cycle to
+    # trace. A lock is the fix, and a lock that is never exercised is the kind of
+    # control this project has been burned by before.
+    #
+    # The lock is taken at a **temporary path**, never `module.LOCK`, so running this
+    # checker cannot disturb a real harness run.
+    with tempfile.TemporaryDirectory(prefix="qqq-repair-lock-") as td:
+        lock_path = Path(td) / "harness.lock"
+
+        first = module._Lock(lock_path)
+        try:
+            got_first = first.acquire()
+            check("the harness lock can be taken", got_first is True)
+            check("the lock file exists while held", lock_path.exists())
+            check(
+                "the lock file names the owning pid",
+                f"pid={os.getpid()}" in lock_path.read_text(encoding="utf-8"),
+                f"the file reads {lock_path.read_text(encoding='utf-8')!r}",
+            )
+
+            # Capture stderr: `acquire` explains the refusal there, by design.
+            import contextlib
+            import io
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                got_second = module._Lock(lock_path).acquire()
+            check(
+                "a second acquisition is refused while the lock is held",
+                got_second is False,
+                "two mutators could run at once, which is the §O-193 defect",
+            )
+            check(
+                "the refusal explains why, and names a way forward",
+                "cannot overlap" in err.getvalue() and "--break-lock" in err.getvalue(),
+                f"the message was {err.getvalue()!r}",
+            )
+        finally:
+            first.release()
+        check("the lock file is gone after release", not lock_path.exists())
+
+        # A pid that cannot be running: both platforms cap far below this.
+        lock_path.write_text("pid=999999999 started=1970-01-01T00:00:00", encoding="utf-8")
+        third = module._Lock(lock_path)
+        try:
+            check(
+                "a lock whose process is gone is reclaimed",
+                third.acquire() is True,
+                "a stale lock must not make the harness permanently unusable",
+            )
+        finally:
+            third.release()
+
+        lock_path.write_text("pid=1 started=1970-01-01T00:00:00", encoding="utf-8")
+        module._Lock(lock_path).break_lock()
+        check("--break-lock removes the lock", not lock_path.exists())
 
     # --- the real documents must be byte-identical to before -------------------
     #

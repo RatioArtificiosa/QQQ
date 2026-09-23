@@ -40,6 +40,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+import os
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECK = ROOT / "tools" / "check_xrefs.py"
@@ -496,11 +498,153 @@ def check_clean_only() -> int:
     return 1
 
 
+LOCK = ROOT / ".self_test_xrefs.lock"
+
+
+class _Lock:
+    """An exclusive marker that only one mutating harness run may hold.
+
+    # Why a lock file and not `flock`
+
+    `O_CREAT | O_EXCL` behaves the same on Windows and Linux, and this harness runs on
+    both: the bridge runs it under Linux and a developer runs it under Windows. `flock`
+    is POSIX-only; `msvcrt.locking` is Windows-only.
+
+    # Why a stale lock is reclaimed rather than obeyed
+
+    A `SIGKILL` or a container stop cannot run a handler, so the file outlives its owner.
+    A lock that refuses forever would make the harness permanently unusable, and one that
+    is ignored is not a lock. So the file carries the owner's PID, a lock whose PID is
+    gone is reclaimed with a message, and the reclaim race is accepted as smaller than
+    the corruption it prevents.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.held = False
+
+    def acquire(self) -> bool:
+        """Take the lock, or report that a live run holds it."""
+        if self._reclaim_if_stale():
+            pass
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            owner = self._owner()
+            print(
+                f"FATAL: another harness run holds the corpus ({owner}).\n"
+                f"  The lock is {self.path.name}. It mutates the three documents, so two\n"
+                f"  runs cannot overlap: the second would restore the first's injection\n"
+                f"  mid-flight and leave the corpus in a state that reads as document\n"
+                f"  drift (\u00a7O-193).\n"
+                f"  Wait for the other run, or, if it is gone, run with `--break-lock`.",
+                file=sys.stderr,
+            )
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(self._describe())
+        self.held = True
+        return True
+
+    def _describe(self) -> str:
+        return f"pid={os.getpid()} started={time.strftime('%Y-%m-%dT%H:%M:%S')}"
+
+    def _owner(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8").strip() or "unknown owner"
+        except OSError:
+            return "unreadable lock file"
+
+    def _pid_alive(self, pid: int) -> bool:
+        """Whether `pid` is a live process. Best-effort and platform-split.
+
+        On POSIX, signal 0 asks the kernel whether the process exists without
+        delivering anything. On Windows there is no such probe without a handle, so
+        `tasklist` output is the check; if that fails the lock is treated as live,
+        which errs toward refusing rather than toward two mutators.
+        """
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            try:
+                out = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                    capture_output=True, text=True, timeout=15, check=False,
+                ).stdout
+                return str(pid) in out
+            except (OSError, subprocess.SubprocessError):
+                return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _reclaim_if_stale(self) -> bool:
+        if not self.path.exists():
+            return False
+        owner = self._owner()
+        pid = 0
+        for part in owner.split():
+            if part.startswith("pid="):
+                try:
+                    pid = int(part[4:])
+                except ValueError:
+                    pid = 0
+        if pid and self._pid_alive(pid):
+            return False
+        print(
+            f"note: reclaiming a stale harness lock ({owner}); its process is gone.",
+            file=sys.stderr,
+        )
+        try:
+            self.path.unlink()
+        except OSError:
+            return False
+        return True
+
+    def break_lock(self) -> None:
+        """Remove the lock unconditionally, for `--break-lock`."""
+        try:
+            self.path.unlink()
+            print(f"broke the lock at {self.path}", file=sys.stderr)
+        except OSError as e:
+            print(f"could not remove {self.path}: {e}", file=sys.stderr)
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        self.held = False
+
+
 def main() -> int:
     # `--check-clean` is the commit gate: report only, change nothing.
     if len(sys.argv) > 1 and sys.argv[1] == "--check-clean":
         return check_clean_only()
+    if len(sys.argv) > 1 and sys.argv[1] == "--break-lock":
+        _Lock(LOCK).break_lock()
+        return 0
 
+    # **One mutator at a time.** This harness rewrites the three real documents, and a
+    # second run overlapping the first restores an injection mid-flight and leaves a
+    # corpus that reads as document drift (`\u00a7O-193`: `\u00a7C-006` renamed to `REMOVED` by
+    # one run while a repair was in progress in another).
+    lock = _Lock(LOCK)
+    if not lock.acquire():
+        return 1
+    try:
+        return _run(lock)
+    finally:
+        lock.release()
+
+
+def _run(lock: _Lock) -> int:
     # Install the signal handlers FIRST, so a timeout during any later step still
     # restores. `SIGKILL` cannot be caught, which is why the check below exists.
     for sig in (signal.SIGTERM, signal.SIGINT):

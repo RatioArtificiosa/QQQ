@@ -1742,11 +1742,24 @@ fn stop_after_the_bound(
 ///    server as little as possible, and the body is the part a client controls the size of.
 ///    A check after the body was read has already paid for the thing the cap exists to
 ///    prevent.
-/// 2. **Both gates run before `serve_special_route`.** A preflight, an upgrade and a stream
-///    are each a way of committing the connection to something, so granting any of them to a
-///    route the manifest refused would let a caller reach a handler the manifest said no to.
-///    A CORS preflight for a denied route is refused, deliberately — the policy is about
-///    whether the route is served at all, and CORS is about who may read the answer.
+/// 2. **Both gates run before `serve_special_route`**, for the upgrade and stream branches.
+///    Each is a way of committing the connection to something, so granting either to a route
+///    the manifest refused would let a caller reach a handler the manifest said no to.
+///
+///    **A preflight is the exception, and this doc said otherwise until §O-188.**
+///    `serve_special_route` answers an `OPTIONS` request naming
+///    `access-control-request-method` from the *path* alone, before `table.match_route` is
+///    called at all -- deliberately, because a browser is asking *about* the path rather
+///    than calling it, and a `404` would make the browser refuse a request the server would
+///    serve. So a preflight is answered for a path whose route is denied, and for a path
+///    with no route at all. The claim that a denied route's preflight is refused was stated
+///    as policy and was never what the code did.
+///
+///    **That is not a bypass**, and the reason is worth stating precisely: the preflight
+///    carries no body and reaches no handler, and the actual request that follows it passes
+///    through this function like any other, so the auth gate still decides whether the route
+///    is served. What a preflight discloses is that a path is *considered* by the route
+///    table, which a `404` on a real request already discloses.
 /// 3. **A path that matches no route is not refused here.** It is a 404 from the dispatcher,
 ///    and answering 403 for it would tell an unauthenticated caller which paths exist.
 ///
@@ -2204,7 +2217,11 @@ async fn read_head(
 ///
 /// That is `§O-045a`'s shape a third time: a documented invariant, a call order that
 /// contradicted it, and no test that could tell the two apart. The order is now the one
-/// the paragraph describes, and `tests/stream.rs` drives it.
+/// the paragraph describes, and two tests drive it:
+/// `a_streaming_route_does_not_read_the_request_body` and its control, both in
+/// `tests/streaming_route.rs`. The control matters because the streaming handler ignores
+/// the body, so "the body was not read" is only observable against a route that is not
+/// streaming — which the first version of this comment did not say.
 async fn drain_body(
     stream: &mut TcpStream,
     buf: &mut Vec<u8>,

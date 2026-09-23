@@ -458,6 +458,26 @@ pub fn filter_tests(tests: &[DiscoveredTest], filter: Option<&str>) -> Vec<Disco
 /// `NONDETERMINISTIC: 1 of 2 test(s) produced different output across 3 trials`.
 /// A determinism check that fires on a stable suite is worse than no check,
 /// because it teaches the reader to ignore the one signal it exists to give.
+///
+/// # Why `--test-threads 1`
+///
+/// Because libtest's default is *as many threads as the machine has cores*, and a
+/// default that depends on the machine makes the measurement depend on the machine.
+/// A trial here runs one test, but a test binary's `#[cfg(test)]` modules share
+/// process state -- a `OnceLock`-cached store, a global counter -- and tests in the
+/// same binary can still be started concurrently by that default. A suite that is
+/// deterministic under one core and not under sixteen is not deterministic.
+///
+/// Found rather than reasoned about: the reference application's own suite failed
+/// **once**, in a detached-worktree run, with
+/// `the_store_refuses_a_write_at_its_cap_rather_than_evicting` reporting that the
+/// store accepted every write up to `MAX_ORDERS + 16`. That test holds a serial
+/// guard and resets the store, but it *had 22 seconds* of work to do while the
+/// rest of the binary ran, and `cargo test` on the default thread count is entitled
+/// to start 57 tests at once. It has not reproduced in five runs since -- the
+/// honest record is one failure in eight runs, unreproduced, with the mechanism
+/// identified and the fix verified by reading rather than by catching it again
+/// (`\u00a7O-188`).
 fn run_once(project_dir: &Path, program: &str, run_args: &[&str], name: &str) -> (bool, String) {
     let output = Command::new(program)
         .args(run_args)
@@ -465,6 +485,8 @@ fn run_once(project_dir: &Path, program: &str, run_args: &[&str], name: &str) ->
         .arg("--")
         .arg("--exact")
         .arg("--nocapture")
+        .arg("--test-threads")
+        .arg("1")
         .current_dir(project_dir)
         .output();
 

@@ -2473,6 +2473,8 @@ Items are grouped below by **phase**, because dependency order matters more than
     again; the rows that remain are the ones CI enforces (`audit_unsafe.py` exits
     non-zero on any code-position `unsafe`, and the workspace lints carry
     `forbid(unsafe_code)` in all 11 crate roots). Measured in `§O-186`.
+
+### ABI — WIT packages
   → **A zero that appears for the wrong reason is worse than a non-zero, because it
     looks like an achievement.** Two explanations were distinguished rather than
     assumed:
@@ -2894,9 +2896,12 @@ Items are grouped below by **phase**, because dependency order matters more than
   → **`None` means unlimited; zero means the smallest limit, and the two fields differ**: a zero **body** cap accepts an empty body and rejects any non-empty one, while a zero **request** cap rejects every request. They are deliberately different values from `None` because a limit of zero is almost never what an operator meant, and making them distinguishable turns that mistake into a visible violation rather than silent non-enforcement (`§O-128`).
   → **The window is a caller-supplied monotonic instant, not a timer** — a background task resetting counters would be a second authority on time, and the connection state machine is already the first. It also makes the limiter a pure function of `(tenant, now)`, testable without sleeping. `check_and_record` consumes the allowance as a side effect, because a separate `check` and `record` would let a caller check without recording — a limiter that never limits (`§O-130`).
   → **Measured**: 15 limit tests + 2 fault injections, both reproducing (an off-by-one using `>` for `>=` fails five tests; one shared window instead of per-tenant fails exactly the isolation tests and would present in production as one busy client throttling everybody). Workspace **2113 passed, 0 failed**, run **three times consecutively**.
-  → **Still not wired**: `TenantLimits` is not constructed from a manifest, and `serve_connection` does not consult it. The limits are correct and **unapplied**, and `SRV-020` stays open until they are. The per-tenant *connection* ceiling was already enforced by `ConnectionLedger`.
+  → **Still not wired** (at the time of writing; **superseded on 2026-09-22** by the
+    update below, which is why this line is kept rather than deleted): `TenantLimits`
+    is not constructed from a manifest, and `serve_connection` does not consult it. The
+    limits are correct and **unapplied**, and `SRV-020` stays open until they are. The
+    per-tenant *connection* ceiling was already enforced by `ConnectionLedger`.
 
-### ABI — WIT packages
 
 
   → **2026-09-22 — the limits are wired, and the per-tenant key was wrong.** Two fixes, both

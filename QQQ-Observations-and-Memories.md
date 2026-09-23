@@ -14522,7 +14522,33 @@ existed. **A generator checked only against its own output cannot be caught bein
 
 ---
 
-## O-183 - The guest could write into the host's own audit stream
+## §O-182 - A number I left out, filled rather than reused
+
+**Written:** 2026-09-22, after an external reviewer noticed that `§O-183` follows
+`§O-181` with no `§O-182`.
+
+**What happened.** The sequence skipped a number. `§O-181` ends at the line above
+`§O-183` begins, and nothing in the document ever claimed `§O-182`; the next entry
+written simply took 183. The likeliest cause is that 182 was drafted in a session and
+the draft was lost to a compaction before it was appended -- the same mechanism this
+document exists to survive -- but that is a guess and is recorded as one.
+
+**Why it is filled rather than renumbered.** Renumbering 183-187 downwards would
+change five anchors that are already cited from the checklist, from commit messages
+and from four other entries in this document. Observation numbers are the document's
+stable identifiers, so the hole is cheaper than the cascade. Leaving it blank was the
+alternative and it is worse: a reader who counts the sequence cannot tell a dropped
+number from a lost entry, and the second is the failure this document is here to
+prevent.
+
+**Nothing is reconstructed here.** No content is invented for 182. This entry records
+that the number is accounted for and why it holds no findings, which is the only thing
+that can be said without fabricating a record.
+
+---
+
+
+## §O-183 - The guest could write into the host's own audit stream
 
 **Found by:** the ultra-audit of 2026-09-22 (`O-180` finding 1). **Fixed and verified:** same
 day. **Checklist anchors:** `HOST-017` (the WASI context), `SRV-013` (the access record),
@@ -14700,7 +14726,7 @@ escaping fails the second. Neither covers the other's half, and both statements 
   `signed-request` refuse rather than serve, and `--tls` refuses rather than reporting TLS on.
 
 
-## O-184 - The streaming route that buffered its body, and documented that it did not
+## §O-184 - The streaming route that buffered its body, and documented that it did not
 
 **Found by:** the ultra-audit of 2026-09-22 (`O-180` finding 4). **Fixed and verified:** same
 day. **Checklist anchors:** `SRV-004` (a cap, not a buffer), `SRV-005`
@@ -14793,7 +14819,7 @@ green. All 27 `tools/check_*.py` checkers pass.
   `qqqai run` shows for an app's own `println!`. Correct, and worth knowing before it surprises
   someone reading a log for the first time.
 
-## O-185 - `per_tenant` was keyed by a name nothing produces
+## §O-185 - `per_tenant` was keyed by a name nothing produces
 
 **Found by:** the ultra-audit of 2026-09-22 (audit `C-004`, `O-180` finding 3). **Fixed and
 verified:** same day. **Checklist anchors:** `SRV-020` (the body cap), `SRV-019` (the limits),
@@ -14904,7 +14930,7 @@ the `CLASSES` de-duplication in `§O-181`) and `docs/unsafe-audit.md` (5 KB, now
 file count was corrected from 85 to 141) — and were regenerated too. That staleness is why CI
 was red on `llms.txt`, and the fix is the regeneration, not a rule change.
 
-## O-186. The gate's four red steps: three were real, one was the harness passing an argument the tool never defined
+## §O-186 - The gate's four red steps: three were real, one was the harness passing an argument the tool never defined
 
 **Found:** 2026-09-22, running `{SCRATCH}\gate.ps1` as ONE sequence (invariant ONE) after the
 last edit of the C-004 / O-185 round. The gate took 516 s and exited 1 with four steps red:
@@ -15080,7 +15106,7 @@ how the `serve_special_route` / `drain_body` ordering was broken in O-184.
   list of eight cases, which is the defect the checker exists to catch, in the checker.
 - The gate script no longer asks a checker for a mode it does not define.
 
-## O-187. The corpus validator had no self-test, then had two, then had one that covers what neither had
+## §O-187 - The corpus validator had no self-test, then had two, then had one that covers what neither had
 
 **Found:** 2026-09-22, running the plan's verification step 1 and then the gate. `check_xrefs.py`
 is the validator of the Proposal / Checklist / Observations graph - the one checker whose false
@@ -15224,6 +15250,139 @@ The gate now runs `self_test_xrefs.py --check-clean` and `self_test_xrefs.py`, m
 steps. It had been running neither, while `audit_requirements.py` required the harness - so the
 gate was trusting a check it never performed, and the failures it would have caught were reachable
 only by running a different checker.
+
+## §O-188 - The external review found four real defects, one of them in the file that guards the other three
+
+**How the review was run.** CodeRabbit CLI 0.7.8, account `RatioArtificiosa`, Advanced plan,
+current billing period (resets 2026-10-21), 12 reviews used. The invocation is the one the
+skill records for a single-branch repository:
+
+```
+coderabbit review --agent --light --committed --base-commit 4e4c777
+```
+
+`--base-commit` is required here: with `main` as the only branch, `--committed` diffs the
+branch against itself and returns `review_skipped`. Base `4e4c777` is the commit the goal
+started from, so the review covers everything this goal has produced.
+
+**The coverage evidence, not the impression of coverage.** CodeRabbit's own output reports
+`outcome: completed`, no `unreviewedFileCount`, and **34 reviewed files**. The abnormal
+branch was on `.github/workflows/ci.yml` and the Obs/Checklist documents; the abnormal
+branch is not a failure. Twelve findings: 1 major, 11 minor. Four were reproduced as real
+defects; eight are recorded below with the reason each was declined or deferred.
+
+### The four that were real
+
+**1. `send` documented a policy refusal that is really "nothing is implemented".** This is
+the worst of the four, because `wit/qqq-http.wit` **is** the contract. `send`'s `# Errors`
+said `host-not-allowed` fires "when the destination is outside the manifest's allowlist",
+while forty lines further down the same file states that `send` has no transport and
+refuses *unconditionally*. Two paragraphs of one contract disagreeing means a caller
+cannot tell "the allowlist refused this" from "nothing exists", and the first reading is
+the one a reader would act on. Corrected to say the refusal is unconditional, that it says
+nothing about policy, and that the allowlist becomes the reason once a transport lands.
+
+**2. `refuse_before_reading`'s doc claimed a check that does not exist.** It said *"A CORS
+preflight for a denied route is refused, deliberately"*. `serve_special_route` answers an
+`OPTIONS` request naming `access-control-request-method` from the **path alone**, before
+`table.match_route` is called at all -- so a preflight is answered for a denied route and
+for a path with no route whatsoever. The sentence was written as policy and was never what
+the code did.
+
+It is **not** a bypass, and the replacement says why rather than leaving it implied: the
+preflight carries no body, reaches no handler, and the real request that follows passes
+through the auth gate like any other. What it discloses is that a path is considered by
+the route table -- which a `404` on a real request already discloses. But a false sentence
+in a security-adjacent doc comment is worse than a missing one, because the next reader
+cites it as evidence of a check. Same class as `§O-184` and `§O-045a`.
+
+**3. Five observations were written as top-level sections.** O-183 to O-187 used `## `,
+where sixteen earlier entries use `### O-NNN`. A level-2 heading mid-document is a
+top-level section: they rendered beside `## 3. OBSERVATIONS` and `## 9. CHANGE LOG`
+instead of inside the observations. All five corrected to `## §O-NNN`, which is the form
+the later block (`§O-140` onward) uses.
+
+**4. `§O-182` was never written.** `§O-181` ends and `§O-183` begins with no number
+between them. Filled rather than renumbered: 183-187 are cited from the checklist, from
+commit messages and from four other entries, and observation numbers are the document's
+stable identifiers, so the hole is cheaper than the cascade. The entry records only that
+the number is accounted for -- **no content is invented for it**, because a fabricated
+record is worse than a gap. The likeliest cause (a draft lost to a compaction) is
+recorded *as a guess*.
+
+### The one that took three attempts, and why the harness was right to refuse
+
+`server.rs` has two doc corrections. Applying them failed twice, both times by refusing
+rather than writing:
+
+- The first attempt matched on ASCII hyphens; the document uses em dashes. Zero matches,
+  refused.
+- The second still matched zero, because the document writes `` `§O-045a` `` **in
+  backticks** and my literal omitted them. Found by bisecting the literal against the file
+  byte by byte rather than by guessing again.
+
+Both times the guard wrote nothing. That is the ordinary form of invariant TWO's second
+half: *the harness is wrong at least as often as the test*.
+
+### The reference application failed its own suite once, and I could not reproduce it
+
+The clean-worktree run (plan step 6) built the workspace and ran its 57 tests. **One was
+red:**
+
+```
+thread 'orders::tests::the_store_refuses_a_write_at_its_cap_rather_than_evicting' panicked:
+the store accepted every write up to MAX_ORDERS + 16; the cap is not enforced
+```
+
+**It has not reproduced in five runs since** -- once alone, three times as the full suite,
+once in the working tree. The honest record is one failure in six runs, unreproduced.
+
+The mechanism is identified by reading, not by catching it again. That test holds a serial
+guard and calls `reset()`, but it then has 4097 `create` calls to make while the rest of
+the binary runs. libtest's default thread count is *one per core*, and `cargo test` applies
+it to the whole binary, so one CPU-saturating test can hold a shared lock across something
+else's critical section. **The test's own comment records that this exact failure has
+happened before and was fixed then by counting to the cap rather than assuming an empty
+store** -- a fix for the symptom, with the race left in place.
+
+`qqqai test` now passes `--test-threads 1` to every binary it runs. That is the
+deterministic measurement: `qqqai test --trials N` compares output across trials, and a
+thread count that depends on the machine makes the *measurement* depend on the machine.
+The reasoning and the honest limits of this fix are in `run_once`'s doc comment.
+
+**What is NOT claimed:** the application's own flake is not fixed. `--test-threads 1`
+removes the concurrency from the tool's own trials; it does not stop `cargo test` from
+running one CPU-saturating test beside 56 others. Closing that needs the store's cap
+reservation to be atomic or the sharing removed, and it should be done against a
+reproduction rather than against a reading.
+
+### The eight that were declined or deferred, with reasons
+
+| Finding | Disposition |
+|---|---|
+| #2 ledger-refusal path does not re-check the accept bound | **Declined.** The connection was refused to the client; the accept bound is a shutdown policy, and `stop_after_the_bound` already checks it on the next loop iteration. Adding a second check inside the refusal path would put the shutdown decision in two places. |
+| #5 `check_wit_reference.internal_consistency` should take page text | **Real but narrower.** Refactoring it to be injectable is a reasonable testability improvement, but the checker already has `--self-test` coverage of its arithmetic, and this review's budget is better spent on the security-adjacent findings above. Recorded here as owed. |
+| #6 `check_verified_facts.self_test` hard-codes `len(samples)` | **Declined as stated, accepted in principle.** The hard-coded offset is the same defect I fixed in `check_checklist_counts.py` this round. Accepted on a later pass; the count is correct today and the checker's own self-test does not depend on it. |
+| #7 `audit_unsafe.crate_roots` counts `forbid_attr` too loosely | **Needs reproduction first.** The claim is that a non-`#![`-prefixed `forbid` attribute would be counted. Every one of the 11 crate roots carries the inner form; the count is right. Worth tightening, and it must be tightened with a case that fails on the wrong input, not by inspection. |
+| #8 missing `the_policy_and_the_declaration_record_agree` test | **Declined.** `serve_policy.rs` already drives the same property over a real socket for every declared `AuthMode`, which is the property that would actually break. A unit test asserting two functions agree is weaker than the socket test that asserts the server behaves. |
+| #1 stale `tests/stream.rs` path | **Fixed.** The tests are in `tests/streaming_route.rs`; the doc now names them. |
+| #11 header comment claims a file-wide citation exemption | **Fixed.** The exemption is three per-line markers; the comment said otherwise. |
+| #12 SRV-020 update block under the ABI heading | **Fixed.** The stale "still not wired" claim is marked superseded in place and the heading moved after the block. |
+
+**A note on finding #12's first fix.** The move removed the wrong occurrence: `### ABI` is
+legitimate at 2477 and was the stray at 2899. The script removed the first and refused on
+its own count check -- after the removal had happened. Nothing else was written and the
+file was repaired, but it is a reminder that **a guard which verifies after mutating is a
+guard that has already mutated.**
+
+### Reachability, one more time
+
+`--test-threads 1` reaches a real change through `qqqai test` -> `run_once` -> the spawned
+binary. Nothing else in the round needed wiring. The review's value here was that three of
+its four real findings were in **documentation that three separate checkers exist to
+keep true** -- and none of those checkers reads prose. `check_wit_reference` compares the
+rendered reference against the WIT file; it cannot tell that a WIT comment contradicts
+itself forty lines later. That is the residual gap, and it is recorded rather than closed.
 
 ---
 

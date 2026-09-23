@@ -1,12 +1,101 @@
 {
-  "$id": "https://qqq.codes/schema/cli-envelope",
+  "$defs": {
+    "ErrorContextEntry": {
+      "$id": "https://qqq.codes/schema/qqqai-cli-envelope#ErrorContextEntry",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `ErrorContextEntry` record.",
+      "properties": {
+        "name": {
+          "description": "The key.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "qqqai-cli-envelope#ErrorContextEntry",
+      "type": "object"
+    },
+    "ErrorPayload": {
+      "$id": "https://qqq.codes/schema/qqqai-cli-envelope#ErrorPayload",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `ErrorPayload` record.",
+      "properties": {
+        "backtrace": {
+          "description": "The guest backtrace, resolved to source lines when a map was available. `HOST-009` requires a trap report carry \"code, guest backtrace and (if DWARF present) source line\". The `cause` strings carry a *rendered* form of the frames, which is right for a human and useless to a consumer that wants the f",
+          "type": [
+            "object",
+            "array",
+            "null"
+          ]
+        },
+        "cause": {
+          "description": "The causal chain, outermost first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "code": {
+          "description": "The stable code, e.g. `QQQ-4003`.",
+          "type": "string"
+        },
+        "context": {
+          "description": "Ordered context describing where it happened.",
+          "items": {
+            "$ref": "#/$defs/ErrorContextEntry"
+          },
+          "type": "array"
+        },
+        "docs_url": {
+          "description": "The permanent docs URL.",
+          "type": "string"
+        },
+        "message": {
+          "description": "One human sentence. **Do not parse.**",
+          "type": "string"
+        },
+        "remediation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The actionable next step."
+        },
+        "retryable": {
+          "description": "Whether retrying the same operation may succeed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "docs_url",
+        "message",
+        "retryable"
+      ],
+      "title": "qqqai-cli-envelope#ErrorPayload",
+      "type": "object"
+    }
+  },
+  "$id": "https://qqq.codes/schema/qqqai-cli-envelope",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The stable JSON envelope every `qqqai` command emits under `--json`. `schema_version` is bumped only for a breaking change within a major version.",
   "properties": {
     "command": {
+      "description": "The command that produced this.",
       "type": "string"
     },
     "data": {
+      "description": "The command's payload, when it succeeded.",
       "type": [
         "object",
         "array",
@@ -16,42 +105,42 @@
     "error": {
       "anyOf": [
         {
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "message": {
-              "type": "string"
-            },
-            "remediation": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "code",
-            "message"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/ErrorPayload"
         },
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "The error, when it failed."
     },
     "ok": {
+      "description": "Whether the command succeeded.",
       "type": "boolean"
     },
+    "producer": {
+      "description": "Always `\"qqqai\"`, so a consumer can tell at a glance what produced this.",
+      "type": "string"
+    },
     "schema_version": {
+      "description": "The machine-contract version this conforms to.",
+      "type": "string"
+    },
+    "summary": {
+      "description": "A one-line human summary of the outcome.",
+      "type": "string"
+    },
+    "version": {
+      "description": "The runtime version.",
       "type": "string"
     }
   },
   "required": [
-    "schema_version",
     "command",
-    "ok"
+    "ok",
+    "producer",
+    "schema_version",
+    "summary",
+    "version"
   ],
   "title": "qqqai-cli-envelope",
   "type": "object"

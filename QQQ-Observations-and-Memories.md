@@ -16597,6 +16597,100 @@ every possible file, so a checker that accepts one checks nothing.
    one of them was checked for the same property: *does it fail when the defect is
    present?*
 
+## §O-206 — The CLI's published envelope described five of the eight fields it emits, and cited a checker that does not exist
+
+**What was wrong.** `schema/cli-envelope.schema.json` is the contract an agent or
+a generated client reads to parse `qqqai --json`. It was **hand-written**, and it
+documented this:
+
+```text
+required: schema_version, command, ok
+properties: schema_version, command, ok, data, error{code, message, remediation}
+```
+
+The shipped binary emits this, captured from `qqqai schema --json`:
+
+```json
+{"producer":"qqqai","version":"0.0.0","schema_version":"1.0.0","command":"schema",
+ "ok":true,"summary":"27 commands, 39 error codes, 24 capabilities","data":{...}}
+```
+
+and on a failure path:
+
+```json
+{"producer":"qqqai","version":"0.0.0","schema_version":"1.0.0","command":"why",
+ "ok":false,"summary":"`why` needs a capability to explain",
+ "error":{"code":"QQQ-7001","message":"...","remediation":"...",
+          "docs_url":"https://qqq.codes/errors/QQQ-7001","retryable":false}}
+```
+
+Seven fields were missing from the document: `producer`, `version` and `summary`
+at the root, and `docs_url`, `retryable`, `cause` and `context` inside `error`.
+The document also had no `additionalProperties: false`, so it did not *reject*
+them — it simply did not describe them, and a client generated from it would drop
+`producer` (what produced this), `version` (which build), `summary` (the
+human-readable line), and every diagnostic on the error path.
+
+**Why it drifted, and the comment that should have been a warning.** The
+hand-written literal's own doc comment said:
+
+> The field list is checked against the trait by `check_schema_drift.py`, so this
+> literal cannot drift from the code.
+
+`check_schema_drift.py` **does not exist** and never did. `git grep` finds the
+name exactly once, in that sentence. So the comment asserted a guard that was
+never built, and the thing it guarded drifted — which is what an unguarded
+contract does. A doc comment naming a checker is not a checker.
+
+**The premise was also wrong.** The comment justified hand-writing the document
+because "it is not one struct — it is the *contract* the `CommandOutput` trait
+requires of every implementor". But the envelope is two plain
+`#[derive(Serialize)]` structs in `crates/qqq-run/src/output.rs`: `Envelope<T>`
+and `ErrorPayload`. `Manifest` and `Lockfile` are derived from their structs, and
+so is this one now. Removing the literal removed the surface that had no guard.
+
+**Three rewrites, each stated rather than silent.** The generator refuses a type
+it cannot describe, so deriving the envelope forced three explicit decisions:
+
+| Field | Declared | Documented | Why |
+|---|---|---|---|
+| `Envelope.data` | `Option<T>` | any JSON | generic; per-command shape comes from `qqqai schema --all` |
+| `ErrorPayload.backtrace` | `Option<ResolvedBacktrace>` | any JSON | another module's contract, in `trap_report.rs` |
+| `ErrorPayload`'s sibling records | — | only the reachable ones | `CommandSchema.data_schema` is a raw `serde_json::Value` and `Output` is the renderer, not the wire format |
+
+`AnyJson` is deliberately **not** in the scalar table. It stands for
+`serde_json::Value`, which is reachable only through `Envelope<Value>` at the
+call sites, and adding it to the scalars would silently accept an arbitrary value
+in `Manifest` or `Lockfile`, where that would be a defect rather than a contract.
+
+**The check that could not have missed this.** `--check` compares the document
+against the generator, so a hand-written document is not compared to anything.
+`check_schema_conformance.py` now covers three surfaces, not two, and it gained a
+**runtime probe**: it runs the built binary and validates its real stdout against
+the published schema, on a success path and a failure path, because the envelope
+has two shapes and checking one proves half. Where the binary is absent — a
+source-only CI job — it prints `NOTICE ... SKIPPED` rather than implying it ran.
+
+**Evidence, from the shipped binary:**
+
+```text
+SCHEMA CONFORMANCE OK -- 3 surface(s): every documented key is declared in the source, ...
+  schema: valid, ok=True
+  why (a missing argument, so the failure envelope): valid, ok=False
+  doctor: valid, ok=True
+ENVELOPE PROBE OK -- 3 command(s) match the published schema
+```
+
+and `18` self-test cases, two of them added for this surface: dropping the
+envelope's `producer` (the drift that actually happened) and renaming
+`error.docs_url`. Both are caught; both restore byte-for-byte.
+
+**The pattern, now counted across three entries.** §O-205 was a check that
+compared an artifact to its own producer. This one is a check that was *asserted
+in a comment and never written*. Both are the same lesson in different clothes:
+**a claim of verification is not verification**, and the only way to tell them
+apart is to make the claim run.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

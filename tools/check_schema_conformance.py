@@ -51,6 +51,7 @@ import json
 import pathlib
 import re
 import sys
+from dataclasses import replace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schema"
@@ -59,7 +60,15 @@ SCHEMA_DIR = ROOT / "schema"
 SURFACES = [
     ("qqq-toml.schema.json", "crates/qqq-cap/src/manifest.rs", "Manifest"),
     ("qqq-lock.schema.json", "crates/qqq-pkg/src/lock.rs", "Lockfile"),
+    ("cli-envelope.schema.json", "crates/qqq-run/src/output.rs", "Envelope"),
 ]
+
+# `cli-envelope` describes two records: the envelope and the error payload. The
+# nested set is declared per surface so the root-only comparison cannot silently
+# skip a record that carries its own requiredness.
+EXTRA_STRUCTS = {
+    "cli-envelope.schema.json": ["ErrorPayload"],
+}
 
 # Load the generator's reader so both tools agree on what the source says. If
 # they disagree, one of them is wrong and the disagreement is the finding.
@@ -117,6 +126,22 @@ def check_surface(name: str, rust_rel: str, struct_name: str) -> list[str]:
         if label == "the root" and struct == struct_name:
             fields = [f for f in fields if f.name not in {"source", "path"}]
 
+        # The generator rewrites two fields whose declared Rust type is not the
+        # wire shape, and both rewrites are deliberate, documented at the call
+        # site, and asserted here so they cannot silently widen:
+        #
+        #   * `Envelope.data: Option<T>` is generic; the document says "any JSON",
+        #     and the per-command shape comes from `qqqai schema --all`.
+        #   * `ErrorPayload.backtrace: Option<ResolvedBacktrace>` is another
+        #     module's contract; the document says "any JSON".
+        REWRITTEN = {"data", "backtrace"}
+        fields = [
+            replace(f, ty="AnyJson")
+            if f.name in REWRITTEN
+            else f
+            for f in fields
+        ]
+
         declared = {f.json_name: f for f in fields}
 
         for key in sorted(props):
@@ -153,6 +178,15 @@ def check_surface(name: str, rust_rel: str, struct_name: str) -> list[str]:
 
     # The root struct.
     compare("the root", schema, struct_name)
+
+    # Records the surface declares explicitly, which are not in `$defs` under
+    # their own name in every case. `cli-envelope#ErrorPayload` is one.
+    for extra in EXTRA_STRUCTS.get(name, []):
+        node = (schema.get("$defs") or {}).get(extra)
+        if node is None:
+            problems.append(f"{name}: declares {extra} as part of its contract but has no definition for it")
+            continue
+        compare(f"$defs.{extra}", node, extra)
 
     # Every `$defs` entry that names a real struct in the same file. A definition
     # whose name is not a struct in this file is reported, because a nested
@@ -192,6 +226,132 @@ def run() -> int:
 
 
 # ---------------------------------------------------------------------------
+# The strongest check available: the real binary's real output.
+# ---------------------------------------------------------------------------
+
+# Commands whose `--json` output must satisfy the published envelope schema. One
+# success path and one failure path, because the envelope has two shapes and a
+# check that only sees one proves half of it.
+ENVELOPE_PROBES = [
+    ("schema", ["schema", "--json"], True),
+    ("why (a missing argument, so the failure envelope)", ["why", "--json"], False),
+    ("doctor", ["doctor", "--json"], True),
+]
+
+
+def find_binary() -> pathlib.Path | None:
+    """The built `qqqai` binary, if the workspace has been built."""
+    for profile in ("debug", "release"):
+        for name in ("qqqai.exe", "qqqai"):
+            p = ROOT / "target" / profile / name
+            if p.exists():
+                return p
+    return None
+
+
+def validate_envelope(instance: object, schema: dict) -> list[str]:
+    """The subset of draft 2020-12 the envelope schema uses."""
+    errors: list[str] = []
+
+    def resolve(node: dict) -> dict:
+        while isinstance(node, dict) and "$ref" in node:
+            node = schema["$defs"][node["$ref"].split("/")[-1]]
+        return node
+
+    def walk(value: object, node: dict, path: str) -> None:
+        node = resolve(node)
+        if "anyOf" in node:
+            if not any(not walk_collect(value, alt, path) for alt in node["anyOf"]):
+                errors.append(f"{path}: matches no branch of anyOf")
+            return
+        t = node.get("type")
+        if t:
+            types = t if isinstance(t, list) else [t]
+            ok = (
+                ("object" in types and isinstance(value, dict))
+                or ("array" in types and isinstance(value, list))
+                or ("string" in types and isinstance(value, str))
+                or ("boolean" in types and isinstance(value, bool))
+                or ("null" in types and value is None)
+                or ("integer" in types and isinstance(value, int) and not isinstance(value, bool))
+            )
+            if not ok:
+                errors.append(f"{path}: expected {t}, got {type(value).__name__}")
+                return
+        if isinstance(value, dict):
+            for req in node.get("required", []):
+                if req not in value:
+                    errors.append(f"{path}: missing required property {req!r}")
+            props = node.get("properties") or {}
+            for k, v in value.items():
+                if k in props:
+                    walk(v, props[k], f"{path}.{k}")
+
+    def walk_collect(value: object, node: dict, path: str) -> list[str]:
+        before = len(errors)
+        walk(value, node, path)
+        return errors[before:]
+
+    walk(instance, schema, "$")
+    return errors
+
+
+def probe_envelope() -> int:
+    """Run the shipped binary and validate its output against the schema.
+
+    Returns 0 when every probe passes, 1 when one fails, and 0 with a NOTICE when
+    the binary has not been built -- a source-only CI job must not fail for want of
+    an artifact, but it must say so rather than imply it checked.
+    """
+    binary = find_binary()
+    if binary is None:
+        print(
+            "  NOTICE: no built `qqqai` binary, so the runtime probe was SKIPPED. "
+            "Build with `cargo build -p qqq-run --bin qqqai` to run it.",
+            file=sys.stderr,
+        )
+        return 0
+
+    import subprocess
+
+    schema = json.loads((SCHEMA_DIR / "cli-envelope.schema.json").read_text(encoding="utf-8"))
+    failures = 0
+    for label, args, expect_ok in ENVELOPE_PROBES:
+        r = subprocess.run([str(binary), *args], capture_output=True, text=True)
+        line = r.stdout.strip().splitlines()
+        if not line:
+            print(f"  {label}: no JSON on stdout (exit {r.returncode})", file=sys.stderr)
+            failures += 1
+            continue
+        try:
+            doc = json.loads(line[0])
+        except json.JSONDecodeError as e:
+            print(f"  {label}: stdout is not JSON: {e}", file=sys.stderr)
+            failures += 1
+            continue
+        errs = validate_envelope(doc, schema)
+        if errs:
+            failures += 1
+            print(f"  {label}: {len(errs)} schema violation(s)", file=sys.stderr)
+            for e in errs[:10]:
+                print(f"      {e}", file=sys.stderr)
+        elif doc.get("ok") is not expect_ok:
+            failures += 1
+            print(
+                f"  {label}: envelope says ok={doc.get('ok')}, expected {expect_ok}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  {label}: valid, ok={doc.get('ok')}")
+
+    if failures:
+        print(f"ENVELOPE PROBE FAILED -- {failures} of {len(ENVELOPE_PROBES)}", file=sys.stderr)
+        return 1
+    print(f"ENVELOPE PROBE OK -- {len(ENVELOPE_PROBES)} command(s) match the published schema")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Self-test: the three real divergences must each be caught.
 # ---------------------------------------------------------------------------
 
@@ -224,6 +384,22 @@ MUTATIONS = [
             d["$defs"]["Metadata"]["properties"].__setitem__(
                 "generated_by",
                 d["$defs"]["Metadata"]["properties"].pop("generated-by"),
+            ),
+            d,
+        )[1],
+    ),
+    (
+        "the envelope's `producer` dropped, which is how it drifted before",
+        "cli-envelope.schema.json",
+        lambda d: (d["properties"].pop("producer"), d)[1],
+    ),
+    (
+        "`error.docs_url` renamed to a name the source does not declare",
+        "cli-envelope.schema.json",
+        lambda d: (
+            d["$defs"]["ErrorPayload"]["properties"].__setitem__(
+                "docs-url",
+                d["$defs"]["ErrorPayload"]["properties"].pop("docs_url"),
             ),
             d,
         )[1],
@@ -295,9 +471,15 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--self-test" in argv[1:]:
+    args = argv[1:]
+    if "--self-test" in args:
         return self_test()
-    return run()
+    if "--probe" in args:
+        return probe_envelope()
+    code = run()
+    if code != 0:
+        return code
+    return probe_envelope()
 
 
 if __name__ == "__main__":

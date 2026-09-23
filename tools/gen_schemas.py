@@ -53,7 +53,7 @@ import json
 import pathlib
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schema"
@@ -375,6 +375,12 @@ def json_type(
         return {"type": "string", "enum": enums[t]}
     scalar = {
         "String": {"type": "string"},
+        # A borrowed string serialises identically to an owned one, so the
+        # document says `string` for both. `Envelope.producer` and
+        # `Envelope.version` are `&'static str`; refusing them would mean the
+        # envelope could not be derived, which is how it came to be hand-written
+        # and then drift (`§O-205`).
+        "&'static str": {"type": "string"},
         "bool": {"type": "boolean"},
         "u8": {"type": "integer", "minimum": 0, "maximum": 255},
         "u16": {"type": "integer", "minimum": 0, "maximum": 65535},
@@ -386,6 +392,14 @@ def json_type(
     }
     if t in scalar:
         return scalar[t]
+    # The payload of the generic CLI envelope. It is not a Rust type name that
+    # appears in this workspace's declarations — it stands for
+    # `serde_json::Value`, which the envelope is instantiated with at its call
+    # sites. Kept out of `scalar` deliberately so that `Manifest` or `Lockfile`
+    # cannot use it: an arbitrary value in a file-format field would be a defect,
+    # not a contract.
+    if t == "AnyJson":
+        return {"type": ["object", "array", "null"]}
     raise UnknownType(f"unrecognised Rust type: {t!r}")
 
 
@@ -510,50 +524,103 @@ def lockfile_schema() -> dict:
 
 
 def cli_envelope_schema() -> dict:
-    """The JSON envelope every `qqqai` command emits.
+    """The JSON envelope every `qqqai` command emits — derived from the struct.
 
-    # Why this one is hand-written rather than derived
+    # Why this is now derived rather than hand-written
 
-    Because it is not one struct — it is the *contract* the `CommandOutput`
-    trait requires of every implementor, and the trait is the authority. The
-    schema states the envelope's own shape; per-command `data` shapes come from
+    It used to be a literal, on the reasoning that the envelope "is not one struct
+    but the contract the `CommandOutput` trait requires of every implementor". The
+    literal's doc comment then claimed the field list "is checked against the trait
+    by `check_schema_drift.py`, so this literal cannot drift from the code".
+
+    **There is no `check_schema_drift.py`.** Nothing checked it, and it drifted:
+    the hand-written document listed `schema_version`, `command`, `ok`, `data` and
+    an `error` with `code` / `message` / `remediation`, while the binary actually
+    emits `producer`, `version` and `summary` at the root and `docs_url`,
+    `retryable`, `cause` and `context` inside `error`. A client generated from the
+    published document would drop all seven.
+
+    The premise was also wrong: the envelope *is* two structs, `Envelope<T>` and
+    `ErrorPayload`, both plain `#[derive(Serialize)]` types in
+    `crates/qqq-run/src/output.rs`. Deriving the document from them is the same
+    treatment `Manifest` and `Lockfile` get, and it removes the literal that had no
+    guard.
+
+    Per-command `data` shapes are still not here: they come from
     `qqqai schema --all`, which derives them from the command table.
-
-    The field list is checked against the trait by
-    `check_schema_drift.py`, so this literal cannot drift from the code.
     """
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://qqq.codes/schema/cli-envelope",
-        "title": "qqqai-cli-envelope",
-        "description": (
-            "The stable JSON envelope every `qqqai` command emits under `--json`. "
-            "`schema_version` is bumped only for a breaking change within a major "
-            "version."
-        ),
-        "type": "object",
-        "properties": {
-            "schema_version": {"type": "string"},
-            "command": {"type": "string"},
-            "ok": {"type": "boolean"},
-            "data": {"type": ["object", "array", "null"]},
-            "error": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "code": {"type": "string"},
-                            "message": {"type": "string"},
-                            "remediation": {"type": ["string", "null"]},
-                        },
-                        "required": ["code", "message"],
-                    },
-                    {"type": "null"},
-                ]
-            },
-        },
-        "required": ["schema_version", "command", "ok"],
-    }
+    src = (ROOT / "crates/qqq-run/src/output.rs").read_text(encoding="utf-8")
+    structs = read_structs(src)
+    enums = read_enums(src)
+    for required in ("Envelope", "ErrorPayload"):
+        if required not in structs:
+            raise ParseError(f"`{required}` not found in crates/qqq-run/src/output.rs")
+
+    envelope = structs["Envelope"]
+    # `Envelope<T>` is generic in its payload, and `data: Option<T>` carries a
+    # *per-command* shape that this document does not describe — per-command
+    # shapes come from `qqqai schema --all`, which derives them from the command
+    # table. So the payload is written as the one thing true of every
+    # instantiation: an arbitrary JSON value, which is what the old hand-written
+    # document also said (`["object", "array", "null"]`).
+    #
+    # `Value` is spelled into the field rather than added to the type resolver,
+    # because there is no Rust type to name here: `serde_json::Value` is only
+    # reachable through `Envelope<Value>` at the two call sites in `output.rs`,
+    # and the generator reads declarations, not instantiations. Adding `Value` to
+    # the scalar table would also silently accept it in `Manifest` or `Lockfile`,
+    # where an arbitrary value would be a defect.
+    envelope.fields = [
+        (
+            replace(f, ty="AnyJson")
+            if f.name == "data"
+            else f
+        )
+        for f in envelope.fields
+    ]
+
+    names = set(structs)
+    schema = schema_for(
+        envelope,
+        "qqqai-cli-envelope",
+        "The stable JSON envelope every `qqqai` command emits under `--json`. "
+        "`schema_version` is bumped only for a breaking change within a major "
+        "version.",
+        known=names,
+        enums=enums,
+    )
+    # The envelope is a closed contract: an agent parses it by field name, and a
+    # field the document does not describe is one a generated client silently
+    # drops. The nested records get the same treatment.
+    # The nested records, restricted to the ones REACHABLE from `Envelope`.
+    #
+    # Emitting `$defs` for every struct in the file pulled in `CommandSchema`,
+    # whose `data_schema` is a raw `serde_json::Value`, and `Output`, which is the
+    # renderer rather than part of the wire format. Neither is in the envelope, and
+    # generating them produced a hard failure — correctly, because the generator
+    # refuses a type it cannot describe rather than omitting the field. The
+    # reachable set is `ErrorPayload` (via `error`) and `ErrorContextEntry` (via
+    # `error.context`).
+    reachable = {"ErrorPayload", "ErrorContextEntry"}
+    defs = {}
+    for name in sorted(reachable & set(structs)):
+        # `ErrorPayload.backtrace` is `Option<ResolvedBacktrace>`, whose struct
+        # lives in `crates/qqq-run/src/trap_report.rs` — a different module with a
+        # different contract. Describing it as an opaque object is honest and is
+        # what the field is here: the envelope promises the key exists, and the
+        # trap report's own shape belongs to the trap report.
+        s = structs[name]
+        s.fields = [
+            replace(f, ty="AnyJson") if f.ty.endswith("ResolvedBacktrace>") else f
+            for f in s.fields
+        ]
+        defs[name] = schema_for(
+            s, f"qqqai-cli-envelope#{name}", f"The `{name}` record.",
+            known=names, enums=enums,
+        )
+    if defs:
+        schema["$defs"] = defs
+    return schema
 
 
 SURFACES = {

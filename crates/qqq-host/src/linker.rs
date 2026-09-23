@@ -886,6 +886,20 @@ pub fn build_linker<'a>(
             //   Per-interface work is tracked by the WIT files themselves and
             //   by the `implemented` flag in the `qqq-abi` registry.
             //
+            // `CON-009`'s defence in depth is `recheck` below — the capability
+            // predicate is `GrantSet::grants`, and no method named `allows`
+            // exists on `GrantSet`. An earlier revision of this note referred to
+            // an `allows` check; this comment is now the only place that name
+            // appears in the crate, which is why it is quoted and explained
+            // rather than used.
+            //
+            // `recheck` itself is called from its own three tests and from no
+            // invocation path yet: the host interfaces that would call it —
+            // `qqq:fs`, `qqq:sql`, `qqq:http` and the rest — are the ones this
+            // stub records as unbound. That is the honest state, and it is
+            // recorded here rather than left for a reader to discover by
+            // searching for callers.
+            //
             // Note that `qqq:crypto` is only *partially* implemented — `random`
             // and `hashing` are real, `hmac`/`aead`/`signing` are absent on
             // purpose. A component importing the latter therefore still gets

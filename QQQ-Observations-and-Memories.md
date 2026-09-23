@@ -15987,33 +15987,54 @@ committed bytes were already LF, so nothing was lost, and the tree reads LF now.
 
 ---
 
-## §O-197 The linker's stub note names a check the code does not perform
+## §O-197 The linker's stub note named a method that does not exist, and the defence in depth has no invocation-path caller
 
-**Found by cross-checking `CON-009`'s three citations against each other**, which is the
+**Found by cross-checking `CON-009`'s citations against each other**, which is the
 `§O-193` method: the doc comment, the implementation, and the checklist entry.
 
-| Where | What it says |
+**The first version of this entry was itself wrong, and the correction is the useful part.**
+It was written from a summary rather than from the file, and it claimed the implementation was
+"`CHECK_DEPTH` plus `HOST-021` defence in depth". Those tokens are not
+there: `CHECK_DEPTH` occurs nowhere in `crates/qqq-host`, and `HOST-021`
+is not named at that call site. Reading the file gave this instead:
+
+| Where | What it actually says |
 |---|---|
-| `crates/qqq-host/src/linker.rs`, the `QQQ-STUB(CON-009)` doc comment | the check is "`GrantSet::allows` at call time" |
-| `crates/qqq-host/src/linker.rs`, the implementation | `CHECK_DEPTH` plus `HOST-021`'s defence-in-depth check |
-| `QQQ-Checklist-V1.md`, `CON-009` | ticked, with the witness named as the `calls == 1` note on `note_first_call` |
+| `crates/qqq-host/src/linker.rs:868`, the `QQQ-STUB(CON-009)` note | an earlier revision named a `GrantSet::allows` check |
+| `crates/qqq-host/src/linker.rs:955`, `pub fn recheck` | the defence in depth, gated on `data.grants.grants(capability)` |
+| `QQQ-Checklist-V1.md`, `CON-009` | ticked, witnessed by the `calls == 1` note on `note_first_call` |
 
-Two of the three agree; the doc comment is the sentence that was never updated. The
-mismatch is in a comment and not in behaviour, so nothing is unsafe: `HOST-021` is the
-check that runs, and the checklist names it. It is recorded rather than fixed because the
-fix is a sentence in `linker.rs` plus its citation, and this round's edits are in the
-tooling chain.
+`GrantSet::allows` does not exist; the predicate is `GrantSet::grants`, used 61 times
+across the crate. Before the fix, the note was the **only** occurrence of the string `allows`
+in `linker.rs`. A comment naming a method that does not exist is worse than no comment,
+because the next reader greps for it in the invocation path, finds nothing, and concludes the
+defence is missing.
 
-**Why it is worth recording rather than shrugging at.** A doc comment that names a
-*check that does not exist* is worse than no comment, because the next reader searching for
-`GrantSet::allows` in the invocation path finds nothing and concludes the defence is
-missing. `§O-181` is the same shape at a larger scale: a claim the code stopped supporting.
+**The verification produced a finding more interesting than the claim that prompted it.**
+`recheck` -- documented as "the call-time re-check", which "consults the instance's grant
+set again, at the point of use" -- has exactly three call sites, and all three are its own tests,
+at `linker.rs:1424`, `:1433` and `:1454`. Nothing on an invocation path calls it. This
+is invariant THREE's exact shape: a defence that is implemented, documented, tested, and
+unreachable.
 
-**Method that found it, worth reusing.** For each ticked item that cites two or more
-places, read all of them together and ask whether they describe one mechanism. Points where
-they diverge are cheap to find this way and expensive to find by reading the code alone.
+It is honest rather than alarming, and the note now says so. The host interfaces that would call
+`recheck` are `qqq:fs`, `qqq:sql`, `qqq:http` and the rest -- precisely the ones the
+`QQQ-STUB(CON-009)` marker records as unbound. A defence in depth with no enforcement point yet
+is the correct state for a stub, and the linker's own construction is what enforces the grant set
+today.
 
-**Files:** none -- a correction to be made in `crates/qqq-host/src/linker.rs`.
+**Fixed, in `crates/qqq-host/src/linker.rs`.** The note no longer names an absent method. It
+says the predicate is `GrantSet::grants`, and it says that `recheck` is called from its own
+tests and from no invocation path yet. `cargo fmt --check -p qqq-host` is clean and the 25
+linker tests pass. Verified afterwards: `GrantSet::allows` occurs **0** times in
+`crates/qqq-host`.
+
+**Method, restated because it caught me.** For each ticked item citing two or more places, read
+the places themselves rather than a summary of them, and ask whether they describe one mechanism.
+When an entry asserts a symbol, grep for that symbol before writing it down: both wrong tokens in
+the first version would have been refuted by a single search.
+
+**Files:** `crates/qqq-host/src/linker.rs` (the note above the `_` arm of `build`).
 
 ---
 
@@ -16077,6 +16098,63 @@ Recorded from a cross-check of the three citations, not from an executed read of
 in this round. Verify it before acting on it.
 
 **Files:** none -- a verification record.
+
+---
+
+## §O-199 The cap test's flake was a guard shared by one module and not the other, and the fix is proved by injection
+
+**The gate found it, one run in four.** A full gate run failed at
+`examples/orders-api`: `the_store_refuses_a_write_at_its_cap_rather_than_evicting` panicked
+with *"the store accepted every write up to MAX_ORDERS + 16; the cap is not enforced"*. The
+test passes when run alone. Four full-suite runs measured the rate at **1 of 4**.
+
+**The mechanism is ordering, and the test's own comment described a different one.**
+`orders.rs`'s tests take a serial guard (`store_test`, a `static OnceLock<Mutex<()>>` in the
+tests module) precisely so two writers cannot interleave, and the comment above it records
+that as the fix for an earlier flake. That account is right for writers and does not cover
+this failure:
+
+* Two writers cannot interleave, because each holds the store's own mutex for the whole of
+  its `create`. A writer that filled the store would itself hit the cap.
+* What interleaves is a **reset against a fill**. `router.rs`'s
+  `the_manifest_contract_routes_from_5_3_are_served` calls `crate::orders::reset()` -- the
+  public function, not the guard -- and writes an order through the router. Its lock is a
+  *different* `Mutex<()>`, so it serializes against the other router tests and against
+  nothing in `orders.rs`.
+* A reset landing inside the cap test's loop drops the orders it has accumulated, so the
+  loop has to rediscover the cap from zero. Late enough, and the loop's own bound of
+  `MAX_ORDERS + 16` runs out before any refusal -- which is the panic verbatim.
+
+**Fixed by making the guard one lock for the crate.** `store_test` moved out of the tests
+module to a `pub(crate)` function on `orders`, so `router.rs` takes the same lock rather
+than `reset()` alone. A lock that covers some writers is indistinguishable from no lock at
+the moment it matters.
+
+**Proved, not asserted.** Ten consecutive full-suite runs after the fix: **57 passed, 0
+failed** each time, against 1-in-4 failing before. Then the defect was reintroduced once --
+`crate::orders::store_test()` replaced by a bare `crate::orders::reset()` in `router.rs` --
+and the suite was run eight times: **1 of 8 failed**, at the same rate. The file was then
+restored, re-read, and confirmed byte-for-byte identical with no injected marker remaining.
+
+**A harness that reported MISSED and was wrong.** The first injected run reported **0 of 8**
+failures, which reads as *the test is blind*. It was not: the harness swallowed the failure
+reason, so a compile error inside the `try` would have looked exactly the same. The harness
+was changed to print the failure reason, the injection was repeated, and it detected on run 5.
+Invariant TWO's warning applies to this harness as much as to any test -- and the honest
+reading of the first result was never "the test is blind", it was "0/8 is consistent with a
+1-in-4 flake that did not land".
+
+**What this means for the gate's own history.** Previous rounds recorded the reference
+application as passing; it did, on those runs, at a 3-in-4 rate. A flaky test is not a test
+that passes.
+
+**A note for the next reader.** This is a `examples/orders-api` guest crate, so it declares
+its own workspace and is not a member of the root one -- invariant ELEVEN. The workspace-wide
+test command does not run these 57 tests, and the local gate runs them as a separate step for
+that reason.
+
+**Files:** `examples/orders-api/src/orders.rs` (`store_test` moved and documented),
+`examples/orders-api/src/router.rs` (takes the shared guard).
 
 ---
 

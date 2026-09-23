@@ -152,6 +152,51 @@ pub fn reset() {
     *s = Store::new();
 }
 
+/// Take exclusive ownership of the order store and start it empty.
+///
+/// # Why this is `pub(crate)` rather than a `#[cfg(test)]` helper in one module
+///
+/// Because the store is shared by more than one module's tests, and the guard has to be
+/// shared with it. `router.rs`'s `the_manifest_contract_routes_from_5_3_are_served` resets
+/// the store and writes an order through the router, and it used to do so under a lock of
+/// its own -- which serialized it against the *other* router tests and against nothing in
+/// this module.
+///
+/// # Why that mattered, measured
+///
+/// `the_store_refuses_a_write_at_its_cap_rather_than_evicting` failed **about one full-suite
+/// run in four** and passed when run alone. The mechanism is not the obvious one: two
+/// writers cannot interleave, because each holds the store's own mutex for the whole of its
+/// `create`. What interleaves is a **reset against a fill**. The cap test loops up to
+/// `MAX_ORDERS + 16` times; if a router test resets the store part-way through that loop,
+/// the accumulated orders are dropped and the loop has to rediscover the cap from zero. If
+/// the reset lands late enough, the loop's own bound runs out first and no refusal is ever
+/// seen -- which is exactly the panic the test reports, *"the store accepted every write up
+/// to MAX_ORDERS + 16"*.
+///
+/// So the guard has to be one lock for every writer in the crate, not one per module. A
+/// lock that covers some writers is indistinguishable from no lock at the moment it
+/// matters.
+///
+/// The returned guard must be bound (`let _g = store_test();`), not dropped:
+/// `let _ = store_test();` would release the lock immediately, which is a silent way to
+/// write a flaky test.
+///
+/// `#[cfg(test)]` rather than `#[allow(dead_code)]`: it is a test helper, so it should not
+/// exist in a release build at all, and an `allow` would leave it in the library and quiet
+/// about it. Without the attribute the non-test build reports it as dead code, which is the
+/// lint working correctly.
+#[cfg(test)]
+pub(crate) fn store_test() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    guard
+}
+
 /// `hello` — the smallest possible answer.
 ///
 /// The `§9.1` row measures "raw framework + runtime overhead", so this must do
@@ -654,15 +699,12 @@ mod tests {
     /// The returned guard must be bound (`let _g = store_test();`), not dropped:
     /// `let _ = store_test();` would release the lock immediately, which is a
     /// silent way to write a flaky test.
-    fn store_test() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = SERIAL
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset();
-        guard
-    }
+    ///
+    /// The guard and its lock live in `orders`, not here, because `router.rs`'s tests
+    /// write to the same store. See `store_test`'s own comment for the measurement that
+    /// forced that: a per-module lock left the cap test failing one full-suite run in
+    /// four.
+    use super::store_test;
 
     fn body(r: &Response) -> String {
         String::from_utf8(r.body.clone()).expect("responses are UTF-8")

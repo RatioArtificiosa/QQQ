@@ -738,7 +738,13 @@ mod tests {
         // §5.3 declares three routes. Each must be reachable, with the status its
         // handler implies. This is the item's real end-to-end claim, expressed as
         // HTTP rather than as a table lookup.
-        crate::orders::reset();
+        //
+        // The shared guard, not a bare `crate::orders::reset()`. This test writes to the
+        // order store, which `orders.rs`'s tests also write to, and a per-module lock
+        // covered only half of them. Measured: with the bare reset the cap test failed
+        // about one full-suite run in four, because this reset could land inside that
+        // test's fill loop and drop the orders it had accumulated.
+        let _g = crate::orders::store_test();
 
         // `{ path = "/healthz", methods = ["GET"], handler = "health", auth = "none" }`
         assert_eq!(route(&get("https://x.test/healthz")).status, 200);

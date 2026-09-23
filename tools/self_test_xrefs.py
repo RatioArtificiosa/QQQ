@@ -7,6 +7,18 @@ Proves the validator actually detects the failure modes it claims to detect.
 A validator that never fires is worse than no validator, because it manufactures
 false confidence. Run this after any change to check_xrefs.py.
 
+Two phases, one entry point:
+
+  1. `check_xrefs.py --self-test` -- the hermetic matrix. It builds a small synthetic
+     corpus in a temporary directory, injects each numbered check's defect into a
+     fresh copy of it, and never touches this repository. Some rules can only be
+     violated by a source file or a repeated heading, so this is where [3], [7] and
+     [11] are covered at all.
+  2. The in-place cases below -- the integration proof. They mutate the three real
+     documents, run the validator, and restore. This is the phase that can leave a
+     defect behind if it is killed, and the reason for the signal handlers and for
+     `--check-clean`.
+
 Usage:  python tools/self_test_xrefs.py
 Exit:   0 = all fault injections were correctly detected, 1 = a check is dead
 
@@ -474,6 +486,44 @@ def main() -> int:
         print(out[-2000:])
         return 1
     print("baseline: PASSED\n")
+
+    # ------------------------------------------------------------------
+    # Phase 1: the hermetic rule matrix
+    # ------------------------------------------------------------------
+    #
+    # Why both phases exist, and which one owns which rule
+    #
+    # The cases below mutate the three real documents and restore them. That is the
+    # integration proof -- it shows the rules fire against the corpus as it actually
+    # is -- and it is the phase that can leave a defect behind if the process is
+    # killed, which is why the signal handlers and `--check-clean` exist.
+    #
+    # It is not, and cannot be, the whole proof. Three numbered checks need a source
+    # file or a repeated heading to violate, and mutating those in place risks more
+    # than it proves:
+    #
+    #   [3]  an anchor defined twice            -- needs a repeated heading
+    #   [7]  a stub marker naming no checklist item, and markers with no stub section
+    #   [11] stub sections with no inline marker
+    #
+    # `check_xrefs.py --self-test` builds its own corpus in a temporary directory and
+    # covers those three plus every other numbered check. Running it FIRST means a
+    # dead rule is reported by the cheap, safe harness before anything touches the
+    # tree, and it is the same `--self-test` interface every other checker in `tools/`
+    # exposes.
+    #
+    # Not a duplicate of the cases below: this phase asserts each rule on a corpus
+    # built to violate exactly one of them; the cases below assert the same rules
+    # against the documents that will actually be committed.
+    hermetic = subprocess.run(
+        [sys.executable, str(CHECK), "--self-test"],
+        capture_output=True, text=True, errors="replace", cwd=ROOT,
+    )
+    if hermetic.returncode != 0:
+        print("FATAL: check_xrefs.py --self-test failed -- a rule is dead.")
+        print((hermetic.stdout or hermetic.stderr)[-4000:])
+        return 1
+    print("hermetic rule matrix: PASSED (16 cases over every numbered check)\n")
 
     results: list[bool] = []
 

@@ -199,11 +199,20 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **DOC-005** Add a `docs/README.md` index that explains the three-document system and how to keep them in sync.
   → Done: `docs/README.md` — the three documents and their division of labour, the
     rule that a claim lives in the Proposal *or* the Observations and never both, the
-    nine checks the self-test actually exercises (listed from the harness, not from
-    the validator's shorter docstring), and the change recipes.
+    numbered checks each harness proves (listed with the harness that drives it, not
+    from the validator's shorter docstring), and the change recipes.
   → The first draft listed twelve checks from the validator's module docstring; the
     self-test drives nine. Counting coverage from the thing that *exercises* it is the
     correction.
+  → **2026-09-22 — the bare count is gone, because a bare count is what drifts.** This
+    entry said `self_test_xrefs.py` exercises "nine" checks, and that was true of the
+    only harness that existed. A second harness now covers four the in-place one cannot
+    reach safely (`[3]` wants a repeated heading, `[5]` an uncited section, `[7]` and
+    `[11]` a stub marker in a source file), so the page names both phases instead of a
+    total. The failure this avoids is the one `SEC-020` records against itself: a number
+    true when written, never tied to the tree, and wrong by the time anyone rereads it.
+    `docs/README.md` tables each rule against the harness that proves it. Measured in
+    `§O-187`.
   → §0.4 How to read the cross-references
 - [x] **DOC-006** Build `tools/check-xrefs/` — the cross-reference validator described in the proposal.
   → Done: `tools/check_xrefs.py` — checks over the Proposal/Checklist/Observations graph.

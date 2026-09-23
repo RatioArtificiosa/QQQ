@@ -15080,6 +15080,151 @@ how the `serve_special_route` / `drain_body` ordering was broken in O-184.
   list of eight cases, which is the defect the checker exists to catch, in the checker.
 - The gate script no longer asks a checker for a mode it does not define.
 
+## O-187. The corpus validator had no self-test, then had two, then had one that covers what neither had
+
+**Found:** 2026-09-22, running the plan's verification step 1 and then the gate. `check_xrefs.py`
+is the validator of the Proposal / Checklist / Observations graph - the one checker whose false
+`PASSED` is worst, because every other document check is written against the graph it validates.
+The local gate ran every `tools/check_*.py` with `--self-test`, and this one had none. That is
+where O-186 stopped: the gate was fixed to skip it.
+
+### The first thing I got wrong: three numbered rules had no proof anywhere
+
+Before writing anything I read the seven checkers that have no `--self-test`. Three of them are
+worth covering, and the one that mattered was the validator. But reading further turned up
+`tools/self_test_xrefs.py`, a 600-line fault-injection harness for exactly this checker, run by
+CI at `.github/workflows/ci.yml` lines 144 (`--check-clean`) and 356 (the injections), required by
+`audit_requirements.py` line 98, and used by `docker/entrypoint.sh` line 924. So the checker was
+never unproven. My first reading of the gate failure - "the repository forgot" - was wrong, and
+the checklist line that says both are required steps in the `xrefs` CI job is true.
+
+What that harness does NOT cover is the interesting part. Its nine in-place cases are `[1]`, `[2]`,
+`[4]`, `[6]`, `[8]`, `[9]`, `[10]`, `[10b]`, `[12]`. Four numbered checks had **no fault injection
+anywhere**:
+
+| Never exercised | Why the in-place form cannot reach it |
+|---|---|
+| `[3]` an anchor defined twice | needs a repeated `##` heading in the Proposal |
+| `[5]` a section no item cites | needs a section nothing points at |
+| `[7]` a stub marker naming no checklist item, and markers with no `§S-` section | needs a source file to carry the marker |
+| `[11]` stub sections with no inline marker | needs a `§S-` entry in Observations |
+
+`[7]` and `[11]` are the stub-marker rules, and the plan's acceptance criterion 3 is *"no silent
+stubs"*. The rule that detects a silent stub had never been seen to fire.
+
+### What was built, and the duplication it created
+
+`check_xrefs.py --self-test` builds a **synthetic corpus in a temporary directory** - never the
+repository - proves the pristine copy exits 0, then injects each numbered check's defect into a
+fresh copy and asserts the checker exits non-zero **naming that rule**. The corpus is small, the
+cases are one defect each, and rule `[3]` becomes trivial: add the same heading twice.
+
+That is 16 cases over every numbered check. `[5]` is the one check that only *warns* (the
+checklist is a description of the work, not the work), so its case asserts exit 0 **with the tag
+present** - the shape `[5]` actually has.
+
+**Then I had two harnesses for one checker, which this repository forbids.** The resolution is
+one entry point and an explicit division of labour, not a deletion:
+
+- `self_test_xrefs.py` keeps its nine in-place cases and is still the integration proof - the same
+  rules against the corpus that will actually be committed, with signal handlers and
+  `--check-clean` for the interruptions that can leave it mutilated.
+- Its **Phase 1** now runs `check_xrefs.py --self-test` and aborts if it fails. Cheap and safe
+  first: with `[1]` made blind the harness reports
+  `FATAL: check_xrefs.py --self-test failed -- a rule is dead` and exits 1 **before touching a
+  single document**, which is a property the in-place phase cannot have.
+
+Both files carry the reasoning. `docs/README.md` now tables each rule against the harness that
+proves it, with a third column, instead of a bare total.
+
+### The self-inflicted defect: the checker read its own source
+
+The synthetic corpora contain `QQQ-STUB(...)` markers, because that is the only way to violate
+rule `[7]`. Written as literals, they put a marker into `check_xrefs.py` itself - and the
+checker scans **every `.py` file under the repo root** for markers, `tools/` included. So the
+first run after adding the self-test failed the *real* corpus:
+
+```
+[7] stub marker CAP-777 in source does not match any checklist item
+```
+
+Fixed by assembling the marker from two pieces (`_STUB = "QQQ" + "-STUB"`), and it took **two
+attempts**, because the explanatory comment above the helper contained a complete
+`QQQ-STUB(CAP-777)` in prose and tripped the same scan. A comment describing the fix reintroduced
+the defect. That is worth remembering: when a checker greps source text, a comment *is* source
+text.
+
+Positive side effect: this proves the marker scan really does cover `tools/`.
+
+### The citation checker, and refusing the wide escape hatch
+
+`check_checklist_citations.py` then flagged three lines - `CAP-777` twice, `CAP-999` once -
+because a fabricated reference is what rules `[7]` and `[2]` are proved with. The repository has
+two exemption forms and documents them:
+
+- a per-line marker, `not-a-checklist-item`, honoured within a three-line window;
+- a file-level marker, `checklist-citations-exempt`, for files whose **whole purpose** is
+  fabricating references - `self_test_xrefs.py` is the case it was added for.
+
+I first added the file-level one. **That was wrong**, and the reason is inside the checker it
+would blind: its own self-test names "an exemption that can swallow anything" as the obvious
+failure mode, and it exercises a case asserting that the per-line marker does *not* reach past
+its window. A file-wide marker in `check_xrefs.py` would exempt 786 lines of the corpus validator,
+which validates rather than fabricates. Narrowed to three per-line markers, on the three lines
+that fabricate. The count of checked citations went from **907 to 914** - the difference is the
+validator's own real citations, which the file-level exemption had been hiding.
+
+### Two harness refusals that were correct
+
+Both of the scratch scripts that made these edits refused on the first run, and both refusals
+were right:
+
+- The narrowing script guarded with `if MARKER not in body` where `MARKER` was the *per-line*
+  spelling, which the file did not contain yet. Refused: `the file-level exemption was not found
+  as expected`.
+- It then anchored on "a `\"\"\"` line whose predecessor mentions `dependency-free`". The
+  predecessor is the docstring's last sentence, not the phrase being sought. Refused: `could not
+  find the module docstring terminator`.
+
+Neither script wrote anything. That is invariant TWO's second half in its ordinary form: *the
+harness is wrong at least as often as the test*, and a refusal that names its reason is cheaper
+than a wrong edit.
+
+### Fault injections
+
+| Injection | Expected | Observed |
+|---|---|---|
+| Rule `[1]` made blind in `check_xrefs.py` | the hermetic case reports DEAD and the run exits 1 | DEAD, exit 1; restored to `d068f14d` |
+| The same blindness, through `self_test_xrefs.py` | Phase 1 aborts before mutating anything | `FATAL ... a rule is dead`, exit 1, corpus clean |
+| `fault_inject_naming.py` (verification step 1) | 3/3 DETECTED | 3/3 DETECTED, exit 0 |
+
+One injection per file per process, restored byte-for-byte, and the marker scan confirmed empty
+after each - with the caveat that `Select-String` is case-insensitive by default and reported
+three false "INJECTED" hits from ordinary lowercase prose in comments before I corrected the
+scan.
+
+### The stale counts this round turned up
+
+Adding a field to a document makes other documents' numbers wrong, and two were already wrong in
+this exact way:
+
+- `docs/README.md` said the self-test exercises **nine** checks. Now two phases exist, so the page
+  names each harness per rule rather than a total.
+- `DOC-005` in the checklist repeated that count and is **ticked**. Corrected, with the reason
+  recorded in the entry: a bare count is what drifts, which is the lesson `SEC-020` already
+  carries after its own 85-versus-142.
+
+`llms.txt` was regenerated because it quotes `docs/README.md`'s byte size - the second time in two
+rounds that a documentation edit moved a generated artifact. It is checked, so it is cheap; it is
+also invisible until the push.
+
+### Reachability, and what the gate was not doing
+
+The gate now runs `self_test_xrefs.py --check-clean` and `self_test_xrefs.py`, matching CI's two
+steps. It had been running neither, while `audit_requirements.py` required the harness - so the
+gate was trusting a check it never performed, and the failures it would have caught were reachable
+only by running a different checker.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

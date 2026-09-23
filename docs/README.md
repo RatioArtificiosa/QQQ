@@ -37,30 +37,43 @@ Proposal §6.2  ──"→ Checklist: CAP-011…"──▶  Checklist item CAP-0
                                                └──"→ §6.2 qqq-cap"──▶ Proposal §6.2
 ```
 
-Both directions are required. `tools/check_xrefs.py` reports numbered checks, and
-`tools/self_test_xrefs.py` exercises **nine** of them — the ones a fault injection can
-reach, listed here as the self-test names them:
+Both directions are required. `tools/check_xrefs.py` reports numbered checks, and two
+harnesses prove each one fires, run as two phases from one entry point:
 
-| Check | What it rejects |
-|---|---|
-| `[1]` | A checklist item citing a Proposal section that does not exist |
-| `[2]` | A Proposal line citing a checklist ID that does not exist |
-| `[4]` | A checklist item with no Proposal citation line |
-| `[6]` | A checklist ID defined twice |
-| `[8]` | An Appendix A correction row with no matching Observations entry |
-| `[9]` | An open question numbered in one document but not the other |
-| `[10]` | A Proposal citation naming an undefined Observations decision |
-| `[10b]` | An Observations decision the Proposal never cites |
-| `[12]` | The Observations document losing one of its required sections |
+- **In place** - `tools/self_test_xrefs.py` mutates the three real documents, asserts the
+  rule fires against the corpus that will be committed, and restores them. This is the
+  integration proof, and it is the phase that can leave a defect behind if it is killed,
+  which is why it installs signal handlers and why `--check-clean` exists.
+- **Hermetic** - `check_xrefs.py --self-test` runs first, on a corpus built in a temporary
+  directory that is never the repository. It exists because four checks cannot be violated
+  in place without more risk than proof: `[3]` wants a repeated heading, `[5]` wants an
+  uncited section, and `[7]` and `[11]` want a stub marker in a source file.
 
-The self-test **breaks the corpus on purpose** and asserts each of those fires, because
+| Check | What it rejects | Proven by |
+|---|---|---|
+| `[1]` | A checklist item citing a Proposal section that does not exist | in place |
+| `[2]` | A Proposal line citing a checklist ID that does not exist | in place |
+| `[3]` | One anchor defined twice | hermetic |
+| `[4]` | A checklist item with no Proposal citation line | in place |
+| `[5]` | A Proposal section no checklist item cites (reported as a warning, not a failure) | hermetic |
+| `[6]` | A checklist ID defined twice | in place |
+| `[7]` | A stub marker naming no checklist item, or markers with no stub section | hermetic |
+| `[8]` | An Appendix A correction row with no matching Observations entry | in place |
+| `[9]` | An open question numbered in one document but not the other | in place |
+| `[10]` | A Proposal citation naming an undefined Observations decision | in place |
+| `[10b]` | An Observations decision the Proposal never cites | in place |
+| `[11]` | A stub section with no inline marker anywhere in the source | hermetic |
+| `[12]` | The Observations document losing a required section, or reordering them | in place |
+
+The in-place phase **breaks the corpus on purpose** and asserts each rule fires, because
 a validator that cannot fail manufactures confidence rather than safety. It also
 self-heals: an interrupted run leaves fault markers behind, and the harness detects,
 reverses and verifies their removal rather than letting the next validator run report
-them as real document drift. Both run in CI and in the local Linux bridge.
+them as real document drift. Both phases run in CI, in the local Linux bridge, and in the
+gate.
 
-The validator's own module docstring lists a shorter set — the checks as originally
-written. The table above is what the self-test actually drives, which is the number to
+The validator's own module docstring lists a shorter set - the checks as originally
+written. The table above is what the harnesses actually drive, which is the number to
 trust: a claim about coverage should come from the thing that exercises it.
 
 ---

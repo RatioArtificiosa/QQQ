@@ -473,11 +473,25 @@ def main() -> int:
     # a description of the work, and failing CI because a count is low would
     # create pressure to tick boxes rather than to build things.
     # ----------------------------------------------------------------------
-    done_items = re.findall(r"^- \[x\] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
-    open_items = re.findall(r"^- \[ \] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
+    # Every marker the checklist's `Status legend` defines, parsed once so the
+    # count of definitions and the progress fraction cannot disagree about the
+    # population. An earlier version counted only `[x]` and `[ ]` here while the
+    # report above counted all five: the two `[!]` blocked items were reported as
+    # *defined* and then silently dropped from the denominator, and an
+    # in-progress, dropped or blocked item was invisible in the one line printed
+    # on every run.
+    item_markers = re.findall(
+        r"^- \[([ x~!-])\] \*\*[A-Z]+-\d{3}\*\*", checklist, re.M
+    )
+    by_marker: dict[str, int] = {m: item_markers.count(m) for m in "x ~!-"}
+    done_items = by_marker["x"]
+    in_progress = by_marker["~"]
+    blocked = by_marker["!"]
+    dropped = by_marker["-"]
+    not_started = by_marker[" "]
     partial = len(re.findall(r"^  → Partial:", checklist, re.M))
-    total = len(done_items) + len(open_items)
-    pct = (100 * len(done_items) / total) if total else 0
+    total = sum(by_marker.values())
+    pct = (100 * done_items / total) if total else 0
 
     # A crate with a substantial implementation and no ticked items is the
     # symptom that started this: work happening where the checklist cannot see
@@ -509,8 +523,23 @@ def main() -> int:
     print(f"Stub markers in source    : {len(marker_ids)}")
     print(f"Stub entries in Observations: {obs_stub_count}")
     print("-" * 60)
-    print(f"Checklist progress        : {len(done_items)}/{total} ({pct:.1f}%) checked"
-          + (f", {partial} annotated partial" if partial else ""))
+    # Each non-zero marker is named, so the denominator is auditable from the
+    # output alone: a reader can add the parts and get `total`. `[!]` blocked is
+    # the case that exposed the defect -- it was in neither the numerator nor the
+    # denominator, so the line above and this one disagreed by its count.
+    breakdown = ", ".join(
+        f"{n} {label}"
+        for n, label in (
+            (not_started, "not started"),
+            (in_progress, "in progress"),
+            (blocked, "blocked"),
+            (dropped, "dropped"),
+        )
+        if n
+    )
+    print(f"Checklist progress        : {done_items}/{total} ({pct:.1f}%) checked"
+          + (f", {partial} annotated partial" if partial else "")
+          + (f" [{breakdown}]" if breakdown else ""))
     if implemented_crates:
         print("Implemented crates (>500 lines):")
         for name, lines in implemented_crates.items():
@@ -840,11 +869,91 @@ def self_test() -> int:
                       observations=_observations(skeleton=swapped))
         case("[12] Observations headings are out of order", d, "12")
 
+        # --- the progress line counts every marker the legend defines ---------
+        #
+        # This is a *report* rather than a numbered check, so the assertion is not
+        # "an error was raised" but "the arithmetic in the output is right". It is
+        # here because the line was wrong: it counted `[x]` and `[ ]` while the
+        # line above counted all five legend markers, so the two numbers a few
+        # lines apart disagreed by the number of `[!]`/`[~]`/`[-]` items and
+        # nothing explained the gap. An item marked blocked, in progress or
+        # dropped was invisible in the one line printed on every run.
+        #
+        # The corpus has one item per marker, so the denominator must be 5 and the
+        # breakdown must name each non-zero marker. A checker that regressed to
+        # two markers would report 3/4 and fail here.
+        d = base / "rprogress"
+        _write_corpus(
+            d,
+            proposal=_proposal(),
+            checklist=_checklist(
+                items=(
+                    "- [x] **CAP-002** Done.\n"
+                    "  \u2192 \u00a76.4 Capability engine\n"
+                    "- [ ] **CAP-003** Not started.\n"
+                    "  \u2192 \u00a76.4 Capability engine\n"
+                    "- [~] **CAP-004** In progress.\n"
+                    "  \u2192 \u00a76.4 Capability engine\n"
+                    "- [!] **CAP-005** Blocked.\n"
+                    "  \u2192 \u00a76.4 Capability engine\n"
+                    "- [-] **CAP-006** Dropped.\n"
+                    "  \u2192 \u00a76.4 Capability engine"
+                )
+            ),
+            observations=_observations(),
+        )
+        total += 1
+        code, out = _run(d)
+        line = next(
+            (l for l in out.splitlines() if "Checklist progress" in l), ""
+        )
+        # Assert the *relationship*, not a magic total: the denominator must be
+        # the number of items the corpus defines, and the named breakdown must
+        # account for every item that is not done. A hard-coded number here would
+        # be a second copy of the count -- the defect this whole change is about.
+        #
+        # The corpus defines six items: the helper's own `CAP-001` (`[ ]`) plus the
+        # five injected, one per marker.
+        corpus = _checklist(
+            items=(
+                "- [x] **CAP-002** Done.\n"
+                "  \u2192 \u00a76.4 Capability engine\n"
+                "- [ ] **CAP-003** Not started.\n"
+                "  \u2192 \u00a76.4 Capability engine\n"
+                "- [~] **CAP-004** In progress.\n"
+                "  \u2192 \u00a76.4 Capability engine\n"
+                "- [!] **CAP-005** Blocked.\n"
+                "  \u2192 \u00a76.4 Capability engine\n"
+                "- [-] **CAP-006** Dropped.\n"
+                "  \u2192 \u00a76.4 Capability engine"
+            )
+        )
+        defined = len(re.findall(r"^- \[[ x~!-]\] \*\*[A-Z]+-\d{3}\*\*", corpus, re.M))
+        # "N/M (P%) checked [a not started, ...]"
+        m = re.search(r"Checklist progress\s*: (\d+)/(\d+) \([\d.]+%\) checked", line)
+        parts = re.findall(r"(\d+) (not started|in progress|blocked|dropped)", line)
+        ok = (
+            code == 0
+            and m is not None
+            and int(m.group(2)) == defined
+            and m.group(1) == "1"
+            and len(parts) == 4
+            and sum(int(n) for n, _ in parts) == defined - 1
+        )
+        print(f"  {'OK  ' if ok else 'DEAD'}  [report] the progress line counts every "
+              f"legend marker")
+        if not ok:
+            failures += 1
+            print(f"         exit={code}; corpus defines {defined} item(s) and the line "
+                  f"was {line!r} -- the denominator must equal the number of items and "
+                  f"the named parts must sum to the items that are not done")
+
     if failures:
         print(f"\nSELF-TEST FAILED -- {failures}/{total} case(s) bad")
         return 1
     print(f"\nSELF-TEST PASSED -- {total}/{total} case(s); every numbered check that"
-          f" fails a run was observed to fire, plus the [5] warning")
+          f" fails a run was observed to fire, plus the [5] warning and the progress"
+          f" line")
     return 0
 
 

@@ -15488,6 +15488,130 @@ elsewhere in this file: an assertion in the artifact itself. There is now one fo
 
 ---
 
+## §O-190 The checklist progress line counted two of the five markers its own report claimed
+
+**Found:** the closing revision pass, reading the report `check_xrefs.py` prints on every run.
+Two numbers three lines apart disagreed:
+
+```
+Checklist items defined   : 586
+Checklist progress        : 185/584 (31.7%) checked
+```
+
+**The defect.** `RE_ITEM_DEF` (`tools/check_xrefs.py:66`) accepts `[ ]`, `[x]`, `[~]`, `[!]` and
+`[-]`, which is the five-row `Status legend` at `QQQ-Checklist-V1.md:57-65`. The progress
+accounting accepted two of them, in two hand-written regexes with no shared definition:
+
+```python
+done_items = re.findall(r"^- \[x\] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
+open_items = re.findall(r"^- \[ \] \*\*([A-Z]+-\d{3})\*\*", checklist, re.M)
+total = len(done_items) + len(open_items)
+```
+
+So the two `[!]` items -- `SEC-024` and `SEC-025`, the two commissioned external audits, which
+are non-goals of the current goal and marked blocked for a recorded reason -- were counted as
+**defined** on the line above and dropped from the denominator on the line below. The report
+never mentioned them, and no reader could tell whether two items had been dropped, or whether
+the two labels meant different populations.
+
+**Why it matters more than a display bug.** The percentage is the number the checklist's own
+progress is judged by, and it was computed over a population the report did not name. The
+same code path would have hidden an item marked `[~]` in progress or `[-]` dropped -- a
+dropped item is exactly the kind of thing a reader scanning for open work needs to see, and
+it appeared in neither numerator nor denominator. This is the repository's most-recorded
+failure shape: *a number true when written, never tied to the tree afterwards.* `SEC-020`
+records the same defect against itself in `docs/unsafe-audit.md` (85 files stated, 139 held),
+and `§O-186` records the checklist keeping its own stale copy of that same 85.
+
+**The fix.** One parse, used for both numbers:
+
+```python
+item_markers = re.findall(
+    r"^- \[([ x~!-])\] \*\*[A-Z]+-\d{3}\*\*", checklist, re.M
+)
+by_marker: dict[str, int] = {m: item_markers.count(m) for m in "x ~!-"}
+```
+
+and each non-zero marker is named in the output, so a reader can add the parts and get the
+whole. Measured after the change:
+
+```
+Checklist progress        : 185/586 (31.6%) checked, 9 annotated partial [399 not started, 2 blocked]
+```
+
+The percentage moved 31.7 -> 31.6 because the denominator grew by the two items that were
+always there.
+
+**What was verified, and how.** `check_xrefs.py --self-test` gained a case that builds a corpus
+with one item per marker and asserts the *relationship* rather than a number: the denominator
+must equal the count of items the corpus defines, and the named parts must sum to the items
+that are not done. A hard-coded total would be a second copy of the count, which is the defect
+being fixed. The case is the 17th; the harness now reports `17/17`.
+
+**Fault-injected.** The two-marker regex was restored (`[([ x~!-])]` -> `[(x| )]`), the fault's
+presence in the file was confirmed before any conclusion was drawn, the self-test failed at
+exactly the new `[report]` case, and the file was restored from the original bytes with the
+restore verified byte-for-byte. Result: **DETECTED**. The injection script refused on a dirty
+baseline and refuses to report MISSED without proving the fault landed, which is the rule
+`§O-167` records.
+
+**Two mistakes made while fixing it, both mine and both caught by the harness.**
+
+1. The first version of the self-test case asserted `"/5 " in line`. The helper `_checklist()`
+   already contributes one item (`CAP-001`), so a corpus with five injected items has six, and
+   the checker correctly said `1/6`. The assertion was the wrong part. Rewritten to assert the
+   relationship, which cannot drift when the helper changes.
+2. The corrected case then failed on a regex that expected `(16.7%)` and the line prints
+   `(16.7%)` with the `%` *inside* the parentheses. A wrong assertion again, corrected in one
+   place.
+
+Both are the pattern invariant TWO warns about from the other side: **the harness is wrong at
+least as often as the test**, and a DEAD case is evidence about the assertion until the
+assertion is proven right.
+
+**A third defect found in passing, and fixed.** The Python edits rewrote the file with CRLF,
+because `Path.write_text` translates on Windows. The repository pins `eol=lf` in
+`.gitattributes` and `tools/check_xrefs.py` is committed as 854 LF lines with zero CRLF, so the
+working copy disagreed with the committed form and git warned on every `git diff`. Git would
+have normalized it at commit, so nothing would have reached CI -- but "the tool will fix it"
+is the reasoning that let the two Docker defects in `§O-189` survive, and the working tree is
+what the next command reads. Rewritten as LF explicitly; the diff is now 116 insertions and 7
+deletions with no line-ending warning.
+
+**Also measured, and worth recording because it looks like a defect and is not.** The
+collapsed terminal rendering of the report shows `CHECKLIST ITEMS DEFINED : 586` and
+`CHECKLIST PROGRESS : 185/586`, which agree. Windows consoles render `§` and `—` as `?`
+and `-`; that is a display artifact recorded before and it does not affect the file or CI.
+
+**Files:** `tools/check_xrefs.py` (the parse, the breakdown, the self-test case),
+`docs/README.md` (the `[report]` row in the coverage table, plus a sentence naming it as the
+phase's one *report* case rather than a fifth numbered check), `llms.txt` (regenerated: the
+index tracks documentation byte sizes, and `docs/README.md` grew from 7 KB to 8 KB).
+
+**What this does not change:** no checklist item was ticked or unticked. `git diff
+4e4c777..HEAD -- QQQ-Checklist-V1.md` contains zero checkbox lines, confirmed by a
+head-anchored search for added or removed `- [x]`/`- [ ]` lines. `SEC-024` and `SEC-025` stay
+`[!]` blocked, which is why the denominator grew.
+
+**A fourth finding, recorded so it costs no one the time again.** With `tools/check_xrefs.py`
+and `QQQ-Observations-and-Memories.md` correctly LF, `git status --porcelain` still reported
+`M QQQ-Checklist-V1.md` and `M QQQ-Proposal-V1.md` -- two files nothing in this session had
+edited. Three probes resolve it, in increasing order of authority:
+
+1. `git diff --numstat <file>` -> **empty**. No content difference.
+2. `git add --dry-run <file>` -> **nothing to stage**. Nothing would be recorded.
+3. Normalizing the working tree to LF and comparing bytes against `git show HEAD:<file>` ->
+   **identical**, 326768 and 138082 bytes respectively.
+
+So both are clean, and the `M` is the stat-cache artefact `\u00a7O-189` records: a file whose
+working-tree line endings differ from `index=lf` while its *content* agrees. `git
+update-index --refresh` reports `needs update` for them and does not clear it, which is the
+part that misleads -- `needs update` reads like real drift. The test that settles it is
+`git add --dry-run`: if it prints nothing, there is nothing to commit and the file can be
+left alone. Both files were left byte-for-byte as found.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

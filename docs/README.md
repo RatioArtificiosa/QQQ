@@ -47,7 +47,10 @@ harnesses prove each one fires, run as two phases from one entry point:
 - **Hermetic** - `check_xrefs.py --self-test` runs first, on a corpus built in a temporary
   directory that is never the repository. It exists because four checks cannot be violated
   in place without more risk than proof: `[3]` wants a repeated heading, `[5]` wants an
-  uncited section, and `[7]` and `[11]` want a stub marker in a source file.
+  uncited section, and `[7]` and `[11]` want a stub marker in a source file. It also carries
+  the one case that is a **report** rather than a check - the progress line - because a
+  report is a claim about the corpus and a claim nobody exercises is a claim that drifts;
+  `SEC-020` and `§O-190` are both that failure.
 
 | Check | What it rejects | Proven by |
 |---|---|---|
@@ -64,6 +67,7 @@ harnesses prove each one fires, run as two phases from one entry point:
 | `[10b]` | An Observations decision the Proposal never cites | in place |
 | `[11]` | A stub section with no inline marker anywhere in the source | hermetic |
 | `[12]` | The Observations document losing a required section, or reordering them | in place |
+| `[report]` | The progress line counting fewer markers than the legend defines | hermetic |
 
 The in-place phase **breaks the corpus on purpose** and asserts each rule fires, because
 a validator that cannot fail manufactures confidence rather than safety. It also

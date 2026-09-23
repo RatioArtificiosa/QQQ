@@ -26,7 +26,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## Using it
 
-- [docs/README.md](docs/README.md) — Index of the documentation directory, with what each file is for. _(human)_ (7 KB)
+- [docs/README.md](docs/README.md) — Index of the documentation directory, with what each file is for. _(human)_ (8 KB)
 - [docs/glossary.md](docs/glossary.md) — The 18 defined terms. Several are load-bearing and mean something narrower here than in general use. (3 KB)
 - [docs/threat-model.md](docs/threat-model.md) — The adversaries QQQ defends against, and what it explicitly does not. (11 KB)
 - [docs/out-of-scope.md](docs/out-of-scope.md) — What is deliberately not defended, so absences are decisions rather than oversights. (7 KB)

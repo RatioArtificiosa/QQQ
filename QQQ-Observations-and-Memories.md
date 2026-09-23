@@ -13726,9 +13726,96 @@ declares its own empty workspace and is invisible to `cargo test --workspace`.
 → `crates/qqq-core/tests/architecture.rs`, `tools/check_topology.py`;
 `.scratch/verify_two_lists.py`.
 
+### O-170: `git commit -a` does not stage new files, and the commit message claimed work that was not in it
+
+Committing the `HOST-009` work, the output read:
+
+```
+[main 4744bc3] feat(host): resolve a detached trap report to source lines (HOST-009)
+ 10 files changed, 571 insertions(+), 6 deletions(-)
+```
+
+The message described two new modules. **Ten** files changed, and the two new
+files were not among them:
+
+```
+?? crates/qqq-debug/src/resolve.rs
+?? crates/qqq-run/src/trap_report.rs
+```
+
+`git commit -a` stages *tracked modifications only*. A new file is untracked, so
+`-a` skips it silently — no warning, no error, a successful commit. The result
+would have been a commit whose message announces 951 lines of resolver and whose
+diff contains neither the resolver nor its consumer. It would have compiled
+nowhere and failed on CI for a reason the message actively misdirects.
+
+#### Why the count is what caught it
+
+I noticed because `571 insertions` did not match the size of two files I had just
+written (20 KB and 18.6 KB). That is luck. The reliable signal is the one already
+in the invariants — **verify every write by reading it back** — applied to
+commits: after committing, read `git show --stat` and `git status --short`, and
+require the status to be *empty*. An untracked file left after a commit is a
+defect, not a straggler.
+
+#### Fixed by amending, and the amend is itself worth noting
+
+`git add <both paths>` then `git commit --amend -F <message file>`. The amend
+**rewrote the commit hash** (`4744bc3` → `3116597`), which is correct and worth
+stating: nothing had been pushed, so no history was rewritten that anyone else
+had seen. Had the first commit already been pushed, the honest move would have
+been a follow-up commit rather than a force-push — the rule this repository
+follows elsewhere.
+
+After the amend, `git show --stat` lists 12 files including both `create mode
+100644` lines, and `git status --short` is empty.
+
+#### The generalisable rule
+
+`git commit -a` is a convenience with a **silent** blind spot, and the blind spot
+is exactly the case that matters most: the files that are new. A commit that
+adds a module must name it:
+
+```text
+git add path/to/new_file.rs     # then -a for the modifications
+```
+
+This is the eleventh invariant restated — *confirm the push landed* — one step
+earlier in the sequence: confirm the **commit** contains what its message says.
+A message is a claim, and a claim about a diff is checkable in one command.
+
+→ commit `3116597` (amend of `4744bc3`, unpushed, so no shared history moved).
+
+---
+
+### O-171: a green tool has a scope, and `PERF-002`/`CLI-013` are now ticked
+
+The two items that were waiting on verified-green CI are ticked, at the commit
+whose run is green rather than at an earlier one.
+
+- CI run [35803815743](https://github.com/RatioArtificiosa/QQQ/actions/runs/35803815743)
+  on `d3915f3`: **11 success, 0 failures** (DCO skipped by design, not failing).
+- Gate at that commit: fmt, clippy `-D warnings`, 2409 workspace tests, 57 guest.
+
+What the ticks do **not** claim is recorded in the entries themselves. `PERF-002`
+is the *harness* — ten workloads, the methodology as a type, the budgets as data —
+and **no workload has been run against real hardware here**, so `PERF-003` through
+`PERF-013` stay unticked. Ticking a budget item because the mechanism that could
+measure it exists would be the first fabricated measurement in a document whose
+entire value is that its numbers came from commands. That distinction was already
+written into the checklist by an earlier round, and this round honoured it rather
+than quietly relaxing it.
+
+The pattern worth keeping: **a tick needs a run id.** An item "done" with no CI run
+behind it is an assertion; an item with a link to a green run is a fact, and the
+link is what lets a future reader disagree.
+
+→ `QQQ-Checklist-V1.md` (`PERF-002`, `CLI-013`).
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

@@ -1334,7 +1334,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [x] **CON-009** Define and enforce the typed-error rule: every fallible host call returns `result<T, E>`.
   → Done: `tools/check_wit_errors.py`, wired into CI with a fault-injection harness.
-    **73 functions checked across 13 interfaces, 19 declared infallible by name.**
+    **82 functions checked across 15 interfaces, 19 declared infallible by name.**
+    Re-derived from the tool rather than carried: `python tools/check_wit_errors.py`
+    prints these three numbers itself, and the entry read 73/13 until 2026-09-23 —
+    a count copied at authoring time and never re-run. If this entry and the tool
+    disagree again, the tool is right and this line is stale.
   → **The rule is about *fallible* calls, and that distinction is the whole
     difficulty.** It cannot be "every function returns `result`": `clock.timezone`
     returns `"UTC"` and genuinely cannot fail, while `crypto.decrypt` returns
@@ -1373,7 +1377,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     **parseable**.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
 - [x] **CON-010** Implement the CI check that no host interface reads an environment variable or the working directory implicitly.
-  → Done: `tools/check_no_ambient.py` — 40 source files across the six
+  → Done: `tools/check_no_ambient.py` — 73 source files across the six
     guest-reachable crates, wired into CI with a fault-injection harness.
     Also serves `CON-018`, which is the same rule stated as an architecture test.
   → **A source check rather than a runtime test, and the reason is the failure

@@ -109,9 +109,25 @@ not an intention:
 
 The upgrade is a two-file change (`[workspace.dependencies]` plus
 `crates/qqq-host/src/config.rs`, with `Cargo.lock` regenerated), so rollback is a
-`git revert` of one commit. Nothing in QQQ persists engine-specific native code
-that would need clearing: the AOT cache is keyed on `ENGINE_VERSION`, so entries
-produced by the new engine are simply not looked up after a revert.
+`git revert` of one commit, followed by the gate.
+
+**Nothing needs clearing by hand — and the honest reason is thinner than "the
+cache is keyed correctly".** Two separate facts, checked rather than assumed:
+
+* `aot_cache_key` *does* fold `ENGINE_VERSION` in (`h.update(ENGINE_VERSION
+  .as_bytes())` in `crates/qqq-host/src/config.rs`), so an entry compiled by one
+  engine version can never be mistaken for another's. That part is real.
+* **There is no AOT cache on disk yet.** The only caller of `aot_cache_key` is
+  `crates/qqq-host/src/preload.rs`, which computes the key for a report; no crate
+  stores a `.cwasm`, reads one back, or looks one up. So nothing *can* be stale
+  across a revert, because nothing is persisted.
+
+The second point is the one to re-read when the cache lands. Once a store keyed on
+`aot_cache_key` exists, this section gains a real step — the old entries remain on
+disk, harmless but dead weight — and a revert should say so rather than leave an
+operator wondering. Written down now so the sentence does not quietly become
+false later: **the key design is what will make the cache safe; the cache itself
+is not built.**
 
 ---
 

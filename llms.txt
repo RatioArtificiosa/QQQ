@@ -38,7 +38,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/verified-facts.md](docs/verified-facts.md) — Facts asserted in the Proposal, each classified by how perishable it is and when it was last checked. (13 KB)
 - [docs/reconciliation.md](docs/reconciliation.md) — Corrections made to the Proposal, with the reasoning. (4 KB)
 - [docs/wasmtime-advisory-process.md](docs/wasmtime-advisory-process.md) — How a Wasmtime security advisory is handled. _(human)_ (11 KB)
-- [docs/wasmtime-upgrade-runbook.md](docs/wasmtime-upgrade-runbook.md) — How a scheduled Wasmtime upgrade is taken: the steps, their evidence, and the behaviours an upgrade can change without breaking the build. _(human)_ (7 KB)
+- [docs/wasmtime-upgrade-runbook.md](docs/wasmtime-upgrade-runbook.md) — How a scheduled Wasmtime upgrade is taken: the steps, their evidence, and the behaviours an upgrade can change without breaking the build. _(human)_ (8 KB)
 - [docs/unsafe-audit.md](docs/unsafe-audit.md) — The `unsafe` audit: what it covers and what it has found. _(human)_ (5 KB)
 - [SECURITY.md](SECURITY.md) — How to report a vulnerability, and what response to expect. _(human)_ (5 KB)
 - [docs/development-bridge.md](docs/development-bridge.md) — How the Linux verification bridge works, and the one-way rule it enforces on build output. _(human)_ (11 KB)

@@ -27,39 +27,88 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+def derive_topology_injection():
+    """Pick an upward, acyclic edge to inject into `crates/qqq-cap/Cargo.toml`.
+
+    The old version hardcoded `qqq-cap -> qqq-debug`. That was correct while
+    `qqq-debug` sat at position 9; `HOST-009` moved it to position 2, the edge
+    became downward and legal, and CI reported `MISSED topology (upward
+    dependency)` -- the harness correctly detecting that its *target* had gone
+    stale.
+
+    Two conditions, both from §O-059c:
+
+    1. **Upward** -- the target sits above the source in §4.3, so the edge is a
+       real violation.
+    2. **Acyclic** -- the target must not already reach the source. A cycle makes
+       Cargo refuse the manifest, and the test never runs, which reports BROKEN
+       rather than DETECTED. A cycle is a different protection from the one under
+       test.
+
+    The order is read from `check_topology.py` and the graph from the manifests,
+    deliberately duplicated rather than imported: an injector sharing the
+    checker's code could not detect a bug in that code. `qqq-sys` is skipped
+    because the checker treats it as exempt.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import check_topology
+        order = [n for n in check_topology.ORDER if n != 'qqq-sys']
+    except Exception as exc:  # pragma: no cover - reported, not swallowed
+        print(f'  SKIP      topology: could not read the order ({exc})')
+        raise SystemExit(f'cannot derive the topology injection: {exc}')
+
+    source = 'qqq-cap'
+    index = {name: i for i, name in enumerate(order)}
+
+    # Declared dependencies, from the manifests (the *declared* graph, matching
+    # what the architecture test reads).
+    def declared(name):
+        manifest = ROOT / 'crates' / name / 'Cargo.toml'
+        if not manifest.is_file():
+            return set()
+        found = set()
+        for line in manifest.read_text(encoding='utf-8').splitlines():
+            head = line.split('=', 1)[0].strip().strip('"')
+            if head.startswith('qqq-') and head in index:
+                found.add(head)
+        return found
+
+    def reaches(start):
+        seen, stack = set(), [start]
+        while stack:
+            for dep in declared(stack.pop()):
+                if dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
+        return seen
+
+    if source not in index:
+        raise SystemExit(f'{source} is not in the order; cannot derive')
+
+    for target in order:
+        if target == source or target in declared(source):
+            continue
+        upward = index[target] > index[source]
+        acyclic = source not in reaches(target)
+        if upward and acyclic:
+            return (
+                'topology (upward dependency)',
+                Path(f'crates/{source}/Cargo.toml'),
+                '[dependencies]',
+                f'[dependencies]\n{target} = {{ path = "../{target}", version = "0.0.0" }}',
+                'no_crate_depends_on_a_crate_above_it',
+                f'depends on `{target}`',
+            )
+
+    raise SystemExit(
+        f'no upward, acyclic target for {source} -- the injection cannot be derived'
+    )
+
+
 INJECTIONS = [
-    (
-        # `qqq-cap` is position 3; `qqq-io` is position 6. The edge points UP,
-        # which is the violation. It is also ACYCLIC, and that matters: the first
-        # version of this injection used `qqq-serve`, which created a dependency
-        # cycle — `qqq-serve` already depends on `qqq-cap` — so Cargo refused the
-        # manifest and the test never ran. That reported "BROKEN", not
-        # "DETECTED", and a cycle is a *different* protection from the one under
-        # test (§O-059c).
-        #
-        # **This target was `qqq-debug` until `qqq-debug` moved.** It was position
-        # 9, so the edge pointed up; `HOST-009` moved it to position 2 (its only
-        # dependency is `qqq-core` and nothing depended on it, so a position above
-        # the CLI asserted a layering the manifest never had). `qqq-cap` -> 
-        # `qqq-debug` then pointed DOWN and was legal, so the injection stopped
-        # being a fault and CI reported `MISSED topology (upward dependency)`.
-        #
-        # That is the injection harness working correctly and the *target* going
-        # stale: a fault-injection case is coupled to the fact it violates, so
-        # changing the fact invalidates the case. `qqq-io` is chosen because it is
-        # upward (3 -> 6) and acyclic — `qqq-cap` depends only on `qqq-core`, and
-        # `qqq-io` likewise, so neither can reach the other. Verified by
-        # enumerating the real graph, not by reasoning about it.
-        #
-        # `qqq-registry` is also legal but is in `NOT_YET_BUILT`, so an edge to it
-        # is skipped by the checker and would not exercise the rule at all.
-        'topology (upward dependency)',
-        Path('crates/qqq-cap/Cargo.toml'),
-        '[dependencies]',
-        '[dependencies]\nqqq-io = { path = "../qqq-io", version = "0.0.0" }',
-        'no_crate_depends_on_a_crate_above_it',
-        'depends on `qqq-io`',
-    ),
+    # DERIVED, not hardcoded -- see `derive_topology_injection` below.
+    derive_topology_injection(),
     (
         'unsafe policy (bare allow)',
         Path('crates/qqq-io/src/lib.rs'),

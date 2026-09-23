@@ -184,6 +184,38 @@ RUN mkdir -p /linux-target /linux-fuzz-target /linux-corpus /results \
     && chown -R qqq:qqq /linux-target /linux-fuzz-target /linux-corpus /results \
         /home/qqq/.cargo
 
+# # Why the runtime user owns `RUSTUP_HOME`
+#
+# Because rustup adds toolchain components at RUN time, not build time. The
+# container installs a moving `stable` (see `CI_CLIPPY_TOOLCHAIN`), and the first
+# `cargo metadata` against a workspace with a wasm target in it makes rustup fetch
+# and unpack `wasm32-wasip2` for that toolchain. `RUSTUP_HOME` is root-owned, so it
+# failed with:
+#
+#     error: could not create component directory:
+#     '/usr/local/rustup/toolchains/1.98-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-wasip2/lib':
+#     Permission denied (os error 13)
+#
+# `cmd_checks` died on its second step and every checker after it never ran, so the
+# bridge reported a failure that looked like a code defect and was a permission.
+#
+# # Why not pre-install the target instead
+#
+# `rustup toolchain install "${CI_CLIPPY_TOOLCHAIN}" -t wasm32-wasip2` above would fix
+# the 1.98 toolchain this image happens to carry, and would NOT fix the next one.
+# The toolchain is deliberately floating: when stable moves, rustup installs a new
+# toolchain at run time, that toolchain has no target, and the same wall returns for
+# a reason nobody would connect to this line. A toolchain added at run time has to
+# be writable at run time.
+#
+# # What this does not weaken
+#
+# It widens nothing a test depends on. `SEC-019`'s positive path needs the process to
+# be **unprivileged**, which it still is; `RUSTUP_HOME` ownership is a property of a
+# build tool's own cache. The source guard is unaffected, and `/workspace` is not
+# touched.
+RUN chown -R qqq:qqq /usr/local/rustup
+
 COPY --chown=qqq:qqq docker/entrypoint.sh /usr/local/bin/qqq-entrypoint
 RUN chmod +x /usr/local/bin/qqq-entrypoint
 
@@ -208,7 +240,36 @@ RUN chmod +x /usr/local/bin/qqq-entrypoint
 # `safe.directory` is the narrowest correct fix. The alternative -- chowning the
 # bind mount -- would modify the host's ownership, which is exactly the kind of
 # write-back the bridge exists to prevent.
-RUN git config --global --add safe.directory /workspace
+# # And why `HOME` is declared before it
+#
+# Found by running it. With `HOME` unset -- the base image defines `CARGO_HOME` and
+# `RUSTUP_HOME` but never `HOME` -- `git config --global` wrote to `/root/.gitconfig`,
+# which the image discards at `USER qqq`. The setting above was therefore inert from
+# the day it was written, and the guard it protects failed with:
+#
+#     fatal: detected dubious ownership in repository at '/workspace'
+#     fatal: unable to read config file '/home/qqq/.gitconfig': No such file or directory
+#
+# The block above records the identical hazard for `CARGO_HOME`: a `RUN` reads its
+# `ENV`s in file order, and no linter checks that a variable is declared before use.
+# This is that trap a second time, in the same file, which is why the assertion below
+# exists rather than another comment.
+ENV HOME=/home/qqq
+
+# # Why the setting is asserted here rather than trusted
+#
+# `/workspace` is only `WORKDIR` at build time -- an empty directory. The source, and
+# with it `.git`, arrives when `compose.yaml` bind-mounts the host tree at RUN time,
+# so a `--file /workspace/.git/config` write here cannot work and does not:
+#
+#     error: could not lock config file /workspace/.git/config: No such file or directory
+#
+# The global file is different. It is written into the image at a real path, owned by
+# `qqq`, and no mount covers it -- which is exactly why `ENV HOME` above is the fix and
+# the whole fix. The assertion makes a silent regression in that ordering a failed
+# build instead of a guard that measures nothing.
+RUN git config --global --add safe.directory /workspace \
+    && git config --global --get-all safe.directory | grep -qx /workspace
 
 # # Why `CARGO_TARGET_DIR` is set to a volume path and not left to default
 #

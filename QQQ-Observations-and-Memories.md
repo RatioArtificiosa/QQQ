@@ -15384,6 +15384,108 @@ keep true** -- and none of those checkers reads prose. `check_wit_reference` com
 rendered reference against the WIT file; it cannot tell that a WIT comment contradicts
 itself forty lines later. That is the residual gap, and it is recorded rather than closed.
 
+## §O-189 - The Linux bridge had been broken since it was written, twice, by Docker's own ordering rules
+
+**Why this was found now.** The plan's step 9 says to use Linux or Docker verification
+where available, and the bridge is `tools/qqqdev.ps1` over `docker/compose.yaml`. Docker
+29.6.1 is installed. `qqqdev checks` failed on its second step, and each failure was a
+real defect in the bridge rather than in the code under test -- and neither could be seen
+from Windows, because both are properties of the container image.
+
+### Failure 1: rustup could not install a target, so every checker after it never ran
+
+```
+FATAL: cargo metadata failed
+error: could not create component directory:
+'/usr/local/rustup/toolchains/1.98-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-wasip2/lib':
+Permission denied (os error 13)
+```
+
+`cmd_checks` begins with `cmd_lint_ci`, which runs clippy under the **floating** `stable`
+toolchain (deliberately: a linter one version behind the gate it predicts is not a check).
+`cargo metadata` on a workspace that names a wasm target then makes rustup fetch
+`wasm32-wasip2` for that toolchain -- and `RUSTUP_HOME=/usr/local/rustup` is root-owned,
+while the container runs as `qqq`. So the fetch rolled back and the checker suite died at
+step two. **Thirty-odd checkers never executed and the output looked like a code failure.**
+
+Two fixes were available and one was rejected on evidence. Pre-installing the target
+(`rustup toolchain install "${CI_CLIPPY_TOOLCHAIN}" -t wasm32-wasip2`) fixes the toolchain
+this image happens to carry and not the next one: the toolchain floats, so when stable
+moves, rustup installs a new toolchain at run time, that one has no target, and the same
+wall returns for a reason nobody would connect to the line that caused it. A toolchain
+added at run time has to be writable at run time, so the fix is `chown -R qqq:qqq
+/usr/local/rustup`, placed before `USER qqq`.
+
+### Failure 2: the source guard had been measuring nothing since the day it was added
+
+With the toolchain fixed the suite progressed to `normalize_eol.py --check`, which runs
+`git ls-files --eol` and got exit 128. The cause:
+
+```
+fatal: detected dubious ownership in repository at '/workspace'
+fatal: unable to read config file '/home/qqq/.gitconfig': No such file or directory
+```
+
+The Dockerfile has a long comment about this exact hazard and ends it with
+`RUN git config --global --add safe.directory /workspace`. **That line wrote to
+`/root/.gitconfig`.** The base image defines `CARGO_HOME` and `RUSTUP_HOME` as `ENV` and
+never defines `HOME`, so `--global` resolved to root's home -- and the image discards it
+at `USER qqq`. The setting was inert from the day it was written.
+
+This is the same trap the Dockerfile records forty lines earlier for `CARGO_HOME`, in the
+same file: *"a Docker build reads its `ENV`s in file order, and no linter checks that a
+`RUN` only references variables declared before it."* The file already knew the rule and
+had broken it again.
+
+`ENV HOME=/home/qqq` now precedes the `git config`, and the build **asserts** the setting
+with `git config --global --get-all safe.directory | grep -qx /workspace`, so a future
+reordering fails the image build instead of producing a guard that measures nothing.
+
+The guard is not decorative: `source_guard_snapshot()` pipes `git ls-files` through
+`sha1sum`, and a refused `git` produces the hash of an empty string. The Dockerfile says
+so in as many words -- *"the ONLY control enforcing the bridge's one-way rule"* -- which
+had been OFF, not merely weak.
+
+### A fix that had to be withdrawn, and why the build said so
+
+The first attempt at failure 2 also wrote the setting to `/workspace/.git/config`, on the
+reasoning that a second, environment-independent copy is sturdier. The build refused:
+
+```
+error: could not lock config file /workspace/.git/config: No such file or directory
+```
+
+`/workspace` is only `WORKDIR` at build time -- an empty directory. The host's source, and
+with it `.git`, appears when `compose.yaml` bind-mounts it at run time. A file written into
+the image's `/workspace` is **hidden by the mount**, and the path does not exist while the
+image is being built. The durable half is the half that works: `ENV HOME`.
+
+### One false alarm, recorded because it cost time
+
+An intermediate probe printed `HOME=C:UsersUsuario` inside the container, which looked like
+a third defect: a host variable leaking in. It was my own diagnostic. The backslash-`$HOME`
+I passed was consumed by PowerShell before docker saw it, so what reached the container was
+a mangled literal rather than a variable reference. Verified properly:
+
+- `docker run --rm --entrypoint sh qqq-dev-linux:1.97 -c 'echo HOME=$HOME'` -> `/home/qqq`
+- `docker compose ... run --rm --entrypoint sh linux -c 'echo HOME=$HOME'` -> `/home/qqq`
+- the harness shell has no `HOME` exported at all, and compose forwards only what is asked
+
+The image is correct. **The lesson is the one from §O-151 in a new dialect:** when a probe
+disagrees with two other probes, suspect the probe.
+
+### What this says about the bridge as a control
+
+The bridge exists so that a green local run means something on Linux. Both defects had the
+same shape as the failures this project keeps rediscovering: **a control believed live that
+is not.** Failure 1 left thirty checkers unexecuted while printing a failure that pointed at
+cargo. Failure 2 disabled the one guard that enforces the bridge's central rule, and the
+guard's failure mode is silence -- it hashes an empty string and reports a match.
+
+Neither was reachable from Windows, and neither would be caught by any test in the
+repository, because both live in `docker/Dockerfile`. The defence is the one already used
+elsewhere in this file: an assertion in the artifact itself. There is now one for the guard.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -37,6 +37,11 @@ import sys
 import tempfile
 
 ROOT = os.environ.get("QQQ_UNSAFE_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates"))
+# The page this scan is the evidence for. Checked by `--check-doc`; see `check_doc` for why
+# a hand-copied count in a safety document is a defect rather than a stale detail.
+DOC = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "docs", "unsafe-audit.md"
+)
 
 # Code-position unsafe forms. The `unsafe` KEYWORD followed by a code construct.
 CODE_PATTERNS = {
@@ -215,7 +220,124 @@ def self_test():
     if failures:
         print(f"SELF-TEST FAILED -- {failures} problem(s)")
         return 1
+
+    # --- The document check, proven live ---------------------------------
+    #
+    # `--check-doc` is a gate on a safety page, so it needs the same treatment as the
+    # scanner: a checker that has never rejected anything has never been shown to work.
+    # Three cases, and the middle one is the point -- a check that fired on *everything*
+    # would pass the first and third while being useless.
+    root = os.path.normpath(ROOT)
+    files, _code, _prose, lint_hits = scan(root)
+    with tempfile.TemporaryDirectory() as tmp:
+        good = os.path.join(tmp, "good.md")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write(
+                f"| `.rs` files scanned under `crates/` | **{len(files)}** |\n"
+                "| Crates carrying a bare `#![forbid(unsafe_code)]` | **11** (every crate) |\n"
+            )
+        if check_doc(files, lint_hits, good) == 0:
+            print("  OK    doc check accepts a correct table")
+        else:
+            print("  DEAD  doc check rejects a correct table")
+            failures += 1
+
+        bad = os.path.join(tmp, "bad.md")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write(
+                "| `.rs` files scanned under `crates/` | **85** |\n"
+                "| Crates carrying a bare `#![forbid(unsafe_code)]` | **11** (every crate) |\n"
+            )
+        if check_doc(files, lint_hits, bad) != 0:
+            print("  OK    doc check catches a stale file count")
+        else:
+            print("  DEAD  doc check accepted a stale file count")
+            failures += 1
+
+        missing = os.path.join(tmp, "missing.md")
+        with open(missing, "w", encoding="utf-8") as f:
+            f.write("# no table at all\n")
+        if check_doc(files, lint_hits, missing) != 0:
+            print("  OK    doc check catches a table that lost its row")
+        else:
+            print("  DEAD  doc check accepted a document with no table")
+            failures += 1
+
+    print()
+    if failures:
+        print(f"SELF-TEST FAILED -- {failures} problem(s)")
+        return 1
     print("SELF-TEST PASSED -- every injection detected, no prose false positive")
+    return 0
+
+
+def check_doc(files, lint_hits, doc_path=None) -> int:
+    """Fail when `docs/unsafe-audit.md`'s table disagrees with the live scan.
+
+    # Why the report is checked rather than trusted
+
+    The document said **85** `.rs` files scanned while the tree held 139. The count
+    was true when it was written and nothing tied it to the tree afterwards, so it
+    decayed the way every hand-copied number decays — silently, and in the direction
+    of understating the work.
+
+    It matters more here than the arithmetic suggests. This page is the *evidence* for
+    the workspace's central safety claim (`SEC-020`), and its argument is "a zero that
+    appears for the wrong reason is worse than a non-zero". A page whose own sample
+    size is wrong is exactly the wrong reason, in miniature: the reader cannot tell
+    whether 85 was the real count and the tree grew, or whether the scanner was
+    looking somewhere else all along.
+
+    So the number is derived from the scan that is already running, and this mode is a
+    gate on the page rather than a second report.
+    """
+    forbids = [h for h in lint_hits if h[2] == "forbid_attr"]
+    # `#![forbid(unsafe_code)]` on every crate, plus incidental mentions of the attribute in
+    # doc comments and test fixtures. The claim is about crates, so it is counted from the
+    # crate roots rather than from every hit.
+    crate_roots = {
+        rel.split(os.sep)[0] for rel, _ln, kind, _text in lint_hits if kind == "forbid_attr"
+    }
+
+    try:
+        with open(doc_path or DOC, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        print(f"DRIFT: could not read {doc_path or DOC}: {e}")
+        return 1
+
+    problems = []
+
+    m = re.search(r"\|\s*`\.rs` files scanned under `crates/`\s*\|\s*\*\*(\d+)\*\*\s*\|", text)
+    if not m:
+        problems.append("the `files scanned` row is missing or has lost its `**bold**` count")
+    elif int(m.group(1)) != len(files):
+        problems.append(
+            f"`files scanned` says {m.group(1)}, the scan found {len(files)}"
+        )
+
+    m = re.search(r"\|\s*Crates carrying a bare `#!\[forbid\(unsafe_code\)\]`\s*\|\s*\*\*(\d+)\*\*", text)
+    if not m:
+        problems.append("the `Crates carrying a bare forbid` row is missing")
+    elif int(m.group(1)) != len(crate_roots):
+        problems.append(
+            f"`crates carrying forbid` says {m.group(1)}, {len(crate_roots)} crate root(s) carry it"
+        )
+
+    if problems:
+        for p in problems:
+            print(f"  DRIFT: {p}")
+        print(
+            "  Update the table in `docs/unsafe-audit.md` to match this scan. The numbers "
+            "are produced by `python tools/audit_unsafe.py`, so the page never needs to be "
+            "guessed at."
+        )
+        return 1
+
+    print(
+        f"UNSAFE AUDIT DOC OK -- {len(files)} file(s), {len(crate_roots)} crate root(s) "
+        f"carrying `forbid(unsafe_code)`"
+    )
     return 0
 
 
@@ -225,6 +347,9 @@ def main():
 
     root = os.path.normpath(ROOT)
     files, code_hits, prose_hits, lint_hits = scan(root)
+
+    if "--check-doc" in sys.argv:
+        return check_doc(files, lint_hits)
 
     print(f"scanned {len(files)} .rs files under {root}")
     print()

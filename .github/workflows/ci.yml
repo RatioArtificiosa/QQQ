@@ -304,6 +304,20 @@ jobs:
       - name: Prove the citation check catches a fabricated identifier
         run: python tools/check_checklist_citations.py --self-test
 
+      # The checklist's own arithmetic. Its header states a per-area count, a grand
+      # total, and a per-phase table, and all three are prose a human edits. Measured
+      # drift when this step was added: **fifteen** wrong numbers, including a grand
+      # total three items short of the item count -- so the document disagreed with
+      # itself about how much work the project contains. Nothing caught it, because
+      # every other checker reads the *items* and none read the *summary*.
+      #
+      # The phase-to-area map is read from §2 rather than hard-coded, so adding an area
+      # to a phase cannot silently exempt it.
+      - name: Verify the checklist's own counts add up
+        run: python tools/check_checklist_counts.py
+      - name: Prove the count check catches a wrong total
+        run: python tools/check_checklist_counts.py --self-test
+
       # §9.2 is a contract with twelve stated budgets. `Budget::ALL` in
       # `crates/qqq-bench/src/budget.rs` is its machine-readable copy, and this
       # compares the Proposal, that table and the checklist against each other.
@@ -762,6 +776,16 @@ jobs:
       # development: a string literal containing `unsafe {` was flagged as code.
       - name: unsafe audit is live (SEC-020)
         run: python tools/audit_unsafe.py --self-test
+
+      # The audit's *numbers* are evidence too, and they are the part nothing checked.
+      # `docs/unsafe-audit.md` said 85 files scanned while the tree held 139: true when
+      # written, never tied to the tree afterwards, and wrong in the direction that
+      # understates the sample. The page's own argument is that "a zero that appears for
+      # the wrong reason is worse than a non-zero", and a drifted sample size is that
+      # problem in miniature -- the reader cannot tell whether the count was right and the
+      # tree grew, or whether the scanner was looking elsewhere all along.
+      - name: unsafe audit document matches the tree (SEC-020)
+        run: python tools/audit_unsafe.py --check-doc
 
   # ---------------------------------------------------------------------------
   # MSRV: does the workspace actually build on the version Cargo.toml promises?

@@ -41,18 +41,16 @@ recorded — and a re-verification is an action, not an edit to a document.
 
 ## Summary
 
-| Class | Facts | Re-verify every |
+| Class | Facts | Cadence |
 |---|---|---|
 | **local** | 3 | every 7 days |
 | **perishable** | 4 | every 7 days |
 | **volatile** | 10 | every 30 days |
 | **stable** | 13 | every 180 days |
-| **volatile** | 10 | every 30 days |
-| **stable** | 13 | every 180 days |
 
 **30 of 30 facts classified.**
 
-## Local — re-verify every every 7 days
+## Local — re-verify every 7 days
 
 *a property of a development machine changes whenever anyone works.*
 
@@ -74,7 +72,7 @@ recorded — and a re-verification is an action, not an edit to a document.
 
 **Verified by.** `Command lookup failure`
 
-## Perishable — re-verify every every 7 days
+## Perishable — re-verify every 7 days
 
 *a version number or a popularity metric changes without notice.*
 
@@ -102,7 +100,7 @@ recorded — and a re-verification is an action, not an edit to a document.
 
 **Verified by.** `Component Model documentation`
 
-## Volatile — re-verify every every 30 days
+## Volatile — re-verify every 30 days
 
 *a registry or DNS fact changes unpredictably, and the change is not announced.*
 
@@ -166,155 +164,9 @@ recorded — and a re-verification is an action, not an edit to a document.
 
 **Verified by.** `DNS SOA query`
 
-## Stable — re-verify every every 180 days
+## Stable — re-verify every 180 days
 
 *a licence or a specification's content changes rarely, and loudly when it does.*
-
-### `B-4` — Wasmtime licence
-
-**Value at 2026-09-20.** Apache-2.0 WITH LLVM-exception
-
-**Verified by.** `GitHub API `license`; docs.rs`
-
-### `B-5` — Component Model preview releases
-
-**Value at 2026-09-20.** 0.2.0 (shared-nothing/everything linking, resources, WIT); **0.3.0** (native concurrency: `async`, `stream`, `future`); 0.3.1 (`map<K,V>`, `implements`)
-
-**Verified by.** `Component Model repo README (WebAssembly/component-model)`
-
-### `B-6` — WASI 0.3 = Preview 3 is current
-
-**Value at 2026-09-20.** Confirmed; "replacing the earlier explicit streams and polling interfaces with the component model's native, composable `async` functionality via the `future` and `stream` types"
-
-**Verified by.** `WASI repo README (WebAssembly/WASI)`
-
-### `B-7` — Wasmtime Tier 1 Wasm proposals include `component-model`, `simd`, `gc`, `exception-handling`, `memory64`, `tail-call`, `multi-memory`, `relaxed-simd`, `wide-arithmetic`
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Wasmtime `docs/stability-tiers.md``
-
-### `B-9` — `wasi:http` p3 is enabled by default in `wasmtime-wasi-http`
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Wasmtime 49.0.0 release notes`
-
-### `B-10` — WASI proposals past Preview 1 include `wasi-http`, `wasi-sockets`, `wasi-filesystem`, `wasi-clocks`, `wasi-random`, `wasi-io`
-
-**Value at 2026-09-20.** Confirmed as Tier 1
-
-**Verified by.** ``stability-tiers.md``
-
-### `B-12` — Wasmtime exposes `Config::epoch_interruption`, `Store::epoch_deadline_async_yield_and_update`, `Config::consume_fuel`, `Store::fuel_async_yield_interval`, `StoreLimitsBuilder`, `PoolingAllocationConfig`, `Module::serialize`/`deserialize`, `Component::new`
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `docs.rs API index for wasmtime 48.0.2`
-
-### `B-13` — Wasmtime requires `*_async` APIs once async host functions, async limiters, or async fuel/epoch yields are configured
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `docs.rs crate documentation, "Async" section`
-
-### `B-14` — Wasmtime's WASIp2 implementation explicitly opts out of Tokio's per-task cooperative budget for `poll` calls
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Wasmtime 49.0.0 release notes`
-
-### `B-26` — GitHub CLI authenticated as `RatioArtificiosa` with `repo`, `workflow`, `gist`, `read:org` scopes
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** ``gh auth status``
-
-### `B-27` — Target repository `RatioArtificiosa/QQQ` is **public and empty** (no commits, no branches)
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `GitHub API `repos/.../contents`, `/branches`, `/commits``
-
-### `B-29` — Component Model structural property: a component **may not export a memory**, so it cannot communicate indirectly through shared memory
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Component Model documentation`
-
-### `B-30` — Component Model enables static analysis of component graphs (e.g. proving a business-logic component has no access to a PII component)
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Component Model documentation`
-
-## Volatile — re-verify every every 30 days
-
-*the row defers to the method above it — a spec's stability tiers, which move when a proposal advances rather than on a schedule.*
-
-### `B-8` — Wasmtime Tier 2 proposals include `threads`; `stack-switching` is 🚧 for Cranelift x86_64 and unsupported on aarch64
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Same document`
-
-### `B-11` — `wasi-nn`, `wasi-config`, `wasi-keyvalue`, `wasi-tls`, `wasi-threads` are Tier 3 (unstable)
-
-**Value at 2026-09-20.** Confirmed
-
-**Verified by.** `Same`
-
-### `B-15` — `qqq` on crates.io
-
-**Value at 2026-09-20.** **Taken** (v0.2.0, 131 downloads)
-
-**Verified by.** `crates.io API`
-
-### `B-16` — `qqq` on npm
-
-**Value at 2026-09-20.** **Taken** (v0.0.6)
-
-**Verified by.** `npm registry API`
-
-### `B-17` — `github.com/qqq`
-
-**Value at 2026-09-20.** **Taken** (personal user account)
-
-**Verified by.** `GitHub API`
-
-### `B-18` — `qqqai` on crates.io / npm / GitHub
-
-**Value at 2026-09-20.** **Free on all three**
-
-**Verified by.** `crates.io, npm registry, GitHub APIs`
-
-### `B-19` — `qqq-codes` on crates.io
-
-**Value at 2026-09-20.** Free
-
-**Verified by.** `crates.io API`
-
-### `B-20` — `qx3` on crates.io / npm
-
-**Value at 2026-09-20.** Free
-
-**Verified by.** `crates.io, npm APIs`
-
-### `B-21` — `github.com/qx3`
-
-**Value at 2026-09-20.** **Taken** (organization)
-
-**Verified by.** `GitHub API`
-
-### `B-22` — `qqq.dev`, `qqq.run`
-
-**Value at 2026-09-20.** Registered (SOA records present)
-
-**Verified by.** `DNS SOA query`
-
-## Stable — re-verify every every 180 days
-
-*an API or specification property: it changes only with a major release, and a design that rests on it must notice when it does.*
 
 ### `B-4` — Wasmtime licence
 

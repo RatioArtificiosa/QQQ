@@ -85,6 +85,12 @@ pub mod boundary;
 pub mod call;
 pub mod config;
 pub mod guard;
+/// Sanitising sinks for guest stdout and stderr.
+///
+/// Added with `§O-183`: `host_wasi::context` inherited the host's stdout for the
+/// guest, and `qqq-serve`'s access log is written to that same stdout — so a guest
+/// could emit a line byte-identical to a host access record.
+pub mod guest_output;
 pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
@@ -123,6 +129,10 @@ pub use config::{
     StoreLimits as LimitSet,
 };
 pub use guard::{guard, guard_reporting, PanicReport};
+pub use guest_output::{
+    Escaper, GuestOutput, GuestSink, SanitisingWriter, MAX_ESCAPED_RUN, STDERR_PREFIX,
+    STDOUT_PREFIX,
+};
 pub use handles::{Handle, HandleStats, HandleTable};
 pub use host_http::{
     describe_ungranted as describe_http_ungranted, register as register_http,

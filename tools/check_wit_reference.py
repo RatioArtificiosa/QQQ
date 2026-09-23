@@ -29,12 +29,16 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GEN = ROOT / "tools" / "gen_wit_reference.py"
+# The committed page. Checked for internal consistency as well as for agreement with the
+# generator; see `internal_consistency` for why one check is not the other.
+TARGET = ROOT / "docs" / "wit-reference.md"
 
 sys.path.insert(0, str(ROOT / "tools"))
 import gen_wit_reference as gen  # noqa: E402
@@ -69,7 +73,69 @@ interface thing {
 """
 
 
+def internal_consistency() -> tuple[bool, str]:
+    """Whether the committed page agrees with *itself*.
+
+    # Why comparing against the generator is not enough
+
+    `run_check` regenerates the page and diffs it. That catches a page that has
+    drifted from the generator, and it is blind to a page that is wrong in the same
+    way the generator is — which is exactly what happened: the header said
+    **61 functions** and the `qqq:fs@1.0.0` row said **0**, while the section beneath
+    that row listed seven methods. Regenerating reproduced all of it faithfully, so
+    the checker passed for as long as the bug existed.
+
+    The missing check is arithmetic the page can be held to on its own: the header
+    total must equal the sum of the column under it, and a table row that says an
+    interface declares nothing must not be contradicted by its own section. This was
+    the third time in this project that a generator's *number* was wrong while its
+    *text* was right.
+    """
+    text = TARGET.read_text(encoding="utf-8")
+    header = re.search(
+        r"\*\*(\d+) package\(s\), (\d+) interface\(s\), (\d+) function\(s\)\.\*\*", text
+    )
+    if not header:
+        return False, "the header's package/interface/function line is missing"
+    stated = int(header.group(3))
+
+    rows = re.findall(r"^\| `([^`]+)` \| \[`([^`]+)`\]\(#[^)]*\) \| (\d+) \|$", text, re.M)
+    if not rows:
+        return False, "the interfaces table has no rows"
+    total = sum(int(n) for _pkg, _iface, n in rows)
+
+    if stated != total:
+        return False, (
+            f"the header says {stated} function(s); the table's own column sums to {total}"
+        )
+
+    # A row of zero must be true: the section for that interface must declare no methods
+    # either. This is the assertion that would have caught the original defect directly.
+    for pkg, iface, n in rows:
+        if int(n) != 0:
+            continue
+        section = re.search(
+            rf"^### `{re.escape(iface)}`$.*?(?=^### |^## |\Z)",
+            text,
+            re.M | re.S,
+        )
+        if section and re.search(r"\d+ method\(s\)", section.group(0)):
+            return False, (
+                f"`{pkg}`/`{iface}` is listed with 0 functions but its section lists methods"
+            )
+
+    return True, f"{len(rows)} interface row(s), header total {stated} matches the column"
+
+
 def run_check() -> tuple[int, str]:
+    code, out = _regenerate_check()
+    ok, detail = internal_consistency()
+    if not ok:
+        return 1, f"DRIFT: the WIT reference contradicts itself -- {detail}"
+    return code, out
+
+
+def _regenerate_check() -> tuple[int, str]:
     p = subprocess.run(
         [sys.executable, str(GEN), "--check"],
         capture_output=True,

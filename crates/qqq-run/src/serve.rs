@@ -20,16 +20,30 @@
 //!   serve (this file) bind, route, dispatch, shut down
 //! ```
 //!
-//! # Why `--workers` is a *capacity* rather than a thread count
+//! # Why `--workers` accepts only `1`
 //!
-//! A worker in a component-per-request runtime is not a thread that owns a
-//! connection: V1 already runs async-single-threaded with one task per connection
-//! (§4.7), and the pooling allocator is what bounds concurrent instances. So
-//! `--workers` is parsed, validated and **reported**, and its honest meaning in V1
-//! is the instance-pool capacity — not a thread pool this command creates. Saying
-//! that here rather than quietly ignoring the flag matters: a flag that looks like
-//! it does something and does nothing is the defect shape this project keeps
-//! recording.
+//! A worker in a component-per-request runtime is not a thread that owns a connection:
+//! V1 runs async-single-threaded with one task per connection (§4.7), and there is no
+//! instance pool on this path at all — `GuestApp` instantiates per request. So
+//! `--workers` was parsed, validated and **reported** with no effect, and the claim that
+//! its "honest meaning in V1 is the instance-pool capacity" was a description of a pool
+//! that does not exist here. `--workers 4` was accepted and the process ran one.
+//!
+//! `1` is therefore accepted because it is true, and anything else is refused with a
+//! remediation naming `[limits] max_instances` — the ceiling the runtime does enforce.
+//! A refusal is the honest shape while the flag has nothing to size; when a pool lands,
+//! the check is deleted and the number acquires its meaning.
+//!
+//! # Why `--tls` is refused
+//!
+//! `--tls` used to parse, set `ServeOutput::tls`, print `TLS: on` and serve cleartext: the
+//! manifest has no `[server.tls]` section and there is no TLS-terminating accept path, so
+//! the flag had nothing to turn on. A command that reports an active security feature it
+//! does not provide is worse than one that has no such flag, because the operator's belief
+//! is the thing being relied on.
+//!
+//! It is refused at parse time, naming what is missing and what to do instead, so the
+//! failure lands while the user is looking at the command they typed.
 //!
 //! # Why `--config` names a manifest and is not an overlay format
 //!
@@ -69,9 +83,10 @@ pub const MAX_WORKERS: u32 = 128;
 pub struct ServeOptions {
     /// `--listen <host:port>`.
     pub listen: String,
-    /// `--workers <n>`. See the module documentation for what it means in V1.
+    /// `--workers <n>`. Only `1` is accepted; see the module documentation.
     pub workers: u32,
-    /// `--tls` — serve TLS using the manifest's TLS configuration.
+    /// `--tls`. Refused while no TLS configuration or accept path exists; see the module
+    /// documentation.
     pub tls: bool,
     /// `--config <path>` — an alternate manifest to serve.
     pub config: Option<String>,
@@ -185,6 +200,39 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
         }
     }
 
+    // --- The two flags that would otherwise report something untrue ---------
+    //
+    // Both are *refusals at parse time* rather than warnings at startup, because the
+    // alternative is a server that prints a security claim it cannot honour. `--tls` was
+    // the sharper of the two: it printed `TLS: on` while serving cleartext, so an operator
+    // reading the command's own output would conclude the listener was encrypted.
+    //
+    // Refusing is a smaller change than it looks, and a reversible one: when `[server.tls]`
+    // is modelled and a TLS-terminating accept path exists, these two checks are deleted
+    // and nothing else moves.
+    if opts.tls {
+        return Err(usage(
+            "`--tls` is not implemented: the manifest has no `[server.tls]` section and \
+             there is no TLS-terminating accept path, so this server would serve cleartext \
+             while reporting TLS",
+        )
+        .with_remediation(
+            "terminate TLS in front of `qqqai serve` (a reverse proxy or a service mesh) \
+             until `SRV-007`'s configuration and accept path land",
+        ));
+    }
+    if opts.workers > 1 {
+        return Err(usage(format!(
+            "`--workers {}` is not implemented: V1 serves every connection as a task on \
+             one runtime, so a second worker would not exist",
+            opts.workers
+        ))
+        .with_remediation(
+            "pass `--workers 1`, and bound concurrency with `[limits] max_instances` in \
+             qqq.toml — that is the ceiling the runtime actually enforces",
+        ));
+    }
+
     Ok(opts)
 }
 
@@ -240,7 +288,40 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     })?;
 
     let routes = routes_from_manifest(server, &loaded.path.display().to_string())?;
-    let config = ServerConfig::for_addr(addr);
+
+    // --- The configuration the manifest asked for, attached ----------------
+    //
+    // Every field here was previously computed and then dropped: `routes_from_manifest`
+    // built the per-route auth modes, the per-tenant limits and the CORS policy, and
+    // `ServerConfig::for_addr` produced a config with all of them absent. The server ran,
+    // answered, and enforced none of it — including `default_auth`, whose default is
+    // `deny`. Attaching them is the whole of `§O-181`.
+    let mut config = ServerConfig::for_addr(addr);
+
+    // The authentication policy. Always attached, never optional on this path: a manifest
+    // always has an opinion about authority (`default_auth`), so a server started from one
+    // always has a policy. An empty route list is already refused above.
+    config.auth = Some(Arc::new(routes.auth_policy));
+
+    // The per-tenant request limits, or `None` when `[server.limits]` is absent — which is
+    // the manifest saying "no limits", a different statement from "the server forgot to
+    // install them".
+    config.limits = routes.limits;
+
+    // The cross-origin policy, or `None` when `[server.cors]` is absent.
+    config.cors = build_cors(server)?;
+
+    // Metrics, always on for the production command.
+    //
+    // No manifest switch exists for this, and inventing one would be a configuration
+    // surface with a single value. §10.2 asks for the default metric set on a served
+    // process, and the recording sites are `Option`-checked, so attaching the registry is
+    // what turns `qqq-serve`'s counters from tested-and-unreachable into reachable. The
+    // registry allocates nothing until a request is recorded.
+    config.metrics = Some(Arc::new(qqq_serve::metrics::HttpMetrics::new()));
+
+    // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
+    config.accept_limit = opts.accept_limit;
 
     let (dispatch, guest_loaded) = build_dispatch(loaded, opts)?;
 
@@ -251,6 +332,55 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         routes: server.routes.len(),
         guest_loaded,
     })
+}
+
+/// Build the cross-origin policy from the manifest's `[server.cors]`.
+///
+/// # Why the whole section is converted rather than only `allow_origins`
+///
+/// A policy with the right origin list and the wrong credentials flag is a policy that
+/// behaves differently from the one the author wrote, in a way no test of the origin list
+/// can see. Every field the manifest models is carried, and the two that V1 refuses
+/// (`*` and a subdomain wildcard) are refused by `Cors::from_manifest` with a message
+/// naming the reason — a refusal at startup rather than a policy that silently matches
+/// nothing.
+///
+/// # Errors
+///
+/// `QQQ-2002` when an origin in `allow_origins` is not a valid origin, or is a wildcard.
+fn build_cors(server: &qqq_cap::manifest::Server) -> Result<Option<qqq_serve::cors::Cors>> {
+    let Some(declared) = server.cors.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut cors = qqq_serve::cors::Cors::from_manifest(&declared.allow_origins).map_err(|e| {
+        Error::new(
+            ErrorCode::ManifestSchemaViolation,
+            format!("`[server.cors] allow_origins` is not usable: {e}"),
+        )
+        .with_remediation(
+            "name each origin explicitly, for example \
+             `allow_origins = [\"https://app.example.com\"]`",
+        )
+    })?;
+
+    if declared.allow_credentials {
+        cors = cors.with_credentials();
+    }
+    if !declared.allow_methods.is_empty() {
+        cors = cors.with_methods(&declared.allow_methods);
+    }
+    if !declared.allow_headers.is_empty() {
+        cors = cors.with_allowed_headers(&declared.allow_headers);
+    }
+    if !declared.expose_headers.is_empty() {
+        cors = cors.with_exposed_headers(&declared.expose_headers);
+    }
+    if let Some(seconds) = declared.max_age {
+        cors = cors.with_max_age(seconds);
+    }
+
+    Ok(Some(cors))
 }
 
 /// A server that is ready to bind.
@@ -495,21 +625,70 @@ mod tests {
     }
 
     #[test]
-    fn every_documented_flag_parses() {
+    fn every_supported_flag_parses() {
         let o = options(&args(&[
             "--listen",
             "0.0.0.0:8080",
             "--workers",
-            "4",
-            "--tls",
+            "1",
             "--config",
             "prod.toml",
+            "--accept-limit",
+            "3",
         ]))
-        .expect("the documented flags must parse");
+        .expect("the supported flags must parse");
         assert_eq!(o.listen, "0.0.0.0:8080");
-        assert_eq!(o.workers, 4);
-        assert!(o.tls);
+        assert_eq!(o.workers, 1);
         assert_eq!(o.config.as_deref(), Some("prod.toml"));
+        assert_eq!(o.accept_limit, Some(3));
+    }
+
+    #[test]
+    fn tls_is_refused_rather_than_reported_as_on() {
+        // The defect this replaces: `--tls` parsed, `ServeOutput::tls` was true, the command
+        // printed `TLS: on`, and the listener served cleartext. A flag that reports a
+        // security feature it does not provide is worse than a flag that is absent, so the
+        // refusal has to name what is missing rather than say "unsupported".
+        let err = options(&args(&["--tls"])).expect_err("--tls must be refused");
+        assert!(
+            err.message.contains("not implemented"),
+            "the message must say the flag is not implemented: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("cleartext"),
+            "the message must say what would actually happen: {}",
+            err.message
+        );
+        let remediation = err.remediation.as_deref().unwrap_or_default();
+        assert!(
+            remediation.contains("reverse proxy") || remediation.contains("terminate"),
+            "the remediation must name a way to get TLS today: {remediation}"
+        );
+    }
+
+    #[test]
+    fn more_than_one_worker_is_refused_and_names_the_real_ceiling() {
+        // `--workers 4` was accepted and reported while the process ran every connection on
+        // one runtime. The honest answer is a refusal that points at the setting the runtime
+        // *does* enforce, because that is what the operator was reaching for.
+        let err = options(&args(&["--workers", "4"])).expect_err("--workers 4 must be refused");
+        assert!(
+            err.message.contains("--workers 4"),
+            "the message must quote what was asked for: {}",
+            err.message
+        );
+        let remediation = err.remediation.as_deref().unwrap_or_default();
+        assert!(
+            remediation.contains("max_instances"),
+            "the remediation must name the ceiling that exists: {remediation}"
+        );
+    }
+
+    #[test]
+    fn one_worker_is_accepted_because_it_is_what_runs() {
+        let o = options(&args(&["--workers", "1"])).expect("one worker is the truth");
+        assert_eq!(o.workers, 1);
     }
 
     #[test]

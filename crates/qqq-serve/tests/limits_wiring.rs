@@ -62,6 +62,15 @@ struct Server {
 
 impl Server {
     async fn start(limits: Option<Limits>) -> Self {
+        Self::start_with(limits.map(TenantLimits::uniform)).await
+    }
+
+    /// Start with a full `TenantLimits`, so a test can exercise `per_tenant`.
+    async fn start_with(limits: Option<TenantLimits>) -> Self {
+        // Wrapped once, outside the retry loop. `TenantLimits` is deliberately not `Clone`
+        // -- it owns the rate counters, so a clone would be a second set of them -- but
+        // `Arc` gives each attempt the same one.
+        let limits = limits.map(Arc::new);
         // Retried, because between `free_addr` dropping its listener and `serve` binding the
         // port, another test in this process -- or another process on the runner -- can take
         // it. That is a real CI failure this crate has already had.
@@ -72,7 +81,7 @@ impl Server {
             let mut config = ServerConfig::for_addr(listen);
             let metrics = Arc::new(HttpMetrics::new());
             config.metrics = Some(Arc::clone(&metrics));
-            config.limits = limits.map(|l| Arc::new(TenantLimits::uniform(l)));
+            config.limits = limits.clone();
             let local = shutdown.clone();
 
             let probe = tokio::spawn(async move {
@@ -139,7 +148,82 @@ impl Drop for Server {
 // A body cap
 // ---------------------------------------------------------------------------
 
-/// **A body over the tenant's cap is refused with `413`, before the handler runs.**
+/// **A `per_tenant` entry keyed by the client's address is applied to a real request.**
+///
+/// # The defect this closes
+///
+/// `RequestLimits::per_tenant` was documented as *"keyed by tenant name"* while
+/// `tenant_of` returns `peer.ip().to_string()` and `limits_for` looks the tenant up by
+/// that string. So the entry could never match: it parsed, it validated, `qqqai inspect`
+/// listed it, and it was never applied. A policy that read as live and was not — the shape
+/// this repository has recorded more than twenty times. `§O-185`.
+///
+/// # Why this test and not a unit test
+///
+/// The unit test proves `limits_for` looks a string up in a map. Only this proves the
+/// string the **server** passes is the one the manifest author wrote — which is the half
+/// that was wrong, and the half no unit test on the limiter can reach.
+///
+/// The client connects over the loopback interface, so its peer address is `127.0.0.1`,
+/// and that is the key the manifest entry uses.
+#[tokio::test]
+async fn a_per_tenant_entry_keyed_by_the_peer_address_is_applied() {
+    let limits = TenantLimits::new(
+        [(
+            "127.0.0.1".to_owned(),
+            qqq_serve::limits::Limits::with_body(16),
+        )],
+        qqq_serve::limits::Limits::with_body(1000),
+    );
+    let server = Server::start_with(Some(limits)).await;
+
+    // 100 bytes is under the fallback and over the per-tenant cap, so the answer says
+    // which one the server chose.
+    let got = server
+        .request("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+        .await;
+
+    assert!(
+        got.contains("413"),
+        "the per-tenant entry for 127.0.0.1 must apply to a loopback client, so a 100-byte \
+         body is over its 16-byte cap: {got}"
+    );
+    assert!(!got.contains("200 OK"), "the handler must not run: {got}");
+}
+
+/// **The control: an entry for a different address does not apply.**
+///
+/// Without this, the test above would pass on a server that applied every `per_tenant`
+/// entry to every request — which is a worse defect than the one it checks for, since a
+/// cap meant for one caller would throttle everyone.
+#[tokio::test]
+async fn a_per_tenant_entry_for_another_address_is_not_applied() {
+    let limits = TenantLimits::new(
+        [(
+            // Documentation range (RFC 5737): a real address, never the loopback peer.
+            "198.51.100.7".to_owned(),
+            qqq_serve::limits::Limits::with_body(16),
+        )],
+        qqq_serve::limits::Limits::with_body(1000),
+    );
+    let server = Server::start_with(Some(limits)).await;
+
+    // The body is **sent**, unlike the test above: 100 bytes is under this server's
+    // fallback cap, so the request is not refused on its declared length and the server
+    // reads it. Declaring without sending would test the read timeout instead.
+    let body = "a".repeat(100);
+    let raw = format!(
+        "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{body}"
+    );
+    let got = server.request(&raw).await;
+
+    assert!(
+        got.contains("200 OK"),
+        "the fallback applies to a peer with no entry, so a 100-byte body is served: {got}"
+    );
+}
+
+/// A body over the tenant's cap is refused with `413`, before the handler runs.
 ///
 /// Checked against the **declared** length, so the server never reads the body it is refusing
 /// — which is the entire point of a cap. A test that sent the body anyway would pass against

@@ -20,26 +20,26 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | Area | Meaning | Count | Owner role |
 |---|---|---|---|
 | `FND` | Foundation: repo, CI, process, tooling | 12 | Architect |
-| `DOC` | Documentation, docs-as-code, cross-reference machinery | 20 | Tech writer |
+| `DOC` | Documentation, docs-as-code, cross-reference machinery | 21 | Tech writer |
 | `MKT` | Market research, positioning, competitive analysis | 16 | Founder |
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
 | `HOST` | `qqq-host` execution engine | 24 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 16 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
-| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 20 | Architect |
+| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
 | `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
 | `SRV` | HTTP/application server | 20 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
-| `SUP` | Supply chain: signing, provenance, SBOM | 14 | Security engineer |
+| `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
 | `DX` | Developer experience, CLI ergonomics, errors | 20 | DX engineer |
 | `CLI` | CLI commands | 24 | DX engineer |
 | `TEST` | Test runner and test infrastructure | 18 | Runtime engineer |
 | `MIG` | Migration tooling | 14 | DX engineer |
 | `AI` | `qqq:ai` inference capability | 10 | Runtime engineer |
 | `LANG` | Language toolchains (5 languages) | 40 | Runtime engineer |
-| `AGENT` | Agent face: MCP, schemas, machine contracts | 24 | Architect |
-| `PERF` | Performance: benchmarks, budgets, optimizations | 26 | Performance engineer |
+| `AGENT` | Agent face: MCP, schemas, machine contracts | 25 | Architect |
+| `PERF` | Performance: benchmarks, budgets, optimizations | 27 | Performance engineer |
 | `DET` | Determinism and replay | 16 | Systems engineer |
 | `OBS` | Observability: logs, metrics, traces, audit | 18 | Platform engineer |
 | `DIST` | Distribution and installation | 20 | Platform engineer |
@@ -52,7 +52,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 578 items.**
+**Total: 586 items.**
 
 ### Status legend
 
@@ -2444,14 +2444,26 @@ Items are grouped below by **phase**, because dependency order matters more than
   → **Scope was widened deliberately.** The item says "the three exception crates",
     but an `unsafe` block in a crate that is *supposed* to forbid it is a more
     serious finding than one in a crate allowed to have it — so the audit covers
-    all 85 `.rs` files in the workspace.
+    every `.rs` file in the workspace.
     | Measure | Count |
     |---|---|
-    | `.rs` files scanned | **85** |
+    | `.rs` files scanned | *in `docs/unsafe-audit.md`*, where `audit_unsafe.py --check-doc` fails when it drifts |
     | Code-position `unsafe` (`{}`, `fn`, `impl`, `trait`, `extern`) | **0** |
     | `#[allow(unsafe_code)]` in a code position | **0** |
     | `cfg_attr(..., allow(unsafe_code))` | **0** |
     | Crates with a bare `#![forbid(unsafe_code)]` | **11** (every crate) |
+  → **2026-09-22 — the count above was a false claim, and it is deleted rather
+    than corrected.** This line read "all 85 `.rs` files" and the table row said
+    **85**, while a live scan found **142**: true when written, never tied to the
+    tree, and wrong by 57 files in the direction that *understates the sample*. It
+    is the same defect `docs/unsafe-audit.md` records about itself — that page once
+    said 85 while the tree held 139 — and that page was fixed by adding
+    `--check-doc` to CI. **The checklist kept its own copy and was not fixed**,
+    because nothing checks a number written in the checklist. The copy is deleted
+    here instead of updated, because a second copy of a CI-tied number drifts
+    again; the rows that remain are the ones CI enforces (`audit_unsafe.py` exits
+    non-zero on any code-position `unsafe`, and the workspace lints carry
+    `forbid(unsafe_code)` in all 11 crate roots). Measured in `§O-186`.
   → **A zero that appears for the wrong reason is worse than a non-zero, because it
     looks like an achievement.** Two explanations were distinguished rather than
     assumed:
@@ -2708,6 +2720,20 @@ Items are grouped below by **phase**, because dependency order matters more than
     reaches the client **while the handler is still parked** — a buffered path would deadlock rather than
     fail, because the handler awaits a signal the test only sends after reading that event. Workspace
     **1966 passed, 0 failed**. See `§O-133` for the lifetime bug found on the way.
+
+  → **2026-09-22 — the "cap, not a buffer" claim was false for a streaming route, and is
+    now true.** `serve_connection` called `drain_body` and *then* `serve_special_route`,
+    while `drain_body`'s own documentation stated that a streaming route "is dispatched
+    before this function runs". A `StreamingHandler` takes `(head, route_match,
+    &mut StreamWriter)` and has **no body parameter**, so the body was read into memory for
+    a handler that could not read it. Nothing failed — the response was correct and only the
+    cost was wrong — which is why no test noticed. The call order is now the one the
+    paragraph describes, and `crates/qqq-serve/tests/streaming_route.rs` drives it:
+    `a_streaming_route_does_not_read_the_request_body` declares `Content-Length: 4096` and
+    sends none of it, and the first streamed event must still arrive; the control
+    `a_flat_route_does_read_the_declared_body` shows a flat route *does* wait, so a server
+    that ignored the declaration entirely could not pass both. Fault-injected by swapping
+    the calls back: **detected**. See `§O-184`.
 - [x] **SRV-005** Implement `max_request_bytes` enforced during streaming, not after buffering.
   → §6.4 `qqq-serve` — the HTTP and application server
   → Done. `BodyReader::account` charges each piece **before it is returned**, so a
@@ -2863,6 +2889,30 @@ Items are grouped below by **phase**, because dependency order matters more than
 
 ### ABI — WIT packages
 
+
+  → **2026-09-22 — the limits are wired, and the per-tenant key was wrong.** Two fixes, both
+    fault-injected.
+  → **Wired.** `prepare()` now sets `config.limits` from the manifest's `[server.limits]`, so
+    `serve_connection` consults it. The earlier entry's *"`TenantLimits` is not constructed
+    from a manifest, and `serve_connection` does not consult it"* is no longer true; the
+    limits are applied and the body cap is answered with `413` on a real socket
+    (`crates/qqq-serve/tests/limits_wiring.rs`, 8 tests).
+  → **The key was a name nothing produces.** `RequestLimits::per_tenant` was documented as
+    *"keyed by tenant name"* while `tenant_of` returns `peer.ip().to_string()` and
+    `limits_for` looks the tenant up by that string — so every entry was dead configuration:
+    it parsed, it validated, `qqqai inspect` listed it, and it was never applied. The
+    reality was already recorded in `§O-136` (*"**The tenant is the peer IP address.**"*),
+    written when a *metric* test failed on the same mismatch, and it was not applied to the
+    manifest field three files away.
+  → `RequestLimits::validate` now refuses a key that is not a **canonical** IP address,
+    naming the key, the reason, a working example and the `default` alternative;
+    `Ipv6Addr::to_string` compresses, so a non-canonical spelling that parses and still
+    cannot match is refused too. Tests: `a_per_tenant_key_that_is_a_name_is_refused`,
+    `a_non_canonical_ipv6_key_is_refused_and_the_canonical_one_named`,
+    `a_canonical_address_key_is_accepted` (the control) in `qqq-cap`; and on a real socket,
+    `a_per_tenant_entry_keyed_by_the_peer_address_is_applied` with the control
+    `a_per_tenant_entry_for_another_address_is_not_applied` in `qqq-serve`. Fault-injected
+    by removing the key check: **detected** in both `qqq-cap` and `qqq-run`. See `§O-185`.
 - [x] **ABI-001** Author `qqq:http@1.0` with routing, streaming and client.
   → Done: `wit/qqq-http.wit` — 103 lines, 2 interface(s), 3 function(s).
     Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
@@ -3118,6 +3168,25 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **CLI-011** Implement `qqqai serve` with `--workers`, `--tls`, `--config`.
   → §6.4 `qqq-serve` — the HTTP and application server
+
+  → **State on 2026-09-22, after the serve wiring was repaired.** The manifest is now
+    attached to the server rather than computed and dropped: `prepare()` sets
+    `config.auth`, `config.limits`, `config.cors`, `config.metrics` and
+    `config.accept_limit`, and `--config` is read (it was parsed and then ignored, because
+    the handler read the *global* `--manifest` flag that `serve::options` rejects). The
+    guest chain is loaded and served: `build_dispatch` compiles the artifact through
+    `GuestApp` and registers `dispatch()` / `dispatch_with_body()` per declared route name.
+    Verified end to end on 2026-09-22 against the reference application: `qqqai build`
+    produced `target/qqq/orders-api.component.wasm` (167,828 bytes), `qqqai serve` answered
+    `GET /healthz` three times with an identical body `ok`, `POST /orders` with a
+    form-encoded body answered `201` with the guest's own JSON
+    (`{"id":"A1","total_cents":1000,"created_seq":1}`), a malformed body was refused by the
+    **guest** with its own `400` message, and an undeclared path was a `404`. Transcript
+    captured outside the repository.
+  → **Still not done, and this is why the item stays unticked.** `--tls` refuses rather than
+    serving cleartext while reporting TLS on, and `--workers N` refuses for N > 1 rather
+    than pretending to spawn workers. Both refusals name a remedy. The refusal is the honest
+    state, not the finished one.
 - [x] **CLI-012** Implement `qqqai test`.
   → Done: `qqq-run::test_runner` (the module is named `test_runner` because `test` is a Rust keyword, so the file uses `#[path]` like `scaffold`), dispatched from `main.rs`. Discovery asks cargo for its test targets and runs **each binary directly**, which makes a test's source file exact rather than inferred. `--filter`, `--fail-fast`, `--trials N`, `--dry-run` and `--json` work; a failing test **exits 1** so CI can gate on it. 51 CLI integration tests.
   → `--trials N` is the first architecture-enabled feature from §6.7 and the one that needs no unbuilt dependency: it runs each test N times and flags output that differs. A determinism failure counts as a failure for the exit code, because a test passing 4 of 5 trials is not a passing test.
@@ -3916,16 +3985,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 | Phase | Milestone | Items |
 |---|---|---|
-| P0 Foundation | M0 | 74 |
-| P1 Heartbeat | M1 | 64 |
+| P0 Foundation | M0 | 79 |
+| P1 Heartbeat | M1 | 58 |
 | P2 Capability engine | M2 | 46 |
 | P3 HTTP | M3 | 36 |
-| P4 DX v0 | M4 | 44 |
+| P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 40 |
-| P6 Packages | M6 | 38 |
-| P7 Agent face | M9 | 56 |
-| P8 Perf/determinism/obs | continuous | 60 |
-| P9 V1 release | M10, M11 | 76 |
+| P6 Packages | M6 | 36 |
+| P7 Agent face | M9 | 57 |
+| P8 Perf/determinism/obs | continuous | 61 |
+| P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 34 |
 | **Total** | | **586** |
 

@@ -14402,6 +14402,684 @@ and rewrites it), so a non-empty file is not by itself evidence — check the ti
 against the boot time.
 
 
+### O-181: the manifest was the contract, and the server was not reading it
+
+Four features were implemented, unit-tested and **unreachable from `qqqai serve`**. This is
+the `§O-130` failure mode again — "four features complete, tested and entirely unreachable
+until wired" — and the fix is the same shape: find the edge nobody owned and connect it.
+
+#### What was actually wrong
+
+`serve::prepare` called `routes_from_manifest(...)`, which builds a `ServerRoutes` holding
+`table`, `auth`, `unauthenticated` and `limits`, and then kept only `routes.table`. The
+server config came from `ServerConfig::for_addr(addr)`, which sets `cors: None`,
+`limits: None`, `metrics: None`. The only assignments to those three fields anywhere in the
+workspace were in `crates/qqq-serve/tests/{cors_wiring,limits_wiring,metrics_wiring}.rs`.
+
+The consequence, in the project's own terms:
+
+| Feature | Manifest says | Server did |
+|---|---|---|
+| `default_auth` (default **`deny`**) | refuse every route that does not name a mode | served every route |
+| `[server.limits]` | enforce the per-tenant body and rate caps | enforced nothing |
+| `[server.cors]` | apply the origin policy | applied nothing |
+| metrics (`§10.2`) | record the default set | recorded nothing |
+
+Two of those were **ticked** with claims the code did not support: `SRV-019` said CORS was
+"Wired … into `serve_connection` … 9 wiring tests", and `SRV-020` said "Enforced, and
+`SRV-020` is done". Both statements are true of a `ServerConfig` a test constructed by hand
+and false of the one the command builds. That is the "verified against a different path"
+trap, and it is why the wiring tests passed while the feature was dead.
+
+#### Why no test could see it
+
+Each half was correct in isolation. `AuthPolicy` decided correctly; `qqq-serve` had an
+enforcement point; `qqq-run` computed the modes; the conversion from manifest to limiter was
+written and unit-tested. The **edge** between them had no owner, because every checklist item
+is scoped to one crate (`§O-146`'s observation, which this round confirms).
+
+#### The fix, and what it is made of
+
+- `qqq-serve/src/auth.rs` (new): `RouteAuth`, `Decision`, `AuthPolicy`. Keyed by
+  `(pattern, handler)` — the two fields a `Match` carries — and **fail-closed** for a route it
+  was not told about, because the defect being fixed *was* a missing entry. Keying on the
+  request method would have missed every `HEAD`, which the router serves from a `GET` route.
+- `ServerConfig::auth` and an enforcement point in `serve_connection` placed **after the
+  limits and before `drain_body`**, so a refused request costs nothing and no preflight,
+  upgrade or stream reaches a handler the manifest refused.
+- `Served::Unauthorized`, distinct in the access record and identical to `Refused` in the
+  metric — the same split `BodyRejected`/`Refused` already makes, for the same reason.
+- `qqq-run`: `route_auth` translates the five modes. `None` → `Public`; `Deny` → refused;
+  `BearerJwt`/`Mtls`/`SignedRequest` → refused **and named**, because no authenticator exists
+  and serving them would treat "could not check" as "check passed".
+- `build_cors` carries every field of `[server.cors]`, not only `allow_origins`.
+- `--config` now reaches the loader. `with_manifest` read the global `--manifest`, which
+  `serve::options` rejects as unknown, so `--config prod.toml` served `qqq.toml` and said
+  nothing. The comment claiming otherwise was already in the source.
+- `--tls` and `--workers > 1` are now **refused**. `--tls` printed `TLS: on` while serving
+  cleartext; `--workers 4` was accepted and the process ran one. Refusing is the honest shape
+  while neither has anything to bind to, and each refusal names the real alternative.
+- `--accept-limit` is now honoured, via `ServerConfig::accept_limit`, which signals the
+  existing drain path after the Nth connection has been *served*.
+
+#### The bug inside the fix, caught by the integration tests
+
+The first `accept_limit` implementation counted accepts and signalled immediately after
+spawning the connection task. The task had not read a byte, so it saw a signalled shutdown on
+its first poll, drained, and closed without answering — every request against
+`--accept-limit 1` returned **nothing**. The count now increments at accept and the signal is
+raised inside the task after `serve_connection` returns. Found by
+`crates/qqq-run/tests/serve_policy.rs`, not by reasoning.
+
+A second bug in the test harness itself: readiness was probed by **connecting**, and that
+connection is an accept, so the probe consumed the budget it was waiting for. Readiness is now
+probed by attempting to **bind** the same port — free, and it changes nothing.
+
+#### Evidence
+
+- `crates/qqq-run/tests/serve_policy.rs`: nine tests that spawn the real binary, open a real
+  socket and read real bytes. Each positive case has a negative control, so a server that
+  refused everything would fail too.
+- Fault injection: `config.auth = Some(...)` removed → `a_manifest_that_forgets_default_auth_refuses_its_routes`
+  fails with `left: 503, right: 403`; restored byte-for-byte (sha256 `41cadafe…`), test green.
+- `docs/wit-reference.md` regenerated: header `61 function(s)` → **`80`**, `qqq:fs` row `0` →
+  **`7`**. The parser had counted 80 all along; only the renderer dropped resource methods.
+- `docs/verified-facts.md`: the Volatile and Stable sections were each emitted twice, because
+  both loops iterated `CLASSES` (which holds *rules*, two of which share a class name). Now
+  30 facts, 4 summary rows, 4 sections.
+- `docs/unsafe-audit.md`: `85` files scanned → **`141`**, now checked by
+  `audit_unsafe.py --check-doc`.
+- `QQQ-Checklist-V1.md`: fifteen arithmetic errors corrected. §1 said `Total: 578` while its
+  rows summed to 587 and the document held 586; §14 said `Total = 586` while its phase rows
+  summed to 568; five per-area counts were wrong.
+
+#### New checkers, each with a live self-test
+
+| Tool | Checks | Self-test |
+|---|---|---|
+| `check_checklist_counts.py` | §1 area counts, §1 total, §14 phase counts, §14 total, every area in a phase; `--fix` regenerates both tables | 6 cases |
+| `audit_unsafe.py --check-doc` | the safety page's sample size against a live scan | 3 cases added |
+| `check_wit_reference.py` (extended) | the page against **itself**: header total vs the table's column, and a zero row contradicted by its own section | existing 11 cases |
+
+The third is the one worth remembering. `check_wit_reference.py` regenerated the page and
+diffed it, which catches drift and is blind to a page wrong in the same way the generator is.
+Regenerating reproduced the defect faithfully, so the checker passed for as long as the bug
+existed. **A generator checked only against its own output cannot be caught being wrong.**
+
+#### What is still open, and named rather than implied
+
+- **No authenticator.** `bearer-jwt`, `mtls` and `signed-request` refuse. That is fail-closed
+  and visible, not silent, and the arm that changes is one function in `qqq-run`.
+- **TLS.** `qqq-serve::tls` builds a `rustls::ServerConfig`; there is no `[server.tls]`
+  manifest section and no TLS-terminating accept path, so `--tls` refuses.
+- **`--workers` is only `1`.** There is no instance pool on the serve path.
+- **`per_tenant` limits are keyed by tenant name, and the runtime's tenant is the peer IP.**
+  `tenant_of(peer)` returns the address and `TenantLimits::limits_for` looks the tenant up by
+  that string, so a `per_tenant` entry cannot match. Unreachable even now that `limits` is
+  attached; needs a decision about what a tenant *is* before it is a bug rather than a gap.
+- **Guest stdout/stderr can forge host access records** (`O-180` finding 1), and the request
+  body is still collected before route dispatch (`O-180` finding 4). Both carried forward.
+
+---
+
+## O-183 - The guest could write into the host's own audit stream
+
+**Found by:** the ultra-audit of 2026-09-22 (`O-180` finding 1). **Fixed and verified:** same
+day. **Checklist anchors:** `HOST-017` (the WASI context), `SRV-013` (the access record),
+`SEC-020` (the unsafe audit that counts the files touched here).
+
+### The defect, reproduced before it was fixed
+
+`crates/qqq-host/src/host_wasi.rs` built every instance's WASI context with:
+
+```rust
+    // stdout and stderr go to the host's, so an app's own output is visible.
+    builder.inherit_stdout();
+    builder.inherit_stderr();
+```
+
+`crates/qqq-serve/src/server.rs`'s `emit_record` writes each access record to the **same**
+stdout - one `writeln!` to a locked `std::io::stdout()` handle, deliberately, because
+`println!` panics on a closed pipe and a logger must never fail a request.
+
+So a guest that printed
+
+```text
+{"ts":"2026-01-01T00:00:00Z","method":"DELETE","path":"/admin","status":200,"tenant":"other"}
+```
+
+emitted a line **byte-identical** to a host access record. This was reproduced by reading both
+call sites and confirming they resolve to the same `std::io::Stdout`: `inherit_stdout()`
+installs `wasmtime_wasi::cli::stdout()`, whose `AsyncWrite` impl is
+`std::io::stdout().write(buf)` - the same object `emit_record` locks. There is no third party
+in the path, so no runtime experiment was needed to establish the identity; what *did* need an
+experiment was whether the fix holds through the real trait path, and that is
+`the_stream_interface_sanitises_through_the_real_trait_method` below.
+
+**What the guest gains, stated precisely.** No new capability: it cannot read another tenant's
+data or reach an ungranted import. It gains the ability to write into the host's audit stream -
+a forged `status: 200` beside a real `403` hides the refusal, and a forged line naming another
+tenant's path manufactures evidence. For a runtime whose premise is that a guest's authority is
+exactly what its manifest names, that is authority its manifest did not name.
+
+**Why no existing test could see it.** Nothing in the suite had a guest that writes to stdout.
+`host_wasi`'s tests assert the *decision* (which clock is denied) and never drive a guest,
+because `register`'s own documentation records that a hand-written component cannot reproduce a
+`wasm32-wasip2` guest's WASI import identity - four spellings were tried and all failed at
+instantiation. So the suite had no path from "a guest writes" to "the host's log". That is the
+shape this repository has recorded more than twenty times: **a control believed live that is
+not**.
+
+### The rule, and why prefixing alone was not it
+
+**No byte a guest emits may begin a physical line on a host stream.**
+
+The first design escaped `\n` *and* emitted a real line break. That was wrong in a way the
+tests caught immediately: it doubled the line count and mangled the app's output (`\n` then a
+break) for no security gain, because the forged record is still present either way. The rule
+that survived is:
+
+1. Every physical line of guest output carries a fixed marker - `qqq-guest stdout | ` or
+   `qqq-guest stderr | `.
+2. `\n` becomes a **real** break with the marker re-armed. It is the one control byte that is
+   not escaped, because re-arming the marker already delivers the property and escaping it as
+   well only costs readability.
+3. Every other control byte (`\r`, `\t`, `\`, all of C0, DEL) is escaped. `\r` because it is a
+   line terminator to some readers; `\x1b` because an escape sequence can rewrite what a
+   terminal shows for the host's *own* records; the rest because a total rule is auditable and
+   a list of dangerous bytes is a claim that goes stale.
+4. An unterminated run is broken at `MAX_ESCAPED_RUN` (4096) bytes, so a guest that never emits
+   a newline cannot hold one line open and leave a line-oriented collector nothing to parse.
+
+**What it does and does not defend, stated honestly.** It defends whole-line readers, which is
+what an access log is. It does not defend a reader that searches the raw stream for a substring:
+under any design the guest's text is present, and escaping it into `\x7b\x22...` would only make
+the log unreadable while a determined matcher decoded it anyway. The claim the marker makes is
+the achievable one - *this line is not a host record* - and the module documents it in those
+words rather than implying more.
+
+### The code
+
+New module `crates/qqq-host/src/guest_output.rs`:
+
+| Item | Role |
+| --- | --- |
+| `Escaper` | the escaping rule as a pure state machine, testable without a `Pin`, a `Context` or a destination |
+| `GuestSink` | a destination writable through `&self` - `Stdout`, `Stderr`, any `Mutex<W>`, and `Arc<W>` |
+| `GuestOutput` | implements `wasmtime_wasi::cli::StdoutStream`; installed by `context` in place of `inherit_*` |
+| `SanitisingWriter` | the `tokio::io::AsyncWrite` wasmtime-wasi writes through; delegates to `Escaper`, never returns `Pending` |
+| `STDOUT_PREFIX`, `STDERR_PREFIX`, `MAX_ESCAPED_RUN` | the fixed markers and the run bound |
+
+`context` now installs `GuestOutput::stdout()` / `GuestOutput::stderr()`.
+
+### Mistakes made while fixing it, and their fixes
+
+1. **`tokio` was only a dev-dependency.** `wasmtime-wasi` 48's p2 stdio API has **no synchronous
+   write pipe**: `StdoutStream::async_stream` is declared to return `Box<dyn AsyncWrite + Send +
+   Sync>`, and every provided sink is `AsyncWrite`-based. So a sanitising sink requires
+   implementing `AsyncWrite`, which requires `tokio`. The `unsafe`-free route was tried first - a
+   hand-built `RawWaker` for a synchronous poll - and the crate-level `forbid(unsafe_code)`
+   refused it, correctly, since `forbid` cannot be relaxed by an inner `allow`. **`tokio` is now
+   a real dependency with an `io-util` feature and a §4.3 justification in `Cargo.toml`.** The
+   synchronous *behaviour* is kept: `poll_write` escapes and writes in one step and never returns
+   `Pending`, so no executor is needed at runtime despite the async trait.
+2. **`Cargo.lock` did not change, and that is correct.** Invariant TEN says a dependency change
+   is two files. Here the second file legitimately does not change, because `Cargo.lock` merges
+   normal and dev dependencies into one `dependencies` array per package and `tokio` was already
+   recorded for `qqq-host` through its dev-dependency. Proved rather than assumed: a script reads
+   `qqq-host`'s locked dependency list and prints `tokio`, and `git status --porcelain Cargo.lock`
+   is empty. **The lesson is that "two files" is a check, not a rule about which two** - the
+   check is that the lockfile agrees with the manifests, and here it already did.
+3. **`Arc<dyn GuestSink>` cannot be written through with `&mut self`.** The first `GuestSink` was
+   `Write + Send + Sync + 'static` with a blanket impl, which needs `&mut self` - and an `Arc`
+   hands out shared references only. It also forced a `Mutex` around `std::io::Stdout`, which
+   already supports writes through `&Stdout` and needs no lock. Fixed by defining the trait with
+   `&self` methods and three provided implementations.
+4. **`Pin::new` on `dyn AsyncWrite` does not compile** (`dyn AsyncWrite` is not `Unpin`). Fixed
+   with `Box::into_pin`, because `Pin<Box<dyn AsyncWrite>>` is itself `AsyncWrite` and is
+   `Unpin` - no `unsafe` needed. `Waker::noop()` (stable since 1.85, and the MSRV is 1.97)
+   replaced the hand-built vtable.
+5. **The wiring test failed on itself.** It scans `include_str!("host_wasi.rs")` for
+   `.inherit_stdout()`, and the assertion message containing that literal string is *in the same
+   file*. Fixed by cutting the source at the first `#[cfg(test)]` and checking only the
+   production half. **A source-scanning test must exclude its own source.**
+
+### Verification
+
+Ten tests in `guest_output`, one in `host_wasi`:
+
+| Test | Property |
+| --- | --- |
+| `a_guest_line_cannot_impersonate_an_access_record` | the forged record is not a line of its own |
+| `a_guest_cannot_open_an_unprefixed_line` | every physical line carries the marker, and the guest's two breaks survive as two breaks |
+| `every_control_byte_is_escaped` | the whole C0 range plus DEL, with `\n` the single documented exception |
+| `an_unterminated_run_is_broken_at_the_bound` | the bound fires |
+| `the_bound_does_not_fire_early` | the control for it: a run below the bound is untouched |
+| `a_guest_cannot_forge_the_escape_sequence` | `\` is escaped, so a literal `\n` cannot pass for a host-inserted break |
+| `stdout_and_stderr_are_distinguishable_when_merged` | the markers differ, so `2>&1` keeps them apart |
+| `the_stream_interface_sanitises_through_the_real_trait_method` | drives the **real** `StdoutStream::async_stream` method wasmtime-wasi calls, into a captured sink |
+| `the_production_constructors_name_the_process_streams` | the constructors are the sanitising type with the expected markers |
+| `a_writer_started_mid_line_still_prefixes` | a fresh writer prefixes its first line |
+| `host_wasi::the_context_does_not_inherit_the_guest_streams` | the call site installs `GuestOutput` and no `inherit_*` remains |
+
+**Fault-injected twice, one injection per file per process (invariant TWO):**
+
+- **A** - `builder.stdout(GuestOutput::stdout())` reverted to `builder.inherit_stdout()`:
+  **DETECTED**. `the_context_does_not_inherit_the_guest_streams` failed with
+  *"`.inherit_stdout()` is back in host_wasi.rs"*. Restored byte-for-byte, sha256
+  `73f25a42496524e8b0c2695b5447299739c3534aa22f8cc4d6124f647d3695ec`, test green again.
+- **B** - the prefix dropped from `Escaper::push` while keeping the escaping: **DETECTED**.
+  Six tests failed, including the real-trait-path one, with
+  *"bytes reached the sink without the marker"*. Restored byte-for-byte, sha256
+  `a2b05006fe01796361f38b0fc7c053d0291ef186b9cae8971437ba779b7ce3b3`, all ten green again.
+  No `INJECTED` marker remains in `crates/qqq-host/src/`.
+
+**Suite state:** `cargo test -p qqq-host --lib` - **427 passed, 0 failed**. All 27
+`tools/check_*.py` checkers pass.
+
+### Why the wiring is asserted on the source, and what that does not prove
+
+A behavioural test cannot reach the installed stream: `WasiCtx::cli()` returns a `WasiCliCtx`
+whose `stdout` and `stderr` fields are `pub(crate)` with no accessor, and `StdoutStream` is not
+`Any`, so the box cannot be downcast. Driving a real guest is out for the reason `register`
+already documents. This is the same wall `a_denied_wall_clock_carries_no_information...` hit for
+the clocks, and it is answered the same way: state the limitation instead of implying coverage.
+
+The pair is complete but split: `the_context_does_not_inherit_the_guest_streams` asserts **what
+`context` installs**, and `the_stream_interface_sanitises_through_the_real_trait_method` asserts
+**that what it installs sanitises**. Reverting the call site fails the first; breaking the
+escaping fails the second. Neither covers the other's half, and both statements are needed.
+
+### What is still open
+
+- **The request body is still collected before route dispatch** (`O-180` finding 4): a
+  streaming, WebSocket or bodyless route buffers bytes it never reads.
+- **`per_tenant` limits are keyed by tenant name and the runtime's tenant is the peer IP**
+  (`O-180` finding 3 / audit C-004), so a `per_tenant` entry cannot match.
+- **No authenticator and no TLS**, unchanged from `O-181`: `bearer-jwt`, `mtls` and
+  `signed-request` refuse rather than serve, and `--tls` refuses rather than reporting TLS on.
+
+
+## O-184 - The streaming route that buffered its body, and documented that it did not
+
+**Found by:** the ultra-audit of 2026-09-22 (`O-180` finding 4). **Fixed and verified:** same
+day. **Checklist anchors:** `SRV-004` (a cap, not a buffer), `SRV-005`
+(`max_request_bytes` enforced during streaming), `SRV-020` (the body cap).
+
+### The defect
+
+`crates/qqq-serve/src/server.rs`'s `serve_connection` called `drain_body` and **then**
+`serve_special_route`. `drain_body`'s own doc said the opposite:
+
+> A route with a `StreamingHandler` is dispatched **before** this function runs, so a
+> streaming route never buffers.
+
+The claim was false. A streaming route's request body was read into memory in full before
+`serve_special_route` was ever called — and `StreamingHandler` takes `(head, route_match,
+&mut StreamWriter)`, **no body parameter at all**, so the bytes could not be read by the
+handler even in principle. The same applied to the WebSocket upgrade branch and to a CORS
+preflight.
+
+**Why nothing failed.** The response was correct. A streaming handler ignores the body, so the
+client got exactly what it should and only the *cost* was wrong — the very cost `SRV-004`'s
+*"a cap, not a buffer"* exists to prevent. No test asserted on what was **not** read, because
+asserting an absence is the harder test to write and the easier one to omit.
+
+This is `§O-045a`'s shape a third time, and `O-181`'s shape again: **a documented invariant, a
+call order that contradicted it, and no test that could tell the two apart.** The repository now
+has three instances of this exact pattern in one day's work. The general lesson, recorded here
+for whoever reads this next: *when a doc comment states an ordering, the ordering needs a test
+that fails when the calls are swapped, or the comment is decoration.*
+
+### The fix
+
+`serve_special_route` now runs **before** `drain_body`. Nothing is lost by not draining, and
+both reasons were verified in the source rather than assumed:
+
+1. **The per-tenant declared-length cap** is checked above both, at `serve_connection`'s limits
+   block (`limits.check_body(&tenant, declared)`), before anything is read.
+2. **The absolute `max_request_bytes` cap** is enforced by the **parser** on a declared
+   `Content-Length` — `http1.rs`, `ParseError::BodyTooLarge` — which runs before any of this.
+   `drain_body`'s `config_max_request_bytes` doc already said so ("the parser enforces the same
+   cap on a *declared* length"), and the code at `http1.rs:545` confirms it.
+3. **Connection reuse is not a hazard.** All three special branches close the connection:
+   `serve_streaming` and `serve_preflight` force `Connection: close` and call `shutdown`;
+   the WebSocket loop owns the socket from the handshake on. So an unread body cannot leave
+   the request loop parsing the next request from mid-body — which is the reason
+   `reject_body` and `refuse_limits` both close.
+
+**The one behaviour change, stated rather than left to be found:** a *chunked* body past the
+absolute cap on a streaming or WebSocket route is no longer refused with `413`. It is not read
+either — nothing reads it, and the connection closes — so the server never buffers it and no
+memory is at risk. A declared `Content-Length` past the cap is still `413`, from the parser,
+unchanged.
+
+### Verification
+
+Two tests in `crates/qqq-serve/tests/streaming_route.rs`, one of them the other's control:
+
+| Test | Property |
+| --- | --- |
+| `a_streaming_route_does_not_read_the_request_body` | the request declares `Content-Length: 4096`, sends **none** of it, and the first streamed event still arrives |
+| `a_flat_route_does_read_the_declared_body` | the same declaration on a flat route produces **nothing** until the promised 11 bytes are sent |
+
+**Why the declaration is the instrument, and why no timing threshold is involved.** A server
+that reads the body first blocks in `read` waiting for bytes that never arrive. A blocking read
+does not complete late; it does not complete. So the streaming test fails by receiving nothing,
+not by receiving something slowly — there is no window to tune and no flake to chase.
+
+**The control is load-bearing.** Without `a_flat_route_does_read_the_declared_body`, the first
+test would also pass on a server that ignored `Content-Length` entirely — a far worse defect
+than the one being checked, and one that would make streaming *and* flat routes answer before
+their bodies arrived.
+
+**Fault-injected:** the two calls were swapped back (with the `drain_body` result still bound,
+so the file compiled — a non-compiling injection proves something about the compiler, not about
+the tests). **DETECTED**: `a_streaming_route_does_not_read_the_request_body` failed with
+`Got: ""` after the 5-second read timeout, exactly as predicted, while the other five tests
+stayed green. Restored byte-for-byte, sha256
+`48526d3f6a226d8dbb8b3c7a619cbba5c40ba7c0a36e837c2acf94fe2bcdb5ee`, and `INJECTED` appears
+0 times in `server.rs`.
+
+**Suite state:** `cargo test -p qqq-serve` — 661 unit tests plus 12 integration binaries, all
+green. All 27 `tools/check_*.py` checkers pass.
+
+### What is still open
+
+- **`per_tenant` limits are keyed by tenant name and the runtime's tenant is the peer IP**
+  (`O-180` finding 3 / audit C-004), so a `per_tenant` entry cannot match.
+- **No authenticator and no TLS**, unchanged from `O-181`.
+- **The guest output sink now prefixes every line** (`O-183`), which is a visible change to what
+  `qqqai run` shows for an app's own `println!`. Correct, and worth knowing before it surprises
+  someone reading a log for the first time.
+
+## O-185 - `per_tenant` was keyed by a name nothing produces
+
+**Found by:** the ultra-audit of 2026-09-22 (audit `C-004`, `O-180` finding 3). **Fixed and
+verified:** same day. **Checklist anchors:** `SRV-020` (the body cap), `SRV-019` (the limits),
+`CAP-014` (per-tenant isolation).
+
+### The defect
+
+`crates/qqq-cap/src/manifest.rs` documented the field as:
+
+```rust
+    /// Per-tenant overrides, keyed by tenant name.
+    pub per_tenant: BTreeMap<String, TenantLimit>,
+```
+
+And the runtime's tenant is the peer address — `qqq_serve::server::tenant_of` returns
+`peer.ip().to_string()`, and `TenantLimits::limits_for` looks the tenant up by that string:
+
+```rust
+    pub fn limits_for(&self, tenant: &str) -> Limits {
+        self.limits.get(tenant).copied().unwrap_or(self.fallback)
+    }
+```
+
+So a `[server.limits.per_tenant.acme]` entry could never match. It parsed, it validated, it
+appeared in `qqqai inspect`, and it was never applied — **a policy that read as live and was
+not**, which is the shape this repository has recorded more than twenty times.
+
+### The part that stings, and the lesson
+
+**The reality was already recorded in this document.** `§O-136`, written in an earlier round,
+states it in bold:
+
+> **The tenant is the peer IP address.**
+
+That entry exists because a *metric* test had failed by using the wrong key — `"default"` —
+and tracing it through `drain_body` → `record_request` → `bytes_in_for` showed the count was
+right and the key was not. The lesson was learned, written down, and then **not applied to the
+manifest field, which was three files away and made the same claim in the opposite
+direction.**
+
+So the general form, worth more than this one fix: *when a round establishes what a shared
+key is, the next round must grep for every other place that names it.* `§O-136` named the
+tenant key in prose; `manifest.rs` named it in a doc comment; only one of the two was
+checked. The audit found the second, which is what the audit is for.
+
+### The fix
+
+Three parts, and the third is the one that makes the other two hold.
+
+1. **The key is validated.** `RequestLimits::validate` now calls `validate_tenant_key`, which
+   refuses a key that is not a canonical IP address. The refusal names the key, the reason,
+   and a key that would work:
+   *"the per-tenant limits are keyed by client address, and `acme` is not an IP address. A
+   request's tenant is the peer address, so a name can never match: write the address (for
+   example `127.0.0.1` or `::1`), or move the cap to `[server.limits.default]` if it is meant
+   for every caller"*.
+2. **The canonical spelling is required, not merely a parse.** `Ipv6Addr::to_string`
+   compresses, so `2001:0db8::1` and `2001:db8::1` are the same address and different
+   strings. A key written the long way parses and still never matches — the same defect with a
+   friendlier error message — so the key is compared against `IpAddr`'s own rendering and the
+   message names the spelling to use.
+3. **The field's documentation now says what the code does**, and says why the refusal lives
+   in validation rather than in a comment: *"When an authenticator exists, this key becomes
+   the authenticated subject and this doc comment becomes wrong — which is why the refusal
+   lives here rather than in a comment."*
+
+**Why refuse rather than implement an authenticated tenant.** V1 has no authenticator: the
+three authenticating `AuthMode`s refuse rather than serve (`§O-181`). A tenant identity that
+comes from an unauthenticated request is a value the caller chooses, which is exactly the
+`§O-136` cardinality hazard one layer down. So the honest key space in V1 is the peer address,
+and a key outside it is an error rather than a silently dead entry.
+
+### Verification
+
+Four new tests, in three crates, each asserting a different half:
+
+| Test | Where | Property |
+| --- | --- | --- |
+| `a_per_tenant_key_that_is_a_name_is_refused` | `qqq-cap` | the refusal names the key, the reason, a working example, and the `default` alternative |
+| `a_non_canonical_ipv6_key_is_refused_and_the_canonical_one_named` | `qqq-cap` | the long IPv6 spelling is refused and `2001:db8::1` is named |
+| `a_canonical_address_key_is_accepted` | `qqq-cap` | **the control**: four canonical forms parse and survive as map keys, so the refusals are not a `validate` that rejects everything |
+| `a_per_tenant_entry_keyed_by_the_peer_address_is_applied` | `qqq-serve`, real socket | a loopback client's 100-byte body is refused with `413` against a 16-byte per-tenant cap, while the fallback is 1000 |
+| `a_per_tenant_entry_for_another_address_is_not_applied` | `qqq-serve`, real socket | **the control**: an entry for `198.51.100.7` does not apply to a loopback client, which the fallback serves |
+| `a_name_key_is_refused_at_validation` | `qqq-run` | the same refusal through `Manifest::parse`, so the manifest cannot load at all |
+| `per_tenant_limits_override_the_fallback` (updated) | `qqq-run` | the lookup still works, now with an address key |
+
+**Why the real-socket pair and not only unit tests.** A unit test on `limits_for` proves a
+string is looked up in a map. Only the socket test proves the string the **server** passes is
+the one the manifest author wrote — which is the half that was wrong, and the half no unit
+test on the limiter can reach.
+
+**A mistake made while writing the control, recorded because it is instructive.** The first
+version of `a_per_tenant_entry_for_another_address_is_not_applied` declared
+`Content-Length: 100` and sent no body, so the server correctly waited for it and the response
+was empty after the 5-second timeout. The declaration alone is enough when the cap refuses the
+request *before* reading (which is why the sibling test works without a body) and is not
+enough when the request is served. The fix was to send the 100 bytes.
+
+**Suite state:** `cargo test -p qqq-cap -p qqq-run` green (241 + 467 unit tests and every
+integration binary), `cargo test -p qqq-serve --test limits_wiring` 8/8.
+
+### Consequential regenerations
+
+The doc comment is part of the generated JSON Schema, so `schema/qqq-toml.schema.json` moved by
+one line and was regenerated. `llms.txt` and `llms-full.txt` were stale for a second reason —
+they still carried the **pre-fix** sizes for `docs/verified-facts.md` (13 KB, now 8 KB after
+the `CLASSES` de-duplication in `§O-181`) and `docs/unsafe-audit.md` (5 KB, now 6 KB after the
+file count was corrected from 85 to 141) — and were regenerated too. That staleness is why CI
+was red on `llms.txt`, and the fix is the regeneration, not a rule change.
+
+## O-186. The gate's four red steps: three were real, one was the harness passing an argument the tool never defined
+
+**Found:** 2026-09-22, running `{SCRATCH}\gate.ps1` as ONE sequence (invariant ONE) after the
+last edit of the C-004 / O-185 round. The gate took 516 s and exited 1 with four steps red:
+
+```
+FAIL  cargo clippy --workspace --all-targets --all-features -D warnings (exit 101)
+FAIL  checker check_xrefs.py --self-test (exit 1)
+FAIL  audit_unsafe --check-doc (exit 1)
+FAIL  audit_requirements (exit 1)
+```
+
+The fourth is expected while the work is uncommitted - its only failing requirement is
+`no uncommitted changes`, which lists the 27 modified files, and it scored 31/32 - so the
+real count is three. Two of the three were defects in the tree. One was a defect in the
+gate.
+
+### 1. `check_xrefs.py --self-test` was a step that could never pass
+
+The gate ran every `tools/check_*.py` twice, once plainly and once with `--self-test`,
+because every *other* checker has a self-test and CI runs a self-test after nearly every
+checker step. `check_xrefs.py` does not: it takes a **directory** argument
+(`root = Path(sys.argv[1]) if len(sys.argv) > 1 else ...`, line 129) and no self-test mode
+was ever written for it. So the flag was consumed as the root directory and the checker
+reported
+
+```
+FATAL: missing --self-test\QQQ-Proposal-V1.md
+```
+
+which reads like corpus drift - a missing Proposal file - and is really the harness asking a
+tool for a mode it never had. Confirmed against CI: `.github/workflows/ci.yml` line 126 and
+line 376 both run `python tools/check_xrefs.py` bare, and nothing anywhere asks it for a
+self-test. The gate was the only caller that did.
+
+**Fixed in the gate, not in the checker**, because the checker's interface is the one CI
+uses and a self-test invented to satisfy a harness bug is a test written for the wrong
+reader. The loop now greps the checker for the literal `--self-test` and prints
+`skip  checker check_xrefs.py --self-test (no --self-test defined)` instead of running it.
+
+**The general lesson, which is invariant SIX's shape one level up:** when a step fails with
+an error that names an input, the first hypothesis is that the *call* was malformed. Here the
+error named a path, and the path was the flag.
+
+### 2. Adding one source file made a checked document claim stale
+
+`docs/unsafe-audit.md`'s findings table said **141** `.rs` files scanned under `crates/`;
+the live scan found **142**, because this round added `crates/qqq-host/src/guest_output.rs`.
+The page is not free prose: `python tools/audit_unsafe.py --check-doc` compares every row
+against a live scan and **CI runs it**, so this was a red CI run waiting for the push.
+
+That is the whole point of the check, and it was added for exactly this failure: the same
+row once said **85** while the tree held 139 - true when written, never tied to the tree
+afterwards, and wrong in the direction that *understates the sample*, so a reader cannot tell
+whether the count was right and the tree grew or whether the scanner was looking elsewhere
+the whole time. A safety document whose sample size drifts is "zero for the wrong reason"
+in miniature.
+
+**Fixed:** the row now reads 142, and `--check-doc` passes -
+`UNSAFE AUDIT DOC OK -- 142 file(s), 11 crate root(s) carrying 'forbid(unsafe_code)'`.
+`python tools/gen_llms_txt.py --check` was re-run because `llms.txt` and `llms-full.txt`
+quote this page's byte size: both report `OK`, so no regeneration was needed this time. Note
+the near-miss: **the last round needed regeneration and this one did not**, so the check is
+run rather than assumed.
+
+**Consequence for the workflow, worth remembering:** any round that adds or removes a `.rs`
+file under `crates/` must re-run `audit_unsafe.py --check-doc`. It is in CI, it is cheap, and
+it is invisible until the push.
+
+### 3. `needless_pass_by_value` on `with_manifest_at`: the fix was the signature
+
+Clippy's report was at a *call site* - `explicit: Option<std::path::PathBuf>` in
+`crates/qqq-run/src/main.rs` - and the body only ever used `explicit.as_deref()`. Invariant
+FIVE says an error reported at a call site is usually a mistake in the signature, and that is
+what it was: `with_manifest_at` loads a manifest from an explicit path *or* discovers one, and
+`LoadedManifest::discover` takes `Option<&Path>`. Owning a `PathBuf` to hand it a borrow was
+the mistake.
+
+Changing the parameter to `Option<&std::path::Path>` then surfaced two further errors, both
+of which are the same lesson continued:
+
+- **`main.rs:1519`**, `serve`'s call site, passed `opts.config.as_deref().map(PathBuf::from)`.
+  With the new signature the correct expression is `opts.config.as_deref().map(Path::new)` -
+  the `PathBuf` allocation existed only to satisfy the old signature.
+- **`main.rs:2300`**, the body, then failed `clippy::needless_option_as_deref`: with
+  `explicit` already an `Option<&Path>`, `explicit.as_deref()` derefs a type to itself.
+
+One signature change, three edits. **The second and third are not new defects** - they were
+masked by the first, which is why "fix the lint" and "fix the signature" produce different
+amounts of work and only one of them is correct.
+
+The body edit needed care because **four** sites in `main.rs` call
+`LoadedManifest::discover(&cwd, explicit.as_deref())` - lines 749, 957, 1360 and 2300 - and
+only 2300 holds an `Option<&Path>`; the other three hold an `Option<PathBuf>` that clippy is
+content with. A blanket replace would have broken three commands. The edit was made by a
+scratch script (`fix_discover_as_deref.py`) that refuses unless it finds exactly four
+occurrences and the nearest enclosing `fn` above the fourth is `with_manifest_at`, and that
+also refuses unless that function's signature still takes `Option<&std::path::Path>`. The
+first version of the script's anchor was a 14-line window around the call and it refused
+correctly - the `fn` line is 12 lines above the call and outside a 6-line window - which is
+the harness being wrong and saying so rather than mutating the wrong line.
+
+### 4. `zombie_processes` in `serve_policy.rs` was a real leak, not a false positive
+
+Clippy flagged `let child = Command::new(...).spawn()` in `crates/qqq-run/tests/serve_policy.rs`
+with "spawned process is not `wait()`ed on in all code paths". The obvious reading is that
+clippy cannot see `Serving`'s `Drop` (which does `kill()` then `wait()`) and the lint is a
+false positive. It is not:
+
+```rust
+let child = Command::new(...).spawn()...;
+let deadline = Instant::now() + Duration::from_secs(30);
+while Instant::now() < deadline {
+    if TcpListener::bind(("127.0.0.1", port)).is_err() {
+        return Serving { child, port };   // <- reaped by Drop
+    }
+    std::thread::sleep(Duration::from_millis(25));
+}
+panic!("`qqqai serve` never bound 127.0.0.1:{port} for {tag}");   // <- `child` dropped bare
+```
+
+On the panic path `child` is still owned by the function, so it is dropped as a bare `Child`
+- and **`Child`'s own `Drop` neither kills nor waits**. A server that failed to bind within
+30 s therefore left a live process behind, holding a port that the next test in the same
+process would then fail to claim. Rare, and real.
+
+**Fixed by moving the `Serving` construction above the probe** rather than by allowing the
+lint: the panic now unwinds through `Serving::drop` and reaps the child. The lint went quiet
+as a consequence of the fix, which is the only reason to trust the silence.
+
+### 5. `match_same_arms` in the same file's read loop
+
+`Ok(0) => break,` and `Err(_) => break,` in `request`'s read loop. Merged into
+`Ok(0) | Err(_) => break,` with the `n` bound separately:
+
+```rust
+let n = match stream.read(&mut buf) {
+    Ok(0) | Err(_) => break,
+    Ok(n) => n,
+};
+```
+
+The two arms genuinely mean the same thing here - "no more bytes are coming" - and an `Err`
+is not a failure to report, because a server that closes after a refusal produces exactly
+that. `match_same_arms` is right that the test does not distinguish them.
+
+### 6. The three `qqq-serve` clippy errors from the same round
+
+Recorded here because they were the same run's first failures and the fixes are load-bearing
+for the streaming and limits work:
+
+| Lint | Fix |
+|---|---|
+| `serve` at 101/100 lines | extracted `stop_after_the_bound(limit, &accepted, &shutdown)` - see below |
+| `serve_connection` at 104/100 lines | extracted `refuse_before_reading(...)`, carrying the ordering rule in its doc comment |
+| `match_same_arms` on `Served::Unauthorized` | merged into the `Refused` arm; the distinction is carried by the access record, not the metric series |
+
+`stop_after_the_bound` also **fixed a behaviour bug**, and its doc comment says so: the first
+version signalled the shutdown on the acceptor immediately after the spawn, and every request
+against `--accept-limit 1` returned nothing. `refuse_before_reading`'s doc comment records
+the three-part ordering it protects - both gates before `drain_body`, both before
+`serve_special_route`, and a path matching no route is *not* refused here because answering
+403 would tell an unauthenticated caller which paths exist. Holding that code mid-function is
+how the `serve_special_route` / `drain_body` ordering was broken in O-184.
+
+### State after this round
+
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` exits **0**.
+- `python tools/audit_unsafe.py --check-doc` passes at 142 files.
+- `python tools/gen_llms_txt.py --check` passes with no regeneration.
+- `check_checklist_counts.py` was wired into CI this round (verify + `--self-test`) after it
+  measured **fifteen** wrong numbers in the checklist including a grand total three items
+  short, and its own self-test summary was corrected: it printed a hard-coded `6/6` under a
+  list of eight cases, which is the defect the checker exists to catch, in the checker.
+- The gate script no longer asks a checker for a mode it does not define.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -21,6 +21,8 @@
 //! | Streaming bodies, backpressure | **implemented** (`SRV-004`) |
 //! | `max_request_bytes` enforced during streaming | **implemented** (`SRV-005`) |
 //! | TLS, mTLS | **implemented** (`SRV-007`, `SRV-008`) |
+//! | Per-route authentication policy (refuse-by-default) | **implemented** (`auth`) |
+//! | Authenticators (`bearer-jwt`, `mtls`, `signed-request`) | **not implemented** — refused, never served |
 //! | `WebSockets`, SSE | not implemented (`SRV-009`, `SRV-010`) |
 //!
 //! Each of those is named rather than silently absent. A listener that accepted
@@ -84,6 +86,12 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod access_log;
+/// Per-route authentication policy: which routes may be served at all.
+///
+/// Not re-exported at the crate root, because its `Decision` would collide with
+/// `cors::Decision` — two different questions ("may this origin read it?" and "may
+/// this caller have it?") whose answers happen to share a name.
+pub mod auth;
 pub mod body;
 pub mod body_bytes;
 

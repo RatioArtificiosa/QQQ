@@ -94,6 +94,31 @@ def self_test() -> int:
     missing = [r["id"] for r in rows if f"`{r['id']}`" not in text]
     case("every fact appears in the register", not missing, f"missing: {missing}")
 
+    # **One section per cadence class.** `CLASSES` holds *rules*, and a class may need
+    # more than one (`volatile` has two, `stable` has two). Both emitters iterated
+    # `CLASSES` directly, so a two-rule class printed its summary row twice and its whole
+    # section twice, with every one of its facts listed under each. The page claimed "30 of
+    # 30 facts classified" while rendering 48 rows.
+    #
+    # Nothing else could see it. `check_verified_facts.py` compares the page against
+    # Appendix B, and a duplicated section agrees with Appendix B exactly as well as a
+    # single one — so the one checker whose job is this page was blind to a page that
+    # contradicted itself. Counting the headings is what catches it.
+    names = [c[0] for c in gen.distinct_classes()]
+    case(
+        "each cadence class is emitted once",
+        len(names) == len(set(names)) and len(names) > 0,
+        f"distinct_classes returned {names}",
+    )
+    headings = [
+        line for line in text.splitlines() if line.startswith("## ") and "re-verify" in line
+    ]
+    case(
+        "no cadence section is duplicated in the register",
+        len(headings) == len(set(headings)),
+        f"headings: {headings}",
+    )
+
     # The committed file matches the source.
     code, out = run_check()
     case("the committed register matches Appendix B", code == 0, out.strip())
@@ -109,7 +134,7 @@ def self_test() -> int:
         if original:
             TARGET.write_text(original, encoding="utf-8")
 
-    total = len(samples) + 6
+    total = len(samples) + 8
     print("")
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")

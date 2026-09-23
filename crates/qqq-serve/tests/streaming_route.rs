@@ -111,6 +111,23 @@ impl Server {
         stream.flush().await.expect("flush");
         stream
     }
+
+    /// Connect and send a request that **declares** `declared` body bytes, sending none.
+    ///
+    /// The declaration is the whole instrument. A server that reads the body before
+    /// dispatching must block waiting for bytes that never arrive, so a response that
+    /// still arrives is proof the body was not read — and no timing threshold is
+    /// involved, because a blocking read never completes rather than completing slowly.
+    async fn open_declaring(&self, target: &str, declared: u64) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n\r\n");
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .expect("write request");
+        stream.flush().await.expect("flush");
+        stream
+    }
 }
 
 impl Drop for Server {
@@ -134,6 +151,25 @@ async fn read_until(stream: &mut TcpStream, needle: &str) -> String {
                     }
                 }
             }
+        }
+    })
+    .await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Read whatever arrives within `window`, then return it.
+///
+/// Used by the control test below, which asserts on **absence**: the only way to show a
+/// server is waiting is to wait a bounded time and find nothing.
+async fn read_within(stream: &mut TcpStream, window: Duration) -> String {
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(window, async {
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = stream.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
         }
     })
     .await;
@@ -215,6 +251,76 @@ async fn a_streaming_route_delivers_an_event_before_the_handler_returns() {
     assert!(
         rest.contains("data: second"),
         "the second event must arrive after the gate opens: {rest:?}"
+    );
+}
+
+/// **A streaming route must not read the request body.**
+///
+/// # The defect this test exists for
+///
+/// `drain_body` documented that *"a route with a `StreamingHandler` is dispatched
+/// **before** this function runs, so a streaming route never buffers"* — while the call to
+/// `serve_special_route` sat **below** the call to `drain_body`. So a streaming route's
+/// body was read into memory and then handed to a handler that has no body parameter and
+/// could not read it if it wanted to. Nothing failed: the response was correct and only
+/// the cost was wrong, which is why no test noticed.
+///
+/// # Why the declaration is the instrument
+///
+/// The request declares `Content-Length: 4096` and sends **none** of those bytes. A server
+/// that reads the body first blocks in `read` forever, so the first event never arrives
+/// and `read_until`'s timeout finds nothing. A server that dispatches first streams the
+/// event immediately. There is no timing threshold to tune: a blocking read does not
+/// complete late, it does not complete.
+#[tokio::test]
+async fn a_streaming_route_does_not_read_the_request_body() {
+    let (tx, rx) = oneshot::channel();
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open_declaring("/events", 4096).await;
+    let got = read_until(&mut client, "data: first").await;
+
+    assert!(
+        got.contains("data: first"),
+        "the stream must start without the declared body: the handler was dispatched \
+         before the body was read, or the server is blocked waiting for 4096 bytes that \
+         will never arrive. Got: {got:?}"
+    );
+
+    let _ = tx.send(());
+}
+
+/// **The control: a flat route does read the declared body.**
+///
+/// Without this, `a_streaming_route_does_not_read_the_request_body` would also pass on a
+/// server that ignored `Content-Length` entirely — which would be a far worse defect than
+/// the one it is checking for, and this test is what tells the two apart.
+#[tokio::test]
+async fn a_flat_route_does_read_the_declared_body() {
+    let dispatch = Dispatch::flat(flat_handler());
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open_declaring("/events", 11).await;
+
+    // Nothing yet: the server is waiting for the eleven bytes it was promised.
+    let early = read_within(&mut client, Duration::from_millis(300)).await;
+    assert!(
+        early.is_empty(),
+        "a flat route must not answer before its declared body arrives, so the server \
+         does honour Content-Length. Got: {early:?}"
+    );
+
+    client
+        .write_all(b"hello world")
+        .await
+        .expect("write the promised body");
+    client.flush().await.expect("flush");
+
+    let got = read_until(&mut client, "flat").await;
+    assert!(
+        got.contains("200 OK") && got.ends_with("flat"),
+        "once the body arrives the flat handler runs: {got:?}"
     );
 }
 

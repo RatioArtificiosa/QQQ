@@ -268,13 +268,41 @@ def parse_wit(path: Path) -> dict[str, object]:
     }
 
 
+def interface_calls(iface: dict[str, object]) -> int:
+    """How many callable functions an interface declares.
+
+    # Why this counts resource methods
+
+    A resource's methods **are** the interface's public API — a guest calls
+    `directory.read-file(name)`, not `read-file(directory, name)` — so an interface that
+    declares seven of them declares seven callable functions.
+
+    The header total and the per-interface column counted only interface-level `func`s,
+    so `qqq:fs@1.0.0/filesystem` was reported as **0 functions** while the body of the
+    same page listed its seven methods, `qqq:sql` was reported as 4 against 12, and
+    `qqq:trace` as 2 against 6. Nineteen methods were missing from the count and the page
+    contradicted itself: the table said an interface did nothing and the section beneath
+    it said what it did.
+
+    The parser was never wrong — `check_wit_reference.py --self-test` has always counted
+    the methods (`Resource methods` is one of the two bugs its docstring says it was
+    written for). The *renderer* was, and the checker could not see it, because it
+    compares the page against the generator rather than against the WIT.
+    """
+    n = len(iface["functions"])  # type: ignore[arg-type]
+    for t in iface["types"]:  # type: ignore[union-attr]
+        if t.get("kind") == "resource":
+            n += len(t.get("methods") or [])
+    return n
+
+
 def render(records: list[dict[str, object]]) -> str:
     """Render the reference markdown."""
     parts = [HEADER]
 
     total_ifaces = sum(len(r["interfaces"]) for r in records)  # type: ignore[arg-type]
     total_funcs = sum(
-        len(i["functions"])  # type: ignore[arg-type]
+        interface_calls(i)
         for r in records
         for i in r["interfaces"]  # type: ignore[union-attr]
     )
@@ -289,7 +317,7 @@ def render(records: list[dict[str, object]]) -> str:
     for r in records:
         for i in r["interfaces"]:  # type: ignore[union-attr]
             parts.append(
-                f"| `{r['package']}` | [`{i['name']}`](#{str(r['package']).replace(':', '').replace('@', '').replace('.', '')}-{i['name']}) | {len(i['functions'])} |"  # type: ignore[arg-type]
+                f"| `{r['package']}` | [`{i['name']}`](#{str(r['package']).replace(':', '').replace('@', '').replace('.', '')}-{i['name']}) | {interface_calls(i)} |"  # type: ignore[arg-type]
             )
     parts.append("")
 

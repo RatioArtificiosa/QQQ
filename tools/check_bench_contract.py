@@ -189,196 +189,33 @@ def rust_rows(text: str) -> list[dict[str, str]]:
 
 
 def main() -> int:
+    """Report `analyse`'s verdict on the real files.
+
+    # Why this function holds no rules
+
+    It used to hold a second copy of them. `main` checked that each Rust target
+    matched §9.2 and that a §9.2 row was one `EXPECTED_ROWS` had been taught;
+    `analyse` checked neither. The self-test drives `analyse`, CI drives `main`,
+    so the two paths could validate different properties while both reported
+    success -- and a self-test that certifies a different function than the one
+    CI runs certifies nothing.
+
+    One rule, one implementation, both callers. Anything that must be true of the
+    verdict belongs in `analyse`; what remains here is reading, printing and the
+    exit code.
+    """
     proposal_text = read(PROPOSAL)
     checklist_text = read(CHECKLIST)
     budget_text = read(BUDGET_RS)
 
-    errors: list[str] = []
+    errors = analyse(budget_text, proposal_text, checklist_text)
 
-    # --- 0. Anti-vacuity: refuse to pass on nothing -------------------------
+    # Printed unconditionally, including on the vacuity path: "extracted only 3
+    # rows" is only actionable next to the number it was measured against.
     prop = proposal_rows(proposal_text)
     rust = rust_rows(budget_text)
-
-    if len(prop) < 10:
-        print(
-            f"FATAL: extracted only {len(prop)} row(s) from §9.2. §9.2 has at "
-            "least 10; a parser that finds nothing must fail rather than pass."
-        )
-        return 1
-    if not rust:
-        print("FATAL: extracted no rows from Budget::ALL. The parse is broken.")
-        return 1
-
     print(f"§9.2 rows found in the Proposal: {len(prop)}")
     print(f"rows found in Budget::ALL:       {len(rust)}")
-
-    # --- 1. Every Proposal row is either implemented or explicitly excluded --
-    declared = {r["item"] for r in rust}
-    excluded_text = budget_text[budget_text.find("NOT_A_HARNESS_ROW") :]
-
-    for metric, target, direction in prop:
-        if metric in {r[0] for r in EXPECTED_ROWS}:
-            continue
-        # A row this checker's EXPECTED_ROWS does not know about is a Proposal
-        # change the checker has not been taught -- which must fail loudly.
-        errors.append(
-            f"§9.2 row '{metric}' is not in this checker's EXPECTED_ROWS. "
-            "If §9.2 changed, update EXPECTED_ROWS deliberately."
-        )
-
-    # Every EXPECTED row must be found in the Proposal.
-    proposal_metrics = {m for m, _, _ in prop}
-    for metric, target, direction in EXPECTED_ROWS:
-        found = [p for p in prop if metric in p[0]]
-        if not found:
-            errors.append(
-                f"EXPECTED_ROWS names '{metric}', but §9.2 has no such row. "
-                "Either §9.2 changed or this list is wrong."
-            )
-            continue
-        _, prop_target, prop_direction = found[0]
-        if abs(prop_target - target) > 0.001:
-            errors.append(
-                f"'{metric}': this checker expects {target}, §9.2 states "
-                f"{prop_target}. One of the two is wrong."
-            )
-        if prop_direction != direction:
-            errors.append(
-                f"'{metric}': this checker expects '{direction}', §9.2 states "
-                f"'{prop_direction}'. A flipped direction makes every verdict "
-                "for this row invert."
-            )
-
-    # --- 2. Every checklist item cited by a budget row must exist ------------
-    cited: set[str] = set()
-    for row in rust:
-        m = re.search(r"Item::(Perf\d+)", row.get("item", ""))
-        if not m:
-            errors.append(f"a Budget::ALL row has no parsable item: {row}")
-            continue
-        # `Perf003` -> `PERF-003`
-        num = m.group(1)[4:]
-        item_id = f"PERF-{num}"
-        cited.add(item_id)
-
-        if item_id not in checklist_text:
-            errors.append(
-                f"{item_id} is cited by a budget row but does not appear in "
-                "QQQ-Checklist-V1.md -- §O-126's invented-citation defect"
-            )
-
-    # Anti-vacuity for the citation loop.
-    if not cited:
-        errors.append("no checklist items were extracted; the citation check is vacuous")
-
-    # --- 3. Every cited item must have a method naming bench/ ----------------
-    for row in rust:
-        method = row.get("method", "")
-        if not method.startswith("bench/"):
-            errors.append(
-                f"{row.get('item')} has method '{method}', which does not name a "
-                "path under bench/. §9.2 says each row 'has a measurement method "
-                "in bench/'."
-            )
-
-    # --- 4. The two directions must both be represented ----------------------
-    directions = {row.get("direction", "").strip() for row in rust}
-    if not any("AtMost" in d for d in directions):
-        errors.append("no AtMost budget: every ceiling row is missing")
-    if not any("AtLeast" in d for d in directions):
-        errors.append(
-            "no AtLeast budget: the throughput row is missing, and without a "
-            "floor row the direction branch is untested"
-        )
-
-    # --- 5. Every §9.2 budget row is either implemented or explicitly excluded --
-    #
-    # The property: for each of §9.2's rows, the project has made a **decision** --
-    # either a `Budget` exists, or the row is named in `NOT_A_HARNESS_ROW` with a
-    # reason. A row that is in neither is an oversight, and a row count comparison
-    # cannot see that because the two lists are keyed differently.
-    #
-    # The first version of this check compared three integers and was wrong in
-    # both directions: it counted tuple literals that were not rows, and it
-    # assumed a relationship between §9.2's row count and the implementation
-    # count that does not hold, because §9.1's `cold` row appears twice in §9.2.
-    m = re.search(
-        r"NOT_A_HARNESS_ROW: \[\(&'static str, &'static str\); (\d+)\]", budget_text
-    )
-    if not m:
-        errors.append("NOT_A_HARNESS_ROW is not declared with an explicit length")
-        declared_excluded = 0
-    else:
-        declared_excluded = int(m.group(1))
-
-    # Extract the excluded row names from the array body.
-    excluded_names: list[str] = []
-    ex_start = budget_text.find("NOT_A_HARNESS_ROW: [")
-    if ex_start != -1:
-        ex_end = budget_text.find("];", ex_start)
-        ex_body = budget_text[ex_start:ex_end]
-        excluded_names = re.findall(r'\(\s*"([^"]+)"', ex_body)
-
-    if len(excluded_names) != declared_excluded:
-        errors.append(
-            f"NOT_A_HARNESS_ROW declares {declared_excluded} rows but names "
-            f"{len(excluded_names)}: {excluded_names}"
-        )
-
-    # Every Proposal row must be accounted for by SOME decision.
-    #
-    # # Which source is authoritative, and why the first version was wrong
-    #
-    # The implemented row names are read from `Item::metric()` -- but that function
-    # is a *lookup table for an enum*, not proof that a row exists. The self-test's
-    # first injection removed `Perf002` from `Budget::ALL` and the checker stayed
-    # silent, because `Item::Perf002 => "Routed request overhead (empty handler)"`
-    # was still in `metric()`.
-    #
-    # That is the same "check aimed at a nearby property" shape this repository
-    # records repeatedly: `metric()` is nearby and easy to read, while "a row
-    # exists for this §9.2 metric" is the property that matters. So the source of
-    # truth is the **`item:` field of each `Budget::ALL` entry**, resolved through
-    # `metric()` only to get its human-readable name.
-    metric_fn = re.search(r"pub fn metric\(self\) -> &'static str \{(.*?)\n    \}", budget_text, re.S)
-    metric_names: dict[str, str] = {}
-    if metric_fn:
-        for m in re.finditer(r"Self::(\w+)\s*=>\s*\"([^\"]+)\"", metric_fn.group(1)):
-            metric_names[m.group(1)] = m.group(2)
-
-    if not metric_names:
-        errors.append(
-            "could not read any metric names from `Item::metric()`; the accounting "
-            "check would be vacuous"
-        )
-
-    # The items that actually have a row, taken from `Budget::ALL`.
-    row_items = set()
-    for row in rust:
-        m = re.search(r"Item::(\w+)", row.get("item", ""))
-        if m:
-            row_items.add(m.group(1))
-
-    if not row_items:
-        errors.append("no `item:` fields extracted from Budget::ALL; nothing to account for")
-
-    implemented_metrics = {metric_names[i] for i in row_items if i in metric_names}
-
-    # `PERF-007`'s AOT cache row shares §9.2's cold-instantiate measurement rather
-    # than occupying a row of its own -- recorded here rather than silently
-    # allowed, because a reader comparing the two tables will notice.
-    AOT_CACHE_SHARES_COLD = "PERF-007"
-    _ = AOT_CACHE_SHARES_COLD
-
-    for metric, _target, _direction in prop:
-        if metric in implemented_metrics:
-            continue
-        if any(name in metric or metric in name for name in excluded_names):
-            continue
-        errors.append(
-            f"§9.2 row '{metric}' has no decision: it is neither implemented by a "
-            "Budget nor named in NOT_A_HARNESS_ROW with a reason"
-        )
 
     if errors:
         print(f"\n{len(errors)} PROBLEM(S):")
@@ -387,6 +224,11 @@ def main() -> int:
         print("\nBENCH CONTRACT VIOLATED")
         return 1
 
+    cited = {
+        f"PERF-{m.group(1)[4:]}"
+        for row in rust
+        if (m := re.search(r"Item::(Perf\d+)", row.get("item", "")))
+    }
     print(
         f"\n{len(rust)} budget row(s) implemented, {len(cited)} checklist item(s) "
         "cited and all present"
@@ -401,16 +243,28 @@ def self_test() -> int:
     # Why every checker in this repository has this
 
     A checker whose self-test only exercises the passing path certifies nothing.
-    This one has four properties to defend, and each is injected below against a
+    This one has six properties to defend, and each is injected below against a
     **synthetic source string** rather than by mutating the real files: the point
     is to exercise the *rule*, and writing to the repository to test a checker
     would make the test itself a hazard.
 
-    The four:
+    The six:
       1. a `§9.2` row with no decision (neither implemented nor excluded);
-      2. a budget whose target drifted from the Proposal;
+      2. a budget whose target drifted from the Proposal -- the rule `analyse`
+         was missing, which is why the injection for it once reported PASS;
       3. a citation of an item that does not exist in the checklist;
-      4. a method that does not name a path under `bench/`.
+      4. a method that does not name a path under `bench/`;
+      5. a `§9.2` row `EXPECTED_ROWS` has not been taught -- a rule that lived in
+         `main` alone, invisible to a self-test that drives `analyse`;
+      6. a `NOT_A_HARNESS_ROW` whose declared length its body does not match.
+
+    # Why each injection asserts its own anchor applied
+
+    A `str.replace` whose needle is absent returns the input unchanged, and the
+    case then tests the unmodified source -- which passes, which the case reports
+    as a failure of the checker when it is a failure of the harness. The two
+    newest cases assert the substitution took; `§O-183` records the general
+    shape.
     """
     print("self-test: injecting the defects this checker exists to catch")
 
@@ -457,6 +311,33 @@ def self_test() -> int:
         '"bench/routed.rs::routed_request_overhead"', '"somewhere/else.rs::fn"', 1
     )
     cases.append(("a method outside bench/", bad_method, proposal_text, True))
+
+    # 5. A §9.2 row the checker has not been taught. This rule used to live in
+    #    `main` only, so the self-test could not see it. Injecting it here is what
+    #    keeps it in `analyse`, where both callers run it.
+    grown_proposal = proposal_text.replace(
+        "| Warm instance acquire |",
+        "| Some brand new row | ≤ 1.0 | µs | `PERF-001` |\n| Warm instance acquire |",
+        1,
+    )
+    if grown_proposal == proposal_text:
+        print("HARNESS FAIL: the proposal row injection did not apply")
+        return 1
+    cases.append(
+        ("a §9.2 row EXPECTED_ROWS has not been taught", real_budget, grown_proposal, True)
+    )
+
+    # 6. `NOT_A_HARNESS_ROW` declaring a length its body does not match. The
+    #    declared length is what a reader trusts; the body is what runs.
+    short_declared = real_budget.replace(
+        "NOT_A_HARNESS_ROW: [(&'static str, &'static str); 3]",
+        "NOT_A_HARNESS_ROW: [(&'static str, &'static str); 9]",
+        1,
+    )
+    if short_declared == real_budget:
+        print("HARNESS FAIL: the NOT_A_HARNESS_ROW length injection did not apply")
+        return 1
+    cases.append(("a declared row count its body does not match", short_declared, proposal_text, True))
 
     # --- The control ---------------------------------------------------------
     # The real source must PASS. Without this, a checker that failed on
@@ -610,11 +491,44 @@ def analyse(
         errors.append("no AtLeast budget")
 
     # Every §9.2 row needs a decision.
+    #
+    # Extracted **before** the two rules below that use it. A reference to a variable
+    # assigned later in the same function is an `UnboundLocalError` in Python, and the
+    # first version of this edit had exactly that — the note further down records the
+    # same mistake being made once before.
     excluded_names: list[str] = []
     ex_start = budget_src.find("NOT_A_HARNESS_ROW: [")
     if ex_start != -1:
         ex_end = budget_src.find("];", ex_start)
         excluded_names = re.findall(r'\(\s*"([^"]+)"', budget_src[ex_start:ex_end])
+
+    # Every §9.2 row must be one this checker has been taught about.
+    #
+    # Moved here from `main`, where it was one of two implementations of overlapping
+    # rules. A §9.2 row that is implemented in Rust but absent from `EXPECTED_ROWS`
+    # would pass `analyse` and fail `main`, which is the definition of two
+    # implementations disagreeing — and it is invisible to the self-test, because the
+    # self-test drives `analyse`.
+    known = {r[0] for r in EXPECTED_ROWS}
+    for metric, _target, _direction in prop:
+        if metric in known:
+            continue
+        errors.append(
+            f"§9.2 row '{metric}' is not in this checker's EXPECTED_ROWS. "
+            "If §9.2 changed, update EXPECTED_ROWS deliberately."
+        )
+
+    # `NOT_A_HARNESS_ROW` declares its own length; the array body must match it.
+    declared = re.search(
+        r"NOT_A_HARNESS_ROW: \[\(&'static str, &'static str\); (\d+)\]", budget_src
+    )
+    if not declared:
+        errors.append("NOT_A_HARNESS_ROW is not declared with an explicit length")
+    elif len(excluded_names) != int(declared.group(1)):
+        errors.append(
+            f"NOT_A_HARNESS_ROW declares {declared.group(1)} rows but names "
+            f"{len(excluded_names)}: {excluded_names}"
+        )
 
     # The source of truth is `Budget::ALL`'s `item:` field, not `metric()`. See
     # the note in `main` for why: the self-test's first injection caught the

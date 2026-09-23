@@ -43,6 +43,25 @@ wasmtime = { workspace = true }
 # would disagree about the canonical ABI. `§D-003` pins the engine to 48; this pin
 # follows it, and `tools/check_toolchain.py`'s neighbours keep such pins honest.
 wasmtime-wasi = { workspace = true }
+# The `AsyncWrite` trait the guest-output sink implements (`§O-183`).
+#
+# # Why this is a real dependency and not a dev-dependency
+#
+# `wasmtime-wasi` 48's p2 stdio API has **no synchronous write pipe**: the only sinks
+# are `AsyncWrite`-based (`AsyncWriteStream`, `MemoryOutputPipe`, `simplex`), and
+# `StdoutStream::async_stream` is declared to return `Box<dyn AsyncWrite + Send +
+# Sync>`. Sanitising a guest's output therefore requires implementing `AsyncWrite`,
+# which requires `tokio`.
+#
+# The `unsafe`-free route was checked first: a hand-built `RawWaker` for a synchronous
+# poll would have avoided the trait, but the crate-level `forbid(unsafe_code)` rejects
+# it and `forbid` cannot be relaxed by an inner `allow`. The synchronous *behaviour* is
+# kept — `poll_write` escapes and writes in one step and never returns `Pending` — so
+# no executor is needed at runtime despite the async trait.
+#
+# Tokio was already a workspace dependency and already in `Cargo.lock` through the
+# dev-dependency below, so this promotes an existing pin rather than adding a crate.
+tokio = { workspace = true, features = ["io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

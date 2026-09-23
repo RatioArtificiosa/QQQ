@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **85** |
+| `.rs` files scanned under `crates/` | **142** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -23,6 +23,14 @@ finding than one in a crate that is allowed to have it.
 
 **Reproduce with `python tools/audit_unsafe.py`.** It exits non-zero if any
 code-position `unsafe` exists, so it is a gate rather than a report.
+
+**The counts above are checked, not copied.** `python tools/audit_unsafe.py --check-doc`
+fails when this table disagrees with a live scan, and CI runs it. It was added because the
+file count here said **85** while the tree held 139: true when written, never tied to the
+tree afterwards, and wrong in the direction that understates the sample. A safety document
+whose own sample size has drifted is the "zero for the wrong reason" problem in miniature —
+a reader cannot tell whether the count was right and the tree grew, or whether the scanner
+was looking elsewhere the whole time.
 
 ## 2. Why the count is zero, which matters more than the count
 

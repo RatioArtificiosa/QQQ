@@ -473,7 +473,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/TenantLimit"
           },
-          "description": "Per-tenant overrides, keyed by tenant name.",
+          "description": "Per-tenant overrides, keyed by the **client's IP address**. # Why an address and not a name A request's tenant is the peer address: `qqq_serve::server::tenant_of` returns `peer.ip().to_string()` and `TenantLimits::limits_for` looks the tenant up by that string. So a key that is not an address litera",
           "type": "object"
         }
       },

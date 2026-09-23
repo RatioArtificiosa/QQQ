@@ -107,6 +107,34 @@ pub struct ServerConfig {
     /// no origins. Keeping the field optional means a manifest with no `[server.cors]`
     /// table produces a server that has never heard of CORS.
     pub cors: Option<crate::cors::Cors>,
+    /// The per-route authentication policy, or `None` for none.
+    ///
+    /// `None` means **no policy is installed**, which is different from a policy that
+    /// refuses everything and different again from one that allows. With `None` the server
+    /// has no opinion about authority and serves every route it can match — which is
+    /// correct for `qqq-serve`'s own socket tests and for an embedder that enforces
+    /// authority itself, and is **not** what `qqqai serve` may do, because the manifest
+    /// always has an opinion (`default_auth`, whose default is `deny`).
+    ///
+    /// `qqq-run` is therefore the crate that must supply it, and
+    /// `qqq_serve::auth::AuthPolicy::decide` is fail-closed for a route it was not told
+    /// about. See that module for why the missing-entry case refuses.
+    pub auth: Option<Arc<crate::auth::AuthPolicy>>,
+    /// Stop accepting after this many connections, or `None` to run until shutdown.
+    ///
+    /// # Why this is a server setting and not a test harness
+    ///
+    /// An unbounded accept loop that cannot be bounded is a loop that cannot be verified:
+    /// a socket test has to be able to say "serve exactly three connections and then
+    /// finish", or it either hangs or relies on a timeout to end it, and a test that ends
+    /// by timing out cannot distinguish "done" from "stuck".
+    ///
+    /// The count is of connections **accepted**, not served: a connection refused by the
+    /// ledger still counts, because the bound exists to end the loop rather than to measure
+    /// work. Reaching the bound signals the same shutdown the drain path uses, so the
+    /// listener, the connections in flight and the exit all take the one path that already
+    /// has tests.
+    pub accept_limit: Option<u64>,
 }
 
 impl ServerConfig {
@@ -127,6 +155,15 @@ impl ServerConfig {
             // A built-in cap here would be a number this crate invented, silently changing
             // behaviour on upgrade -- see `qqq_cap::manifest::RequestLimits`.
             limits: None,
+            // No policy is installed by default. An embedder that has already decided
+            // authority does not need a second opinion from this crate, and inventing one
+            // here would make every socket test carry a policy it never asked for. The
+            // manifest-driven path installs one; see `ServerConfig::auth`.
+            auth: None,
+            // Unbounded by default: a production server runs until it is told to stop, and a
+            // default bound would be a number this crate invented that silently stopped
+            // serving. `qqqai serve --accept-limit` sets it.
+            accept_limit: None,
         }
     }
 }
@@ -309,6 +346,16 @@ pub enum Served {
     /// unknown. That is why this is an outcome rather than a response the loop could continue
     /// from.
     Refused,
+    /// The manifest's authentication policy refused the route.
+    ///
+    /// Distinct from [`Self::Refused`] in the **log** and identical to it in the metric,
+    /// which is the same split [`Self::BodyRejected`] and [`Self::Refused`] make for the
+    /// same reason: an operator needs to know which of "too many", "too much" and "you may
+    /// not" fired, while §10.2 needs a bounded label set. The status code carries the
+    /// distinction into the access record; the counter stays five-valued.
+    ///
+    /// The body was not read, so the connection cannot be reused.
+    Unauthorized,
     /// The server is draining and closed it.
     Drained,
     /// The handler asked to close.
@@ -345,6 +392,10 @@ pub async fn serve(
     // **mutable** state, so this is not merely an optimisation: a per-connection copy would
     // give each connection its own allowance and the limit would enforce nothing.
     let limits: Option<Arc<crate::limits::TenantLimits>> = config.limits.clone();
+    // Cloned per task, which clones only the `Arc`: one policy, many connections. See
+    // `ServerConfig::auth` for why `None` here means "no policy installed" rather than
+    // "everything is public".
+    let auth: Option<Arc<crate::auth::AuthPolicy>> = config.auth.clone();
     // Bounded tenant labels, shared for the same reason the registry is: a per-connection
     // copy would let each connection disagree about which tenants are named and which are
     // collapsed, so the same tenant could appear under two labels depending on which
@@ -395,6 +446,13 @@ pub async fn serve(
     // ordinal.
     let trace_counter = Arc::new(TraceCounter::new());
 
+    // The accept bound. Read once from the config rather than borrowed, so the closure does
+    // not capture `config` and cannot accidentally read a field that changed underneath it.
+    let accept_limit: Option<u64> = config.accept_limit;
+    // Counted on the acceptor rather than per connection: the bound is on connections
+    // *accepted*, and a connection that the ledger refuses still consumed an accept.
+    let accepted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     // The accept loop hands each connection to a task. `accept_stream` takes a
     // synchronous callback, so the spawn happens here rather than inside it —
     // and the callback must not block, because it runs on the acceptor.
@@ -414,6 +472,8 @@ pub async fn serve(
             let metrics = metrics.clone();
             // Cloned per task, which clones the `Arc` -- one limiter, many connections.
             let limits = limits.clone();
+            // Cloned per task, which clones the `Arc` -- one policy, many connections.
+            let auth = auth.clone();
             // Cloned per task, which clones the `Arc`: the label set must be **one** value,
             // or two connections could disagree about whether a tenant is named.
             let tenant_labels = Arc::clone(&tenant_labels);
@@ -422,6 +482,22 @@ pub async fn serve(
             // starts and two connections can never share one — not even if the
             // scheduler runs the tasks in an unexpected order.
             let trace = trace_counter.next_trace();
+
+            // The accept bound, honoured **after** the connection has been served.
+            //
+            // Signalling here — on the acceptor, immediately after the spawn — was the first
+            // version and it was wrong: the spawned task had not read a byte yet, so it saw a
+            // signalled shutdown on its first poll, drained, and closed without answering.
+            // Every request against `--accept-limit 1` returned nothing at all, which is what
+            // the integration tests in `qqq-run/tests/serve_policy.rs` caught.
+            //
+            // The count is of connections *accepted*, and it is read inside the task so the
+            // signal lands after the last connection has been served rather than before it
+            // has been read.
+            let accepted = Arc::clone(&accepted);
+            let shutdown_for_task = task_shutdown.clone();
+            let limit = accept_limit;
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             tokio::spawn(async move {
                 let id = ConnectionId::new(peer, trace);
@@ -446,6 +522,7 @@ pub async fn serve(
                     shutdown: &local_shutdown,
                     logger: &logger,
                     cors: cors.as_deref(),
+                    auth: auth.as_ref(),
                     // `ConnectionConfig` holds a plain `Duration` (a connection always has
                     // one); the context holds an `Option` because a WebSocket may
                     // legitimately want none — a long-lived socket with its own heartbeat
@@ -479,6 +556,15 @@ pub async fn serve(
 
                 let mut l = ledger.lock().await;
                 l.release(&id.tenant);
+                drop(l);
+
+                // Now that this connection is finished, honour the bound.
+                //
+                // Signalling the shared shutdown rather than breaking out of the acceptor is
+                // deliberate: the drain path already exists, is tested, and lets the other
+                // connections in flight finish. A `break` would be a second way to stop a
+                // server, and the second way is the one that forgets to drain.
+                stop_after_the_bound(limit, &accepted, &shutdown_for_task);
             });
         })
         .await;
@@ -1174,6 +1260,13 @@ pub struct ConnectionContext<'a> {
     pub logger: &'a Logger,
     /// The cross-origin policy, or `None` when the manifest declared none.
     pub cors: Option<&'a crate::cors::Cors>,
+    /// The per-route authentication policy, or `None` when the caller installed none.
+    ///
+    /// Borrowed from the `Arc` the accept loop cloned, so every connection consults the
+    /// **same** policy: a per-connection copy would let two connections disagree about
+    /// whether a route is public, which is the class of bug the shared `Arc` on `metrics`
+    /// and `limits` exists to prevent.
+    pub auth: Option<&'a Arc<crate::auth::AuthPolicy>>,
     /// How long the connection may be idle before the server closes it.
     ///
     /// Carried into an upgraded connection too: a WebSocket has no natural end, so the
@@ -1384,61 +1477,17 @@ async fn serve_connection(
         // Starting it earlier would cut off a slow-but-progressing client for
         // the server's own think time.
 
-        // **Consume the body before dispatching.** `reject_body` states why the ordering
-        // is the rule rather than a preference.
+        // --- The two gates that must run before anything is read ------------
         //
-        // The count is kept for the metric: `body_bytes` must be the bytes that crossed the
-        // socket, not the head's declared length. `reject_body` records the refusal itself,
-        // because a body over the cap is precisely the case `SRV-020` wants counted and no
-        // response is produced for it here.
-        // --- Per-tenant limits, before anything is read ---------------------
-        //
-        // Both checked **here**, before the body is consumed and before a handler runs, so a
-        // refused request costs the server as little as possible. A check after the body was
-        // read would have already paid for the thing the cap exists to prevent.
-        //
-        // The rate check is `check_and_record`, which consumes the allowance as a side
-        // effect: a separate `check` and `record` would let a caller check without recording,
-        // which is a limiter that never limits. The refusal is recorded as a metric so an
-        // operator can see it, and answered with 429 -- the status that means "you are
-        // sending too often", distinct from 413 for "you are sending too much".
-        if let Some(limits) = ctx.limits {
-            // The **declared** length first. A client understating it is caught by the
-            // streaming count below; a client stating it honestly pays nothing to find out.
-            if let Some(declared) = head.content_length {
-                if limits.check_body(&tenant, declared).is_err() {
-                    if let Some(m) = ctx.metrics {
-                        let label = ctx.tenant_labels.label(&tenant);
-                        m.record_body_limit(label.as_str());
-                    }
-                    return refuse_limits(
-                        &mut stream,
-                        &head,
-                        path,
-                        &tenant,
-                        ctx,
-                        span_seq + 1,
-                        false,
-                    )
-                    .await;
-                }
-            }
-            if limits.check_and_record(&tenant, Instant::now()).is_err() {
-                span_seq += 1;
-                return refuse_limits(&mut stream, &head, path, &tenant, ctx, span_seq, true).await;
-            }
+        // Extracted so the ordering rule lives in one named place rather than in the middle
+        // of a hundred-line function where a later edit can move it without noticing. The
+        // extraction is also what the line-count lint was asking for.
+        if let Some(served) =
+            refuse_before_reading(&mut stream, &head, path, table, &tenant, ctx, &mut span_seq)
+                .await
+        {
+            return served;
         }
-
-        let Some((body, body_bytes)) = drain_body(&mut stream, &mut buf, &head).await else {
-            if let Some(m) = ctx.metrics {
-                // The refusal is counted because a body over the cap is exactly the case
-                // `SRV-020` asks about, and no `record_request` runs for it: the connection
-                // closes without a completed request.
-                let label = ctx.tenant_labels.label(&tenant);
-                m.record_body_limit(label.as_str());
-            }
-            return reject_body(&mut stream, &head).await;
-        };
 
         // --- Preflight, WebSocket, or streaming: three ways off the HTTP path ----
         //
@@ -1446,6 +1495,31 @@ async fn serve_connection(
         // a preflight before routing, then an upgrade before a response, then a stream.
         // Each is a case where answering with an ordinary HTTP response would commit the
         // connection to something the client did not ask for.
+        //
+        // **Before `drain_body`, and that ordering is the point of this block.** None of
+        // the three reads the request body: `StreamingHandler` and the WebSocket handler
+        // are both called with the head and the route match and no body at all, and a
+        // preflight has none by definition. Draining first buffered a body nothing would
+        // ever read — the cost `SRV-004`'s *"a cap, not a buffer"* exists to avoid — and
+        // it made `drain_body`'s own documentation false, since that function stated a
+        // streaming route *"is dispatched before this function runs"* while the call sat
+        // below it. Two halves of one rule, disagreeing.
+        //
+        // All three branches close the connection — `serve_streaming` and
+        // `serve_preflight` force `Connection: close` and shut the socket down, and the
+        // WebSocket loop owns it from the handshake on — so leaving the body unread cannot
+        // leave the request loop parsing the next request from mid-body.
+        //
+        // # What is not lost by not draining
+        //
+        // * The per-tenant **declared-length** cap is checked above, before this block.
+        // * The absolute `max_request_bytes` cap is enforced by the **parser** on a
+        //   declared `Content-Length` (`http1`), which runs before any of this.
+        //
+        // A *chunked* body past the absolute cap on a streaming or WebSocket route is
+        // therefore no longer refused with `413` — and it is not read either, because
+        // nothing reads it and the connection closes. That is the one behaviour change in
+        // this ordering, and it is stated here rather than left to be discovered.
         if let Some(served) = serve_special_route(
             &mut stream,
             &head,
@@ -1461,6 +1535,26 @@ async fn serve_connection(
         {
             return served;
         }
+
+        // --- The body, now that the request is known to be an ordinary one ------
+        //
+        // **Consume the body before dispatching.** `reject_body` states why the ordering
+        // is the rule rather than a preference.
+        //
+        // The count is kept for the metric: `body_bytes` must be the bytes that crossed the
+        // socket, not the head's declared length. `reject_body` records the refusal itself,
+        // because a body over the cap is precisely the case `SRV-020` wants counted and no
+        // response is produced for it here.
+        let Some((body, body_bytes)) = drain_body(&mut stream, &mut buf, &head).await else {
+            if let Some(m) = ctx.metrics {
+                // The refusal is counted because a body over the cap is exactly the case
+                // `SRV-020` asks about, and no `record_request` runs for it: the connection
+                // closes without a completed request.
+                let label = ctx.tenant_labels.label(&tenant);
+                m.record_body_limit(label.as_str());
+            }
+            return reject_body(&mut stream, &head).await;
+        };
 
         let response = dispatch_flat(table, dispatch, &head, path, &body);
 
@@ -1606,6 +1700,110 @@ async fn serve_special_route(
     None
 }
 
+/// Stop accepting once `limit` connections have been accepted.
+///
+/// # Why this is a function
+///
+/// The reasoning is four times the length of the code, and inside the connection task it was
+/// one more thing to read past on the way to the request loop. Extracted, the whole rule —
+/// *count accepts, signal after the last one is served, signal the shared shutdown so the
+/// existing drain path runs* — is in one place with its history.
+///
+/// # The bug it records
+///
+/// The first version signalled on the acceptor immediately after the spawn. The spawned task
+/// had not read a byte, so it saw a signalled shutdown on its first poll, drained, and closed
+/// without answering: every request against `--accept-limit 1` returned nothing at all. The
+/// integration tests in `qqq-run/tests/serve_policy.rs` caught it. Signalling is therefore
+/// read here, **after** `serve_connection` returns, which is why this takes the counter and
+/// the shutdown rather than only the limit.
+fn stop_after_the_bound(
+    limit: Option<u64>,
+    accepted: &std::sync::atomic::AtomicU64,
+    shutdown: &Shutdown,
+) {
+    if let Some(limit) = limit {
+        if accepted.load(std::sync::atomic::Ordering::SeqCst) >= limit {
+            shutdown.signal();
+        }
+    }
+}
+
+/// The two gates that must run **before the server reads a byte of the request**.
+///
+/// Returns `Some` when the request was refused, which is the caller's signal to return
+/// without dispatching. `None` means the request passed both gates and may proceed.
+///
+/// # Why this is one function and not two blocks in `serve_connection`
+///
+/// The ordering is the security property, and it has three parts that must all hold:
+///
+/// 1. **Both gates run before `drain_body`.** A request that will be refused must cost the
+///    server as little as possible, and the body is the part a client controls the size of.
+///    A check after the body was read has already paid for the thing the cap exists to
+///    prevent.
+/// 2. **Both gates run before `serve_special_route`.** A preflight, an upgrade and a stream
+///    are each a way of committing the connection to something, so granting any of them to a
+///    route the manifest refused would let a caller reach a handler the manifest said no to.
+///    A CORS preflight for a denied route is refused, deliberately — the policy is about
+///    whether the route is served at all, and CORS is about who may read the answer.
+/// 3. **A path that matches no route is not refused here.** It is a 404 from the dispatcher,
+///    and answering 403 for it would tell an unauthenticated caller which paths exist.
+///
+/// Held in the middle of a hundred-line function, that rule is one careless edit away from
+/// being broken in a way no test notices — which is exactly what happened to the ordering of
+/// `serve_special_route` and `drain_body` (`§O-184`). As a named function called from one
+/// place, it can be read in full.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_before_reading(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    table: &RouteTable,
+    tenant: &str,
+    ctx: &ConnectionContext<'_>,
+    span_seq: &mut u64,
+) -> Option<Served> {
+    // --- Per-tenant limits -------------------------------------------------
+    //
+    // The rate check is `check_and_record`, which consumes the allowance as a side effect:
+    // a separate `check` and `record` would let a caller check without recording, which is a
+    // limiter that never limits. The refusal is recorded as a metric so an operator can see
+    // it, and answered with 429 -- the status that means "you are sending too often",
+    // distinct from 413 for "you are sending too much".
+    if let Some(limits) = ctx.limits {
+        // The **declared** length first. A client understating it is caught by the streaming
+        // count in `drain_body`; a client stating it honestly pays nothing to find out.
+        if let Some(declared) = head.content_length {
+            if limits.check_body(tenant, declared).is_err() {
+                if let Some(m) = ctx.metrics {
+                    let label = ctx.tenant_labels.label(tenant);
+                    m.record_body_limit(label.as_str());
+                }
+                return Some(
+                    refuse_limits(stream, head, path, tenant, ctx, *span_seq + 1, false).await,
+                );
+            }
+        }
+        if limits.check_and_record(tenant, Instant::now()).is_err() {
+            *span_seq += 1;
+            return Some(refuse_limits(stream, head, path, tenant, ctx, *span_seq, true).await);
+        }
+    }
+
+    // --- The route's authentication policy ---------------------------------
+    if let Some(policy) = ctx.auth {
+        if let Some(matched) = table.match_route(head.method, path) {
+            if let crate::auth::Decision::Refuse { mode } = policy.decide(&matched) {
+                *span_seq += 1;
+                return Some(refuse_auth(stream, head, path, tenant, ctx, *span_seq, mode).await);
+            }
+        }
+    }
+
+    None
+}
+
 /// Answer a request that a per-tenant limit refused.
 ///
 /// # Why the two refusals have different statuses
@@ -1628,6 +1826,53 @@ async fn serve_special_route(
 /// The body was **not** consumed -- that is the point of checking first -- so the connection
 /// is positioned mid-request and the framing offset is unknowable. Keeping it alive would
 /// mean the next request is read as this one's body.
+/// Refuse a request the manifest's authentication policy denied.
+///
+/// # Why `403` and not `401`
+///
+/// `401` means "authenticate and try again", and it obliges the server to name a scheme in
+/// `WWW-Authenticate` (RFC 9110 §15.5.2). For `deny` there is no scheme to name and no
+/// credential that would help — the route is refused for everyone, by configuration. `403`
+/// is the status that says "understood, and no".
+///
+/// The three authenticating modes are refused with the same status for a different reason:
+/// there is no authenticator in this crate yet, so a request to a `bearer-jwt` route cannot
+/// be *proved* to carry a valid token. Answering `401` would invite a retry that could
+/// never succeed; answering `403` says the route is closed, which is true until an
+/// authenticator exists. Serving it would be the one answer that is never acceptable.
+///
+/// # Why the body names the mode
+///
+/// The manifest author's next action is to edit the route that asked for this, and the
+/// deployment's next action is to notice that it asked for something the runtime cannot do.
+/// A bare `403` tells neither of them which line to look at. The mode is in the body and in
+/// the `X-QQQ-Error` header so a human and a script each get it in the form they read.
+async fn refuse_auth(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    tenant: &str,
+    ctx: &ConnectionContext<'_>,
+    span: u64,
+    mode: &'static str,
+) -> Served {
+    let body = format!("this route is not served: its manifest entry requires `auth = \"{mode}\"`");
+    let mut response = crate::response::Response::text(403, body);
+    response.set_header("X-QQQ-Error", "unauthenticated");
+    response.set_header("X-QQQ-Auth-Mode", mode);
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let bytes = response::write_response(&response, head.version, false, is_head(head));
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    Served::Unauthorized
+}
+
 async fn refuse_limits(
     stream: &mut TcpStream,
     head: &RequestHead,
@@ -1738,11 +1983,18 @@ fn metric_outcome_of(served: Served) -> crate::metrics::Outcome {
         // Both deadlines: the *server* ended the connection on a timer, which is a
         // different operational fact from the peer violating the protocol.
         Served::IdleTimeout | Served::HeaderTimeout => Outcome::Timeout,
-        // The server refused to continue — a request ceiling or a graceful drain. Neither
-        // is the client's fault and neither is a protocol error.
-        // The server refused to continue -- a request ceiling, a graceful drain, or a
-        // per-tenant limit. None is the client's protocol mistake and none is a success.
-        Served::RequestLimit | Served::Drained | Served::Refused => Outcome::Refused,
+        // The server refused to continue -- a request ceiling, a graceful drain, a
+        // per-tenant limit, or the route's authentication policy. None is the client's
+        // protocol mistake and none is a success, so all four land in one series.
+        //
+        // Merged into one arm rather than written as two arms with the same body: clippy's
+        // `match_same_arms` is right, and the distinction that matters is already carried by
+        // the access record's status and body (`Served::Unauthorized`, `refuse_auth`), not
+        // by the metric series. A second arm saying `Outcome::Refused` again would imply the
+        // metric distinguishes them, and it does not.
+        Served::RequestLimit | Served::Drained | Served::Refused | Served::Unauthorized => {
+            Outcome::Refused
+        }
         // The two client mistakes collapse into one series. See this function's
         // documentation for why the distinction lives in the log rather than the metric.
         Served::BadRequest | Served::BodyRejected => Outcome::ProtocolError,
@@ -1941,6 +2193,18 @@ async fn read_head(
 /// produce one `Response` -- which requires the whole body in memory by construction.
 /// The cap is enforced by `BodyReader` *during* the read either way, so collecting cannot
 /// be used to exhaust memory.
+///
+/// # The paragraph above was false for a while, and the shape is worth keeping
+///
+/// It said exactly this while the call to `serve_special_route` sat **below** the call to
+/// this function, so a streaming route's body was fully buffered before the streaming
+/// handler was ever considered -- the opposite of the claim, in the one function that made
+/// it. Nothing failed: the handler ignores the body, so the output was right and only the
+/// cost was wrong, and no test asserted on what was *not* read.
+///
+/// That is `§O-045a`'s shape a third time: a documented invariant, a call order that
+/// contradicted it, and no test that could tell the two apart. The order is now the one
+/// the paragraph describes, and `tests/stream.rs` drives it.
 async fn drain_body(
     stream: &mut TcpStream,
     buf: &mut Vec<u8>,

@@ -27,7 +27,7 @@ is absent rather than plausible, and it lands when `ABI-*` provides a consumer t
 compile the examples in CI.
 
 
-**15 package(s), 22 interface(s), 61 function(s).**
+**15 package(s), 22 interface(s), 80 function(s).**
 
 ## Interfaces
 
@@ -44,17 +44,17 @@ compile the examples in CI.
 | `qqq:crypto@1.0.0` | [`signing`](#qqqcrypto100-signing) | 3 |
 | `qqq:dns@1.0.0` | [`resolver`](#qqqdns100-resolver) | 3 |
 | `qqq:env@1.0.0` | [`environment`](#qqqenv100-environment) | 3 |
-| `qqq:fs@1.0.0` | [`filesystem`](#qqqfs100-filesystem) | 0 |
+| `qqq:fs@1.0.0` | [`filesystem`](#qqqfs100-filesystem) | 7 |
 | `qqq:http@1.0.0` | [`http`](#qqqhttp100-http) | 2 |
 | `qqq:http@1.0.0` | [`incoming-handler`](#qqqhttp100-incoming-handler) | 1 |
 | `qqq:kv@1.0.0` | [`store`](#qqqkv100-store) | 7 |
 | `qqq:log@1.0.0` | [`logging`](#qqqlog100-logging) | 3 |
 | `qqq:queue@1.0.0` | [`messaging`](#qqqqueue100-messaging) | 6 |
 | `qqq:secrets@1.0.0` | [`secret-use`](#qqqsecrets100-secret-use) | 3 |
-| `qqq:sql@1.0.0` | [`database`](#qqqsql100-database) | 3 |
-| `qqq:sql@1.0.0` | [`transaction`](#qqqsql100-transaction) | 1 |
+| `qqq:sql@1.0.0` | [`database`](#qqqsql100-database) | 6 |
+| `qqq:sql@1.0.0` | [`transaction`](#qqqsql100-transaction) | 6 |
 | `qqq:test@1.0.0` | [`assertions`](#qqqtest100-assertions) | 6 |
-| `qqq:trace@1.0.0` | [`tracing`](#qqqtrace100-tracing) | 2 |
+| `qqq:trace@1.0.0` | [`tracing`](#qqqtrace100-tracing) | 6 |
 
 ## Package `qqq:agent@1.0.0`
 

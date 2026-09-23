@@ -1504,12 +1504,21 @@ fn dispatch_serve(
         }
     };
 
-    // `--config <path>` names an alternate manifest; `with_manifest` finds the
-    // default (`qqq.toml`) otherwise. Both paths go through the same loader, so a
-    // served project is validated exactly as a built one is.
-    with_manifest(name, out, args, |loaded| {
-        qqq_run::serve::run_blocking(loaded, &opts)
-    })
+    // `--config <path>` names an alternate manifest; the loader finds the default
+    // (`qqq.toml`) otherwise. Both paths go through the same loader, so a served
+    // project is validated exactly as a built one is.
+    //
+    // This comment was here before the code was: `with_manifest` reads the *global*
+    // `--manifest` flag, which `serve::options` rejects as an unknown flag, so `--config`
+    // was parsed into `ServeOptions::config` and never read. `qqqai serve --config prod.toml`
+    // served `qqq.toml` and said nothing. `with_manifest_at` takes the path explicitly so the
+    // flag the command documents is the flag the loader receives (`§O-181`).
+    with_manifest_at(
+        name,
+        out,
+        opts.config.as_deref().map(std::path::Path::new),
+        |loaded| qqq_run::serve::run_blocking(loaded, &opts),
+    )
 }
 
 /// Dispatch `qqqai add`.
@@ -2264,9 +2273,31 @@ where
     F: FnOnce(&qqq_run::LoadedManifest) -> qqq_core::Result<T>,
 {
     let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    with_manifest_at(name, out, explicit.as_deref(), f)
+}
+
+/// Load a manifest from an explicit path, or discover one, and hand it to `f`.
+///
+/// # Why the path is a parameter and not a flag name
+///
+/// Because two commands name the same thing differently: `--manifest` is the global flag,
+/// and `serve` documents `--config`. A helper that took the *flag name* would have to know
+/// which command was calling it, and the version that guessed — always reading `--manifest` —
+/// silently ignored `serve --config`. Taking the resolved path removes the question, and the
+/// caller that owns the flag does the reading.
+fn with_manifest_at<T, F>(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    explicit: Option<&std::path::Path>,
+    f: F,
+) -> ExitCode
+where
+    T: qqq_run::output::CommandOutput,
+    F: FnOnce(&qqq_run::LoadedManifest) -> qqq_core::Result<T>,
+{
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit) {
         Ok(l) => l,
         Err(e) => {
             let _ = out.emit_error(name, &e);

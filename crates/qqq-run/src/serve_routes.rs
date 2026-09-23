@@ -55,6 +55,19 @@ use qqq_serve::route::{Method, Route, RouteTable, RouterError};
 /// router matches on, and the dispatcher consults them after a match. That keeps the
 /// router's job to *matching* and the capability model's job to *authority*, which is
 /// the separation `§4.4` requires.
+///
+/// # Why there is a policy *and* a vector
+///
+/// [`Self::auth`] is the declaration record: one mode per `server.routes` entry, in the
+/// order the author wrote them, which is what an error message or an audit wants to cite.
+/// It is **not** usable for enforcement, because a request arrives with a matched route and
+/// no declaration index.
+///
+/// [`Self::auth_policy`] is the enforcement form: keyed by `(pattern, handler)`, the two
+/// fields a `qqq_serve::route::Match` carries. Both are built from one pass over the same
+/// list, and `the_policy_and_the_declaration_record_agree` asserts they cannot drift — the
+/// failure mode being a vector that says `deny` while the policy that is actually consulted
+/// says something else.
 #[derive(Debug)]
 pub struct ServerRoutes {
     /// The router, ready to match.
@@ -62,8 +75,15 @@ pub struct ServerRoutes {
     /// The authentication mode for each route, in the order they were declared.
     ///
     /// Parallel to the manifest's `server.routes`, so a caller can name the offending
-    /// entry when a request is refused.
+    /// entry when a request is refused. **Reporting only** — enforcement consults
+    /// [`Self::auth_policy`]; see this type's documentation.
     pub auth: Vec<AuthMode>,
+    /// The enforcement policy: the mode for each route, keyed by what a match returns.
+    ///
+    /// Fail-closed for a route it was not told about, so a gap in this construction refuses
+    /// rather than serves. Installed into `qqq_serve::ServerConfig::auth` by
+    /// `crate::serve`.
+    pub auth_policy: qqq_serve::auth::AuthPolicy,
     /// The routes that would be served without authenticating anything.
     ///
     /// Computed here rather than by the caller because it is the first question an
@@ -115,11 +135,13 @@ impl ServerRoutes {
 pub fn routes_from_manifest(server: &Server, manifest_path: &str) -> Result<ServerRoutes> {
     let mut table = RouteTable::new();
     let mut auth = Vec::with_capacity(server.routes.len());
+    let mut auth_policy = qqq_serve::auth::AuthPolicy::new();
     let mut problems: Vec<String> = Vec::new();
 
     for (i, entry) in server.routes.iter().enumerate() {
         let mode = entry.effective_auth(server.default_auth);
         auth.push(mode);
+        auth_policy.insert(&entry.path, &entry.handler, route_auth(mode));
 
         for raw in &entry.methods {
             let Some(method) = method_from_str(raw) else {
@@ -177,9 +199,42 @@ pub fn routes_from_manifest(server: &Server, manifest_path: &str) -> Result<Serv
     Ok(ServerRoutes {
         table,
         auth,
+        auth_policy,
         unauthenticated,
         limits: build_limits(server.limits.as_ref()),
     })
+}
+
+/// Translate the manifest's authentication mode into the server's enforcement vocabulary.
+///
+/// # Why three of the five modes become a refusal
+///
+/// `qqq-serve` has no JWT validator, no client-certificate binding to a route, and no
+/// request-signature verifier. Each of those modes names a *check that would have to pass*,
+/// and none of the checks exists, so a request to such a route cannot be shown to satisfy
+/// it. Serving the request would treat "I could not check" as "the check passed", which is
+/// the single worst outcome available and the exact shape of the defect that made this
+/// function necessary in the first place — `default_auth` was `deny` and the server served
+/// everything.
+///
+/// So they become refusals that **name themselves**. The refusal is honest, it is visible
+/// in the access record, and it fails in the safe direction. When an authenticator lands,
+/// the mode's arm changes here and nowhere else, which is why this is one function rather
+/// than five `match` arms scattered through the serving path.
+///
+/// `deny` is a refusal for a different reason: it is the manifest saying "refuse", and it
+/// is the default, so this is the arm that makes an omitted `default_auth` safe.
+#[must_use]
+fn route_auth(mode: AuthMode) -> qqq_serve::auth::RouteAuth {
+    match mode {
+        AuthMode::None => qqq_serve::auth::RouteAuth::Public,
+        AuthMode::Deny => qqq_serve::auth::RouteAuth::Refused { mode: "deny" },
+        AuthMode::BearerJwt => qqq_serve::auth::RouteAuth::Refused { mode: "bearer-jwt" },
+        AuthMode::Mtls => qqq_serve::auth::RouteAuth::Refused { mode: "mtls" },
+        AuthMode::SignedRequest => qqq_serve::auth::RouteAuth::Refused {
+            mode: "signed-request",
+        },
+    }
 }
 
 /// Build the runtime limiter from the manifest's `[server.limits]` table.
@@ -455,6 +510,11 @@ max_body_bytes = 1024
     }
 
     /// **Per-tenant entries override the fallback.**
+    ///
+    /// The key is a client address, not a name: the runtime's tenant is the peer address
+    /// (`tenant_of`), so a name could never match — `Manifest::parse` now refuses one.
+    /// `§O-185` records the round that found the mismatch between this field's
+    /// documentation and the lookup.
     #[test]
     fn per_tenant_limits_override_the_fallback() {
         let server = server_from(
@@ -464,7 +524,7 @@ routes = [{ path = "/", methods = ["GET"], handler = "root" }]
 [server.limits.default]
 max_body_bytes = 100
 
-[server.limits.per_tenant.big]
+[server.limits.per_tenant."127.0.0.1"]
 max_body_bytes = 100_000
 "#,
         );
@@ -472,12 +532,12 @@ max_body_bytes = 100_000
         let limits = routes.limits.expect("a limiter");
 
         assert!(
-            limits.check_body("other", 101).is_err(),
-            "the fallback applies"
+            limits.check_body("198.51.100.7", 101).is_err(),
+            "the fallback applies to an address with no entry"
         );
         assert!(
-            limits.check_body("big", 50_000).is_ok(),
-            "the named tenant gets its own cap"
+            limits.check_body("127.0.0.1", 50_000).is_ok(),
+            "the named address gets its own cap"
         );
     }
 
@@ -544,6 +604,10 @@ window_seconds = 5
     /// The incoherence that makes a limiter allow everything. It must be caught at
     /// validation, where the failure names the tenant, rather than at construction where the
     /// message can only say that something is wrong.
+    ///
+    /// The key is an address because `per_tenant` is keyed by the client address and a name
+    /// is refused first (`§O-185`); using a name here would test that refusal instead of
+    /// this one.
     #[test]
     fn a_zero_window_is_refused_at_validation() {
         // A full manifest, and the assertion is on **`Manifest::parse` failing** rather
@@ -560,17 +624,48 @@ version = "0.1.0"
 [server]
 routes = [{ path = "/", methods = ["GET"], handler = "root" }]
 
-[server.limits.per_tenant.sneaky]
+[server.limits.per_tenant."127.0.0.1"]
 max_requests_per_window = 1
 window_seconds = 0
 "#,
         )
         .expect_err("a zero window with a cap must be refused at parse time");
         let text = format!("{err}");
-        assert!(text.contains("sneaky"), "the tenant must be named: {text}");
+        assert!(
+            text.contains("127.0.0.1"),
+            "the tenant must be named: {text}"
+        );
         assert!(
             text.contains("zero window"),
             "and the rule must be named: {text}"
+        );
+    }
+
+    /// **A name key is refused by the manifest, and the refusal names the address form.**
+    ///
+    /// The pairing matters: the test above proves a valid key reaches the limit validation,
+    /// and this one proves an invalid key never does.
+    #[test]
+    fn a_name_key_is_refused_at_validation() {
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "acme"
+version = "0.1.0"
+
+[server]
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.per_tenant.sneaky]
+max_requests_per_window = 1
+"#,
+        )
+        .expect_err("a name key can never match a request, so the manifest must not load");
+        let text = format!("{err}");
+        assert!(text.contains("sneaky"), "the key must be named: {text}");
+        assert!(
+            text.contains("not an IP address"),
+            "and the reason must be named: {text}"
         );
     }
 }

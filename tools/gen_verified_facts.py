@@ -138,6 +138,34 @@ def classify(fact: str, method: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def distinct_classes() -> list[tuple[str, str, str]]:
+    """One `(name, cadence, why)` per class, in first-appearance order.
+
+    # Why this exists, and what it fixed
+
+    `CLASSES` is a list of **rules**, and a class may need more than one: `volatile`
+    covers both "same document / ibid" rows and the Component Model API properties, and
+    `stable` covers both API prose and specification text. That is correct for
+    classification — `classify` returns on the first rule that matches, so ordering is
+    what decides.
+
+    It is wrong for *emission*, and the two loops below used to iterate `CLASSES`
+    directly. A class with two rules therefore printed its summary row twice and its
+    whole section twice, with the same facts under each. The page said "30 of 30 facts
+    classified" while listing 48 rows, and `check_verified_facts.py` could not see it:
+    that checker compares the page against Appendix B, and a duplicated section agrees
+    with Appendix B just as well as a single one.
+
+    The cadence and reason reported for a class are the **first** rule's, which is the
+    one the module docstring at the top of `CLASSES` names for each class.
+    """
+    seen: dict[str, tuple[str, str, str]] = {}
+    for name, _pattern, cadence, why in CLASSES:
+        if name not in seen:
+            seen[name] = (name, cadence, why)
+    return list(seen.values())
+
+
 def parse_appendix_b(text: str) -> list[dict[str, str]]:
     """Extract the Appendix B rows."""
     marker = "# Appendix B — Verified external facts"
@@ -236,9 +264,9 @@ def render(rows: list[dict[str, str]]) -> str:
     for _row, cls, _cadence, _why in classified:
         counts[cls] = counts.get(cls, 0) + 1
     parts.append("## Summary\n")
-    parts.append("| Class | Facts | Re-verify every |")
+    parts.append("| Class | Facts | Cadence |")
     parts.append("|---|---|---|")
-    for cls, _pattern, cadence, _why in CLASSES:
+    for cls, cadence, _why in distinct_classes():
         if counts.get(cls):
             parts.append(f"| **{cls}** | {counts[cls]} | {cadence} |")
     parts.append(f"\n**{len(classified)} of {len(rows)} facts classified.**\n")
@@ -254,11 +282,14 @@ def render(rows: list[dict[str, str]]) -> str:
             parts.append(f"* `{row['id']}` — {row['fact']}")
         parts.append("")
 
-    for cls, _pattern, cadence, why in CLASSES:
+    for cls, cadence, why in distinct_classes():
         group = [c for c in classified if c[1] == cls]
         if not group:
             continue
-        parts.append(f"## {cls.capitalize()} — re-verify every {cadence}\n")
+        # `cadence` already reads "every 7 days", so the heading must not prefix another
+        # "every": the first version produced "re-verify every every 7 days", which is the
+        # kind of thing a reader notices and a checker cannot.
+        parts.append(f"## {cls.capitalize()} — re-verify {cadence}\n")
         parts.append(f"*{why}.*\n")
         for row, _cls, _cadence, _why in group:
             parts.append(f"### `{row['id']}` — {row['fact']}\n")

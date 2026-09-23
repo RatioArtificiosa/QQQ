@@ -1393,7 +1393,21 @@ pub struct RequestLimits {
     /// accidentally constrain everybody else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<TenantLimit>,
-    /// Per-tenant overrides, keyed by tenant name.
+    /// Per-tenant overrides, keyed by the **client's IP address**.
+    ///
+    /// # Why an address and not a name
+    ///
+    /// A request's tenant is the peer address: `qqq_serve::server::tenant_of` returns
+    /// `peer.ip().to_string()` and `TenantLimits::limits_for` looks the tenant up by that
+    /// string. So a key that is not an address literal can never match, and the entry is
+    /// dead configuration — it reads as a policy, it is never applied, and nothing reports
+    /// the difference. [`RequestLimits::validate`] refuses such a key by name, and
+    /// `§O-185` records the round that found it.
+    ///
+    /// An authenticated tenant identity is a different thing, and V1 has none: the three
+    /// authenticating `AuthMode`s refuse rather than serve (`§O-181`). When an authenticator
+    /// exists, this key becomes the authenticated subject and this doc comment becomes
+    /// wrong — which is why the refusal lives here rather than in a comment.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_tenant: BTreeMap<String, TenantLimit>,
 }
@@ -1438,10 +1452,47 @@ impl RequestLimits {
             d.validate("`default`")?;
         }
         for (tenant, limit) in &self.per_tenant {
+            validate_tenant_key(tenant)?;
             limit.validate(&format!("`{tenant}`"))?;
         }
         Ok(())
     }
+}
+
+/// Check that a `per_tenant` key can ever match a request.
+///
+/// # Why a key must be a canonical IP address
+///
+/// The runtime's tenant is the **peer address**. A key that is not an address literal
+/// cannot match anything, so the entry is dead configuration: a manifest author reads it
+/// back as a policy, it is never applied, and no command reports the difference. That is
+/// the *"a control believed live that is not"* shape this repository has recorded more
+/// than twenty times, and a refusal at parse time is what converts it into a visible
+/// error.
+///
+/// # Why the canonical spelling and not merely a parse
+///
+/// `Ipv6Addr::to_string` compresses, so `2001:0db8::1` and `2001:db8::1` are the same
+/// address and different strings. A key written the long way parses and still never
+/// matches — the same defect with a friendlier error message — so the key is compared
+/// against `IpAddr`'s own rendering and the message names the spelling to use.
+fn validate_tenant_key(key: &str) -> Result<(), String> {
+    let Ok(addr) = key.parse::<std::net::IpAddr>() else {
+        return Err(format!(
+            "the per-tenant limits are keyed by client address, and `{key}` is not an IP \
+             address. A request's tenant is the peer address, so a name can never match: \
+             write the address (for example `127.0.0.1` or `::1`), or move the cap to \
+             `[server.limits.default]` if it is meant for every caller"
+        ));
+    };
+    if addr.to_string() != key {
+        return Err(format!(
+            "the per-tenant key `{key}` is not the canonical spelling of `{addr}`. The \
+             runtime compares the key against the peer address exactly as `IpAddr` renders \
+             it, so `{key}` would never match — write `{addr}`"
+        ));
+    }
+    Ok(())
 }
 
 impl TenantLimit {
@@ -2586,5 +2637,85 @@ reproducible = true
             !obj.contains_key("dev-dependencies"),
             "an empty dev-dependency table must not appear when serialized: {value}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `per_tenant` keys (`§O-185`)
+    // -----------------------------------------------------------------------
+
+    /// A manifest with one `per_tenant` entry under `key`.
+    fn with_tenant(key: &str) -> String {
+        format!(
+            "{MINIMAL}\n[server.limits.default]\nmax_body_bytes = 100\n\n\
+             [server.limits.per_tenant.\"{key}\"]\nmax_body_bytes = 200\n"
+        )
+    }
+
+    /// **A tenant name is refused, because it can never match a request.**
+    ///
+    /// The defect this catches: `per_tenant` was documented as *"keyed by tenant name"*
+    /// while the runtime's tenant is the peer IP address, so every entry was dead
+    /// configuration. It parsed, it validated, it appeared in `qqqai inspect`, and it was
+    /// never applied — a policy that read as live and was not.
+    #[test]
+    fn a_per_tenant_key_that_is_a_name_is_refused() {
+        let err = format!(
+            "{}",
+            Manifest::parse(&with_tenant("acme"))
+                .expect_err("a name key cannot match any request, so it must be refused")
+        );
+        assert!(
+            err.contains("acme") && err.contains("not an IP address"),
+            "the refusal must name the key and the reason: {err}"
+        );
+        assert!(
+            err.contains("127.0.0.1"),
+            "the refusal must show a key that would work: {err}"
+        );
+        assert!(
+            err.contains("default"),
+            "the refusal must name the alternative for a cap meant for everyone: {err}"
+        );
+    }
+
+    /// A key that parses but is not the canonical spelling is refused too.
+    ///
+    /// `2001:0db8::1` and `2001:db8::1` are the same address and different strings, and the
+    /// runtime compares the key against `IpAddr`'s rendering. Accepting the long form would
+    /// be the same dead configuration with a friendlier error message.
+    #[test]
+    fn a_non_canonical_ipv6_key_is_refused_and_the_canonical_one_named() {
+        let err = format!(
+            "{}",
+            Manifest::parse(&with_tenant("2001:0db8::1"))
+                .expect_err("a non-canonical key would never match")
+        );
+        assert!(
+            err.contains("2001:db8::1"),
+            "the refusal must name the spelling that works: {err}"
+        );
+    }
+
+    /// The positive control: an address literal in canonical form is accepted.
+    ///
+    /// Without this, the two refusals above would pass on a `validate` that rejected every
+    /// key — which would delete the feature rather than fix it.
+    #[test]
+    fn a_canonical_address_key_is_accepted() {
+        for key in ["127.0.0.1", "::1", "2001:db8::1", "203.0.113.9"] {
+            let m = Manifest::parse(&with_tenant(key))
+                .unwrap_or_else(|e| panic!("`{key}` is a canonical address and must parse: {e}"));
+            let limits = m.server.limits.expect("limits");
+            assert!(
+                limits.per_tenant.contains_key(key),
+                "`{key}` must survive as the map key: {:?}",
+                limits.per_tenant.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                limits.validate().is_ok(),
+                "`{key}` must validate: {:?}",
+                limits.validate()
+            );
+        }
     }
 }

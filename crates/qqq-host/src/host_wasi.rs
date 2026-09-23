@@ -185,9 +185,22 @@ pub fn should_deny(grants: &GrantSet, clock: qqq_cap::capability::Capability) ->
 pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
 
-    // stdout and stderr go to the host's, so an app's own output is visible.
-    builder.inherit_stdout();
-    builder.inherit_stderr();
+    // stdout and stderr go to the host's streams, so an app's own output is visible --
+    // but through a **sanitising sink**, never by inheritance.
+    //
+    // # Why inheritance was wrong
+    //
+    // `inherit_stdout()` gave the guest the host process's stdout, and `qqq-serve`
+    // writes its access records to that same stdout (`server::emit_record`). A guest
+    // printing a JSON line shaped like an access record produced a line
+    // **byte-identical** to one, so the host's audit stream could be forged by the
+    // very code it exists to describe. See `crate::guest_output` for the rule that
+    // closes it: no byte a guest emits may begin a physical line on a host stream.
+    //
+    // The prefix is what makes that true for every line rather than only the first,
+    // and it is why this is a type rather than a flag on `inherit_stdout`.
+    builder.stdout(crate::guest_output::GuestOutput::stdout());
+    builder.stderr(crate::guest_output::GuestOutput::stderr());
 
     // stdin is explicitly **not** inherited: a closed stream makes a read return EOF
     // rather than blocking a request on the host's terminal.
@@ -541,5 +554,65 @@ mod tests {
         // panicking inside a store constructor.
         assert!(context(&GrantSet::empty(), &[]).is_ok());
         assert!(context(&grants_from(NO_CLOCK), &[]).is_ok());
+    }
+
+    /// **The guest's streams must not be inherited from the host's.**
+    ///
+    /// # Why this asserts on the source
+    ///
+    /// The defect (`§O-183`): `context` called `WasiCtxBuilder::inherit_stdout`, so the
+    /// guest wrote into the same stdout that `qqq-serve`'s access log uses, and a guest
+    /// could emit a line byte-identical to a host access record.
+    ///
+    /// A behavioural test cannot reach the installed stream. `WasiCtx::cli()` returns a
+    /// `WasiCliCtx` whose `stdout` and `stderr` fields are `pub(crate)` with no
+    /// accessor, and `StdoutStream` is not `Any`, so the box cannot be downcast either.
+    /// Driving a real guest is also out: `register`'s own documentation records that a
+    /// hand-written component cannot reproduce a `wasm32-wasip2` guest's WASI import
+    /// identity. This is the same wall `a_denied_wall_clock_carries_no_information...`
+    /// hit for the clocks.
+    ///
+    /// So the pair of tests is: this one asserts **what `context` installs**, and
+    /// `guest_output`'s `the_stream_interface_sanitises_through_the_real_trait_method`
+    /// asserts **that what it installs sanitises**, driving the real `async_stream`
+    /// method wasmtime-wasi calls. Reverting the call site fails this test; breaking
+    /// the escaping fails that one. Neither test covers the other's half, and both
+    /// statements are needed.
+    ///
+    /// # What it does not prove
+    ///
+    /// It does not prove the stream is reached at runtime — only that no inheritance
+    /// call exists and that the sanitising constructors do. That is the strongest claim
+    /// available from outside `wasmtime-wasi`, and it is stated rather than implied.
+    #[test]
+    fn the_context_does_not_inherit_the_guest_streams() {
+        let source = include_str!("host_wasi.rs");
+
+        // Only the production half. This test's own source contains the needles it
+        // searches for -- it is in the same file -- so scanning the whole file would
+        // find them in the assertion messages and pass vacuously. The first version
+        // did exactly that and failed on itself, which is how the cut was found.
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part");
+
+        for method in ["stdout", "stderr", "stdio"] {
+            let inherited = format!(".inherit_{method}()");
+            assert!(
+                !production.contains(&inherited),
+                "`{inherited}` is back in host_wasi.rs. Inheriting the host's streams \
+                 puts the guest's bytes on the same stdout as the access log, where a \
+                 guest can forge a record. Install `GuestOutput` instead."
+            );
+        }
+
+        for installed in ["GuestOutput::stdout()", "GuestOutput::stderr()"] {
+            assert!(
+                production.contains(installed),
+                "host_wasi.rs no longer installs `{installed}`, so the guest's stream is \
+                 not the sanitising sink and its output is unsanitised."
+            );
+        }
     }
 }

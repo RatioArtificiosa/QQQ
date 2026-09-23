@@ -78,9 +78,14 @@ def current(root: pathlib.Path) -> dict[str, dict[str, object]]:
 
 def record(root: pathlib.Path = ROOT, record_path: pathlib.Path = RECORD) -> int:
     snap = current(root)
-    record_path.write_text(
-        json.dumps(snap, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    # Written with `write_bytes` rather than `write_text`, because
+    # `Path.write_text` translates `\\n` to `os.linesep` — `\\r\\n` on Windows —
+    # and this repository pins LF in `.gitattributes`. A CRLF record is rewritten
+    # to LF by git on the next touch, so the file would appear modified in every
+    # status for no reason, and a diff of it would show every line changed. The
+    # same trap bit `schema/*.json` once; `write_bytes` is the fix here.
+    payload = (json.dumps(snap, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    record_path.write_bytes(payload)
     print(f"recorded {len(snap)} document digest(s) to {record_path.name}")
     for name, d in snap.items():
         print(f"  {name}: {d['bytes']} bytes  {str(d['sha256'])[:16]}…")

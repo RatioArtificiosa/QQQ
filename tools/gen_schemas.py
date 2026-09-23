@@ -694,7 +694,14 @@ def generate(check: bool) -> int:
                 continue
             print(f"  OK    {path.relative_to(ROOT)}")
         else:
-            path.write_text(text, encoding="utf-8")
+            # `write_bytes` rather than `write_text`, because `Path.write_text`
+            # translates `\n` to `os.linesep` — `\r\n` on Windows — and
+            # `.gitattributes` pins `* text=auto eol=lf`. A CRLF file is rewritten
+            # to LF by git on the next touch, so it shows as modified in every
+            # status and its diff reports every line changed. The `--check` path
+            # above compares decoded text, so it could not see the difference,
+            # which is why this only ever showed up as a git warning.
+            path.write_bytes(text.encode("utf-8"))
             print(f"  wrote {path.relative_to(ROOT)}")
 
     if ungenerated:

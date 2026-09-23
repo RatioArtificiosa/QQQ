@@ -176,20 +176,26 @@ beside the measurements rather than replaced.
 
 **A fixed per-crossing cost dominates everything.** The `u64` row — an argument and
 a result of eight bytes each, the smallest possible crossing — costs ~900 ns at
-p50. The string row costs the same ~900 ns for 64 bytes, and the `list<u32>` row
-with **one** element costs 800 ns while the same row with **1 000** elements costs
-1 600 ns. So:
-
-* The marginal cost of 999 extra `u32`s is about **800 ns**, or **~0.8 ns per
-  element** — the copy itself, exactly as `§9.3` describes it.
-* The fixed cost of *entering and leaving the component* is about **800 ns**, and
-  `§9.3` does not price it at all.
+p50. The string row costs the same ~900 ns for 64 bytes. The fixed cost of
+*entering and leaving the component* is therefore of order **900 ns**, and `§9.3`
+does not price it at all.
 
 That fixed cost is the finding. `§9.3`'s conclusion — *"QQQ is fast for
 compute-heavy, few-crossings workloads and merely competitive for chatty,
 crossing-heavy workloads"* — is **correct and understated**: the boundary is not a
 few nanoseconds of "effectively free" overhead, it is ~900 ns per call. A design
 that assumed crossings were free would be wrong by three orders of magnitude.
+
+> **A claim from the first version of this document, withdrawn.** It read: *"the
+> marginal cost of 999 extra `u32`s is about 800 ns, or ~0.8 ns per element — the
+> copy itself, exactly as `§9.3` describes it."* That rested on run 1's p50s for the
+> 1-element (800 ns) and 1 000-element (1 600 ns) lists. **It did not reproduce.**
+> In run 2 the same two rows measured 1 400 ns and 900 ns — the opposite order, and
+> physically implausible, since a 1 000-element list must copy 4 000 bytes a
+> 1-element list does not. At this scale the harness is measuring its own noise:
+> the fixed crossing cost and the marginal copy cost are both ~800 ns, so a single
+> 20 000-sample run cannot separate them. The per-element figure is **not
+> established** and is not published as one. See §2's run-to-run table.
 
 **The absolute values remain small for the intended workload.** At ~900 ns p50 per
 crossing against `§9.2`'s ≤ 60 µs p99 routed-request budget, a handful of
@@ -251,7 +257,7 @@ coverage claim that is not written down is one a reader will assume too generous
 
 | Not measured | Why, and what it means |
 |---|---|
-| **Three repetitions with variance** | `§9.1` requires "three repetitions **with variance**". This is **one run of 20 000 samples**. Within-run variance is visible (p50 → p99 spans 2–3×), but **run-to-run variance is not established**, and no `Repetitions` value is published. A second run on the same commit is required before these numbers are a *claim* rather than a *measurement*. **This is the largest gap in this document.** |
+| **Three repetitions with variance** | `§9.1` requires "three repetitions **with variance**". **Two runs** of 20 000 samples were taken (both published in §2), and **no `Repetitions` spread is published** because `Repetitions::new` requires three and refuses fewer — correctly, and it is why no spread appears above. Two runs is still not three. What the second run *did* establish is that p99 reproduces to within ~3 % while p50 does not, and that one published claim (the per-element copy cost) did not survive it. A third and fourth run would extend this; the per-element question needs **more repetitions**, not more samples per run. **This remains the largest gap in this document.** |
 | **A controlled machine** | Not core-pinned, not governor-adjusted, not otherwise quiesced. See §1. |
 | **QQQ's actual engine configuration** | The harness builds Wasmtime **directly** with the minimal component-model config. `qqq-host`'s `to_wasmtime_config` additionally enables the **pooling allocator**, 2 GiB memory guard pages and **epoch interruption**, all of which change the per-call path. This document measures the **canonical ABI**, not the engine as deployed. |
 | **The async row is not reachable today** | `qqq-host`'s engine config enables **neither** `wasm_component_model_async` nor `-stackful`, and no `qqq:*` WIT interface uses `future` or `stream`. The async figure answers *"what will this cost when `§9.4`'s async row is implemented"*, not *"what does QQQ cost today"* — today there is no async path to have a cost. Its appearance in this table should not be read as evidence that async is implemented. |
@@ -276,12 +282,20 @@ spread — or to say plainly that only one run was taken. This document says so.
 * The seven crossings are **real** component-model crossings, on the pinned engine.
 * Each is a **nearest-rank percentile** over 20 000 samples with a stated warmup.
 * The environment is named exactly.
+* The **p99 figures reproduce** to within ~3 % across two independent runs; the
+  **p50 figures do not**, and §2 publishes both runs so the difference is visible.
 * The harness **fails loudly** if a probe component stops compiling or stops
   exporting the function it claims — `every_probe_component_compiles_and_instantiates`
   runs by default in CI, so a Wasmtime upgrade cannot silently invalidate these WAT
   strings.
 * Every probe has an in-test **control** asserting the call returns the expected
   value, so a sample cannot be timing a call that did nothing.
+
+**What is *not* established, despite appearing in an earlier version of this
+document:** the per-element cost of a `list<u32>` copy, and any figure below ~1 µs
+with more precision than "hundreds of nanoseconds". Both are withdrawn in §3 and
+§2 respectively, and withdrawn because a second run contradicted them — not because
+they were re-derived.
 
 ---
 

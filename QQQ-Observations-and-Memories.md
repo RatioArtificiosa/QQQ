@@ -14219,6 +14219,115 @@ reference seam in `@deepseek-ai/dsh-tool-call-timeout-policy/lib/index.js:84,116
 proof of wiring via `dsh --profile default --dump-config`.
 
 
+### O-178: the 30-commit CodeRabbit review — 18 findings, and the two that mattered
+
+Ran `coderabbit review --agent --light --committed --base-commit ef79110`, covering
+30 commits. **18 findings: 10 major, 8 minor.** Two were worth more than the other
+sixteen combined, and one of them was a real security leak.
+
+#### The leak: granting one clock granted both
+
+`crates/qqq-host/src/host_wasi.rs`:
+
+```rust
+let has_clock = grants.grants(Capability::ClockMonotonic)
+    || grants.grants(Capability::ClockWall);
+if !has_clock {
+    builder.wall_clock(DeniedClock);
+    builder.monotonic_clock(DeniedClock);
+}
+```
+
+The `||` is the whole bug. Granting **either** clock installed **neither** denial, so
+a manifest granting only `monotonic = true` received a working **wall clock reading
+the host's real time**. A guest could learn when it was running despite never being
+granted `wall`. That is ambient authority — the exact category `§4.4` exists to
+eliminate, and the fourth time this project has found a capability reaching further
+than its grant.
+
+Fixed by evaluating each clock independently, and the rule extracted into
+`should_deny(grants, clock)` so the test calls the **same function** `context` does.
+A test that restates a rule can drift from it and keep passing.
+
+Fault-injected: reintroducing the combined rule fails
+`granting_the_monotonic_clock_does_not_grant_the_wall_clock`, naming the consequence
+("the guest can read the host's real time"); restored byte-for-byte, hash match.
+
+#### Why this one was invisible, and the pattern it shares
+
+`every_clock_grant_combination_builds` asserted each combination **constructs**. A
+correctly-denied clock constructs fine. **Asserting construction is not asserting the
+property** — and this is now the third instance of that exact shape in this project:
+
+| Instance | Test asserted | Property that mattered |
+|---|---|---|
+| the compatibility suite | all four rows ran | each row measured *its own* failure (they were all measuring an epoch trap) |
+| `PERF-005`'s first draft | the numbers were printed | that the difference was above the harness's noise floor |
+| this | each combination builds | which clocks are actually denied |
+
+Worth generalising: **when a test asserts that something succeeded, ask what it would
+still pass under.** Construction, non-emptiness, absence of panic, and "it ran" are
+all conditions a badly broken system satisfies.
+
+#### The review's other major findings, triaged
+
+* **Guest output can forge log records** (`inherit_stdout`/`inherit_stderr` pass raw
+  guest bytes to the host's streams, so a guest can emit an ANSI escape or a forged
+  `qqq-serve` access line). Real, and the right fix needs a sanitising sink. Not yet
+  fixed — recorded as pending, not ticked.
+* **`--config` ignored on `serve`**, **`--tls` accepted but not applied**, **request
+  body collected before route dispatch** (so streaming and WebSocket routes buffer
+  needlessly), **`check_bench_contract.py` duplicating its own validation** so CI and
+  `--self-test` exercise different rules.
+* The rest were minor documentation and robustness items.
+
+An independent reviewer was worth this run for the clock leak alone.
+
+→ `.scratch/{parse_cr30,cr30_findings}.txt`; commit `a509e5f`.
+
+---
+
+### O-179: a measurement that did not reproduce, and the claim withdrawn
+
+`PERF-005`'s first draft concluded from two rows that the marginal cost of a
+`list<u32>` element is **~0.8 ns**, with the fixed per-crossing cost at ~800 ns.
+
+Re-measuring the same two rows:
+
+| Run | `list<u32>` 1000 elements (p50) | `list<u32>` 1 element (p50) |
+|---|---|---|
+| 1 (the original) | 1 600 ns | 800 ns |
+| 2 | 900 ns | 1 500 ns |
+| 3 | 900 ns | 900 ns |
+
+The ordering **flips between runs**, and run 2's ordering is physically impossible: a
+1 000-element list must copy 4 000 bytes that a 1-element list does not, so it cannot
+be cheaper. That impossibility is what identifies the spread as harness noise rather
+than an interesting result.
+
+The conclusion is now stated as a **limit of the instrument** rather than a finding:
+at 20 000 samples, a fixed crossing cost of ~800 ns and a marginal copy cost of ~800 ns
+cannot be separated by this harness at all. The per-element figure is withdrawn, and
+the withdrawal is kept in the document beside the surviving claims.
+
+Two things worth keeping from this:
+
+1. **A non-reproducing result is evidence about the instrument, and the physically
+   implausible ordering is what proves it.** Without that check, "0.8 ns per element"
+   would have been published as a measured fact.
+2. **Withdrawing a claim in public strengthens the document.** The surviving rows
+   carry their environment, their raw output, and now a record of what the harness
+   cannot resolve. A reader can tell which numbers to trust and why.
+
+Related: the same document records that Windows `Instant::now()` costs tens of
+nanoseconds and is read immediately outside each call, so it sits **inside every
+sample**. §9.3's 2–5 ns `u64` estimate is therefore *below this harness's own timer
+floor*, which is why the ~180× gap is stated as a lower bound rather than a
+measurement.
+
+→ `docs/abi-cost-measured.md` §2–§3; `crates/qqq-bench/tests/abi_cost.rs`.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

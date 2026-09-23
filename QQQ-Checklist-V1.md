@@ -1486,8 +1486,40 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `tools/gen_schemas.py` + `tools/self_test_schemas.py`, with
     `schema/qqq-toml.schema.json`, `schema/qqq-lock.schema.json` and
     `schema/cli-envelope.schema.json` published and wired into
-    `.github/workflows/ci.yml` **and** `docker/entrypoint.sh`. **7/7 fault
-    injections detected.**
+    `.github/workflows/ci.yml` **and** `docker/entrypoint.sh`. **8/8 fault
+    injections detected** (`python tools/self_test_schemas.py`; this line said
+    **7/7** and was corrected — see below).
+  → **Three things this item did not originally cover, added afterwards.** The
+    tick above predated all three, so the count and the scope were both stale.
+    • **The schemas were only checked against their own generator, which was the
+    wrong comparison.** `gen_schemas.py --check` proves the document matches what
+    the generator *read*; it says nothing about whether the generator read the
+    source correctly, and it had not: the manifest schema documented
+    `dev_dependencies`, `generated_by` and `lockfile_hash` where the source
+    declares `dev-dependencies`, `generated-by` and `lockfile-hash`, and listed
+    one of them as **required** so the schema rejected a minimal manifest the
+    parser accepts. `tools/check_schema_conformance.py` now compares the
+    published schema against the Rust source directly — every documented key must
+    be declared, every declared key documented, and `required` must match the
+    source's optionality markers. It carries **20 self-test cases** and covers
+    four surfaces. Recorded as §O-205.
+    • **The CLI envelope was hand-written and had drifted from the binary it
+    describes.** It listed 5 fields and a fabricated `check_schema_drift.py`;
+    the shipped binary emits 8 plus an `error` with `code`, `message`,
+    `remediation`, `docs_url`, `retryable`, `cause` and `context`. It is now
+    **derived** from `Envelope<T>` and `ErrorPayload` in
+    `crates/qqq-run/src/output.rs`, and — because a schema can agree with its
+    source while the source disagrees with the running program — the checker
+    **runs the shipped binary** and validates three real envelopes against the
+    published schema. Recorded as §O-206.
+    • **The runtime probe then found a field that was present and false.**
+    Adding `Envelope::exit_code` let the probe assert the envelope's number
+    equals the process's status, which showed every failure envelope reporting a
+    hardcoded `1` — 38 of 48 disagreed with their own `$?`. Recorded as §O-208.
+    • **The published envelope is a live contract and the probe is what keeps it
+    so**: the checker's own self-test injects a constant `exit_code` and rebuilds,
+    because with the field hardcoded every unit test still passes and the binary
+    still exits 69.
   → **§8.3's sentence had no implementation**: *"CI fails if it drifts from the
     implementation"* — and no drift check existed anywhere. Measured, the
     surface was worse than unchecked: **three of §8.3's machine-readable

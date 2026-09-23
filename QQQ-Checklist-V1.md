@@ -3094,8 +3094,12 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §12.3 The DX commitments (measurable, in CI)
 - [x] **DX-013** Implement the `--help` brevity standard (≤40 lines, actionable) and a CI check.
   → Done: `HELP_MAX_LINES`, `HELP_GROUPS` and `render_help(verbose)` in
-    `crates/qqq-run/src/main.rs` (**6 tests**), plus a CI step in
-    `.github/workflows/ci.yml`.
+    `crates/qqq-run/src/main.rs` (**5 help tests**, of 22 in the file), plus a CI step in
+    `.github/workflows/ci.yml`. Re-derived by listing the binary's own tests: the five are
+    `no_arguments_shows_help`, `help_lists_every_command`, `help_fits_the_brevity_standard`,
+    `the_full_help_is_a_superset_of_the_brief_one` and `help_mentions_the_json_contract`.
+    This entry said 6 until 2026-09-23; the file's total is 22, so neither number was the
+    file count, and 5 is the count of the surface the sentence names.
   → **Measured before: 53 lines. Measured after: 40** — which satisfies the item's own
     `≤ 40` and is one off the 39 this entry claimed until 2026-09-23. `qqqai --help`
     is the measurement; re-run it rather than trusting either number. §12.3's table is titled

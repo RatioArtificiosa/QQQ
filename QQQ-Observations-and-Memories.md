@@ -16259,6 +16259,63 @@ citations, not arithmetic.
 
 ---
 
+## §O-202 The eight per-module claims checked: seven held, one drifted, and two were misfiled
+
+`§O-201` named eight per-module test counts as unchecked. Checking them took twenty minutes and
+produced one real correction, which is as useful a result as eight would have been -- and the
+reason to record it is that **most of them held**.
+
+**Checked by parsing the file each entry names**, not by filtering test names. The first attempt
+filtered (`cargo test -p X -- <word>`) and matched nothing for four of the eight; a filter that
+matches nothing means the filter is wrong, and the entries name source files, so the count came
+from the `#[test]` / `#[tokio::test]` attributes in those files.
+
+| Item | Entry | Measured | Verdict |
+|---|---|---|---|
+| `ARCH-003` | 10 | 10 in `arch003.rs` | held |
+| `ARCH-012` | 14 | 14 in `arch012.rs` | held |
+| `CAP-011` | 72 | 68 in `policy.rs` | **drifted** (not corrected -- see below) |
+| `CAP-015` | 34 | 33 in `audit.rs` | **drifted** (not corrected -- see below) |
+| `CON-005` | 44 | 44 in `lock.rs` | held |
+| `DX-013` | 6 | 5 `help*` tests of 22 in `main.rs` | **corrected** |
+| `SEC-008` | 7 | **exactly 7 failures** under injection | held, and it is a different kind of claim |
+| `SEC-017` | 3 | no such number in the entry | **misfiled by the extractor** |
+
+**The two misfiled ones, and why that matters more than the drift.** `SEC-008`'s "7 tests" is
+*"disabling the limit check in `handles.rs` makes 7 tests fail"* -- a fault-injection
+measurement, not a module size. It was checked by performing that injection: the guard
+`if self.live >= self.limit as usize {` became `if false && ...`, seven tests failed by name
+(`the_limit_is_enforced_with_a_remediation`, `the_table_never_exceeds_its_limit`,
+`a_zero_limit_permits_nothing`, and four more), the file was restored byte-for-byte, and no
+marker remained. The claim is exactly right.
+
+`SEC-017`'s "3 tests" is not a count in that entry at all -- the extractor's regex caught a
+number from a sentence about protocol versions. **A number means what its sentence says**, and
+an extractor that ignores the sentence will mis-group. That is the second time this round that
+a tool reported a failure which was really a tool defect (`§O-199`'s harness was the first), and
+both were caught by reading the entry rather than by trusting the tool.
+
+**The one correction: `DX-013`.** The entry said `main.rs` carries "6 tests". The file carries
+22; five of them are named `help*` and are the surface the sentence names. Corrected to
+"**5 help tests**, of 22 in the file", with the five names listed so the claim can be re-checked
+by listing the binary's tests.
+
+**Two drifts left in place, deliberately.** `CAP-011` claims 72 where `policy.rs` carries 68
+`#[test]` attributes, and `CAP-015` claims 34 where `audit.rs` carries 33. Both entries describe
+their numbers as covering a *module's work* ("lexer, parser, static analyser, executable
+termination proof, scope/demand evaluator"), and tests for some of that can live outside one
+file. Without knowing which tests the author counted, editing the number would replace one
+guess with another. Named here as unresolved rather than silently "fixed".
+
+**The honest summary.** Of eight claims, six are verifiably right or corrected, two are
+unresolved because the sentence does not pin down what was counted, and none was a fabricated
+figure. The ledger's numbers are, on this evidence, mostly trustworthy -- which is worth
+knowing, and is not something the earlier three corrections could have established on their own.
+
+**Files:** `QQQ-Checklist-V1.md` (`DX-013`).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -14079,6 +14079,76 @@ occur to me until CI told me twice.
 (the "who depends on this" query). Commits `4ff2c97`, `4d9c485`.
 
 
+### O-176: what CI failure looks like when a fact is restated rather than used
+
+This round produced **three** red CI jobs, and they were the same bug wearing three
+different costumes. Worth recording as a pattern, because the fourth instance is
+already foreseeable.
+
+| # | Job | Symptom | Real cause |
+|---|---|---|---|
+| 1 | Cross-reference integrity | `MISSED topology (upward dependency)` | `fault_inject_architecture.py` hardcoded an edge that the order change made legal |
+| 2 | WIT interface validation | `every docs/*.md is indexed or excluded` | a new `docs/*.md` must be registered in `llms.txt`'s corpus |
+| 3 | Cross-reference integrity | `MISSED package named qqq` | `qqq-debug` is a path dependency of `qqq-run`, so renaming it broke the build and the test never ran |
+
+Failures 1 and 3 share a shape that is easy to miss:
+
+> **A non-detection that is really a build failure is not evidence about the test.**
+
+Both harnesses printed something that reads like a test verdict ("the check passed
+on violating input") when in truth the test process never started. The topology
+harness already documents this distinction for *cycles* — "that reported BROKEN,
+not DETECTED" — and I had read that comment two rounds earlier without
+generalising it. The generalisation is:
+
+**Before believing a MISSED, establish that the test executed at all.** Invariant
+two already says to prove the fault was present; it should also say to prove the
+*test ran*, which is a different question and, in failure 3, the one that mattered.
+The check is cheap: run the single test by hand with the fault injected and read
+the output. In failure 3 that immediately showed
+
+```text
+error: no matching package named `qqq-debug` found
+required by package `qqq-run v0.0.0 (crates/qqq-run)`
+```
+
+#### The rule this earned
+
+**When you change a fact, search for every restatement of it, not just every user
+of it.** The *users* of the §4.3 order all compiled: the checker read its list, the
+architecture test read its list, and both were updated. The *restatement* was a
+fault-injection target — a place where the fact had been turned into a literal so
+it could be violated on purpose. `grep -rn "qqq-debug" tools/ docs/` would have
+found it in one command.
+
+A restatement is any place a fact appears as a literal, a comment, a doc string, a
+test fixture, or an injected string. Compilation cannot protect those, and neither
+can a green local gate — which is exactly why invariant one exists, and why CI is
+the thing that catches it.
+
+#### What was fixed, concretely
+
+| Fix | File |
+|---|---|
+| Topology injection target is now **derived** at runtime, not hardcoded | `tools/fault_inject_architecture.py` |
+| Naming injection renamed a package nothing depends on (`qqq-sys`, not `qqq-debug`) | `tools/fault_inject_naming.py` |
+| The runbook is registered in the `llms.txt` corpus | `tools/gen_llms_txt.py` |
+
+The derivation is the interesting one, and it was verified two ways rather than
+one — "it passes" is weak evidence for a derivation:
+
+* It yields a real edge: `qqq-cap` (index 3) → `qqq-io` (index 6), with the
+  expected failure message naming the target.
+* **It is robust to the exact move that broke the old version**: re-deriving with
+  `qqq-debug` restored to index 2 still yields `qqq-io` and never `qqq-debug`.
+  That second check is the whole point — a derivation that happened to produce a
+  legal edge today would pass the first check alone.
+
+→ commits `4ff2c97`, `4d9c485`, `178e135`; all three CI runs read and confirmed
+green (11 success, 0 failures each). `.scratch/{ci_logs,find_injection,
+find_rename_target,verify_derivation}.py`.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

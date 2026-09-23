@@ -14014,6 +14014,71 @@ or uncomment `disabled: true` in the row. A pre-change copy sits at
 `cordis.patch.yml.bak-toolcallrepair`.
 
 
+### O-175: the §4.3 order lives in three places, and that is the bug behind this round's CI failure
+
+This round's first CI failure was not a mistake in one file. It was the **third
+copy** of the same fact.
+
+The §4.3 rule — "No crate may depend on a crate above it in this list" — is
+asserted by:
+
+| # | Location | What it holds |
+|---|---|---|
+| 1 | `tools/check_topology.py` | `ORDER`, 11 entries (`qqq-sys` exempt) |
+| 2 | `crates/qqq-core/tests/architecture.rs` | `ORDER`, 12 entries |
+| 3 | `tools/fault_inject_architecture.py` | the *consequence*: `qqq-cap -> qqq-debug` is upward, hardcoded in a comment and a string |
+
+Moving `qqq-debug` to position 2 required editing all three. I edited two, and CI
+failed with `MISSED topology (upward dependency)` — not because the harness was
+wrong, but because **a fault-injection case is coupled to the fact it violates.**
+Change the fact and the case silently stops being a fault.
+
+That coupling is unavoidable: an injection has to name something concrete. What
+is avoidable is the *order* being restated three times, so that only the
+injector's target needs thought when the order moves.
+
+#### The fix worth making
+
+Have `fault_inject_architecture.py` **derive** its target from the same source the
+checker uses, instead of naming it. Concretely: import `ORDER` from
+`tools/check_topology.py`, walk the real dependency graph from `cargo metadata`,
+and pick the first pair that is upward and acyclic — the exact enumeration
+`.scratch/find_injection.py` already performs. Then the harness cannot go stale,
+and its `MISSED` means what it says.
+
+**Correction, added after reading `architecture.rs`'s own doc comment.** I first
+wrote that the `architecture.rs` copy should be deleted, or asserted equal to the
+Python one. That was wrong, and the comment (line 92) says why:
+
+> Duplicated deliberately from `tools/check_topology.py` rather than shared: the
+> tool reads `cargo metadata` (the *resolved* graph, including edges a workspace
+> dependency introduces) and this test reads the manifest text (the *declared*
+> graph). They answer different questions, and a single shared list would make
+> one of them silently inherit the other's blind spot. Both failing on the same
+> edit is the point.
+
+Asserting the two lists equal would **destroy** the property that makes them
+useful: they are designed to be able to disagree. The comment also records the
+duplication catching two incomplete fixes (`qqq-bench`, then `qqq-debug`), so it
+has already earned its keep twice.
+
+The distinction that matters — lists 1 and 2 answer *different questions* and must
+stay separate. List 3, the fault-injection target, answers **no** question: it is a
+hardcoded consequence, and it is the only one worth deriving.
+
+#### The rule this round earned
+
+**When you change a fact, grep for every restatement of it, not just every use
+of it.** The uses compiled and passed. The restatement, in a harness whose whole
+job is to encode the fact as a fault, did not. `grep -rn "qqq-debug"` across
+`tools/`, `docs/` and the tests would have found it in one command and did not
+occur to me until CI told me twice.
+
+→ `tools/fault_inject_architecture.py`, `tools/fault_inject_naming.py`;
+`.scratch/find_injection.py` (the enumeration), `.scratch/find_rename_target.py`
+(the "who depends on this" query). Commits `4ff2c97`, `4d9c485`.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

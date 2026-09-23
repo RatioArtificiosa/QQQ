@@ -1438,18 +1438,25 @@ Numeric targets. These are the numbers engineering is held to, and each has a me
 
 ## §9.3 The ABI cost, quantified honestly
 
-The Component Model canonical ABI has real overhead. Approximate figures for planning (to be replaced by measured numbers in `PERF-005`):
+The Component Model canonical ABI has real overhead. These figures were **estimates for planning**; they have since been measured on a real component boundary. Both are shown, because the comparison is the value — four of the six estimates were wrong, and one of them was wrong by two orders of magnitude. **Measured values, environment, and an explicit statement of what was not measured: [`docs/abi-cost-measured.md`](docs/abi-cost-measured.md)** (`PERF-005`, 2026-09-22, commit `d3e71fd`).
 
-| Operation | Approx. cost | Note |
-|---|---|---|
-| `u64` argument + return across boundary | ~2–5 ns | Effectively free |
-| String `(ptr,len)` copy in, small | ~25–70 ns | Dominated by bounds checks and copy |
-| `list<u32>` of 1000 elements | ~1–3 µs | O(n), unavoidable without shared memory |
-| Resource handle create | ~15–40 ns | Table slot allocation |
-| Async `future` rendezvous | ~100–400 ns | Acceptable; replaces a thread wakeup |
-| `stream<u8>` chunk (64 KiB) | ~2–8 µs | Memory-bandwidth bound |
+| Operation | Estimated | Measured p50 | Measured p99 | Verdict |
+|---|---|---|---|---|
+| `u64` argument + return across boundary | ~2–5 ns | **900 ns** | 1 800 ns | **Above — ~180× the estimate.** Not "effectively free" |
+| String `(ptr,len)` copy in, small | ~25–70 ns | **900 ns** | 1 900 ns | **Above — ~13×.** Dominated by the fixed crossing, not by the copy |
+| `list<u32>` of 1000 elements | ~1–3 µs | **1.60 µs** | 2.00 µs | **Confirmed.** The one estimate that held |
+| Resource handle create | ~15–40 ns | **1.20 µs** | 2.50 µs | **Above — ~30×.** Table slot allocation is not the cost; the crossing is |
+| Async `future` rendezvous | ~100–400 ns | **2.10 µs** | 3.80 µs | **Above — ~5×.** See the reachability caveat below |
+| `stream<u8>` chunk (64 KiB) | ~2–8 µs | **24.8 µs** | 51.4 µs | **Above — ~3–6×.** Chunk machinery, not raw memory bandwidth |
 
-**The conclusion this forces:** QQQ is fast for *compute-heavy, few-crossings* workloads and merely competitive for *chatty, crossing-heavy* workloads. The design response is the batch-first WIT rule (§4.5) and `stream`/`resource` usage. The honest marketing response is to steer benchmarks and reference apps toward real application shapes, not microbenchmarks.
+**The measurement that changes the model: a fixed ~900 ns cost per crossing.** The `u64` row is the smallest possible crossing and costs ~900 ns at p50. A one-element `list<u32>` costs 800 ns while a thousand-element one costs 1 600 ns, so the **marginal** cost of 999 extra `u32`s is ~0.8 ns per element — the copy, exactly as estimated — while the **fixed** cost of entering and leaving the component is ~900 ns, which the estimates did not price at all. A design that assumed a scalar crossing was free would be wrong by three orders of magnitude.
+
+**The conclusion this forces:** QQQ is fast for *compute-heavy, few-crossings* workloads and merely competitive for *chatty, crossing-heavy* workloads. The design response is the batch-first WIT rule (§4.5) and `stream`/`resource` usage. The honest marketing response is to steer benchmarks and reference apps toward real application shapes, not microbenchmarks. **The measurement strengthens this conclusion rather than overturning it:** at ~900 ns per crossing, batching is the difference between a request costing one crossing and one costing a hundred, and against §9.2's ≤60 µs p99 routed-request budget a handful of crossings is ~5% of budget while a hundred would be most of it.
+
+> **Two caveats on the async row, stated here because a reader would otherwise over-read it.** First, **`qqq-host` does not enable the async component model** — its engine configuration sets neither `wasm_component_model_async` nor `-stackful` — and no `qqq:*` WIT interface uses `future` or `stream`. The async figure answers *"what will this cost when §9.4's async row is implemented"*, not *"what does QQQ cost today"*; there is no async path today to have a cost. Second, the measured rows come from a harness that drives **Wasmtime directly with the minimal component-model configuration**, so they measure the **canonical ABI** and not the deployed engine, which adds the pooling allocator, guard pages and epoch interruption. Both caveats, and eight further gaps, are listed in [`docs/abi-cost-measured.md` §5](docs/abi-cost-measured.md).
+
+> **Not yet satisfied:** §9.1 requires "three repetitions **with variance**". The measurement published here is **one run of 20 000 samples** — within-run variance is visible, run-to-run variance is not established, and no `Repetitions` spread is published. This is recorded as the largest gap in the measured document rather than papered over with three uncorrelated runs.
+
 
 ## §9.4 Specific optimizations planned
 

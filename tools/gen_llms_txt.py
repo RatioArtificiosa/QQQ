@@ -166,6 +166,14 @@ CURATED: list[tuple[str, str, str, str]] = [
     ),
     # --- The machinery ----------------------------------------------------
     (
+        "docs/abi-cost-measured.md",
+        "The measured ABI-crossing costs (`PERF-005`), replacing the estimates "
+        "in §9.3, with the environment, the estimate-by-estimate comparison, and "
+        "an explicit statement of what was not measured.",
+        "both",
+        "machinery",
+    ),
+    (
         "docs/verified-facts.md",
         "Facts asserted in the Proposal, each classified by how perishable it "
         "is and when it was last checked.",

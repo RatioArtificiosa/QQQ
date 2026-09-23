@@ -152,6 +152,36 @@ impl HostMonotonicClock for DeniedClock {
 /// malformed environment entry, say — does not change every caller's signature. The
 /// alternative, an `expect` at three call sites, would turn a future refusal into a
 /// panic.
+/// Whether a clock capability must be denied, given the manifest's grants.
+///
+/// **One implementation, called by both [`context`] and its tests.** A test that
+/// restates a rule proves nothing about the code: the two drift and the test keeps
+/// passing. Extracted so the test observes the real decision.
+///
+/// # Why this is a security boundary
+///
+/// The rule is *per clock*, never combined. An earlier version asked whether
+/// **either** clock was granted and denied both only when neither was, so a manifest
+/// granting `monotonic = true` alone received a working **wall** clock reading the
+/// host's real time -- ambient authority, and exactly what `§4.4` forbids.
+#[must_use]
+pub fn should_deny(grants: &GrantSet, clock: qqq_cap::capability::Capability) -> bool {
+    !grants.grants(clock)
+}
+
+/// Build the WASI context for a grant set and environment.
+///
+/// # What the manifest decides here
+///
+/// The **environment** is exactly the named variables passed in, never inherited;
+/// and each **clock** is denied individually unless the manifest granted it (see
+/// [`should_deny`]).
+///
+/// # Errors
+///
+/// A refusal when an environment entry is malformed. The function is documented as
+/// infallible for an empty environment, and the `Result` exists so a future refusal
+/// does not change every caller's signature.
 pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
 
@@ -166,16 +196,23 @@ pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
     // No command line: a request has none.
     builder.args(&[] as &[&str]);
 
-    // The clock is the manifest's decision, not Wasmtime's default. When neither
-    // clock capability is granted the context gets a clock that refuses, so
-    // `qqq.toml`'s silence on the subject is enforced rather than ignored.
-    let has_clock = grants.grants(qqq_cap::capability::Capability::ClockMonotonic)
-        || grants.grants(qqq_cap::capability::Capability::ClockWall);
-    if !has_clock {
-        // `DeniedClock` is a unit struct and `Copy`, so both setters get their own
-        // value. No `Arc` is needed, and none is used: the traits are implemented on
-        // the concrete type, not on `Arc<DeniedClock>`.
+    // The clock is the manifest's decision, not Wasmtime's default.
+    //
+    // **Each clock is evaluated independently, and that is a security property, not
+    // a style choice.** An earlier version asked `monotonic || wall` and installed
+    // no denial when either was granted -- so a manifest granting only
+    // `monotonic = true` got a working wall clock reading the host's real time. That
+    // is ambient authority, which is precisely what the capability model exists to
+    // make impossible: a guest could tell when it was running despite never being
+    // granted the wall clock.
+    //
+    // `DeniedClock` is a unit struct and `Copy`, so each setter gets its own value.
+    // No `Arc` is needed, and none is used: the traits are implemented on the
+    // concrete type, not on `Arc<DeniedClock>`.
+    if should_deny(grants, qqq_cap::capability::Capability::ClockWall) {
         builder.wall_clock(DeniedClock);
+    }
+    if should_deny(grants, qqq_cap::capability::Capability::ClockMonotonic) {
         builder.monotonic_clock(DeniedClock);
     }
 
@@ -304,6 +341,106 @@ mod tests {
         )
         .expect("a context with env should build");
         drop(ctx);
+    }
+
+    /// **Granting one clock must not grant the other.**
+    ///
+    /// The clock branch used to ask "is *either* clock granted?" with `||`, so a
+    /// manifest granting only `monotonic = true` installed no denial at all: the
+    /// guest got a working wall clock reading the host's real time. That is ambient
+    /// authority -- the guest could learn when it was running despite never being
+    /// granted `wall` -- and it is exactly what `§4.4` forbids.
+    ///
+    /// `every_clock_grant_combination_builds` did not catch it because it asserted
+    /// each combination *constructs*, and a correctly-denied clock constructs fine.
+    /// Asserting construction is not asserting the property.
+    ///
+    /// # What this asserts, and what it does not
+    ///
+    /// This pins the **decision**: for a given grant set, which clocks receive
+    /// [`DeniedClock`]. It does not drive a guest, because the installed clock cannot
+    /// be read from outside `wasmtime-wasi` -- `WasiCtx::clocks()` returns a
+    /// `WasiClocksCtx` whose fields are `pub(crate)` with **no accessors** -- and a
+    /// hand-written component cannot reproduce a real `wasm32-wasip2` guest's WASI
+    /// import identity. Four spellings were tried against `register()`'s linker --
+    /// `@0.2.0`, `@0.2.12`, unversioned, and `@0.2.9` (the version this module's own
+    /// documentation records real guests importing) -- and all failed at
+    /// instantiation, because that identity comes from the `wasm32-wasip2` target's
+    /// own WIT resolution and a hand-written component cannot reproduce it.
+    ///
+    /// Stating the limit matters: without a guest this proves the *configuration* is
+    /// right, not that a guest observes it. The stronger test is to instantiate the
+    /// reference application built for `wasm32-wasip2` -- the path `host_wasi`'s
+    /// module documentation records as working -- and it is recorded as a gap in
+    /// `QQQ-Observations-and-Memories.md` rather than implied here.
+    #[test]
+    fn granting_the_monotonic_clock_does_not_grant_the_wall_clock() {
+        let grants = grants_from(MONOTONIC);
+        assert!(
+            grants.grants(qqq_cap::capability::Capability::ClockMonotonic),
+            "the fixture must actually grant the monotonic clock"
+        );
+        assert!(
+            !grants.grants(qqq_cap::capability::Capability::ClockWall),
+            "the fixture must NOT grant the wall clock -- otherwise it proves nothing"
+        );
+
+        let denial = clock_denial(&grants);
+        assert!(
+            denial.wall,
+            "a manifest granting only `monotonic = true` left the WALL clock undenied: \
+             granting one clock granted the other, so the guest can read the host's \
+             real time"
+        );
+        assert!(
+            !denial.monotonic,
+            "the monotonic clock was denied although the manifest granted it"
+        );
+    }
+
+    /// The control: granting **both** clocks must deny neither.
+    ///
+    /// Without this, the test above would also pass if every clock were denied
+    /// unconditionally -- and "we deny everything" is a different, broken claim from
+    /// "we deny exactly what was not granted".
+    #[test]
+    fn granting_both_clocks_denies_neither() {
+        let denial = clock_denial(&grants_from(WALL));
+        assert!(
+            !denial.wall && !denial.monotonic,
+            "both clocks were granted, so neither may be denied: {denial:?}"
+        );
+    }
+
+    /// The other control: granting **nothing** must deny both.
+    #[test]
+    fn granting_no_clock_denies_both() {
+        let denial = clock_denial(&GrantSet::empty());
+        assert!(
+            denial.wall && denial.monotonic,
+            "a manifest granting no clock must deny both: {denial:?}"
+        );
+    }
+
+    /// Which clocks a grant set denies.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ClockDenial {
+        wall: bool,
+        monotonic: bool,
+    }
+
+    /// Replay the module's own decision, mirroring [`context`] exactly.
+    ///
+    /// This asserts the *rule* the builder applies. It is the closest observable
+    /// proxy for the installed clock, given that `WasiClocksCtx` exposes no
+    /// accessors. If [`context`] and this helper ever disagree, that is itself a bug
+    /// -- and the test below pins them together by construction: both call
+    /// [`should_deny`].
+    fn clock_denial(grants: &GrantSet) -> ClockDenial {
+        ClockDenial {
+            wall: should_deny(grants, qqq_cap::capability::Capability::ClockWall),
+            monotonic: should_deny(grants, qqq_cap::capability::Capability::ClockMonotonic),
+        }
     }
 
     #[test]

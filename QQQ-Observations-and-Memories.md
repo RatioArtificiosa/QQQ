@@ -17214,6 +17214,83 @@ the file has `parse_variants`, not `extract_variants`, so the splice produced
 another costume: **an assertion that something is present is not an assertion that
 it is correct.**
 
+## §O-212 — `y1`: every ticked item's evidence re-derived, and the three checks that found nothing
+
+`y1` asks to audit every ticked item's cited code and test evidence. Reading 188
+ticked items proves nothing — the claim and its citation were written by the same
+hand — so the audit **re-derived** three properties by command.
+
+### The population
+
+| | Count |
+|---|---|
+| checklist items | 584 |
+| unticked | 396 |
+| ticked | 188 |
+| ticked items citing a path | 91 |
+
+### Check 1 — every cited path resolves
+
+Every backticked path matching `crates/…`, `tools/…`, `schema/…`, `wit/…`,
+`docker/…` or `docs/…` in a ticked item, resolved against the tree.
+
+**Result: 1 of 91 does not resolve — `DOC-020` naming `docs/env-example.md`.**
+Inspected in context and it is **correct**: the sentence records a gap the
+`gen_llms_txt` self-test found and fixed — *"one exclusion named a file that
+**does not exist** (`docs/env-example.md` — the real file is `docs/.env`)"*. The
+citation is history, not a claim of existence, and rewriting it would destroy the
+record. **No defect.**
+
+### Check 2 — every cited test function is still a test
+
+All 2,395 `#[test]` functions in the workspace were collected with their file, and
+each backticked snake_case name in a ticked item was looked up.
+
+**Result: 91 ticked items cite a name that is a declared test function.** A
+further 89 backticked snake_case names are not test functions — and a second pass
+against every identifier declared anywhere in `crates/`, `tools/`, `examples/` and
+`wit/` reduced that to **two** names appearing nowhere at all:
+
+* `SEC-012` → **`manifest_parse`** — a fuzz target, and `fuzz/fuzz_targets/
+  manifest_parse.rs` exists.
+* `SEC-013` → **`workflow_dispatch`** — a GitHub Actions trigger, and
+  `.github/workflows/fuzz.yml:39` declares it.
+
+Both are correct citations of things outside the Rust sources, which is why the
+identifier scan could not see them. **No defect.**
+
+The same pass re-verified the cited schedule as a concrete fact rather than a
+transcription: `SEC-013` claims fuzzing runs *"nightly at 03:17 UTC"*, and
+`fuzz.yml` line 38 is `- cron: '17 3 * * *'`.
+
+### Check 3 — every checker a ticked item cites still passes
+
+Twenty-three `tools/check_*.py` files are cited by ticked items. Each was executed.
+
+**Result: all 23 exit 0.** A ticked item citing a checker that now fails would be
+a claim whose evidence had gone stale, and this is the cheapest of the three
+checks to re-run.
+
+### What the audit is worth
+
+Three mechanical checks, **zero defects found**, and the value is in what that
+does and does not establish. It rules out the specific failure mode this ledger
+has actually suffered — a citation pointing at a file, a test or a checker that
+moved — and it rules out nothing else. It cannot tell whether
+`minimal_manifest_parses_and_grants_nothing` still asserts what `SEC-003` says it
+asserts, because that requires reading the assertion and the claim together.
+
+That is the honest scope of `y1`, and it is the reason this document does not
+report the audit as *"all 188 items verified"*. The checks that would establish
+that are the ones the twelve-area pass already runs one item at a time, and the
+per-item evidence is recorded in the items themselves.
+
+**One correction came out of `y1` before the mechanical checks ran, and it was
+found by review rather than by a tool**: `CLI-021` and `DX-016` were the same
+deliverable described in two checklist areas, ticked in one (§O-211, F8). That is
+the shape a ledger defect actually takes here — not a broken citation, but two
+well-formed items disagreeing about one fact.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

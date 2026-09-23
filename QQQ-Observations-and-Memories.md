@@ -14328,6 +14328,80 @@ measurement.
 → `docs/abi-cost-measured.md` §2–§3; `crates/qqq-bench/tests/abi_cost.rs`.
 
 
+### O-180: the state at the restart, and the five open findings I am handing forward
+
+The user is restarting the harness so the `dsh-tool-call-repair` plugin loads for the
+first time since it was wired. This entry records the exact state so nothing has to be
+rediscovered, and lists what is genuinely unfinished rather than leaving it implied.
+
+#### Verified state at the restart
+
+| Check | Result |
+|---|---|
+| `git status -sb` | clean, `main` in sync with `origin/main` |
+| CI on `02e49ab` | **11 success, 0 failures** — read from the run, not assumed |
+| Gate | fmt, clippy `-D warnings`, **2421** workspace tests, **57** guest tests |
+| Background jobs | all three completed; none running |
+| Subagent | finished; `PERF-005` delivered and committed |
+
+Last commit: `02e49ab`. Nothing is mid-edit.
+
+#### The five open findings, in priority order
+
+All five came from the 30-commit CodeRabbit review (O-178). None is ticked anywhere.
+
+1. **Guest output can forge host log records.** `host_wasi::context` calls
+   `inherit_stdout`/`inherit_stderr`, and the host's access log goes to the **same
+   stdout** (`qqq-run/src/serve.rs:374` builds a `Logger`; `qqq_serve::serve` writes
+   records there). Nothing frames the two apart, so a guest can print a line that
+   parses as an access record, emit an ANSI escape, or split a host record with a bare
+   newline. For a project whose audit trail is the product, this is a correctness bug
+   in the evidence.
+   **Attempted and reverted.** The sanitiser needs `tokio::io::AsyncWrite`, and
+   `tokio` is a **dev-dependency** of `qqq-host` (`crates/qqq-host/Cargo.toml:59`), so
+   the library cannot use it. The working shape is
+   `wasmtime_wasi::p2::pipe::AsyncWriteStream::new(GUEST_OUTPUT_BUDGET, writer)` with
+   `writer: tokio::io::AsyncWrite + Send + 'static`
+   (`wasmtime-wasi-48.0.2/src/p2/write_stream.rs:143`), so the fix is either to promote
+   `tokio` to a real dependency of `qqq-host` **with the §4.3 justification that
+   requires**, or to write the sink without tokio. The reverted code is in
+   `.scratch/guest_sink_v3.py` — it is correct except for the dependency.
+2. **`--config` is ignored by `serve`.** `opts.config` never reaches
+   `LoadedManifest::discover`, so a user who passes it is silently served a different
+   manifest than they asked for.
+3. **`--tls` is accepted but not applied.** `ServerConfig::for_addr` does not enable
+   TLS, so the flag reports an active security feature that is not active. A flag that
+   reports success without doing the thing is worse than a missing flag.
+4. **The request body is collected before route dispatch** (`qqq-serve/src/server.rs`),
+   so streaming, WebSocket and bodyless routes buffer data they never read. Also makes
+   `SRV-004`'s stated invariant untrue as written.
+5. **`check_bench_contract.py` validates differently in CI than in `--self-test`.**
+   `main()` duplicates logic instead of delegating to `analyse()`, so the two paths can
+   disagree — and a self-test that exercises different rules from CI is not a self-test.
+
+#### Why the restart matters, and what it will not fix
+
+A dsh plugin is loaded at **harness boot**. `dsh --profile default --dump-config`
+confirms the `tool-call-repair` row is composed into the tree correctly, so the plugin
+is wired right and has simply never been loaded.
+
+**The restart will not make the leak disappear.** That is structural (O-177): the
+plugin hooks `tools/execute`, which fires only when a call *is* dispatched, and a
+leaked call by definition never is. Its docstring was corrected to stop claiming
+otherwise.
+
+#### The first thing to check after the restart
+
+```text
+Get-Content C:\Users\Usuario\.dsh\tool-call-repair\repairs.jsonl
+```
+
+A line appearing there is the first genuine proof of a live repair. Note that the file
+has been created three times already by the plugin's **own test** (`verify.mjs` deletes
+and rewrites it), so a non-empty file is not by itself evidence — check the timestamp
+against the boot time.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

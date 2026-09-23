@@ -43,9 +43,25 @@ INJECTIONS = [
         '`qqq new`',
     ),
     (
+        # `qqq-sys`, NOT `qqq-debug`. The target must be a package that nothing
+        # depends on, or the rename breaks a path dependency and Cargo refuses to
+        # build the test at all -- which the harness reads as "the check passed on
+        # violating input", a false MISSED. `qqq-debug` is depended on by
+        # `qqq-run`, so renaming it produced exactly that:
+        #
+        #   error: no matching package named `qqq-debug` found
+        #   required by package `qqq-run v0.0.0 (crates/qqq-run)`
+        #
+        # Only `qqq-run` and `qqq-sys` have no dependents (`cargo metadata`), and
+        # `qqq-run` is already injection #1's target, so the two cases would fight.
+        #
+        # Same distinction as the topology harness's "BROKEN, not DETECTED": a
+        # non-detection that is really a build failure is not evidence about the
+        # test. Verified by hand first -- with `qqq-sys` renamed the test runs and
+        # names the violation (`§D-001`).
         'package named qqq',
-        Path('crates/qqq-debug/Cargo.toml'),
-        'name = "qqq-debug"',
+        Path('crates/qqq-sys/Cargo.toml'),
+        'name = "qqq-sys"',
         'name = "qqq"',
         'no_package_is_named_qqq',
         'named `qqq`',

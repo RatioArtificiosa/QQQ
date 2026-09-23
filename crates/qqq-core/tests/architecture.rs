@@ -114,6 +114,18 @@ const ORDER: &[&str] = &[
     // which is the duplication working as the doc comment above intends -- but it
     // is worth knowing that a new crate is a two-file change.
     "qqq-bench",
+    // **Moved here, and this list is what caught the move being incomplete.**
+    //
+    // `qqq-debug` sat last, below `qqq-run`, which made the `HOST-009` edge
+    // `qqq-run -> qqq-debug` point *upward* and fail. The crate's real graph is
+    // `qqq-debug -> qqq-core` and nothing else, with nothing depending on it, so
+    // a position above the CLI asserted a layering the manifest never had.
+    //
+    // The ordering was corrected in `tools/check_topology.py` first, and the
+    // full gate then failed **here**: this list had the same wrong position, and
+    // the two-list duplication caught an incomplete fix. That is the duplication
+    // earning its keep a second time -- the first was `qqq-bench` above.
+    "qqq-debug",
     "qqq-cap",
     "qqq-abi",
     "qqq-host",
@@ -122,7 +134,6 @@ const ORDER: &[&str] = &[
     "qqq-pkg",
     "qqq-run",
     "qqq-registry",
-    "qqq-debug",
     "qqq-sys",
 ];
 

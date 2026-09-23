@@ -57,6 +57,27 @@ ORDER = [
     # declaration is not harmless -- it is a false statement about the dependency
     # graph, and this checker would have accepted an edge that does not exist.
     "qqq-bench",
+    # **Moved here, because the built graph proved the old position wrong.**
+    #
+    # This sat last, below `qqq-run`, which made a `qqq-run -> qqq-debug` edge
+    # point upward and get rejected. That edge is the one `HOST-009` needs: the
+    # CLI is where a detached trap report is rendered, and it is the only crate
+    # that depends on both `qqq-host` (which produces the report) and a source
+    # map (which resolves it). No other crate can host that join without
+    # inverting something -- `qqq-host` cannot, because depending on `qqq-debug`
+    # would put the trap producer above its own resolver.
+    #
+    # The move follows the crate's *actual* edges, which this checker reads from
+    # `cargo metadata` rather than from this list: `qqq-debug` depends on
+    # `qqq-core` and on nothing else. A crate whose only internal edge points at
+    # the bottom of the graph does not belong above the CLI. The old position
+    # asserted a layering the manifest never had, and because nothing depended on
+    # `qqq-debug` at all, no edge ever contradicted it -- the same "statement true,
+    # table false" defect §4.3 already records twice for `qqq-abi` and `qqq-pkg`.
+    #
+    # Positioned directly above `qqq-host`, next to the other crate that reads
+    # debug information, and below every crate that could consume a source map.
+    "qqq-debug",
     "qqq-cap",
     "qqq-abi",
     "qqq-host",
@@ -65,7 +86,6 @@ ORDER = [
     "qqq-pkg",
     "qqq-run",
     "qqq-registry",
-    "qqq-debug",
 ]
 
 # Crates the Proposal lists as "narrowly-scoped, require unsafe" exceptions that

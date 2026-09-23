@@ -13427,6 +13427,308 @@ the type system could not see.
 `.scratch/{probe_parse,diag_framing,fix_response_head_calls}.py`;
 `§O-164` for the same round's earlier type-driven failures.
 
+### O-166: Four lints, not three, and the third one was a real defect hiding as a style nit
+
+The round before this one left clippy reporting "three lints". Reading the actual
+output rather than the note I had written showed **four**. The extra one had been
+folded into another in my notes, which is exactly how a real finding gets lost
+between rounds: a count carried forward by memory instead of re-measured.
+
+The four were two missing `# Panics` sections, one `map().unwrap_or()` on a
+`Result`, and one redundant closure. The closure and the doc sections are genuinely
+cosmetic. The `map().unwrap_or()` was not.
+
+#### The one that mattered
+
+```rust
+std::thread::available_parallelism()
+    .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+    .unwrap_or(1)
+```
+
+Clippy's complaint is about shape — `map` then `unwrap_or` is `map_or`. Applying
+only that rewrite would have been the wrong move twice over:
+
+1. **The `unwrap_or(1)` is a silent lie.** `available_parallelism` failing does not
+   mean the machine has one CPU. It means the count is *unreadable*, and those are
+   different facts. `§9.1` requires the machine be published with every result so a
+   reader can judge it; publishing `1` for a 64-core box misrepresents the
+   measurement, and does it invisibly.
+2. **The saturating conversion needed the same treatment.** `u32::try_from(...)
+   .unwrap_or(u32::MAX)` truncates to a *wrong* number if it ever fires.
+
+The rewrite keeps `map_or` but states why the saturation is there: truncating would
+silently under-report the machine a published result came from, which is the one
+thing the environment section exists to prevent. The correctness question and the
+style question turned out to be the same edit, but only because I asked what the
+fallback *meant* before rewriting the shape.
+
+The honest caveat, recorded rather than glossed: the `unwrap_or(1)` branch is still
+reachable and still wrong. A follow-up should make an unreadable CPU count a named
+`"unknown"` like the other probes in that function, instead of a plausible-looking
+number. Ticking nothing until that is done.
+
+#### Why the `# Panics` sections say "in principle never"
+
+Both new sections document a panic the compiler can see on the formatting path,
+while the prose says no path panics in practice, because every probe degrades to a
+named fallback and every fallible step returns `Error`.
+
+Writing that down was deliberate. The alternative — restructuring code to satisfy a
+lint about a panic that cannot occur — trades a true statement for a quiet one. The
+crate's rule is that a benchmark must not panic while reporting its own conditions,
+because that loses the measurement and the explanation together. The doc section is
+how a caller learns the claim without having to read the function.
+
+### The ordering rule proved its cost again
+
+`cargo fmt --all` ran **before** the gate, never between the gate and the commit.
+Formatting is an edit; anything verified before it is unverified afterwards. This
+sequence is now habitual because it has produced three red CI runs, and it is worth
+restating that the discipline is cheap — one ordered script run — while the failure
+mode is expensive and silent.
+
+Result, as one sequence with no edit afterwards:
+
+```
+PASS  fmt            exit=0
+PASS  clippy         exit=0
+PASS  test           exit=0 (2380 passed)
+PASS  guest tests    exit=0 (57 passed)
+```
+
+The guest count is 57 and not workspace-covered: the reference application declares
+its own empty workspace, so the workspace-wide test command cannot see it. Two
+numbers, two commands, always.
+
+→ `crates/qqq-run/src/bench.rs`, `crates/qqq-run/src/bench_output.rs`; commit
+`d3915f3`, pushed, `main` confirmed in sync by `git status -sb`.
+
+### O-167: `qqq-debug` was ordered below the CLI, and nothing depended on it — so no edge could ever contradict the table
+
+Working `HOST-009`'s remaining half started with a design question that turned out
+to be an architecture defect: **where does a source map get resolved against a
+trap?**
+
+`qqq-host` builds a trap's frames two ways, and only one was ever wired:
+
+| Situation | Frames come from | Wired? |
+|---|---|---|
+| A live instance traps | `Wasmtime`'s `WasmBacktrace`, resolved in memory through the module's DWARF | yes |
+| A report is read **later** | `qqq_debug::SourceMap`, extracted from the artifact | **no** |
+
+The second is the interesting one, and it is the case the checklist names:
+`WasmFrame.offset` was populated *specifically* so a detached report could be
+resolved, and no code path read it. `SourceMap::lookup` had 24 unit tests and
+4 end-to-end tests proving it works, and zero callers. That is `§O-045a` a third
+time: the field and the function both had tests, which proves they *can* work and
+nothing about whether anything *uses* them.
+
+#### The join point was unwritable, and the manifest said so
+
+The natural home was `qqq-host` — it produces the trap and it knows the artifact.
+That is impossible: `qqq-host` sits at position 5 of §4.3's order and `qqq-debug`
+at position 10, so the edge points **upward** and `tools/check_topology.py`
+rejects it. The join therefore belongs in `qqq-run`, which is above both and is
+where a trap is actually rendered for a human.
+
+But `qqq-run` → `qqq-debug` also pointed upward, because `qqq-debug` was listed
+**last**. Adding the edge made the checker fail:
+
+```
+`qqq-run` (position 9) depends on `qqq-debug` (position 10), which is at or above it
+```
+
+#### What the real graph says
+
+`cargo metadata` settled it in one reading:
+
+```
+qqq-debug      -> qqq-core
+WHO DEPENDS ON qqq-debug:  (nobody)
+```
+
+`qqq-debug`'s **only** internal edge points at the bottom of the graph, and
+**nothing at all depends on it**. A crate in that position does not belong above
+the CLI; the ordering was asserting a layering the manifest never had. And because
+nothing depended on it, no edge could ever contradict the table — which is why
+this survived until an item needed the edge.
+
+This is exactly the defect §4.3 already documents twice for `qqq-abi` and
+`qqq-pkg`: *"a reader who checked would have found the architecture violated and
+had no way to tell that the document was the thing out of date."* Third instance,
+and this one was in the **checker** rather than the Proposal, which is worse —
+a checker whose reference order is wrong rejects the correct graph and accepts a
+wrong one.
+
+`qqq-debug` moved to position 2, directly above `qqq-core` and below everything
+that could consume a source map. `check_topology.py` is green with the new edge.
+
+#### What was built
+
+- `crates/qqq-debug/src/resolve.rs` — `resolve_frames(&[ReportedFrame], &SourceMap)`
+  returns the frames **and** a `ResolveReport` counting resolved / already-resolved
+  / unmapped / no-offset frames, plus an `explain()` that names which gap occurred.
+  The input is a neutral, serde-derived frame shape rather than `qqq_host::Trap`,
+  because a resolver that needed the host type could only be called by something
+  that already had the host — which defeats the purpose of a *detached* report.
+  16 tests.
+- `crates/qqq-run/src/trap_report.rs` — the consumer that makes it reachable.
+  Parses the frame strings `Trap::to_error` attaches as causes, resolves them,
+  and `source_map_for_artifact` extracts a map from the artifact on disk.
+  16 tests.
+- `crates/qqq-run/src/output.rs` — `emit_error_with_backtrace`, and an optional
+  `backtrace` field on `ErrorPayload`. Additive and `skip_serializing_if`, so an
+  error that is not a trap serializes byte-identically to before.
+- `crates/qqq-run/src/main.rs` — `dispatch_run_with_trap_report`, wired into the
+  dispatch table, extracts the map *before* running and resolves on failure.
+
+#### Two rules the code had to respect
+
+1. **A resolved frame is left alone.** `Wasmtime`'s in-memory resolution read the
+   same DWARF from the same artifact with the engine's own loader; re-resolving
+   could only agree or be worse. Asserted by a test that hands in an
+   engine-resolved frame and requires it back unchanged.
+2. **A frame with no offset is dropped, not guessed.** A bare function name is
+   indistinguishable from ordinary context prose, and accepting it would turn
+   every non-frame cause into a fake frame. Asserted.
+
+Two parse cases were worth the trouble and would have been silent bugs:
+
+- A Rust closure renders as `foo::{{closure}}`, so splitting on the **first** `(`
+  truncates the name. The split is on the last `" ("`.
+- `C:\src\a.rs:42` has two colons; a first-colon split yields `C` as the file.
+
+---
+
+### O-168: the injection harness lied about "byte-for-byte restore", and the hash check is what caught it
+
+The `HOST-009` fault injection reported:
+
+```
+2. injecting the fault
+   fault present in file: True
+  [injected] failed=True | test result: FAILED. 36 passed; 1 failed
+3. restoring byte-for-byte
+   hash match: False
+ABORT: restore did not reproduce the original bytes
+```
+
+The test side worked — exactly one test failed, the right one. The **restore**
+was the failure, and it is the more dangerous half.
+
+#### Cause
+
+The script used `Path.read_text` / `write_text`. Python's text mode translates
+newlines, and this checkout is **CRLF on disk while `.gitattributes` declares
+`eol: lf`**. Measured:
+
+```
+CRLF count: 338
+bare LF count: 0
+CRLF surviving text-mode read: 0
+```
+
+So the "restore" converted all 338 line endings and produced a different file
+with identical-looking content. The suite still passed and the source read
+correctly; only the hash and `git status` disagreed.
+
+#### Why this matters beyond one script
+
+Every fault injection in this project ends with the claim *"restored
+byte-for-byte"*. On a CRLF checkout read in text mode that claim is **false while
+appearing to succeed** — and the failure it hides is a 338-line diff smuggled into
+a later commit. The hash assertion is not ceremony; it is the only thing that
+distinguishes a restore from a rewrite.
+
+#### Fix, and the rule that generalises
+
+The harness now uses `read_bytes`/`write_bytes` and asserts three things a text
+harness cannot: the SHA-256 matches, `git status` is clean, and no `INJECTED`
+marker remains. Re-run:
+
+```
+2. injecting the fault
+   fault present in file: True
+  [injected] failed=True | test result: FAILED. 36 passed; 1 failed
+3. restoring byte-for-byte
+   hash match: True
+   git status clean: True ''
+5. no injected marker remains: True
+```
+
+The generalisable rule: **a "byte-for-byte" claim needs a byte-level check.**
+Comparing content after a round trip through any layer that can normalise —
+text mode, an encoder, an editor, a formatter — tests the layer, not the file.
+
+One file was left modified by the failed attempt and was recovered with
+`git checkout --`, verified clean afterwards. Worth recording that the recovery
+was needed: a harness that aborts on a mismatch still has to be *recovered*, and
+"it aborted" is not the same as "nothing changed".
+
+→ `crates/qqq-debug/src/{resolve,source_map,lib}.rs`,
+`crates/qqq-run/src/{trap_report,output,main,lib}.rs`,
+`crates/qqq-run/Cargo.toml`, `tools/check_topology.py`;
+`.scratch/{inject_host009c,diag_restore,show_order}.py`.
+
+### O-169: the fix was incomplete in a second file, and the gate found it — not memory
+
+Moving `qqq-debug`'s position in the topology order was a **two-file** change and
+I made it in one.
+
+`tools/check_topology.py` was corrected first, and it went green. That green was
+the trap: the architecture test carries its own copy of the order, and the two
+are deliberately duplicated so that neither can inherit the other's blind spot.
+The full gate then failed on the second copy:
+
+```
+---- no_crate_depends_on_a_crate_above_it stdout ----
+architecture violations:
+  `qqq-run` (position 8) depends on `qqq-debug` (position 10);
+  a dependency may only point DOWN the §4.3 order
+```
+
+Two things worth recording.
+
+**One.** A tool that goes green is not evidence that the change is complete when
+the same fact is stated in more than one place. Here the duplication is *by
+design* — the doc comment above `architecture.rs`'s `ORDER` says so, and notes
+that adding `qqq-bench` previously "required updating **two** lists". I had read
+that comment earlier in this same session and still updated one list. The lesson
+is not "remember the second list"; it is that **a green check has a scope**, and
+the scope of `python tools/check_topology.py` is that script, not the workspace.
+
+**Two.** The failure was reported by the *test*, in the *gate*, as a named
+violation with both positions. That is the system behaving exactly as intended —
+and it is the third time this session that a defence built earlier caught a
+mistake made later (`§O-166`'s count, `§O-168`'s hash, now this). Building a check
+costs less than remembering a rule, every time.
+
+`crates/qqq-core/tests/architecture.rs`'s `ORDER` was corrected to match, with
+the reason recorded in place, and a small script (`verify_two_lists.py`) now
+asserts the two orders agree on their common crates and that `qqq-debug` sits
+below `qqq-run` in both. That script is a convenience, not a replacement: the
+gate is the authority.
+
+#### A count I had wrong, corrected rather than repeated
+
+I described `resolve.rs` as having 16 tests. It has **13**
+(`extract` 13, `resolve` 13, `source_map` 11; crate total 37). The 16 was
+`trap_report.rs`. The crate total was right and I divided it wrongly, which is
+precisely the failure mode `§O-166` recorded one round earlier — a number carried
+by memory instead of re-measured. Corrected in the entry and in the script, and
+the script now asserts the exact figures rather than a floor.
+
+Workspace total after this round: **2409** (was 2380 — 13 + 16 = 29 new, which is
+the arithmetic checking out). Guest application: 57, run separately, because it
+declares its own empty workspace and is invisible to `cargo test --workspace`.
+
+→ `crates/qqq-core/tests/architecture.rs`, `tools/check_topology.py`;
+`.scratch/verify_two_lists.py`.
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*
+
+
+

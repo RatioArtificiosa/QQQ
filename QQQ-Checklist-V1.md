@@ -3113,7 +3113,23 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `qqq-run::test_runner` (the module is named `test_runner` because `test` is a Rust keyword, so the file uses `#[path]` like `scaffold`), dispatched from `main.rs`. Discovery asks cargo for its test targets and runs **each binary directly**, which makes a test's source file exact rather than inferred. `--filter`, `--fail-fast`, `--trials N`, `--dry-run` and `--json` work; a failing test **exits 1** so CI can gate on it. 51 CLI integration tests.
   → `--trials N` is the first architecture-enabled feature from §6.7 and the one that needs no unbuilt dependency: it runs each test N times and flags output that differs. A determinism failure counts as a failure for the exit code, because a test passing 4 of 5 trials is not a passing test.
   → §6.7 `qqqai test` — test runner
-- [ ] **CLI-013** Implement `qqqai bench`.
+- [x] **CLI-013** Implement `qqqai bench`.
+  → Done: `crates/qqq-run/src/bench.rs` + `bench_output.rs`, dispatched from
+    `main.rs`. Every `§9.2` row is selectable, `--json` emits the document, and
+    `--fail-on-miss` is opt-in because `§9.2` calls these "numeric targets
+    engineering is held to" rather than a pass/fail gate — turning a measurement
+    tool into a gate by default would be the wrong default.
+  → The document is the unit of output: a result cannot be rendered without its
+    methodology, because `PERF-001` made the methodology a required field.
+  → Two bugs found and fixed by its own tests: `parse_response` returned
+    `(status, len)` and a caller misread it as a head length, reporting 38 bytes
+    for a 2-byte body (now a named `ResponseHead` struct); and `read_to_end`
+    waited for a close that `qqq-serve` never sends (now frames on
+    `Content-Length`). A failing target also used to cost 200 warmup requests ×
+    10 s, now bounded by a separate `connect_timeout` and `EARLY_EXIT_AFTER`.
+  → **Verified**: gate clean at `d3915f3`; CI run
+    [35803815743](https://github.com/RatioArtificiosa/QQQ/actions/runs/35803815743)
+    green — 11 success, 0 failures.
   → §9.1 The honest benchmark position
 - [ ] **CLI-014** Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains.
   → §5.2 The command surface
@@ -3518,7 +3534,23 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → **A fourth defect was found by a pre-existing checker, not by me.** `check_checklist_citations.py` rejected the new source because a doc comment quoted a non-existent identifier in the form `AREA-NNN`. It was a quotation of a historical defect, not a live citation — but a bare token is indistinguishable from one, which is exactly what that checker exists to catch (`§O-126`). Rewritten to describe the identifier rather than reproduce it.
   → **Gap named, not papered over**: this harness **runs no workload and meets no budget**. `PERF-002` implements the ten §9.1 benchmarks; `PERF-003`–`PERF-013` are the numeric targets. A budget item is met by a harness that **produces** the number plus a recorded comparison against the target — never by asserting the target is achievable. Writing those numbers before something produced them would be the first fabricated measurement in a document whose entire value is that its numbers came from commands.
   → Also unblocks: `PERF-005` (real ABI costs replacing §9.3's estimates), `PERF-020` (regression detection in CI, which needs the contract), `PERF-022` ("what this does not measure", now a required field rather than a section someone must remember to write).
-- [ ] **PERF-002** Implement the ten benchmarks listed in §9.1.
+- [x] **PERF-002** Implement the ten benchmarks listed in §9.1.
+  → Done: the ten §9.1 workloads are `qqq-bench::Workload::ALL` (exactly 10, a
+    `static` table rather than a hand-maintained list), with `Methodology`,
+    `Distribution` (nearest-rank percentiles; **no `mean`**, so an average cannot
+    be published even by mistake), `Budget::ALL` (the §9.2 rows as data) and
+    `loadgen` (async, `Connection: close`, frames on `Content-Length`).
+  → Reachable via `qqqai bench` (`CLI-013`), which is what stops the harness being
+    a library nothing calls.
+  → `tools/check_bench_contract.py` compares §9.2, `Budget::ALL` and this
+    checklist against each other; `--self-test` fault-injects 5 cases, including
+    the `≥ 60k RPS` parse that was silently reading as **60.0**.
+  → **Verified**: gate clean at `d3915f3` (2409 workspace + 57 guest tests, fmt
+    and clippy at `-D warnings`), and GitHub Actions run
+    [35803815743](https://github.com/RatioArtificiosa/QQQ/actions/runs/35803815743)
+    green on that commit — 11 jobs success, 0 failures.
+  → **Not claimed**: no workload has been *run against real hardware here*, so
+    `PERF-003`–`PERF-013` remain unticked. This item is the harness, not a number.
   → §9.1 The honest benchmark position
 - [ ] **PERF-003** Meet the warm-instance-acquire budget (≤100 µs p99).
   → §9.2 The performance budget

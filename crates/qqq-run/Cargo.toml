@@ -53,6 +53,24 @@ qqq-io = { path = "../qqq-io", version = "0.0.0" }
 # usable without a CLI, which is what `§9.1` means when it requires the benchmark
 # harness be open source and independently runnable.
 qqq-bench = { path = "../qqq-bench", version = "0.0.0" }
+qqq-debug = { path = "../qqq-debug", version = "0.0.0" }
+# The detached trap report path (`HOST-009`).
+#
+# `qqq-host` builds a trap's frames two ways and only one was ever wired: while an
+# engine is alive, `Wasmtime` resolves each frame through the module's DWARF in
+# memory. Once the error has crossed a process boundary -- into a log, a JSON
+# response, an agent's context -- that engine is gone, and its frames were stuck at
+# `func+0x1a3` with no file and no line. `WasmFrame::offset` existed precisely so
+# this could be fixed, and nothing consumed it.
+#
+# The CLI is the join point: it is the only crate depending on both the crate that
+# *produces* a report (`qqq-host`) and the crate that *resolves* one
+# (`qqq-debug`). `qqq-host` cannot host the join, because depending on
+# `qqq-debug` would place the trap producer above its own resolver and
+# `tools/check_topology.py` rejects that upward edge. That rejection is what
+# surfaced `qqq-debug` being ordered last in the first place -- it depends on
+# `qqq-core` alone, so it now sits at position 2, below everything that could
+# consume a source map.
 # # Why the CLI needs a runtime of its own
 #
 # `qqqai bench` (CLI-013) drives qqq_bench::loadgen, which is async because the

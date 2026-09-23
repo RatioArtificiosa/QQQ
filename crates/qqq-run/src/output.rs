@@ -359,6 +359,19 @@ pub struct ErrorPayload {
     /// Ordered context describing where it happened.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<ErrorContextEntry>,
+    /// The guest backtrace, resolved to source lines when a map was available.
+    ///
+    /// `HOST-009` requires a trap report carry "code, guest backtrace and (if
+    /// DWARF present) source line". The `cause` strings carry a *rendered* form
+    /// of the frames, which is right for a human and useless to a consumer that
+    /// wants the frame list: it would have to parse prose to get `func`,
+    /// `offset`, `file` and `line` back out.
+    ///
+    /// Absent, not empty, when there is no backtrace — so a consumer checking
+    /// `error.backtrace` is asking a question with a meaningful answer, and an
+    /// error that is not a trap does not carry a misleading empty array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backtrace: Option<crate::trap_report::ResolvedBacktrace>,
 }
 
 /// One context entry, as a name/value pair rather than a tuple.
@@ -390,6 +403,10 @@ impl From<&Error> for ErrorPayload {
                     value: value.clone(),
                 })
                 .collect(),
+            // `None` here, not an attempt to resolve: this `From` has no source
+            // map and no artifact to read one from. Only a caller that knows
+            // *which* artifact trapped can resolve, which is `emit_error_with_backtrace`.
+            backtrace: None,
         }
     }
 }
@@ -447,6 +464,48 @@ impl<W: Write> Output<W> {
             Format::Human => self.write_line(&error.render()),
             Format::Json | Format::JsonLines => {
                 let text = render_failure(command, error)?;
+                self.write_line(&text)
+            }
+        }
+    }
+
+    /// Emit a failure, with a guest backtrace resolved to source lines.
+    ///
+    /// This is the `HOST-009` path made reachable. `emit_error` cannot do it: a
+    /// source map comes from *a specific artifact*, and only the caller that ran
+    /// that artifact knows which one. Passing the already-resolved backtrace in
+    /// keeps this function from having to guess at a path.
+    ///
+    /// # Why the human form is more than `error.render()`
+    ///
+    /// Because the frames are the point. `Error::render()` prints the causes,
+    /// which for a trap are `frame 1: spin+0x1a3` — the bytecode offsets a
+    /// developer cannot act on. Appending the resolved block is what turns the
+    /// same trap into `spin (src/handler.rs:42)`, which is a line they can open.
+    /// A resolved frame is *added*, never substituted for the raw causes: the
+    /// offset is what identifies the instruction, and dropping it would make a
+    /// report less precise than the one that had no debug info at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QQQ-6005` if the sink rejects the write.
+    pub fn emit_error_with_backtrace(
+        &mut self,
+        command: CommandName,
+        error: &Error,
+        backtrace: &crate::trap_report::ResolvedBacktrace,
+    ) -> Result<()> {
+        match self.format {
+            Format::Human => self.write_line(&render_error_with_backtrace(error, backtrace)),
+            Format::Json | Format::JsonLines => {
+                let mut payload = ErrorPayload::from(error);
+                // Only attach a backtrace that has frames. An error that is not
+                // a trap then serializes exactly as it did before this field
+                // existed, so the contract is unchanged for every other command.
+                if !backtrace.is_empty() {
+                    payload.backtrace = Some(backtrace.clone());
+                }
+                let text = render_failure_payload(command, error, payload)?;
                 self.write_line(&text)
             }
         }
@@ -510,6 +569,19 @@ fn render_success<T: CommandOutput>(command: CommandName, value: &T) -> Result<S
 
 /// Serialize a failure envelope.
 fn render_failure(command: CommandName, error: &Error) -> Result<String> {
+    render_failure_payload(command, error, ErrorPayload::from(error))
+}
+
+/// Serialize a failure envelope from an already-built payload.
+///
+/// Split out so a caller that must *augment* the payload — the resolved-backtrace
+/// path — reuses the envelope construction rather than duplicating it. Two
+/// envelopes that drifted apart would be two machine contracts.
+fn render_failure_payload(
+    command: CommandName,
+    error: &Error,
+    payload: ErrorPayload,
+) -> Result<String> {
     let envelope = Envelope::<serde_json::Value> {
         producer: "qqqai",
         version: qqq_core::VERSION,
@@ -518,9 +590,37 @@ fn render_failure(command: CommandName, error: &Error) -> Result<String> {
         ok: false,
         summary: error.message.clone(),
         data: None,
-        error: Some(ErrorPayload::from(error)),
+        error: Some(payload),
     };
     serde_json::to_string(&envelope).map_err(|e| serialize_failure(&e))
+}
+
+/// The human error block, with a resolved backtrace appended.
+///
+/// `Error::render()` first, so nothing that was already printed is lost, then the
+/// frames under a heading — mirroring `qqq_host::Trap::render`'s shape so a reader
+/// who has seen one trap report recognises the other.
+fn render_error_with_backtrace(
+    error: &Error,
+    backtrace: &crate::trap_report::ResolvedBacktrace,
+) -> String {
+    let mut out = error.render();
+    if backtrace.is_empty() {
+        return out;
+    }
+    out.push_str("  guest backtrace:\n");
+    for line in backtrace.render().lines() {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    // The explanation is printed even when everything resolved, because it is
+    // the sentence that says *whether* debug info was found. A reader who sees
+    // three resolved frames still needs to know the map covered all of them.
+    out.push_str("    ");
+    out.push_str(&backtrace.explanation);
+    out.push('\n');
+    out
 }
 
 /// Build an error for a failed write.

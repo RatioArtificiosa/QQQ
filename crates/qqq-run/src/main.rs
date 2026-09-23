@@ -522,7 +522,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Inspect => dispatch_inspect(name, args, &mut out),
         CommandName::Audit => dispatch_audit(name, args, &mut out),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
-        CommandName::Run => dispatch_run(name, args, flags, &mut out),
+        CommandName::Run => dispatch_run_with_trap_report(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
         CommandName::Init => dispatch_init(name, args, &mut out),
         CommandName::Dev => dispatch_dev(name, args, &mut out),
@@ -909,6 +909,83 @@ fn dispatch_run(
         }
         qqq_run::run::execute(loaded, &opts)
     })
+}
+
+/// Dispatch `qqqai run` with `HOST-009`'s detached trap report.
+///
+/// # Why this is a separate function from `with_manifest`
+///
+/// Because resolving a trap's frames needs **the artifact that trapped**, and
+/// `with_manifest` is generic over every command — most of which have no artifact
+/// at all. Threading an `Option<PathBuf>` through it for one command would put a
+/// field that is `None` fourteen times into the shared path.
+///
+/// # What it does that the generic path cannot
+///
+/// Before running, it extracts a `SourceMap` from the artifact. On failure, it
+/// resolves the trap's frames against that map. This is the whole point: the
+/// frames `qqq_host` attaches are already the *offsets*, and the map is what
+/// turns them into lines — with no engine, and after the fact.
+///
+/// Extraction failure is deliberately **not** fatal. A project built without
+/// `debug = true` has no DWARF, which is a legitimate configuration and not a
+/// reason to refuse to run it; the trap is still reported, with `func+0x…`
+/// frames and an explanation naming the missing debug info.
+fn dispatch_run_with_trap_report(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match run_options(args, flags) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    if opts.dry_run {
+        // A rehearsal instantiates nothing, so no trap can occur and there is
+        // nothing to resolve. Delegating keeps one definition of what a dry run
+        // does rather than two that could drift.
+        return dispatch_run(name, args, flags, out);
+    }
+
+    let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error(name, &e);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    // Extract the map **before** running, while the artifact is known to exist
+    // and before any trap has a chance to confuse the picture. Done here rather
+    // than in the error arm because the error arm no longer has the artifact
+    // path -- the error is a `qqq_core::Error` and carries no filesystem state.
+    let map = qqq_run::run::locate_artifact(&loaded, &opts)
+        .ok()
+        .map(|path| qqq_run::trap_report::source_map_for_artifact(&path))
+        .unwrap_or_default();
+
+    match qqq_run::run::execute(&loaded, &opts) {
+        Ok(value) => report(out, name, &value),
+        Err(e) => {
+            let backtrace = qqq_run::trap_report::resolve_error(&e, &map);
+            if backtrace.is_empty() {
+                // Not a trap: no frames to resolve, so the ordinary path is used
+                // and the output is byte-identical to what it was before this
+                // existed.
+                let _ = out.emit_error(name, &e);
+            } else {
+                let _ = out.emit_error_with_backtrace(name, &e, &backtrace);
+            }
+            ExitCode::from(exit::FAILURE)
+        }
+    }
 }
 
 /// Dispatch `qqqai new`.

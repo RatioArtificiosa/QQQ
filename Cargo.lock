@@ -1448,6 +1448,7 @@ dependencies = [
  "qqq-bench",
  "qqq-cap",
  "qqq-core",
+ "qqq-debug",
  "qqq-host",
  "qqq-io",
  "qqq-pkg",

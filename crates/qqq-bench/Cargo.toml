@@ -60,3 +60,38 @@ serde_json = { workspace = true }
 # A test needs to run the driver against a listener it controls, so the runtime
 # has to be constructible inside a `#[tokio::test]`.
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros"] }
+
+# # Why `wasmtime` is a dev-dependency and NOT a dependency (`PERF-005`)
+#
+# The comment above explains that `qqq-bench` depends on `serde` and Tokio and
+# **nothing else**, "so it can be used to measure anything, including a future
+# non-QQQ comparison (`PERF-*`) without dragging in this project's internals".
+# That property is worth keeping, and it is kept: this is the `[dev-dependencies]`
+# table, so a consumer of the published `qqq-bench` library still gets a crate with
+# no engine in it. The benchmark harness that MEASURES components is allowed to
+# depend on the engine; the *library* is not.
+#
+# # Why `qqq-host` is not the dependency instead
+#
+# `PERF-005` measures the canonical ABI's `lower`/`lift` cost. That cost is
+# Wasmtime's, and `qqq-host` sits *above* `qqq-bench` at §4.3 position 5 -- an
+# edge from `qqq-bench` (position 1) to `qqq-host` would point **upward** and
+# `tools/check_topology.py` plus `crates/qqq-core/tests/architecture.rs`
+# (`ARCH-004`) both reject it. Verified, not assumed: both checkers filter on the
+# `qqq-` prefix, and both pass with this line present.
+#
+# The honest consequence is stated in the measurement's own docs: this harness
+# drives Wasmtime **directly**, with the minimal component-model configuration,
+# and therefore measures the ABI rather than QQQ's configured engine. qqq-host's
+# pooling allocator, guard pages and epoch interruption are deliberately outside
+# this measurement, because they are `PERF-003`'s subject and not this one.
+#
+# # Why the version is the workspace pin
+#
+# `§D-003` pins the engine to 48, and the whole point of the numbers in
+# `docs/abi-cost-measured.md` is that they describe the engine QQQ actually uses.
+# A floating `wasmtime = "48"` resolves through `Cargo.lock` to the same 48.0.2
+# that `qqq-host` compiles against, so the harness and the host cannot drift onto
+# different canonical ABIs -- the failure mode the workspace manifest records for
+# `wasmtime-wasi`.
+wasmtime = { workspace = true }

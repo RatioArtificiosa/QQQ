@@ -14149,6 +14149,76 @@ green (11 success, 0 failures each). `.scratch/{ci_logs,find_injection,
 find_rename_target,verify_derivation}.py`.
 
 
+### O-177: the tool-call-repair plugin is correctly wired and cannot catch the leak it was built for
+
+The user showed me two of my own tool calls that appeared as **visible text** rather
+than executing, and asked whether the plugin caught them. It did not. Here is the
+verified diagnosis, because the reason matters more than the fact.
+
+#### Verified: the plugin loads and uses the correct seam
+
+| Claim | Evidence |
+|---|---|
+| It is in the composed config tree | `dsh --profile default --dump-config` contains `- id: tool-call-repair` / `name: file:///...lib/index.js` |
+| Its hook API matches the shipped reference | `dsh-tool-call-timeout-policy/lib/index.js`: `const inject = ["tools"]` and `ctx.on("tools/execute", async (exec, next) => ...)` — exactly what my plugin does |
+| Its logic is sound | `node test/verify.mjs` → 11 passed, 0 failed, including two negative cases |
+| It repaired nothing this session | `~/.dsh/tool-call-repair/repairs.jsonl` is **absent** — no entry was ever written |
+
+`--dump-config` is the check I had been missing all along. It composes the profile
+without booting it, which is the only way to prove a plugin is wired short of
+observing a live repair. It should be step one of any future plugin diagnosis.
+
+#### Why it cannot work, structurally
+
+The plugin's own docstring contains the contradiction, twenty lines apart:
+
+> **line 9–10:** the body arrives as visible prose with the closing markup intact
+> but no opening bracket. **Nothing is dispatched** — the call simply vanishes.
+>
+> **line 21:** It listens on the `tools/execute` pipeline.
+
+`tools/execute` fires **when a call is dispatched**. A call that is never dispatched
+never reaches it. The plugin was built to catch a failure that occurs upstream of
+the only place it can see — so it can observe *successful* calls and repair
+*damaged arguments on dispatched* calls, but a leak is invisible to it by
+construction.
+
+This is invariant six pointing the other way. Invariant six says *"when a tool
+appears to do nothing, the first hypothesis is that the call was never made"*. The
+plugin was written to enforce exactly that, but placed on a seam that only sees
+calls that **were** made.
+
+#### What the two leaks actually were
+
+Both were well-formed calls whose *text was emitted into the reply* instead of
+being executed — a rendering/emission failure, not an argument-damage failure.
+There were no arguments to normalise, because no call object existed. No repair at
+the execute seam could have touched them.
+
+#### What this means for the plugin's future
+
+The repair half is not useless — it normalises string-typed arguments and would
+log them — but it addresses a failure mode I have **never observed**, while the
+failure mode I **have** observed repeatedly is invisible to it. Two honest options,
+and the choice is the user's:
+
+1. **Keep it for the argument-repair case**, and stop describing it as a leak
+   catcher. Its docstring currently claims a capability it does not have, which is
+   the worst state for anyone reading it later.
+2. **Move the detection upstream** — somewhere that sees the model's raw output
+   before dispatch. That is a different plugin on a different seam, and it is the
+   only place a leak is observable.
+
+Whichever is chosen, **the docstring must stop asserting the leak-catching claim
+until a mechanism exists that can honour it.** A plugin that says it catches leaks
+and cannot is worse than no plugin, because it converts a visible failure into a
+false sense of coverage.
+
+→ `~/.dsh/plugins/dsh-tool-call-repair/lib/index.js` (docstring lines 9–10 vs 21);
+reference seam in `@deepseek-ai/dsh-tool-call-timeout-policy/lib/index.js:84,116`;
+proof of wiring via `dsh --profile default --dump-config`.
+
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

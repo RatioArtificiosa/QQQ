@@ -429,9 +429,14 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **LIC-005** Define the revenue-attestation mechanism for the free-tier boundary (open question `OQ-001`).
   → §13.2 The licence model, and why NN-8 still holds
 - [x] **LIC-006** Add SPDX headers to every source file and a CI check that they are present and correct.
-  → Done: **145 files** now carry `SPDX-License-Identifier: Apache-2.0` — every `.rs`
-    under `crates/` and `fuzz/fuzz_targets/`, every `wit/*.wit`, and every `tools/*.py`.
-    `tools/check_spdx.py` enforces it in CI and in the bridge.
+  → Done: **145 `.rs` files** under `crates/` and `fuzz/fuzz_targets/`, plus every
+    `wit/*.wit` and every `tools/*.py`, now carry
+    `SPDX-License-Identifier: Apache-2.0`.
+   The 145 counts only the `.rs` population: `git ls-files` gives 145 there, 17 in
+    `wit/` and 53 in `tools/`, 215 across the three. The entry's "and" read as a sum
+    until 2026-09-23, when the three were counted separately and the number turned out
+    to be exactly right for the population it actually describes.
+   `tools/check_spdx.py` enforces it in CI and in the bridge.
   → The identifier must match the workspace's declared licence, because a header naming a
     different licence from `Cargo.toml` is **worse than none**: it is a contradiction a
     scanner reports as fact.
@@ -1548,8 +1553,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.2 `qqq-cap` — the capability engine
 - [x] **CAP-011** Implement the restricted policy expression language with static analysability and termination proofs.
   → Done: `crates/qqq-cap/src/policy.rs` — lexer, parser, static analyser,
-    executable termination proof, scope/demand evaluator. **72 tests**, all
-    green. Bounds: `MAX_EXPR_DEPTH` 16, `MAX_RULES` 4096,
+    executable termination proof, scope/demand evaluator. **68 tests in that
+    module**, all green, counted by `cargo test -p qqq-cap --lib policy::`
+    (this entry said 72 until 2026-09-23, when the count was re-derived; 68
+    is what the runner reports and `policy.rs` carries 68 `#[test]`
+    attributes, so the two agree). Bounds: `MAX_EXPR_DEPTH` 16, `MAX_RULES` 4096,
     `MAX_SOURCE_BYTES` 1 MiB.
   → **The three claims §6.2 makes are made true rather than asserted.**
     *Non-Turing-complete*: no loop, no recursion, no user-defined function, no
@@ -1654,8 +1662,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §7.1 What we are defending, precisely
 - [x] **CAP-015** Implement capability-use accounting feeding the audit stream.
   → Done: `crates/qqq-host/src/audit.rs` — `AuditStream`, `AuditRecord`,
-    `AuditFields`, `Outcome`, `Ledger`, `Append`, `AppendCounters`. **34 tests**,
-    all green. `DEFAULT_CAPACITY` 65,536.
+    `AuditFields`, `Outcome`, `Ledger`, `Append`, `AppendCounters`. **33 tests in
+    that module**, all green, counted by `cargo test -p qqq-host --lib audit::`
+    (this entry said 34 until 2026-09-23, when the count was re-derived; 33
+    is what the runner reports and `audit.rs` carries 33 `#[test]`
+    attributes). `DEFAULT_CAPACITY` 65,536.
   → **§10.1's three emphasised words are each a property a log does not have,
     and each has its own test.** *Append-only*: a full stream **refuses**
     (`Append::Full`) rather than overwriting — under the exact condition an audit

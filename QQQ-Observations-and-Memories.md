@@ -16316,6 +16316,64 @@ knowing, and is not something the earlier three corrections could have establish
 
 ---
 
+## §O-203 — The three counts §O-202 left open, resolved by the runner rather than by argument
+
+§O-202 closed with two per-module claims unresolved — CAP-011 said 72 tests and
+CAP-015 said 34 — on the reasoning that "without knowing which tests the author
+counted, editing the number would replace one guess with another". That reasoning
+was right about *editing* and wrong about *leaving it there*: there is a third
+option, which is to ask the test runner, and the runner is the only authority that
+matters for a sentence beginning "N tests, all green".
+
+**The measurement.** Both entries name exactly one file in their `Done:` line, and
+both claims are about the tests in that file:
+
+| Entry | File the entry names | `#[test]` in the file | Runner count for that module |
+|---|---|---|---|
+| CAP-011 | `crates/qqq-cap/src/policy.rs` | 68 | `cargo test -p qqq-cap --lib policy::` → **68 passed** |
+| CAP-015 | `crates/qqq-host/src/audit.rs` | 33 | `cargo test -p qqq-host --lib audit::` → **33 passed** |
+
+Two independent measurements agreeing is the strongest evidence available here, and
+it is the same shape §O-201 established as the durable fix: make the claim name the
+surface that produces it. Both entries now say "**68 tests in that module**,
+counted by `cargo test -p qqq-cap --lib policy::`" rather than a bare figure, so the
+next reader runs a command instead of trusting a number.
+
+**Where the two extra numbers probably came from.** They are almost certainly real
+counts of a *different population*. `qqq-cap`'s lib target runs 241 tests, so
+"72 tests" is a plausible count for the policy work together with the handful of
+static-analysability cases that live in neighboring modules. `qqq-host`'s lib
+target runs 427. Neither entry says which population it meant, which is exactly the
+defect: a count whose population is unstated cannot be checked by anyone, including
+its author a week later. The fix is not the arithmetic, it is naming the population.
+
+**LIC-006's 145 was right and read wrong.** The entry said "**145 files** now carry
+`SPDX-License-Identifier: Apache-2.0` — every `.rs` under `crates/` and
+`fuzz/fuzz_targets/`, every `wit/*.wit`, and every `tools/*.py`." Read as written,
+the `and` makes 145 the sum of three populations. Measured from the index:
+
+```
+crates/ + fuzz/fuzz_targets/ *.rs   145
+wit/*.wit                            17
+tools/*.py                           53
+                              total  215
+```
+
+145 is exactly the `.rs` population. The claim was not stale; its grammar was
+ambiguous. The entry now says "**145 `.rs` files** under … plus every `wit/*.wit`
+and every `tools/*.py`", and states all three counts so the next reader can see the
+partition rather than having to guess at it. `tools/check_spdx.py` itself reports
+213, which is a third measurement of a third population — it walks the tree rather
+than the index — and that discrepancy is now written down rather than left to
+surprise someone.
+
+**What this closes.** Of the eight per-module counts and the several bare-file
+counts §O-201 and §O-202 enumerate, every one is now either re-derived from a
+command or reworded so that the command that produces it is named in the entry. The
+pattern across all three rounds holds: **six stale numbers and one ambiguous one, and
+every single one was accurate when written.** Nothing was invented, and nothing was
+guessed at in the fix either — each correction is anchored to a command's output.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

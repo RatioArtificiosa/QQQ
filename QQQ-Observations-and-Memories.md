@@ -16374,6 +16374,123 @@ pattern across all three rounds holds: **six stale numbers and one ambiguous one
 every single one was accurate when written.** Nothing was invented, and nothing was
 guessed at in the fix either — each correction is anchored to a command's output.
 
+## §O-204 — A fault injection reached a commit through the index, and the guard that exists for this said clean
+
+**What happened.** Commit `0a9e2eb` was created with `git add -A` and, as
+written, carried one line of `QQQ-Proposal-V1.md`:
+
+```text
+-→ **Checklist:** `HOST-001` … `HOST-024`
++→ **Checklist:** `HOST-999` … `HOST-024`
+```
+
+`HOST-999` is not a checklist item. It is the string `self_test_xrefs.py` writes
+into the Proposal as check [2] — "the Proposal citing a dangling checklist ID" —
+and removes again. It was in the commit and not on disk. The commit was amended
+before pushing (`2a30b38`), so nothing reached the remote, but the defect is real
+and worth recording precisely, because three separate mechanisms that should have
+caught it each reported success.
+
+**The diagnosis, and the wrong one I started with.** My first reading was that a
+killed harness run had left the marker behind and `git add -A` swept it up. That
+reading is wrong, and it was disproved with a command rather than by re-reading
+the code: `git show HEAD~1:QQQ-Proposal-V1.md` and the working-tree copy are
+**byte-identical** (`wd == parent` → `True`), and the working tree never contained
+the marker. So the marker existed only in the index and in the commit object.
+
+**The actual mechanism.** The harness mutates a file, runs the validator, and
+restores the file. My `git add -A` executed inside one of those windows:
+
+```text
+harness:   write `HOST-999` into the Proposal
+me:        git add -A                      <- captures the injected bytes
+harness:   restore `HOST-001`
+me:        git commit                      <- writes the index blob it captured
+```
+
+Afterwards the working tree is correct, `--check-clean` is correct, and the
+commit is wrong. I reproduced the mechanism on a throwaway file in scratch and
+confirmed the shape: the staged bytes are the injected ones while the on-disk
+bytes are the restored ones. That is a **new failure class**, distinct from
+§O-191/§O-193 (a killed run left a marker behind): here the harness succeeded, and
+the interleaving was the problem.
+
+**Why each guard reported success.**
+
+| Guard | What it checks | Why it passed |
+|---|---|---|
+| `self_test_xrefs --check-clean` | the working tree, against its marker list | run at gate step *n*; the injection window opened at step *n+1* |
+| `git status` | index vs tree vs HEAD | after the amend, all three agreed again |
+| `check_xrefs.py` (the xref validator) | does a citation resolve | `HOST-999` does resolve *as a dangling reference* — that is what check [2] injects — so the validator was the thing under test, not a guard |
+
+The third row is the interesting one and worth stating plainly: **the injection is
+designed to be detected by the validator, so the validator cannot be its guard.**
+The guard has to be a separate check that runs *after* the harness and before the
+commit, and the workspace has one — `--check-clean` — which is exactly why
+`self_test_xrefs` was run twice in the gate.
+
+**Is the guard blind, or was it mistimed?** Not blind. Asked directly, with the
+marker applied to the Proposal by hand:
+
+```text
+marker_is_present(PROPOSAL, '`HOST-999`', False) -> True
+  DETECTED QQQ-Proposal-V1.md: '`HOST-999`' (check [2]: the Proposal citing a dangling checklist ID)
+restored byte-for-byte: True
+```
+
+and a full harness run afterwards reports `9/9 fault injections detected` and
+`SELF-TEST PASSED`, leaving `git diff` against all three documents empty. So the
+guard works; it simply ran before the window opened. Invariant ONE is what was
+violated in spirit: the gate is a sequence, and a step inside it (`self_test_xrefs`
+full) is itself an *edit*. The sequence does not end when the last checker exits;
+it ends when the tree is proven unchanged since the gate started.
+
+**The durable fixes, and which are taken.** All three are now implemented; the
+third was written after the first two, when the interleaving was reproduced on a
+scratch file and the shape of the window became clear.
+
+1. **Taken, now.** `git add -A` is not used on the three canonical documents
+   again in this session; the amend was done with `git checkout HEAD~1 -- <file>`
+   to restore byte-for-byte and `git show --stat` read before every push. The
+   evidence for the amend is recorded in the commit message itself, including the
+   exact line and the proof that the working tree matched `HEAD~1`.
+2. **Taken, now.** `QQQ-Proposal-V1.md`'s content is asserted equal to `HEAD~1`
+   for every file a commit touches, by reading `git show --stat` and the diff, on
+   the rule that *a file I did not intend to edit appearing in `git status` is a
+   finding, not noise*. That check is what caught this one.
+3. **Taken, now.** `tools/check_corpus_at_rest.py` records a SHA-256 and a byte
+   length per canonical document and refuses when either differs. It catches the
+   interleaving above because it asks a different question from every other guard:
+   `--check-clean` and `check_xrefs.py` ask "is a *known* fault text present?",
+   while a digest asks "are these the bytes we agreed on?" and therefore needs no
+   marker list and catches a fault nobody has thought of. It is wired into the CI
+   cross-reference job immediately after the mutating harness, and into the local
+   gate after `self_test_xrefs` — after, because a barrier placed before the thing
+   it guards is the defect it exists to catch.
+
+   Proved live rather than asserted (invariant TWO). The defect reintroduced was
+   the obvious shortcut of comparing **length only**:
+
+   ```text
+   -if e["sha256"] == a["sha256"] and e["bytes"] == a["bytes"]:
+   +if a["bytes"] == a["bytes"] and e["bytes"] == a["bytes"]:
+   ```
+
+   Four of the eleven self-test cases went red — the three real injections plus
+   `caught: a same-length substitution by digest`, which is the case that exists
+   precisely to discriminate a length check from a digest check. The file was
+   restored byte-for-byte (`restored sha == before sha` → `True`), the injected
+   marker was absent, and the post-restore run exited 0. The self-test also carries
+   an anti-vacuity case: deleting a document must report failure, because a
+   deleted file trivially satisfies "no known fault text is present".
+
+**The lesson.** A self-healing harness and a commit are not composable without a
+barrier. The harness's own guard is correctly placed (`--check-clean` refuses at
+commit time) but a *sequence* that invokes the mutating mode before the commit
+leaves a window, and an index captured inside that window is a commit of
+something nobody reviewed. **Take the index snapshot from a tree you have proven
+is at rest, not from a tree a harness is currently editing.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

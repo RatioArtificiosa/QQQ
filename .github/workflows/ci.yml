@@ -434,6 +434,27 @@ jobs:
       - name: Confirm the corpus survived the harness
         run: python tools/check_xrefs.py
 
+      # **A digest barrier, because every marker scan above asks a narrower question.**
+      #
+      # `--check-clean` and `check_xrefs.py` both ask "is a *known* fault text
+      # present?". A digest asks "are these the bytes we agreed on?", which needs no
+      # marker list and catches a fault nobody has thought of.
+      #
+      # The failure it closes is `§O-204`: the harness mutates a document, proves the
+      # validator, and restores it, all within one run. A commit built from an index
+      # captured inside that window records the *injected* bytes while the working
+      # tree, `git status` and `--check-clean` all look correct. That happened --
+      # `0a9e2eb` carried `HOST-999` (not-a-checklist-item) in the Proposal and was
+      # amended before pushing.
+      #
+      # Recording and verifying in the same job makes the barrier self-checking on
+      # every run: if the corpus is left changed by anything at all, this step names
+      # the document and the byte-length delta.
+      - name: Prove the corpus is byte-identical to its recorded digests
+        run: |
+          python tools/check_corpus_at_rest.py --record
+          python tools/check_corpus_at_rest.py
+
       # `HOST-011` requires every host function to be panic-guarded, and the
       # guard is a *wrapper*: a host function added without it compiles, passes
       # every test that does not panic, and kills the process (the release

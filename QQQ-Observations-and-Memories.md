@@ -18045,4 +18045,95 @@ would be worse than naming the gap. §2.1 NN-1's promise — *"an agent can be g
 `qqqai schema --all` and write correct code from this platform from a cold start"* — now has
 the document it refers to.
 
+## §O-221 — `crates/qqq-run/src/main.rs` was 173 KB of null bytes, and the fault was
+mistaken for a code defect
+
+**Found:** 2026-09-22, opening a session on `E:\QQQ`. **Fixed and verified:** same session.
+**Checklist anchors:** `CLI-017` (the command that could not compile), `SUP-002`.
+
+### The defect
+
+`cargo build -p qqq-run` failed with two errors that read like a source-level mistake:
+
+```
+error: unknown start of token: \u{0}
+ --> crates\qqq-run\src\main.rs:1:1
+error[E0601]: `main` function not found in crate `qqqai`
+```
+
+The file was **173,062 bytes of `0x00`** — every byte null. `git show HEAD:...main.rs` held the
+intact 3,917-line file, so nothing had been lost, but the working tree carried a file that could
+not compile and whose diff read as a binary change (`Bin 166879 -> 173062 bytes`).
+
+### Why it is worth recording rather than just fixing
+
+`git checkout --` restored it in one command, and that is the whole fix. What is worth the entry
+is the trap: **a null-filled file produces compiler errors that describe a code defect.** The
+first read of that output suggests a stray `\0` in a source line or a corrupt encoding, and the
+productive next step — confirm the file's own bytes before reasoning about its content — is not
+where the error message points.
+
+The same session found two related environment damages that also masquerade as code defects:
+`LNK1285: corrupt PDB file 'target\debug\deps\cli-....pdb'` (fixed by deleting that one `.pdb`;
+the linker rebuilds it) and a stale generated project directory that made a serve test read a
+manifest from a previous run. All three are build-cache or filesystem damage presenting as
+logic errors, and all three cost more time than the fix because the error text describes the
+symptom rather than the cause.
+
+### The rule
+
+**Before reasoning about a compile error in a file, read the file's bytes back.** For a source
+file that is suspiciously large, all-null, or shows as `Bin` in `git diff --stat`, the file is
+the finding and the compiler output is noise. Invariant EIGHT (*read every file write back*)
+generalized from "the file I just wrote" to "the file I am about to debug".
+
+## §O-222 — The serve path's four features are wired, and the fifth question was answered
+by a bisect instead of a guess
+
+**Found:** 2026-09-22, verifying the plan's criterion-2 gate. **Verified:** same session.
+**Checklist anchors:** `SRV-019` (CORS), `SRV-020` (limits), `O-181` (the wiring fix).
+
+`O-181` recorded the fix for four features that were implemented, unit-tested and unreachable
+from `qqqai serve`. This entry records the **end-to-end** confirmation over a real socket, since
+the previous evidence was `config.auth = ...` assignments read in the source rather than requests
+answered by a running server.
+
+### What was driven, and what came back
+
+A generated project with a `deny` route, an `auth = "none"` route, a 64-byte
+`[server.limits.default].max_body_bytes`, and a `[server.cors]` block, served by the real
+binary on a real port:
+
+| Request | Response | Proves |
+|---|---|---|
+| `GET /denied` | `403 Forbidden` | the manifest's `default_auth = "deny"` is enforced, and not by accident (a `200` here was the failure condition) |
+| `GET /open` | `503 not_built` | **the control** — auth did not become a blanket refusal, so the 403 above is a decision rather than a broken gate |
+| `POST /open`, 500 bytes vs a 64-byte ceiling | `413 Content Too Large` | the body cap refuses on the **declared** length, before reading |
+| `OPTIONS /open`, allowed origin | `204` + `Access-Control-Allow-Origin: https://allowed.example` + `Vary: Origin` | the manifest's CORS decision reaches the wire |
+| `OPTIONS /open`, `https://evil.example` | no `Access-Control-Allow-Origin` | the policy discriminates, rather than reflecting whatever it is sent |
+
+The listener answered five requests on one process, so this is a running server and not five
+one-shot checks.
+
+### The wrong turn, recorded because it was instructive
+
+My first CORS assertion **failed** with `403`, and a bisect showed the code was right and my
+test was wrong twice over:
+
+1. The route declared `methods = ["GET", "POST"]` while the test issued `OPTIONS`. No `OPTIONS`
+   route matched, so the request never reached the preflight path.
+2. After adding `OPTIONS` to the route, the manifest's `[server.cors]` block had **no
+   `allow_methods`**. `Cors::preflight` *checks* the requested method against the configuration
+   instead of echoing it — deliberately, since *"a preflight that echoes is not a policy - it
+   grants every method on demand"* — so an empty allow-list refuses every method.
+
+A bisect over four manifest variants (no auth, `default_auth = deny` alone, limits alone, both)
+returned `204` with the correct header in all four, which located the cause in the manifest I had
+written rather than in the server. **The lesson is the ordering:** a failing end-to-end assertion
+against a system whose unit tests are green is a claim about *my fixture* until a bisect says
+otherwise, and the bisect is cheap. Invariant FOUR (*reproduce a finding before fixing it*) is
+what stopped a "CORS preflight is broken by auth ordering" entry from being written into this
+document — and it would have been written confidently, because the `403` looked exactly like an
+ordering defect.
+
 *End of `QQQ-Observations-and-Memories.md`.*

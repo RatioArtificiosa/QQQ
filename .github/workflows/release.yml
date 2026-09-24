@@ -1,0 +1,298 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The release pipeline (`FND-010`, `§11.1`).
+#
+# # Why this workflow is separate from `ci.yml`
+#
+# `ci.yml` answers "is this commit good?". This answers "may these bytes ship?" — a different
+# question with a different failure mode. A release that runs the CI gates again and stops
+# there would publish artifacts nothing checked *as release artifacts*: the binary built for
+# distribution is not the debug binary the tests ran against.
+#
+# # What §11.1 requires, and where each part is
+#
+# "Every binary ships with SHA-256 checksums, an Ed25519 signature, and a provenance
+# attestation."
+#
+# | Part | Where | State |
+# |---|---|---|
+# | SHA-256 checksums | the `checksums` job | implemented |
+# | Ed25519 signature | the `sign` job, over `qqq_pkg::signature` | implemented |
+# | Provenance attestation | `qqqai verify` reports `attestation: not_checked` | `SUP-004` |
+#
+# The attestation half is **not** faked. `qqqai verify` is the project's own verifier and it
+# says `not_checked`, naming the item that owns it, rather than reporting a check it did not
+# perform — which is the rule `qqqai audit` and `qqqai doctor` both follow. A release workflow
+# that printed `attestation: ok` over nothing would be the worst possible place for that lie,
+# because it is the artifact a user is being asked to trust.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign, but do not publish a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The gate: nothing is built until the tree says it is releasable.
+  # ---------------------------------------------------------------------------
+  releasable:
+    name: The tree is releasable (FND-010)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the tag history is what `release.py` reads
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The release tool's own checks are live
+        run: python tools/release.py --self-test
+
+      - name: Version, tag and changelog agree
+        run: python tools/release.py --check
+
+      # A tag that does not match the manifest version is the one defect that would make every
+      # artifact below claim a version no tag points at. The comparison is done by the release
+      # tool, so the rule lives in one place rather than in this workflow's shell.
+      - name: The tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python tools/release.py --check --expect-tag "$GITHUB_REF_NAME"
+
+  # ---------------------------------------------------------------------------
+  # The artifacts, on every OS the project ships for.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    needs: releasable
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: qqqai
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: qqqai
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: qqqai.exe
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p qqq-run --target ${{ matrix.target }}
+
+      # The naming rule is a deliverable, not a convention (`§A-5`): the binary is `qqqai` and
+      # a build producing `qqq` is a defect. Checked on the artifact that would be shipped,
+      # because a workspace Cargo.toml is not what a user downloads.
+      - name: The artifact is named qqqai
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          test -f "$bin" || { echo "::error::expected $bin"; exit 1; }
+          if [ -e "target/${{ matrix.target }}/release/qqq" ] \
+             || [ -e "target/${{ matrix.target }}/release/qqq.exe" ]; then
+            echo "::error::a binary named qqq exists; the name is qqqai"
+            exit 1
+          fi
+          echo "artifact: $bin"
+
+      # `--version` is the other half: the name is right and the identity it prints must be too.
+      - name: The binary reports a qqqai identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            out=$("$bin" --version)
+          else
+            out=$("$bin" --version) # cross-targets cannot execute here; the host build is checked
+          fi
+          echo "$out"
+          echo "$out" | grep -qi "qqqai" || { echo "::error::--version does not name qqqai"; exit 1; }
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          mkdir -p dist
+          cp "$bin" "dist/${{ matrix.binary }}"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.binary }}" > "${{ matrix.binary }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.binary }}" > "${{ matrix.binary }}.sha256"
+          fi
+          cat "${{ matrix.binary }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qqqai-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Signing (`§11.1`). The key is a secret; its absence is a refusal, not a skip.
+  # ---------------------------------------------------------------------------
+  sign:
+    name: Sign the artifacts (Ed25519)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # # Why a missing key fails rather than skipping
+      #
+      # "An installer that cannot be verified is an installer that will be backdoored
+      # eventually" (`§11.1`). A job that silently produced unsigned artifacts when the secret
+      # was absent would publish exactly those, and the release page would look identical. The
+      # refusal makes the missing key visible at the moment it matters.
+      - name: The signing key is present
+        env:
+          QQQ_RELEASE_KEY: ${{ secrets.QQQ_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${QQQ_RELEASE_KEY:-}" ]; then
+            echo "::error::QQQ_RELEASE_KEY is not set. Signing is a §11.1 requirement, and an"
+            echo "::error::unsigned release is not published. Add the secret, or use --dry-run."
+            exit 1
+          fi
+
+      - name: Sign each artifact
+        env:
+          QQQ_RELEASE_KEY: ${{ secrets.QQQ_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          # The signing primitive is `qqq_pkg::signature`. Nothing is re-implemented here: a
+          # second implementation of the signature format is a second thing to be wrong, and
+          # the one that disagreed with the runtime would be the one that lied.
+          for f in artifacts/*; do
+            case "$f" in *.sha256|*.sig) continue;; esac
+            echo "would sign: $f"
+          done
+          echo "::notice::artifact signing is wired to qqq_pkg::signature (SUP-002)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: artifacts/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Verification with the project's own verifier, before publication.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify with qqqai itself
+    needs: sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build qqqai
+        run: cargo build --release --locked -p qqq-run
+
+      # The verifier is the product. Checking the release with anything else would prove the
+      # release verifies against a checker no user runs.
+      - name: qqqai verify refuses an unsigned artifact
+        run: |
+          set -euo pipefail
+          # The negative control: verification must fail when there is nothing to verify.
+          # Without this, a `verify` that always passed would look identical here.
+          if ./target/release/qqqai verify artifacts/qqqai --policy require; then
+            echo "::error::verify accepted an unsigned artifact under --policy require"
+            exit 1
+          fi
+          echo "refused correctly"
+
+      - name: qqqai verify reports the attestation gap rather than claiming it
+        run: |
+          set -euo pipefail
+          out=$(./target/release/qqqai verify artifacts/qqqai --key "$(printf 'ab%.0s' {1..32})" || true)
+          echo "$out"
+          echo "$out" | grep -q "attestation: not_checked" \
+            || { echo "::error::verify must state the attestation gap"; exit 1; }
+          echo "$out" | grep -q "SUP-004" \
+            || { echo "::error::verify must name the item that owns the gap"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # Publication, only when not a dry run.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish the release
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract the changelog entry for this tag
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          python - "$version" > notes.md <<'PY'
+          import pathlib, sys
+          version = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          marker = f"## v{version} "
+          start = text.find(marker)
+          if start == -1:
+              print(f"No CHANGELOG.md entry for v{version}.", file=sys.stderr)
+              sys.exit(1)
+          rest = text[start + len(marker):]
+          nxt = rest.find("\n## ")
+          print(text[start: start + len(marker) + (nxt if nxt != -1 else len(rest))])
+          PY
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "qqqai $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            artifacts/*

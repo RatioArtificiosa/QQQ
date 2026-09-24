@@ -72,6 +72,7 @@ pub mod test_runner;
 /// Resolving a trap's backtrace to source lines without an engine (`HOST-009`).
 pub mod trap_report;
 pub mod update;
+pub mod verify;
 pub mod watch;
 
 pub use build::{

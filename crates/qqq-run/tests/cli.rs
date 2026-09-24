@@ -85,6 +85,18 @@ impl Sandbox {
 
     /// Write a file relative to the sandbox root.
     fn write(&self, name: &str, content: &str) {
+        self.write_bytes(name, content.as_bytes());
+    }
+
+    /// Write raw bytes.
+    ///
+    /// # Why `write` delegates here rather than the reverse
+    ///
+    /// Because a signature is bytes, and a byte with the high bit set is not a `char` — so a
+    /// fixture routed through `&str` would have to be encoded and decoded, and any asymmetry
+    /// between the two would change the bytes being signed. One path, taking bytes, with the
+    /// text convenience on top.
+    fn write_bytes(&self, name: &str, content: &[u8]) {
         let target = self.path.join(name);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).expect("create parent");
@@ -390,6 +402,167 @@ fn caps_refuses_an_unknown_flag() {
         "the remediation must not carry a run of spaces:\n{}",
         json.stdout
     );
+}
+
+/// The signing seed every `verify` test uses, so a failure is reproducible.
+const VERIFY_SEED: [u8; 32] = [0x42; 32];
+
+/// Write a signed artifact and its `.sig` into the sandbox, and return the public key in hex.
+///
+/// Signing through `qqq_pkg::signature` rather than embedding a fixture: a stored `.sig` would
+/// be a second copy of the format that drifts the moment either side changes, and a test that
+/// asserts against a drifted fixture passes for the wrong reason.
+fn signed_artifact(s: &Sandbox, name: &str, bytes: &[u8]) -> String {
+    let sig = qqq_pkg::signature::sign(bytes, &VERIFY_SEED).expect("sign the fixture");
+    s.write_bytes(name, bytes);
+    s.write_bytes(&format!("{name}.sig"), &sig.to_bytes());
+
+    let public = ed25519_dalek::SigningKey::from_bytes(&VERIFY_SEED)
+        .verifying_key()
+        .to_bytes();
+    public.iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+/// A signed artifact verifies, and the answer names the key and the digest.
+///
+/// # What this catches
+///
+/// `CLI-017` was an unimplemented command answering QQQ-6004. The assertions are the promises
+/// §5.2 makes for `qqqai verify <artifact>`: it verifies, it says **which** key, and — since a
+/// verification is about specific bytes — it reports the digest those bytes produced.
+#[test]
+fn verify_accepts_a_real_signature_and_names_the_key() {
+    let s = Sandbox::new("verify-ok");
+    s.write("qqq.toml", MINIMAL);
+    let public = signed_artifact(&s, "app.wasm", b"the artifact bytes");
+
+    let run = s.run(&["verify", "app.wasm", "--key", &public]);
+    run.assert_ok()
+        .assert_contains("signature verified against key")
+        .assert_contains("digest sha256:")
+        // The attestation half of §5.2 is not implemented, and the command says so rather
+        // than letting "verified" be read as covering it.
+        .assert_contains("attestation: not_checked")
+        .assert_contains("SUP-004");
+
+    let json = s.run(&["verify", "app.wasm", "--key", &public, "--json"]);
+    json.assert_ok();
+    assert!(
+        json.stdout.contains("\"ok\":true") && json.stdout.contains("\"state\":\"verified\""),
+        "the envelope must agree with the process status:\n{}",
+        json.stdout
+    );
+}
+
+/// One flipped byte is refused, with a non-zero status and the digest of what was refused.
+///
+/// # Why the digest is asserted on the failure path
+///
+/// Because the first question about a rejected artifact is "which bytes were rejected?", and a
+/// report that answered only "signature failed" would leave the reader unable to tell a
+/// corrupted download from a substituted file.
+#[test]
+fn verify_refuses_a_modified_artifact() {
+    let s = Sandbox::new("verify-tampered");
+    s.write("qqq.toml", MINIMAL);
+    let public = signed_artifact(&s, "app.wasm", b"the artifact bytes");
+
+    // Flip one byte, keeping the original signature.
+    s.write_bytes("tampered.wasm", b"the artifact bytez");
+    let sig = std::fs::read(s.path.join("app.wasm.sig")).expect("read the signature");
+    s.write_bytes("tampered.wasm.sig", &sig);
+
+    let run = s.run(&["verify", "tampered.wasm", "--key", &public]);
+    run.assert_failed()
+        .assert_contains("does not match the artifact")
+        .assert_contains("sha256:");
+}
+
+/// An unsigned artifact is `unsigned` under an optional policy and a failure under `require`.
+///
+/// # Why the two statuses are asserted as a pair
+///
+/// Because they are the distinction `--policy` exists for. A test that checked only one would
+/// pass if the flag were ignored and the policy were hard-coded either way.
+#[test]
+fn verify_distinguishes_an_absent_signature_from_a_failing_one() {
+    let s = Sandbox::new("verify-unsigned");
+    s.write("qqq.toml", MINIMAL);
+    let public = signed_artifact(&s, "app.wasm", b"signed");
+    s.write_bytes("bare.wasm", b"nobody signed this");
+
+    let optional = s.run(&["verify", "bare.wasm", "--key", &public]);
+    optional.assert_ok().assert_contains("unsigned");
+
+    let required = s.run(&[
+        "verify",
+        "bare.wasm",
+        "--key",
+        &public,
+        "--policy",
+        "require",
+    ]);
+    required
+        .assert_failed()
+        .assert_contains("requires a signature");
+}
+
+/// A key the policy does not list is refused, and the remediation names the accepted ones.
+#[test]
+fn verify_refuses_a_key_the_policy_does_not_accept() {
+    let s = Sandbox::new("verify-other-key");
+    s.write("qqq.toml", MINIMAL);
+    signed_artifact(&s, "app.wasm", b"the artifact bytes");
+
+    let run = s.run(&["verify", "app.wasm", "--key", &"aa".repeat(32)]);
+    run.assert_failed().assert_contains("does not accept");
+}
+
+/// A signature the policy cannot attribute is refused rather than accepted.
+///
+/// # Why this is the important negative case
+///
+/// A signature verified against *nothing* proves only that the file is internally consistent.
+/// Treating "no keys configured" as "nothing to check, so pass" is the failure this guards,
+/// and it is the one that would make `qqqai verify` decorative.
+#[test]
+fn verify_refuses_a_signature_it_cannot_attribute() {
+    let s = Sandbox::new("verify-no-keys");
+    s.write("qqq.toml", MINIMAL);
+    signed_artifact(&s, "app.wasm", b"the artifact bytes");
+
+    let run = s.run(&["verify", "app.wasm"]);
+    run.assert_failed().assert_contains("no keys");
+}
+
+/// Argument mistakes are exit 2, distinct from a verification that ran and failed.
+///
+/// A gate that read "you typed the flag wrong" the same as "the artifact is untrusted" would
+/// report a red build for a command that never checked anything.
+#[test]
+fn verify_reports_usage_errors_separately_from_findings() {
+    let s = Sandbox::new("verify-usage");
+    s.write("qqq.toml", MINIMAL);
+    signed_artifact(&s, "app.wasm", b"x");
+
+    // A malformed key names the length, because a truncated paste and a base64 key are the
+    // two mistakes that actually happen.
+    let bad_key = s.run(&["verify", "app.wasm", "--key", "abcd"]);
+    bad_key.assert_failed().assert_contains("64 hex characters");
+
+    let bad_policy = s.run(&["verify", "app.wasm", "--policy", "maybe"]);
+    bad_policy
+        .assert_failed()
+        .assert_contains("is not a policy");
+
+    let no_artifact = s.run(&["verify"]);
+    no_artifact
+        .assert_failed()
+        .assert_contains("needs the artifact");
 }
 
 /// The §8.3 document carries every field §8.3 names.

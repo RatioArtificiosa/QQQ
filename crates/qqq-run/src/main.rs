@@ -521,6 +521,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Openapi => dispatch_openapi(name, args, &mut out),
         CommandName::Inspect => dispatch_inspect(name, args, &mut out),
         CommandName::Audit => dispatch_audit(name, args, &mut out),
+        CommandName::Verify => dispatch_verify(name, args, &mut out),
         CommandName::Build => dispatch_build(name, args, flags, &mut out),
         CommandName::Run => dispatch_run_with_trap_report(name, args, flags, &mut out),
         CommandName::New => dispatch_new(name, args, &mut out),
@@ -810,6 +811,142 @@ fn dispatch_audit(
         return ExitCode::from(exit::FAILURE);
     }
     ExitCode::from(exit::OK)
+}
+
+/// Dispatch `qqqai verify <artifact>` (`§5.2`, `SUP-002`).
+///
+/// # Why the parsing lives here rather than in `verify.rs`
+///
+/// `qqq_run::verify` takes a [`qqq_run::verify::VerifyOptions`] — a value — and every other
+/// command in this file follows the same split: the module owns the meaning, the CLI owns the
+/// spelling. Keeping `--key`'s accumulation out of the module is also what lets the module's
+/// own tests build an option set directly instead of going through argv.
+///
+/// # The flag vocabulary, and why `--key` repeats
+///
+/// | Flag | Meaning |
+/// |---|---|
+/// | `--key <hex>` | one trusted publisher key; repeatable, because a rotation means two |
+/// | `--policy require` | a signature is **required**, not merely verified when present |
+///
+/// `--policy` takes exactly one value today. An unknown value is refused rather than ignored,
+/// because the failure mode of ignoring it is the worst one available: `--policy requiere`
+/// would leave the policy opportunistic, and an unsigned artifact would then pass a check the
+/// caller believed was mandatory. That is a typo turning into a security decision, so it is a
+/// usage error instead.
+fn dispatch_verify(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    const TAKES_VALUE: [&str; 2] = ["--key", "--policy"];
+    let mut artifact: Option<String> = None;
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    let mut require_signature = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        // Both flags accept `--flag value` and `--flag=value`. The two forms are handled
+        // separately rather than by splitting on '=' up front, because a key may legitimately
+        // contain ':' as a separator and pre-splitting would have to decide what else is safe.
+        let (flag, inline): (&str, Option<&str>) = match a.split_once('=') {
+            Some((f, v)) if TAKES_VALUE.contains(&f) => (f, Some(v)),
+            _ => (a, None),
+        };
+        match flag {
+            "--key" | "--policy" => {
+                let value = match inline {
+                    Some(v) => v.to_owned(),
+                    None => {
+                        if let Some(v) = args.get(i + 1) {
+                            i += 1;
+                            v.clone()
+                        } else {
+                            let e = missing_value(flag);
+                            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                            return ExitCode::from(exit::USAGE);
+                        }
+                    }
+                };
+                if flag == "--policy" {
+                    if value != "require" {
+                        // Built here rather than through `unknown_choice`, whose phrasing is
+                        // "`x` is not a known <kind>". The policy flag's job is to say *what
+                        // kind of thing* was rejected, and "not a policy" reads as the flag
+                        // being wrong rather than the value — which is the distinction the
+                        // caller needs when the typo is theirs.
+                        let e = qqq_core::Error::new(
+                            qqq_core::ErrorCode::McpArgumentInvalid,
+                            format!("`{value}` is not a policy"),
+                        )
+                        .with_remediation(
+                            "choose one of: require (a signature is required, not merely \
+                             verified when present)",
+                        );
+                        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                        return ExitCode::from(exit::USAGE);
+                    }
+                    require_signature = true;
+                } else {
+                    match qqq_run::verify::parse_key(&value) {
+                        Ok(k) => keys.push(k),
+                        Err(e) => {
+                            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                            return ExitCode::from(exit::USAGE);
+                        }
+                    }
+                }
+            }
+            // A global flag (`--json`) is tolerated, as in `inspect`: refusing one here would
+            // make a valid invocation fail.
+            _ if a.starts_with('-') => {}
+            _ if artifact.is_none() => artifact = Some(a.to_owned()),
+            _ => {
+                let e = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("`verify` takes one artifact, but `{a}` is a second"),
+                )
+                .with_remediation(format!(
+                    "for example: {} verify app.wasm --key <hex>",
+                    qqq_core::BINARY_NAME
+                ));
+                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                return ExitCode::from(exit::USAGE);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(artifact) = artifact else {
+        let e = qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`verify` needs the artifact to check",
+        )
+        .with_remediation(format!(
+            "for example: {} verify app.wasm --key <hex>",
+            qqq_core::BINARY_NAME
+        ));
+        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let options = qqq_run::verify::VerifyOptions {
+        artifact: std::path::PathBuf::from(artifact),
+        keys,
+        require_signature,
+    };
+
+    // A verification that fails is a *finding*, not a usage error, so it gets `FAILURE`:
+    // that is the distinction a CI gate acts on. `QQQ-5002` is the code either way, which is
+    // why the exit status is decided here rather than read off the error.
+    match qqq_run::verify::verify(&options) {
+        Ok(report) => report_with_verdict(out, name, &report, |_| exit::OK),
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
+            ExitCode::from(exit::FAILURE)
+        }
+    }
 }
 
 /// Dispatch `qqqai build`.

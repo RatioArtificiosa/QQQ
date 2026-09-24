@@ -23,6 +23,7 @@ path = "src/main.rs"
 qqq-core = { path = "../qqq-core", version = "0.0.0" }
 qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
 qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
+sha2 = { workspace = true }
 qqq-host = { path = "../qqq-host", version = "0.0.0" }
 qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
 # The edge that makes `[server]` reachable.
@@ -96,3 +97,7 @@ wasmtime = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The `verify` tests sign with the project's own signer rather than embedding a `.sig`
+# fixture, so the pair cannot drift: a stored blob would be a second copy of the format.
+qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
+ed25519-dalek = { workspace = true }

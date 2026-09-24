@@ -42,6 +42,7 @@
 
 pub mod lock;
 pub mod semver;
+pub mod signature;
 pub mod store;
 
 pub use lock::{CapabilityDelta, DependencyChange, LockDiff, LockPackage, Lockfile, LockfileError};

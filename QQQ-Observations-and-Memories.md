@@ -4686,6 +4686,73 @@ while the performance baseline it also produced is explicitly still owed.
 
 ---
 
+### §S-006 — Eight host interfaces have no implementation (`CON-009`)
+
+**Marker in code:** `crates/qqq-host/src/linker.rs:868` — `// QQQ-STUB(CON-009): \`qqq:fs\`,
+\`qqq:http\`, \`qqq:sql\` and the rest`.
+
+**What it is.** `build_linker` binds four interface families and records everything else in
+`BoundInterfaces::unimplemented`:
+
+| Bound today | Granted but unbound |
+|---|---|
+| `qqq:clock`, `qqq:crypto`, `qqq:http`, and WASI | `qqq:fs`, `qqq:sql`, `qqq:dns`, `qqq:kv`, `qqq:queue`, `qqq:log`, `qqq:trace`, `qqq:env` |
+
+**Why the marker is the right shape rather than a defect.** A component that imports an unbound
+interface gets a `QQQ-6004` naming the capability and the missing interface, rather than Wasmtime's
+*"unknown import"*. That is what makes a partially-implemented milestone honest: the gap is
+diagnosed, not silent.
+
+**What a user now sees, and did not before.** §O-225 fixed the user-facing half. `qqqai inspect`
+carried `implemented: false` in its data and the human renderer printed the bare interface name, so
+a project granting `[[capabilities.fs]]` read a report listing `qqq:fs@1.0.0` as though it were
+live. Measured now:
+
+```
+gaptest: 4 capabilities, 4 interfaces, posture: exposed (3 with no host implementation yet, marked below)
+
+Interfaces
+  qqq:clock@1.0.0
+  qqq:dns@1.0.0  (no host implementation yet)
+  qqq:env@1.0.0  (no host implementation yet)
+  qqq:fs@1.0.0  (no host implementation yet)
+```
+
+**Where the work is tracked.** §6.3 of the Proposal is the section; `CON-009` is the checklist
+item that names the gap; the per-interface checklist items (`ABI-*`, `HOST-*`) own each one as it
+lands. **Not started**, and deliberately: eight host interfaces is milestone-sized, and beginning
+one without its section read is how a half-interface ships.
+
+**What is owed beyond the code.** Every interface listed above needs a `.wit` definition that
+already exists — they are authored and validated (`16/16 interfaces valid`) — so the work is
+host-side binding plus its tests, not design.
+
+---
+
+### §S-007 — The crate map is discharged for the hardening surface only (`ARCH-007`)
+
+**Marker in code:** `crates/qqq-host/src/lib.rs:11` — `QQQ-STUB(ARCH-007) is discharged for the
+hardening surface only: the crate`.
+
+**What it is.** `ARCH-007` requires every crate listed in the topology to exist with its correct
+name and tier. That holds. What does not hold is the stronger reading — that every crate named in
+§4.3 is *populated* with the surface the Proposal assigns it.
+
+**Why this is a stub rather than a tick.** The distinction the marker records is between a crate
+that exists and compiles (true, and checked by `check_topology.py`) and a crate that carries its
+full designed surface (true for the hardening path, not yet for the rest). Ticking `ARCH-007` on the
+weaker reading would be the false-positive the whole stub policy exists to prevent.
+
+**Where the work is tracked.** `ARCH-007` itself, with the per-crate items (`HOST-*`, `SRV-*`,
+`PKG-*`, `DET-*`) owning each surface as it lands.
+
+**Closed for the part that is real.** Everything the security argument depends on — the
+per-instance linker, the capability pipeline, the trap containment, the WASI context — is
+implemented and tested, which is why the marker says "hardening surface" rather than leaving the
+whole item open.
+
+---
+
 ### §S-005 — No open `TODO`/`FIXME` markers were left in the deliverables
 
 **Verified.** The three documents contain no unresolved `TODO`, `FIXME` or `XXX` markers. The only deliberately-flagged incomplete work is the five stubs above, each with a checklist successor ID, and the twelve open questions in `§Q`, each with a decision gate.

@@ -20,6 +20,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 - [docs/errors.md](docs/errors.md) — Every `QQQ-XXXX` error code with its cause and remediation. _(agent)_ (13 KB)
 - [docs/wit-reference.md](docs/wit-reference.md) — Every WIT package, interface, function and type, generated from `wit/`. _(agent)_ (17 KB)
+- [docs/wit-style-guide.md](docs/wit-style-guide.md) — The six WIT style rules from §6.3, which are machine-checked and which are judgement. _(agent)_ (7 KB)
 - [schema/qqq-toml.schema.json](schema/qqq-toml.schema.json) — JSON Schema for `qqq.toml`, generated from the Rust type that parses it. _(agent)_ (19 KB)
 - [schema/qqq-lock.schema.json](schema/qqq-lock.schema.json) — JSON Schema for `qqq.lock`, including the per-package `caps` record. _(agent)_ (7 KB)
 - [schema/cli-envelope.schema.json](schema/cli-envelope.schema.json) — JSON Schema for the `--json` envelope every command emits. _(agent)_ (3 KB)

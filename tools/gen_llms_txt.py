@@ -107,6 +107,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "contract",
     ),
     (
+        "docs/wit-style-guide.md",
+        "The six WIT style rules from §6.3, which are machine-checked and which are judgement.",
+        "agent",
+        "contract",
+    ),
+    (
         "schema/qqq-toml.schema.json",
         "JSON Schema for `qqq.toml`, generated from the Rust type that parses it.",
         "agent",

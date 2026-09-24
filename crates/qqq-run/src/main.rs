@@ -542,9 +542,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             // `with_manifest`, so the missing-argument error does not conflict
             // with the later mutable borrow.
             if let Some(cap) = args.first().cloned() {
-                with_manifest(name, &mut out, args, |loaded| {
-                    qqq_run::commands::why(loaded, &cap)
-                })
+                dispatch_why(name, &mut out, args, &cap)
             } else {
                 let err = qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
@@ -555,9 +553,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
                 ExitCode::from(exit::USAGE)
             }
         }
-        CommandName::Caps => with_manifest(name, &mut out, args, |loaded| {
-            Ok(qqq_run::commands::caps(loaded))
-        }),
+        CommandName::Caps => dispatch_caps(name, &mut out, args),
         CommandName::Openapi => dispatch_openapi(name, args, &mut out),
         CommandName::Inspect => dispatch_inspect(name, args, &mut out),
         CommandName::Audit => dispatch_audit(name, args, &mut out),
@@ -2358,6 +2354,124 @@ where
             ExitCode::from(exit::FAILURE)
         }
     }
+}
+
+/// As [`with_manifest_at`], but the value decides the exit status.
+///
+/// # Why this exists
+///
+/// Some commands answer a question whose *negative* answer is the useful one.
+/// `qqqai why <cap>` reporting `DENIED` is exactly what a CI gate wants to see, and
+/// it must be distinguishable from a grant by exit status or the gate cannot read
+/// it. Measured before this existed: `qqqai why sql.execute` printed the denial and
+/// the fix stanza, and exited **0**, so a granted and a denied capability looked
+/// identical to a script.
+///
+/// Discovery is shared with [`with_manifest_at`] rather than re-implemented, because
+/// two capability commands that found different manifests would report grants that
+/// disagree with what the runtime enforces — and the disagreement would be invisible
+/// until it mattered.
+fn with_manifest_verdict<T, F, V>(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+    f: F,
+    verdict: V,
+) -> ExitCode
+where
+    T: qqq_run::output::CommandOutput,
+    F: FnOnce(&qqq_run::LoadedManifest) -> qqq_core::Result<T>,
+    V: FnOnce(&T) -> u8,
+{
+    let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    match f(&loaded) {
+        Ok(value) => report_with_verdict(out, name, &value, verdict),
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
+            ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
+/// Dispatch `qqqai caps`, with `--explain`.
+///
+/// # Why an unknown flag is refused
+///
+/// Measured defect: `qqqai caps --explain` produced **byte-identical output** to
+/// `qqqai caps`. The flag was never parsed, so it was neither honoured nor rejected — and
+/// a reject would at least have told the user. `§5.2` documents `--explain` and
+/// `audit.rs` tells the reader to run it, so the directive was reaching a command that
+/// silently ignored it. `--explan` behaved the same way, which is the worse half: a typo
+/// that succeeds is undetectable.
+///
+/// `--manifest` is passed through rather than consumed here, because
+/// `with_manifest_verdict` owns it and reads its value.
+fn dispatch_caps(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+) -> ExitCode {
+    let mut explain = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--explain" => explain = true,
+            "--manifest" => i += 1,
+            other if other.starts_with('-') => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `caps`"),
+                )
+                .with_remediation(
+                    "`caps` takes `--explain` (show which layer decided each capability) and \
+                     the global `--manifest`",
+                );
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                return ExitCode::from(exit::USAGE);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    with_manifest(name, out, args, |loaded| {
+        Ok(qqq_run::commands::caps(loaded, explain))
+    })
+}
+
+/// `qqqai why <capability>` with a status that reflects the decision.
+///
+/// # Why a denial is non-zero
+///
+/// §5.2 defines the command as explaining "why a capability was or was not granted".
+/// The second half is the one a CI gate uses — "assert this build cannot reach the
+/// network" is `qqqai why http.client` — and a gate needs a status, because parsing
+/// prose is not a contract. `exit::FAILURE` rather than a new code: a denial is the
+/// command's own negative answer, not a usage mistake and not an internal error, and
+/// the human output already names the decision, so the status agrees with the text
+/// rather than contradicting it.
+fn dispatch_why(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+    cap: &str,
+) -> ExitCode {
+    with_manifest_verdict(
+        name,
+        out,
+        args,
+        |loaded| qqq_run::commands::why(loaded, cap),
+        |w| if w.granted { exit::OK } else { exit::FAILURE },
+    )
 }
 
 /// Read the value following a flag, e.g. `--manifest path/to/qqq.toml`.

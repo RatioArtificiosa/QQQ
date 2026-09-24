@@ -217,6 +217,16 @@ pub struct CapsOutput {
     pub covert_channels: Vec<String>,
     /// Whether the project grants nothing at all.
     pub deny_all: bool,
+    /// Per-capability reasoning, populated only by `--explain`.
+    ///
+    /// Absent from the JSON of a plain `caps` rather than present-and-empty, so a
+    /// consumer reading the envelope can tell "not asked for" from "no decisions" --
+    /// an empty array would conflate the two.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub explained: Vec<ExplainedCapability>,
+    /// Non-blocking warnings from resolution, e.g. a developer overlay being active.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Capabilities sharing a namespace.
@@ -245,8 +255,9 @@ impl CommandOutput for CapsOutput {
             return format!(
                 "{}: no capabilities granted\n\nNothing is granted, which is the default: a \
                  capability\nabsent from qqq.toml is denied. Run `qqqai why <capability>` to\n\
-                 get the exact stanza that would grant one.",
-                self.project
+                 get the exact stanza that would grant one.{}",
+                self.project,
+                self.warning_suffix()
             );
         }
 
@@ -262,13 +273,47 @@ impl CommandOutput for CapsOutput {
             }
         );
 
+        // Indexed by name so the loop below stays a lookup rather than a scan: a
+        // quadratic walk over a hundred capabilities is small but pointless, and the map
+        // is already the shape the JSON uses.
+        let reasoning: std::collections::BTreeMap<&str, &ExplainedCapability> = self
+            .explained
+            .iter()
+            .map(|e| (e.capability.as_str(), e))
+            .collect();
+
         for ns in &self.by_namespace {
             let _ = write!(out, "\n  {}\n", ns.namespace);
             for cap in &ns.capabilities {
-                let _ = writeln!(out, "    {cap}");
+                if let Some(e) = reasoning.get(cap.as_str()) {
+                    let _ = writeln!(out, "    {cap}");
+                    // Each step is one line, aligned, with the layer first because the
+                    // question `--explain` answers is "which layer?". A step that *removed*
+                    // the capability is the interesting one, so it says so rather than
+                    // printing a bare `false`.
+                    for d in &e.decisions {
+                        let _ = writeln!(
+                            out,
+                            "      {:<12} {} {}",
+                            d.layer,
+                            if d.granted { "grants:" } else { "revokes:" },
+                            d.rule
+                        );
+                    }
+                } else {
+                    let _ = writeln!(out, "    {cap}");
+                }
             }
         }
         out.pop();
+
+        if self.explained.iter().all(|e| e.decisions.is_empty()) && !self.explained.is_empty() {
+            let _ = write!(
+                out,
+                "\n\nNo layer recorded a decision for these capabilities. That means each was \
+                 granted\nby qqq.toml and nothing narrowed it -- which is the normal case."
+            );
+        }
 
         if !self.layers.is_empty() {
             let _ = write!(out, "\n\nGranted by: {}", self.layers.join(", "));
@@ -280,6 +325,7 @@ impl CommandOutput for CapsOutput {
                 self.covert_channels.join(", ")
             );
         }
+        let _ = write!(out, "{}", self.warning_suffix());
         out
     }
 
@@ -288,9 +334,62 @@ impl CommandOutput for CapsOutput {
     }
 }
 
+impl CapsOutput {
+    /// The resolution warnings, as a trailing block.
+    ///
+    /// # Why this is a method and not two copies
+    ///
+    /// Both `summary` returns need it — the deny-all path and the listing path — and a
+    /// developer overlay is *most* likely to have emptied the grant set, which is exactly
+    /// the path a copy would have missed.
+    fn warning_suffix(&self) -> String {
+        if self.warnings.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        for w in &self.warnings {
+            let _ = write!(out, "\n\nwarning: {w}");
+        }
+        out
+    }
+}
+
+/// One capability with the reasoning behind it, for `caps --explain`.
+///
+/// # Why this is a list of decisions and not a sentence
+///
+/// A capability can be touched by several layers, and `--explain` exists to show
+/// **which** one decided. Rendering it as prose would lose the layer boundary that
+/// `audit.rs` sends the reader here to find.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainedCapability {
+    /// The capability.
+    pub capability: String,
+    /// Every step that changed this capability's fate, in order.
+    pub decisions: Vec<ExplainedDecision>,
+}
+
+/// One layer's decision about one capability.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainedDecision {
+    /// The layer that made the decision.
+    pub layer: String,
+    /// The rule that fired, as the resolver recorded it.
+    pub rule: String,
+    /// Whether the capability is granted after this step.
+    pub granted: bool,
+}
+
 /// Show the effective grants for a project.
+///
+/// # Why `explain` is a parameter and not a second function
+///
+/// The two renderings share the resolution, the grouping and the digest, and differ only in
+/// whether each capability carries its reasoning. A separate function would duplicate the
+/// resolution, and the two copies would eventually disagree about what is granted -- which
+/// is the one thing this command must not get wrong.
 #[must_use]
-pub fn caps(loaded: &LoadedManifest) -> CapsOutput {
+pub fn caps(loaded: &LoadedManifest, explain: bool) -> CapsOutput {
     let resolution = Resolution::from_manifest(&loaded.manifest);
     let grants: Vec<Capability> = resolution.grants.capabilities();
 
@@ -327,6 +426,29 @@ pub fn caps(loaded: &LoadedManifest) -> CapsOutput {
             .map(|c| c.name().to_owned())
             .collect(),
         deny_all: grants.is_empty(),
+        // Built only when asked, so the ordinary listing does not pay for the trace and
+        // the JSON of a plain `caps` does not grow a field nobody requested.
+        explained: if explain {
+            grants
+                .iter()
+                .map(|&c| ExplainedCapability {
+                    capability: c.name().to_owned(),
+                    decisions: resolution
+                        .trace
+                        .iter()
+                        .filter(|n| n.capability == Some(c) && n.changed())
+                        .map(|n| ExplainedDecision {
+                            layer: n.layer.as_str().to_owned(),
+                            rule: n.reason.clone(),
+                            granted: n.granted_after,
+                        })
+                        .collect(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        warnings: resolution.warnings.clone(),
     }
 }
 
@@ -1249,7 +1371,7 @@ mod tests {
     #[test]
     fn caps_lists_the_capabilities_it_counted() {
         let l = loaded(CRYPTO);
-        let out = caps(&l);
+        let out = caps(&l, false);
         let text = out.summary();
 
         assert!(text.contains("crypto.hash"), "the name must appear: {text}");
@@ -1265,7 +1387,7 @@ mod tests {
     #[test]
     fn caps_explains_a_deny_all_project() {
         let l = loaded(DENY_ALL);
-        let text = caps(&l).summary();
+        let text = caps(&l, false).summary();
         assert!(text.contains("no capabilities granted"), "{text}");
         assert!(
             text.contains("denied"),
@@ -1328,7 +1450,7 @@ mod tests {
             }
         }
 
-        let caps_text = caps(&loaded(CRYPTO)).summary();
+        let caps_text = caps(&loaded(CRYPTO), false).summary();
         for (i, line) in caps_text.lines().enumerate() {
             assert_eq!(
                 line,
@@ -1402,7 +1524,7 @@ mod tests {
 
     #[test]
     fn caps_of_a_deny_all_project_reports_nothing_granted() {
-        let out = caps(&loaded(DENY_ALL));
+        let out = caps(&loaded(DENY_ALL), false);
         assert!(out.deny_all);
         assert!(out.grants.is_empty());
         assert!(out.by_namespace.is_empty());
@@ -1417,7 +1539,7 @@ mod tests {
 
     #[test]
     fn caps_groups_by_namespace() {
-        let out = caps(&loaded(CRYPTO));
+        let out = caps(&loaded(CRYPTO), false);
         assert!(!out.deny_all);
         assert_eq!(out.by_namespace.len(), 1);
         assert_eq!(out.by_namespace[0].namespace, "crypto");
@@ -1452,7 +1574,7 @@ mod tests {
         let two = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
                    [capabilities.crypto]\nhash = [\"sha256\"]\n\
                    [capabilities.clock]\nwall = true\n";
-        let text = caps(&loaded(two)).summary();
+        let text = caps(&loaded(two), false).summary();
         assert!(text.contains("2 namespaces"), "{text}");
         assert!(!text.contains("2 namespace\n"), "{text}");
     }
@@ -1461,7 +1583,7 @@ mod tests {
     /// is the grant most likely to be added without thought.
     #[test]
     fn caps_surfaces_covert_channels() {
-        let out = caps(&loaded(CRYPTO));
+        let out = caps(&loaded(CRYPTO), false);
         assert!(
             out.covert_channels.contains(&"crypto.random".to_owned()),
             "randomness is a covert channel and must be flagged: {:?}",
@@ -1471,10 +1593,10 @@ mod tests {
 
     #[test]
     fn caps_digest_is_stable_and_content_addressed() {
-        let a = caps(&loaded(CRYPTO));
-        let b = caps(&loaded(CRYPTO));
+        let a = caps(&loaded(CRYPTO), false);
+        let b = caps(&loaded(CRYPTO), false);
         assert_eq!(a.digest, b.digest);
-        assert_ne!(a.digest, caps(&loaded(DENY_ALL)).digest);
+        assert_ne!(a.digest, caps(&loaded(DENY_ALL), false).digest);
     }
 
     // -- inspect -----------------------------------------------------------
@@ -1826,7 +1948,7 @@ handler = "health"
         assert_eq!(why_json["granted"], true);
         assert!(why_json["steps"].is_array());
 
-        let caps_json = serde_json::to_value(caps(&l)).unwrap();
+        let caps_json = serde_json::to_value(caps(&l, false)).unwrap();
         assert!(caps_json["digest"].is_string());
         assert!(caps_json["by_namespace"].is_array());
 

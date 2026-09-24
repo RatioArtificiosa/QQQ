@@ -291,6 +291,107 @@ fn caps_names_the_capabilities_in_human_output() {
         .assert_contains("crypto");
 }
 
+/// `caps --explain` shows the reasoning, and plain `caps` does not.
+///
+/// # What this catches
+///
+/// Measured defect: `qqqai caps --explain` produced **byte-identical output** to
+/// `qqqai caps`. The flag was parsed as unknown and dropped, so `§5.2`'s documented
+/// `--explain` and `audit.rs`'s own instruction to run it both reached a command that did
+/// nothing.
+///
+/// The two assertions are deliberate and different. "They differ" catches the flag being
+/// ignored. "The explanation names the layer" catches it printing anything at all --
+/// a test that only compared the strings would pass on a flag that emitted noise.
+#[test]
+fn caps_explain_adds_the_reasoning() {
+    let s = Sandbox::new("caps-explain");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    let plain = s.run(&["caps"]);
+    plain.assert_ok();
+
+    let explained = s.run(&["caps", "--explain"]);
+    explained.assert_ok();
+
+    assert_ne!(
+        plain.stdout, explained.stdout,
+        "`--explain` must change the human output; identical output is the defect this \
+         test exists for"
+    );
+    explained
+        .assert_contains("crypto.hash")
+        .assert_contains("manifest")
+        .assert_contains("declared in qqq.toml");
+}
+
+/// The reasoning appears in the envelope only when it was asked for.
+///
+/// `skip_serializing_if` rather than an always-present empty array: a consumer must be able
+/// to tell "the caller did not ask" from "there were no decisions", and an empty array
+/// conflates them.
+#[test]
+fn caps_json_grows_explained_only_when_asked() {
+    let s = Sandbox::new("caps-explain-json");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    let plain = s.run(&["caps", "--json"]);
+    plain.assert_ok();
+    assert!(
+        !plain.stdout.contains("\"explained\""),
+        "a plain `caps` must not carry the field:\n{}",
+        plain.stdout
+    );
+
+    let explained = s.run(&["caps", "--explain", "--json"]);
+    explained.assert_ok();
+    assert!(
+        explained.stdout.contains("\"explained\""),
+        "`--explain --json` must carry the reasoning:\n{}",
+        explained.stdout
+    );
+    assert!(
+        explained.stdout.contains("\"layer\":\"manifest\""),
+        "the explanation must name the layer that decided:\n{}",
+        explained.stdout
+    );
+}
+
+/// An unknown flag is refused, not ignored.
+///
+/// `caps --explan` previously exited 0 having printed the ordinary listing. A typo that
+/// succeeds is worse than one that fails: there is nothing to notice. Same QQQ-7001 class
+/// and same `exit::USAGE` as `build`'s and `run`'s unknown-flag refusals, so a script has
+/// one behaviour to handle.
+#[test]
+fn caps_refuses_an_unknown_flag() {
+    let s = Sandbox::new("caps-unknown-flag");
+    s.write("qqq.toml", MINIMAL);
+
+    let typo = s.run(&["caps", "--explan"]);
+    typo.assert_failed()
+        .assert_contains("unknown flag `--explan` for `caps`")
+        .assert_contains("--explain");
+
+    // The remediation is a single sentence. A stray line-continuation once left twenty-two
+    // spaces in the middle of it, which only the JSON path made visible.
+    let json = s.run(&["caps", "--explan", "--json"]);
+    json.assert_failed();
+    assert!(
+        !json.stdout.contains("capability)  "),
+        "the remediation must not carry a run of spaces:\n{}",
+        json.stdout
+    );
+}
+
 /// A deny-all project is explained rather than summarised.
 #[test]
 fn caps_explains_a_deny_all_project() {
@@ -335,13 +436,26 @@ fn inspect_shows_interfaces_and_limits() {
 /// This is the command's whole reason for existing: it is run at the moment a
 /// capability is refused. It printed `fs.read DENIED` and dropped the stanza,
 /// which the scaffolded `qqq.toml` explicitly promises it prints.
+///
+/// # Why this asserts `assert_failed` and not `assert_ok`
+///
+/// It asserted `assert_ok` until 2026-09-24, which **enshrined** the bug: a denied
+/// capability exited `0`, so a grant and a denial were indistinguishable to a
+/// script. The test passed and the command could not gate anything. Measured on the
+/// shipped binary before the fix:
+///
+/// ```text
+/// granted  human  process=0
+/// denied   human  process=0
+/// denied   json   process=0  envelope_exit_code=0
+/// ```
 #[test]
 fn why_prints_the_stanza_for_a_denied_capability() {
     let s = Sandbox::new("why-denied");
     s.write("qqq.toml", MINIMAL);
 
     s.run(&["why", "fs.read"])
-        .assert_ok()
+        .assert_failed()
         .assert_contains("DENIED")
         .assert_contains("capabilities.fs")
         .assert_contains("qqq.toml");
@@ -358,7 +472,9 @@ fn why_does_not_repeat_the_stanza_preamble() {
     s.write("qqq.toml", MINIMAL);
 
     let run = s.run(&["why", "fs.read"]);
-    run.assert_ok();
+    // The status is the other test's subject; this one counts text, so it asserts
+    // only that the run happened and produced output.
+    run.assert_failed();
     assert_eq!(
         run.all().matches("add to qqq.toml:").count(),
         1,
@@ -381,6 +497,55 @@ fn why_names_the_deciding_layer_for_a_grant() {
         .assert_ok()
         .assert_contains("GRANTED")
         .assert_contains("manifest");
+}
+
+/// **The status tells a grant from a denial, and the envelope agrees.**
+///
+/// The pair is the contract: a script asking "can this build reach the network?"
+/// runs `qqqai why http.client` and reads the status. A denial sharing exit `0` with
+/// a grant makes the command unable to answer, which is most of what §5.2 defines it
+/// for.
+///
+/// The envelope check is the second half and not decoration: `Envelope::exit_code`
+/// was hardcoded to `0` in one renderer once (`§O-208`), and a test that reads only
+/// the process status would have missed it. Both must agree.
+#[test]
+fn why_exit_status_separates_a_grant_from_a_denial() {
+    let s = Sandbox::new("why-status");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+    );
+
+    // A grant: success, and the envelope says 0.
+    let granted = s.run(&["why", "crypto.hash", "--json"]);
+    granted.assert_ok();
+    assert!(
+        granted.stdout.contains("\"granted\":true"),
+        "the grant must be reported:\n{}",
+        granted.stdout
+    );
+    assert!(
+        granted.stdout.contains("\"exit_code\":0"),
+        "the envelope must carry the status the process returned:\n{}",
+        granted.stdout
+    );
+
+    // A denial: **non-zero**, and the envelope says the same.
+    let denied = s.run(&["why", "http.client", "--json"]);
+    denied.assert_failed();
+    assert!(
+        denied.stdout.contains("\"granted\":false"),
+        "the denial must be reported:\n{}",
+        denied.stdout
+    );
+    assert!(
+        denied.stdout.contains("\"exit_code\":1"),
+        "the envelope must carry the same non-zero status the process returned, or a \
+         script reading JSON would still see a denial as success:\n{}",
+        denied.stdout
+    );
 }
 
 /// A typo gets a suggestion, because a typo is why the command is run.

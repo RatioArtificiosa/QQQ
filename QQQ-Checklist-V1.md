@@ -3414,8 +3414,55 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [ ] **CLI-017** Implement `qqqai verify` for signature and attestation checking.
   → §5.2 The command surface
-- [ ] **CLI-018** Implement `qqqai caps` with `--explain`.
+- [x] **CLI-018** Implement `qqqai caps` with `--explain`.
   → §5.2 The command surface
+  → Done: `caps(loaded, explain)` in `qqq-run::commands`, dispatched by `dispatch_caps` in
+    `main.rs`. `--explain` adds the resolution reasoning under each capability — the layer
+    that decided and the rule that fired, from the same `Resolution::trace` that `why` reads,
+    filtered to `changed()` nodes so only the steps that moved that capability appear:
+    `qqqai caps --explain` prints
+    `      manifest     grants: declared in qqq.toml` under `clock.wall`, and the JSON gains
+    `"explained":[{"capability":...,"decisions":[{"granted":true,"layer":"manifest",
+    "rule":"declared in qqq.toml"}]}]`.
+
+  → **The flag was accepted and silently ignored.** Measured on the shipped binary before the
+    fix: `qqqai caps --explain` produced **byte-identical output** to `qqqai caps`. The string
+    `explain` appeared nowhere in the argument handling, so the flag was parsed as unknown and
+    dropped — and `--explan` behaved the same way, which is worse: a typo that succeeds is
+    undetectable. This mattered because two separate texts send the reader to the flag:
+    Proposal §5.2 documents it, and `crates/qqq-run/src/audit.rs:378` tells them to *"run
+    `qqqai caps --explain` to see which layer granted it"*. Unknown flags are now a QQQ-7001
+    usage error naming the flag and listing what `caps` accepts, which is what `build` and
+    `run` already do.
+
+  → Why one function and not two: the two renderings share the resolution, the grouping and
+    the digest, and differ only in whether each capability carries its reasoning. A second
+    function would duplicate the resolution and the copies would eventually disagree about
+    what is granted — the one thing this command must not get wrong. The reasoning is built
+    only when asked, and the JSON field is `skip_serializing_if` so a consumer can tell "not
+    asked for" from "no decisions".
+
+  → Also fixed here: `Resolution::warnings` had **no consumer** in this file. A developer
+    overlay — the one warning a reader most needs — was computed and discarded. It now renders
+    through `CapsOutput::warning_suffix`, used by both `summary` returns, because the deny-all
+    path is exactly where an overlay is most likely to have landed.
+
+  → Verified by a live probe against the freshly built binary over a real project: plain
+    `caps` and `caps --explain` differ; `--explain --json` carries `"explained"` and
+    `"layer":"manifest"`; plain `--json` does not carry the field; `--explan` exits 2 with
+    `unknown flag`. Three tests in `crates/qqq-run/tests/cli.rs`
+    (`caps_explain_adds_the_reasoning`, `caps_json_grows_explained_only_when_asked`,
+    `caps_refuses_an_unknown_flag`), each **fault-injected**: forcing `explain = false` in
+    `caps`, forcing the JSON field unconditional, and removing the unknown-flag arm each made
+    exactly the corresponding test fail; every file restored byte-for-byte (sha256 compared)
+    and no `INJECTED FAULT` marker remains.
+
+  → Caught while measuring: the new remediation string carried a run of **twenty-two spaces**,
+    because a line-continuation backslash was missing. It is invisible in the human renderer
+    and visible in the JSON one. Reading the source lines with `repr()` showed the literal, so
+    the cause was the literal rather than a renderer — the same construct in `run`'s
+    remediation renders correctly. The test asserts no run of spaces survives, because only one
+    of the two renderers makes the mistake obvious. Recorded as §O-218b.
 - [ ] **CLI-019** Implement `qqqai why`.
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CLI-020** Implement `qqqai trace`.

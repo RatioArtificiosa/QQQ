@@ -17697,4 +17697,142 @@ this one came from *not* reading it.
 `--all-targets` is why it saw the error in a **test** file. A clippy run without
 `--all-targets` would have missed `similar_names` entirely and CI would have gone red
 again. The flags are not decoration.
+## §O-218 — `why` exited zero on a denial, `caps --explain` did nothing, and the CI log a
+truncated read hid
+
+Three defects, one of them measured on the shipped binary, plus the process failure that
+hid the third for a full run.
+
+### 218a. `qqqai why sql.execute` printed DENIED and exited 0
+
+`§5.2` defines `why` as explaining *"why a capability was or was not granted"*. The second
+half is the one a CI gate uses — *"assert this build cannot reach the network"* is
+`qqqai why http.client` — and a gate needs a status, because parsing prose is not a
+contract.
+
+Measured on the shipped binary, before the fix:
+
+```
+$ qqqai why crypto.hash ; echo $?      ->  GRANTED by manifest   ... 0
+$ qqqai why sql.execute ; echo $?      ->  DENIED + fix stanza   ... 0
+```
+
+**Two existing tests enshrined the bug.** `why_prints_the_stanza_for_a_denied_capability`
+and `why_does_not_repeat_the_stanza_preamble` in `crates/qqq-run/tests/cli.rs` both ended
+in `.assert_ok()`, so the suite asserted that a denial exits zero. That is the failure mode
+worth remembering: a test written against observed behaviour, rather than against the
+contract, converts a bug into a requirement. Fixing the code made both tests fail, which is
+how the enshrinement became visible.
+
+**The fix.** `exit::FAILURE` for a denial, not a new code: a denial is the command's own
+negative answer, not a usage mistake (`USAGE`) and not an internal error (`UNAVAILABLE`).
+Implemented as `with_manifest_verdict`, a sibling of `with_manifest_at` that takes a
+`verdict: FnOnce(&T) -> u8`; discovery is shared rather than re-implemented, so the two
+cannot disagree about which manifest is loaded. The JSON envelope's `exit_code` agrees with
+the process status in both directions, which is the property a script actually reads.
+
+A new test, `why_exit_status_separates_a_grant_from_a_denial`, asserts the pair: granted →
+exit 0 with `"exit_code":0`, denied → non-zero with `"exit_code":1`.
+
+### 218b. `qqqai caps --explain` was byte-identical to `qqqai caps`
+
+Measured on the shipped binary before the fix:
+
+```
+=== caps ===
+app: 1 capabilities across 1 namespace
+  crypto
+    crypto.hash
+Granted by: manifest
+=== caps --explain ===
+app: 1 capabilities across 1 namespace
+  crypto
+    crypto.hash
+Granted by: manifest
+```
+
+The string `explain` appeared nowhere in the argument handling. In `crates/qqq-run/src/`,
+its only occurrence was prose in `audit.rs:378` telling the reader to **run it**:
+*"…in qqq.toml; run `qqqai caps --explain` to see which layer granted it"*. So the tool
+directed users at a flag that did nothing, and there was no error to notice because the
+flag was never parsed — `caps --explan` also succeeded silently.
+
+Two lessons, both already in the invariants and both violated here:
+
+* **A flag that is accepted and ignored is worse than one that is refused.** A typo that
+  succeeds is undetectable. The fix refuses unknown flags for `caps`, which is the pattern
+  `doctor` already used.
+* **Documentation that names a feature is a specification.** `audit.rs` and `§5.2` both
+  named `--explain`; nothing checked that it existed. A `git grep` for a documented flag in
+  the argument handling is a cheap audit and is worth repeating for the other commands.
+
+Implementation: `caps(loaded, explain: bool)` — one function, because the two renderings
+share the resolution, the grouping and the digest and differ only in whether each
+capability carries its reasoning; a second function would duplicate the resolution and the
+two copies would eventually disagree about what is granted. `ExplainedCapability {
+capability, decisions: Vec<ExplainedDecision> }` with `ExplainedDecision { layer, rule,
+granted }`, built from the same `Resolution::trace` that `why` reads, filtered to
+`n.capability == Some(c) && n.changed()` so only the steps that moved that capability
+appear. Built only when asked, so a plain `caps` pays neither the trace cost nor a new JSON
+field.
+
+### 218c. The CI failure I read only the tail of — `§O-217` repeated
+
+CI run 35944529714 (`22bc703`) failed on all three Rust matrix operating systems at one
+step: `unsafe audit document matches the tree (SEC-020)`.
+
+```
+DRIFT: `files scanned` says 142, the scan found 143
+```
+
+Reproduced locally in one command. The cause is benign and structural:
+`crates/qqq-serve/tests/accept_bound.rs` was added in `e2a2fd4`, taking the count 142 → 143,
+and `docs/unsafe-audit.md`'s table was not updated. The document had *already* been corrected
+once for exactly this (141 → 142 in `67ff581`), and its own prose explains why the number
+matters: it is the sample size behind the workspace's central safety claim, and a page whose
+own sample size has drifted is the *"zero for the wrong reason"* problem in miniature.
+
+Worth noting for the next run: **`clippy`, `build` and `test` all passed on all three
+operating systems.** The only red step was a document-vs-tree count. That is the second time
+a green code gate has been held hostage by a hand-copied number.
+
+### 218d. Process: three failed script attempts, and the blind spot that caused them
+
+The document fix took four attempts. Every failure is instructive.
+
+| Attempt | What happened |
+|---|---|
+| 1 | Wrote a literal `{FILES}` into the prose — a plain string among f-strings. The paragraph *did* land, so the next run's anchor no longer matched, and the error that surfaced was the *later* assertion. |
+| 2 | Reported "nothing changed" while the diff showed three edits. The script printed `check.stdout` first; `--check-doc` printed to stdout and `FAILURES:` was appearing under a heading that read like the scanner's own self-test output. |
+| 3 | The `forbid` row was rewritten to a different wording, and `check_doc`'s regex requires the **exact** row — `\|\s*Crates carrying a bare \`#!\[forbid\(unsafe_code\)\]\`\s*\|\s*\*\*(\d+)\*\*`. My "improvement" broke the contract. Reverted to the original wording. |
+| 4 | Passed: `UNSAFE AUDIT DOC OK -- 143 file(s), 11 crate root(s) carrying forbid(unsafe_code)`. |
+
+The pattern in all three failures: **I asserted on a string I had changed, in a script whose
+previous run had already changed the file.** The rule that fixes it is cheap — restore with
+`git checkout --` before every attempt, so the anchors are always the committed ones — and
+it is what attempt 4 did. `§O-217`'s lesson (read the summary line, do not pipe a gate
+through a truncating filter) has a sibling here: **do not diagnose a mutating script by
+reading its own partial output; read `git diff`.** The diff showed all three edits at once
+and would have saved two attempts.
+
+Also worth preserving: rewriting a **checked** row to be more informative is not an
+improvement. `check_doc` counts crate *roots* (11) while the scanner counts lint *positions*
+(16); the extra five are an architecture test and doc comments that quote the lint. The
+distinction is real and the checker is right — a document row coupled to a gate must keep
+the gate's wording, and the explanation belongs in prose, not in the row.
+
+### 218e. Standing debt this entry does not clear
+
+* `crates/qqq-run/src/commands.rs` still carries the **`field '<unknown>'`** defect: a
+  wrongly-shaped `[capabilities.fs]` reports
+  `field '<unknown>' is invalid: invalid type: map, expected a sequence` without naming the
+  offending field. `serde` needs the field name threaded through the error path.
+* `docs/abi-cost-measured.md` still carries **contradictory run counts** and a ~3% vs ~6%
+  p99 discrepancy (CodeRabbit round 2, not yet reproduced or dispositioned).
+* Six further round-2 findings are un-dispositioned: `docker/entrypoint.sh`,
+  `tools/check_wit_reference.py` (a missing fault-injection case),
+  `tools/audit_unsafe.py` (crate-root counting — ruled **correct** here, see 218d),
+  `tools/gen_error_catalogue.py` (sentence_case should skip leading emphasis markers),
+  `tools/gen_schemas.py` (bare-link rewrite inside code spans).
+
 *End of `QQQ-Observations-and-Memories.md`.*

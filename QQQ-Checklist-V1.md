@@ -3394,7 +3394,33 @@ Items are grouped below by **phase**, because dependency order matters more than
     [35803815743](https://github.com/RatioArtificiosa/QQQ/actions/runs/35803815743)
     green — 11 success, 0 failures.
   → §9.1 The honest benchmark position
-- [ ] **CLI-014** Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains.
+- [x] **CLI-014** Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains.
+  → §5.2 The command surface
+  → Done as a unified interface, which is the item's own wording: one module
+    (`qqq_run::style`) holds the language resolution, the driver's arguments and the
+    declared-but-unbuilt diagnosis, because splitting the two verbs would have duplicated
+    exactly the parts that must not drift.
+  → The language comes from the manifest's `[build] language` rather than a flag, so `lint`
+    cannot check a different toolchain than `build` compiles. `fmt` runs `cargo fmt --all`;
+    `lint` runs `cargo clippy --all-targets -- -D warnings`, which is the gate this repository
+    runs on itself — without `-D warnings` clippy prints and exits zero, making the command
+    decorative in a CI job. The tool runs in the manifest's directory, so
+    `--manifest path/to/qqq.toml` lints that project rather than the caller's cwd.
+  → Verified against the real reference application, not a fixture: `qqqai fmt` in
+    `examples/orders-api` reports "already formatted, no changes needed" and exits 0, and
+    `qqqai lint` runs clippy and reports "no problems found".
+  → Of the five languages in the manifest grammar, Rust has a driver; `ts`, `go`, `python` and
+    `cpp` are refused with `QQQ-1003` naming the language and the `LANG-*` item that owns each.
+    The refusal is the point: a `lint` answering "0 problems" for a language it never checked is
+    a green light over nothing, and is indistinguishable in a log from a real clean run.
+  → Verified: nine unit tests over the pure planner (which driver, which arguments, which
+    directory, and both refusal kinds) and five CLI tests driving the built binary through argv
+    (`fmt_refuses_a_language_with_no_driver_and_names_the_owner` and four others in
+    `crates/qqq-run/tests/cli.rs`). Three faults injected, all caught and restored byte-for-byte
+    from SHA-256. The first injection run reported all three MISSED and the cause was the
+    harness, not the tests — recorded as `§O-223`, whose fix (assert a non-zero executed-test
+    count) is now in place. `cargo clippy -D warnings` clean; 733 tests green across `qqq-pkg`
+    and `qqq-run`.
   → §5.2 The command surface
 - [x] **CLI-015** Implement `qqqai inspect` with static capability reporting and `--diff`.
   → Done: `qqqai inspect` with no argument reports the manifest's grants; `qqqai inspect <artifact>` compiles the component without instantiating it and reports the capabilities its **import table** requires, with the digest and `component`/`core-module` kind so a report is tied to the bytes that produced it. Unmapped interfaces are listed rather than dropped, and a file that is not a component is an error rather than a fallback to the manifest.

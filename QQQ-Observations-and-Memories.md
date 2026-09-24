@@ -18136,4 +18136,60 @@ what stopped a "CORS preflight is broken by auth ordering" entry from being writ
 document — and it would have been written confidently, because the `403` looked exactly like an
 ordering defect.
 
+## §O-223 — The fault-injection harness read "0 tests ran" as a pass, and reported three
+MISSEDs that were its own fault
+
+**Found:** 2026-09-22, injecting faults into `qqq_run::style` (`CLI-014`). **Fixed:** same
+session. **Anchor:** `CLI-014`.
+
+### What happened
+
+Three faults were injected, one per process, as invariant TWO requires. All three came back
+**MISSED** — the test passed with the fault in the file. The harness restored the source after
+each one, and the restore hash was identical all three times, which was the first hint that
+nothing was being exercised.
+
+Per §O-220's discipline, the fault was proved present before the test was blamed. It was: the
+broken text was in the file, `original text gone` was `True`, and the build succeeded, so the
+broken source really was compiled.
+
+### The cause was the harness, not the tests
+
+`cargo test -p qqq-run --lib -- <name> --exact` was passed a **bare** test name
+(`rust_lint_plans_clippy_that_can_fail`). The real test is namespaced
+(`style::tests::rust_lint_plans_clippy_that_can_fail`), so `--exact` matched **nothing**, and
+cargo reported:
+
+```
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 491 filtered out; finished in 0.00s
+```
+
+The harness's success check was `"test result: ok" in out`, which that line satisfies. **A filter
+that matches zero tests produces a green result line**, so every fault was scored against a run
+that executed nothing.
+
+### The two fixes, both required
+
+1. **Pass the fully-qualified name**, so `--exact` matches the test.
+2. **Assert the reported pass count is at least 1.** This is the one that matters: (1) fixes
+   today's names, and (2) makes the *class* of error impossible, because a filter that matches
+   nothing is now a harness failure rather than a green run.
+
+The re-run caught all three faults, each with `runs: 1 test(s)` printed before injection, proving
+non-vacuity first.
+
+### Why this is §O-220's shape a second time
+
+§O-220 recorded two false MISSEDs in a batch of three, one of which was a harness bug
+(a duplicate `json!` key) and one a genuinely blind test. The lesson written there was *prove the
+fault is in the file before concluding the test is blind*. This round applied that step and it
+worked — it cleared the tests — but the proof stopped one layer short: it established the fault
+reached the **build** and never established that a **test executed**.
+
+The general form, worth more than either instance: **a fault-injection harness must prove its own
+non-vacuity, on clean code, before it injects anything.** "The test passed with the fault in" has
+two readings — the test is blind, or the test never ran — and they are distinguished by a single
+number that cargo already prints. Running the target test once on clean code and requiring it to
+pass with a non-zero count costs one compile and removes the ambiguity permanently.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -3098,19 +3098,33 @@ impl qqq_run::output::CommandOutput for DoctorOutput {
         // `--fix` is reported separately from the checks, because "what I
         // found" and "what I did about it" are different claims and a reader
         // must be able to tell them apart.
+        //
+        // The header goes on its own line only when it has lines under it. The
+        // first version pushed `"\n\n  fix   "` unconditionally and then a
+        // newline before each entry, so with a plan present it emitted trailing
+        // whitespace after `fix` and nothing else on that line — invisible in a
+        // terminal, and enough to break `grep '^  fix'`.
         if self.fix.requested {
-            out.push_str("\n\n  fix   ");
-            if self.fix.planned.is_empty() {
-                out.push_str("nothing needed repairing");
-            }
-            for line in &self.fix.planned {
-                let _ = write!(out, "\n        planned: {line}");
-            }
-            for line in &self.fix.applied {
-                let _ = write!(out, "\n        applied: {line}");
-            }
-            for line in &self.fix.skipped {
-                let _ = write!(out, "\n        left to you: {line}");
+            let lines: Vec<String> = self
+                .fix
+                .planned
+                .iter()
+                .map(|l| format!("  planned: {l}"))
+                .chain(self.fix.applied.iter().map(|l| format!("  applied: {l}")))
+                .chain(
+                    self.fix
+                        .skipped
+                        .iter()
+                        .map(|l| format!("  left to you: {l}")),
+                )
+                .collect();
+            let _ = write!(out, "\n\n  fix");
+            if lines.is_empty() {
+                out.push_str("   nothing needed repairing");
+            } else {
+                for line in &lines {
+                    let _ = write!(out, "\n        {line}");
+                }
             }
         }
 

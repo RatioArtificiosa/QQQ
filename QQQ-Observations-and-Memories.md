@@ -17291,6 +17291,55 @@ deliverable described in two checklist areas, ticked in one (§O-211, F8). That 
 the shape a ledger defect actually takes here — not a broken citation, but two
 well-formed items disagreeing about one fact.
 
+## §O-213 — the final revision pass found a layout defect in the output I had just been reviewing
+
+After `DX-016` was ticked, its four defects fixed, its nine CodeRabbit findings
+addressed and three CI runs green, I re-read `doctor`'s summary builder rather
+than trusting the item's own evidence. Two things came out of that.
+
+### The defect
+
+With a plan to print, `--fix`'s human output was:
+
+```
+  ok    binary-name
+
+  fix
+        planned: install the wasm32-wasip2 rustup target — `rustup target add wasm32-wasip2`
+```
+
+The `fix` header carried trailing whitespace and nothing followed it on the line,
+because the code pushed `"\n\n  fix   "` unconditionally and then emitted a
+newline *before* each entry. It renders acceptably in a terminal, which is why it
+survived every test, three CI runs and a nine-finding external review — and it is
+still wrong: `grep '^  fix'` does not match it, `trim_end` on a captured line
+changes it, and a byte comparison of two runs of the same command would show the
+spaces as part of the contract.
+
+Fixed by building the lines first and printing the header with content on it or
+with `nothing needed repairing`, never bare.
+
+### What the rest of the pass confirmed
+
+The same reading re-verified the parts that are easiest to get subtly wrong, all
+by running the binary rather than reading it:
+
+* `qqqai doctor --fix` with a failing `wasm-target` **and** `QQQ_TEST_WASM_TARGET_PRESENT=0`
+  prints the plan, then reports the network-touching repair as `left to you:` with
+  its exact command, and does not run it.
+* `qqqai doctor --fix --json` carries the same information in `data.fix` with
+  `planned`, `applied` and `skipped` as arrays, and `requested: true`.
+* A failing check with **no** automatic repair (`manifest`) still appears in
+  `skipped` with its own `fix` text, so silence never stands in for a decision.
+
+### The lesson
+
+The item was ticked, tested, externally reviewed and green in CI, and its output
+still had a defect — found by reading the eleven lines that produce it. Every
+earlier check asked *"does this work"*; none asked *"is this the best version of
+this"*. Those are different questions, and only the second one finds trailing
+whitespace, an inconsistent indent, or a header with nothing after it.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

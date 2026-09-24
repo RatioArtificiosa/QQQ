@@ -307,7 +307,24 @@ Items are grouped below by **phase**, because dependency order matters more than
     exist. Caught by running it, and kept in the document as the example of the exact
     failure the page warns about.
   → §0.5 Identifier and anchor discipline
-- [ ] **DOC-015** Add the "framework vs runtime" usage rule to the contributing guide.
+- [x] **DOC-015** Add the "framework vs runtime" usage rule to the contributing guide.
+  → §3.4 Positioning statement and the language we use
+  → Done: a new "The words we use: runtime vs framework" section in `CONTRIBUTING.md`, placed
+    directly after "Read these first" so it is read before any copy is written, with a two-row
+    table giving the say/for/example for each word and three rules that apply to all copy
+    (README, `docs/`, CLI help and error text, commit messages, issue replies).
+  → The rule is stated as a positioning matter rather than a style preference, because that is
+    what it is: Proposal §3.4 makes vocabulary discipline the only mitigation for risk `R-10`
+    ("Framework" positioning confuses the market). The section names the canonical one-sentence
+    positioning and points at §3.4's four vocabulary rules, so the guide defers to the Proposal
+    rather than restating it and drifting.
+  → The third rule covers the comparison words ("Bun-killer", "a faster Node") under the same
+    principle — say what is true, and when the claim is about speed, say *measured*, give the
+    number, and name the file — which is the rule a contributor is most likely to break in a
+    commit message or a changelog entry.
+  → Verified: `python tools/check_xrefs.py` passes (§ references resolve, no new anchor
+    duplicates), and `python tools/gen_llms_txt.py --check` confirms the generated index still
+    matches the tree after the edit.
   → §3.4 Positioning statement and the language we use
 - [x] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.
   → Done: `docs/verified-facts.md` — **30 facts** from the Proposal's Appendix B, each

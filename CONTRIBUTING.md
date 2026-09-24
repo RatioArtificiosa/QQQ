@@ -15,6 +15,33 @@ Thank you for considering it. This document is short on ceremony and specific ab
 
 ---
 
+## The words we use: runtime vs framework
+
+**QQQ is a runtime.** The word "framework" describes only the app-facing layer built *on* the
+runtime, and reaching for it in the wrong place is a positioning defect rather than a style
+quibble — it is risk `R-10` in the Proposal, with vocabulary discipline as its only mitigation.
+
+| Say | For | Example |
+|---|---|---|
+| **runtime** | the thing a user installs once and runs everything on | *"install the QQQ runtime"*, *"the QQQ runtime executes WebAssembly components"* |
+| **framework** | the app-facing layer a user writes against, on top of the runtime | *"this framework's router"*, and only where a layer above the runtime is actually meant |
+
+Three rules follow from that, and they apply to **all** copy: the README, `docs/`, CLI help and
+error text, commit messages, and issue replies.
+
+1. **Default to "runtime".** If a sentence works with "runtime", it does not get "framework".
+2. **"Framework" needs a layer to point at.** Do not use it for the runtime, for Wasmtime, or for
+   the Component Model — those are the runtime, the engine, and the interface language.
+3. **The comparison words are the same rule.** Not "Bun-killer", not "a faster Node". Say what is
+   true, and when the claim is about speed, say *measured*, give the number, and name the file it
+   came from.
+
+The canonical one-sentence positioning is in §3.4 of the Proposal, which also carries the four
+vocabulary rules this section enforces. `DOC-015` owns this section; the Proposal's `DOC-014`
+and `MKT-012` own the copy it governs.
+
+---
+
 ## The workflow
 
 0. **Configure line endings first.** One command, and without it your working

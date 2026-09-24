@@ -62,6 +62,9 @@ pub mod scaffold;
 pub mod serve;
 /// Building a router from a manifest: the join between `qqq-cap` and `qqq-serve`.
 pub mod serve_routes;
+/// One interface over the project's language toolchain: `qqqai fmt` and `qqqai lint`
+/// (`CLI-014`).
+pub mod style;
 /// `qqqai test` — the built-in test runner.
 ///
 /// The module is named `test_runner` rather than `test` because `test` is a Rust

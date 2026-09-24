@@ -2358,3 +2358,84 @@ fn openapi_out_keeps_stdout_clean() {
         run.stdout
     );
 }
+
+// -- `qqqai fmt` and `qqqai lint` (`CLI-014`) ------------------------------
+
+/// A manifest whose language is `rust`, so the driver path is reachable.
+fn style_manifest(language: &str) -> String {
+    format!(
+        "[package]\nname = \"style\"\nversion = \"0.1.0\"\n\n\
+         [build]\nlanguage = \"{language}\"\ntarget = \"wasm32-wasip2\"\n"
+    )
+}
+
+/// A language with no style driver is refused by name, and the refusal names its owner.
+///
+/// # Why this is the test that matters most here
+///
+/// The tempting implementation answers "0 problems" for any language whose tool is not
+/// wired, and that answer is indistinguishable in a CI log from a real clean run. So the
+/// assertion is not merely that the command fails - it is that it fails *for go* and names
+/// `LANG-`, which is the checklist area that owns the driver.
+#[test]
+fn fmt_refuses_a_language_with_no_driver_and_names_the_owner() {
+    let s = Sandbox::new("fmt-go");
+    s.write("qqq.toml", &style_manifest("go"));
+    let run = s.run(&["fmt"]);
+    run.assert_failed()
+        .assert_contains("go")
+        .assert_contains("fmt")
+        .assert_contains("LANG-");
+    // The control against a refusal that rejects every language alike: `go` IS a language
+    // this build knows, so the "not a language" message would be a different bug.
+    assert!(
+        !run.stdout.contains("not a language this build can drive"),
+        "a declared language must not be reported as unknown: {}",
+        run.stdout
+    );
+}
+
+/// `lint` refuses for the same reason and with the same shape, so the pair does not diverge.
+#[test]
+fn lint_refuses_a_language_with_no_driver_and_names_the_owner() {
+    let s = Sandbox::new("lint-go");
+    s.write("qqq.toml", &style_manifest("go"));
+    let run = s.run(&["lint"]);
+    run.assert_failed()
+        .assert_contains("go")
+        .assert_contains("lint")
+        .assert_contains("LANG-");
+}
+
+/// Refusal is a usage-shaped failure with a remediation a reader can act on.
+///
+/// Asserted separately from the message because `QQQ-1003` carries the install/support
+/// pointer, and a bare exit code would satisfy a weaker test while leaving the user stuck.
+#[test]
+fn a_style_refusal_carries_the_checklist_pointer() {
+    let s = Sandbox::new("fmt-ts");
+    s.write("qqq.toml", &style_manifest("ts"));
+    let run = s.run(&["fmt"]);
+    run.assert_failed()
+        .assert_contains("QQQ-1003")
+        .assert_contains("QQQ-Checklist-V1.md");
+}
+
+/// Both verbs need a project, and say so rather than guessing a language.
+#[test]
+fn fmt_without_a_manifest_says_so() {
+    let s = Sandbox::new("fmt-nomanifest");
+    let run = s.run(&["fmt"]);
+    run.assert_failed().assert_contains("qqq.toml");
+}
+
+/// `--json` is a global flag and must not be read as a language or a path.
+#[test]
+fn style_accepts_the_global_json_flag() {
+    let s = Sandbox::new("lint-json");
+    s.write("qqq.toml", &style_manifest("go"));
+    let run = s.run(&["lint", "--json"]);
+    // Still a refusal, because `go` has no driver - the point is that `--json` did not
+    // change *which* refusal it is.
+    run.assert_failed().assert_contains("QQQ-1003");
+}

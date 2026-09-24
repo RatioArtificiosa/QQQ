@@ -529,6 +529,8 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Dev => dispatch_dev(name, args, &mut out),
         CommandName::Serve => dispatch_serve(name, args, &mut out),
         CommandName::Bench => dispatch_bench(name, args, &mut out),
+        CommandName::Fmt => dispatch_style(name, args, &mut out, qqq_run::style::StyleVerb::Format),
+        CommandName::Lint => dispatch_style(name, args, &mut out, qqq_run::style::StyleVerb::Lint),
         CommandName::Add => dispatch_add(name, args, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
@@ -947,6 +949,43 @@ fn dispatch_verify(
             ExitCode::from(exit::FAILURE)
         }
     }
+}
+
+/// Dispatch `qqqai fmt` and `qqqai lint` (`§5.2`, `CLI-014`).
+///
+/// # Why the language comes from the manifest rather than the command line
+///
+/// The project already declares its language in `[build] language`, and a `--language` flag
+/// would be a second answer to a question the repository has one answer to — the two could
+/// disagree, and the disagreement would be a `lint` that checked a different toolchain than
+/// `build` compiles. The manifest is the single source, and a project whose language is not
+/// the one being edited is a manifest bug rather than a flag the user forgot.
+///
+/// # Why the exit status is the tool's own
+///
+/// `lint` exists to fail a CI job. A wrapper that returned `0` because it ran the linter
+/// successfully would be a gate that cannot close, which is the `doctor` defect this repository
+/// already fixed once. A non-zero status from the tool becomes `FAILURE` here, and a tool that
+/// could not be started is `UNAVAILABLE` — a different fact, with a different remedy.
+fn dispatch_style(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+    verb: qqq_run::style::StyleVerb,
+) -> ExitCode {
+    with_manifest(name, out, args, |loaded| {
+        let language = loaded.manifest.build.language.clone();
+        // The tool runs in the directory the manifest was found in, not the process's cwd:
+        // `qqqai lint --manifest path/to/qqq.toml` must lint that project, and a toolchain
+        // invoked from the caller's directory would check whatever project happened to be here.
+        let dir = loaded.path.parent().map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+        let plan = qqq_run::style::plan(&language, verb, &dir)?;
+        let outcome = qqq_run::style::run(&plan, verb, &language)?;
+        Ok(qqq_run::style::StyleOutput::from(outcome))
+    })
 }
 
 /// Dispatch `qqqai build`.

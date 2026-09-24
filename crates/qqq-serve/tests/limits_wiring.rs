@@ -403,3 +403,100 @@ async fn a_refusal_is_recorded() {
         "the served request must be counted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The per-tenant connection ceiling (`SRV-020`)
+// ---------------------------------------------------------------------------
+
+/// **A per-tenant `max_connections` is enforced by the ledger, before dispatch.**
+///
+/// The limit is a connection count rather than a request count, so connections are
+/// *held* open: a dropped stream would release its slot and the next connection would be
+/// admitted, which would test the happy path instead.
+///
+/// # Why the ceiling is filled rather than assumed
+///
+/// `Server::start_with` probes readiness by connecting, and that connection is counted.
+/// It is then dropped, so its slot is released -- but the release is asynchronous, so how
+/// many slots are busy when the body below starts is not fixed. The first version assumed
+/// one and asserted against a ceiling of two, which left the connection under test admitted
+/// as the second. Filling the ceiling explicitly makes the precondition the test's own
+/// statement rather than a property of the harness, and the whole point of the test is the
+/// assertion after the ceiling is full.
+///
+/// The refusal is the ledger's own -- a bare status line with `content-length: 0` and no
+/// `X-QQQ-Error` -- not a routed 503. Under `qqq-run` that distinction is invisible because
+/// its fixture's guest is unbuilt; the positive control below proves the difference by
+/// reaching a real 200.
+#[tokio::test]
+async fn a_per_tenant_connection_ceiling_is_enforced() {
+    const CEILING: u32 = 2;
+    let limits = TenantLimits::with_connections([("127.0.0.1".to_owned(), CEILING)], 16);
+    let server = Server::start_with(Some(limits)).await;
+
+    // Hold `CEILING` connections open. Each is kept alive for the whole test, which is what
+    // makes it occupy a slot.
+    let mut held: Vec<TcpStream> = Vec::new();
+    for _ in 0..CEILING {
+        let mut c = TcpStream::connect(server.addr).await.expect("held connect");
+        c.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("write");
+        c.flush().await.expect("flush");
+        let mut buf = [0u8; 256];
+        let _ = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf)).await;
+        // Pushed **after** the read, and kept for the whole test: the stream must stay
+        // alive or the server releases the slot and the ceiling never fills.
+        held.push(c);
+        // Let the server ledger this connection before the next arrives.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The ceiling is now full, so this connection must be refused by the ledger.
+    let refused = server
+        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await;
+    assert!(
+        refused.starts_with("HTTP/1.1 503") && refused.contains("content-length: 0"),
+        "a tenant at its ceiling must be refused by the ledger:\n{refused}"
+    );
+    assert!(
+        !refused.contains("X-QQQ-Error"),
+        "the refusal must come from the ledger, which has no route to name:\n{refused}"
+    );
+
+    drop(held);
+}
+
+/// The positive control: one held connection, at the same ceiling, leaves the next
+/// connection served **200**.
+///
+/// Without this, the test above would pass against a server that refused the next
+/// connection for any reason -- an overloaded pool, a broken limiter, anything. Here the
+/// only difference from the test above is that the ceiling is not full, so a 200 isolates
+/// the ceiling as the cause.
+#[tokio::test]
+async fn a_connection_under_the_ceiling_is_served() {
+    let limits = TenantLimits::with_connections([("127.0.0.1".to_owned(), 2)], 16);
+    let server = Server::start_with(Some(limits)).await;
+
+    // One held connection, so the ceiling has room for one more.
+    let mut c = TcpStream::connect(server.addr).await.expect("held connect");
+    c.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        .await
+        .expect("write");
+    c.flush().await.expect("flush");
+    let mut buf = [0u8; 256];
+    let _ = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let served = server
+        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await;
+    assert!(
+        served.starts_with("HTTP/1.1 200"),
+        "a connection under the ceiling must be served:\n{served}"
+    );
+
+    drop(c);
+}

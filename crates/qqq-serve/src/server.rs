@@ -418,7 +418,19 @@ pub async fn serve(
     })?;
 
     let table = Arc::new(table);
-    let ledger = Arc::new(tokio::sync::Mutex::new(ConnectionLedger::new(
+    // The per-tenant connection ceilings, taken from the manifest's `[server.limits]`
+    // table when there is one. Read from `config.limits` rather than from a second
+    // field so that one manifest key has one home: a parallel `connections` map on the
+    // config would be a second authority on the same policy, and the two would drift.
+    //
+    // `connections_per_tenant` remains the fallback, so naming one tenant does not
+    // change the ceiling for every other.
+    let ceilings = config
+        .limits
+        .as_ref()
+        .map_or_else(Vec::new, |l| l.connections_by_tenant());
+    let ledger = Arc::new(tokio::sync::Mutex::new(ConnectionLedger::with_limits(
+        ceilings,
         config.connections_per_tenant,
     )));
     // Wrapped in an `Arc` so each connection task shares one immutable config
@@ -509,6 +521,18 @@ pub async fn serve(
                         // the defender, which is the wrong way round.
                         drop(l);
                         let _ = close_immediately(stream, 503).await;
+                        // A refusal is still an **accept**: the counter on the
+                        // acceptor was incremented for it before this task was
+                        // spawned, deliberately, because the bound counts
+                        // connections accepted rather than requests answered.
+                        //
+                        // Returning without this left the count at the bound with
+                        // nothing to signal it -- and a burst of connection
+                        // attempts is both the load that produces refusals and the
+                        // load a bound exists for, so the two arrive together. The
+                        // server then ran on past its bound indefinitely, which is
+                        // the defect `tests/accept_bound.rs` pins.
+                        stop_after_the_bound(limit, &accepted, &shutdown_for_task);
                         return;
                     }
                 }
@@ -2341,8 +2365,53 @@ async fn close_immediately(mut stream: TcpStream, status: u16) -> std::io::Resul
             "Error"
         }
     );
+    // Drain what the client has already sent, **before** writing the refusal.
+    //
+    // # Why this is not optional
+    //
+    // The refusal path deliberately reads nothing, so at this point the client's request
+    // is sitting unread in the receive buffer. Closing a socket with unread data makes the
+    // stack send an RST rather than a FIN, and the RST discards whatever the peer has not
+    // yet read -- including the refusal written below. Measured on Windows: a client that
+    // connected and read without writing received the full 74-byte 503; a client that sent
+    // a request first received **nothing at all**. Every real client sends a request, so
+    // every real client saw a reset instead of a status.
+    //
+    // The cost bound is what keeps the original property: this reads at most
+    // `REFUSAL_DRAIN_BYTES` with a short deadline, so a peer that sends a large body still
+    // spends almost nothing on the defender, and no body is ever parsed.
+    drain_for_refusal(&mut stream).await;
     stream.write_all(text.as_bytes()).await?;
     stream.flush().await
+}
+
+/// How many bytes are drained from a refused connection before closing.
+///
+/// Large enough for a request head, small enough that a peer streaming a body gains
+/// nothing: the point of refusing before reading is that the refused side pays.
+const REFUSAL_DRAIN_BYTES: usize = 8192;
+
+/// How long the drain waits for the client's request to arrive.
+///
+/// A client that connects and says nothing must not hold the task open. Long enough for a
+/// request already in flight on a local or LAN connection, short enough that an idle
+/// attacker's connections free their tasks quickly.
+const REFUSAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Read and discard the client's pending bytes so the close is orderly.
+///
+/// Errors are ignored: this is a courtesy to the stack, and a refusal whose drain fails is
+/// still a refusal.
+async fn drain_for_refusal(stream: &mut TcpStream) {
+    let mut buf = [0u8; 1024];
+    let mut total = 0usize;
+    while total < REFUSAL_DRAIN_BYTES {
+        let read = tokio::time::timeout(REFUSAL_DRAIN_TIMEOUT, stream.read(&mut buf)).await;
+        match read {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => total += n,
+        }
+    }
 }
 
 /// Map a close reason to the reported outcome.

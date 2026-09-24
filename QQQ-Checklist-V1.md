@@ -2960,6 +2960,34 @@ Items are grouped below by **phase**, because dependency order matters more than
   → **A preflight is answered before routing**, because it names a path the route table may have no `OPTIONS` handler for — the browser is asking about the path, not calling it. A 404 there would make the browser refuse a request the server would serve. The grant is `204`, the refusal `403`: a preflight has no application semantics, so a status is safe to use, unlike on a simple request where a denial must leave the response intact.
   → **Measured**: 29 policy tests + 9 wiring tests; workspace **1975 passed, 0 failed**.
 - [x] **SRV-020** Implement request-body size and count limits enforced per tenant, with metrics.
+  → **The last open clause is closed: the per-tenant connection ceiling is configurable.**
+    It was a compiled constant — `ServerConfig::connections_per_tenant`, defaulting to
+    10 000, reachable from no manifest key and no flag — so "count limits enforced per
+    tenant" held only at the default. Now `[server.limits.per_tenant."<ip>"] max_connections`
+    is a manifest key and travels the whole chain: `git grep max_connections -- crates/`
+    shows the field in `qqq-cap`'s `TenantLimit` and its zero-value refusal, its carriage in
+    `qqq-run`'s `build_limits`, `qqq-serve`'s `Limits`, `ConnectionLedger::with_limits`, and
+    the served path's read at `server.rs:429` — where the ledger's ceilings come from the
+    manifest table with `connections_per_tenant` as the fallback for an unnamed tenant.
+    A zero is refused at parse time, because the ledger raises zero to one and a manifest
+    claiming zero would state a policy the server does not apply. `ConnectionLedger` became
+    per-tenant-keyed with that fallback, so naming one tenant does not change the ceiling
+    for every other. Published in `schema/qqq-toml.schema.json`, shaped exactly like its
+    three siblings (`anyOf` nullable integer).
+  → **Measured, six tests**: `a_per_tenant_connection_ceiling_is_carried` and
+    `a_zero_connection_ceiling_is_refused` in `qqq-cap`; `a_named_tenant_gets_its_own_ceiling_and_others_keep_the_fallback`
+    and `a_zero_ceiling_in_the_table_is_raised_to_one` in `qqq-serve`'s ledger;
+    `a_per_tenant_connection_ceiling_is_enforced` (fills the ceiling, then asserts the
+    ledger's bare refusal) and `a_connection_under_the_ceiling_is_served` (the 200 control)
+    over a real socket; and `a_manifest_connection_ceiling_is_applied` /
+    `raising_the_ceiling_lets_a_second_connection_through` through the `qqqai` binary itself.
+    Fault-injected twice, both **DETECTED**: making `admit` ignore the per-tenant table, and
+    removing `stop_after_the_bound` from the ledger-refusal path.
+  → **A separate, serious defect was found and fixed while proving this** — see §O-215: the
+    ledger's refusal closed the socket with the client's request still unread, so the stack
+    sent an RST instead of a FIN and the `503` was discarded. Every real client saw a reset
+    rather than a refusal; the tests could not see it because their probes read without
+    sending. Fixed by draining the pending request, bounded at 8192 bytes / 250 ms.
   → §10.2 Metrics that ship by default
   → Partial: header-count and header-size caps, and a declared-body cap, are enforced
     in `qqq-serve::http1`.

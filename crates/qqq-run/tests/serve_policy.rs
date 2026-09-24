@@ -497,3 +497,111 @@ fn config_serves_the_manifest_it_names() {
     let _ = serving.child.kill();
     let _ = serving.child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// The per-tenant connection ceiling
+// ---------------------------------------------------------------------------
+
+/// A manifest with a public route and a per-tenant ceiling of one connection.
+///
+/// The key is the peer address the server derives, so it matches the loopback client
+/// these tests connect from. `default_auth = "none"` is explicit, because the default is
+/// `deny` and a route the test cannot reach would make the ceiling untestable.
+const CONNECTION_CEILING_ONE: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+    [server]\ndefault_auth = \"none\"\n\
+    [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n\
+    [server.limits.per_tenant.\"127.0.0.1\"]\nmax_connections = 1\n";
+
+/// Hold a keep-alive connection open and read whatever the server answers.
+///
+/// Returns the stream so the caller keeps the connection alive: the ceiling counts open
+/// connections, so dropping this would release the slot.
+fn hold_open(port: u16) -> TcpStream {
+    let mut held = TcpStream::connect(("127.0.0.1", port)).expect("connect the held connection");
+    held.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        .expect("write on the held connection");
+    held.flush().expect("flush");
+    held.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut buf = [0u8; 512];
+    let _ = held.read(&mut buf);
+    held
+}
+
+/// **The ledger's own refusal, which no routed path produces.**
+///
+/// `close_immediately` writes a bare status line with `content-length: 0` and **no**
+/// `X-QQQ-Error`, because there is no route to name. Every refusal that goes through the
+/// router carries that header (`not_built`, `unauthenticated`, ...). Asserting on the
+/// header's absence is therefore the only way to tell the ledger's 503 from the
+/// not-built 503 in a test that runs against an unbuilt guest -- and without it this
+/// test passed while the ceiling was doing nothing at all.
+fn is_bare_ledger_refusal(response: &str) -> bool {
+    response.starts_with("HTTP/1.1 503")
+        && response.contains("content-length: 0")
+        && !response.contains("X-QQQ-Error")
+}
+
+/// **A manifest's `max_connections` is applied by the served path.**
+///
+/// The ceiling was a compiled constant with no configuration route until `SRV-020` was
+/// finished, so this is the difference between a manifest key that is read and one that
+/// is listed by `qqqai inspect` and never applied -- the shape the per-tenant address key
+/// had when it was documented as "tenant name" (`§O-185`).
+#[test]
+fn a_manifest_connection_ceiling_is_applied() {
+    let s = Sandbox::new("conn-ceiling");
+    s.write("qqq.toml", CONNECTION_CEILING_ONE);
+
+    let serving = start(&s, "conn-ceiling", 3);
+
+    // Hold the tenant's only slot. Held, not dropped: a dropped stream releases the slot
+    // and the next connection would be admitted, making this a test of the happy path.
+    let held = hold_open(serving.port);
+
+    let refused = request(
+        serving.port,
+        "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        is_bare_ledger_refusal(&refused),
+        "a tenant at its declared ceiling must be refused by the ledger, whose refusal \
+         carries no `X-QQQ-Error`:\n{refused}"
+    );
+
+    drop(held);
+}
+
+/// The positive control: a raised ceiling lets the second connection through the ledger.
+///
+/// Asserted on the **absence of the bare ledger refusal**, not on a 200. A 200 is
+/// unreachable here because the fixture's guest is unbuilt, and asserting one made this
+/// control fail against a correct server. What the control must show is narrower and
+/// exactly right: with a ceiling of four, the second connection reaches the router.
+#[test]
+fn raising_the_ceiling_lets_a_second_connection_through() {
+    let s = Sandbox::new("conn-ceiling-high");
+    let raised = CONNECTION_CEILING_ONE.replace("max_connections = 1", "max_connections = 4");
+    s.write("qqq.toml", &raised);
+
+    let serving = start(&s, "conn-ceiling-high", 3);
+
+    let held = hold_open(serving.port);
+
+    let second = request(
+        serving.port,
+        "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        !is_bare_ledger_refusal(&second),
+        "with a ceiling of four the second connection must pass the ledger and reach the \
+         router, whose answer carries `X-QQQ-Error`:\n{second}"
+    );
+    assert!(
+        second.contains("X-QQQ-Error"),
+        "the second connection must have been answered by a routed path, which is what \
+         proves it got past the ledger:\n{second}"
+    );
+
+    drop(held);
+}

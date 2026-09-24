@@ -66,6 +66,12 @@ pub struct Limits {
     /// Ignored when `max_requests_per_window` is `None`. A window with no count is
     /// meaningless, and requiring both would let a caller set one and forget the other.
     pub window: Duration,
+    /// The largest number of simultaneous connections the tenant may hold.
+    ///
+    /// `None` means the server's own ceiling applies, which is the fallback the ledger was
+    /// already built with. Read by `ConnectionLedger::with_limits`; a tenant this field
+    /// names gets its own ceiling and every other tenant keeps the server default.
+    pub max_connections: Option<u32>,
 }
 
 impl Limits {
@@ -80,6 +86,7 @@ impl Limits {
             max_body_bytes: None,
             max_requests_per_window: None,
             window: Duration::from_secs(60),
+            max_connections: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl Limits {
             max_body_bytes: Some(max_body_bytes),
             max_requests_per_window: None,
             window: Duration::from_secs(60),
+            max_connections: None,
         }
     }
 
@@ -100,6 +108,7 @@ impl Limits {
             max_body_bytes: None,
             max_requests_per_window: Some(max_requests_per_window),
             window,
+            max_connections: None,
         }
     }
 
@@ -296,6 +305,54 @@ impl TenantLimits {
     #[must_use]
     pub fn limits_for(&self, tenant: &str) -> Limits {
         self.limits.get(tenant).copied().unwrap_or(self.fallback)
+    }
+
+    /// A table whose only limit is the per-tenant **connection** ceiling.
+    ///
+    /// For a caller that has a connection policy and no request policy — the manifest path
+    /// builds a full table and does not use this. Each entry's other limits are
+    /// [`Limits::none`], so this never turns on a body or rate cap by accident.
+    #[must_use]
+    pub fn with_connections<I>(ceilings: I, fallback_connections: u32) -> Self
+    where
+        I: IntoIterator<Item = (String, u32)>,
+    {
+        let limits: BTreeMap<String, Limits> = ceilings
+            .into_iter()
+            .map(|(tenant, ceiling)| {
+                (
+                    tenant,
+                    Limits {
+                        max_connections: Some(ceiling),
+                        ..Limits::none()
+                    },
+                )
+            })
+            .collect();
+        let fallback = Limits {
+            max_connections: Some(fallback_connections),
+            ..Limits::none()
+        };
+        Self::new(limits, fallback)
+    }
+
+    /// The per-tenant **connection** ceilings, for tenants that name one.
+    ///
+    /// # Why only the tenants that name a ceiling appear
+    ///
+    /// A tenant whose entry sets a body cap and no `max_connections` must keep the
+    /// server's ceiling. Emitting its `None` as a ceiling would reset that tenant to
+    /// unbounded merely because it appears in the table, which is the opposite of what
+    /// its author wrote -- so this filters, and absence keeps the fallback.
+    ///
+    /// The shape is `(tenant, ceiling)` rather than a map so the caller can hand it
+    /// straight to `ConnectionLedger::with_limits`, which owns the fallback.
+    #[must_use]
+    pub fn connections_by_tenant(&self) -> Vec<(String, u32)> {
+        self.limits
+            .iter()
+            .filter_map(|(tenant, l)| l.max_connections.map(|c| (tenant.clone(), c)))
+            .collect()
     }
 
     /// Check a body length against the tenant's cap, **without** recording anything.

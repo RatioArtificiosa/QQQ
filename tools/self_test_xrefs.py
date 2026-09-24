@@ -690,7 +690,21 @@ def _run(lock: _Lock) -> int:
         print("FATAL: check_xrefs.py --self-test failed -- a rule is dead.")
         print((hermetic.stdout or hermetic.stderr)[-4000:])
         return 1
-    print("hermetic rule matrix: PASSED (16 cases over every numbered check)\n")
+    # The count is read from the subprocess rather than written here. It was the
+    # literal `16` until this line was fixed, while the subprocess had reached 17:
+    # a message asserting another program's output that nothing compares to that
+    # output drifts silently, and this one had already drifted.
+    hermetic_out = hermetic.stdout or hermetic.stderr or ""
+    _m = re.search(r"SELF-TEST PASSED -- (\d+)/(\d+) case", hermetic_out)
+    if _m is None:
+        print("FATAL: check_xrefs.py --self-test printed no case total to read.")
+        print(hermetic_out[-4000:])
+        return 1
+    hermetic_cases = int(_m.group(2))
+    print(
+        f"hermetic rule matrix: PASSED ({hermetic_cases} cases over every "
+        f"numbered check)\n"
+    )
 
     results: list[bool] = []
 

@@ -57,9 +57,14 @@ def run_check() -> tuple[int, str]:
 
 def self_test() -> int:
     failures = 0
+    # Counted by `case` itself rather than declared here: a hand-maintained total
+    # understates the moment a case is added, and the summary is then a claim the
+    # self-test cannot support.
+    cases = 0
 
     def case(name: str, ok: bool, detail: str = "") -> None:
-        nonlocal failures
+        nonlocal failures, cases
+        cases += 1
         print(f"  {'OK  ' if ok else 'DEAD'}  {name}")
         if not ok:
             failures += 1
@@ -142,13 +147,12 @@ def self_test() -> int:
         if original:
             write_text_lf(TARGET,original, encoding="utf-8")
 
-    total = len(samples) + 8
     print("")
     if failures:
-        print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")
+        print(f"SELF-TEST FAILED -- {failures}/{cases} case(s) not detected")
         return 1
     print(
-        f"SELF-TEST PASSED -- {total}/{total} case(s), every check is live "
+        f"SELF-TEST PASSED -- {cases}/{cases} case(s), every check is live "
         f"({len(rows)} fact(s), all classified)"
     )
     return 0

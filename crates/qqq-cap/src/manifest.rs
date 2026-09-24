@@ -1437,6 +1437,22 @@ pub struct TenantLimit {
     /// `qqq_serve::limits::Limits::is_coherent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_seconds: Option<u64>,
+    /// The largest number of **simultaneous connections** the tenant may hold.
+    ///
+    /// # Why this is here and not only on the server
+    ///
+    /// `ServerConfig::connections_per_tenant` bounds sockets a tenant holds, and it had no
+    /// configuration route at all: `git grep connections_per_tenant -- crates/` found only
+    /// its declaration, its default and its one read, so every deployment got 10 000 and
+    /// could ask for nothing else. `SRV-020` asks for per-tenant *count* limits, and a
+    /// connection ceiling is the count a tenant drives hardest, so it is a manifest key
+    /// here and the server's field becomes the fallback for a tenant this table does not
+    /// name.
+    ///
+    /// Absent means "whatever the server's ceiling is", so a table that lists only a body
+    /// cap does not silently reset the connection ceiling to unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
 }
 
 impl RequestLimits {
@@ -1503,6 +1519,18 @@ impl TenantLimit {
                 "the limits for {who} set a request cap with a zero window, which would \
                  allow every request: the window is always considered elapsed, so the \
                  count resets on every call"
+            ));
+        }
+        // A zero **connection** ceiling is refused rather than silently raised to one.
+        // The ledger raises zero to one because a tenant allowed no connections cannot be
+        // served at all; accepting zero here and raising it there would make the manifest
+        // state a policy the server does not apply, which is the failure `§O-185` records
+        // for a per-tenant key that could never match.
+        if self.max_connections == Some(0) {
+            return Err(format!(
+                "the limits for {who} set `max_connections = 0`, which would let the \
+                 tenant open no connection at all: every request would be refused with 503 \
+                 and nothing would say why"
             ));
         }
         Ok(())
@@ -2693,6 +2721,60 @@ reproducible = true
         assert!(
             err.contains("2001:db8::1"),
             "the refusal must name the spelling that works: {err}"
+        );
+    }
+
+    /// **A per-tenant connection ceiling is carried, not dropped.**
+    ///
+    /// `SRV-020` asks for per-tenant *count* limits, and the connection ceiling was a
+    /// compiled constant (`ServerConfig::connections_per_tenant`) reachable from no
+    /// manifest key. This pins that the key parses into the struct the server reads,
+    /// so it cannot become the dead configuration `§O-185` records.
+    #[test]
+    fn a_per_tenant_connection_ceiling_is_carried() {
+        let text = format!(
+            "{MINIMAL}\n[server.limits]
+\n[server.limits.per_tenant.\"127.0.0.1\"]\n\
+             max_connections = 17\n"
+        );
+        let m = Manifest::parse(&text).expect("a connection ceiling must parse");
+        let limits = m.server.limits.expect("limits");
+        let entry = limits
+            .per_tenant
+            .get("127.0.0.1")
+            .expect("the entry must survive");
+        assert_eq!(
+            entry.max_connections,
+            Some(17),
+            "the ceiling must reach the struct the server reads"
+        );
+        assert!(limits.validate().is_ok(), "17 is a valid ceiling");
+    }
+
+    /// **A zero connection ceiling is refused.**
+    ///
+    /// The ledger raises a ceiling of zero to one, because a tenant allowed no
+    /// connections cannot be served at all -- every request would be a 503 with nothing
+    /// saying why. Accepting zero here and raising it there would make the manifest state
+    /// a policy the server does not apply, which is the dead-configuration shape with a
+    /// friendlier symptom. Refusing names the problem where someone is looking.
+    #[test]
+    fn a_zero_connection_ceiling_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[server.limits]\n\n[server.limits.per_tenant.\"127.0.0.1\"]\n\
+             max_connections = 0\n"
+        );
+        let err = format!(
+            "{}",
+            Manifest::parse(&text).expect_err("a zero ceiling must be refused")
+        );
+        assert!(
+            err.contains("max_connections = 0"),
+            "the refusal must name the key and the value: {err}"
+        );
+        assert!(
+            err.contains("503"),
+            "the refusal must say what would happen, so the number is not just rejected: {err}"
         );
     }
 

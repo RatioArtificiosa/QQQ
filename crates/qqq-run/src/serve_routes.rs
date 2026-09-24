@@ -264,6 +264,7 @@ fn build_limits(
         max_body_bytes: l.max_body_bytes,
         max_requests_per_window: l.max_requests_per_window,
         window: l.window(),
+        max_connections: l.max_connections,
     };
 
     let fallback = declared

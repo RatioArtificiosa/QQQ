@@ -592,6 +592,18 @@
           ],
           "description": "The largest request body accepted, in bytes."
         },
+        "max_connections": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The largest number of **simultaneous connections** the tenant may hold."
+        },
         "max_requests_per_window": {
           "anyOf": [
             {

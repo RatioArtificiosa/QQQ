@@ -742,13 +742,19 @@ allow_origins = ["https://app.example.com"]
                     max_body_bytes: Some(1_048_576),
                     max_requests_per_window: Some(1_000),
                     window_seconds: Some(60),
+                    max_connections: Some(64),
                 }),
+                // A canonical client address, not a name: `validate_tenant_key` refuses a
+                // name because it can never match a request's tenant. This fixture builds
+                // the struct directly and so bypasses that check, which is why the old
+                // `"big"` key survived here while the same key is refused by `parse`.
                 per_tenant: std::collections::BTreeMap::from([(
-                    "big".to_owned(),
+                    "127.0.0.1".to_owned(),
                     TenantLimit {
                         max_body_bytes: Some(16_777_216),
                         max_requests_per_window: None,
                         window_seconds: None,
+                        max_connections: Some(8),
                     },
                 )]),
             }),

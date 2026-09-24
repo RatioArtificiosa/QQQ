@@ -1048,16 +1048,22 @@ fn dispatch_new(name: CommandName, args: &[String], out: &mut Output<std::io::St
     match qqq_run::scaffold::create(&opts, &cwd) {
         Ok(value) => report(out, name, &value),
         Err(e) => {
-            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
             // A refused name is a usage mistake; a refused directory is an
             // environment condition the user must resolve. Distinguishing them
             // lets a script tell "I called it wrong" from "something is in the
             // way".
+            //
+            // The code is computed **before** the envelope is emitted and then
+            // used for both. Emitting with `FAILURE` and returning `USAGE`
+            // afterwards is the contradiction §O-208 removed from 48 other
+            // sites, and it survived here because the two values happen to agree
+            // on every path the tests exercised.
             let code = if e.message.contains("not a usable") || e.message.contains("plain name") {
                 exit::USAGE
             } else {
                 exit::FAILURE
             };
+            let _ = out.emit_error_with_exit(name, &e, code);
             ExitCode::from(code)
         }
     }
@@ -2770,15 +2776,18 @@ fn wasm_target_present_with(inputs: &WasmProbeInputs) -> bool {
     }
 
     // The active toolchain's own sysroot — the same path the build resolves.
+    //
+    // When `rustc --print sysroot` succeeded, its answer is **final**: a target
+    // installed on some other toolchain is not installed for this build, so
+    // falling through to the scan would answer a different question and pass a
+    // machine that cannot build. The scan is reached only when there is no
+    // sysroot to ask — `rustc` absent or unusable.
     if let Some(sysroot) = &inputs.sysroot {
-        if sysroot
+        return sysroot
             .join("lib")
             .join("rustlib")
             .join(WASM_TARGET)
-            .is_dir()
-        {
-            return true;
-        }
+            .is_dir();
     }
 
     // Fallback: some mounted toolchain has it. Weaker evidence than the
@@ -3655,10 +3664,24 @@ mod tests {
             "an empty sysroot and home must report absent with rustup disabled"
         );
 
+        // With the sysroot known, it decides: a target on some *other*
+        // toolchain is not installed for this build. The scan is a fallback for
+        // when there is no sysroot to ask, which the case below pins.
         let (i, _t) = probe_inputs(None, false, true, false);
         assert!(
-            wasm_target_present_with(&i),
-            "a mounted toolchain with the target must be found as a fallback"
+            !wasm_target_present_with(&i),
+            "a target on another toolchain must not satisfy a known sysroot that \
+             lacks it"
+        );
+
+        // And the scan is still reachable when there is no sysroot at all:
+        // the same inputs with `sysroot` cleared, so only the toolchain tree can
+        // answer.
+        let (mut no_sysroot, _t) = probe_inputs(None, false, true, false);
+        no_sysroot.sysroot = None;
+        assert!(
+            wasm_target_present_with(&no_sysroot),
+            "with no sysroot to ask, the toolchain scan must still find the target"
         );
     }
 

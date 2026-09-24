@@ -17340,9 +17340,205 @@ earlier check asked *"does this work"*; none asked *"is this the best version of
 this"*. Those are different questions, and only the second one finds trailing
 whitespace, an inconsistent indent, or a header with nothing after it.
 
+## §O-214 — the CI barrier verified the file it had just written
+
+A second CodeRabbit check, scoped at the capability and host crates but run over a
+wider base commit, returned **26 findings across 63 files** — much broader than
+intended, and including code this session wrote. Three findings were against that
+code. One of them is the most serious defect found in this whole session, and it
+was **mine**.
+
+### The finding
+
+`.github/workflows/ci.yml`, the step §O-204 added:
+
+```yaml
+      - name: Prove the corpus is byte-identical to its recorded digests
+        run: |
+          python tools/check_corpus_at_rest.py --record
+          python tools/check_corpus_at_rest.py
+```
+
+`--record` **writes** `tools/corpus_at_rest.json` from the tree's current hashes.
+So the step hashed the tree, overwrote the recorded digests with the result, and
+then verified the tree against the file it had just written. **The check could not
+fail.** It would pass on a corpus that had been edited by anything at all —
+including the scenario it was built to catch, an interrupted run leaving injected
+bytes behind.
+
+The comment above it explains why `--record` was there: so the second invocation
+would compare against a fresh baseline. That reasoning is circular and the
+comment made it *look* deliberate. A fresh baseline is precisely what an
+at-rest check must not use — the committed digest file is the authority, and
+regenerating it is a deliberate local act whose diff gets reviewed.
+
+**Fixed** by running the check alone, against the committed digests.
+
+### This is the fourth instance of one class
+
+| Entry | The check | What was wrong |
+|---|---|---|
+| §O-205 | a schema checker | compared an artifact to its own producer |
+| §O-206 | a schema conformance claim | cited a checker that was never written |
+| §O-211 F5 | a self-test case | could skip its own subject and report PASSED |
+| **§O-214** | **the corpus digest barrier** | **wrote the digests, then verified them** |
+
+Every one is a validator that cannot fail, and every one was written *in the
+course of fixing a validator that could not fail*. The pattern is now strong
+enough to state as a rule worth carrying: **when adding a check, the first
+question is what input makes it go red, and the answer must be an input the check
+does not itself produce.**
+
+The `--record` step passed the local gate, passed three CI runs, and passed the
+first CodeRabbit review of this session. Nothing about it looked wrong, because
+its output was a tidy `CORPUS AT REST -- 3 document(s) match their recorded
+digests`.
+
+### The other two
+
+**`dispatch_new` emitted `FAILURE` and returned `USAGE`.** The arm computes an
+exit code from the error — a refused project name is a usage mistake, a refused
+directory is an environment condition — and then emitted its envelope with a
+hardcoded `FAILURE` *before* computing the real code. So `qqqai new ../bad --json`
+reported `"exit_code":1` while the process returned `2`: the §O-208 defect, at one
+of the 48 sites, on the one path where the two values differ. Fixed by computing
+the code first, and **verified against the binary**:
+
+```
+$ qqqai new "../bad" --json
+{...,"ok":false,"exit_code":2,...,"code":"QQQ-2002",...}
+$ echo $?
+2
+```
+
+It survived §O-208 because the mechanical rewrite took each site's code from the
+`return ExitCode::from(exit::X)` that follows it, and this site computes `X` into
+a *variable* — so the pattern did not match and the site kept the default. A
+conversion driven by pattern-matching inherits the blind spots of the pattern.
+
+**The WASM probe still fell back to the toolchain scan after a successful
+`rustc --print sysroot`.** With the sysroot known and lacking the target, it went
+on to the scan and returned true for a target installed on some *other* toolchain
+— the exact false confidence F2 was fixed to remove, still present for that input
+set. When `rustc` answers, the answer is final; the scan is for when there is no
+sysroot to ask. Fixed, and the test now pins both directions: a known sysroot
+without the target is `false` even when another toolchain has it, and the scan
+still answers when `sysroot` is `None`.
+
+Both of these are the *second* pass over the same function. F2 and §O-208 were
+each reported as fixed and each was incomplete, and neither the tests nor the
+gate could see it — the tests asserted the behaviour I had in mind, and the
+incompleteness was in the part I had not thought about.
+
+### Disposition of the rest
+
+Twenty-three of the 26 findings are against files outside this session's change
+set — `docs/abi-cost-measured.md` (contradictory run counts), `docker/entrypoint.sh`,
+`crates/qqq-serve/src/server.rs` (a refused connection not triggering shutdown),
+`tools/check_xrefs.py` (an exemption-declaration comment), `tools/gen_verified_facts.py`,
+and several others. They are real-looking and are **not** dispositioned here:
+each needs its own reproduction, and several are in code this session did not
+touch. They are recorded as the next work rather than silently dropped — a finding
+neither fixed nor explained is the thing this document exists to prevent.
+
+## §O-215 — a refused connection was invisible to every real client
+
+Two defects, one of them new and serious, found by finishing `SRV-020`'s
+per-tenant connection ceiling.
+
+### The ceiling had no configuration route
+
+`SRV-020` was ticked `[x]` while its own body said "Partial" twice. Reproduced
+with a real command rather than read from the prose:
+
+```
+$ git grep -n connections_per_tenant -- crates/
+crates/qqq-serve/src/server.rs:73:    pub connections_per_tenant: u32,
+crates/qqq-serve/src/server.rs:147:            connections_per_tenant: 10_000,
+crates/qqq-serve/src/server.rs:422:        config.connections_per_tenant,
+```
+
+Three lines: a declaration, a default, one read. No manifest key, no flag. So
+"count limits enforced per tenant" held only at a compiled 10 000.
+
+That is now a manifest key. `TenantLimit` gained `max_connections`, the value
+travels through `Limits` into `TenantLimits`, `ConnectionLedger` became
+per-tenant-keyed with a fallback (the same shape `TenantLimits` already used, so
+naming one tenant does not change the ceiling for every other), and `ServerConfig`
+reads the table rather than a second parallel field. A zero ceiling is refused at
+parse time, because the ledger raises zero to one and a manifest claiming zero
+would state a policy the server does not apply — the same dead-configuration shape
+`§O-185` records for a per-tenant key that could never match.
+
+### The reset, which is the serious one
+
+The test that proves the ceiling is enforced kept failing with an **empty**
+response. Two wrong hypotheses first — that the readiness probe had consumed the
+ceiling, and that the arithmetic was wrong. Both were tested and both were false;
+the ledger chain was verified correct on its own (`connections_by_tenant` produced
+the entry, `ceiling_for` returned 2, the third `admit` returned false).
+
+Reading what the sockets actually received found it in one run:
+
+```
+DIAG held[0] read 81 bytes: Some("HTTP/1.1 200 OK")
+DIAG held[1] read 81 bytes: Some("HTTP/1.1 200 OK")
+DIAG refused raw = ""
+DIAG silent read 74 bytes: "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0...\r\n\r\n"
+```
+
+The refused client received nothing. A client that connected and read **without
+sending a request** received the full 503.
+
+The mechanism is TCP, not HTTP. The refusal path deliberately reads nothing before
+refusing — that is the property the code documents, so a peer cannot spend the
+defender's cost on its own request. But at that point the client's request is
+sitting **unread in the server's receive buffer**, and a socket closed with unread
+data makes the stack answer with an **RST** rather than a FIN. The RST discards
+what the peer has not yet read, including the refusal just written.
+
+Every real client sends a request. So every ledger refusal — connection ceiling,
+and pool exhaustion, which shares `close_immediately` — was seen by real clients as
+a connection reset rather than as `503 Service Unavailable`. The tests did not
+catch it because the harnesses that assert on a refusal response connect and read
+in a way that leaves nothing unread, or assert on shutdown rather than on bytes.
+
+**Fixed** by draining the pending request before writing the refusal, bounded at
+8192 bytes with a 250 ms deadline so a peer streaming a body still gains nothing
+and an idle connection frees its task quickly. Verified: both clients now receive
+the identical 74-byte response.
+
+### Why this one matters beyond the fix
+
+The observable the tests asserted on — the status line — was **never what a real
+client saw**, and no unit test could see it because the defect lives in the
+interaction between the socket's receive buffer, the close path, and the peer. A
+test that connects and reads without writing is not testing a client; it is
+testing a probe. The lesson is worth carrying: **when a refusal is the thing under
+test, the test must send what a real peer sends, or it is testing a different
+program.**
+
+### Fault injections this round
+
+| Test | Injected | Result |
+|---|---|---|
+| `a_refused_connection_still_honours_the_accept_bound` | removed `stop_after_the_bound` from the refusal path | **DETECTED** |
+| `a_manifest_connection_ceiling_is_applied` | made `admit` ignore the per-tenant table | **DETECTED** |
+
+Both restored byte-for-byte, `git grep "INJECTED FAULT"` empty.
+
+### Also this round
+
+`check_verified_facts.py` printed `total = len(samples) + 8` — a hand-maintained
+arithmetic over its own case count. `case()` now counts its own invocations.
+
+`self_test_xrefs.py` printed "**16** cases over every numbered check" while
+`check_xrefs.py --self-test` reports **17**. Reproduced by running both:
+
+```
+$ python tools/self_test_xrefs.py
+hermetic rule matrix: PASSED (17 cases over every numbered check)
+```
+
+The count is now parsed from the subprocess's own output, so it cannot drift again.
 *End of `QQQ-Observations-and-Memories.md`.*
-
-
-
-
-

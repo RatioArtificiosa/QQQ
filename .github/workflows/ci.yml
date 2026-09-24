@@ -451,8 +451,13 @@ jobs:
       # every run: if the corpus is left changed by anything at all, this step names
       # the document and the byte-length delta.
       - name: Prove the corpus is byte-identical to its recorded digests
+        # Verified against the **committed** digest file. `--record` is
+        # deliberately absent: it rewrites the digests from the tree, so a job
+        # that recorded and then verified would compare the tree to itself and
+        # pass on any corpus. The committed `tools/corpus_at_rest.json` is the
+        # authority; regenerating it is a deliberate local act whose diff is
+        # reviewed, which is the only way the barrier can mean anything.
         run: |
-          python tools/check_corpus_at_rest.py --record
           python tools/check_corpus_at_rest.py
 
       # `HOST-011` requires every host function to be panic-guarded, and the

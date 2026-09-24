@@ -29,17 +29,21 @@ including a bare CI container.
 # marker would blind the citation checker for all of it, and an escape hatch that
 # can swallow a whole file is the failure mode that checker's own self-test names.
 #
-# The marker is `not-a-checklist-item`.
-# This file is exempt from `tools/check_checklist_citations.py`, in full.
+# The marker is `not-a-checklist-item`. **Not** the file-level spelling
+# (`checklist-citations-exempt`) -- this file carries three per-line markers and no
+# file-wide declaration, which is the same choice `self_test_xrefs.py` made for the
+# opposite reason (that file is all fabrications; this one is three).
+#
+# An earlier version of this comment declared the file exempt in full, one
+# paragraph after arguing that a file-wide marker is the failure mode the citation
+# checker's own self-test names. The declaration was also untrue: the checker had
+# never seen it. Corrected to describe what the file does.
 #
 # `--self-test` fabricates identifiers deliberately: the only way to prove rule [7]
 # fires is to write a `QQQ-STUB` marker naming an item that does not exist, and the
 # only way to prove rule [2] fires is to cite one from the Proposal. Those
 # fabrications are the test. Flagging them would mean the tool that tests a control
-# fails the build by doing its job -- the same reasoning `self_test_xrefs.py`
-# records for its own exemption, and the declaration is written once per file for
-# the same reason: nine per-line markers are nine places to keep right, and the
-# tenth fabricated identifier added later would be missed.
+# fails the build by doing its job.
 
 from __future__ import annotations
 

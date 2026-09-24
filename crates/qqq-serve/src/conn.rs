@@ -462,7 +462,17 @@ impl Connection {
 /// (`SRV-012`).
 #[derive(Debug)]
 pub struct ConnectionLedger {
-    /// The per-tenant ceiling.
+    /// Per-tenant ceilings, for a tenant the manifest names.
+    ///
+    /// Empty is the common case: a deployment that declares no per-tenant
+    /// `max_connections` gets the fallback for everybody.
+    ceilings: std::collections::BTreeMap<String, u32>,
+    /// The ceiling for a tenant not in `ceilings`.
+    ///
+    /// This is `ServerConfig::connections_per_tenant`, and it is a fallback rather
+    /// than an override so that naming one tenant does not change the ceiling for
+    /// every other — the same shape `TenantLimits` uses for its limits, and for the
+    /// same reason.
     per_tenant: u32,
     /// Open connections per tenant.
     counts: std::collections::BTreeMap<String, u32>,
@@ -478,15 +488,46 @@ impl ConnectionLedger {
     #[must_use]
     pub fn new(per_tenant: u32) -> Self {
         Self {
+            ceilings: std::collections::BTreeMap::new(),
             per_tenant: per_tenant.max(1),
             counts: std::collections::BTreeMap::new(),
         }
     }
 
-    /// The ceiling.
+    /// A ledger with per-tenant ceilings and a fallback.
+    ///
+    /// A ceiling of zero in the table is raised to one for the same reason
+    /// [`Self::new`] raises the fallback: a tenant allowed no connections cannot be
+    /// served at all. The manifest refuses `max_connections = 0` before a server
+    /// binds, so this is defence in depth rather than the only guard.
+    #[must_use]
+    pub fn with_limits<I>(ceilings: I, fallback: u32) -> Self
+    where
+        I: IntoIterator<Item = (String, u32)>,
+    {
+        Self {
+            ceilings: ceilings
+                .into_iter()
+                .map(|(tenant, ceiling)| (tenant, ceiling.max(1)))
+                .collect(),
+            per_tenant: fallback.max(1),
+            counts: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The fallback ceiling.
     #[must_use]
     pub const fn per_tenant(&self) -> u32 {
         self.per_tenant
+    }
+
+    /// The ceiling that applies to one tenant.
+    #[must_use]
+    pub fn ceiling_for(&self, tenant: &str) -> u32 {
+        self.ceilings
+            .get(tenant)
+            .copied()
+            .unwrap_or(self.per_tenant)
     }
 
     /// Try to admit a connection.
@@ -495,8 +536,13 @@ impl ConnectionLedger {
     /// answers with 503 and `Retry-After` — the same loading-shedding path as
     /// pool exhaustion, because it is the same situation.
     pub fn admit(&mut self, tenant: &str) -> bool {
+        let ceiling = self
+            .ceilings
+            .get(tenant)
+            .copied()
+            .unwrap_or(self.per_tenant);
         let count = self.counts.entry(tenant.to_owned()).or_insert(0);
-        if *count >= self.per_tenant {
+        if *count >= ceiling {
             return false;
         }
         *count += 1;
@@ -1066,5 +1112,51 @@ mod tests {
         assert_eq!(l.per_tenant(), 1);
         assert!(l.admit("a"), "a tenant must be able to connect at all");
         assert!(!l.admit("a"));
+    }
+
+    /// **A named tenant gets its own ceiling, and other tenants keep the fallback.**
+    ///
+    /// The whole point of per-tenant limits, and the half that a table read as an
+    /// override rather than as per-tenant entries would get wrong: naming one tenant
+    /// must not change the ceiling for every other.
+    #[test]
+    fn a_named_tenant_gets_its_own_ceiling_and_others_keep_the_fallback() {
+        let mut l = ConnectionLedger::with_limits([("a".to_owned(), 2)], 5);
+        assert_eq!(l.ceiling_for("a"), 2, "the named ceiling must apply");
+        assert_eq!(
+            l.ceiling_for("b"),
+            5,
+            "an unnamed tenant keeps the fallback"
+        );
+
+        assert!(l.admit("a"));
+        assert!(l.admit("a"));
+        assert!(!l.admit("a"), "`a` is at its own ceiling of two");
+
+        for _ in 0..5 {
+            assert!(
+                l.admit("b"),
+                "`b` is bounded by the fallback, not by `a`'s entry"
+            );
+        }
+        assert!(!l.admit("b"), "`b` is now at the fallback ceiling of five");
+    }
+
+    /// A zero ceiling in the **table** is raised the same way the fallback is.
+    ///
+    /// The manifest refuses `max_connections = 0` before a server binds, so this is
+    /// defence in depth: a ledger built directly must not create a tenant that can never
+    /// connect, which would answer every request with 503 and say nothing about why.
+    #[test]
+    fn a_zero_ceiling_in_the_table_is_raised_to_one() {
+        let mut l = ConnectionLedger::with_limits([("a".to_owned(), 0)], 5);
+        assert_eq!(l.ceiling_for("a"), 1);
+        assert!(l.admit("a"), "the tenant must be able to connect at all");
+        assert!(!l.admit("a"));
+        assert_eq!(
+            l.ceiling_for("b"),
+            5,
+            "raising `a` must not touch the fallback"
+        );
     }
 }

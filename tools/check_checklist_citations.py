@@ -74,7 +74,12 @@ CITATION = re.compile(r"\b([A-Z]{2,5})-(\d{3})\b")
 # them was reported as pointing at nothing. A checker that flags two real items is
 # worse than no checker, because the two false positives are what a reader remembers
 # when the next, real finding arrives.
-ITEM = re.compile(r"^-\s*\[[ x!]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*", re.MULTILINE)
+# The marker set is the checklist's documented legend: `[ ]`, `[x]`, `[~]`,
+# `[!]`, `[-]`. `[~]` was missing until `SRV-020` became the first item marked in
+# progress, at which point every citation of it was reported as "not in the
+# checklist" -- a false failure across nine files, caused by this grammar being
+# narrower than the legend and narrower than `check_xrefs.py`'s identical regex.
+ITEM = re.compile(r"^-\s*\[[ x~!-]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*", re.MULTILINE)
 
 # A citation is *allowed* to point at nothing when the source says so nearby.
 #

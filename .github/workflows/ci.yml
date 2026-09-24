@@ -164,6 +164,16 @@ jobs:
       - name: Validate proposal <-> checklist graph
         run: python tools/check_xrefs.py
 
+      # A leaked `\uXXXX` renders as literal text in Markdown, so a cross-reference that
+      # *looks* present is absent to a `grep` for the real character. This happened: a
+      # `` `\u00a7O-189` `` sat in Observations where `§O-189` belonged. The scanner fires on
+      # `\u` alone and stays silent on the `\x`/`\*` byte and regex literals the corpus
+      # legitimately quotes, so it can be satisfied rather than worked around.
+      - name: Refuse a document carrying the text of a Unicode escape
+        run: python tools/check_unicode_escapes.py
+      - name: Prove the escape scanner fires on a leak and stays silent on source text
+        run: python tools/check_unicode_escapes.py --self-test
+
       # **Before the validator, refuse a corpus that carries a left-over injection.**
       #
       # Ordering this first matters. `check_xrefs.py` reports the *symptom* — "the

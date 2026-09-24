@@ -15603,7 +15603,7 @@ edited. Three probes resolve it, in increasing order of authority:
 3. Normalizing the working tree to LF and comparing bytes against `git show HEAD:<file>` ->
    **identical**, 326768 and 138082 bytes respectively.
 
-So both are clean, and the `M` is the stat-cache artefact `\u00a7O-189` records: a file whose
+So both are clean, and the `M` is the stat-cache artefact §O-189 records: a file whose
 working-tree line endings differ from `index=lf` while its *content* agrees. `git
 update-index --refresh` reports `needs update` for them and does not clear it, which is the
 part that misleads -- `needs update` reads like real drift. The test that settles it is
@@ -18316,5 +18316,142 @@ suggestion rather than literally:
 - CodeRabbit suggested a 44-character base64 fixture; the fix uses a **real** one generated from
   `base64(bytes(range(32)))` and adds the 64-character companion, so both refusal paths are
   pinned and neither test can pass via the other's path.
+
+## §O-225 — `qqqai inspect` knew which interfaces had no implementation and
+did not say so
+
+**Found:** 2026-09-24, auditing the stub inventory after external review. **Fixed and verified:**
+same session. **Anchors:** `CON-009` (the missing interfaces), `CLI-008` (the `inspect` command),
+`§O-130` (the feature-with-no-caller shape).
+
+### The defect
+
+`InterfaceReport` carries an `implemented: bool`, populated from the capability registry, and
+`inspect_marks_unimplemented_interfaces_honestly` asserted it. The **human renderer** printed the
+bare name:
+
+```rust
+for iface in &self.interfaces {
+    let _ = writeln!(out, "  {}", iface.name);   // `implemented` never read
+}
+```
+
+Measured on a project declaring `[[capabilities.fs]]`:
+
+```
+$ qqqai inspect
+gaptest: 1 capabilities, 1 interfaces, posture: contained
+
+Interfaces
+  qqq:fs@1.0.0
+```
+
+`qqq:fs` has **no host implementation at all** — `linker.rs` binds `qqq:clock`, `qqq:crypto`,
+`qqq:http` and WASI, and records everything else in `BoundInterfaces::unimplemented`. The JSON
+carried `"implemented": false` the whole time. A developer declaring an `fs` capability read a
+report that listed the interface as though it were live, and the first hint to the contrary was a
+`QQQ-6004` at instantiation.
+
+### Why it is worth recording
+
+This is the **inverse** of §O-130's shape. There, a feature was implemented and had no caller.
+Here the fact was *computed, stored, tested and published in one format* — and dropped by the
+other. Both are the same underlying error: **a claim that is available is not a claim that is
+made.** The JSON is not what a person reads.
+
+The specific lesson is about the test: `inspect_marks_unimplemented_interfaces_honestly` asserted
+the *field*, and it was correct and stable for as long as the renderer ignored the field. A test
+on a struct proves the struct; it says nothing about the text a user sees. The new
+`inspect_renders_the_unimplemented_gap_for_a_human` asserts the rendered string, and its
+**control** — `inspect_does_not_annotate_a_fully_implemented_project` — exists because a
+renderer that marked everything as unimplemented would satisfy the first test while telling every
+user their working project cannot run.
+
+The fix also puts the count on the **summary line**, not only beside the interface, for the reason
+the module's own `caps` comment gives: a number inside a section is what people skim past.
+
+### The fix
+
+- `Interfaces` annotates an unbound interface with `(no host implementation yet)`.
+- The summary line carries `(N with no host implementation yet, marked below)` when N > 0.
+- The JSON is unchanged — the field was already correct, and changing it would have been a
+  second, incompatible answer.
+
+### The stub inventory, which is what started this
+
+A full scan found **two** `QQQ-STUB` markers in the workspace and **zero** `todo!()` or
+`unimplemented!()` calls:
+
+| Marker | What it records |
+|---|---|
+| `linker.rs` — `QQQ-STUB(CON-009)` | `qqq:fs`, `qqq:sql`, `qqq:dns`, `qqq:kv`, `qqq:queue`, `qqq:log`, `qqq:trace`, `qqq:env` have no registered interface; `qqq:clock`, `qqq:crypto`, `qqq:http` and WASI do |
+| `qqq-host/src/lib.rs` — `QQQ-STUB(ARCH-007)` | the crate map is discharged for the hardening surface only |
+
+Both are paired with a `§S-` entry in this document, which `check_xrefs.py` rules 7 and 11
+enforce bidirectionally — so a stub cannot exist without a record, and a record cannot exist
+without a stub. The gap named by `CON-009` is therefore **findable by design**, and the
+`inspect` fix is what makes it findable by a **user** rather than only by a reader of the source.
+
+### Declined
+
+None. The `CON-009` stub itself was left in place: eight host interfaces is a milestone-sized body
+of work (`§6.3`), not something to begin without the section read and the item owned. What was
+in scope was making it impossible for a user to be surprised by it, which is now true.
+
+## §O-226 — An assertion that searched the whole document, and so could not
+tell a summary line from an interface line
+
+**Found:** 2026-09-24, by fault injection on the `inspect` gap rendering (§O-225).
+**Fixed and verified:** same session. **Anchors:** `CLI-008`, `§O-225`.
+
+### What happened
+
+§O-225 added a test that the unimplemented-interface gap reaches the rendered output, with two
+assertions:
+
+```rust
+assert!(text.contains("no host implementation yet"));          // the interface line
+assert!(text.contains("1 with no host implementation yet"));   // the summary line
+```
+
+The first fault injection removed the per-interface annotation, leaving only the summary line —
+and the test **passed**. The reason is one string: the summary line's own text is
+*"1 with no host implementation yet, marked below"*, which **contains** the phrase the first
+assertion searched for. A document-wide `contains` cannot distinguish which of two places supplied
+the match, so the assertion proved one annotation while claiming two.
+
+### Why this is §O-220's lesson in a new costume
+
+§O-220 recorded two blind tests, both substring assertions on a JSON document, and drew the
+rule *if the subject is a JSON document, the assertion parses it.* This is the same failure with a
+plain-text subject: **a `contains` over a whole document asserts that a phrase appears somewhere,
+not that it appears where the claim says.** The two are the same whenever a second location happens
+to hold the same words — which, in output generated from one renderer, is exactly what neighbouring
+lines do.
+
+### The fix
+
+Both annotations are now located by the line they belong to:
+
+```rust
+let summary_line = lines.first()...;                        // the count lives on line 1
+let heading = lines.iter().position(|l| l.trim() == "Interfaces")...;
+let interface_line = lines[heading + 1];                    // the entry under the heading
+```
+
+Each assertion is made against its own line, so the two are independent and either can be broken
+without the other covering for it.
+
+### The generalisable rule
+
+**Assert on the smallest span that carries the claim.** A whole-document search is the textual
+equivalent of asserting a property of a struct by searching the debug dump: it passes whenever the
+value appears *anywhere*, including in a place that does not mean what the test thinks it means.
+Locate the line, the field, or the node — and when the subject is structured, parse it.
+
+This is now the **second** blind test found by fault injection in two rounds, and both were
+`contains` calls. That correlation is worth acting on: in this repository a bare
+`assert!(text.contains(..))` over generated output should be read as a smell, and the question to
+ask is *"could a neighbouring line satisfy this?"*
 
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -758,10 +758,39 @@ impl CommandOutput for InspectOutput {
             self.posture.as_str()
         );
 
+        // A project that cannot run as declared says so on the first line.
+        //
+        // This is the count a reader needs before anything else: the interfaces below are what
+        // the project is *allowed* to import, and one with no host implementation means the
+        // artifact will fail at instantiation rather than at the call the author expected. A
+        // number buried in a section is the thing people skim past; the first line is not.
+        let unimplemented = self.interfaces.iter().filter(|i| !i.implemented).count();
+        if unimplemented > 0 {
+            let _ = write!(
+                out,
+                " ({unimplemented} with no host implementation yet, marked below)"
+            );
+        }
+
         if !self.interfaces.is_empty() {
             out.push_str("\n\nInterfaces\n");
             for iface in &self.interfaces {
-                let _ = writeln!(out, "  {}", iface.name);
+                // The `implemented` flag is rendered, not merely carried.
+                //
+                // It was in the struct, populated from the registry, and asserted by
+                // `inspect_marks_unimplemented_interfaces_honestly` — and the human output printed
+                // the bare name anyway. So `qqqai inspect` on a project granting `[[capabilities.fs]]`
+                // listed `qqq:fs@1.0.0` as though it were live, and the first hint that it has no
+                // host implementation was the `QQQ-6004` at runtime.
+                //
+                // The JSON carried the field the whole time, which is the trap: a fact that is
+                // *available* and not *presented* reads as a fact that does not exist. The
+                // annotation is the whole reason `InterfaceReport` has the field.
+                if iface.implemented {
+                    let _ = writeln!(out, "  {}", iface.name);
+                } else {
+                    let _ = writeln!(out, "  {}  (no host implementation yet)", iface.name);
+                }
             }
             out.pop();
         }
@@ -1640,6 +1669,76 @@ mod tests {
             "crypto is only partially implemented and must say so"
         );
         assert!(!crypto.summary.is_empty());
+    }
+
+    /// The gap must reach the **rendered** output, not only the struct.
+    ///
+    /// # Why this test is separate from the one above
+    ///
+    /// `inspect_marks_unimplemented_interfaces_honestly` asserts the field, and it passed for as
+    /// long as the human renderer printed the bare interface name and dropped the flag. A field
+    /// that is populated and not presented reads to a user exactly like a field that does not
+    /// exist, so the assertion has to be made against the text a person sees — on the summary
+    /// line and beside the interface, because a count inside a section is what people skim past.
+    ///
+    /// # Why the two annotations are asserted by their own line
+    ///
+    /// The first version of this test searched the whole document for
+    /// `"no host implementation yet"`. The summary line starts with that same phrase, so the
+    /// assertion was satisfied by the summary alone and the per-interface annotation was
+    /// untested — proved by fault injection, which removed the annotation and watched the test
+    /// **pass**. Both places are now pinned by locating the line they belong to, which is what
+    /// makes the two independent.
+    #[test]
+    fn inspect_renders_the_unimplemented_gap_for_a_human() {
+        let out = inspect(&loaded(CRYPTO)).unwrap();
+        let text = out.summary();
+        let lines: Vec<&str> = text.lines().collect();
+
+        // The summary line: the first line, carrying the count.
+        let summary_line = lines.first().copied().unwrap_or_default();
+        assert!(
+            summary_line.contains("1 with no host implementation yet"),
+            "the summary line must carry the count:\n{summary_line}"
+        );
+
+        // The interface line: the entry *under* the `Interfaces` heading, not the summary above
+        // it. Found by walking from the heading rather than by a document-wide search.
+        let heading = lines
+            .iter()
+            .position(|l| l.trim() == "Interfaces")
+            .expect("the Interfaces heading must be present");
+        let interface_line = lines[heading + 1];
+        assert!(
+            interface_line.contains("qqq:crypto"),
+            "the line after the heading is the interface:\n{interface_line}"
+        );
+        assert!(
+            interface_line.contains("no host implementation yet"),
+            "the interface line itself must be annotated:\n{interface_line}"
+        );
+    }
+
+    /// The control: a fully implemented project must not be annotated.
+    ///
+    /// Without this, a renderer that marked *everything* as unimplemented would satisfy the test
+    /// above while telling every user their working project cannot run.
+    #[test]
+    fn inspect_does_not_annotate_a_fully_implemented_project() {
+        // `qqq:clock` is registered end to end, so this grant set has no gap.
+        let manifest = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                        [capabilities.clock]\nwall = true\n";
+        let out = inspect(&loaded(manifest)).unwrap();
+        assert!(
+            out.interfaces.iter().all(|i| i.implemented),
+            "the fixture must have no gap, or it cannot be a control: {:?}",
+            out.interfaces
+        );
+        let text = out.summary();
+        assert!(
+            !text.contains("no host implementation yet"),
+            "a working project must not be annotated:\n{text}"
+        );
     }
 
     /// A project that reaches the network is `Exposed`, and `inspect` must say

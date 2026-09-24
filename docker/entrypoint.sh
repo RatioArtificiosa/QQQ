@@ -924,6 +924,12 @@ cmd_checks() {
     python3 tools/self_test_xrefs.py
     python3 tools/check_xrefs.py
 
+    # A leaked `\uXXXX` renders as literal text in Markdown, so a cross-reference that looks
+    # present is invisible to a search for the real character. Kept beside the xref check for
+    # the same reason: both are about a document saying what it means.
+    python3 tools/check_unicode_escapes.py
+    python3 tools/check_unicode_escapes.py --self-test
+
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired
     # the corpus and then died on it (`§O-191`). This drives the real function against

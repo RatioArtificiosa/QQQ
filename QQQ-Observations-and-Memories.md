@@ -18742,4 +18742,68 @@ is why this is easy to misread as a hang rather than a failure, and why the elap
 the message. Worth knowing: a workspace run that takes far longer than usual is often this test
 waiting out its probes, not a build problem.
 
+## §O-229 — `--check` and `--self-test` are not substitutes, and only one was
+being run locally
+
+**Found:** 2026-09-24, by CI on the `CON-011` push. **Fixed and verified:** same session.
+**Anchors:** `DOC-020` (the generated index), `§O-223` (a check that ran nothing).
+
+### The failure
+
+```
+WIT interface validation → Prove the llms.txt check detects drift and a stale exclusion
+  python tools/gen_llms_txt.py --self-test
+SELF-TEST FAILED -- 1 case(s) wrong
+FAIL  every docs/*.md is indexed or excluded
+      these are neither: ['docs/wit-style-guide.md']
+```
+
+The upstream failure was mine: a new `docs/*.md` must be either listed in the generator's `CURATED`
+table or deliberately excluded with a reason, and `docs/wit-style-guide.md` was neither. The checker
+was right and the fix is one table entry.
+
+### Why the local gate missed it
+
+The gate ran `python tools/gen_llms_txt.py --check`. That compares the rendered index to the
+committed `llms.txt` — and it **passes as soon as the file is regenerated**, because regenerating is
+precisely what makes output and file agree. The completeness rule lives in `--self-test`, which
+injects a violation and requires the checker to report it.
+
+So the pair is asymmetric in a way that is easy to miss:
+
+| Command | What it validates | Passes when |
+|---|---|---|
+| `--check` | output vs committed file | the file has been regenerated — **including when the rule is wrong** |
+| `--self-test` | the rule itself, against a fabricated violation | the rule actually fires |
+
+A gate that runs only `--check` therefore validates the **rendering** and not the **rule**, and the
+two failures look identical from CI.
+
+### The gate now runs both
+
+`{SCRATCH}\gate.py` gained the self-test of every generator and checker it invokes:
+`gen_llms_txt`, `check_wit_style`, `check_unicode_escapes`, `release`, `check_checklist_counts`,
+`check_topology`, alongside the pre-existing `self_test_xrefs`. That is nine steps where there were
+eight, and the new one is the only kind that could have caught this.
+
+### What this is, in the family
+
+§O-223 recorded a fault-injection harness that read `test result: ok. 0 passed` as a pass — a
+check that ran nothing. This is the same family one layer out: a **check pair where only the weaker
+half was run**. Both share the property that the evidence looked green and proved less than it
+appeared to.
+
+The repository's own handbook already states that every generator has both halves and that
+`run_ci_checkers.py` "runs every `python tools/...` invocation, **including `--self-test` halves**".
+The rule existed; the local gate had partially implemented it. Worth stating plainly because the
+lesson is not about this generator: **when a tool documentedly has two verification modes, a gate
+that runs one of them is testing half a tool.**
+
+### A note on where the miss was found
+
+CI caught it, which is the mechanism working — but it cost a full cycle (506 s) for a one-line fix,
+and the read of the actual log was required to find it. `§O-129` established that the gate must run
+in one sequence after the last edit; this entry adds that the sequence must contain the *strongest*
+form of each check, not merely one form of it.
+
 *End of `QQQ-Observations-and-Memories.md`.*

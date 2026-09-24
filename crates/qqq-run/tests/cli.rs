@@ -392,6 +392,170 @@ fn caps_refuses_an_unknown_flag() {
     );
 }
 
+/// The §8.3 document carries every field §8.3 names.
+///
+/// # What this catches
+///
+/// Measured before: `qqqai schema --all` and `qqqai schema --command caps` both printed the
+/// same one-line summary and dropped the flags, so the document §8.3 specifies could not be
+/// obtained at all. The four fields that existed were emitted in **`snake_case`**
+/// (`schema_version`), and `manifest`, `wit` and `mcp` were missing entirely.
+///
+/// §2.1 NN-1 says an agent can be given `qqqai schema --all` and write correct code from a
+/// cold start. Every assertion here is one of the promises that claim rests on.
+#[test]
+fn schema_all_emits_the_section_8_3_document() {
+    let s = Sandbox::new("schema-all");
+    s.write("qqq.toml", MINIMAL);
+
+    let run = s.run(&["schema", "--all", "--json"]);
+    run.assert_ok();
+
+    for field in [
+        "\"qqqai\"",
+        "\"schemaVersion\"",
+        "\"commands\"",
+        "\"errors\"",
+        "\"manifest\"",
+        "\"capabilities\"",
+        "\"wit\"",
+        "\"mcp\"",
+    ] {
+        assert!(
+            run.stdout.contains(field),
+            "the §8.3 document must carry {field}:\n{}",
+            &run.stdout[..run.stdout.len().min(600)]
+        );
+    }
+
+    // The camelCase spelling is the contract, and it lives **inside `data`**. The
+    // envelope's own top-level `schema_version` is a different key on a different object, so
+    // the check is scoped to the document rather than to the whole payload: a substring test
+    // over stdout would pass or fail on which of the two happened to be spelled which way.
+    let envelope: serde_json::Value =
+        serde_json::from_str(&run.stdout).expect("the envelope must be valid JSON");
+    let doc = &envelope["data"];
+    assert!(
+        doc.get("schemaVersion").is_some(),
+        "§8.3 spells it `schemaVersion` inside the document, and a consumer generated from \
+         the Proposal's example looks for that exact key; `data` carries: {:?}",
+        doc.as_object().map(|o| o.keys().collect::<Vec<_>>())
+    );
+    assert!(
+        doc.get("schema_version").is_none(),
+        "the document must not carry the snake_case spelling as well: two keys for one fact \
+         is how a consumer picks the wrong one"
+    );
+
+    // **Presence is not the property.** A substring check on `"manifest"` is satisfied by
+    // `"manifest":null`, and §8.3's whole point is that these sections carry content. Each
+    // one is asserted to be an object (or, for `commands`, a non-empty array), which is the
+    // check that distinguishes "the section is there" from "the key is there".
+    for section in ["manifest", "wit", "mcp"] {
+        assert!(
+            doc[section].is_object(),
+            "§8.3's `{section}` section must be an object, not a placeholder; it is {:?}",
+            doc[section]
+        );
+    }
+    for section in ["commands", "errors", "capabilities"] {
+        assert!(
+            doc[section].as_array().is_some_and(|a| !a.is_empty()),
+            "§8.3's `{section}` section must be a non-empty array; it is {:?}",
+            doc[section]
+        );
+    }
+
+    // A section that is an object but empty would still be a placeholder, so the one field
+    // that states completeness is asserted directly rather than inferred from silence.
+    assert_eq!(
+        doc["wit"]["complete"],
+        serde_json::Value::Bool(false),
+        "`wit` must say explicitly that it is not the whole story rather than implying \
+         completeness by silence"
+    );
+    assert_eq!(
+        doc["mcp"]["complete"],
+        serde_json::Value::Bool(false),
+        "`mcp` must say explicitly that it is not the whole story"
+    );
+}
+
+/// `--command <name>` narrows the command list and names the command it answered for.
+#[test]
+fn schema_command_narrows_and_names_the_command() {
+    let s = Sandbox::new("schema-command");
+    s.write("qqq.toml", MINIMAL);
+
+    let narrowed = s.run(&["schema", "--command", "caps", "--json"]);
+    narrowed.assert_ok();
+
+    // **Parsed, not substring-matched.** The nested `commands` entry is
+    // `{"command":"caps",...}`, which serializes to the same text a top-level field would —
+    // so `stdout.contains("\"command\":\"caps\"")` is satisfied by the nested entry alone
+    // and cannot see the top-level one go missing. Proved by injection: removing the
+    // top-level assignment left that substring intact and the test passing.
+    let envelope: serde_json::Value =
+        serde_json::from_str(&narrowed.stdout).expect("the envelope must be valid JSON");
+    let doc = &envelope["data"];
+    assert_eq!(
+        doc.get("command").and_then(|v| v.as_str()),
+        Some("caps"),
+        "the answer must name the command at the **top level**, so a caller does not have to \
+         search a one-element array to confirm what it got; `data` carries: {:?}",
+        doc.as_object().map(|o| o.keys().collect::<Vec<_>>())
+    );
+    assert_eq!(
+        doc["commands"].as_array().map(Vec::len),
+        Some(1),
+        "the command list must be narrowed to the one asked for"
+    );
+    assert_eq!(
+        doc["commands"][0]["command"].as_str(),
+        Some("caps"),
+        "and that one entry must be the command asked for"
+    );
+
+    // The full document still carries every section: asking about one command narrows the
+    // command list, and does not turn the document into a command-only fragment.
+    for field in ["\"errors\"", "\"manifest\"", "\"wit\"", "\"mcp\""] {
+        assert!(
+            narrowed.stdout.contains(field),
+            "narrowing to one command must not drop {field}"
+        );
+    }
+}
+
+/// An unknown command name is a usage error, not an empty answer.
+///
+/// An empty `commands` map reads as "this command has no schema". The truth is "that command
+/// does not exist", and the two need different fixes — so the refusal names the valid ones.
+#[test]
+fn schema_refuses_an_unknown_command_name() {
+    let s = Sandbox::new("schema-unknown");
+    s.write("qqq.toml", MINIMAL);
+
+    let run = s.run(&["schema", "--command", "nope"]);
+    run.assert_failed()
+        .assert_contains("`nope` is not a command");
+
+    // The remediation lists the commands, because the next action is to pick a real one.
+    run.assert_contains("known commands: new, init");
+
+    let json = s.run(&["schema", "--command", "nope", "--json"]);
+    json.assert_failed();
+    assert!(
+        json.stdout.contains("\"exit_code\":2"),
+        "the envelope must agree with the process status:\n{}",
+        json.stdout
+    );
+
+    // An unknown *flag* is refused too, and lists what `schema` accepts.
+    let flag = s.run(&["schema", "--bogus"]);
+    flag.assert_failed()
+        .assert_contains("unknown flag `--bogus` for `schema`");
+}
+
 /// A deny-all project is explained rather than summarised.
 #[test]
 fn caps_explains_a_deny_all_project() {

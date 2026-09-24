@@ -3477,8 +3477,55 @@ Items are grouped below by **phase**, because dependency order matters more than
     `CON-004` pointing at `CON-016`.
 - [ ] **CLI-022** Implement `qqqai mcp`.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **CLI-023** Implement `qqqai schema --all` and the per-command schema output.
+- [x] **CLI-023** Implement `qqqai schema --all` and the per-command schema output.
   → §8.3 The machine contract layer
+  → Done: `dispatch_schema` in `main.rs` plus `SchemaDocument` in `qqq-run`, emitting §8.3's
+    document with all eight fields — `qqqai`, `schemaVersion`, `commands`, `errors`,
+    `manifest`, `capabilities`, `wit`, `mcp`. `--all` is accepted and is the bare command's
+    behaviour; `--command <name>` narrows `commands` to one entry and adds a top-level
+    `command` field so a caller does not have to search a one-element array to confirm what
+    it got. Verified against the built binary: `schema --all --json` has exactly those eight
+    top-level keys, 27 commands, 40 error codes, 13 WIT interfaces, 12 MCP tool names.
+
+  → **Both flags were accepted and silently ignored.** Measured before the work:
+    `qqqai schema --all` and `qqqai schema --command caps` produced the **same one-line
+    summary** (`27 commands, 40 error codes, 24 capabilities`) and dropped the flag, so the
+    document §8.3 specifies could not be obtained at all. Four of the eight fields existed
+    and were emitted in **snake_case** (`schema_version`), which a consumer generated from
+    the Proposal's own example would not have found. §2.1 NN-1's promise — *"an agent can be
+    given `qqqai schema --all` and write correct code against this platform from a cold
+    start"* — referred to a document the command did not emit.
+
+  → `wit` and `mcp` carry `"complete": false` and a `note` naming where the definitions live
+    (`wit/` for the interfaces; `qqqai mcp --list` for the tool schemas, `CLI-022` being
+    open). A section that silently omitted them would be a lie of omission; one claiming a
+    shape it does not have would be worse. The `wit` list is read from `qqq_abi::interfaces()`
+    rather than hand-written, because a second copy of a fact the repository already states is
+    how the two drift apart.
+
+  → An unknown command name is **refused**, not answered with an empty `commands` map: empty
+    reads as "this command has no schema", when the truth is "that command does not exist",
+    and the two need different fixes. The refusal is QQQ-7001 listing every valid name, and it
+    exits 2 with the envelope agreeing.
+
+  → Three tests in `crates/qqq-run/tests/cli.rs` (`schema_all_emits_the_section_8_3_document`,
+    `schema_command_narrows_and_names_the_command`, `schema_refuses_an_unknown_command_name`),
+    each **fault-injected**. Two injections initially reported MISSED and both were
+    investigated before anything was concluded, per invariant TWO:
+    * the first was a **harness bug** — the null was appended *after* the real
+      `"manifest": manifest_schema()`, and `serde_json::json!` keeps the last duplicate, so
+      the fault never reached the binary;
+    * the second was a **genuinely blind test** — `stdout.contains("\"command\":\"caps\"")`
+      could not see the top-level field go missing, because the nested `commands` entry
+      serializes to the same substring.
+    Both assertions now parse the envelope and check the structure, and both injections are
+    DETECTED. Recorded as §O-220, with the general rule: **if the subject is a JSON document,
+    the assertion parses it.**
+
+  → One assertion was also **wrong rather than the code**: the first version required that
+    `schema_version` appear nowhere in stdout, and it failed because the *envelope's* own
+    top-level `schema_version` is a different key on a different object from the document's
+    §8.3 `schemaVersion`. Scoped to `data`, where the contract lives.
 - [ ] **CLI-024** Implement `qqqai migrate`.
   → §6.8 `qqqai migrate` — the adoption ramp
 

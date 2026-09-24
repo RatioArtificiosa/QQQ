@@ -464,43 +464,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
     let mut out = Output::new(format, std::io::stdout());
 
     match name {
-        CommandName::Schema => {
-            use qqq_run::output::{command_schemas, CommandOutput};
-            struct SchemaOutput;
-            impl serde::Serialize for SchemaOutput {
-                fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                    use serde::ser::SerializeStruct;
-                    let mut st = s.serialize_struct("SchemaOutput", 4)?;
-                    st.serialize_field("schema_version", qqq_core::SCHEMA_VERSION)?;
-                    st.serialize_field("commands", &command_schemas())?;
-                    st.serialize_field("errors", &error_catalogue())?;
-                    st.serialize_field("capabilities", &capability_catalogue())?;
-                    st.end()
-                }
-            }
-            impl CommandOutput for SchemaOutput {
-                fn command(&self) -> CommandName {
-                    CommandName::Schema
-                }
-                fn summary(&self) -> String {
-                    format!(
-                        "{} commands, {} error codes, {} capabilities",
-                        command_schemas().len(),
-                        qqq_core::ErrorCode::all().len(),
-                        qqq_cap::Capability::all().len()
-                    )
-                }
-                fn to_json(&self) -> serde_json::Value {
-                    serde_json::json!({
-                        "schema_version": qqq_core::SCHEMA_VERSION,
-                        "commands": command_schemas(),
-                        "errors": error_catalogue(),
-                        "capabilities": capability_catalogue(),
-                    })
-                }
-            }
-            report(&mut out, name, &SchemaOutput)
-        }
+        CommandName::Schema => dispatch_schema(name, &mut out, args),
         CommandName::Doctor => {
             // `doctor` has one flag of its own, `--fix`, and `--json` is
             // global. Anything else is a mistake worth naming: `--fix` itself
@@ -2683,6 +2647,187 @@ where
             ExitCode::from(exit::INTERNAL)
         }
     }
+}
+
+/// Dispatch `qqqai schema`, honouring `--all` and `--command <name>`.
+///
+/// # The two flags, and why neither is a no-op
+///
+/// Measured before this existed: `qqqai schema --all` and `qqqai schema --command caps`
+/// both printed `27 commands, 40 error codes, 24 capabilities` — the same human summary,
+/// with the flags parsed as unknown and dropped. §8.3 specifies one JSON document as *the*
+/// thing that makes QQQ teachable to a model that has never seen it, and §2.1 NN-1 says an
+/// agent "can be given `qqqai schema --all`". It could not be, because the flag did nothing.
+///
+/// `--all` is therefore the default rather than a modifier with a different default: there
+/// is no other sensible reading of the bare command, and `--all` exists so a script that
+/// spells its intent gets the same answer as one that does not.
+fn dispatch_schema(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+) -> ExitCode {
+    let mut only: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            // Accepted and identical to the bare command; see the doc comment.
+            "--all" | "--errors" => {}
+            "--command" => {
+                let Some(v) = args.get(i + 1) else {
+                    let err = qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        "`--command` needs a command name",
+                    )
+                    .with_remediation("for example: qqqai schema --command caps");
+                    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                    return ExitCode::from(exit::USAGE);
+                };
+                only = Some(v.clone());
+                i += 1;
+            }
+            other => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("unknown flag `{other}` for `schema`"),
+                )
+                .with_remediation("`schema` takes `--all`, `--errors`, `--command <name>`");
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                return ExitCode::from(exit::USAGE);
+            }
+        }
+        i += 1;
+    }
+
+    // An unknown command name is refused rather than answered with an empty map: an empty
+    // `commands` reads as "this command has no schema", when the truth is "that command
+    // does not exist". §12.6's rule that ambiguity is a defect applies to the machine
+    // contract most of all.
+    if let Some(want) = &only {
+        let known: Vec<&str> = CommandName::all().iter().map(|c| c.as_str()).collect();
+        if !known.contains(&want.as_str()) {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("`{want}` is not a command"),
+            )
+            .with_remediation(format!("known commands: {}", known.join(", ")));
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    }
+
+    report(out, name, &SchemaDocument { only })
+}
+
+/// The `qqqai schema` payload, in the shape §8.3 specifies.
+///
+/// # Why a struct and not `serde_json::json!`
+///
+/// Because the field names are the contract. §8.3 writes `schemaVersion` in camelCase and
+/// the four existing fields were emitted in `snake_case`, so a consumer generated from the
+/// Proposal's example would have found `schema_version`. The rename is applied here, once.
+#[derive(Debug, Clone, serde::Serialize)]
+struct SchemaDocument {
+    /// Narrowed to one command, or every command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    only: Option<String>,
+}
+
+impl qqq_run::output::CommandOutput for SchemaDocument {
+    fn command(&self) -> CommandName {
+        CommandName::Schema
+    }
+
+    fn summary(&self) -> String {
+        // The human format is a *pointer*, not the document: a reader who asked for the
+        // machine contract wants the JSON, and printing forty kilobytes of it would bury
+        // the fact. The count is followed by how to get it.
+        match &self.only {
+            Some(c) => {
+                format!("schema for `{c}`; run `qqqai schema --all --json` for the full document")
+            }
+            None => format!(
+                "{} commands, {} error codes, {} capabilities; run with `--json` for the \
+                 full document",
+                qqq_run::output::command_schemas().len(),
+                qqq_core::ErrorCode::all().len(),
+                qqq_cap::Capability::all().len()
+            ),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let all = qqq_run::output::command_schemas();
+        let commands: Vec<_> = match &self.only {
+            Some(want) => all.into_iter().filter(|c| c.command == want).collect(),
+            None => all,
+        };
+
+        let mut doc = serde_json::json!({
+            // §8.3: `"qqqai": "1.0.0"` — the CLI's own version, distinct from the schema
+            // version, because a CLI can gain a command without the wire format moving.
+            "qqqai": qqq_core::VERSION,
+            "schemaVersion": qqq_core::SCHEMA_VERSION,
+            "commands": commands,
+            "errors": error_catalogue(),
+            "manifest": manifest_schema(),
+            "capabilities": capability_catalogue(),
+            "wit": wit_catalogue(),
+            "mcp": mcp_catalogue(),
+        });
+
+        // A narrowed request carries the name it asked for at the top level, so the caller
+        // does not have to search a one-element array to confirm what it got.
+        if let Some(c) = &self.only {
+            doc["command"] = serde_json::Value::String(c.clone());
+        }
+        doc
+    }
+}
+
+/// The `manifest` section of §8.3's document.
+///
+/// Carries the section names the parser knows, taken from the same table the manifest
+/// schema generator uses, so the two cannot disagree about what a manifest may contain.
+fn manifest_schema() -> serde_json::Value {
+    serde_json::json!({
+        "sections": [
+            "package", "capabilities", "limits", "server", "dependencies",
+            "languages", "build", "covert_channels"
+        ],
+        "path": "qqq.toml",
+        "note": "Each section's full JSON Schema is emitted by `qqqai schema` for the \
+                 manifest itself; this lists what the parser accepts.",
+    })
+}
+
+/// The `wit` section of §8.3's document.
+///
+/// # Why `complete` is stated rather than omitted
+///
+/// The proposal asks for "machine-readable interface descriptions". What exists is the WIT
+/// package registry, whose documents are the `.wit` files under `wit/` — already
+/// machine-readable, and already validated by `check_wit.py`. Reproducing them here would be
+/// a second copy of the same text, which is the drift this project removes wherever it finds
+/// it. So the section names the packages and says where the definitions live, and says so
+/// explicitly rather than leaving a reader to infer it.
+fn wit_catalogue() -> serde_json::Value {
+    serde_json::json!({
+        "interfaces": qqq_run::output::wit_interfaces(),
+        "complete": false,
+        "note": "the definitions are the `.wit` files under `wit/`, which are themselves \
+                 machine-readable; this describes the registry the host dispatches through",
+    })
+}
+
+/// The `mcp` section of §8.3's document.
+fn mcp_catalogue() -> serde_json::Value {
+    serde_json::json!({
+        "tools": qqq_run::output::mcp_tool_names(),
+        "complete": false,
+        "note": "tool schemas are emitted by `qqqai mcp --list`. `CLI-022` is open; the \
+                 names are listed here so a consumer can see the surface",
+    })
 }
 
 /// The error catalogue, for `qqqai schema --all`.

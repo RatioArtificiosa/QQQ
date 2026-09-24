@@ -831,6 +831,55 @@ static SCHEMA_FOR_OPENAPI: std::sync::LazyLock<serde_json::Value> =
         })
     });
 
+/// The WIT interface names, for §8.3's `wit` section.
+///
+/// Read from the registry in `qqq-abi` rather than listed here, because a hand-written list
+/// is a second source of truth for something the repository already states — and
+/// `check_wit.py` already gates that registry against the files under `wit/`. The registry
+/// also carries `implemented`, which is the fact a consumer most needs: a granted capability
+/// that unlocks an interface the host cannot serve is `QQQ-6004`, not a silent success.
+#[must_use]
+pub fn wit_interfaces() -> Vec<serde_json::Value> {
+    qqq_abi::interfaces()
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "name": i.name,
+                "implemented": i.implemented,
+                "summary": i.summary,
+                "unlocked_by": i.unlocked_by.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+/// The MCP tool names §8.2 specifies, for the `mcp` section of §8.3's document.
+///
+/// # Why this is a literal list
+///
+/// `CLI-022` is open: the MCP server is not built, so there is no registry to read. The list
+/// is therefore the *specified* surface, taken from the Proposal's §8.2 tool table, and the
+/// section it feeds carries `"complete": false` so a consumer is told which it is looking at.
+/// Deriving it from the document at runtime is not possible — the Proposal is not shipped in
+/// the binary — and leaving the section out would hide a surface the design has already fixed.
+#[must_use]
+pub fn mcp_tool_names() -> Vec<&'static str> {
+    vec![
+        "qqq_manifest_get",
+        "qqq_manifest_validate",
+        "qqq_caps_explain",
+        "qqq_caps_list",
+        "qqq_build",
+        "qqq_run",
+        "qqq_test",
+        "qqq_audit",
+        "qqq_inspect",
+        "qqq_bench",
+        "qqq_schema",
+        "qqq_errors_lookup",
+    ]
+}
+
 /// Build the schema registry.
 ///
 /// # Exhaustiveness

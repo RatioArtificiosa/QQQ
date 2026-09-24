@@ -17835,4 +17835,214 @@ the gate's wording, and the explanation belongs in prose, not in the row.
   `tools/gen_error_catalogue.py` (sentence_case should skip leading emphasis markers),
   `tools/gen_schemas.py` (bare-link rewrite inside code spans).
 
+## §O-218f — One red run in fifteen: `an_unimplemented_authenticator_refuses_and_names_itself`
+
+The gate's first full run after the `caps` change reported a **real** failure:
+
+```
+---- an_unimplemented_authenticator_refuses_and_names_itself stdout ----
+panicked at crates\qqq-run\tests\serve_policy.rs:282:5:
+assertion `left == right` failed: a route needing an authenticator that does not exist must
+be refused:
+HTTP/1.1 404 Not Found
+Content-Length: 10
+
+not found
+  left: 404
+ right: 403
+```
+
+The test asserts that a route declaring `auth = "bearer-jwt"` — an authenticator the runtime
+cannot implement — is refused **403** with `X-QQQ-Auth-Mode: bearer-jwt`, rather than served.
+It received the dispatcher's 404 instead.
+
+**What was ruled out, with a command each:**
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| A code regression from the `caps` change | The change touches `commands.rs`, `main.rs` and `cli.rs`; nothing in the serve path | Ruled out by inspection, then by the runs below |
+| Interference between the eleven tests in this suite | `cargo test -p qqq-run --test serve_policy`, twelve consecutive runs | **0 failures** |
+| The suite alone is flaky | Same command, run under the full workspace binary (`cargo test --workspace --all-features`), six consecutive runs | **0 failures** |
+
+So the failure rate is roughly **one in fifteen** suite executions — twelve plus six plus the
+original is nineteen attempts, one of which failed. It is neither deterministic nor confined
+to a particular invocation, which is what makes it worth writing down rather than shrugging
+at.
+
+**Why the 404 is the informative part.** `serve_policy.rs`'s `a_route_that_does_not_exist_is_a_404_and_not_a_403`
+documents the intended semantics: *"the policy is consulted only for a route the router
+matched; everything else is the dispatcher's 404"*, and a 403 for an undeclared path would
+leak which paths exist. The failing test therefore received the answer for **a route the
+router did not match**, while its manifest declares the route. Two candidate mechanisms:
+
+* `start(&s, "bearer", 1)` starts the server with `--accept-limit 1`. If the readiness
+  probe's own connect were the accept, the request under test would be the *second*
+  connection and would be refused at the ledger — but a ledger refusal is a bare
+  `HTTP/1.1 503`, and this response is a well-formed 404 with a body. That does not fit.
+* `free_port()` releases an ephemeral port and the server binds it later, and the readiness
+  probe is `TcpListener::bind(...).is_err()`. If the probe's bind succeeds *before* the
+  server's, the probe returns immediately — but the server then fails to bind and the
+  request could not be answered at all. That does not fit either.
+
+Neither explanation accounts for a coherent 404. The remaining possibility is a race inside
+the server's own start-up — the listener accepting before its per-route policy is installed,
+so the request is routed against an empty table. That is a **serve-path** hypothesis, and it
+is testable: a request that arrives in the window between `listen()` and the policy being
+installed must be either refused or delayed, never answered from an empty table.
+
+**Recorded rather than fixed, deliberately.** Reproducing it needs a targeted harness (start
+the server, race the first request against the policy install, hundreds of iterations), and a
+one-in-fifteen suite-level flake is not evidence enough to justify changing the serve start-up
+order. It is not a silent stub: the observation names the exact command sequence that bounded
+it, the two mechanisms that were ruled out and why, and the remaining hypothesis. The next
+agent should reproduce it with a dedicated harness before touching the code, which is
+invariant FOUR applied to an internal finding rather than an external one.
+
+One further possibility worth stating because it is the cheapest to check first: the readiness
+probe treats *any* bind error as "the server is up". `TcpListener::bind` returns
+`PermissionDenied` and `AddrNotAvailable` as well as `AddrInUse`, and on a machine where
+ephemeral ports are exhausted the probe would return early and the test's connect would land
+on whatever holds the port. Reading the error kind before returning is a one-line change and
+would either fix this or remove it from the list of explanations.
+
+### Section 218g — what the round's evidence actually supports
+
+For the avoidance of a later reader inheriting an over-claim: the three defects in §O-218a
+through §O-218c were each **measured on the shipped binary before the fix and measured again
+after**, and each new test was fault-injected with the file restored byte-for-byte. The flake
+above is the one thing in this round that is *not* closed, and it is closed only to the extent
+of "eleven consecutive suite runs are green".
+
+## §O-219 — `CLI-016` was implemented and never ticked, and the checklist is not the only
+source of truth
+
+`CLI-016` — *"Implement `qqqai audit` with SARIF output and `--fail-on`"* — has been open
+while all of it exists and works. Measured on the shipped binary against a real project:
+
+| Claim | Command | Result |
+|---|---|---|
+| It reports a posture | `qqqai audit --manifest <m>` | `1 finding(s) over caps, limits, supply chain and provenance; worst severity: note` |
+| SARIF is emitted | the same with `--sarif` | a SARIF 2.1.0 document: `$schema`, `version`, `runs[].tool.driver.rules` with five rules, and `results[]` |
+| SARIF is the **whole** output | the same with `--sarif` | nothing before the document and nothing after it — which `audit.rs`'s own test asserts, because a consumer parsing stdout would otherwise get a header it cannot read |
+| `--fail-on` is a real gate | `--fail-on note` | exit **1** |
+| The threshold is respected | `--fail-on error` on the same corpus | exit **0** |
+| The flag is validated | `--fail-on high` | QQQ-7001 naming the three accepted spellings, and naming the omission that means "never fail" |
+
+`qqqai verify` answers **QQQ-6004 not implemented yet**, which is the correct shape for an
+unbuilt command: a named code, a remediation pointing at the checklist, and the
+`exit::UNAVAILABLE` path. `CLI-017` is therefore genuinely open and its refusal is honest.
+
+### The lesson worth keeping
+
+The tick mark is not the only evidence of state, and this round found the drift in **both**
+directions within the same area:
+
+* `CLI-016` was **complete and unticked**.
+* `CLI-018` was **ticked-able but broken**: `caps --explain` was accepted and ignored, so the
+  item looked like a missing feature when the feature was present and inert.
+* `CLI-011` was correctly left unticked with the reason written down (`--tls` and `--workers`
+  refuse rather than pretend), which is the item that got it right.
+
+So an audit pass should never trust the marker alone. The cheap check that would have caught
+`CLI-016` in seconds is to run each ticked-and-unticked command once and compare what it
+actually does against the one-line item text. That is `qqqai --help` plus a shell loop, and it
+is worth doing for every remaining open `CLI-` item before the final revision pass — a command
+that answers `not implemented` is a fact, and a command that answers something *else* is a
+finding.
+
+Recorded here rather than acted on immediately because the disposition of each item needs its
+own measurement, and guessing from the marker is exactly what this entry says not to do.
+
+## §O-220 — Two fault injections reported MISSED, and both times the test really was blind
+
+`CLI-023`'s three tests were fault-injected one per process, as invariant TWO requires. Two
+of the three reported **MISSED**, and the disciplined response — *"first prove that the fault
+was actually present in the file before concluding the test is blind"* — paid off twice in the
+same way and once in a third way worth separating.
+
+### 220a. MISSED #1 was a genuine harness bug
+
+Injection: append `"manifest": serde_json::Value::Null` after the `commands` key of the
+`serde_json::json!` document. The test passed.
+
+The proof script found the injected line **in the file** at line 2771, built the binary, and
+dumped the real output:
+
+```
+injected line at 2771: "manifest": serde_json::Value::Null,
+output `manifest` type: dict
+output `manifest` value: {'note': ..., 'path': 'qqq.toml', 'sections': [...]}
+```
+
+`serde_json::json!` is a map literal: a **later duplicate key wins**. The real
+`"manifest": manifest_schema()` sits a few lines below the injected one, so the macro replaced
+the null with the true object before a single test ran. The fault never reached the binary.
+The harness was wrong; the test was never given the fault to catch.
+
+The lift is concrete: an injection into a `json!` block must replace the **existing** key
+rather than add a duplicate, because the macro silently drops the earlier one. Re-run with the
+anchor `"manifest": manifest_schema(),` it was DETECTED.
+
+### 220b. MISSED #2 was the test's fault, and the proof is what established that
+
+Injection: replace `if let Some(c) = &self.only { doc["command"] = ... }` with a comment, so a
+narrowed `--command caps` answer loses its top-level name. The test passed.
+
+The proof script ruled out the harness first, which is the order invariant TWO prescribes:
+
+* The fault **was** in the file.
+* The build **succeeded** (`exit 0`, one `variable does not need to be mutable` warning), so
+  `cargo test` demonstrably compiled the fault in rather than reusing a stale binary.
+* The output **did** lose the key: `'command' in doc` was `False`.
+
+And then the reason the test could not see it:
+
+```
+stdout contains '"command":"caps"': True
+```
+
+because the narrowed document's `commands` array holds `{"command": "caps", ...}`, which
+serializes to exactly the substring the assertion searched for. **A substring search over the
+whole payload cannot distinguish a top-level field from identical text nested one level down.**
+
+So the test was blind, and the injection was the only thing that could have said so. Fixed by
+parsing the envelope and asserting on `doc["command"]`; re-run, DETECTED.
+
+### 220c. The pattern, which is worth more than either instance
+
+Both blind spots were **substring assertions on a serialized document**:
+
+| Assertion | What defeats it |
+|---|---|
+| `stdout.contains("\"manifest\"")` | `"manifest":null` — the key is present, the section is a placeholder |
+| `stdout.contains("\"command\":\"caps\"")` | the same text nested in an array element |
+
+The fix was the same both times: parse the envelope and assert on the **structure**, not on the
+text. §8.3's document is a nested object, and a check that cannot see nesting cannot check it.
+This is the third round in which a substring assertion on JSON was the weak link, and the rule
+is now stated rather than implied: **if the subject is a JSON document, the assertion parses
+it.**
+
+A secondary observation from 220a worth keeping: the two false MISSEDs arrived in a batch of
+three, and without the proof step both would have been recorded as "the test is blind" and one
+of them — the harness bug — would have sent a later agent looking for a defect in the *test*
+that was never there. That is exactly the false trail invariant TWO warns about, and it
+happened on the first occasion the invariant was exercised in this round.
+
+### 220d. `CLI-023`'s measured state
+
+Before the work: `qqqai schema --all` and `qqqai schema --command caps` printed the same
+one-line summary and **dropped both flags**, so §8.3's document could not be obtained at all.
+Section §8.3 specifies eight fields; four existed, in snake_case, and `manifest`, `wit` and
+`mcp` were absent.
+
+After: the document carries all eight — `qqqai`, `schemaVersion` (camelCase, as §8.3 spells
+it), `commands`, `errors`, `manifest`, `capabilities`, `wit`, `mcp` — with `--command <name>`
+narrowing `commands` to one entry and adding a top-level `command` field, and an unknown name
+refused as QQQ-7001 listing the valid ones. `wit` and `mcp` carry `"complete": false` and a
+`note` saying where the definitions live, because claiming a shape the project does not have
+would be worse than naming the gap. §2.1 NN-1's promise — *"an agent can be given
+`qqqai schema --all` and write correct code from this platform from a cold start"* — now has
+the document it refers to.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -841,102 +841,12 @@ fn dispatch_verify(
     args: &[String],
     out: &mut Output<std::io::Stdout>,
 ) -> ExitCode {
-    const TAKES_VALUE: [&str; 2] = ["--key", "--policy"];
-    let mut artifact: Option<String> = None;
-    let mut keys: Vec<[u8; 32]> = Vec::new();
-    let mut require_signature = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        // Both flags accept `--flag value` and `--flag=value`. The two forms are handled
-        // separately rather than by splitting on '=' up front, because a key may legitimately
-        // contain ':' as a separator and pre-splitting would have to decide what else is safe.
-        let (flag, inline): (&str, Option<&str>) = match a.split_once('=') {
-            Some((f, v)) if TAKES_VALUE.contains(&f) => (f, Some(v)),
-            _ => (a, None),
-        };
-        match flag {
-            "--key" | "--policy" => {
-                let value = match inline {
-                    Some(v) => v.to_owned(),
-                    None => {
-                        if let Some(v) = args.get(i + 1) {
-                            i += 1;
-                            v.clone()
-                        } else {
-                            let e = missing_value(flag);
-                            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                            return ExitCode::from(exit::USAGE);
-                        }
-                    }
-                };
-                if flag == "--policy" {
-                    if value != "require" {
-                        // Built here rather than through `unknown_choice`, whose phrasing is
-                        // "`x` is not a known <kind>". The policy flag's job is to say *what
-                        // kind of thing* was rejected, and "not a policy" reads as the flag
-                        // being wrong rather than the value — which is the distinction the
-                        // caller needs when the typo is theirs.
-                        let e = qqq_core::Error::new(
-                            qqq_core::ErrorCode::McpArgumentInvalid,
-                            format!("`{value}` is not a policy"),
-                        )
-                        .with_remediation(
-                            "choose one of: require (a signature is required, not merely \
-                             verified when present)",
-                        );
-                        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                        return ExitCode::from(exit::USAGE);
-                    }
-                    require_signature = true;
-                } else {
-                    match qqq_run::verify::parse_key(&value) {
-                        Ok(k) => keys.push(k),
-                        Err(e) => {
-                            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                            return ExitCode::from(exit::USAGE);
-                        }
-                    }
-                }
-            }
-            // A global flag (`--json`) is tolerated, as in `inspect`: refusing one here would
-            // make a valid invocation fail.
-            _ if a.starts_with('-') => {}
-            _ if artifact.is_none() => artifact = Some(a.to_owned()),
-            _ => {
-                let e = qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
-                    format!("`verify` takes one artifact, but `{a}` is a second"),
-                )
-                .with_remediation(format!(
-                    "for example: {} verify app.wasm --key <hex>",
-                    qqq_core::BINARY_NAME
-                ));
-                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
-            }
+    let options = match verify_options(args) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         }
-        i += 1;
-    }
-
-    let Some(artifact) = artifact else {
-        let e = qqq_core::Error::new(
-            qqq_core::ErrorCode::McpArgumentInvalid,
-            "`verify` needs the artifact to check",
-        )
-        .with_remediation(format!(
-            "for example: {} verify app.wasm --key <hex>",
-            qqq_core::BINARY_NAME
-        ));
-        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-        return ExitCode::from(exit::USAGE);
-    };
-
-    let options = qqq_run::verify::VerifyOptions {
-        artifact: std::path::PathBuf::from(artifact),
-        keys,
-        require_signature,
     };
 
     // A verification that fails is a *finding*, not a usage error, so it gets `FAILURE`:
@@ -973,18 +883,169 @@ fn dispatch_style(
     out: &mut Output<std::io::Stdout>,
     verb: qqq_run::style::StyleVerb,
 ) -> ExitCode {
-    with_manifest(name, out, args, |loaded| {
-        let language = loaded.manifest.build.language.clone();
-        // The tool runs in the directory the manifest was found in, not the process's cwd:
-        // `qqqai lint --manifest path/to/qqq.toml` must lint that project, and a toolchain
-        // invoked from the caller's directory would check whatever project happened to be here.
-        let dir = loaded.path.parent().map_or_else(
-            || std::path::PathBuf::from("."),
-            std::path::Path::to_path_buf,
-        );
-        let plan = qqq_run::style::plan(&language, verb, &dir)?;
-        let outcome = qqq_run::style::run(&plan, verb, &language)?;
-        Ok(qqq_run::style::StyleOutput::from(outcome))
+    // Unknown flags are refused rather than ignored, for the reason `doctor`'s `--fix`
+    // documents: a command that accepts anything it does not understand silently does the wrong
+    // thing. Measured before this existed: `qqqai lint --check` ran a full lint and exited `0`,
+    // so a caller asking for a check got a green result from a flag nothing implemented.
+    if let Some(code) = refuse_flags(name, args, &["--manifest"], out) {
+        return code;
+    }
+    // The verdict is the whole point of `lint` existing, and it was **missing** until external
+    // review caught it: this called `with_manifest`, which maps every `Ok` to `exit::OK`, so a
+    // clippy failure printed `lint reported problems (exit 101)` and then exited **0**. The
+    // module doc above claimed the opposite, which makes it `§O-124`'s shape — a comment stating
+    // an invariant the code does not enforce, written in the same file by the same hand.
+    //
+    // `with_manifest_verdict` already existed for exactly this (`why` needs it too), so the fix
+    // is to use it rather than to invent a second mechanism.
+    with_manifest_verdict(
+        name,
+        out,
+        args,
+        |loaded| {
+            let language = loaded.manifest.build.language.clone();
+            // The tool runs in the directory the manifest was found in, not the process's cwd:
+            // `qqqai lint --manifest path/to/qqq.toml` must lint that project, and a toolchain
+            // invoked from the caller's directory would check whatever project happened to be
+            // here.
+            let dir = loaded.path.parent().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
+            let plan = qqq_run::style::plan(&language, verb, &dir)?;
+            let outcome = qqq_run::style::run(&plan, verb, &language)?;
+            Ok(qqq_run::style::StyleOutput::from(outcome))
+        },
+        |report: &qqq_run::style::StyleOutput| {
+            if report.ok {
+                exit::OK
+            } else {
+                exit::FAILURE
+            }
+        },
+    )
+}
+
+/// Parse `qqqai verify`'s arguments into a request.
+///
+/// # Why this is a pure function returning a `Result`
+///
+/// It was inline in `dispatch_verify`, where every error path emitted and returned an exit code
+/// directly — so the parsing rules could only be tested by running the binary, and the function
+/// grew past the line limit. As a value-returning parser it matches `build_options`,
+/// `new_options` and `run_options`, and the rules below become unit-testable without a process.
+///
+/// # The flag vocabulary
+///
+/// | Flag | Meaning |
+/// |---|---|
+/// | `--key <hex>` | one trusted publisher key; repeatable, because a rotation means two |
+/// | `--policy require` | a signature is **required**, not merely verified when present |
+///
+/// Both accept `--flag value` and `--flag=value`. The two forms are handled at the point of use
+/// rather than by splitting on `=` up front, because a key may legitimately contain `:` as a
+/// separator and a pre-split would have to decide what else is safe to split on.
+///
+/// # Errors
+///
+/// Every failure is a usage error, and each names the specific mistake:
+///
+/// * a missing value for `--key`/`--policy`;
+/// * `--policy` with a value other than `require` — **refused rather than ignored**, because the
+///   failure mode of ignoring it is the worst available: `--policy requiere` would leave the
+///   policy opportunistic and an unsigned artifact would pass a check the caller believed was
+///   mandatory;
+/// * an unrecognised flag — also refused rather than ignored. This arm used to swallow anything
+///   dash-prefixed on the reasoning that a global flag should not fail an invocation, but
+///   `--json` never reaches here (`parse_args` consumes globals before dispatch), so the tokens
+///   that arrived were exactly the unknown ones. Silently dropping them is the `CWE-636`
+///   fail-open shape external review flagged;
+/// * a second positional artifact.
+fn verify_options(args: &[String]) -> qqq_core::Result<qqq_run::verify::VerifyOptions> {
+    const TAKES_VALUE: [&str; 2] = ["--key", "--policy"];
+    let mut artifact: Option<String> = None;
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    let mut require_signature = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let (flag, inline): (&str, Option<&str>) = match a.split_once('=') {
+            Some((f, v)) if TAKES_VALUE.contains(&f) => (f, Some(v)),
+            _ => (a, None),
+        };
+        match flag {
+            "--key" | "--policy" => {
+                let value = match inline {
+                    Some(v) => v.to_owned(),
+                    None => match args.get(i + 1) {
+                        Some(v) => {
+                            i += 1;
+                            v.clone()
+                        }
+                        None => return Err(missing_value(flag)),
+                    },
+                };
+                if flag == "--policy" {
+                    if value != "require" {
+                        // Not `unknown_choice`, whose phrasing is "`x` is not a known <kind>":
+                        // the flag's job is to say *what kind of thing* was rejected, and "not a
+                        // policy" reads as the flag being wrong rather than the value.
+                        return Err(qqq_core::Error::new(
+                            qqq_core::ErrorCode::McpArgumentInvalid,
+                            format!("`{value}` is not a policy"),
+                        )
+                        .with_remediation(
+                            "choose one of: require (a signature is required, not merely \
+                             verified when present)",
+                        ));
+                    }
+                    require_signature = true;
+                } else {
+                    keys.push(qqq_run::verify::parse_key(&value)?);
+                }
+            }
+            _ if a.starts_with('-') => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::CliFlagUnknown,
+                    format!("`{a}` is not a flag `verify` understands"),
+                )
+                .with_remediation(format!(
+                    "`verify` accepts --key <hex> and --policy require; the global --json is \
+                     read before dispatch. For example: {} verify app.wasm --key <hex>",
+                    qqq_core::BINARY_NAME
+                )));
+            }
+            _ if artifact.is_none() => artifact = Some(a.to_owned()),
+            _ => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("`verify` takes one artifact, but `{a}` is a second"),
+                )
+                .with_remediation(format!(
+                    "for example: {} verify app.wasm --key <hex>",
+                    qqq_core::BINARY_NAME
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    let Some(artifact) = artifact else {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`verify` needs the artifact to check",
+        )
+        .with_remediation(format!(
+            "for example: {} verify app.wasm --key <hex>",
+            qqq_core::BINARY_NAME
+        )));
+    };
+
+    Ok(qqq_run::verify::VerifyOptions {
+        artifact: std::path::PathBuf::from(artifact),
+        keys,
+        require_signature,
     })
 }
 

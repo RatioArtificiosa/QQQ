@@ -142,15 +142,21 @@ fn driver_for(language: &str) -> Option<&'static str> {
 ///
 /// # Errors
 ///
-/// * `QQQ-1001` — the language is not one `qqqai build` can drive at all. The remediation names
-///   the supported set, so the refusal is actionable.
-/// * `QQQ-1001` — the language is supported but has no style driver yet, naming the language
-///   matrix item. This is the `ts`/`go`/`python`/`cpp` case, and it is a different fact from the
-///   first: one is "QQQ does not know this language", the other is "QQQ knows it and has not
-///   built its driver".
-/// * `QQQ-1003` — the language is driven but the required tool is not installed. The
-///   remediation names the install command, because "cargo not found" leaves the user exactly
-///   as stuck as before, one step later.
+/// Both refusals use `QQQ-1003` (`MissingTarget`), and they are deliberately distinguishable by
+/// their message because they are different facts with different remedies:
+///
+/// * the language is not one `qqqai build` can drive at all — the remediation names the
+///   supported set, so the refusal is actionable;
+/// * the language is supported but has no style driver yet — `ts`/`go`/`python`/`cpp` today.
+///   The remediation names the language matrix area that owns each, so a reader learns where
+///   the work is tracked rather than that it is missing.
+///
+/// # What this function does not do
+///
+/// It does **not** probe for the tool. Planning is a pure transform — which driver, which
+/// arguments, which directory — so it is testable without a toolchain installed, and the
+/// probe belongs to [`run`], which is where a missing binary becomes `QQQ-1003` with an
+/// install command in the remediation.
 pub fn plan(language: &str, verb: StyleVerb, manifest_dir: &std::path::Path) -> Result<ToolPlan> {
     if !qqq_cap::manifest::Build::supports_language(language) {
         return Err(Error::new(
@@ -223,33 +229,37 @@ impl StyleOutcome {
     ///
     /// # Why a clean run says "no changes" and a clean lint says "no problems"
     ///
-    /// Because they are different claims and a shared sentence would blur them: `fmt` having
-    /// nothing to do means the source already matched the formatter, `lint` having nothing to
-    /// say means no rule fired. A reader scanning a log should be able to tell which command
-    /// they are looking at without reading the invocation line.
+    /// Because they are different claims and a shared sentence would blur them: a clean `fmt`
+    /// means the formatter ran and made no complaint, a clean `lint` means no rule fired. A
+    /// reader scanning a log should be able to tell which command they are looking at without
+    /// reading the invocation line.
+    ///
+    /// # What these sentences may not say, and why
+    ///
+    /// `cargo fmt` **rewrites files in place and exits 0 either way**. It does not report whether
+    /// it changed anything, so this type cannot know. An earlier version of this function said
+    /// *"already formatted, no changes needed"* on a clean `fmt` — a claim the code has no
+    /// evidence for, and false whenever the formatter had just reformatted the source. The same
+    /// version said *"the formatter rewrote files"* on a failure, asserting a rewrite that may
+    /// not have happened.
+    ///
+    /// So each sentence states the one fact available: the exit status, which is the tool's own
+    /// answer. Where a stronger claim is wanted, `--check` on the tool is what produces it, and
+    /// that is the tool's job rather than this summary's.
     #[must_use]
     pub fn summary(&self) -> String {
+        let status = self
+            .exit_code
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
         if self.ok {
             return match self.verb {
-                StyleVerb::Format => {
-                    format!("{}: already formatted, no changes needed", self.language)
-                }
+                StyleVerb::Format => format!("{}: formatted (exit 0)", self.language),
                 StyleVerb::Lint => format!("{}: no problems found", self.language),
             };
         }
         match self.verb {
-            StyleVerb::Format => format!(
-                "{}: the formatter rewrote files (exit {})",
-                self.language,
-                self.exit_code
-                    .map_or_else(|| "signal".to_owned(), |c| c.to_string())
-            ),
-            StyleVerb::Lint => format!(
-                "{}: lint reported problems (exit {})",
-                self.language,
-                self.exit_code
-                    .map_or_else(|| "signal".to_owned(), |c| c.to_string())
-            ),
+            StyleVerb::Format => format!("{}: the formatter failed (exit {status})", self.language),
+            StyleVerb::Lint => format!("{}: lint reported problems (exit {status})", self.language),
         }
     }
 }
@@ -442,6 +452,18 @@ mod tests {
         assert!(!StyleVerb::Lint.mutates());
     }
 
+    /// A clean `fmt` and a clean `lint` must be told apart — **without** over-claiming.
+    ///
+    /// # Why this test asserts the absence of a phrase
+    ///
+    /// An earlier version of `summary` said *"already formatted, no changes needed"* on a clean
+    /// `fmt`, and this test asserted that phrase. `cargo fmt` exits 0 whether it rewrote files
+    /// or not and never reports which, so the sentence was a claim the code had no evidence
+    /// for. External review caught it; the fix was to state only the exit status.
+    ///
+    /// So the test now pins the opposite: the sentence must **not** claim anything about
+    /// changes, and must still be distinguishable from the lint sentence. That is the property
+    /// worth locking — the old assertion locked in the defect.
     #[test]
     fn a_clean_lint_and_a_clean_format_say_different_things() {
         let base = StyleOutcome {
@@ -459,11 +481,23 @@ mod tests {
             ..base
         }
         .summary();
-        assert!(fmt_text.contains("no changes"), "{fmt_text}");
+
+        assert!(fmt_text.contains("formatted"), "{fmt_text}");
         assert!(lint_text.contains("no problems"), "{lint_text}");
         assert_ne!(
             fmt_text, lint_text,
             "the two claims must be distinguishable"
+        );
+
+        // The claim this type cannot support, because `cargo fmt` does not report whether it
+        // changed anything.
+        assert!(
+            !fmt_text.contains("no changes"),
+            "a clean fmt must not claim it changed nothing: {fmt_text}"
+        );
+        assert!(
+            !fmt_text.contains("already formatted"),
+            "a clean fmt cannot claim the source was already formatted: {fmt_text}"
         );
     }
 

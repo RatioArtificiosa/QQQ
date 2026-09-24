@@ -18192,4 +18192,129 @@ two readings — the test is blind, or the test never ran — and they are disti
 number that cargo already prints. Running the target test once on clean code and requiring it to
 pass with a non-zero count costs one compile and removes the ambiguity permanently.
 
+## §O-224 — CodeRabbit found thirteen defects in a module whose 738 tests were green,
+including a panic and a gate that could not close
+
+**Found:** 2026-09-24, external review of the `verify` / `style` work (`CLI-014`, `CLI-017`).
+**Fixed and verified:** same session. **Checked:** `crates/qqq-run` only, one check,
+`reviewedFiles` = 6, `outcome: completed`.
+
+### The two that mattered
+
+**1. `qqqai lint` exited 0 on a lint failure (“critical”).** `dispatch_style` called
+`with_manifest`, which maps every `Ok` to `exit::OK`. `style::run` returns
+`Ok(StyleOutcome { ok: false, .. })` when clippy fails, so:
+
+```
+$ qqqai lint                    # on code clippy rejects
+rust: lint reported problems (exit 101)
+  ran: cargo clippy --all-targets -- -D warnings
+$ echo $?
+0
+```
+
+A `lint` that cannot fail is not a lint. This is the `doctor` defect the repository already
+fixed once (*“a diagnostic that cannot fail is not a diagnostic”*), reintroduced in a new
+command, **and the module doc I wrote directly above the function claimed the opposite**: *“A
+non-zero status from the tool becomes `FAILURE` here”*. That makes it §O-124's shape — a doc
+comment stating an invariant the code does not enforce, written by the same hand, in the same
+file, in the same commit. `with_manifest_verdict` already existed for exactly this and is now
+used.
+
+**Why no internal test caught it.** Every `dispatch_style` test asserted the *message*
+(`“QQQ-1003”`, `“go”`, `“LANG-”`), and the message was correct. Nothing asserted the exit
+status of a *failing tool run*, because producing one needs a real clippy failure inside a real
+project. The regression test now builds a sandbox with a `clone_on_copy` defect and asserts both
+halves — the failure **and** a clean-code control exiting 0, since either alone is satisfied by
+a command that always returns the same code.
+
+**2. `parse_key` panicked on non-ASCII input (“major”).** The length check compared
+`cleaned.len()` — **bytes** — against 64 while the message said “characters”, and the loop
+sliced `&cleaned[i * 2..i * 2 + 2]` by byte index. Reproduced:
+
+```
+$ qqqai verify app.wasm --key <31 ASCII + 'é' + 31 ASCII>
+thread 'main' panicked at crates\qqq-run\src\verify.rs:175:28:
+  end byte index 32 is not a char boundary
+$ echo $?
+101
+```
+
+The fixture shape is the finding: the input is **64 bytes and 63 characters**, so it passes the
+byte-length check and reaches the slicing loop with a character straddling an odd boundary. A
+test using `“é”.repeat(32)` would **not** have caught it — that is 64 bytes and 32 characters
+and happens to slice cleanly. This is the handbook's *“a fixture that cannot exhibit the
+defect”* trap, and it is worth stating that the second fixture is the one that matters.
+
+The fix counts characters, validates the whole string as hex **before** any byte indexing, and
+therefore makes the slices provably ASCII and provably on boundaries. The `+` case is covered
+too: `u8::from_str_radix("+f", 16)` returns `Ok(15)` because Rust accepts a leading sign, so a
+base64 key containing `+` could have been read as hex.
+
+### The rest, and what each was worth
+
+| Finding | Verdict |
+|---|---|
+| `verify`'s unknown-flag arm silently ignored anything dash-prefixed (“major”, CWE-636) | **Real and security-shaped.** `--policy requier` would leave the policy *opportunistic* and pass an unsigned artifact through a check the caller believed mandatory. Refused now. |
+| `lint --check` accepted an unimplemented flag and exited 0 (“major”) | **Real.** Measured: exit 0. Now exit 2. |
+| `StyleOutput::summary` over-claimed twice | **Real.** A clean `fmt` said *“already formatted, no changes needed”* — a claim `cargo fmt` cannot support, since it exits 0 whether or not it rewrote files — and a failed `fmt` said *“the formatter rewrote files”*. Both now state only the exit status. |
+| `plan`'s doc listed `QQQ-1001` and an installed-tool branch the code does not have | **Real.** The code uses `MissingTarget`, and the probe lives in `run`, not `plan`. Doc corrected to match, including a note on what `plan` deliberately does not do. |
+| `VerifyOptions` derived `Default` | **Real, defence in depth.** No caller used it, so it was a reachable way to build an invalid request. Removed. |
+| `a_short_key_names_both_lengths` asserted `contains("4")` when `“64”` contains a 4 | **Real — a fixture that cannot fail.** Now asserts `“found 4 characters”`. |
+| `a_base64_key_is_refused_with_the_reason` used a 60-char hex string while its comment said 44 base64 | **Real.** Now uses `base64(bytes(range(32)))`, which is exactly 44 characters, and a companion test for the 64-character case where the *alphabet* check must fire rather than the length check. |
+| `style_accepts_the_global_json_flag` asserted the code appears in the text | **Real.** Now parses the envelope, the §O-220 lesson applied. |
+| `verify_reports_usage_errors_separately_from_findings` did not assert exit status | **Real.** Now asserts 2. |
+
+### What this round says about the shape of the codebase
+
+Three of the thirteen are **the same defect as the module's own doc comment** — the comment
+stated a rule and the code did not enforce it. Two more are **fixtures that cannot fail**. One is
+**fail-open on unrecognised input**. These are the same three shapes §O-124, §O-125 and
+§O-130 already name, appearing in brand-new code by a different hand: the failure modes are
+properties of *this repository's habits*, not of any one author.
+
+The most transferable lesson is the one about the doc comment. I wrote *“A non-zero status from
+the tool becomes `FAILURE` here”* and then wrote `with_manifest`, which cannot do that. The
+sentence was true of my **intent** and false of the **code**, and nothing in the repository
+compares the two. A doc comment that states a behavioural guarantee is a claim; this project
+already tests claims everywhere else. **When a module doc states an ordering, a default, or an
+exit status, the test that would fail if the code disagreed is part of the work** — not a
+follow-up.
+
+### Method notes worth keeping
+
+- **Outcomes:** the run reported `status: review_completed` with `outcome: completed` and
+  `reviewedFiles: [Cargo.toml, lib.rs, main.rs, style.rs, verify.rs, tests/cli.rs]`. Reading
+  `reviewedFiles` is what makes “0 findings” mean something; it is also how the *scope* is
+  audited (the review did not touch `serve.rs`, so it says nothing about the serve path).
+- **Reproduce before fixing, and the reproduction changes the fix.** `verify --check` was
+  verified to exit **1** in the first probe, which would have *disproved* the finding. The binary
+  was stale. After `cargo build -p qqq-run` it exited **0**, and the finding was real. This is
+  the handbook's *stale binary* trap arriving exactly where it costs most — while assessing
+  whether a finding is true.
+- **Fault injection now proves its own non-vacuity first.** §O-223 recorded a harness that
+  scored `test result: ok. 0 passed` as a pass; the harnesses in this round run the target test
+  on clean code and require a non-zero executed count before injecting anything.
+- **One injected fault did not compile.** A `char` literal written as `'\u{0}'` in a comparison
+  against `&char` produced `E0277`, which the harness reported distinctly rather than counting
+  as a catch or a miss. Worth keeping: a fault that fails to compile is neither.
+
+### The clearing step
+
+`coderabbit review findings --clear --dir crates/qqq-run` removed all 13 after the fixes. The
+handbook calls this the most easily forgotten step and it is: without it the next run re-reports
+work already done, and a review log that repeats itself is one nobody reads.
+
+### Declined, with reasons
+
+None of the thirteen were rejected as wrong. Two were **fixed differently** from the
+suggestion rather than literally:
+
+- CodeRabbit suggested counting characters in `parse_key`; the fix also **reorders** the checks
+  so hex validation precedes byte indexing, because counting alone leaves the slicing loop
+  reachable with non-ASCII input that happens to be 64 characters.
+- CodeRabbit suggested a 44-character base64 fixture; the fix uses a **real** one generated from
+  `base64(bytes(range(32)))` and adds the 64-character companion, so both refusal paths are
+  pinned and neither test can pass via the other's path.
+
 *End of `QQQ-Observations-and-Memories.md`.*

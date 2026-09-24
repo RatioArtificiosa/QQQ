@@ -2430,12 +2430,134 @@ fn fmt_without_a_manifest_says_so() {
 }
 
 /// `--json` is a global flag and must not be read as a language or a path.
+///
+/// # Why this parses the envelope rather than searching the text
+///
+/// `assert_contains("QQQ-1003")` passes just as well on the human rendering, so it says nothing
+/// about whether `--json` did anything. The claim under test is *"the output is a JSON
+/// envelope"*, and the only way to check that is to parse it — the same lesson `§O-220` records
+/// for substring assertions on serialized documents.
 #[test]
 fn style_accepts_the_global_json_flag() {
     let s = Sandbox::new("lint-json");
     s.write("qqq.toml", &style_manifest("go"));
     let run = s.run(&["lint", "--json"]);
-    // Still a refusal, because `go` has no driver - the point is that `--json` did not
-    // change *which* refusal it is.
-    run.assert_failed().assert_contains("QQQ-1003");
+    run.assert_failed();
+
+    let doc: serde_json::Value = serde_json::from_str(&run.stdout).unwrap_or_else(|e| {
+        panic!(
+            "--json must emit a parseable envelope, got {e}\n--- stdout ---\n{}",
+            run.stdout
+        )
+    });
+    // The envelope's error shape, not merely the presence of a code in the text.
+    let text = serde_json::to_string(&doc).expect("serialize");
+    assert!(
+        text.contains("QQQ-1003"),
+        "the envelope must carry the code: {text}"
+    );
+    assert!(
+        doc.get("error").is_some() || doc.get("code").is_some() || doc.get("errors").is_some(),
+        "the envelope must have an error field, got: {text}"
+    );
+}
+
+/// A failing style tool must fail the process, and this is the regression test for the defect.
+///
+/// # Why this test exists
+///
+/// Measured before the fix: `dispatch_style` called `with_manifest`, which maps every `Ok` to
+/// `exit::OK`. `style::run` returns `Ok(StyleOutcome { ok: false, .. })` when clippy fails, so
+/// `qqqai lint` on un-lintable code printed *"lint reported problems (exit 101)"* and then
+/// **exited 0**. The module doc claimed the opposite — a stated invariant the code did not
+/// enforce, which is `§O-124`'s shape.
+///
+/// The two halves are asserted together because either alone is satisfied by a broken command: a
+/// `lint` that always failed would pass the failing case, and one that always succeeded would
+/// pass the clean case.
+#[test]
+fn lint_exits_non_zero_when_the_tool_reports_problems() {
+    let s = Sandbox::new("lint-exit-status");
+
+    // A Rust project with a clippy-detectable defect (`clone_on_copy`), plus the manifest.
+    //
+    // `[workspace]` is in the generated `Cargo.toml` deliberately. Without it cargo searches
+    // *upward* for a workspace root and can find an unrelated manifest outside the sandbox —
+    // measured on this machine, it reached `C:\Users\Usuario\Cargo.toml` and failed with
+    // "invalid potential workspace manifest", which made the clean-code control fail for a
+    // reason that has nothing to do with `qqqai lint`.
+    s.write("qqq.toml", &style_manifest("rust"));
+    s.write(
+        "Cargo.toml",
+        "[package]\nname = \"lintexit\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    s.write(
+        "src/main.rs",
+        "pub fn f() -> i32 {\n    let x = 1;\n    let y = x.clone();\n    y\n}\nfn main() { println!(\"{}\", f()); }\n",
+    );
+
+    let dirty = s.run(&["lint"]);
+    dirty.assert_failed();
+    assert!(
+        dirty.stdout.contains("problems") || dirty.stderr.contains("clone_on_copy"),
+        "the failing run must say what happened:\n{}{}",
+        dirty.stdout,
+        dirty.stderr
+    );
+
+    // The control: the same command on clean source must exit 0, or the assertion above is
+    // satisfied by a `lint` that fails unconditionally.
+    s.write(
+        "src/main.rs",
+        "pub fn f() -> i32 {\n    1\n}\nfn main() { println!(\"{}\", f()); }\n",
+    );
+    let clean = s.run(&["lint"]);
+    clean.assert_ok();
+}
+
+/// An unknown flag is refused rather than ignored.
+///
+/// # Why this is a security-shaped test
+///
+/// Measured before the fix: `qqqai lint --check` ran a full lint and exited **0**. A caller
+/// asking for a check got a green result from a flag nothing implemented, which is the
+/// `CWE-636` fail-open shape external review flagged. The same arm in `verify` silently dropped
+/// misspelled flags, so `--policy requier` left the policy *opportunistic* and let an unsigned
+/// artifact pass a check the caller believed was mandatory.
+#[test]
+fn style_refuses_a_flag_it_does_not_understand() {
+    let s = Sandbox::new("lint-badflag");
+    s.write("qqq.toml", &style_manifest("rust"));
+    let run = s.run(&["lint", "--check"]);
+    run.assert_failed()
+        .assert_contains("--check")
+        .assert_contains("does not accept");
+    // The exit status distinguishes a usage error from a finding.
+    assert_eq!(
+        run.code, 2,
+        "an unknown flag is a usage error (2), not a finding: {}",
+        run.stdout
+    );
+}
+
+/// A misspelled `--policy` value must not silently become the permissive policy.
+#[test]
+fn verify_refuses_an_unknown_flag_rather_than_ignoring_it() {
+    let s = Sandbox::new("verify-badflag");
+    s.write("app.wasm", "not really a component");
+    let run = s.run(&["verify", "app.wasm", "--policy", "requier"]);
+    run.assert_failed().assert_contains("is not a policy");
+    assert_eq!(
+        run.code, 2,
+        "a bad flag value is a usage error: {}",
+        run.stdout
+    );
+
+    let unknown = s.run(&["verify", "app.wasm", "--check"]);
+    unknown.assert_failed().assert_contains("not a flag");
+    assert_eq!(
+        unknown.code, 2,
+        "an unknown flag is a usage error: {}",
+        unknown.stdout
+    );
 }

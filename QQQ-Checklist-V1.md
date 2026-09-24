@@ -3410,7 +3410,21 @@ Items are grouped below by **phase**, because dependency order matters more than
     empty one. Three tests, one fault injection (dropping the ceiling from the report)
     **DETECTED**, and verified on the shipped binary in both renderings. See §O-216.
   → §5.2 The command surface
-- [ ] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
+- [x] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
+  → §5.2 The command surface
+  → Done. Found implemented-and-unticked, the `§O-219` shape, and ticked only after driving both
+    named features against a real project (`examples/orders-api`'s manifest, its two findings).
+  → `--sarif` emits SARIF 2.1.0, not a shape that resembles it: `$schema`, `version`, and a
+    `runs[].tool.driver` carrying `name`, `informationUri` and all five `rules` with
+    `shortDescription` and `helpUri`, with each `results[]` entry naming its `ruleId`, `level`
+    and `fixes[].description.text`. Verified by parsing the output as JSON.
+  → `--fail-on` separates the thresholds rather than always failing: on the same project,
+    `--fail-on warning` exits `1` (a warning-level finding exists) and `--fail-on error` exits
+    `0` (none does). That pair is the test - a threshold that always fired would pass a single
+    check and is what the flag exists to avoid.
+  → The human rendering and the `--sarif` document are separate, so `qqqai --json audit | jq`
+    is not buried behind prose (that ordering bug is recorded in `dispatch_audit`'s own comment
+    and was found by CodeRabbit reviewing this command).
   → §5.2 The command surface
 - [x] **CLI-017** Implement `qqqai verify` for signature and attestation checking.
   → §5.2 The command surface
@@ -3482,7 +3496,19 @@ Items are grouped below by **phase**, because dependency order matters more than
     the cause was the literal rather than a renderer — the same construct in `run`'s
     remediation renders correctly. The test asserts no run of spaces survives, because only one
     of the two renderers makes the mistake obvious. Recorded as §O-218b.
-- [ ] **CLI-019** Implement `qqqai why`.
+- [x] **CLI-019** Implement `qqqai why`.
+  → §6.2 `qqq-cap` - the capability engine
+  → Done. Found implemented-and-unticked (`§O-219`'s shape again) and verified against a real
+    project before ticking.
+  → A granted capability names the deciding layer (`crypto.hash GRANTED by manifest`) and exits
+    `0`; a denied one says why nothing granted it (`sql.query DENIED (default: not granted by
+    any layer)`) and exits `1`, so the exit status carries the answer for a script.
+  → The denial prints a copy-pasteable manifest stanza rather than prose about writing one,
+    which is §6.2's point: the command's job is to tell the author the exact lines that would
+    change the decision. Verified in `qql-run::commands::fix_stanza_for` and in the output above.
+  → Six CLI tests in `crates/qqq-run/tests/cli.rs` drive it through argv, including
+    `why_suggests_a_correction_for_a_typo`, `why_names_the_deciding_layer_for_a_grant` and
+    `why_exit_status_separates_a_grant_from_a_denial`.
   → §6.2 `qqq-cap` — the capability engine
 - [ ] **CLI-020** Implement `qqqai trace`.
   → §10.4 Distributed tracing

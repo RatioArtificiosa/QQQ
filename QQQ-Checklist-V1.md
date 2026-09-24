@@ -3412,8 +3412,27 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [ ] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
   → §5.2 The command surface
-- [ ] **CLI-017** Implement `qqqai verify` for signature and attestation checking.
+- [x] **CLI-017** Implement `qqqai verify` for signature and attestation checking.
   → §5.2 The command surface
+  → Done, with one half of §5.2's "signature + attestation" stated as absent rather than implied.
+    The signature half is real: `qqq_pkg::signature` verifies a detached Ed25519 signature over
+    the artifact's bytes, with the signing key's 8-byte id inside the 72-byte `.sig` so a refusal
+    can name which key signed; `qqq_run::verify::verify` turns that into a report;
+    `dispatch_verify` in `main.rs` gives it `--key <hex>` (repeatable) and `--policy require`.
+    The exit status is the gate: valid `0`, unsigned-under-opportunistic `0` saying `unsigned`,
+    unsigned-under-`require` non-zero, invalid non-zero — so a CI step needs no prose parsing.
+  → The attestation half reports `attestation: not_checked` and names `SUP-004`: §7.4 fixes
+    artifact signing, while provenance attestation has no format in this repository to verify
+    against, and a green check over nothing would be worse than an absent one.
+  → Verified: six CLI tests drive the built binary through argv
+    (`verify_accepts_a_real_signature_and_names_the_key` and five others in
+    `crates/qqq-run/tests/cli.rs`), plus unit tests over key parsing and policy construction in
+    `verify.rs`. Fixtures are signed through `qqq_pkg::signature` rather than embedding a stored
+    `.sig`, so no test can pass against a drifted copy of the format. Three faults were injected
+    and each was caught by exactly the test that should catch it, then restored byte-for-byte
+    with SHA-256 checked: a tampered comparison message, an inverted `require_signature`, and a
+    removed dispatch arm. `cargo clippy -D warnings` clean; 719 tests green across `qqq-pkg` and
+    `qqq-run`.
 - [x] **CLI-018** Implement `qqqai caps` with `--explain`.
   → §5.2 The command surface
   → Done: `caps(loaded, explain)` in `qqq-run::commands`, dispatched by `dispatch_caps` in

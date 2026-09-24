@@ -86,7 +86,22 @@ impl Server {
     /// Retried on a fresh port, because between `free_addr` dropping its listener and
     /// `serve` binding, another test in this process can take the port.
     async fn start(accept_limit: u64) -> Self {
-        for _ in 0..16 {
+        // The probe's deadline, and the reason the failure message carries its total.
+        //
+        // A 16-attempt cascade of 20-second probes is up to 320 seconds before this fails, which
+        // is what a full-suite run costs when the machine is busy: measured, `cargo test
+        // --workspace` on a loaded host reported "could not bind a server after 16 attempts on
+        // 16 different ports" after 320.11s, while the same test alone passes in 0.28s.
+        //
+        // That is a **contended environment**, not a broken server — and the two are
+        // indistinguishable from the message, which is the part worth fixing. The panic below
+        // now states the elapsed time and what it means, so the next person reads "this machine
+        // was busy" instead of "the server does not bind".
+        const ATTEMPTS: u32 = 16;
+        const PROBE_DEADLINE: Duration = Duration::from_secs(20);
+        let started = std::time::Instant::now();
+
+        for _ in 0..ATTEMPTS {
             let addr = free_addr();
             let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
             let shutdown = Shutdown::new();
@@ -119,7 +134,7 @@ impl Server {
             // `serve` to bind.
             let probe_addr = addr;
             let bound = tokio::task::spawn_blocking(move || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                let deadline = std::time::Instant::now() + PROBE_DEADLINE;
                 while std::time::Instant::now() < deadline {
                     if std::net::TcpListener::bind(probe_addr).is_err() {
                         return true;
@@ -133,14 +148,27 @@ impl Server {
             if bound {
                 return s;
             }
-            // Not bound after 20 s: signal and let this attempt go, then try a fresh port.
-            // `abort` rather than awaiting the handle, because awaiting it would move the
+            // Not bound after the deadline: signal and let this attempt go, then try a fresh
+            // port. `abort` rather than awaiting the handle, because awaiting it would move the
             // field out of a type that implements `Drop`, which the compiler refuses --
             // and the server task is a detached probe whose end this test does not need.
             s.shutdown.signal();
             s.task.abort();
         }
-        panic!("could not bind a server after 16 attempts on 16 different ports");
+
+        let elapsed = started.elapsed();
+        panic!(
+            "could not bind a server after {ATTEMPTS} attempts on {ATTEMPTS} different ports, \
+             {elapsed:?} elapsed.\n\
+             This is almost always a **contended machine**, not a broken server: each attempt \
+             waits {PROBE_DEADLINE:?} for the port to refuse a bind, and under load the OS can \
+             keep handing the port out for longer than that.\n\
+             Check by running this test alone -- it needs well under a second when the host is \
+             quiet:\n\
+             \x20   cargo test -p qqq-serve --test accept_bound\n\
+             If it passes alone, the failure was environmental. If it fails alone, `serve` is \
+             genuinely not binding and that is the defect."
+        );
     }
 }
 

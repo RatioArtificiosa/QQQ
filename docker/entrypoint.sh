@@ -930,6 +930,10 @@ cmd_checks() {
     python3 tools/check_unicode_escapes.py
     python3 tools/check_unicode_escapes.py --self-test
 
+    # `CON-011`: the WIT style rules Proposal §6.3 says are enforced in review.
+    python3 tools/check_wit_style.py
+    python3 tools/check_wit_style.py --self-test
+
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired
     # the corpus and then died on it (`§O-191`). This drives the real function against

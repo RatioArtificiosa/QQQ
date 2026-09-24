@@ -18508,4 +18508,171 @@ The practical consequence for whoever writes the next entry: **run the escape ch
 appending, every time.** It found both of these within seconds, and neither was visible by
 reading.
 
+## §O-227 — A WIT style checker whose rule matched nothing, and the corpus
+injection that proved it
+
+**Found:** 2026-09-24, writing `CON-011`'s enforcement. **Fixed and verified:** same session.
+**Anchors:** `CON-011` (the WIT style guide), `CON-012` (`check_batch_first.py`), `§O-124`.
+
+### The rule that could not fire
+
+`tools/check_wit_style.py` was written to enforce the three Proposal §6.3 WIT rules that had no
+check: no `option<option<T>>`, a doc comment on every `@since`-published function, and no
+unreachable `stream<T>`. It reported:
+
+```
+scanned 17 .wit file(s), 85 function(s), 85 published
+WIT STYLE OK -- rules 2, 4 and 5 hold
+```
+
+The self-test passed 8/8. Then a **corpus injection** — removing a doc comment from a real
+function in `wit/qqq-env.wit` — reported `NOT CAUGHT`.
+
+The cause was one character in a regex. The pattern required a quoted version:
+
+```python
+SINCE_RE = re.compile(r"@since\s*\(\s*version\s*=\s*\"")   # requires a quote
+```
+
+and **no `@since` in this corpus is quoted**. Every one is `@since(version = 1.0.0)`. So `has_since`
+was never true, the rule never fired, and the check could not fail — while printing a confident
+`WIT STYLE OK`.
+
+### Why the self-test could not catch it
+
+The synthetic fixtures were **written from the same wrong assumption as the pattern**. They used
+`@since(version = "1.0.0")` because that is what the author believed the corpus contained. A
+self-test built from the implementation's own assumptions tests the implementation against itself;
+it cannot discover that both are wrong about the world.
+
+That is the §O-220/§O-223 family again, one layer further out: not a test that runs nothing,
+but a **rule whose pattern matches nothing real** while its self-test reports health.
+
+### The second detail, found the same way
+
+The annotation-block walk stopped at a blank line. Real doc comments contain `///`-prefixed blank
+lines between paragraphs:
+
+```
+/// Read a named variable as a UTF-8 string.
+///
+/// # Errors
+///
+/// See [`env-error`].
+@since(version = 1.0.0)
+get: func(name: string) -> result<string, env-error>;
+```
+
+Those interior lines are comments, so the block continues through them; only a **truly empty** line
+ends it. The first version would have attributed a preceding declaration's doc comment to the next
+function in the multi-paragraph case — a false negative on exactly the files that are best
+documented.
+
+Also: the count of "85 published" came from a **second copy** of the walk in the reporting code, so
+it kept printing 85 while the rule matched none. Both now call one `_annotation_block` helper.
+
+### What the injection had to get right, and got wrong first
+
+The first corpus injection deleted **one** `///` line from a six-line comment, leaving the function
+still documented — so the checker was correct to stay silent and the injection was the defect. The
+second removed the whole contiguous block and fired immediately:
+
+```
+exit 1
+  [5/doc-comment] wit\qqq-env.wit:49
+  `get` is published (@since) but has no `///` doc comment
+WIT STYLE VIOLATIONS -- 1
+```
+
+**A fault injection that does not reproduce the defect is not evidence about the checker.** It took
+two attempts to inject a real violation, and the first attempt's `NOT CAUGHT` was true of the
+injection rather than of the rule — the same confusion §O-220 records in the opposite direction.
+
+### The rules, restated because this is the third round
+
+1. **A checker's self-test cannot validate its assumptions about the corpus.** Fixtures written by
+   the author share the author's model. Only a check against the real artifact can.
+2. **A rule that has never fired has not been shown to work.** The self-test proves the *code path*
+   runs; the corpus injection proves the *pattern* matches reality.
+3. **The two are not substitutes.** This checker needed both, and each caught something the other
+   structurally could not.
+
+### Scope, stated rather than implied
+
+Rule 2 (*"streaming for anything that can exceed 64 KiB"*) is a design judgement about payload size
+and stays in review. What the checker enforces is the decidable half: a `stream<T>` declared but
+consumed by no function is a type no caller can obtain, which makes any review of the rule vacuous.
+That boundary is written in the module doc, following `check_batch_first.py`'s precedent of naming
+what it deliberately does not attempt.
+
+Rule 5's scope is likewise explicit: the doc requirement applies to **`@since`-published** functions,
+which are the set the Proposal calls published. A blanket requirement over 85 functions of existing
+interface code would produce a check nobody can turn green, and `check_batch_first.py` already names
+that outcome (“paperwork”).
+
+## §O-228 — A red gate that was the machine, and a failure message that could
+not say so
+
+**Found:** 2026-09-24, running the gate after the `CON-011` work. **Fixed and verified:** same
+session. **Anchors:** `SRV-024` (the accept bound), `§O-129` (run the gate after the last edit).
+
+### What happened
+
+`cargo test --workspace` failed inside the gate with:
+
+```
+thread 'a_refused_connection_still_honours_the_accept_bound' panicked at
+  crates\qqq-serve\tests\accept_bound.rs:143:9:
+could not bind a server after 16 attempts on 16 different ports
+test result: FAILED. 0 passed; 1 failed; ... finished in 320.11s
+```
+
+Run **alone**, the same test passes in **0.28 s**. The failure was a contended machine: the test
+probes up to 16 ports, each waiting up to 20 seconds for the OS to start refusing a bind, and under
+load the port keeps being available for longer than the probe waits. 16 × 20 s is the 320 s
+observed.
+
+### Why this is worth an entry when the code was fine
+
+The code was fine, and that is the point. **A gate that fails for a reason the code cannot explain
+teaches the reader to re-run it**, which is the first step toward ignoring it. `§O-129`
+established that the gate must run in one sequence after the last edit; this entry adds that a gate
+whose failures are not all real is only as useful as its worst message.
+
+The specific defect was in the **diagnostic**, not the retry logic. The retry design is correct —
+another test in the same process can take the port between `free_addr` dropping its listener and
+`serve` binding, so retrying is the right answer. What was missing was any way for a reader to tell
+"this host was busy" from "`serve` never binds", and those call for opposite responses: one is a
+re-run, the other is a defect hunt.
+
+The message now states the elapsed time, what the cascade means, and the single command that
+discriminates the two:
+
+> could not bind a server after 16 attempts on 16 different ports, 320.1s elapsed.
+> This is almost always a **contended machine**, not a broken server: each attempt waits 20s for
+> the port to refuse a bind, and under load the OS can keep handing the port out for longer than
+> that.
+> Check by running this test alone — it needs well under a second when the host is quiet:
+> `cargo test -p qqq-serve --test accept_bound`
+> If it passes alone, the failure was environmental. If it fails alone, `serve` is genuinely not
+> binding and that is the defect.
+
+### The generalisable rule
+
+**A test that can fail for an environmental reason must say which reason.** The alternative — a
+bare "could not bind" — leaves the reader to discover the distinction themselves, and the natural
+next move is to re-run until green, which destroys the test's value whether or not it was ever
+right.
+
+This is `§O-124`'s rule (*a doc comment that states a guarantee needs the test that enforces
+it*) applied to an assertion rather than a comment: the code knew the difference between the two
+causes and did not write it down.
+
+### A note on the timing, since it recurs
+
+The cascade makes the *failure* path slow (320 s) while the *success* path is 0.3 s. That asymmetry
+is why this is easy to misread as a hang rather than a failure, and why the elapsed time is now in
+the message. Worth knowing: a workspace run that takes far longer than usual is often this test
+waiting out its probes, not a build problem.
+
 *End of `QQQ-Observations-and-Memories.md`.*

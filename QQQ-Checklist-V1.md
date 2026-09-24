@@ -1459,7 +1459,35 @@ Items are grouped below by **phase**, because dependency order matters more than
     a negative control proving a `#[cfg(test)]` use is NOT reported (a checker
     that flags test code gets worked around rather than obeyed).
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-011** Write the WIT style guide and enforce it in review.
+- [x] **CON-011** Write the WIT style guide and enforce it in review.
+  → §6.3 `qqq-abi` - WIT interfaces as the single source of truth
+  → Done as both halves the item names: a guide, and enforcement that is not review.
+  → The guide is `docs/wit-style-guide.md`. Proposal §6.3 states six rules and says they are
+    *"enforced in review"*; review is prose, and this repository's principle is that prose does
+    not fail a build. Four of the six now have a machine check (`check_batch_first.py` rule 1,
+    `check_wit_errors.py` rule 3, `check_wit_since.py` rule 6, and the new
+    `tools/check_wit_style.py` for rules 2, 4 and 5), and the guide says which is which and why.
+  → **Rules 4 and 5 are decided completely; rule 2's decidable half is enforced and the rest is
+    named.** Rule 2 (*"streaming for anything that can exceed 64 KiB"*) is a judgement about a
+    payload's realistic size, so what the checker enforces is that a declared `stream<T>` is
+    consumed by some function - an unconsumed stream type is one no caller can obtain, which
+    makes any review of the rule vacuous. The boundary is written in the module doc, following
+    `check_batch_first.py`'s precedent of naming what it deliberately does not attempt.
+  → Rule 5's scope is likewise explicit rather than blanket: the doc requirement applies to
+    **`@since`-published** functions, the set the Proposal calls published. A requirement over
+    every one of the 85 existing functions would produce a check nobody can turn green, which is
+    the outcome `check_batch_first.py` names as *"paperwork"*.
+  → Verified: `python tools/check_wit_style.py` passes on the real corpus - **17 .wit files, 85
+    functions, 85 published, zero violations** - and the self-test passes 11/11, firing on each
+    rule and staying silent on valid input.
+  → **The corpus injection is what proved the rule works, and the first version failed it.** A
+    synthetic self-test could not catch that the rule matched nothing: its fixtures were written
+    from the same wrong assumption as the pattern, which required a *quoted* version while every
+    real `@since` in this corpus is bare (`@since(version = 1.0.0)`). Removing a whole six-line
+    doc comment from `wit/qqq-env.wit` now fires `[5/doc-comment]` naming the function, and the
+    restore is byte-for-byte. Recorded as `§O-227`.
+  → Both the checker and its self-test are wired into `ci.yml` and `docker/entrypoint.sh`.
+
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 - [x] **CON-012** Enforce the batch-first rule: implement a lint that flags list-shaped operations accepting single elements.
   → Done: `tools/check_batch_first.py`, wired into CI with a fault-injection

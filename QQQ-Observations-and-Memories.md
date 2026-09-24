@@ -18454,4 +18454,58 @@ This is now the **second** blind test found by fault injection in two rounds, an
 `assert!(text.contains(..))` over generated output should be read as a smell, and the question to
 ask is *"could a neighbouring line satisfy this?"*
 
+
+### The second leak site, and why the first checker could not see it
+
+The escape guard was written for **Markdown**, and the first version scanned
+`*.md`, `docs/**/*.md`, `skills/**/*.md` and `crates/*/*.md` — 44 documents, all clean. Extending
+the same scan to `crates/**/*.rs` found a second instance immediately:
+
+```
+crates/qqq-run/src/test.rs:480 -- a `///` note whose parenthetical cited `O-188` through
+the escape text rather than through the section sign.
+```
+
+A leaked section sign in a **Rust doc comment**, invisible to `grep '§O-188'` in exactly the
+same way, in a file type the Markdown-only checker would never have opened. The lesson generalises
+past this rule: **a checker scoped to one file type certifies one file type**, and the first
+version's clean result said nothing about the other 146 files that also carry prose.
+
+The extension needed a discrimination the Markdown version did not. Scanning Rust source for
+`\uXXXX` finds three more hits, and all three are **correct**:
+
+| Instance | Why it stays |
+|---|---|
+| `crates/qqq-cap/src/manifest.rs:2196` — `path = "/tmp/a\\u0000b"` | a manifest fixture containing a control escape |
+| `crates/qqq-host/src/audit.rs:1506` — `assert_eq!(json_escape("a\u{0}b"), "a\\u0000b")` | the test asserting that a NUL byte serializes to those six characters |
+| `crates/qqq-host/src/audit.rs:1507` — the same for `\u001f` | the same, for the next control character |
+
+So the checker now fires on a **closed set** of prose characters (`00a7`, `2014`, `2019`, `201c`,
+`201d`, `2018`, `2026`, `00b7`, `2192`, `2265`) rather than on `\u` generally. That is a narrower
+rule, and narrow is the point: a rule that also flagged JSON-escape test fixtures could not be
+satisfied without breaking those tests, and an unsatisfiable check is one that gets disabled.
+
+Both machinery cases are in the self-test, so a future widening of the pattern is caught rather
+than discovered in `audit.rs`.
+
+### The checker caught its own documentation, twice
+
+Writing this entry produced two more instances, and both are worth recording because they show the
+rule is enforceable rather than aspirational:
+
+1. The passage quoted the leaked Rust line verbatim to show what it looked like — and the quote
+   **was** a leak. Found by the checker on the next run.
+2. The first attempt to fix that used a different escaped section sign inside a backtick span in
+   the same paragraph. Found on the run after that.
+
+The resolution is that the example now **describes** the pattern in prose rather than
+instantiating it. That is the correct form for any document about a textual defect: an example of
+a violation is a violation, and a checker that permitted one inside its own documentation of it
+would be decorative. The same reasoning is why `check_xrefs.py`'s self-test builds its corpus in a
+temporary directory rather than injecting into the real documents.
+
+The practical consequence for whoever writes the next entry: **run the escape checker after
+appending, every time.** It found both of these within seconds, and neither was visible by
+reading.
+
 *End of `QQQ-Observations-and-Memories.md`.*

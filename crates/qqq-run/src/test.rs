@@ -477,7 +477,7 @@ pub fn filter_tests(tests: &[DiscoveredTest], filter: Option<&str>) -> Vec<Disco
 /// to start 57 tests at once. It has not reproduced in five runs since -- the
 /// honest record is one failure in eight runs, unreproduced, with the mechanism
 /// identified and the fix verified by reading rather than by catching it again
-/// (`\u00a7O-188`).
+/// (`§O-188`).
 fn run_once(project_dir: &Path, program: &str, run_args: &[&str], name: &str) -> (bool, String) {
     let output = Command::new(program)
         .args(run_args)

@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **143** |
+| `.rs` files scanned under `crates/` | **146** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -29,13 +29,15 @@ fails when this table disagrees with a live scan, and CI runs it. It was added b
 file count here said **85** while the tree held 139: true when written, never tied to the
 tree afterwards, and wrong in the direction that understates the sample.
 
-It has since caught the same drift twice, and both times it was a red CI run waiting for a
+It has since caught the same drift three times, and every time it was a red CI run waiting for a
 push, which is the mechanism doing its job. The first was **141 → 142**, when
-`qqq-host/src/guest_output.rs` landed. The second is **142 → 143**, from
+`qqq-host/src/guest_output.rs` landed. The second was **142 → 143**, from
 `crates/qqq-serve/tests/accept_bound.rs`, which arrived with the per-tenant connection
-ceiling. The number above is read from the scanner, never from memory: to update this
-document, run the tool and copy its summary line, or let `--check-doc` print the pair of
-numbers that disagree.
+ceiling. The third is **143 → 146**, from three files in one session:
+`crates/qqq-pkg/src/signature.rs`, `crates/qqq-run/src/verify.rs`, and
+`crates/qqq-run/src/style.rs`. The number above is read from the scanner, never from memory: to
+update this document, run the tool and copy its summary line, or let `--check-doc` print the pair
+of numbers that disagree.
 
 A safety document
 whose own sample size has drifted is the "zero for the wrong reason" problem in miniature —

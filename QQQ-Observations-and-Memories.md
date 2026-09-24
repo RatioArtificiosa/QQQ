@@ -17541,4 +17541,160 @@ hermetic rule matrix: PASSED (17 cases over every numbered check)
 ```
 
 The count is now parsed from the subprocess's own output, so it cannot drift again.
+## §O-216 — two checkers disagreed about a checklist marker, and nobody noticed
+
+### The `[~]` that broke nine files
+
+Marking `SRV-020` partial with `[~]` made the citation checker report every
+citation of it as a missing item:
+
+```
+$ python tools/check_checklist_citations.py
+  crates\qqq-serve\src\limits.rs:3: cites `SRV-020`, which is not in the checklist
+  ... and 4 more
+```
+
+The cause is one character class. The checklist's own legend documents five
+markers:
+
+| Marker | Meaning |
+|---|---|
+| `[ ]` | Not started |
+| `[x]` | Done |
+| `[~]` | In progress |
+| `[!]` | Blocked |
+| `[-]` | Dropped / deferred |
+
+`check_xrefs.py` accepted all five, plus `-`:
+
+```python
+RE_ITEM_DEF = re.compile(r"^\s*-\s*\[[ x~!-]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*")
+```
+
+`check_checklist_citations.py` accepted three:
+
+```python
+ITEM = re.compile(r"^-\s*\[[ x!]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*", re.MULTILINE)
+```
+
+So the two checkers disagreed about what a checklist item is, and the disagreement
+was invisible because **no `[~]` item had ever existed**: measured, 396 `[ ]`, 187
+`[x]`, 2 `[!]`, 1 `[~]`, 0 `[-]`. The single `[~]` was mine. A grammar narrower
+than the documented legend cannot fail until someone uses the legend.
+
+Fixed by giving the citation checker the same class, so the two cannot disagree.
+This is the `§O-211` F8 pattern again in a different costume: **a duplicate
+definition of one fact, where neither copy can notice the other drifting.**
+
+### The comment that forbade a thing and then claimed to do it
+
+`check_xrefs.py` lines 23-30 argue at length against a file-wide exemption marker
+— *"an escape hatch that can swallow a whole file is the failure mode that
+checker's own self-test names"* — and the paragraph immediately after declared
+*"This file is exempt from `tools/check_checklist_citations.py`, in full."* The
+file carried four per-line markers and never the file-level spelling
+(`checklist-citations-exempt`), so the claim was also untrue. Corrected to describe
+what the file does, with the argument kept as the reason.
+
+### The report that hid the limits, now fixed
+
+`qqqai inspect` did not display the per-tenant `[server.limits]` table, so the new
+`max_connections` key was enforced but invisible in the command whose job is to show
+what a project will do. `LimitsReport` carried the three sandbox limits (memory,
+fuel, epoch deadline) and nothing from the request-limit table — enforced and
+invisible, which is the shape this document keeps recording.
+
+Fixed: `LimitsReport` gained `request_limits`, reported from the manifest's own
+`RequestLimits` so the report and the server cannot disagree. Verified on the
+shipped binary:
+
+```
+$ qqqai inspect
+Limits
+  memory            128MiB
+  fuel              50000000
+  epoch_deadline_ms 5000
+
+Request limits (per tenant)
+  default
+      max_body_bytes          1048576
+      max_requests_per_window 100 per 60s
+  127.0.0.1
+      max_body_bytes          4096
+      max_connections         7
+```
+
+Three properties are tested, each a way the report could be wrong: the limits are
+carried (including the ceiling), an entry that declares nothing is dropped rather
+than shown as a limited tenant, and a manifest with no table reports **no** section
+rather than an empty one — absence and emptiness are different facts, and the
+runtime treats them differently. Fault-injected by dropping the ceiling from the
+report: **DETECTED**, restored byte-for-byte.
+
+The published envelope schema covers the envelope, not each command's `data`
+payload (`LimitsReport` was never in it), so no contract changed; the conformance
+check and its 21-case self-test both pass.
+## §O-217 — I read the tail of a gate log and called it green
+
+The gate ran, I read its last 60 lines, saw every checker reporting `ok`, and
+concluded the tree was verified. It was not. Reading the same run's full output:
+
+```
+FAIL cargo fmt --check     2.5s  assert_eq!(d.max_requests_per_window, Some(100));
+FAIL check_corpus_at_rest.py
+FAIL audit_requirements.py
+failures: 3
+```
+
+`cargo fmt --check` was **red**, and clippy had presumably failed too in the parts I
+never saw. I committed and pushed on that reading, and CI failed on all three Rust
+matrix jobs with two clippy errors:
+
+```
+error: unnested or-patterns
+    --> crates/qqq-serve/src/server.rs:2411:13
+error: this function has too many lines (103/100)
+    --> crates/qqq-serve/src/server.rs:373:1
+```
+
+Both were in code I had written that turn. Both were reproducible locally the
+moment I ran clippy with CI's flags:
+
+```
+$ cargo clippy --workspace --all-targets --all-features -- -D warnings
+error: unnested or-patterns
+    --> crates\qqq-serve\src\server.rs:2411:13
+error: this function has too many lines (103/100)
+```
+
+Fixed without suppression: the or-pattern nests to `Ok(Ok(0) | Err(_)) | Err(_)`,
+and the ceilings construction came out of `serve` into `connection_ceilings`, which
+is what `too_many_lines` was asking for. A third error clippy then reported —
+`similar_names` in my own test — was fixed by renaming the binding.
+
+### The lesson, which is about reading rather than about code
+
+The gate printed its failures **first** and its passes last, because the passes take
+minutes and the fast formatter check fails in seconds. `Select-Object -Last 60` showed
+me the slow, passing steps and hid the fast, failing one. I then treated a truncated
+view as if it were the whole result.
+
+Two rules fall out, and both are cheap:
+
+1. **Read the summary line.** The gate prints `failures: N` and a final list. Those
+   two lines are the answer; everything else is detail.
+2. **Never pipe a verification gate through a truncating filter.** Redirect to a file
+   and read the file, or read the failure list directly. `| Select-Object -Last N` on
+   a gate is a way to see the passing steps and nothing else.
+
+This is the second time this session that reading the log — rather than the tail of
+it — was the whole of the diagnosis. `§O-214`'s CI finding came from reading the run;
+this one came from *not* reading it.
+
+### And a third clippy error, which is the point of the flags
+
+`cargo clippy --workspace --all-targets --all-features` is what CI runs, and
+`--all-targets` is why it saw the error in a **test** file. A clippy run without
+`--all-targets` would have missed `similar_names` entirely and CI would have gone red
+again. The flags are not decoration.
 *End of `QQQ-Observations-and-Memories.md`.*

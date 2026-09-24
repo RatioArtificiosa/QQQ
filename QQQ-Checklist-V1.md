@@ -3399,6 +3399,16 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CLI-015** Implement `qqqai inspect` with static capability reporting and `--diff`.
   → Done: `qqqai inspect` with no argument reports the manifest's grants; `qqqai inspect <artifact>` compiles the component without instantiating it and reports the capabilities its **import table** requires, with the digest and `component`/`core-module` kind so a report is tied to the bytes that produced it. Unmapped interfaces are listed rather than dropped, and a file that is not a component is an error rather than a fallback to the manifest.
   → `--diff <other>` reports the **authority** delta between two artifacts, which is §5.4's central supply-chain question: which capabilities did this build add? A gain **exits non-zero** so the flag is usable as a CI gate without parsing output; a loss reports but succeeds, because failing on a reduction would train people to bypass the check. A gain of a *covert channel* (`clock.wall`, `crypto.random`) escalates even though it cannot move the posture band — the §10.5 distinction.
+  → **The per-tenant request limits are reported** (2026-09-24). `LimitsReport` carried
+    the three sandbox limits (memory, fuel, epoch deadline) and nothing from
+    `[server.limits]`, so the per-tenant body cap, request rate and connection ceiling were
+    enforced by the server while appearing nowhere in the command whose purpose is to answer
+    "what will this project do?". Enforced-and-invisible is the shape §O-130 records
+    repeatedly. The report is built from the manifest's own `RequestLimits`, so it cannot
+    disagree with what the server applies; an entry declaring no limit is dropped rather than
+    shown as a limited tenant, and a manifest with no table reports no section rather than an
+    empty one. Three tests, one fault injection (dropping the ceiling from the report)
+    **DETECTED**, and verified on the shipped binary in both renderings. See §O-216.
   → §5.2 The command surface
 - [ ] **CLI-016** Implement `qqqai audit` with SARIF output and `--fail-on`.
   → §5.2 The command surface

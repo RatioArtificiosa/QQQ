@@ -490,12 +490,12 @@ async fn a_connection_under_the_ceiling_is_served() {
     let _ = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let served = server
+    let under_ceiling = server
         .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
-        served.starts_with("HTTP/1.1 200"),
-        "a connection under the ceiling must be served:\n{served}"
+        under_ceiling.starts_with("HTTP/1.1 200"),
+        "a connection under the ceiling must be served:\n{under_ceiling}"
     );
 
     drop(c);

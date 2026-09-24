@@ -491,6 +491,102 @@ pub struct LimitsReport {
     pub fuel: u64,
     /// Wall-clock deadline in milliseconds.
     pub epoch_deadline_ms: u64,
+    /// The per-tenant request limits, absent when the manifest declares none.
+    ///
+    /// # Why this is reported at all
+    ///
+    /// `[server.limits]` bounds what a **client** may send, and it was enforced by the
+    /// server while appearing nowhere in `qqqai inspect` — the command whose whole
+    /// purpose is to answer "what will this project do?". A limit an operator cannot see
+    /// is a limit they will not know to change, and the connection ceiling was in exactly
+    /// that state until `SRV-020` was finished. `None` is reported as an absence rather
+    /// than as zeroes: the manifest saying "no limits" is a different fact from "limits of
+    /// zero", and the runtime treats the two differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_limits: Option<RequestLimitsReport>,
+}
+
+/// The per-tenant request limits, as declared.
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestLimitsReport {
+    /// The cap for a tenant with no entry, or `None` when the manifest sets none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<TenantLimitReport>,
+    /// Per-tenant entries, keyed by the client address they match.
+    pub per_tenant: Vec<TenantLimitReport>,
+}
+
+/// One tenant's declared limits, flattened for display.
+#[derive(Debug, Clone, Serialize)]
+pub struct TenantLimitReport {
+    /// The tenant this entry applies to, or `"default"` for the fallback.
+    pub tenant: String,
+    /// The largest request body accepted, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
+    /// The largest number of requests allowed per window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_requests_per_window: Option<u32>,
+    /// The window those requests are counted over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<u64>,
+    /// The largest number of simultaneous connections the tenant may hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
+}
+
+impl TenantLimitReport {
+    /// One entry, from the manifest's own type.
+    #[must_use]
+    fn from_declared(tenant: &str, l: &qqq_cap::manifest::TenantLimit) -> Self {
+        Self {
+            tenant: tenant.to_owned(),
+            max_body_bytes: l.max_body_bytes,
+            max_requests_per_window: l.max_requests_per_window,
+            window_seconds: l.window_seconds,
+            max_connections: l.max_connections,
+        }
+    }
+
+    /// Whether this entry carries no limit at all.
+    #[must_use]
+    const fn is_empty(&self) -> bool {
+        self.max_body_bytes.is_none()
+            && self.max_requests_per_window.is_none()
+            && self.max_connections.is_none()
+    }
+}
+
+impl RequestLimitsReport {
+    /// The report for a manifest's table, or `None` when there is no table.
+    ///
+    /// An entry with no limit set is dropped: a `[server.limits.per_tenant."1.2.3.4"]`
+    /// header with nothing under it declares nothing, and listing it would suggest a
+    /// policy that does not exist.
+    #[must_use]
+    fn from_declared(l: &qqq_cap::manifest::RequestLimits) -> Self {
+        let default = l
+            .default
+            .as_ref()
+            .map(|d| TenantLimitReport::from_declared("default", d))
+            .filter(|d| !d.is_empty());
+        let per_tenant = l
+            .per_tenant
+            .iter()
+            .map(|(tenant, limit)| TenantLimitReport::from_declared(tenant, limit))
+            .filter(|e| !e.is_empty())
+            .collect();
+        Self {
+            default,
+            per_tenant,
+        }
+    }
+
+    /// Whether the table declares nothing after filtering.
+    #[must_use]
+    fn is_empty(&self) -> bool {
+        self.default.is_none() && self.per_tenant.is_empty()
+    }
 }
 
 /// The overall security posture, as an enum rather than prose.
@@ -563,6 +659,33 @@ impl CommandOutput for InspectOutput {
              epoch_deadline_ms {}",
             limits.memory, limits.fuel, limits.epoch_deadline_ms
         );
+
+        // The per-tenant request limits, when the manifest declares any. Rendered as a
+        // table under its own heading rather than appended to the sandbox limits above:
+        // those bound what a **guest** may consume and these bound what a **client** may
+        // send, and one list would suggest one policy.
+        if let Some(req) = &limits.request_limits {
+            let mut rows: Vec<&TenantLimitReport> = Vec::new();
+            if let Some(d) = &req.default {
+                rows.push(d);
+            }
+            rows.extend(req.per_tenant.iter());
+
+            let _ = write!(out, "\n\nRequest limits (per tenant)");
+            for row in rows {
+                let _ = write!(out, "\n  {}", row.tenant);
+                if let Some(v) = row.max_body_bytes {
+                    let _ = write!(out, "\n      max_body_bytes          {v}");
+                }
+                if let Some(v) = row.max_requests_per_window {
+                    let window = row.window_seconds.unwrap_or(60);
+                    let _ = write!(out, "\n      max_requests_per_window {v} per {window}s");
+                }
+                if let Some(v) = row.max_connections {
+                    let _ = write!(out, "\n      max_connections         {v}");
+                }
+            }
+        }
 
         out
     }
@@ -957,6 +1080,15 @@ pub fn inspect(loaded: &LoadedManifest) -> Result<InspectOutput> {
             memory: loaded.manifest.limits.memory.clone(),
             fuel: loaded.manifest.limits.fuel,
             epoch_deadline_ms: loaded.manifest.limits.epoch_deadline_ms,
+            // From the manifest's own table, so the report and the server cannot
+            // disagree: both read `RequestLimits`.
+            request_limits: loaded
+                .manifest
+                .server
+                .limits
+                .as_ref()
+                .map(RequestLimitsReport::from_declared)
+                .filter(|r| !r.is_empty()),
         },
         posture: classify_posture(&caps),
     })
@@ -1406,6 +1538,104 @@ mod tests {
         assert_eq!(out.limits.memory, "128MiB");
         assert_eq!(out.limits.fuel, 50_000_000);
         assert_eq!(out.limits.epoch_deadline_ms, 5_000);
+    }
+
+    /// A manifest with no `[server.limits]` reports no request limits.
+    ///
+    /// The absence must be an absence, not an empty table: "the author declared no
+    /// limits" and "the author declared limits of nothing" are different facts, and the
+    /// runtime treats them differently (`None` is unlimited; a table is a policy).
+    #[test]
+    fn inspect_reports_no_request_limits_when_none_are_declared() {
+        let out = inspect(&loaded(CRYPTO)).unwrap();
+        assert!(
+            out.limits.request_limits.is_none(),
+            "a manifest declaring no `[server.limits]` must report none"
+        );
+    }
+
+    /// The declared request limits are carried, including the connection ceiling.
+    ///
+    /// The ceiling is the field this test exists for: it was a compiled constant until
+    /// `SRV-020` was finished, so a report that omitted it would leave the one limit an
+    /// operator most needs to change invisible in the command that lists limits.
+    #[test]
+    fn inspect_carries_the_declared_request_limits() {
+        const WITH_LIMITS: &str = r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[server]
+default_auth = "none"
+
+[[server.routes]]
+path = "/healthz"
+methods = ["GET"]
+handler = "health"
+
+[server.limits.default]
+max_body_bytes = 1048576
+max_requests_per_window = 100
+window_seconds = 60
+
+[server.limits.per_tenant."127.0.0.1"]
+max_connections = 7
+"#;
+        let out = inspect(&loaded(WITH_LIMITS)).unwrap();
+        let req = out
+            .limits
+            .request_limits
+            .expect("the declared table must be reported");
+
+        let d = req
+            .default
+            .as_ref()
+            .expect("the default entry must survive");
+        assert_eq!(d.tenant, "default");
+        assert_eq!(d.max_body_bytes, Some(1_048_576));
+        assert_eq!(d.max_requests_per_window, Some(100));
+        assert_eq!(d.window_seconds, Some(60));
+
+        let entry = req
+            .per_tenant
+            .iter()
+            .find(|e| e.tenant == "127.0.0.1")
+            .expect("the per-tenant entry must survive");
+        assert_eq!(
+            entry.max_connections,
+            Some(7),
+            "the connection ceiling must be reported, not only enforced"
+        );
+    }
+
+    /// An entry that declares no limit at all is dropped from the report.
+    ///
+    /// A `[server.limits.per_tenant."1.2.3.4"]` header with nothing under it declares no
+    /// policy, and listing it would show a tenant as limited when nothing bounds it.
+    #[test]
+    fn inspect_drops_a_per_tenant_entry_that_declares_nothing() {
+        const EMPTY_ENTRY: &str = r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[server]
+default_auth = "none"
+
+[[server.routes]]
+path = "/healthz"
+methods = ["GET"]
+handler = "health"
+
+[server.limits.per_tenant."127.0.0.1"]
+"#;
+        let out = inspect(&loaded(EMPTY_ENTRY)).unwrap();
+        assert!(
+            out.limits.request_limits.is_none(),
+            "an entry with no limits declares nothing, so the report must be absent: {:?}",
+            out.limits.request_limits
+        );
     }
 
     // -- posture -----------------------------------------------------------

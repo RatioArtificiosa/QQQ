@@ -418,19 +418,8 @@ pub async fn serve(
     })?;
 
     let table = Arc::new(table);
-    // The per-tenant connection ceilings, taken from the manifest's `[server.limits]`
-    // table when there is one. Read from `config.limits` rather than from a second
-    // field so that one manifest key has one home: a parallel `connections` map on the
-    // config would be a second authority on the same policy, and the two would drift.
-    //
-    // `connections_per_tenant` remains the fallback, so naming one tenant does not
-    // change the ceiling for every other.
-    let ceilings = config
-        .limits
-        .as_ref()
-        .map_or_else(Vec::new, |l| l.connections_by_tenant());
     let ledger = Arc::new(tokio::sync::Mutex::new(ConnectionLedger::with_limits(
-        ceilings,
+        connection_ceilings(&config),
         config.connections_per_tenant,
     )));
     // Wrapped in an `Arc` so each connection task shares one immutable config
@@ -600,6 +589,24 @@ pub async fn serve(
         )
         .with_cause(e.to_string())
     })
+}
+
+/// The per-tenant connection ceilings declared by the manifest.
+///
+/// Read from `config.limits` rather than from a second field on the config, so one
+/// manifest key has one home: a parallel ceilings map would be a second authority on
+/// the same policy and the two would drift. `ServerConfig::connections_per_tenant`
+/// remains the fallback, so naming one tenant does not change the ceiling for every
+/// other.
+///
+/// Extracted from `serve` rather than inlined, because `serve` is at its line budget
+/// without it — which is what clippy's `too_many_lines` asked for.
+#[must_use]
+fn connection_ceilings(config: &ServerConfig) -> Vec<(String, u32)> {
+    config
+        .limits
+        .as_ref()
+        .map_or_else(Vec::new, |l| l.connections_by_tenant())
 }
 
 /// The `manifest_rev` this layer reports, because it has no manifest.
@@ -2408,7 +2415,10 @@ async fn drain_for_refusal(stream: &mut TcpStream) {
     while total < REFUSAL_DRAIN_BYTES {
         let read = tokio::time::timeout(REFUSAL_DRAIN_TIMEOUT, stream.read(&mut buf)).await;
         match read {
-            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            // Nested rather than three flat alternatives, which is what clippy's
+            // `unnested_or_patterns` asks for: `Ok` wraps both the byte count and the
+            // read error, so the two share one arm.
+            Ok(Ok(0) | Err(_)) | Err(_) => break,
             Ok(Ok(n)) => total += n,
         }
     }

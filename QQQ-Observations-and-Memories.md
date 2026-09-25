@@ -22223,4 +22223,104 @@ passing suite made look verified.
 
 ---
 
+## §O-282 — The released artifact was built by a moving compiler, and the guard's file list stopped one file short
+
+**Found:** Phase C, auditing the pinned-toolchain copies. **Anchors:**
+`tools/check_toolchain.py`, `.github/workflows/release.yml`, `.github/workflows/ci.yml`,
+`rust-toolchain.toml`.
+
+### The finding
+
+`tools/check_toolchain.py` compares every stated toolchain version against `rust-toolchain.toml`.
+Its `PIN_SITES` listed **three** files:
+
+```
+rust-toolchain.toml
+.github/workflows/ci.yml
+.github/workflows/advisories.yml
+```
+
+`ci.yml`'s own comment above the check says the version *"is stated in four places, because an
+action input cannot reference a file: `rust-toolchain.toml`, two `toolchain:` inputs in this
+workflow, and one in `advisories.yml`."* There were **five**.
+
+**`release.yml` was not in the list**, and it installs a toolchain **twice** — to build the release
+binaries for each target, and again to rebuild them for the verify step. Neither was compared to
+anything, because `collect()` never looked at the file. Both read:
+
+```yaml
+uses: dtolnay/rust-toolchain@stable
+```
+
+**A moving channel**, which is the defect `rust-toolchain.toml` documents at length and the one
+that cost `§O-121` four red CI jobs across three platforms in one working period.
+
+### Why it matters most on that workflow
+
+Every other job produces a **verdict** — a result that can be reproduced by re-running it. This one
+produces the **published artifact**. `cargo build --release --locked` pins the dependency graph, and
+an unpinned compiler left the other half of the build unreproducible: the released binary's
+provenance depended on the calendar rather than on the commit. §7's and §13's reproducibility
+promises are about exactly this, and the workflow that ships the product was the one place the pin
+was missing.
+
+Fixed: both installs now use `@master` with an explicit `toolchain: "1.98"`, the same form `ci.yml`
+uses — `@master` **requires** the input, which `ci.yml`'s comment records discovering the hard way
+(*"failed on every platform with `'toolchain' is a required input`"*).
+
+### The guard, and one false positive of my own
+
+`release.yml` is now in `PIN_SITES`, and because it escaped by stating **no version at all**, a
+version-comparison rule could never have caught it. So the check gained a second shape: **a
+workflow may not name a moving channel**, scanned across every workflow file.
+
+**My first version of that rule was wrong**, and the run said so:
+
+```python
+MOVING_CHANNEL = re.compile(r"dtolnay/rust-toolchain@stable\b")   # too broad
+```
+
+It flagged `ci.yml:743` — a *comment* that reads *"This step read `dtolnay/rust-toolchain@stable`,
+which names whatever `stable` is on the day the job runs"* — and two of this change's own
+explanations. **A guard that fires on the prose describing the anti-pattern makes writing about it
+impossible, and a guard that must be worked around gets disabled.** Anchored on the YAML key
+(`^\s*(?:-\s*)?uses:\s*dtolnay/rust-toolchain@stable\b`), it points at the thing that installs a
+toolchain and leaves the documentation alone.
+
+That is the "measure the rule against the real corpus before wiring it" discipline (`§O-274`)
+violated and then applied, in the same change.
+
+### And the anti-vacuity rule caught the addition
+
+Adding a fourth file to `PIN_SITES` immediately failed the checker's own self-test:
+
+```
+FAIL  a consistent set was reported broken: ['1 pin site(s) do not exist -- the pattern or the path is wrong']
+```
+
+The self-test's fixture wrote `ci.yml` and `advisories.yml` and never created `release.yml`, so the
+new site was missing from the synthetic tree — and a pin site that does not exist is a failure by
+design. That is the rule working on its own author: a stated site that nothing can find means the
+check is silently inspecting less than it claims.
+
+Fixture extended, and two injections added so the new coverage is *proven* rather than assumed:
+a drifted `release.yml` pin, and a `uses: …@stable` install. Self-test: **8 injections, up from 6**.
+
+### Also verified in Phase C
+
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` on the pinned **1.98.1** →
+  **exit 0**. This is the check that matters for the October release, since a new version brings new
+  lints — `§O-121`'s recorded case.
+- `cargo +1.97.1 check --workspace --all-targets --locked` → **exit 0**. The MSRV claim holds, checked
+  by building rather than by reading `rust-version`.
+- The `msrv` job asserts the workspace has **exactly 11** crates. Re-derived rather than trusted:
+  `cargo metadata --no-deps` reports **11 packages / 11 workspace members**. The assertion is current.
+
+**A guard is only as wide as its file list, and only as narrow as its pattern.** This one was too
+narrow in both directions at once: it did not look at a file, and when it did, it matched prose.
+
+→ `tools/check_toolchain.py`, `.github/workflows/release.yml`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

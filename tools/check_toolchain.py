@@ -45,11 +45,40 @@ REPO = Path(__file__).resolve().parent.parent
 #:
 #: The MSRV job in `ci.yml` deliberately pins a *different* channel (the MSRV), and
 #: is excluded by its own marker rather than by a line number — see `MSRV_JOB`.
+#:
+#: **`release.yml` was missing from this list.** The `ci.yml` comment above the check
+#: says the version "is stated in four places"; there were **five** — `release.yml`
+#: installs a toolchain twice, to build the released binaries and to rebuild them for
+#: verification. Neither was compared to anything, and both read
+#: `dtolnay/rust-toolchain@stable` — the moving target this whole file exists to
+#: prevent, on the one workflow whose output is a published artifact rather than a
+#: verdict. A guard is only as wide as its file list (`§O-282`).
 PIN_SITES = [
     ("rust-toolchain.toml", re.compile(r'^\s*channel\s*=\s*"([^"]+)"', re.MULTILINE)),
     (".github/workflows/ci.yml", re.compile(r'^\s*toolchain:\s*"([^"]+)"', re.MULTILINE)),
     (".github/workflows/advisories.yml", re.compile(r'^\s*toolchain:\s*"([^"]+)"', re.MULTILINE)),
+    (".github/workflows/release.yml", re.compile(r'^\s*toolchain:\s*"([^"]+)"', re.MULTILINE)),
 ]
+
+#: Workflows that must never name a *moving* channel.
+#:
+#: `dtolnay/rust-toolchain@stable` names whatever `stable` is on the day the job runs,
+#: so the same commit builds with a different compiler next week. That is the defect
+#: `rust-toolchain.toml` documents at length and the one that cost `§O-121` four red CI
+#: jobs. Every workflow is in scope, not just the ones that carry a `toolchain:` input:
+#: the failure is the *use of a moving channel*, which `@stable` expresses without any
+#: `toolchain:` line at all — which is exactly how `release.yml` escaped the list above.
+WORKFLOWS = (".github/workflows",)
+
+#: Anchored on the **YAML key**, not the bare string.
+#:
+#: The first version matched `dtolnay/rust-toolchain@stable` anywhere in a line and flagged
+#: three comments that exist to *document the anti-pattern* — `ci.yml:743` ("This step read
+#: `dtolnay/rust-toolchain@stable`, which names whatever…") and two of this change's own
+#: explanations — plus it would have made writing about the defect impossible. A guard that
+#: fires on the prose describing what it forbids is one that gets worked around rather than
+#: kept. Requiring `uses:` keeps it pointed at the thing that installs a toolchain.
+MOVING_CHANNEL = re.compile(r"^\s*(?:-\s*)?uses:\s*dtolnay/rust-toolchain@stable\b")
 
 #: A block that explicitly overrides the pin and must NOT be compared to it.
 #:
@@ -155,6 +184,31 @@ def run(verbose: bool = True) -> list[str]:
                 f"the local and CI toolchains diverge silently"
             )
 
+    # A moving channel in ANY workflow — including one that never states a `toolchain:`
+    # input.
+    #
+    # `release.yml` used `dtolnay/rust-toolchain@stable` twice and was invisible to every rule
+    # above: it stated no version to collect, so `collect()` never saw it, so the comparison
+    # never ran and the rule just above never inspected it. **The defect is the use of a
+    # moving channel**, and `@stable` expresses that without stating anything at all — which is
+    # precisely how it escaped a guard whose subject is stated versions (`§O-282`).
+    moving: list[str] = []
+    for root in WORKFLOWS:
+        for path in sorted((REPO / root).glob("*.yml")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for i, line in enumerate(text.split("\n"), 1):
+                if MOVING_CHANNEL.search(line):
+                    moving.append(f"{path.relative_to(REPO)}:{i}")
+    if moving:
+        problems.append(
+            "a workflow names the moving channel `dtolnay/rust-toolchain@stable`, which is "
+            "whatever `stable` is on the day the job runs — the same commit then builds with a "
+            "different compiler next week, which is what cost §O-121 four red CI jobs. Use "
+            "`@master` with an explicit `toolchain:` input. Found at: " + ", ".join(moving)
+        )
+    elif verbose:
+        print("  OK    no workflow names a moving Rust channel")
+
     return problems
 
 
@@ -172,10 +226,20 @@ def self_test() -> int:
         REPO = tmp
         (tmp / ".github" / "workflows").mkdir(parents=True)
 
-        def build(pin_toml: str, pin_ci: str, pin_adv: str, msrv: str) -> None:
+        def build(
+            pin_toml: str,
+            pin_ci: str,
+            pin_adv: str,
+            msrv: str,
+            pin_rel: str = 'with:\n  toolchain: "1.98"',
+        ) -> None:
             (tmp / "rust-toolchain.toml").write_text(pin_toml, encoding="utf-8")
             (tmp / ".github/workflows/ci.yml").write_text(pin_ci, encoding="utf-8")
             (tmp / ".github/workflows/advisories.yml").write_text(pin_adv, encoding="utf-8")
+            # `release.yml` is a pin site too. It was missing from `PIN_SITES` entirely, so
+            # nothing compared it — and the anti-vacuity rule then reported a missing site the
+            # moment it was added, which is how this fixture came to write it (`§O-282`).
+            (tmp / ".github/workflows/release.yml").write_text(pin_rel, encoding="utf-8")
             (tmp / "Cargo.toml").write_text(
                 f'[workspace]\nrust-version = "{msrv}"\n', encoding="utf-8"
             )
@@ -215,10 +279,30 @@ def self_test() -> int:
             print("  FAIL  a too-new MSRV was accepted")
             failures += 1
 
+        # Injection 6: `release.yml` drifts from the pin. This site was absent from
+        # `PIN_SITES`, so no rule compared it; the case exists to prove it now is (`§O-282`).
+        build(good, good_ci, good_adv, "1.97", 'with:\n  toolchain: "1.99"')
+        if any("disagrees" in p for p in run(verbose=False)):
+            print("  OK    a drifted release.yml pin is detected")
+        else:
+            print("  FAIL  release.yml drift was not detected")
+            failures += 1
+
+        # Injection 7: a moving channel expressed as `uses: ...@stable`, which states no
+        # `toolchain:` input at all and so was invisible to every version-comparison rule.
+        # This is the exact form `release.yml` shipped.
+        build(good, good_ci, good_adv, "1.97", "uses: dtolnay/rust-toolchain@stable")
+        if any("moving channel" in p for p in run(verbose=False)):
+            print("  OK    a `uses: ...@stable` install is detected")
+        else:
+            print("  FAIL  `uses: ...@stable` was accepted")
+            failures += 1
+
         # Injection 4: no pin anywhere (the vacuity case).
         (tmp / "rust-toolchain.toml").write_text("# nothing\n", encoding="utf-8")
         (tmp / ".github/workflows/ci.yml").write_text("steps: []\n", encoding="utf-8")
         (tmp / ".github/workflows/advisories.yml").write_text("steps: []\n", encoding="utf-8")
+        (tmp / ".github/workflows/release.yml").write_text("steps: []\n", encoding="utf-8")
         if any("inspecting nothing" in p for p in run(verbose=False)):
             print("  OK    finding no pin at all is refused as vacuous")
         else:

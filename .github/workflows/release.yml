@@ -98,9 +98,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # **Pinned, not `@stable`.** This step read `dtolnay/rust-toolchain@stable`, which names
+      # whatever `stable` is on the day the job runs — the moving target `rust-toolchain.toml`
+      # and `.github/workflows/ci.yml` both argue against, and the reason `§O-121` cost four red
+      # CI jobs across three platforms in one working period.
+      #
+      # It matters most *here*. Every other job produces a verdict that can be reproduced by
+      # re-running it; this one produces the **published artifact**. `--locked` pins the
+      # dependency graph, and an unpinned compiler left the other half of the build
+      # unreproducible — the released binary's provenance would depend on the calendar rather
+      # than on the commit. `@master` requires an explicit `toolchain:` input, recorded in
+      # `ci.yml`; the number is the one `rust-toolchain.toml` pins, and
+      # `tools/check_toolchain.py` now checks this file too (`§O-282`).
+      - name: Install Rust (pinned, for a reproducible release artifact)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98"
           targets: ${{ matrix.target }}
 
       - name: Build the release binary
@@ -222,8 +235,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # The verify step's toolchain, pinned for the same reason as the build above: it rebuilds
+      # the binary to check the artifact, so an unpinned compiler here would make the *verdict*
+      # depend on the calendar too. `§O-282`.
+      - name: Install Rust (pinned, so the verification is reproducible)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
 
       - name: Build qqqai
         run: cargo build --release --locked -p qqq-run

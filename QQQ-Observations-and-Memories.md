@@ -22623,4 +22623,79 @@ weaker gate and a *differently scoped* one.
 
 ---
 
+## §O-287 — The bridge ran clean, it verified this session's work, and killing it mid-run proved its repair path
+
+**Found:** running the Linux bridge to close DoD 5's second half. **Anchors:**
+`docker/compose.yaml`, `docker/entrypoint.sh`, `.scratch/run_bridge.cmd`.
+
+### The result
+
+```
+docker-compose -f docker/compose.yaml run --rm linux checks      →  BRIDGE_EXIT=0
+```
+
+626 lines of output: **25 `OK --` verdicts, 26 `SELF-TEST PASSED`, 0 failures.** So the checkers and
+their self-tests pass **in the Linux container as well as on Windows**, which is the half of
+Definition-of-done 5 that a local run cannot certify.
+
+**And it ran this session's work**, not just the pre-existing suite:
+
+```
+DOC CLAIMS OK -- 5 claim(s) match the tree
+SELF-TEST PASSED -- the scanner, the resolvers and the comparison are live
+OK    a third-party copy with no source is reported, not failed
+OK    an empty list fails rather than passing vacuously
+OK    an image with no licence label is not a failure
+```
+
+Those are the resolvers (`§O-272`, `§O-275`), the WIT vendoring guard (`§O-270`) and the
+image-label check (`§O-276`) — all of it exercised on Linux, which none of it had been.
+
+### How long it takes, and what dominates
+
+**~46 minutes**, and the bottleneck is one checker. `self_test_xrefs.py` invokes `check_xrefs.py`
+once per injection case (~17), and **`check_xrefs.py` copies the tracked tree into a sandbox on each
+invocation** — a few hundred files. Against `/workspace` on a **Windows bind mount** that is
+`virtiofs`, one invocation measured **16 min wall for 1:32 of CPU**: it is I/O-bound, not
+compute-bound.
+
+Worth knowing before planning a round around a bridge run. It is not a defect — the sandbox copy is
+deliberate, and the alternative is a checker that mutates what it is inspecting — but it makes the
+architecture visible, and a Linux host or a WSL-side checkout would not pay it.
+
+### The harness cap, and what killing a bridge run does
+
+The shell tool **caps a command at 600 s regardless of the requested timeout**, so a bridge run
+cannot be waited on inline: it must be launched detached and polled, which the repository already
+documents.
+
+**Killing one mid-run leaves the corpus mutated** — the self-tests inject faults into the real
+documents and restore them, so a `SIGKILL` between those two steps leaves an injection applied. The
+next bridge run found it and said so:
+
+```
+WARNING: the corpus contains left-over fault injections from a killed run.
+  QQQ-Proposal-V1.md: contains '§REMOVED'  (left by check [10b])
+  repaired: QQQ-ProposalV1.md
+```
+
+**That is a control working on its own author.** The corpus was verified afterwards and is intact —
+`CORPUS AT REST -- 3 document(s) match their recorded digests`, `check_xrefs.py` PASSED, working tree
+clean. The lesson is simply to let a bridge run finish.
+
+### A mistake of mine in the same class
+
+I killed the wrong container. `docker ps -q --filter ancestor=…` returns **newest first**, and I
+took `-First 1` meaning "the oldest, the orphaned one" — so I killed the run I was reading, and its
+output ended `BRIDGE_EXIT=137` (128 + 9, `SIGKILL`). An exit code that looks like a test failure and
+was my own signal.
+
+The fix was to kill *all* bridge containers and relaunch, rather than to guess which one was the
+orphan. **When a filter returns an unordered set and you need a specific member, read the set** —
+`docker ps` had printed both containers with their ages one command earlier.
+
+→ `docker/compose.yaml`, `docker/entrypoint.sh`, `.scratch/run_bridge.cmd`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

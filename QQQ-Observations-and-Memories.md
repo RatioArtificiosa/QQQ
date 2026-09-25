@@ -20359,4 +20359,62 @@ corrected rather than deleted, because a fault injection that flips a row it can
 evidence about the property it claims to test — it is a blind edit that happens to compile.
 **The rule: name the row before mutating it.**
 
+**§O-258 — Decision: the §9.2 budget gate cannot pass on this hardware, and the gate is
+working correctly when it exits 1.** Recorded because a verifier reasonably asked whether the
+exit-1 result is a defect to fix or a true statement to publish, and the answer is the second,
+with the reasoning written down rather than asserted.
+
+### What the exit code means, from the shipped code
+
+`qqqai bench --fail-on-miss` exits non-zero when a §9.2 budget is missed. Both facts are in
+the shipped source, not inferred: `crates/qqq-run/src/bench.rs:71` documents `fail_on_miss` as
+"Exit non-zero when a budget is missed", and `should_fail` (line 532) returns `false` immediately
+when the flag is absent and otherwise reports whether **any** budgeted row is unmet. The flag is
+opt-in on purpose — the doc comment above `should_fail` states that "making a missed budget a
+failure by default would turn a measurement tool into a gate, and `§9.2` calls these 'numeric
+targets engineering is held to' rather than a pass/fail condition."
+
+So there are exactly two defensible readings of a red run, and they are distinguishable by a
+discriminating pair measured on the same tree and the same server: **with** the flag the process
+exits **1**, **without** it exits **0**, and the verdicts inside the JSON are identical
+(`10 benchmark(s) run, 0/4 budget(s) met`). The gate is not broken; it is reporting a shortfall.
+
+### Why the budgets cannot be met here
+
+§9.2 (`QQQ-Proposal-V1.md:1426`) states the throughput row as
+`| Throughput, reference app, 8 cores | ≥ 60k RPS | json benchmark, 1 KB payload |`. This machine
+is **not** that profile: the harness reads it as `windows x86_64`, `Intel64 Family 6 Model 79
+Stepping 1, GenuineIntel`, **12 physical cores**. Two measurements bracket the shortfall:
+
+| configuration | `json` | `multi` | `tailp99` p99 |
+|---|---|---|---|
+| 1 worker, sequential client (the harness default) | 1,086–1,157 RPS | 1,777–1,941 RPS | 47.9–53.4 ms |
+| `--workers 8`, `--connections 8` | 1,503.7 RPS | 1,686.7 RPS | 19.3 ms |
+
+Matched parallelism moves `multi` by about **9%** and `tailp99` by about **2.5×**, and moves the
+throughput from 2.1% of target to 2.5% of target. The gap is therefore **architectural, not
+environmental**: `Connection: close` on every request (the harness's own `does_not_measure` field
+names this), no listener-per-shard (`PERF-016`), no zero-copy streaming (`PERF-017`), and no
+pooled-instance reuse (`ARCH-011` steps 6/14, `PERF-012`). No amount of core count closes a 40×
+throughput gap that survives matched parallelism; that is the measurement, not an opinion.
+
+### The decision
+
+**(a), recorded as a not-met blocker with its reason, with the two measured configurations and
+the hardware profile above as the evidence.** Not (b): "fix the harness/target so `Budget::ALL`
+rows are actually met" would require either the four Phase-2 implementations, which OBJECTIVE
+declares out of scope and whose absence is the shortfall, or reference hardware, which the plan's
+`## Non-goals` explicitly rules out ("Purchasing or provisioning reference hardware so that
+`PERF-010`/`PERF-011` can be met honestly. OBJECTIVE directs that unmet budgets be recorded as
+unmet."). The remaining reading — raising the target until it passes — would convert the one
+mechanism that detects the shortfall into a mechanism that hides it, which is the failure §O-252
+already names.
+
+**What follows for a reader:** the completion condition "`qqqai bench --fail-on-miss --json` green
+… for every row that has a §9.2 budget" is **not satisfied on this hardware and cannot be**,
+and the honest form of that statement is this observation plus the recorded not-met entries for
+`PERF-002`, `PERF-010` and `PERF-011`. Every published number carries its "what this does not
+measure" statement, which is a **required** field on the result type (`NonClaims`, `§O-155`) and
+is populated with three entries on every run.
+
 *End of `QQQ-Observations-and-Memories.md`.*

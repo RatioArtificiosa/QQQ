@@ -1524,8 +1524,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: the policy is stated in `tools/check_wit_since.py`'s header as four
     rules with the reason for each, and **enforced** rather than described. Every
     WIT package is SemVer'd in its `package` line, and every exported function
-    carries `@since(version = 1.0.0)` — 73 annotations across 13 interfaces,
-    added by `tools/add_wit_since.py`.
+    carries `@since(version = 1.0.0)` — **re-derived from the tool rather than
+    carried**: `python tools/check_wit_since.py` reports *"16/16 file(s) satisfy the
+    versioning policy (82 exported function(s) checked; 1 world(s))"*. The
+    annotations were added by `tools/add_wit_since.py`.
   → The policy also states what is deliberately **not** required, which is what
     makes it a policy rather than an aspiration: types and variants inherit their
     introducer's version within a package, so annotating all of them would triple

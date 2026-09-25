@@ -21237,4 +21237,93 @@ docstring rather than leaving as a surprise.
 
 ---
 
+## §O-272 — "Stated four ways" was wrong five times out of six: a referent table instead of a contradiction
+
+**Found:** auditing the corpus for stale counts (`A5`, `A6`). **Anchors:** `wit/*.wit`,
+`crates/qqq-abi/src/wit.rs`, `docs/wit-reference.md`, `docs/stability.md`,
+`tools/check_wit_style.py`, `tools/check_wit_since.py`, `tools/check_wit_errors.py`,
+`tools/gen_wit_reference.py`. **Type:** my own finding, retracted and narrowed by measurement.
+
+### What I claimed, and what measurement said
+
+The audit briefed two defects as numbers "stated four ways" and therefore contradictory:
+
+- **A5**: the `tools/*.py` count — *"`.coderabbit.yaml` says '40+', the handbook says '50', the
+  checklist says '~62', actual 64"*.
+- **A6**: the WIT count — *"`qqqai schema --all` says 13, ABI-015 says 15/13, one row says 15
+  packages / 22 interfaces, `docs/stability.md` says 17, actual 17 files"*.
+
+**A5 is not a defect.** `.coderabbit.yaml`'s *"40+ `tools/*.py` checkers"* is a **lower bound**,
+and 65 ≥ 40. The only genuine error was the handbook's *"The 50 Python tools"*, already corrected.
+A lower bound cannot be contradicted by a larger count — that is what makes it a lower bound.
+
+**A6 reduces to one genuinely stale number.** Every other figure is correct **for its own
+referent**, and the referents are all different:
+
+| Claim | Value | Referent, and the authority that produces it |
+|---|---|---|
+| `docs/stability.md` — *"17 `.wit` files"* | **17** | every `.wit` under `wit/`, recursively (`app/deps/` included) |
+| `check_wit_style.py` — *"scanned 17 .wit file(s), 85 function(s), 85 published"* | **17 / 85** | same recursive scope, which is why it sees 3 functions the others do not |
+| `check_wit_since.py` — *"16/16 file(s) … (82 exported function(s) checked; 1 world(s))"* | **16 / 82** | 15 top-level files **plus `app.wit`**, excluding `deps/` |
+| `check_wit_errors.py` — *"15/15 interface(s) … (82 function(s); 19 declared infallible)"* | **15 / 82** | interfaces carrying the typed-error rule |
+| `check_wit_reference.py` — *"15 package(s), 22 interface(s)"* | **15 / 22** | `package` and `interface` declarations in `wit/*.wit` |
+| `gen_wit_reference.py`, asked directly | **15 / 22 / 80 / 53** | its own `parse_wit` + `interface_calls` — the counts the reference page renders |
+| checklist L383 — *"15 packages, 22 interfaces, 80 functions and 53 types"* | **all four correct** | quoted from the generator above |
+| checklist L3904 — *"8 keys, 27 commands, 40 error codes, **13** WIT interfaces, 12 MCP tools"* | **all five correct** | the **built binary**: 13 is the *capability-backed* registry, so `qqq:agent` and `qqq:test` are excluded from the 15 in `ALL_WIT` |
+| checklist L1656 — *"17 .wit files, 85 functions"* | **correct** | `check_wit_style`'s scope |
+| `CHANGELOG.md` — *"thirteen WIT interfaces"* (`1cfcdc6b`) | **correct as history** | the count at that commit, frozen (§O-235) |
+| `ABI-015` — *"`wit/` held 15 and the crate embedded 13"* | **correct as history** | a past audit, frozen |
+
+**The one real defect:** `CON-007`'s entry said *"73 annotations across 13 interfaces"*.
+`check_wit_since.py` reports **82 exported functions** across **16 files**. Corrected by restating
+the claim in the tool's own words rather than by substituting a number — a claim that quotes its
+instrument cannot drift away from it.
+
+### How the verification went wrong once before it went right
+
+I hand-counted the rendered Markdown and got **61 functions and 72 types** — a third set,
+matching neither the claim nor any tool. The cause: in `docs/wit-reference.md` the `**Types**` and
+`**Functions**` sections appear in **either order** per interface, so a scan that treats one as
+the terminator of the other mis-sections the document.
+
+The recovery was to stop counting and **ask the thing that produces the number** — load
+`gen_wit_reference.py`, call its own `parse_wit` and `interface_calls`, and read the answer:
+15 packages, 22 interfaces, **80 functions, 53 types**, exactly as the checklist said. A number
+with a generator has one authority; a number without one has as many readings as readers.
+
+Similarly, `L3904` claims its figures were *"verified against the built binary"*, so I built
+`qqqai` (`cargo build -p qqq-run`, with the toolchain environment from `§O-271`) and read the JSON
+rather than reasoning from `ALL_WIT`'s length. **A claim that names its own method sets the
+standard for checking it** — inferring would have produced a false finding here, because 13 is
+right and 15 is right, about different sets.
+
+### The pattern, fourth instance
+
+This is the fourth time in this session that a cluster of numbers was read as one contradictory
+number when each member was correct for its own referent:
+
+| # | The cluster | The referents |
+|---|---|---|
+| 1 | *"CI job count stated three ways"* (`§O-269`) | 10 defined · 12 in a run · 11 executing on a push · 9 defined at an earlier commit |
+| 2 | *"tools/\*.py stated four ways"* (here) | a **lower bound** of 40+ · a count of 50 · an actual 65 |
+| 3 | *"WIT count stated four ways"* (here) | files 15/17 · packages 15 · interfaces 22 · capability-backed interfaces 13 · functions 80/82/85 by scope |
+| 4 | the same WIT family again (here) | *history* (13 at `1cfcdc6b`, 15/13 at the audit) vs *now* |
+
+**Generalisable rule, and it is the one to carry forward:** before calling a family of numbers
+contradictory, build a **table with one row per number and an authority column**. If two rows
+disagree, the disagreement is only a finding once their referents are known to match — and where
+a number has a generating tool, the tool is the authority and the prose should quote it rather
+than paraphrase it. A contradiction is the last hypothesis, not the first.
+
+The corollary matters for the plan itself: **"stated N ways" is a hypothesis, not an
+observation.** Three of the four clusters above dissolved under measurement, and each dissolution
+cost more than the original claim would have — because a false finding in a brief is inherited by
+every reader of it.
+
+→ `QQQ-Checklist-V1.md` (CON-007), `wit/*.wit`, `docs/wit-reference.md`, `docs/stability.md`,
+`tools/check_wit_style.py`, `tools/check_wit_since.py`, `tools/check_wit_errors.py`,
+`tools/gen_wit_reference.py`, `.coderabbit.yaml`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

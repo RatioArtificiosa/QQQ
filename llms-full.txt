@@ -2150,11 +2150,11 @@ recorded — and a re-verification is an action, not an edit to a document.
 
 **Verified by.** ``~/.cargo/bin` listing; version commands`
 
-#### `B-25` — `wasm-tools` and `wasmtime` CLIs are **not installed** on the dev machine
+#### `B-25` — `wasm-tools` and `wasmtime` CLIs **are installed** on the dev machine — `wasm-tools` 1.259.0, `wasmtime` 48.0.2
 
 **Value at 2026-09-20.** Confirmed
 
-**Verified by.** `Command lookup failure`
+**Verified by.** ``wasm-tools --version`, `wasmtime --version``
 
 ### Perishable — re-verify every 7 days
 

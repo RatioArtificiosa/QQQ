@@ -174,7 +174,7 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 LABEL org.opencontainers.image.title="qqqai" \
       org.opencontainers.image.description="The QQQ runtime CLI" \
       org.opencontainers.image.source="https://github.com/RatioArtificiosa/QQQ" \
-      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # `nonroot` in the base tag is uid 65532, and it is named rather than repeated so a
 # reader does not have to know the number.

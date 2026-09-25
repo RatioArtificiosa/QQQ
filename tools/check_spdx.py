@@ -45,6 +45,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CARGO = ROOT / "Cargo.toml"
 
+# The OCI licence label, and the images that carry one. A published image is the artefact
+# most likely to be consumed without reading anything else, and no SPDX header covers it.
+IMAGE_LABEL = re.compile(r'org\.opencontainers\.image\.licenses\s*=\s*"([^"]*)"')
+IMAGE_TARGETS = ("docker/Dockerfile.prod", "docker/Dockerfile")
+
 # The header's shape. `// SPDX-License-Identifier: Apache-2.0` is the convention for
 # Rust; the exact comment syntax differs per language, so the pattern captures the
 # identifier and the tool allows either `//` or `#`.
@@ -133,6 +138,30 @@ def check_file(path: Path, license_id: str) -> list[str]:
     return problems
 
 
+def image_label_problems(text: str, license_id: str, rel: str) -> list[str]:
+    """Problems with a Dockerfile's OCI licence label, if it declares one.
+
+    A published image is an artefact **outside the crate**, so no SPDX header covers it: the
+    label is the only licence statement a consumer of that image sees. `Dockerfile.prod`
+    said `licenses="MIT OR Apache-2.0"` while `Cargo.toml`, `LICENSING.md` and all 231
+    headers said `Apache-2.0` — this repository has never been MIT, so the label granted
+    terms nobody agreed to, on the artefact most likely to be consumed without reading
+    anything else. No checker looked at image labels, which is why it drifted (`§O-276`).
+
+    **Absent is not a failure.** A Dockerfile that declares no licence makes no claim, and
+    this repository's rule is that an absent permission is a refusal rather than a defect;
+    only a label naming the *wrong* licence is a contradiction.
+    """
+    return [
+        f"{rel}: the image label declares `{value}` but the workspace declares "
+        f"`{license_id}`. No SPDX header covers a published image, so this label is the "
+        f"only licence statement its consumer sees, and a wrong one grants terms nobody "
+        f"agreed to."
+        for value in IMAGE_LABEL.findall(text)
+        if value != license_id
+    ]
+
+
 def check() -> list[str]:
     """Return every header problem across the corpus."""
     license_id = workspace_license()
@@ -147,6 +176,14 @@ def check() -> list[str]:
 
     for path in files:
         problems.extend(check_file(path, license_id))
+
+    # The image labels, which no header covers.
+    for rel in IMAGE_TARGETS:
+        path = ROOT / rel
+        if path.exists():
+            problems.extend(
+                image_label_problems(path.read_text(encoding="utf-8"), license_id, rel)
+            )
 
     # The exemption list must stay honest.
     for rel in sorted(EXEMPT):
@@ -257,11 +294,51 @@ def self_test() -> int:
         "no licence in Cargo.toml",
     )
 
+    # The image label. `Dockerfile.prod` said `MIT OR Apache-2.0` while everything else
+    # said `Apache-2.0`, and nothing looked at image labels. Three cases so a future
+    # narrowing of the pattern fails here rather than in a published image.
+    case(
+        "an image label naming a different licence is caught",
+        len(
+            image_label_problems(
+                'LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"',
+                "Apache-2.0",
+                "docker/Dockerfile.prod",
+            )
+        )
+        == 1,
+        "a wrong image licence label was not reported",
+    )
+    case(
+        "an image label matching the workspace passes",
+        image_label_problems(
+            'LABEL org.opencontainers.image.licenses="Apache-2.0"',
+            "Apache-2.0",
+            "docker/Dockerfile.prod",
+        )
+        == [],
+        "a correct image licence label was reported",
+    )
+    case(
+        "an image with no licence label is not a failure",
+        image_label_problems("FROM scratch\n", "Apache-2.0", "docker/Dockerfile") == [],
+        "an absent label was treated as a defect; absent is a refusal, not a contradiction",
+    )
+    case(
+        "the real production image declares the workspace licence",
+        not image_label_problems(
+            (ROOT / "docker" / "Dockerfile.prod").read_text(encoding="utf-8"),
+            workspace_license() or "Apache-2.0",
+            "docker/Dockerfile.prod",
+        ),
+        "the committed image label disagrees with Cargo.toml",
+    )
+
     # Silence unused-import warnings in this path; `contextlib`/`io` are used by the
     # real `validate` for nothing yet, and importing them here documents intent.
     _ = (contextlib, io)
 
-    total = 7
+    total = 11
     print("")
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")

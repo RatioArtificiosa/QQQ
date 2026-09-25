@@ -284,7 +284,7 @@ Each advantage becomes a hard constraint that shapes design decisions elsewhere 
 | Enforcement | Mechanism |
 |---|---|
 | Percentiles are the headline | Every benchmark report includes p50/p90/p99/p99.9, throughput at fixed concurrency, and RSS. |
-| No GC in the host | The host is Rust; `#![forbid(unsafe_code)]` in all crates except three named, audited `qqq-*-unsafe` crates. |
+| No GC in the host | The host is Rust; `#![forbid(unsafe_code)]` in **every** crate. §4.3's design allows named, audited exceptions; the workspace currently exercises **none** — `qqq-sys` is the one exception-tier crate and it contains zero `unsafe` blocks (`§O-059f`, `docs/unsafe-audit.md`). |
 | Tail-latency budget | p99 of a routed request ≤ 2 ms on reference hardware at 10k RPS for the reference app. |
 | Cold start budget | Component instantiation ≤ 100 µs warm-pool, ≤ 5 ms cold-from-cache. |
 
@@ -557,7 +557,7 @@ statement and false of the table, which is the worst combination — a reader wh
 checked would have found the architecture violated and had no way to tell that
 the *document* was the thing out of date.
 
-**`unsafe` policy.** `#![forbid(unsafe_code)]` at the root of every crate above. The only exceptions are three narrowly-scoped crates that require it (`qqq-io-uring`, `qqq-mem-hugepage`, `qqq-sys-signals`), each with a written safety argument, each reviewed by a second maintainer, each with Miri coverage where applicable.
+**`unsafe` policy.** `#![forbid(unsafe_code)]` at the root of every crate above. The design permits narrowly-scoped exceptions, each with a written safety argument, each reviewed by a second maintainer, each with Miri coverage where applicable. **The workspace deviates from that, and the deviation is recorded in `§O-059f`:** the three crates this section originally named (`qqq-io-uring`, `qqq-mem-hugepage`, `qqq-sys-signals`) were merged into a single `qqq-sys`, and `qqq-sys` currently contains **no `unsafe` blocks at all** (`docs/unsafe-audit.md` measures zero across the workspace). So no exception is in force, and `ARCH-009`'s per-crate safety argument has no subject yet — it gains one the moment a crate takes the exception.
 
 **Why this matters more than it looks:** the crates.io publish name is `qqqai`, and a modular workspace means third parties can depend on `qqq-host` or `qqq-cap` alone — for example to embed QQQ's capability engine inside their own product. That is a distribution channel that costs nothing.
 
@@ -1432,7 +1432,7 @@ Numeric targets. These are the numbers engineering is held to, and each has a me
 >
 > The proposal budgeted ≤ 100 µs p99 for the *pooled* path. The measured number is roughly **50× better than budget**, and the pooling allocator only improves on the unpooled figure. This is the strongest measured result in the project to date, and it directly underwrites the density argument in §3.3: at sub-microsecond instantiation, per-request isolation stops being a performance compromise and becomes free.
 >
-> Reproduce with `cargo run --release` in the verification probe crate. Full findings, including the three WAT/ABI details this cost us, are in `QQQ-Observations-and-Memories.md §O-006`.
+> Reproduce with `qqqai bench` (`CLI-013`), which carries the `§9.2` budget table as data in `crates/qqq-bench/src/budget.rs` and exits non-zero under `--fail-on-miss`. The baseline above was measured by a **throwaway** probe (`.scratch/witprobe`); its findings, including the three WAT/ABI details this cost us, are in `§O-006` and `§M-004`.
 
 **Anti-goal, stated explicitly:** we do not target winning synthetic HTTP micro-benchmarks. If we later win them, good; promising it sets us up to be judged on the one axis where we are structurally weakest.
 
@@ -1929,7 +1929,7 @@ Every external fact this proposal depends on, with its verification method. **No
 | B-22 | `qqq.dev`, `qqq.run` | Registered (SOA records present) | DNS SOA query |
 | B-23 | Local toolchain: rustc/cargo 1.97.1, rust-analyzer 1.97.1, targets x86_64-pc-windows-msvc only | Confirmed | `rustc --version`, `cargo --version`, `rustup target list --installed` |
 | B-24 | Local auxiliary tooling: cargo-clippy, cargo-deny, cargo-machete present; Node v22.22.0; Bun 1.3.14; Python 3.13.2 | Confirmed | `~/.cargo/bin` listing; version commands |
-| B-25 | `wasm-tools` and `wasmtime` CLIs are **not installed** on the dev machine | Confirmed | Command lookup failure |
+| B-25 | `wasm-tools` and `wasmtime` CLIs **are installed** on the dev machine — `wasm-tools` 1.259.0, `wasmtime` 48.0.2 | Confirmed | `wasm-tools --version`, `wasmtime --version` |
 | B-26 | GitHub CLI authenticated as `RatioArtificiosa` with `repo`, `workflow`, `gist`, `read:org` scopes | Confirmed | `gh auth status` |
 | B-27 | Target repository `RatioArtificiosa/QQQ` is **public and empty** (no commits, no branches) | Confirmed | GitHub API `repos/.../contents`, `/branches`, `/commits` |
 | B-28 | Component binaries report `WebAssembly (wasm) binary module version 0x1000d`; core modules `0x1` | Confirmed | Component Model documentation |

@@ -166,8 +166,12 @@ lto = "fat"
 
 [workspace.lints.rust]
 # NN-2 (Proposal §2.2) and ARCH-008: the host must contain no unsafe code.
-# The three exception crates opt out explicitly and individually, each with a
-# written safety argument (ARCH-009).
+# An exception crate opts out explicitly, individually, and only with a written
+# safety argument (ARCH-009) -- and there is currently NO exception: `qqq-sys` is
+# the one exception-tier crate and it contains zero `unsafe` blocks, so every crate
+# in this workspace inherits this `forbid` unchanged. The design named three
+# exception crates; they were merged into `qqq-sys` (§O-059f). See
+# `docs/unsafe-audit.md` for the measured count.
 unsafe_code = "forbid"
 missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }

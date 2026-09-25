@@ -20429,4 +20429,124 @@ about the same habit: a plausible-looking grep is not a measurement, and a numbe
 another number in the same report (61 matches, 54 blocks) is worth an extra look before it is
 quoted, because coincidence and correlation look identical at that distance.
 
+**§O-260 — Decision: the fault-injection harnesses now inject into a copy, because a
+`SIGKILL`-proof restore does not exist.** Recorded because it changes where the harnesses
+write, and because the reasoning is the reason the two earlier rounds of this goal were lost.
+
+### The mechanism
+
+§O-229 requires every `tools/*.py` checker to be shown green alongside its `--self-test`
+half. Those halves prove a checker can fail by **injuring the artifact it checks**, running
+the checker, and restoring. The harness's own docstring above `expect_failure` already
+records that the restore had failed in production: a killed `qqqdev checks` run left
+`CAP-011`'s citations stripped and a `§` marker in `HOST-001`, and the *next* validator run
+reported faults that were "**the test harness's leftovers rather than real problems**".
+
+The restore was already defended twice over -- a `finally` and a `SIGTERM`/`SIGINT` handler.
+Neither can run after the termination a build tool applies to a command that overruns its
+deadline, so **no amount of save/restore discipline closes this**. The failure is structural:
+a harness whose write target is the artifact under audit is one signal away from corrupting
+that artifact, and the signal is not catchable.
+
+### The decision
+
+**(b) redirect the write target**, rather than (a) police the restore more carefully. Each
+injecting harness now aims at a temporary copy:
+
+| harness | how it is aimed |
+|---|---|
+| `self_test_xrefs.py` | `activate_sandbox()` rebinds `PROPOSAL`/`CHECKLIST`/`OBS`; the validator is passed the copy as its root |
+| `check_reconciliation.py`, `check_glossary.py`, `check_error_catalogue.py` | `--root` on the generator plus a `WORK`/`ACTIVE_ROOT` binding for the mutations |
+| `check_corpus_at_rest.py`, `check_scope_table.py` | already did this; they are the precedent this follows |
+| `check_checklist_counts.py` | already non-mutating -- its self-test works on in-memory strings, and its only write is the documented `--fix` feature |
+
+The assertions are unchanged: same injections, same expected failures, only the write target
+moves. A leftover in a temporary directory is discarded with the directory, so a killed sweep
+cannot leave the audited tree dirty.
+
+### How it is verified rather than asserted
+
+`python tools/self_test_xrefs.py --prove-isolation` **injects into the copy and deliberately
+does not restore it** -- reproducing the killed-run state on purpose -- and then checks the
+repository's own `QQQ-Checklist-V1.md` for the marker. It prints the sandbox root, the
+injection target and the real document path, so a reader can see which is which. It exits 1 if
+the real document carries the mutation. That is the only honest test of a claim about an
+uncatchable signal: leave the damage in place and show it landed somewhere harmless. It runs in
+CI.
+
+**Named limit (`§O-246`'s convention).** `check_schema_conformance.py` is **not** converted.
+Its `exit_code` case injects into `crates/qqq-run/src/output.rs` and then **rebuilds the
+`qqqai` binary** to drive a live probe; a sandbox would need `target/` populated, which
+`sandbox_copy` deliberately skips, so converting it means a full cargo build in a temporary
+directory on every sweep. The cost is real and the benefit is small: it touches no canonical
+document, so a leftover there cannot void the corpus-digest evidence, and its own self-test
+asserts the restore after every case (`restored: {desc}`). What covers it instead is
+`check_handoff.py`'s tree-clean rule, which catches a leftover from *any* harness, converted or
+not -- the generic guard rather than a per-harness one.
+
+**§O-261 — a guard whose rule was wrong was blind to the exact leftover it existed for,
+and the test that would have caught it had never been written.** Found by fault-injecting the
+new isolation proof: it reported "the copy carries the mutation: False" for an injection that
+had demonstrably landed, and `check_xrefs` rejected the same copy. A disagreement between two
+checks of one fact is a defect in one of them.
+
+The cause was `INJECTION_MARKERS`: `assert_clean_corpus`'s marker table declared `**OQ-099**`
+as `line_start=True`, whose meaning is "the applied marker begins a line". The check [9]
+mutation is `t.replace("**OQ-012**", "**OQ-099**", 1)`, and `**OQ-012**` occurs **mid-line**, in
+`- [ ] **OQ-012** Decide the deprecation window: ...`. So an applied leftover reads
+`- [ ] **OQ-099** ...` and a start-of-line test cannot see it.
+
+The consequence is the whole reason this matters: **`assert_clean_corpus` was blind to the
+leftover that refuted two rounds of this goal.** A sweep killed during check [9] left
+`**OQ-099**` in the checklist, the guard scanned for it, found nothing, reported the corpus
+clean, and the next `check_xrefs` run then reported three errors against documents that were
+correct apart from the harness's own damage. The guard existed, ran, and could not see the one
+thing it was built for.
+
+Why it could drift: the comment above the table promised a test named
+`test_the_markers_match_their_mutations`, and **no such test was ever written**. The flag was a
+hand-written claim about behaviour that nothing executed -- the same shape as `ARCH-011`'s three
+counts, in the harness rather than in the artifact being audited.
+
+**The fix derives rather than corrects.** `markers_match_their_mutations` applies each mutation
+to the sandbox copy, asks the shipped `marker_is_present` with the declared flag, and fails when
+the answer is no; it runs before the first injection, so a drifted flag stops the sweep rather
+than silently weakening the guard. The `**OQ-099**` flag is corrected to `False`, and the
+docstring that cited the missing test now names the one that exists. Fault-injected: setting the
+flag back to `True` turns it red with `'**OQ-099**' is not detected by any entry whose anchor
+applies`, and the file is restored byte-identically.
+
+**§O-262 — `git checkout -- <file>` discards uncommitted work, and it did.** While
+fault-injecting the test above, the restore step was written as `git checkout -- tools/self_test_xrefs.py`.
+That reverts to `HEAD`, and the changes were **uncommitted**, so it silently reverted every edit
+in the file -- the sandbox activation, the isolation proof, the derived test -- and the next
+command failed with `AttributeError: module 'self_test_xrefs' has no attribute 'activate_sandbox'`.
+The work was recovered from a copy taken earlier in the same session; the recovery was verified
+by confirming all three functions were present again before continuing.
+
+**The rule: `git checkout --` is only safe on a file whose changes are committed.** For a
+fault-injection restore, hold the pre-injection bytes in a variable and write them back. The
+injection script now does that, and it asserts the restore is byte-identical (`restored
+byte-identical to the fixed file: True`) rather than assuming it.
+
+**§O-263 — one command now asserts what six checks were being trusted to catch.**
+`tools/check_handoff.py` collects the invariants a hand-off needs: the tree is clean, HEAD equals
+`origin/main`, the recorded corpus digests match **both** the working tree and the committed
+blobs, no injection marker is left applied, no stale sweep lock exists, and the CI run for HEAD
+is green on every job with `skipped` allowed only where the workflow's own `if:` excludes the
+event.
+
+Two design choices are load-bearing. **Each rule is a pure function of gathered input**
+(`porcelain_problems`, `digest_problems`, `marker_problems`, `ci_problems`), so `--self-test`
+injects a broken tree, a stale digest, an applied marker and a red run **without touching the
+repository** -- a self-test for this gate that dirtied the tree would destroy the thing it
+certifies. And **the marker rule is imported from the harness rather than restated**, which is
+what `§O-261` teaches: a second copy of "where is this marker applied" is how the first copy
+drifted. Fixing the flag fixed this gate too.
+
+The CI read-back is a **local** step, not a CI step, and the reason is structural rather than a
+compromise: the check needs a *completed* run for HEAD, and while the run for HEAD is executing
+no such run exists. CI runs the `--self-test` half, which exercises every rule including the
+justified-skip rule against the real workflow file.
+
 *End of `QQQ-Observations-and-Memories.md`.*

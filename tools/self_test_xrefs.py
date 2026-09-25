@@ -52,11 +52,195 @@ OBS = ROOT / "QQQ-Observations-and-Memories.md"
 
 
 def run_validator() -> tuple[int, str]:
-    p = subprocess.run(
-        [sys.executable, str(CHECK)],
-        capture_output=True, text=True, cwd=ROOT,
-    )
+    args = [sys.executable, str(CHECK)]
+    if SANDBOX is not None:
+        args.append(str(SANDBOX))
+    p = subprocess.run(args, capture_output=True, text=True, cwd=ROOT)
     return p.returncode, p.stdout + p.stderr
+
+
+# --------------------------------------------------------------------------
+# The sandbox Phase 2 injects into
+# --------------------------------------------------------------------------
+#
+# Phase 2's injections rewrite the three canonical documents. Until this existed
+# they were rewritten **in the repository**, with the restore in a `finally` and a
+# `SIGTERM` handler as the only defence -- and neither runs after the process-group
+# termination a build tool applies to a command that overruns its deadline. The
+# harness's own docstring above `expect_failure` records that happening: a killed
+# run left `CAP-011`'s citations stripped and a `\u00a799.9` marker in `HOST-001`, and
+# the next validator run reported faults that were **the harness's leftovers rather
+# than real problems**.
+#
+# A `SIGKILL`-proof `finally` does not exist, so the guard is not the fix. Redirecting
+# the write target is: Phase 2 now injects into a copy, and a copy left mutated by a
+# signal is discarded with its temporary directory. The audited tree is never written
+# to, so it cannot be left dirty by a signal it cannot catch.
+#
+# # Why rebinding globals is enough, and why the guard still watches the real tree
+#
+# `expect_failure` takes the target document as an argument and every Phase 2 call
+# site passes one of `PROPOSAL` / `CHECKLIST` / `OBS`. Rebinding those three names
+# therefore redirects every injection at once, and keeps the restore logic, the
+# `REVERSALS` table and the marker checks exactly as they were -- only the write
+# target moves.
+#
+# `INJECTION_MARKERS` is the one thing that must NOT move: it is built at import time
+# from the original `Path` objects, so it keeps pointing at the repository. That is
+# deliberate. `assert_clean_corpus` exists to catch a leftover from a *previous, killed*
+# run, which is a property of the audited tree rather than of this run's copy; a guard
+# that watched the copy would answer a question nobody asked.
+SANDBOX: Path | None = None
+_SANDBOX_HOLDER: tempfile.TemporaryDirectory | None = None
+
+
+def activate_sandbox() -> Path:
+    """Copy the tree and point every injection target at the copy.
+
+    Called once, after the hermetic matrix has passed and immediately before the
+    first injection. Returns the sandbox root, which is also passed to the validator
+    so it judges the injected copy rather than the tree.
+    """
+    global SANDBOX, _SANDBOX_HOLDER, PROPOSAL, CHECKLIST, OBS
+    _SANDBOX_HOLDER = tempfile.TemporaryDirectory(prefix="qqq-xrefs-sandbox-")
+    SANDBOX = check_xrefs.sandbox_copy(ROOT, Path(_SANDBOX_HOLDER.name) / "root")
+    PROPOSAL = SANDBOX / "QQQ-Proposal-V1.md"
+    CHECKLIST = SANDBOX / "QQQ-Checklist-V1.md"
+    OBS = SANDBOX / "QQQ-Observations-and-Memories.md"
+    return SANDBOX
+
+
+def prove_isolation() -> int:
+    """Prove a killed sweep cannot dirty the audited tree.
+
+    The failure this file lost two rounds to is precise: **a mutation applied to the
+    real documents and never restored**. `finally` cannot run after a `SIGKILL`, so the
+    only honest test is to leave a mutation un-restored on purpose and show the audited
+    tree is still clean.
+
+    So this injects into the sandbox, deliberately does **not** undo it, and then
+    checks the repository's own documents for the marker. If the sandbox default ever
+    regresses -- if a target escapes back to the worktree -- this goes red, because the
+    real `QQQ-Checklist-V1.md` would carry `**OQ-099**`.
+    """
+    marker, injected = "**OQ-099**", "**OQ-012**"
+    # Read the flag from the table rather than restating it. A hard-coded `True` here
+    # was how this proof first disagreed with the validator: the proof was checking for
+    # a line-anchored marker against a mid-line occurrence. The durable version of that
+    # mistake is a second hand-written copy of a derived value (`§O-261`).
+    line_start = next(ls for m, _p, _s, ls in INJECTION_MARKERS if m == marker)
+    sandbox = activate_sandbox()
+    real_checklist = ROOT / "QQQ-Checklist-V1.md"
+    copy_checklist = sandbox / "QQQ-Checklist-V1.md"
+
+    print(f"sandbox root      : {sandbox}")
+    print(f"injection target  : {copy_checklist}")
+    print(f"real document     : {real_checklist}")
+
+    # The default must be the copy, and the copy must be inside the temporary
+    # directory rather than anywhere near the repository.
+    under_sandbox = copy_checklist.resolve().is_relative_to(sandbox.resolve())
+    targets_are_copies = all(
+        p.resolve().is_relative_to(sandbox.resolve()) for p in (PROPOSAL, CHECKLIST, OBS)
+    )
+    print(f"all three targets are inside the copy : {targets_are_copies}")
+    print(f"the copy is inside the temp root      : {under_sandbox}")
+
+    # Inject and DO NOT restore: this is the killed-run state, reproduced on purpose.
+    original = copy_checklist.read_text(encoding="utf-8")
+    assert original.count(injected) >= 1, f"{injected} must exist in the copy"
+    copy_checklist.write_text(original.replace(injected, marker, 1), encoding="utf-8")
+    print(f"\ninjected {injected} -> {marker} into the copy and left it un-restored")
+
+    copy_dirty = marker_is_present(copy_checklist, marker, line_start)
+    real_dirty = marker_is_present(real_checklist, marker, line_start)
+    print(f"the copy carries the mutation         : {copy_dirty}")
+    print(f"the real document carries it          : {real_dirty}")
+
+    # The validator reads the sandbox, so it sees the injected copy.
+    code, out = run_validator()
+    tag_present = "[9]" in out
+    print(f"the validator rejects the injected copy: {code != 0 and tag_present}")
+
+    ok = targets_are_copies and under_sandbox and copy_dirty and not real_dirty and code != 0
+    print()
+    if ok:
+        print("ISOLATION PROVEN -- a sweep killed mid-injection cannot dirty the "
+              "audited tree")
+        return 0
+    print("ISOLATION FAILED -- an injection reached the audited tree", file=sys.stderr)
+    return 1
+
+
+def markers_match_their_mutations() -> bool:
+    """Derive every marker's `line_start` flag from the mutation it guards.
+
+    # Why this is derived rather than declared
+
+    The `line_start` flag says *where in a line* an applied injection puts its marker.
+    A wrong flag does not make the guard loud; it makes it **silent**, which is the one
+    failure a guard must not have. A `True` on a mutation that lands mid-line means the
+    check looks for the marker at the start of a line, does not find it, and reports the
+    corpus clean while the corpus is not.
+
+    That is not hypothetical: the entry for `**OQ-099**` was declared `True` while check
+    [9] replaces a mid-line occurrence, so `assert_clean_corpus` was blind to the exact
+    leftover that refuted two rounds of this goal (`§O-261`). The flag was a hand-written
+    claim about behaviour, and the comment above the table cited a test that had never
+    been written -- so nothing executed it.
+
+    This applies each mutation to the sandbox copy, asks the **shipped**
+    `marker_is_present` with the declared flag, and fails when the answer is no. The
+    flag is now measured rather than asserted, and the derived value is what a reader
+    should trust.
+    """
+    if SANDBOX is None:
+        print("  !! marker agreement needs an active sandbox", file=sys.stderr)
+        return False
+
+    print("marker table -> the mutations it guards")
+    failures = 0
+    # marker text -> the states of every entry carrying that text
+    coverage: dict[str, list[str]] = {}
+
+    for marker, path, source, line_start in INJECTION_MARKERS:
+        copy = SANDBOX / path.name
+        reversal = REVERSALS.get(marker)
+        if reversal is None:
+            print(f"  !!  {source}: no REVERSALS entry for {marker!r}")
+            failures += 1
+            continue
+        injected, original = reversal
+        text = copy.read_text(encoding="utf-8")
+        if original is None or original not in text:
+            # Text shared with another entry that carries the mutation; that entry
+            # is the one that applies, and this one is the safety net.
+            coverage.setdefault(marker, []).append("anchor-absent")
+            print(f"  --  {source}: anchor absent here; a shared-text safety net")
+            continue
+        copy.write_text(text.replace(original, injected, 1), encoding="utf-8")
+        detected = marker_is_present(copy, marker, line_start)
+        copy.write_text(text, encoding="utf-8")
+        coverage.setdefault(marker, []).append("ok" if detected else "blind")
+        if detected:
+            print(f"  OK  {source}: line_start={line_start} detects its own mutation")
+        else:
+            print(f"  !!  {source}: line_start={line_start} does NOT detect its "
+                  f"mutation -- the guard would miss this leftover")
+            failures += 1
+
+    # A marker no applying entry can see is dead weight: it can never fire.
+    for marker, states in coverage.items():
+        if "ok" not in states:
+            print(f"  !!  {marker!r} is not detected by any entry whose anchor applies")
+            failures += 1
+
+    if failures:
+        print(f"\nmarker table is wrong: {failures} problem(s), so the guard would miss "
+              f"its own leftovers", file=sys.stderr)
+        return False
+    print("  every marker detects the mutation it guards\n")
+    return True
 
 
 def expect_failure(name: str, target: Path, mutate) -> bool:
@@ -173,7 +357,8 @@ INJECTION_MARKERS = [
     ("`HOST-999`", PROPOSAL, "check [2]: the Proposal citing a dangling checklist ID", False),
     # The text here must equal the mutation's replacement verbatim, or the guard
     # reports a leftover on the next clean run. Both are checked against each
-    # other by `test_the_markers_match_their_mutations` below.
+    # other by `markers_match_their_mutations`, which derives each `line_start`
+    # flag from the mutation it guards rather than trusting the value written here.
     (
         "- [ ] **CAP-011** Implement the restricted policy expression language.",
         CHECKLIST,
@@ -181,7 +366,26 @@ INJECTION_MARKERS = [
         True,
     ),
     ("### REMOVED — The \"Wasm is near-native\"", OBS, "check [8]: the Observations §C-006 entry renamed away", True),
-    ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed", True),
+    # `False`, and it was `True` until a test derived it. This mutation is the one
+    # that is *not* line-anchored: check [9] does
+    # `t.replace("**OQ-012**", "**OQ-099**", 1)` and `**OQ-012**` occurs mid-line, in
+    # `- [ ] **OQ-012** Decide the deprecation window: ...`. So the applied leftover
+    # reads `- [ ] **OQ-099** ...` and a start-of-line test cannot see it.
+    #
+    # Declared `True`, this entry was **blind to the exact leftover that refuted two
+    # rounds of this goal** (`§O-261`). A sweep killed during check [9] left
+    # `**OQ-099**` in the checklist; `assert_clean_corpus` scanned for it, found
+    # nothing, reported the corpus clean, and the next validator run reported three
+    # errors against documents that were correct apart from the harness's own damage.
+    # The guard existed, ran, and could not see the one thing it was built for.
+    #
+    # The reason it could drift is the next defect: the comment at the head of this
+    # table promised a test named `test_the_markers_match_their_mutations`, and no
+    # such test was ever written. The flag was therefore a hand-written claim about
+    # behaviour that nothing exercised -- the same shape as `ARCH-011`'s three counts,
+    # in the harness rather than in the artifact. `markers_match_their_mutations`
+    # now derives every flag from the mutation it guards.
+    ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed", False),
     ("`§D-099`", PROPOSAL, "check [10]: the Proposal citing a bad Observations decision", False),
     ("§REMOVED", PROPOSAL, "check [10b]: a decision's citations stripped from the Proposal", False),
     ("## (heading deleted)", OBS, "check [12]: the MISTAKES AND FIXES heading deleted", True),
@@ -617,6 +821,8 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--break-lock":
         _Lock(LOCK).break_lock()
         return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--prove-isolation":
+        return prove_isolation()
 
     # **One mutator at a time.** This harness rewrites the three real documents, and a
     # second run overlapping the first restores an injection mid-flight and leaves a
@@ -660,10 +866,19 @@ def _run(lock: _Lock) -> int:
     #
     # Why both phases exist, and which one owns which rule
     #
-    # The cases below mutate the three real documents and restore them. That is the
-    # integration proof -- it shows the rules fire against the corpus as it actually
-    # is -- and it is the phase that can leave a defect behind if the process is
-    # killed, which is why the signal handlers and `--check-clean` exist.
+    # The cases below mutate the three canonical documents and restore them. That is
+    # the integration proof -- it shows the rules fire against the corpus as it
+    # actually is. They mutate a **copy** of it, made immediately before the first
+    # case below, so the audited tree is not written to; the restore still runs, and
+    # is still what makes a successful sweep leave no trace, but what it protects is
+    # now a temporary directory.
+    #
+    # That distinction is the whole of `§O-260`. In the repository, a sweep killed
+    # mid-injection left a mutation behind that read as a real document defect on
+    # every later run, and the guard built to catch it (`assert_clean_corpus`) could
+    # only detect the damage after the fact. Against a copy there is no damage to
+    # detect. `--prove-isolation` demonstrates it by leaving a mutation un-restored
+    # on purpose and showing the audited tree is clean.
     #
     # It is not, and cannot be, the whole proof. Three numbered checks need a source
     # file or a repeated heading to violate, and mutating those in place risks more
@@ -707,6 +922,18 @@ def _run(lock: _Lock) -> int:
     )
 
     results: list[bool] = []
+
+    # Phase 2 injects, so redirect every write target at a copy first. This is the
+    # line that makes a killed sweep harmless: a mutation left un-restored lands in a
+    # temporary directory rather than in the audited tree (`§O-260`).
+    sandbox = activate_sandbox()
+    print(f"Phase 2 injects into a copy: {sandbox}")
+    print("the audited tree is not written to\n")
+
+    # Before using the marker table, prove it can see its own mutations. A guard whose
+    # flags have drifted is worse than no guard, because it reports the corpus clean.
+    if not markers_match_their_mutations():
+        return 1
 
     print("check [2] dangling checklist ID cited by the Proposal")
     results.append(expect_failure(

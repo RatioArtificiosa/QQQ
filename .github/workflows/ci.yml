@@ -146,8 +146,10 @@ jobs:
           python tools/check_advisories.py --self-test
           python tools/check_verified_facts.py --self-test
           python tools/check_corpus_repair.py --self-test
+          python tools/check_handoff.py --self-test
           python tools/check_xrefs.py --self-test
           python tools/self_test_xrefs.py --check-clean
+          python tools/self_test_xrefs.py --prove-isolation
           python tools/normalize_eol.py --check
 
   # ---------------------------------------------------------------------------

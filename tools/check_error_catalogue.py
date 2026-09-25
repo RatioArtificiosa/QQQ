@@ -34,10 +34,15 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GEN = ROOT / "tools" / "gen_error_catalogue.py"
+
+# The root the generator is aimed at. `None` means the repository, which is what a
+# plain `--check` run wants; the self-test points it at a copy before injecting.
+ACTIVE_ROOT: Path | None = None
 
 # Import the generator so the self-test can drive its parser directly, rather than
 # only through the `--check` mode that needs a file on disk.
@@ -49,7 +54,7 @@ import sys as _sys
 # The byte-faithful writer is shared with the other corpus checkers rather than
 # copied, because two copies of a newline rule is how the two copies drift.
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_xrefs import write_text_lf  # noqa: E402
+from check_xrefs import sandbox_copy, write_text_lf  # noqa: E402
 
 
 GOOD_ENUM = """\
@@ -66,8 +71,11 @@ pub enum ErrorCode {
 
 
 def run_check() -> tuple[int, str]:
+    args = [sys.executable, str(GEN), "--check"]
+    if ACTIVE_ROOT is not None:
+        args += ["--root", str(ACTIVE_ROOT)]
     p = subprocess.run(
-        [sys.executable, str(GEN), "--check"],
+        args,
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -131,8 +139,16 @@ def self_test() -> int:
         failures += 1
         print(f"        exit {code}: {out.strip()[:220]}")
 
+    # **This case injects, so it runs against a copy.** Mutating the repository's own
+    # `docs/errors.md` means a sweep killed mid-injection leaves the file edited and the
+    # next run blames the generator (`§O-260`). `--root` aims the generator, and the
+    # path below aims the mutation, at the copy: same injection, same expected failure.
+    global ACTIVE_ROOT
+    _holder = tempfile.TemporaryDirectory(prefix="qqq-errors-")
+    ACTIVE_ROOT = sandbox_copy(ROOT, Path(_holder.name) / "root")
+
     # A hand-edit inside the generated file must be caught.
-    target = ROOT / "docs" / "errors.md"
+    target = ACTIVE_ROOT / "docs" / "errors.md"
     original = target.read_text(encoding="utf-8") if target.exists() else None
     try:
         if original is not None:

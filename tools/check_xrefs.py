@@ -47,7 +47,11 @@ including a bare CI container.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -722,8 +726,65 @@ def write_text_lf(path: Path, text: str, encoding: str = "utf-8") -> None:
     path.write_bytes(text.encode("utf-8"))
 
 
+# Directories never copied into a sandbox: version control, build output, and the
+# local caches. Everything else is small enough to copy wholesale -- the tracked
+# tree is a few hundred files and a few megabytes.
+SANDBOX_SKIP = frozenset(
+    {".git", "target", "node_modules", ".graf", ".scratch", "__pycache__", ".venv"}
+)
+
+
+def sandbox_copy(root: Path, dest: Path) -> Path:
+    """Copy `root`'s working tree into `dest`, minus build output and caches.
+
+    # Why a fault-injection harness needs this
+
+    A `--self-test` half proves a checker can fail by **injuring the artifact it
+    checks**, running the checker, and restoring. The restore is the fragile part:
+    it is a `finally`, and no `finally` runs after a `SIGKILL` or the process-group
+    termination a build tool applies to a command that overruns its deadline. So a
+    harness that injects into the repository's own documents can be killed mid-
+    injection and leave the tree mutated, and the mutation then reads as a real
+    defect against every later run -- `§O-070`'s shape, and the mechanism behind
+    the two rounds this goal lost (`§O-260`).
+
+    Injecting into a copy removes the failure mode instead of policing it. A
+    leftover in a temporary directory is discarded with the directory; the audited
+    tree is never written to, so it cannot be left dirty by a signal it cannot
+    catch. The save/restore logic stays exactly as it was -- it is still the thing
+    that makes a *successful* run leave no trace -- but what it protects is now a
+    resource that does not matter.
+
+    Copying rather than fabricating a minimal root is deliberate: the whole-tree
+    validator reads `crates/`, `wit/`, `docs/` and `tools/` as well as the three
+    documents, so a fabricated root with only the documents under test would make
+    most of its checks vacuous -- they would pass because the files were absent.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SANDBOX_SKIP]
+        for name in filenames:
+            src = Path(dirpath) / name
+            dst = dest / src.relative_to(root)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+    return dest
+
+
+@contextlib.contextmanager
+def sandbox(root: Path, prefix: str = "qqq-sandbox-"):
+    """Yield a temporary copy of `root`'s tree, removed when the block exits.
+
+    The context-manager form of [`sandbox_copy`], for a self-test that wants to
+    inject into a copy and let the copy clean itself up. See `sandbox_copy` for why
+    injecting into a copy is the fix rather than a better restore.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
+        yield sandbox_copy(root, Path(tmp) / "root")
+
+
 def _run(root: Path) -> tuple[int, str]:
-    import subprocess
 
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), str(root)],

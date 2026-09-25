@@ -40,7 +40,27 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+def _root_from_argv(argv: list[str]) -> Path:
+    """The repository root, overridable with `--root <path>`.
+
+    # Why a generator takes a root at all
+
+    A self-test proves this generator detects drift by injuring the file it writes and
+    the source it reads, then restoring them. Injuring the repository's own files means
+    a run killed mid-injection leaves the tree mutated, and the mutation then reads as a
+    real defect against every later run (`§O-260`). `--root` lets the self-test aim
+    every read and write at a temporary copy. The default is unchanged.
+    """
+    if "--root" in argv:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("FATAL: --root needs a path", file=sys.stderr)
+            raise SystemExit(2)
+        return Path(argv[i + 1]).resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _root_from_argv(sys.argv)
 SOURCE = ROOT / "crates" / "qqq-core" / "src" / "error.rs"
 TARGET = ROOT / "docs" / "errors.md"
 

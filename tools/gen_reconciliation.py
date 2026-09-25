@@ -27,7 +27,29 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+def _root_from_argv(argv: list[str]) -> Path:
+    """The repository root, overridable with `--root <path>`.
+
+    # Why a generator takes a root at all
+
+    A self-test proves this generator detects drift by **injuring the documents it
+    reads**, then restoring them. Injuring the repository's own documents means a run
+    killed mid-injection leaves the tree mutated, and the mutation then reads as real
+    document drift (`§O-260`). `--root` lets the self-test aim the whole generator --
+    and every read and write it performs -- at a temporary copy, so the injection
+    cannot reach the audited tree. The default is unchanged, so every existing caller
+    keeps the behaviour it had.
+    """
+    if "--root" in argv:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("FATAL: --root needs a path", file=sys.stderr)
+            raise SystemExit(2)
+        return Path(argv[i + 1]).resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _root_from_argv(sys.argv)
 PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
 OBSERVATIONS = ROOT / "QQQ-Observations-and-Memories.md"
 TARGET = ROOT / "docs" / "reconciliation.md"

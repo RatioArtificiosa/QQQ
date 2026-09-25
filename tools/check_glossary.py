@@ -35,32 +35,25 @@ import sys as _sys
 # The byte-faithful writer is shared with the other corpus checkers rather than
 # copied, because two copies of a newline rule is how the two copies drift.
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_xrefs import write_text_lf  # noqa: E402
+from check_xrefs import sandbox_copy, write_text_lf  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
 GEN = ROOT / "tools" / "gen_glossary.py"
 
-# A minimal Proposal carrying a §0.6 table, so the self-test does not depend on the
-# real corpus and cannot be affected by an unrelated edit to it.
-FIXTURE_PROPOSAL = """\
-# Proposal
-
-## §0.6 Glossary
-
-| Term | Definition |
-|---|---|
-| **Host** | The native `qqqai` process. |
-| **Guest** | A WebAssembly component executed by the host. |
-| **Fuel** | A deterministic instruction budget. |
-
-## §0.7 Next section
-"""
+# The root the generator is aimed at, and the tree the cases mutate. `None`/`ROOT`
+# is the repository, which is what a plain `--check` run wants; the self-test points
+# both at a copy before injecting.
+ACTIVE_ROOT: Path | None = None
+WORK = ROOT
 
 
 def run_check() -> tuple[int, str]:
+    args = [sys.executable, str(GEN), "--check"]
+    if ACTIVE_ROOT is not None:
+        args += ["--root", str(ACTIVE_ROOT)]
     p = subprocess.run(
-        [sys.executable, str(GEN), "--check"],
+        args,
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -70,6 +63,7 @@ def run_check() -> tuple[int, str]:
 
 def self_test() -> int:
     """Prove the check fails when the generated file and its source disagree."""
+    global ACTIVE_ROOT, WORK
     failures = 0
 
     # The real repository must currently be consistent, or nothing below means
@@ -81,10 +75,26 @@ def self_test() -> int:
         failures += 1
         print(f"        {out.strip()[:200]}")
 
+    # **Everything below this line injects, so it runs against a copy.** The cases
+    # mutate `docs/glossary.md` and the Proposal to prove the generator notices. Run in
+    # the repository, a sweep killed mid-injection leaves a mutation behind that reads
+    # as real document drift against every later run, and the `finally` cannot help
+    # because the process-group termination a build tool applies cannot be caught
+    # (`§O-260`). `--root` aims the generator and `WORK` aims the mutations at the copy:
+    # same cases, same expected failures, new write target.
+    #
+    # The copy is held module-scoped rather than in a `with` block, so the cases below
+    # keep their own indentation and this edit stays reviewable as a target change.
+    _holder = tempfile.TemporaryDirectory(prefix="qqq-glossary-")
+    _sandbox = sandbox_copy(ROOT, Path(_holder.name) / "root")
+    ACTIVE_ROOT = _sandbox
+    WORK = _sandbox
+    print(f"  the cases below inject into a copy: {_sandbox}")
+
     # Corruption: append a line to the generated file.
-    original = (ROOT / "docs" / "glossary.md").read_text(encoding="utf-8")
+    original = (WORK / "docs" / "glossary.md").read_text(encoding="utf-8")
     try:
-        write_text_lf((ROOT / "docs" / "glossary.md"),
+        write_text_lf((WORK / "docs" / "glossary.md"),
             original + "\n## Hand added\n\nA line a human typed.\n", encoding="utf-8"
         )
         code, out = run_check()
@@ -94,12 +104,12 @@ def self_test() -> int:
             failures += 1
             print(f"        exit {code}: {out.strip()[:200]}")
     finally:
-        write_text_lf((ROOT / "docs" / "glossary.md"),original, encoding="utf-8")
+        write_text_lf((WORK / "docs" / "glossary.md"),original, encoding="utf-8")
 
     # **Source drift**: the Proposal's table gains a term the glossary lacks. This is
     # the direction that actually happens in practice, and the first version of a
     # check like this often only tests the other one.
-    proposal = (ROOT / "QQQ-Proposal-V1.md").read_text(encoding="utf-8")
+    proposal = (WORK / "QQQ-Proposal-V1.md").read_text(encoding="utf-8")
     try:
         patched = proposal.replace(
             "| **Fuel** |",
@@ -109,7 +119,7 @@ def self_test() -> int:
         if patched == proposal:
             print("  SKIP  source-drift case: the anchor row `**Fuel**` was not found")
         else:
-            write_text_lf((ROOT / "QQQ-Proposal-V1.md"),patched, encoding="utf-8")
+            write_text_lf((WORK / "QQQ-Proposal-V1.md"),patched, encoding="utf-8")
             code, out = run_check()
             ok = code != 0
             print(f"  {'OK  ' if ok else 'DEAD'}  a new term in the Proposal's table")
@@ -117,10 +127,10 @@ def self_test() -> int:
                 failures += 1
                 print(f"        exit {code}: {out.strip()[:200]}")
     finally:
-        write_text_lf((ROOT / "QQQ-Proposal-V1.md"),proposal, encoding="utf-8")
+        write_text_lf((WORK / "QQQ-Proposal-V1.md"),proposal, encoding="utf-8")
 
     # A missing generated file must be reported, not silently regenerated.
-    glossary = ROOT / "docs" / "glossary.md"
+    glossary = WORK / "docs" / "glossary.md"
     backup = glossary.read_text(encoding="utf-8")
     try:
         glossary.unlink()

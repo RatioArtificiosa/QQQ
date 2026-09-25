@@ -25,14 +25,16 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import sys as _sys
 
-# The byte-faithful writer is shared with the other corpus checkers rather than
-# copied, because two copies of a newline rule is how the two copies drift.
+# The byte-faithful writer and the sandbox copier are shared with the other corpus
+# checkers rather than copied, because two copies of a newline rule -- or of a
+# scratch-isolation rule -- is how the two copies drift.
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_xrefs import write_text_lf  # noqa: E402
+from check_xrefs import sandbox_copy, write_text_lf  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,9 +44,17 @@ PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
 OBSERVATIONS = ROOT / "QQQ-Observations-and-Memories.md"
 
 
+# The root the generator is aimed at. `None` means the repository, which is what a
+# plain `--check` run wants; the self-test points it at a copy before injecting.
+ACTIVE_ROOT: Path | None = None
+
+
 def run_check() -> tuple[int, str]:
+    args = [sys.executable, str(GEN), "--check"]
+    if ACTIVE_ROOT is not None:
+        args += ["--root", str(ACTIVE_ROOT)]
     p = subprocess.run(
-        [sys.executable, str(GEN), "--check"],
+        args,
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -53,6 +63,7 @@ def run_check() -> tuple[int, str]:
 
 
 def self_test() -> int:
+    global ACTIVE_ROOT, TARGET, PROPOSAL, OBSERVATIONS
     failures = 0
 
     # The clean case: the repository must currently be consistent.
@@ -62,6 +73,29 @@ def self_test() -> int:
     if not ok:
         failures += 1
         print(f"        {out.strip()[:200]}")
+
+    # **Everything below this line injects, so it runs against a copy.** The cases
+    # mutate `docs/reconciliation.md`, the Proposal and the Observations to prove the
+    # generator notices. Done in the repository, a run killed mid-injection leaves a
+    # mutation behind that reads as real document drift on every later run, and the
+    # `finally` cannot help because the process-group termination a build tool applies
+    # cannot be caught (`§O-260`).
+    #
+    # `--root` aims the generator -- and therefore every read and write it performs --
+    # at the copy, so the injection cannot reach the audited tree. Nothing else about
+    # the cases changes: same mutations, same expected failures, new write target.
+    #
+    # The holder is deliberately module-scoped rather than a `with` block: the copy is
+    # released when the process exits, so the five cases below keep their own
+    # indentation and this edit stays reviewable as a target change rather than a
+    # rewrite.
+    holder = tempfile.TemporaryDirectory(prefix="qqq-reconciliation-")
+    sandbox_root = sandbox_copy(ROOT, Path(holder.name) / "root")
+    ACTIVE_ROOT = sandbox_root
+    TARGET = sandbox_root / "docs" / "reconciliation.md"
+    PROPOSAL = sandbox_root / "QQQ-Proposal-V1.md"
+    OBSERVATIONS = sandbox_root / "QQQ-Observations-and-Memories.md"
+    print(f"  the cases below inject into a copy: {sandbox_root}")
 
     # Drift direction 1: the generated *region* is edited.
     #

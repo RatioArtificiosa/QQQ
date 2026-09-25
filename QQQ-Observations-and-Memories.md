@@ -20331,4 +20331,32 @@ that is recorded here so a later reader does not have to re-derive it. Two conse
 keeping: the skip is not a failure to investigate, and "all jobs green" is a different sentence
 on the two event types — 11 of 12 versus 12 of 12.
 
+**§O-256 — a cached cargo test binary can report the previous tree's verdict, and this
+machine has produced that phantom twice.** Re-running `the_documented_counts_match_the_table` on
+a provably clean tree reported `FAILED` with a panic naming `| 2, 8, 10, 15 |` — the *injected*
+step list. `git status --short` was empty and the table held exactly the committed rows, so the
+verdict could not belong to the source under test. It did not: cargo keys a test binary on the
+crate, so an edit inside a function body can leave a binary that still reports the prior
+injection. The evidence was in `target/debug/deps`, where `qqq_serve-6ed33aaa68b1b1c1.exe` was
+written at **3:16 AM** while `lifecycle.rs` was last written at **2:20 AM** — a binary *newer*
+than the source and still wrong. Clearing `target/debug/deps/qqq_serve-*` made the same test pass
+in the same invocation. This is the second recorded appearance of the pattern and the first where
+the stale binary was newer than the source, which is why a timing check alone is not sufficient.
+**The rule that follows: before believing a test verdict that disagrees with `git status` and a
+fresh read of the file, clear the crate's cached test binaries and run it again.** A
+fault-injection script must clear the binary *after* each mutation and *before* each run, or it
+will report the previous injection's result as though it were the current one — the same class
+of error as reading a stale CI run.
+
+**§O-257 — the `STAGES` table's `BuiltUnwired` row is step 15 `AUDIT APPEND`, and step 4
+`TENANT RESOLVE` is the `Absent` one.** An injection script written to flip "the built-unwired
+row" asserted the row it found was the step the objective's Phase 0 text names, and the assertion
+failed: the objective describes the `fmt` drift as being in `the_absent_step_is_the_tenant_resolve`
+— a *test* name — and it is easy to read that as the step name. Reading the table rather than
+the prose settled it: step 4 is `TENANT RESOLVE` with `Status::Absent`, step 15 is `AUDIT APPEND`
+with `Status::BuiltUnwired`, and there is exactly one row of each. The assertion was kept and
+corrected rather than deleted, because a fault injection that flips a row it cannot name is not
+evidence about the property it claims to test — it is a blind edit that happens to compile.
+**The rule: name the row before mutating it.**
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -20800,4 +20800,148 @@ form of this entry, and is tracked as the guard half of `A2`.
 
 ---
 
+## §O-268 — The hand-off gate decoded git's output with the locale's encoding, and reported drift on a correct tree
+
+**Found:** by running the gate after a legitimate commit and reading all five of its reported
+problems instead of believing the first one. **Anchors:** `tools/check_handoff.py`,
+`tools/check_corpus_at_rest.py`. **Class size:** 43 call sites in 27 tools.
+
+### What was wrong
+
+`tools/check_handoff.py` runs `git` through `subprocess.run(..., text=True)` with **no
+`encoding=`**. `text=True` decodes the child's output using
+`locale.getpreferredencoding(False)` — `cp1252` on a default Windows console. `git show HEAD:<doc>`
+returns the document's raw bytes, and this corpus is dense with `§` and em-dashes, so the decode
+raised inside subprocess's **reader thread**:
+
+```
+UnicodeDecodeError: 'charmap' codec can't decode byte 0x8f in position 7973
+```
+
+The thread died, so `stdout` came back **empty**, and `_committed_digests` hashed nothing:
+
+```
+QQQ-Checklist-V1.md:        the committed blob (f92225791339) is not what is recorded (32a9c5b28897)
+QQQ-Observations-and-…md:   the committed blob (e3b0c44298fc) is not what is recorded (7c5e06bedd98)
+QQQ-Proposal-V1.md:         the committed blob (e3b0c44298fc) is not what is recorded (0ffdb31451e8)
+```
+
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` is the SHA-256 of **no bytes
+at all**. Every one of those three documents was correct on disk and correct at `HEAD`; the gate
+was hashing the empty string and calling it drift.
+
+This is the worst direction a gate can fail in. `check_handoff.py` exists to answer one question —
+*is this tree safe to hand off?* — and its failure mode was to answer **no** on a tree that was
+fine, in language (`the recorded corpus digests` / `the committed blob`) that reads exactly like
+real drift. A tired reader would have gone looking for an edit that never happened.
+
+### Why it was invisible
+
+CI runs on Linux, where the locale is UTF-8, so the decode succeeds and the gate passes. **The
+gate could only fail on a machine where it was being used interactively**, which is why four red
+CI jobs' worth of tooling could not have caught it. That is `§O-116`'s rule — reproduce the
+command in the environment CI runs it in — failing in the other direction: the local environment
+had a behaviour CI could not exhibit.
+
+Two of the five reported problems were genuinely mine and correct (`HEAD` is not `origin/main`
+because the commit was not pushed; the working tree was dirty because the file was mid-edit). The
+other three were fabricated. **Reading only the first, or trusting the summary line, would have
+sent this round chasing a non-existent corpus problem.**
+
+### The fix
+
+`_git` now decodes the bytes itself rather than letting `text=True` do it:
+
+```python
+p = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, check=False)
+return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace")
+```
+
+Decoding bytes also removes a second, quieter hazard: **`text=True` enables universal-newline
+translation**, so a `\r\n` in the child's output becomes `\n` before re-encoding, and a digest
+computed that way would not describe the file's bytes. No document here contains `\r\n` — the EOL
+check asserts LF — so it had not bitten, but a digest function must not depend on that.
+
+`errors="replace"` is the fail-safe rather than the primary path: a substituted character changes
+the digest, so it surfaces as drift instead of passing silently. The failure direction is
+preserved.
+
+The three remaining calls in the file (`git ls-files --eol`, and the two `gh` reads) now pass
+`encoding="utf-8", errors="replace"` explicitly.
+
+**Verified:** with `PYTHONUTF8` unset, the gate reports
+
+```
+ok    recorded digests match the tree and HEAD
+ok    every tracked file's EOL matches its attribute
+ok    no fault injection is left applied
+ok    no stale sweep lock
+```
+
+and `--self-test` still reports **25 cases, every rule is live**. The rule was not weakened to
+make the tool pass.
+
+### The class, measured
+
+The instance was fixed; the pattern was not. An AST scan (`.scratch/scan_subprocess_encoding.py`,
+which distinguishes a literal `text=True` from `text=<expr>` because only the first is provable)
+finds **43 executable call sites in 27 tools**:
+
+```
+audit_p0.py                      L81
+audit_requirements.py            L97 L115 L139 L163 L167
+check_api_examples.py            L241
+check_doc_claims.py              L87
+check_error_catalogue.py         L77
+check_error_standard.py          L114
+check_glossary.py                L55
+check_reconciliation.py          L63
+check_schema_conformance.py      L323 L500 L537 L562
+check_topology.py                L100
+check_verified_facts.py          L49
+check_wit.py                     L79
+check_wit_reference.py           L147
+check_xrefs.py                   L843
+fault_inject_architecture.py     L181
+fault_inject_batch_first.py      L38 L48
+fault_inject_guard.py            L59
+fault_inject_naming.py           L73
+fault_inject_no_ambient.py       L40 L48
+fault_inject_safety_arg.py       L32
+fault_inject_wit_errors.py       L35 L45
+fault_inject_wit_since.py        L108 L118
+gen_llms_txt.py                  L773
+normalize_eol.py                 L62 L101 L133 L163
+release.py                       L78
+self_test_schemas.py             L61
+self_test_xrefs.py               L64 L769 L908
+```
+
+Not all 43 are reachable — a site only breaks when its child emits a non-ASCII byte, so a call
+that reads only a hash or a SHA never will. But `normalize_eol.py` and `check_glossary.py` read
+document content, `release.py` reads the changelog, and `audit_requirements.py` reads the corpus:
+those are reachable today, and the corpus contains `→` and `§` on nearly every line.
+
+**The durable form is a checker, not 43 edits.** `tools/check_subprocess_encoding.py` should
+forbid `text=True` without `encoding=`, mirroring the scan, with a `--self-test` that injects the
+pattern and proves it fires — registered in `ci.yml` **and** `docker/entrypoint.sh` like every
+other checker. The 43 sites are fixed in the same change, because a checker that fails CI cannot
+ship before the thing it forbids is gone.
+
+### What this cost, and what it would have cost
+
+Nothing functional was broken; two commits' worth of time went into disproving a fabricated
+failure. The cost that matters is the one avoided: a false HAND-OFF BLOCKED on a correct tree,
+read by an agent that trusts its gates, invents a corpus problem, and "fixes" documents that were
+never wrong.
+
+**Generalisable rule:** a tool that shells out and then hashes is a tool whose correctness depends
+on a decode. Specify the encoding at every boundary, and prefer decoding bytes explicitly when the
+result feeds a digest — because `text=True` decides both the codec *and* the newline translation,
+and neither is the platform's to choose.
+
+→ `tools/check_handoff.py`, `.scratch/scan_subprocess_encoding.py`, `tools/check_corpus_at_rest.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

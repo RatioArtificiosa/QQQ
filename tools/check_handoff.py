@@ -220,10 +220,25 @@ def _skip_is_justified(job_name: str, event: str, workflow: str) -> bool:
 
 
 def _git(*args: str) -> tuple[int, str]:
-    p = subprocess.run(
-        ["git", *args], cwd=str(ROOT), capture_output=True, text=True, check=False
-    )
-    return p.returncode, (p.stdout or "") + (p.stderr or "")
+    """Run git and return `(code, decoded output)`.
+
+    **Deliberately not `text=True`.** `text=True` decodes the child's output with the
+    *locale's* encoding — `cp1252` on a default Windows console — so `git show` of a
+    document containing `§` or an em-dash raises `UnicodeDecodeError` inside
+    subprocess's reader thread, the thread dies, and `stdout` comes back **empty**. The
+    committed digest for that document is then
+    `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` — the SHA-256 of no
+    bytes at all — and the gate reports digest drift against a tree that is correct. A
+    false failure, from the one tool whose job is to say whether a hand-off is safe, and
+    invisible in CI because CI runs on a UTF-8 locale. `§O-268`.
+
+    Decoding the bytes here also avoids `text=True`'s universal-newline translation, so
+    re-encoding returns the file's exact bytes — which is what a digest must compare.
+    `errors="replace"` is the fail-safe, not the primary path: a substituted character
+    changes the digest, so it surfaces as drift rather than passing silently.
+    """
+    p = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, check=False)
+    return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace")
 
 
 def _committed_digests() -> dict[str, str]:
@@ -249,7 +264,8 @@ def _eol_rows() -> list[tuple[str, str, str]]:
     """
     out = subprocess.run(
         ["git", "ls-files", "--eol"], cwd=str(ROOT),
-        capture_output=True, text=True, check=False,
+        capture_output=True, check=False,
+        encoding="utf-8", errors="replace",
     )
     rows: list[tuple[str, str, str]] = []
     for line in out.stdout.splitlines():
@@ -312,7 +328,8 @@ def _ci_jobs() -> tuple[list[dict[str, object]], str, str]:
     listed = subprocess.run(
         ["gh", "run", "list", "--limit", "20", "--json",
          "databaseId,headSha,status,conclusion,event"],
-        cwd=str(ROOT), capture_output=True, text=True, check=False,
+        cwd=str(ROOT), capture_output=True, check=False,
+        encoding="utf-8", errors="replace",
     )
     if listed.returncode != 0 or not listed.stdout.strip():
         return [], "", "`gh run list` produced nothing (offline, or not authenticated)"
@@ -336,7 +353,8 @@ def _ci_jobs() -> tuple[list[dict[str, object]], str, str]:
         jobs = subprocess.run(
             ["gh", "api",
              f"repos/RatioArtificiosa/QQQ/actions/runs/{run['databaseId']}/jobs?per_page=100"],
-            cwd=str(ROOT), capture_output=True, text=True, check=False,
+            cwd=str(ROOT), capture_output=True, check=False,
+        encoding="utf-8", errors="replace",
         )
         if jobs.returncode != 0:
             return [], event, f"the jobs of run {run['databaseId']} could not be read"

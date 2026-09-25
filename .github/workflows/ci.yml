@@ -749,6 +749,19 @@ jobs:
       - name: prove the error-standard check fires
         run: python tools/check_error_standard.py --self-test
 
+      # `DX-015`. §12.3 commits to *"every public API has a compiling example"* at 100%, and
+      # the measured state was **2116 public declarations and 3 doctests running**. A check
+      # demanding 2113 new examples in one commit would be red forever and ignored, so this
+      # is a **ratchet**: `--allow` is the visible distance to the target, and the number below
+      # is lowered as examples land. A regression -- an example lost -- fails immediately,
+      # which is the part CI can meaningfully block.
+      #
+      # **This number must be lowered, never raised.** Raising it records a step backwards.
+      - name: public-API example coverage (DX-015)
+        run: python tools/check_api_examples.py --allow 2113
+      - name: prove the API-example counters and gate are live
+        run: python tools/check_api_examples.py --self-test
+
       # §12.3's DX-commitments table is titled "measurable, in CI", and its row
       # is `qqqai --help` for any command <= 40 lines. The unit test asserts it,
       # but a number buried in test output is not *measured* in the sense the

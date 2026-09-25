@@ -296,6 +296,43 @@ pub struct Version {
 
 impl Version {
     /// Construct a version.
+    ///
+    /// # Examples
+    ///
+    /// The interesting method is [`Self::is_compatible_with`], because it is the deprecation
+    /// policy in code: a consumer on 1.4 may use a capability introduced in 1.2, and may never
+    /// use one introduced in 2.0. The relation is **one-directional**, which is the part a reader
+    /// gets wrong by assuming symmetry:
+    ///
+    /// ```
+    /// use qqq_core::ids::Version;
+    ///
+    /// let consumer = Version::new(1, 4, 0);
+    /// let introduced_in = Version::new(1, 2, 0);
+    /// let future = Version::new(2, 0, 0);
+    ///
+    /// assert!(consumer.is_compatible_with(introduced_in));
+    ///
+    /// // Not the other way round: 1.2 cannot assume a capability that arrived in 1.4.
+    /// assert!(!introduced_in.is_compatible_with(consumer));
+    ///
+    /// // A major bump breaks compatibility regardless of the minor.
+    /// assert!(!consumer.is_compatible_with(future));
+    /// assert!(!future.is_compatible_with(consumer));
+    /// ```
+    ///
+    /// A version parses from the three-component form, and the error names the component that
+    /// was wrong rather than saying "invalid version":
+    ///
+    /// ```
+    /// use qqq_core::ids::{Version, VersionParseError};
+    ///
+    /// assert_eq!("1.4.0".parse::<Version>().expect("valid"), Version::new(1, 4, 0));
+    /// assert!("1.4".parse::<Version>().is_err());
+    ///
+    /// let err = "1.x.0".parse::<Version>().expect_err("not a number");
+    /// assert!(matches!(err, VersionParseError::NotANumber(ref s) if s == "x"));
+    /// ```
     #[must_use]
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {

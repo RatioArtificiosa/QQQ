@@ -212,6 +212,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "machinery",
     ),
     (
+        "docs/stability.md",
+        "The stability tier of every crate and the change-promise for each "
+        "published surface: WIT, the manifest, the lockfile and CLI JSON.",
+        "both",
+        "machinery",
+    ),
+    (
         "SECURITY.md",
         "How to report a vulnerability, and what response to expect.",
         "human",

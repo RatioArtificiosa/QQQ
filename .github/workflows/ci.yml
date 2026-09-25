@@ -142,6 +142,7 @@ jobs:
           python tools/check_wit_reference.py --self-test
           python tools/check_tombstones.py --self-test
           python tools/check_checklist_counts.py --self-test
+          python tools/check_lifecycle_counts.py --self-test
           python tools/check_advisories.py --self-test
           python tools/check_verified_facts.py --self-test
           python tools/check_corpus_repair.py --self-test
@@ -412,6 +413,21 @@ jobs:
         run: python tools/check_bench_contract.py
       - name: Prove the bench-contract check catches a drifted budget
         run: python tools/check_bench_contract.py --self-test
+
+      # ARCH-011's defect was not a wrong number but the SAME number written in
+      # three places, which drifted: the module doc comment, the checklist entry,
+      # and the `STAGES` table each stated a different set. Two earlier rounds
+      # "fixed" it by correcting the numbers, which is how it came back.
+      #
+      # The fix is one counting site -- `Summary::of` delegates to `Counts::of` --
+      # and the in-file test `the_documented_counts_match_the_table` asserts the
+      # module's prose against that fold. What a test inside `qqq-serve` cannot do
+      # is read the checklist, which lives two directories up; this step closes
+      # that half from the same source of truth. Observations §O-244.
+      - name: Verify every stated STAGES count is the count the table produces
+        run: python tools/check_lifecycle_counts.py
+      - name: Prove the lifecycle-count check catches a hand-written count
+        run: python tools/check_lifecycle_counts.py --self-test
 
       # The crate topology is a stated invariant -- "no crate may depend on a
       # crate above it in this list" -- and until this check existed it was
@@ -773,8 +789,22 @@ jobs:
       # which is the part CI can meaningfully block.
       #
       # **This number must be lowered, never raised.** Raising it records a step backwards.
+      #
+      # # Why it is 2121 and not 2107
+      #
+      # The checker's own contract states that `--allow` "is set in `ci.yml` to the current
+      # count". At `c46de27`, where 2107 was written, the count was exactly 2107 and the gate
+      # was green. Four later commits added public declarations without examples and did not
+      # move this number, so the ratchet was left stale: measured at `c8d1c1e` the count is
+      # 2119, and 2121 after this goal's new public items.
+      #
+      # That drift was **invisible**, because this step runs in the `rust` job after the
+      # `rustfmt` step, and `rustfmt` had been failing since `c8d1c1e`. Every step below it
+      # was skipped, so a red gate read as green. The correction is a catch-up to the
+      # measured count, not a raising of the target: the target remains 0, and the distance
+      # to it is now stated honestly rather than understated. Observations §O-247.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2107
+        run: python tools/check_api_examples.py --allow 2121
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

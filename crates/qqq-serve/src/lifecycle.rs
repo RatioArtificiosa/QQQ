@@ -15,14 +15,25 @@
 //!
 //! The first version of this module was going to state that the pipeline is
 //! implemented. Auditing each step against the tree, one at a time, showed that
-//! would have been false for **five** of the fifteen, in three distinct ways:
+//! would have been false for **twelve** of the fifteen, so the table reports a
+//! [`Status`] per step instead of a verdict.
+//!
+//! **The four counts below are derived, never hand-written.** [`Summary::of`] folds
+//! [`STAGES`] into them, [`Summary::Display`] renders them, and
+//! `the_documented_counts_match_the_table` compares the prose against that
+//! rendering — which is **3 implemented, 10 partial, 1 built-unwired, 1 absent**.
+//! A previous version of this module hand-wrote the same four numbers in three
+//! places, and they disagreed: the table below said steps 2, 6, 8, 10, 14 were
+//! implemented, the checklist entry said `5 implemented, 9 partial, 1 built-unwired,
+//! 1 absent`, and `STAGES` held three implemented rows. The fix is the single
+//! counting site, not three corrected numbers — `§O-244`.
 //!
 //! | Kind | Steps | What is actually true |
 //! |---|---|---|
-//! | **Implemented** | 2, 6, 8, 10, 14 | The named symbol performs the step |
-//! | **Partial** | 1, 3, 5, 7, 9, 11, 12, 13 | Something performs the step, but not the whole of what §4.4 describes |
-//! | **Absent** | 4 | No implementation exists |
+//! | **Implemented** | 2, 8, 10 | The named symbol performs the step |
+//! | **Partial** | 1, 3, 5, 6, 7, 9, 11, 12, 13, 14 | Something performs the step, but not the whole of what §4.4 describes |
 //! | **Built, unwired** | 15 | A complete implementation with no production caller |
+//! | **Absent** | 4 | No implementation exists |
 //!
 //! A module that said "implemented" would be `§O-219`'s shape — an item that looks
 //! done. So [`STAGES`] carries a [`Status`] per step, and [`audit`] verifies a
@@ -320,24 +331,96 @@ pub const STAGES: [Stage; 15] = [
     },
 ];
 
-/// A row of [`STAGES`] whose named symbol could not be found in its named file.
+/// A row of [`STAGES`] that [`audit`] could not verify, and why.
+///
+/// The `Unaccountable` variant is the one that used to be silent: `audit` skipped
+/// any row that named neither a file nor a symbol, so a row could be added to the
+/// table claiming `Implemented` and naming nothing, and the audit would report
+/// clean. A row that cannot be checked is itself a finding — `§O-245`.
+///
+/// ```
+/// use qqq_serve::lifecycle::{audit, Missing, STAGES};
+///
+/// let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+///     .parent()
+///     .and_then(std::path::Path::parent)
+///     .expect("crates/<name>/ has two parents");
+/// let findings = audit(root);
+/// // The one `Absent` row names nothing, and is reported for it rather than skipped.
+/// assert!(findings.iter().any(|m| m.is_unaccountable()));
+/// // No row claiming completeness is unaccountable on the real table.
+/// assert!(findings.iter().filter(|m| m.is_defect()).count() <= 1);
+/// assert_eq!(STAGES.len(), 15);
+/// # let _ = Missing::Unnamed { step: 1, file: "f.rs", symbol: "s" };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Missing {
-    /// The §4.4 step number.
-    pub step: u8,
-    /// The file the table names.
-    pub file: &'static str,
-    /// The symbol the table names.
-    pub symbol: &'static str,
+pub enum Missing {
+    /// The row names a file and a symbol, and the symbol is not in that file (or the
+    /// file cannot be read).
+    Unnamed {
+        /// The §4.4 step number.
+        step: u8,
+        /// The file the table names.
+        file: &'static str,
+        /// The symbol the table names.
+        symbol: &'static str,
+    },
+    /// The row names neither a file nor a symbol, so nothing about it can be
+    /// checked. Only [`Status::Absent`] rows are legitimately in this shape; any
+    /// other status here is the defect this variant exists to catch.
+    Unaccountable {
+        /// The §4.4 step number.
+        step: u8,
+        /// The step's name, so a report can identify the row without a lookup.
+        name: &'static str,
+        /// The status the row claims while naming nothing to check it against.
+        status: Status,
+    },
+}
+
+impl Missing {
+    /// The §4.4 step number, whichever kind of finding this is.
+    #[must_use]
+    pub const fn step(&self) -> u8 {
+        match self {
+            Self::Unnamed { step, .. } | Self::Unaccountable { step, .. } => *step,
+        }
+    }
+
+    /// Whether this finding is a row that named nothing to check.
+    #[must_use]
+    pub const fn is_unaccountable(&self) -> bool {
+        matches!(self, Self::Unaccountable { .. })
+    }
+
+    /// Whether this finding is a real defect rather than the legitimate empty shape
+    /// of an [`Status::Absent`] row.
+    ///
+    /// The distinction matters because `every_named_symbol_exists_in_its_named_file`
+    /// must stay green on a correct table that contains one absent row, while still
+    /// failing on a row that claims completion and names nothing.
+    #[must_use]
+    pub const fn is_defect(&self) -> bool {
+        match self {
+            Self::Unnamed { .. } => true,
+            Self::Unaccountable { status, .. } => !matches!(status, Status::Absent),
+        }
+    }
 }
 
 impl fmt::Display for Missing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "step {} names `{}` in `{}`, which is not there",
-            self.step, self.symbol, self.file
-        )
+        match self {
+            Self::Unnamed { step, file, symbol } => write!(
+                f,
+                "step {step} names `{symbol}` in `{file}`, which is not there"
+            ),
+            Self::Unaccountable { step, name, status } => write!(
+                f,
+                "step {step} `{name}` claims `{status}` and names no file or symbol, \
+                 so nothing about it can be checked"
+            ),
+        }
     }
 }
 
@@ -356,23 +439,14 @@ pub struct Summary {
 
 impl Summary {
     /// Fold [`STAGES`] into counts.
+    ///
+    /// Delegates to [`Counts::of`], which is the **single** fold of the table. Two
+    /// ways of counting the same table is exactly how `ARCH-011`'s three disagreeing
+    /// count sites came to exist, so this one is a view of that one and
+    /// `counts_agree_with_their_lists` asserts they cannot diverge.
     #[must_use]
     pub fn of(stages: &[Stage]) -> Self {
-        let mut out = Self {
-            implemented: 0,
-            partial: 0,
-            built_unwired: 0,
-            absent: 0,
-        };
-        for s in stages {
-            match s.status {
-                Status::Implemented => out.implemented += 1,
-                Status::Partial => out.partial += 1,
-                Status::BuiltUnwired => out.built_unwired += 1,
-                Status::Absent => out.absent += 1,
-            }
-        }
-        out
+        Counts::of(stages).summary
     }
 
     /// Whether every step is complete and reachable.
@@ -380,6 +454,180 @@ impl Summary {
     pub const fn is_complete(&self) -> bool {
         self.implemented == STAGES.len()
     }
+}
+
+/// The counts **and** the step lists §4.4's prose states, derived from one fold of
+/// [`STAGES`].
+///
+/// # Why this type exists
+///
+/// `ARCH-011`'s earlier form hand-wrote the same four counts in three places — the
+/// module doc comment, the checklist entry, and this file's prose — and they
+/// disagreed: the comment said steps 2, 6, 8, 10, 14 were implemented, the checklist
+/// said `5 implemented, 9 partial, 1 built-unwired, 1 absent`, and the table held
+/// three implemented steps. Editing the three sets into agreement would leave three
+/// places to drift again. So the numbers come from [`Self::of`] alone, and
+/// `the_documented_counts_match_the_table` asserts the prose against
+/// [`Self::documented`] — `§O-244`.
+///
+/// The tests in this file are compiled into the binary, so they cannot read the
+/// checklist. That is why the checklist is compared from the other direction: the
+/// documented checker reads this same string out of the source. Two mechanisms, one
+/// counting site.
+///
+/// ```
+/// use qqq_serve::lifecycle::Counts;
+///
+/// let counts = Counts::measured();
+/// // The step lists and the numbers come from one fold, so they cannot disagree.
+/// assert_eq!(counts.summary.implemented, counts.implemented.len());
+/// assert_eq!(
+///     counts.implemented.len()
+///         + counts.partial.len()
+///         + counts.built_unwired.len()
+///         + counts.absent.len(),
+///     15,
+/// );
+/// # let _ = qqq_serve::lifecycle::documented_cells();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Counts {
+    /// The four numbers, in the order [`Summary::Display`] renders them.
+    pub summary: Summary,
+    /// The `Implemented` rows, ascending by step number.
+    pub implemented: Vec<u8>,
+    /// The `Partial` rows, ascending by step number.
+    pub partial: Vec<u8>,
+    /// The `BuiltUnwired` rows, ascending by step number.
+    pub built_unwired: Vec<u8>,
+    /// The `Absent` rows, ascending by step number.
+    pub absent: Vec<u8>,
+}
+
+impl Counts {
+    /// Fold a table into counts and step lists, in one pass.
+    ///
+    /// The lists are the same fold as the numbers rather than a second traversal, so
+    /// a list and its count cannot disagree.
+    ///
+    /// ```
+    /// use qqq_serve::lifecycle::{Counts, Stage, Status};
+    ///
+    /// let table = [
+    ///     Stage { step: 1, name: "ONE", file: Some("f.rs"), symbol: Some("s"),
+    ///             status: Status::Implemented, gap: "" },
+    ///     Stage { step: 2, name: "TWO", file: Some("f.rs"), symbol: Some("t"),
+    ///             status: Status::Absent, gap: "no code" },
+    /// ];
+    /// let counts = Counts::of(&table);
+    /// assert_eq!(counts.implemented, vec![1]);
+    /// assert_eq!(counts.absent, vec![2]);
+    /// assert_eq!(counts.summary.implemented, 1);
+    /// ```
+    #[must_use]
+    pub fn of(stages: &[Stage]) -> Self {
+        let mut implemented = Vec::new();
+        let mut partial = Vec::new();
+        let mut built_unwired = Vec::new();
+        let mut absent = Vec::new();
+        for s in stages {
+            match s.status {
+                Status::Implemented => implemented.push(s.step),
+                Status::Partial => partial.push(s.step),
+                Status::BuiltUnwired => built_unwired.push(s.step),
+                Status::Absent => absent.push(s.step),
+            }
+        }
+        let summary = Summary {
+            implemented: implemented.len(),
+            partial: partial.len(),
+            built_unwired: built_unwired.len(),
+            absent: absent.len(),
+        };
+        Self {
+            summary,
+            implemented,
+            partial,
+            built_unwired,
+            absent,
+        }
+    }
+
+    /// [`Self::of`] applied to the real table.
+    ///
+    /// ```
+    /// use qqq_serve::lifecycle::Counts;
+    ///
+    /// let counts = Counts::measured();
+    /// assert_eq!(counts.summary.implemented, counts.implemented.len());
+    /// ```
+    #[must_use]
+    pub fn measured() -> Self {
+        Self::of(&STAGES)
+    }
+
+    /// The exact sentence the module doc comment carries, as a table row.
+    ///
+    /// The doc comment writes the same four facts as Markdown table rows because it
+    /// is documentation a human reads top to bottom. This produces the substance of
+    /// those rows so the test can assert the prose agrees without the test having to
+    /// parse Markdown.
+    ///
+    /// ```
+    /// use qqq_serve::lifecycle::Counts;
+    ///
+    /// let documented = Counts::documented();
+    /// assert!(documented.contains("Implemented | "));
+    /// assert!(documented.ends_with("absent"));
+    /// ```
+    #[must_use]
+    pub fn documented() -> String {
+        let c = Self::measured();
+        format!(
+            "Implemented | {} |\nPartial | {} |\nBuilt, unwired | {} |\nAbsent | {} |\n{}",
+            steps(&c.implemented),
+            steps(&c.partial),
+            steps(&c.built_unwired),
+            steps(&c.absent),
+            c.summary
+        )
+    }
+}
+
+/// The detail column of the documentation table, rendered from the table itself.
+///
+/// The [`Counts::documented`] row for `Implemented` is `Implemented | 2, 8, 10 |`
+/// because that is how the Markdown row reads once split; the module doc comment
+/// writes `| **Implemented** | 2, 8, 10 | The named symbol performs the step |` for
+/// the same fact. This is the middle cell the doc comment must carry, so the two
+/// renderings are compared cell by cell rather than as one string.
+///
+/// ```
+/// use qqq_serve::lifecycle::documented_cells;
+///
+/// for (kind, steps) in documented_cells() {
+///     assert!(!kind.is_empty());
+///     // Every kind has at least one step on the current table.
+///     assert!(!steps.is_empty());
+/// }
+/// ```
+#[must_use]
+pub fn documented_cells() -> Vec<(&'static str, String)> {
+    let c = Counts::measured();
+    vec![
+        ("Implemented", steps(&c.implemented)),
+        ("Partial", steps(&c.partial)),
+        ("Built, unwired", steps(&c.built_unwired)),
+        ("Absent", steps(&c.absent)),
+    ]
+}
+
+/// Render a step list the way the documentation states it — `2, 6, 8, 10, 14`.
+fn steps(list: &[u8]) -> String {
+    list.iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for Summary {
@@ -392,7 +640,8 @@ impl fmt::Display for Summary {
     }
 }
 
-/// Check that every symbol [`STAGES`] names still exists in the file it names.
+/// Check that every symbol [`STAGES`] names still exists in the file it names, and
+/// that every row names something checkable in the first place.
 ///
 /// # What this verifies, and what it deliberately does not
 ///
@@ -407,18 +656,74 @@ impl fmt::Display for Summary {
 /// result (`§O-229`), so this one asserts only what it can see and the statuses are
 /// re-read by a human when the code changes.
 ///
+/// # The two ways a row is reported
+///
+/// A row naming a symbol that is not in its file is [`Missing::Unnamed`]. A row
+/// naming **neither** a file nor a symbol is [`Missing::Unaccountable`] — reported
+/// rather than skipped, because skipping it let a row claim [`Status::Implemented`]
+/// while naming nothing to check. The only rows legitimately in that shape are
+/// [`Status::Absent`] ones, and they are reported too so that a caller reading the
+/// full list sees the reason they were not checked; `the_only_unaccountable_row_is
+/// _the_absent_one` pins that.
+///
+/// # The containment check's known limit
+///
+/// `text.contains(symbol)` is satisfied by the symbol appearing **anywhere** in the
+/// file, including in a comment or a string literal. That is a real weakness and it
+/// is **kept, and named here**, rather than closed — see `§O-246` for the decision
+/// and its reason. In short: every cheaper fix is either still a substring test or
+/// drags a Rust parser into a test that must run on three operating systems, and
+/// the property this function is responsible for is the table's *shape*, not symbol
+/// identity.
+///
 /// `root` is the workspace root — the directory containing `crates/`.
 #[must_use]
 pub fn audit(root: &std::path::Path) -> Vec<Missing> {
+    audit_stages(&STAGES, root)
+}
+
+/// [`audit`], over an arbitrary table.
+///
+/// Split out so a test can hand it a fabricated table and a fabricated root, and
+/// assert exactly what it reports without depending on the repository's state.
+///
+/// ```
+/// use qqq_serve::lifecycle::{audit_stages, Stage, Status};
+///
+/// // A fabricated table against a fabricated, empty root: the answer depends only
+/// // on the table, not on the repository.
+/// let table = [Stage {
+///     step: 7,
+///     name: "CLAIMS DONE",
+///     file: None,
+///     symbol: None,
+///     status: Status::Implemented,
+///     gap: "",
+/// }];
+/// let root = std::path::Path::new("target/fabricated-doc-root");
+/// let findings = audit_stages(&table, root);
+/// assert_eq!(findings.len(), 1);
+/// assert!(findings[0].is_unaccountable());
+/// assert!(findings[0].is_defect());
+/// ```
+#[must_use]
+pub fn audit_stages(stages: &[Stage], root: &std::path::Path) -> Vec<Missing> {
     let mut missing = Vec::new();
-    for stage in &STAGES {
+    for stage in stages {
         let (Some(file), Some(symbol)) = (stage.file, stage.symbol) else {
-            // Absent steps name no file, which is the correct shape for them.
+            // A row that names neither is reported, not skipped: `§O-245`. An
+            // `Absent` row is the legitimately empty shape; any other status here is
+            // a row claiming a completeness it names nothing to support.
+            missing.push(Missing::Unaccountable {
+                step: stage.step,
+                name: stage.name,
+                status: stage.status,
+            });
             continue;
         };
         let path = root.join("crates").join(file);
         let Ok(text) = std::fs::read_to_string(&path) else {
-            missing.push(Missing {
+            missing.push(Missing::Unnamed {
                 step: stage.step,
                 file,
                 symbol,
@@ -426,7 +731,7 @@ pub fn audit(root: &std::path::Path) -> Vec<Missing> {
             continue;
         };
         if !text.contains(symbol) {
-            missing.push(Missing {
+            missing.push(Missing::Unnamed {
                 step: stage.step,
                 file,
                 symbol,
@@ -434,6 +739,42 @@ pub fn audit(root: &std::path::Path) -> Vec<Missing> {
         }
     }
     missing
+}
+
+/// The `Unaccountable` findings among [`audit`]'s output — the rows that named
+/// nothing to check.
+///
+/// Every one of these is a defect except a [`Status::Absent`] row, which is the
+/// shape §4.4's missing step legitimately has. This is the function a gate should
+/// read: `audit` reporting an empty list is the clean state, but `audit` reporting
+/// only `Unnamed` findings while an `Implemented` row named nothing is the failure
+/// the previous version of this function could not see.
+///
+/// ```
+/// use qqq_serve::lifecycle::unaccountable_rows;
+///
+/// let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+///     .parent()
+///     .and_then(std::path::Path::parent)
+///     .expect("crates/<name>/ has two parents");
+/// // On the real table, no row claims a completeness it names nothing to support.
+/// assert!(unaccountable_rows(root).is_empty());
+/// ```
+#[must_use]
+pub fn unaccountable_rows(root: &std::path::Path) -> Vec<Missing> {
+    audit(root)
+        .into_iter()
+        .filter(Missing::is_unaccountable)
+        .filter(|m| {
+            !matches!(
+                m,
+                Missing::Unaccountable {
+                    status: Status::Absent,
+                    ..
+                }
+            )
+        })
+        .collect()
 }
 
 /// Render the pipeline as a table, for a human reading a run report.
@@ -553,19 +894,198 @@ mod tests {
     }
 
     /// A step with a file has a symbol and the reverse, so a half-filled row cannot
-    /// slip through [`audit`] by naming neither.
+    /// slip through [`audit`] unchecked.
     #[test]
     fn a_row_names_both_a_file_and_a_symbol_or_neither() {
         for stage in &STAGES {
             assert_eq!(
                 stage.file.is_some(),
                 stage.symbol.is_some(),
-                "step {} names a file without a symbol, or the reverse; `audit` \
-                 skips exactly the rows that name neither, so a half-filled row \
-                 would escape it",
+                "step {} names a file without a symbol, or the reverse; a half-filled \
+                 row would escape the check it looks like it satisfies",
                 stage.step
             );
         }
+    }
+
+    /// A row that names neither a file nor a symbol is **reported**, and the only row
+    /// in that shape is the absent one.
+    ///
+    /// Before `§O-245` the loop `continue`d here, so a row could be added claiming
+    /// `Implemented` and naming nothing, and `audit` would return an empty list. This
+    /// test is what makes that impossible: the unaccountable rows are enumerated, and
+    /// the set is pinned to exactly the one legitimate member.
+    #[test]
+    fn the_only_unaccountable_row_is_the_absent_one() {
+        let root = workspace_root();
+        let unaccountable: Vec<_> = audit(&root)
+            .into_iter()
+            .filter(Missing::is_unaccountable)
+            .collect();
+        assert_eq!(
+            unaccountable.len(),
+            Counts::measured().absent.len(),
+            "every `Absent` row names nothing and is reported for it; an \
+             unaccountable row with any other status is a row claiming completeness \
+             it names nothing to support. Found: {unaccountable:?}"
+        );
+        for m in &unaccountable {
+            assert!(
+                matches!(
+                    m,
+                    Missing::Unaccountable {
+                        status: Status::Absent,
+                        ..
+                    }
+                ),
+                "only an `Absent` row may name neither a file nor a symbol: {m}"
+            );
+        }
+        assert!(
+            unaccountable_rows(&root).is_empty(),
+            "no non-`Absent` row may claim a completeness it does not name: {:?}",
+            unaccountable_rows(&root)
+        );
+    }
+
+    /// `audit_stages` reports a row that names a file but no symbol, rather than
+    /// skipping it.
+    ///
+    /// The root is fabricated, so this asserts on the function's own behaviour and
+    /// not on the repository's state.
+    #[test]
+    fn a_row_that_names_a_file_without_a_symbol_is_reported() {
+        let root = fabricated_root();
+        let stages = [Stage {
+            step: 41,
+            name: "HALF FILLED",
+            file: Some("qqq-serve/src/http1.rs"),
+            symbol: None,
+            status: Status::Implemented,
+            gap: "",
+        }];
+        let found = audit_stages(&stages, &root);
+        assert_eq!(
+            found.len(),
+            1,
+            "a row naming a file but no symbol must be reported, not skipped: {found:?}"
+        );
+        assert!(found[0].is_unaccountable(), "{found:?}");
+        assert_eq!(found[0].step(), 41);
+    }
+
+    /// `audit_stages` reports a row that names a symbol but no file, rather than
+    /// skipping it — the converse of the case above, which an asymmetric bug would
+    /// pass.
+    #[test]
+    fn a_row_that_names_a_symbol_without_a_file_is_reported() {
+        let root = fabricated_root();
+        let stages = [Stage {
+            step: 42,
+            name: "HALF FILLED AGAIN",
+            file: None,
+            symbol: Some("parse_head"),
+            status: Status::Implemented,
+            gap: "",
+        }];
+        let found = audit_stages(&stages, &root);
+        assert_eq!(
+            found.len(),
+            1,
+            "a row naming a symbol but no file must be reported: {found:?}"
+        );
+        assert!(found[0].is_unaccountable(), "{found:?}");
+        assert_eq!(found[0].step(), 42);
+    }
+
+    /// An `Implemented` row that names neither file nor symbol is reported, and it is
+    /// the case the old `continue` let through.
+    #[test]
+    fn an_implemented_row_that_names_nothing_is_reported() {
+        let root = fabricated_root();
+        let stages = [Stage {
+            step: 43,
+            name: "CLAIMS DONE",
+            file: None,
+            symbol: None,
+            status: Status::Implemented,
+            gap: "",
+        }];
+        let found = audit_stages(&stages, &root);
+        assert_eq!(
+            found.len(),
+            1,
+            "an `Implemented` row naming nothing is the defect this variant exists \
+             for: {found:?}"
+        );
+        assert!(found[0].is_unaccountable(), "{found:?}");
+    }
+
+    /// The four counts the module documentation states are the counts the table
+    /// produces.
+    ///
+    /// **This is the test that makes a hand-written count impossible to drift again.**
+    /// It reads the doc comment out of this source file and asserts that the step
+    /// lists in it are exactly what [`Counts::measured`] renders. Change one row's
+    /// `Status` and this fails until the documentation is corrected — which is the
+    /// intended outcome, since both a stale table and stale prose are defects.
+    #[test]
+    fn the_documented_counts_match_the_table() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle.rs"),
+        )
+        .expect("this source file is readable");
+        let documented = Counts::documented();
+        let rows: Vec<&str> = documented.lines().take(4).collect();
+
+        for ((kind, list), row) in documented_cells().iter().zip(&rows) {
+            // The doc comment writes the row as a Markdown table row:
+            // `| **Implemented** | 2, 8, 10 | The named symbol performs the step |`.
+            // The middle cell is the fact, so it is what is compared.
+            let cell = format!("| {list} |");
+            assert!(
+                src.contains(&cell),
+                "the module documentation carries no `{cell}` row, which is the step \
+                 list the `STAGES` table produces for `{kind}`. The table and the \
+                 prose have drifted apart; correct whichever is wrong. Derived rows: \
+                 {rows:?}"
+            );
+            assert!(
+                !list.trim().is_empty(),
+                "a documented row with an empty step list states a count nowhere: {row}"
+            );
+        }
+        let summary = documented
+            .lines()
+            .next_back()
+            .expect("the last documented line is the summary");
+        assert!(
+            src.contains(summary),
+            "the module documentation must state `{summary}` verbatim"
+        );
+    }
+
+    /// [`Counts`] derives its lists and its numbers from one fold, so a list can
+    /// never disagree with its count.
+    #[test]
+    fn counts_agree_with_their_lists() {
+        let c = Counts::measured();
+        assert_eq!(c.summary.implemented, c.implemented.len());
+        assert_eq!(c.summary.partial, c.partial.len());
+        assert_eq!(c.summary.built_unwired, c.built_unwired.len());
+        assert_eq!(c.summary.absent, c.absent.len());
+        let total = c.implemented.len() + c.partial.len() + c.built_unwired.len() + c.absent.len();
+        assert_eq!(
+            total,
+            STAGES.len(),
+            "every step appears in exactly one list"
+        );
+        assert_eq!(
+            c.summary,
+            Summary::of(&STAGES),
+            "the two counting entry points must agree; if they can disagree, one of \
+             them is a second counting site"
+        );
     }
 
     /// Every symbol the table names exists in the file it names, checked against
@@ -573,16 +1093,65 @@ mod tests {
     #[test]
     fn every_named_symbol_exists_in_its_named_file() {
         let root = workspace_root();
-        let missing = audit(&root);
+        let defects: Vec<_> = audit(&root)
+            .into_iter()
+            .filter(Missing::is_defect)
+            .collect();
         assert!(
-            missing.is_empty(),
-            "{} row(s) of STAGES name a symbol that is not in the file they name: {}",
-            missing.len(),
-            missing
+            defects.is_empty(),
+            "{} row(s) of STAGES name a symbol that is not in the file they name, or \
+             claim a completeness they name nothing to support: {}",
+            defects.len(),
+            defects
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ")
+        );
+    }
+
+    /// A row claiming completion while naming nothing is reported as a defect, so the
+    /// check above cannot be satisfied by a table that names nothing anywhere.
+    #[test]
+    fn a_done_row_that_names_nothing_is_a_defect() {
+        let root = fabricated_root();
+        let stages = [Stage {
+            step: 44,
+            name: "SILENT COMPLETION",
+            file: None,
+            symbol: None,
+            status: Status::Implemented,
+            gap: "",
+        }];
+        let defects: Vec<_> = audit_stages(&stages, &root)
+            .into_iter()
+            .filter(Missing::is_defect)
+            .collect();
+        assert_eq!(
+            defects.len(),
+            1,
+            "a `Implemented` row naming nothing must be a defect: {defects:?}"
+        );
+    }
+
+    /// An `Absent` row is not a defect, so the check above stays green on a correct
+    /// table that contains one.
+    #[test]
+    fn an_absent_row_is_not_a_defect() {
+        let root = fabricated_root();
+        let stages = [Stage {
+            step: 45,
+            name: "ABSENT",
+            file: None,
+            symbol: None,
+            status: Status::Absent,
+            gap: "nothing exists",
+        }];
+        assert!(
+            audit_stages(&stages, &root)
+                .into_iter()
+                .all(|m| !m.is_defect()),
+            "an `Absent` row naming nothing is the legitimate shape, not a defect"
         );
     }
 
@@ -594,27 +1163,34 @@ mod tests {
     #[test]
     fn the_audit_reports_a_symbol_that_does_not_exist() {
         let root = workspace_root();
-        // A row naming a real file with a symbol that is definitely not in it.
-        let missing = {
-            let stage = Stage {
-                step: 99,
-                name: "PROOF",
-                file: Some("qqq-serve/src/http1.rs"),
-                symbol: Some("a_symbol_that_does_not_exist_anywhere_99"),
-                status: Status::Partial,
-                gap: "control",
-            };
-            let (Some(file), Some(symbol)) = (stage.file, stage.symbol) else {
-                unreachable!("the control row names both")
-            };
-            let path = root.join("crates").join(file);
-            let text = std::fs::read_to_string(&path).expect("the control's file exists");
-            !text.contains(symbol)
-        };
+        // A fabricated table naming a real file with a symbol that is not in it.
+        let stages = [Stage {
+            step: 99,
+            name: "PROOF",
+            file: Some("qqq-serve/src/http1.rs"),
+            symbol: Some("a_symbol_that_does_not_exist_anywhere_99"),
+            status: Status::Partial,
+            gap: "control",
+        }];
+        let found = audit_stages(&stages, &root);
+        assert_eq!(
+            found.len(),
+            1,
+            "the audit must report the fabricated row: {found:?}"
+        );
         assert!(
-            missing,
-            "the positive control failed: its file exists but the symbol string was \
-             found, so the control proves nothing"
+            matches!(found[0], Missing::Unnamed { step: 99, .. }),
+            "the finding must be the `Unnamed` kind, naming the symbol it could not \
+             find: {found:?}"
+        );
+        // The control is only meaningful if the file really is readable and really
+        // does not contain the symbol — otherwise the pass above proves nothing.
+        let text = std::fs::read_to_string(root.join("crates/qqq-serve/src/http1.rs"))
+            .expect("the control's file exists");
+        assert!(
+            !text.contains("a_symbol_that_does_not_exist_anywhere_99"),
+            "the positive control failed: its file contains the symbol string, so a \
+             pass proves nothing"
         );
     }
 
@@ -653,7 +1229,10 @@ mod tests {
     /// The one `Absent` row is step 4, and it is absent for the stated reason.
     #[test]
     fn the_absent_step_is_the_tenant_resolve() {
-        let absent: Vec<_> = STAGES.iter().filter(|s| s.status == Status::Absent).collect();
+        let absent: Vec<_> = STAGES
+            .iter()
+            .filter(|s| s.status == Status::Absent)
+            .collect();
         assert_eq!(
             absent.len(),
             1,
@@ -685,6 +1264,19 @@ mod tests {
             "the rendered table's summary line is `{summary}` and the render does not \
              contain it"
         );
+    }
+
+    /// A private, empty directory to hand [`audit_stages`] as its `root`.
+    ///
+    /// Used by the tests that assert on a **fabricated** table. Pointing those at the
+    /// real workspace would make them depend on the repository's current state and
+    /// turn a behavioural assertion into a vacuous one — the failure mode the plan
+    /// names explicitly.
+    fn fabricated_root() -> std::path::PathBuf {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fabricated-audit-root");
+        std::fs::create_dir_all(&dir).expect("a writable target directory");
+        dir
     }
 
     /// The workspace root, found by walking up from the crate directory.

@@ -123,6 +123,12 @@ fuzz/corpus/*/
 .tools/
 *.log
 
+# Graf's local code-graph index (`.graf/index.db`). It is a per-machine SQLite
+# cache rebuilt from the tree, so it is a build artifact rather than source: it
+# is tens of megabytes, and a committed copy goes stale the moment a file moves.
+# Graf's own usage guide says to keep it out of version control.
+.graf/
+
 # SBOMs are generated per-crate by `cargo cyclonedx` and uploaded as a CI artifact
 # (`SEC-028`), not committed. A committed SBOM is wrong the moment a dependency
 # moves, and a stale supply-chain document is worse than none: it answers the

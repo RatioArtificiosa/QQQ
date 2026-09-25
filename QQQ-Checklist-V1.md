@@ -933,9 +933,13 @@ Items are grouped below by **phase**, because dependency order matters more than
     it, a `Status`, and the `gap` that says what is missing — plus a test that verifies every
     named symbol still exists in the file it names, so a rename or a move cannot leave the table
     pointing at nothing.
-  → **Measured: 5 implemented, 9 partial, 1 built-unwired, 1 absent.** The numbers come from the
-    table itself (`Summary::of`), and a test asserts the pipeline is *not* complete, so a later
-    commit cannot quietly flip the claim.
+  → **Measured: 3 implemented, 10 partial, 1 built-unwired, 1 absent.** The numbers are
+    **derived, never hand-written**: `Summary::of` folds the table into `Counts`, `Counts`
+    renders both the numbers and the step lists, and `the_documented_counts_match_the_table`
+    asserts the module's prose against that rendering. Change one row's `Status` and the test
+    fails until the documentation is corrected — that injection was run and is captured.
+    `tools/check_lifecycle_counts.py` extends the same guarantee to *this entry*, which the
+    test binary cannot read. `§O-244` records the defect and the fix.
   → **The four findings, each a decision or a debt rather than an oversight.**
     • **Step 4 `TENANT RESOLVE` — absent.** §4.4 maps *host/path → tenant → component ID +
     manifest rev*. There is no such mapping anywhere in the workspace: the router is **path-only**
@@ -960,6 +964,14 @@ Items are grouped below by **phase**, because dependency order matters more than
     three-quarters done.
   → Verified: 10 tests green; `clippy -D warnings` clean; the named-symbol audit passes against
     the real tree and has a **positive control** proving it reports a symbol that does not exist.
+    **`audit` no longer skips an unaccountable row** (`§O-245`): a row that names neither a file
+    nor a symbol is reported as `Missing::Unaccountable` rather than `continue`d past, so a row
+    claiming `Implemented` while naming nothing can no longer pass. `Missing::is_defect`
+    separates that from the legitimate empty shape of the one `Absent` row. Both injections —
+    a restated count and an unaccountable row — were run and observed to fail.
+    **`text.contains(symbol)` is kept as a named, recorded limit** (`§O-246`): it is satisfied by
+    the symbol appearing in a comment or a string literal, and the disposition and its reason are
+    in the observations document.
 - [x] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
   → Done: `crates/qqq-host/src/arch012.rs` — `AUDITED` (8 measured rows),
     `Enforcement`, `AuditFinding`, `scan`, `audit`. **14 tests**, all green.

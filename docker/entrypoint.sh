@@ -934,6 +934,17 @@ cmd_checks() {
     python3 tools/check_wit_style.py
     python3 tools/check_wit_style.py --self-test
 
+    # `DX-004`: §12.2's five parts, on errors the **built binary** emits. Its subject is an
+    # artifact rather than a source tree, so it is skipped with a clear reason when the binary
+    # has not been built here — a check that silently passes on a missing subject certifies
+    # nothing.
+    if [ -x target/debug/qqqai ]; then
+        python3 tools/check_error_standard.py
+        python3 tools/check_error_standard.py --self-test
+    else
+        echo "SKIP: DX-004 needs a built qqqai (cargo build -p qqq-run); not present"
+    fi
+
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired
     # the corpus and then died on it (`§O-191`). This drives the real function against

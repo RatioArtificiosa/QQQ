@@ -3203,7 +3203,36 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.7 NN-7 — Progressive Power, Safe Defaults
 - [x] **DX-003** Implement the "your app has 0 capabilities" guidance shown at dev-server start.
   → §12.1 The first ten minutes (a spec, not a wish)
-- [ ] **DX-004** Implement the error-message standard: what, code, why, fix, machine block.
+- [x] **DX-004** Implement the error-message standard: what, code, why, fix, machine block.
+  → §12.2 Error message design standard
+  → **The standard was already met; nothing checked that it was.** Measured on six real errors
+    driven through the built binary, all five parts are present in every one — the sentence,
+    the stable code, the docs URL, a cause, a remediation, and a machine block carrying
+    `code`, `message`, `remediation`, `docs_url` (the field's name in the published schema;
+    §12.2 names the concept). So this is §O-219's shape, an implemented-and-unticked item,
+    and the gap was enforcement rather than behaviour.
+  → The two existing checks cover the standard's **edges**, not its subject:
+    `gen_error_catalogue.py --check` verifies every `ErrorCode` variant has a cause and a
+    remediation line, and `check_schema_conformance.py` verifies `error.docs_url` exists in
+    the envelope schema. Neither reads a message a user receives, so a complete catalogue
+    entry could still be dropped by the renderer — §O-225's shape exactly.
+  → Done: `tools/check_error_standard.py` drives five error cases through the **real binary**,
+    each run in human **and** `--json` mode, and asserts all five parts in both. Two decisions
+    worth recording: **vacuity is refused per case** (a case that stopped failing fails the
+    check rather than passing it, which is what a command gaining a flag would otherwise do
+    silently), and **a `remediation` equal to `message` is a violation**, because §12.2 part 4
+    asks for a runnable command and a field that restates the message reads complete in a
+    schema while telling a reader nothing.
+  → Verified: self-test 9/9, firing on each missing part and staying silent on a complete
+    error; the real corpus passes 5/5; and a **corpus injection** confirms the check works
+    against the real renderer — renaming the docs URL host in `ErrorCode::docs_url` makes all
+    five cases report `no docs URL in the human output`, restored byte-for-byte from SHA-256
+    and green afterward. The injection failed **twice** before it worked, both times because
+    it did not reproduce the defect, and the diagnostic that separated the two was reading
+    the binary's own output under the fault. Recorded as §O-231.
+  → Wired into `ci.yml`'s Rust job (where a binary exists) and `docker/entrypoint.sh`, which
+    skips with a stated reason when no binary is built — a check that silently passes on a
+    missing subject certifies nothing.
   → §12.2 Error message design standard
 - [x] **DX-005** Implement the `QQQ-XXXX` error-code registry with generated docs pages.
   → Done: `tools/gen_error_catalogue.py` generates `docs/errors.md` from the

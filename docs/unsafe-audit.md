@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **146** |
+| `.rs` files scanned under `crates/` | **147** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -35,7 +35,19 @@ push, which is the mechanism doing its job. The first was **141 → 142**, when
 `crates/qqq-serve/tests/accept_bound.rs`, which arrived with the per-tenant connection
 ceiling. The third is **143 → 146**, from three files in one session:
 `crates/qqq-pkg/src/signature.rs`, `crates/qqq-run/src/verify.rs`, and
-`crates/qqq-run/src/style.rs`. The number above is read from the scanner, never from memory: to
+`crates/qqq-run/src/style.rs`. The fourth is **146 → 147**, from
+`crates/qqq-run/tests/worker_pool.rs`.
+
+**Four drifts in one working period, and every one was caught by CI rather than locally.** That
+is the mechanism working, and it is also a fact worth stating plainly: this number changes
+whenever *any* `.rs` file is added under `crates/`, including a test file whose subject has
+nothing to do with `unsafe`. The counting is deliberately broad — a safety document should not
+narrow its own sample — so the churn is the price of that choice rather than a defect in the
+check. Whoever adds a file should expect this, and the fix is one command:
+
+```
+python tools/audit_unsafe.py --check-doc   # prints the pair that disagrees
+``` The number above is read from the scanner, never from memory: to
 update this document, run the tool and copy its summary line, or let `--check-doc` print the pair
 of numbers that disagree.
 

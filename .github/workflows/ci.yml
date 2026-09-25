@@ -736,6 +736,19 @@ jobs:
       - name: test
         run: cargo test --workspace --all-features --verbose
 
+      # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
+      # checks cover the *catalogue* (every code has a cause and a remediation line) and the
+      # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a
+      # complete catalogue entry can still be dropped by the renderer -- `§O-225`'s shape.
+      #
+      # This drives the binary built above and holds real errors to all five parts in both
+      # the human and `--json` forms. It sits here rather than in the checker job because its
+      # subject is a built binary, and the checker job has none.
+      - name: every error meets the §12.2 standard (DX-004)
+        run: python tools/check_error_standard.py
+      - name: prove the error-standard check fires
+        run: python tools/check_error_standard.py --self-test
+
       # §12.3's DX-commitments table is titled "measurable, in CI", and its row
       # is `qqqai --help` for any command <= 40 lines. The unit test asserts it,
       # but a number buried in test output is not *measured* in the sense the

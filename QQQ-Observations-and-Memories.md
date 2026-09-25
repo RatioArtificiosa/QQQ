@@ -18895,4 +18895,79 @@ placed where `find_artifact` looks (`target/wasm32-wasip2/release/orders_api.was
 `target/qqq/`, which is where a different command stages its output and where the first version of
 the fixture put it, earning a correct `503 not_built`.
 
+## §O-231 — `DX-004` was already met, the check for it is new, and the injection
+that proved the check failed twice before it worked
+
+**Found and fixed:** 2026-09-24. **Anchors:** `DX-004` (§12.2's error-message standard),
+`DX-005` (the code registry), `§O-227` (a checker whose pattern matched nothing).
+
+### The standard was met; nothing checked that it was
+
+§12.2 fixes five parts to every error message, in order: *what happened*, the *stable code and
+docs URL*, *why*, *the fix*, and *a machine-readable block* with `code`, `message`, `cause`,
+`remediation`, `docs`. Two existing checks cover its edges:
+
+| Check | Covers |
+|---|---|
+| `gen_error_catalogue.py --check` | every `ErrorCode` variant has a cause and a remediation line |
+| `check_schema_conformance.py` | `error.docs_url` exists in the published envelope schema |
+
+Neither reads a message a user receives. **Measured** on six real errors driven through the built
+binary, all five parts are present in every one — code, docs URL, cause, remediation, and a
+complete machine block — so the standard was already implemented and unenforced. That is
+§O-219's shape (implemented and unticked), and the same shape §O-225 records in the other
+direction (a value computed, stored, published in one format and dropped by the other).
+
+`tools/check_error_standard.py` closes it: five cases driven through the real binary, each run in
+human **and** `--json` mode, with the code required to match between them.
+
+### Two design decisions worth stating
+
+**Vacuity is refused per case.** A run that stopped failing satisfies "no error violates the
+standard", so every case first asserts a non-zero exit and an `error[QQQ-` prefix. A case whose
+command gained a flag, or whose project gained a manifest, fails the check rather than passing it.
+
+**A remediation equal to the message is a violation.** §12.2 part 4 asks for "a runnable
+command or an exact diff where possible"; a `remediation` field that restates `message` reads
+complete in a schema and tells the reader nothing new. The check compares them literally, which is
+cheap and catches the shape that passes everything else.
+
+### The injection failed twice, and both failures were the injection
+
+This is the part worth keeping, because it is §O-227 recurring inside one session.
+
+**Attempt one** replaced the first occurrence of `https://qqq.codes/errors/` in
+`qqq-core/src/error.rs`. That occurrence is inside a **doc comment** on the line above
+`docs_url()`. The real `format!` was untouched, the binary kept printing the correct URL, and the
+checker reported `NOT CAUGHT` — a true statement about the injection and a false one about the
+checker.
+
+**Attempt two** anchored on the whole `format!` expression. The checker then fired on all five
+cases with `no docs URL in the human output`, restored byte-for-byte and green afterward.
+
+**The diagnostic step is what separated them.** Before blaming the checker, the fault was injected
+and the *binary's own output* was read directly: it printed `https://example.invalid/errors/QQQ-5002`
+and contained no `qqq.codes/errors`. That proved the fault reached the artifact, which located the
+fault in the injection rather than the check. §O-227 drew exactly this rule — *a fault
+injection that does not reproduce the defect is not evidence about the checker* — and it took
+two attempts to satisfy it here.
+
+### The generalisable form, now stated three times
+
+**Prove the fault reached the artifact before concluding the check is blind.** The proof is not the
+edit landing in the file; it is the artifact's own behaviour changing. For a compiled subject that
+means reading the binary's output under the fault, which is one command and removes the ambiguity.
+
+### A drift that keeps recurring
+
+`docs/unsafe-audit.md` records how many `.rs` files the scanner saw, and it drifted **four times**
+in one working period — 141→142, 142→143, 143→146, 146→147 — each time because a
+`.rs` file was added under `crates/`, including test files whose subject has nothing to do with
+`unsafe`. Every occurrence was caught by CI rather than locally.
+
+The document now records the pattern rather than only the number, because the churn is a
+consequence of a deliberate choice: the scan is broad so the safety claim's sample is broad, and a
+broad sample moves whenever the tree does. One command resolves it
+(`python tools/audit_unsafe.py --check-doc` prints the disagreeing pair).
+
 *End of `QQQ-Observations-and-Memories.md`.*

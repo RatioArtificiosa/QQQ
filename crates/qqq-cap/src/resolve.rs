@@ -298,6 +298,58 @@ impl GrantSet {
     /// The returned set is always a subset of `self`. This holds for both
     /// modes and is asserted by a debug assertion *and* by a unit test that
     /// tries to widen with every mode.
+    ///
+    /// # Examples
+    ///
+    /// The two modes can only ever remove authority — including when the
+    /// caller asks for capabilities the set never had. Apply an allowlist and
+    /// a deny rule to a set that starts empty and nothing appears:
+    ///
+    /// ```
+    /// use qqq_cap::{Capability, GrantSet, Layer, Overlay};
+    ///
+    /// let mut grants = GrantSet::empty();
+    /// assert!(grants.is_empty());
+    ///
+    /// // An "allow only" overlay is an intersection, so it cannot introduce a
+    /// // capability the set did not already hold — the empty set stays empty.
+    /// let allow = Overlay::allow_only(
+    ///     Layer::Organization,
+    ///     [Capability::HttpServer, Capability::CryptoHash],
+    ///     "prod baseline",
+    /// );
+    /// grants = grants.narrow(&allow);
+    /// assert!(!grants.grants(Capability::HttpServer));
+    /// assert!(grants.is_empty());
+    ///
+    /// // A deny overlay subtracts. Subtracting from nothing is still nothing.
+    /// let deny = Overlay::deny(Layer::Platform, [Capability::FsRead], "no disk");
+    /// grants = grants.narrow(&deny);
+    /// assert!(grants.is_empty());
+    ///
+    /// // The only way any authority exists is for the manifest to declare it,
+    /// // because the manifest is the sole layer permitted to grant.
+    /// let manifest = qqq_cap::Manifest::parse(
+    ///     "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
+    ///      [capabilities.http]\nserver = true\n",
+    /// )
+    /// .expect("a minimal manifest parses");
+    /// let granted = GrantSet::from_manifest(&manifest);
+    /// assert!(granted.grants(Capability::HttpServer));
+    /// assert_eq!(granted.applied_layers(), [Layer::Manifest]);
+    ///
+    /// // Narrowing that set keeps a subset and records who narrowed it.
+    /// let narrowed = granted.narrow(&Overlay::deny(
+    ///     Layer::Platform,
+    ///     [Capability::HttpServer],
+    ///     "ingress is closed at the edge",
+    /// ));
+    /// assert!(!narrowed.grants(Capability::HttpServer));
+    /// assert_eq!(
+    ///     narrowed.applied_layers(),
+    ///     [Layer::Manifest, Layer::Platform]
+    /// );
+    /// ```
     #[must_use]
     pub fn narrow(&self, overlay: &Overlay) -> Self {
         // Defence in depth: an overlay that claims granting authority is a

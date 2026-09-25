@@ -758,7 +758,7 @@ jobs:
       #
       # **This number must be lowered, never raised.** Raising it records a step backwards.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2113
+        run: python tools/check_api_examples.py --allow 2109
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

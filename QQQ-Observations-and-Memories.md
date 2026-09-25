@@ -16288,8 +16288,8 @@ produces it.
 |---|---|---|---|
 | `DOC-017` | 13 packages, 20 interfaces, 71 functions, 47 types | **15 / 22 / 80 / 53** | the generated page's own first line, and `check_wit_reference.py` |
 | `DX-013` | `--help` is 39 lines after the fix | **40** | `qqqai --help`; the item's own limit is `≤ 40`, so the item passes and the sentence was off by one |
-| `PERF-001` | 2305 passed | **<!-- qqq:claim workspace-tests -->2546<!-- /qqq:claim -->** | the gate's `cargo test --workspace`, summed |
-| `SRV-018` | 2249 passed | **<!-- qqq:claim workspace-tests -->2546<!-- /qqq:claim -->** | the same command |
+| `PERF-001` | 2305 passed | **<!-- qqq:claim workspace-tests -->2547<!-- /qqq:claim -->** | the gate's `cargo test --workspace`, summed |
+| `SRV-018` | 2249 passed | **<!-- qqq:claim workspace-tests -->2547<!-- /qqq:claim -->** | the same command |
 | `CON-009` | 73 functions, 13 interfaces | **82 / 15** | `check_wit_errors.py` |
 | `CON-010` | 40 source files | **73** | `check_no_ambient.py` |
 
@@ -16316,6 +16316,13 @@ fail correctly on a number that was right. A drift table has one re-derivable co
 frozen one, and conflating them is the same error as conflating a claim with its correction. The WIT-count rows are not
 marked here because `check_wit_reference.py` and `check_wit_errors.py` already re-derive
 them; a second mechanism for one number would be two answers to one question (`DOC-018`).
+
+**What the marked cell means, stated so the marker is not read as history.** The `Measured`
+column is the *current* size of the workspace test run, and it is expected to grow — the
+marker turns "this number is what the command yields right now" into a checkable fact, and a
+new test bumps it deliberately in the same commit that adds the test. The two numbers it
+replaced (2305, 2249) were *historical*: each was true when its entry was written and neither
+claimed otherwise. Both readings appeared in the document at once, which is `§O-235`'s subject.
 
 **The durable fix is in how the entries are phrased.** Each corrected claim now names the
 command that produces it -- `check_wit_errors.py`, `check_no_ambient.py`, `qqqai --help`, the
@@ -19131,5 +19138,83 @@ loses.
 
 `cargo test -p qqq-run --test serve_policy --test worker_pool`, six consecutive runs: all green,
 13 tests each. `clippy -D warnings` clean. CI on the fix read separately.
+
+## §O-234 — A stale doctest binary reports a failure that does not exist, and a
+## text-mode write silently rewrote a file from LF to CRLF
+
+Two faults in one fault-injection script, both of which produced a *confident wrong answer* and
+neither of which announced itself.
+
+**The stale relink.** The script wrote a deliberately broken `narrow()` into
+`crates/qqq-cap/src/resolve.rs`, required the new doctest to fail (it did, and the
+narrowing `debug_assert!` named the reason), then restored the file and re-ran the doctest —
+which still failed, panicking from a line in source that no longer contained the fault. The
+source on disk was correct: `git diff --stat` showed only the intended +52 lines and the SHA-256
+matched the pre-injection digest. Cargo fingerprints a doctest binary on the source's **mtime**,
+and a write-and-restore that lands in the same filesystem tick, at the same size, leaves the
+fingerprint unchanged — so Cargo re-ran the binary it had built from the *broken* source. Touching
+the file and re-running turned it green with no code change. **The lesson: never trust a restored
+verification without forcing a rebuild**, and prefer a check that reads the bytes (does the
+injection site still exist?) over one that reads an exit code.
+
+**The line-ending rewrite.** The script's restore used `Path.write_text` and
+`read_text(encoding="utf-8")`, which translate `\n` to `\r\n` on Windows. The file is stored
+LF-only, so the first restore silently converted all 1,155 line breaks; the digest changed, and a
+later `git checkout -- <file>` normalized the working copy back to LF and took the new doctest
+with it — content lost, recovered only because it was still in the transcript. **The lesson: a
+fault-injection harness must do byte-level IO** (`read_bytes().decode()` / `write_bytes(...encode())`)
+**and assert the digest of the restore**, not just the pass/fail of the test that follows it.
+
+A third false signal sat on top of both: the script printed `PASS: restored byte-for-byte` while
+the digests differed, because the digest was computed on the file *before* the restore path ran.
+The verification was placed after the wrong operation. That is `§O-226`'s shape — a check that
+cannot fail, reported as a check that passed.
+
+### Fix
+
+`fault_inject_narrow.py` now uses byte-level IO, refuses to run if the source is already modified,
+re-asserts the injection site is absent after restoring, and forces a relink before the final
+doctest run. With the corrected harness: breaking `narrow()` fails the doctest; the restore
+returns the digest to `78ba6cecab88657e547432d6a0936192e4ccf0ccdfc6b2c06f139be8fa2be94c`,
+identical to the baseline; and the doctest passes again.
+
+## §O-235 — `DOC-018`'s first live claim turned a historical table into a gate that
+## fails whenever the project adds a test
+
+`DOC-018` landed with two `workspace-tests` claim markers in the drift table, and the next CI
+run failed on them:
+
+```
+STALE  QQQ-Observations-and-Memories.md:16291  `workspace-tests` says 2546, the tree has 2547
+STALE  QQQ-Observations-and-Memories.md:16292  `workspace-tests` says 2546, the tree has 2547
+```
+
+The checker was right — the tree gained exactly one test, the `GrantSet::narrow` doctest added in
+the same push, so 2546 became 2547. The defect is not the number; it is that **the number sits in
+a table whose entire purpose is to record what a past audit found.** Those columns read `The entry
+said 2305` beside `Measured`, and the `Measured` value was true when the audit ran. Pinning a live
+resolver to it asserts that the 2026 audit's finding is permanently equal to the workspace's
+current test count, which is a claim nobody wants: it makes every future test addition break a
+build over a sentence about the past.
+
+Two readings had been collapsed into one cell. A **historical fact** ("this is what the command
+yielded when the audit ran") and a **live invariant** ("this is what the command yields now") are
+different claims, and a marker can only assert the second. The earlier fix in the same section had
+already caught the mirror-image error — marking the `The entry said` column, which made the checker
+fail on a historical value that was correct — and this is the same mistake one column over.
+
+The cell now states which reading it carries: the `Measured` column is the workspace's *current*
+test count, the marker re-derives it, and a test added today bumps it in the same commit. The
+prose beside the table says so explicitly rather than leaving the reader to infer it from a comment
+they cannot see in rendered Markdown.
+
+**The general rule.** Before marking a number as re-derivable, ask whether the sentence around it
+is about *now* or about *then*. A resolver can only check a claim about now; a claim about then
+belongs in a frozen column with no marker, and the two must not share a cell.
+
+### Verification
+
+`python tools/check_doc_claims.py` after updating both cells: `2 claim(s) match the tree`.
+The failure was reproduced from the CI log for run `36087065310` before the fix was written.
 
 *End of `QQQ-Observations-and-Memories.md`.*

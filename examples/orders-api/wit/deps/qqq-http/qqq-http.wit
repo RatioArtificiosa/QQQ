@@ -51,8 +51,10 @@ interface http {
   /// An outgoing request.
   record request {
     method: method,
-    /// The full URL. The host parses it; a guest cannot smuggle a different
-    /// host past the allowlist by crafting the authority section.
+    /// The full URL. The host parses it and matches its authority against the
+    /// allowlist, so a guest cannot smuggle a different host past the allowlist by
+    /// crafting the authority section — for example with userinfo (`https://a@b/`)
+    /// or a second `@`. The **resolved** address is not checked; see `send`.
     url: string,
     headers: list<header>,
     /// The body as bytes.
@@ -73,8 +75,33 @@ interface http {
   /// # Errors
   ///
   /// `host-not-allowed` when the destination is outside the manifest's
-  /// allowlist. The host checks the **resolved** authority, so a redirect
-  /// cannot be used to escape the allowlist.
+  /// allowlist.
+  ///
+  /// # What is checked today, and what is not
+  ///
+  /// The host matches the **authority as written in `url`** against the allowlist,
+  /// after normalizing case, a trailing dot and the default port. Three things this
+  /// comment used to claim are **not** implemented, and saying so here matters because
+  /// this file is the contract:
+  ///
+  /// * **No resolved-address check.** The allowlist matches a *name*, and nothing
+  ///   refuses a name that resolves to a loopback, private, link-local or
+  ///   cloud-metadata address. A DNS answer pointing at `169.254.169.254` is not
+  ///   refused on that basis.
+  /// * **No DNS pinning.** There is no resolution step to pin, because `send` has no
+  ///   transport yet: it refuses unconditionally with `host-not-allowed` rather than
+  ///   dialing.
+  /// * **No redirect policy.** Redirects are not followed, so there is no per-hop
+  ///   re-authorization to describe.
+  ///
+  /// The sentence that used to be here — *"the host checks the **resolved** authority,
+  /// so a redirect cannot be used to escape the allowlist"* — described a stronger
+  /// runtime than this one. It was written when the check was planned rather than
+  /// built, and a guest author reading it would have relied on a guarantee nothing
+  /// provides. The gap is tracked as `SEC-022`'s remainder (literal-address refusal is
+  /// implemented; resolved-address refusal, pinning and redirect re-authorization are
+  /// not) and is recorded in the Observations document.
+  ///
   /// A function and a record cannot share a name in one interface, so
   /// the verb is `send` and the noun is `request`.
   @since(version = 1.0.0)

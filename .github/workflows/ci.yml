@@ -313,6 +313,16 @@ jobs:
       - name: Prove the bindings check catches drift in both directions
         run: python tools/check_wit_bindings.py --self-test
 
+      # The vendored copies under `deps/` are the artefact a guest author's toolchain
+      # actually consumes. `check_wit_bindings.py` guards the relationship between `wit/`
+      # and the registry, and does not look at `deps/` — so a corrected interface could
+      # leave a vendored copy asserting a **retracted** guarantee, in the file a guest
+      # reads. That is what happened to `qqq-http`'s egress paragraph (`§O-270`).
+      - name: Validate that every vendored WIT copy matches its source
+        run: python tools/check_wit_vendoring.py
+      - name: Prove the vendoring check catches a drifted copy
+        run: python tools/check_wit_vendoring.py --self-test
+
       # `LIC-006`. A file without an SPDX header has no licence any scanner can
       # determine, and §13.2's model depends on which licence governs which code — the
       # workspace `Cargo.toml` covers the crate, not a file copied out of it.

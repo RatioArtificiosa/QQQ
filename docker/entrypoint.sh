@@ -902,6 +902,8 @@ cmd_checks() {
     python3 tools/check_verified_facts.py --self-test
     python3 tools/check_wit_bindings.py
     python3 tools/check_wit_bindings.py --self-test
+    python3 tools/check_wit_vendoring.py
+    python3 tools/check_wit_vendoring.py --self-test
     python3 tools/check_spdx.py
     python3 tools/check_spdx.py --self-test
     python3 tools/check_license_boundary.py

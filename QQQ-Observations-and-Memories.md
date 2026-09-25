@@ -21052,4 +21052,189 @@ only after the referents are known to match.
 
 ---
 
+## §O-270 — The vendored WIT copies told guest authors a security guarantee that had been retracted
+
+**Found:** while auditing the corpus for stale claims (`A7`). **Anchors:** `wit/qqq-http.wit`,
+`wit/app/deps/qqq-http/qqq-http.wit`, `examples/orders-api/wit/deps/qqq-http/qqq-http.wit`,
+`tools/check_wit_bindings.py`. **Type:** a false security property in the artefact a guest's
+toolchain consumes.
+
+### What was wrong
+
+`wit/qqq-http.wit` was corrected to admit the truth about `send`: it has **no transport**, it
+refuses unconditionally with `host-not-allowed`, the **resolved** address is not checked, and
+there is no redirect policy. The corrected file now says so explicitly, including a paragraph
+that quotes the sentence it is retracting:
+
+> *"The sentence that used to be here — 'the host checks the **resolved** authority, so a
+> redirect cannot be used to escape the allowlist' — described a stronger [guarantee] …"*
+
+**The correction never reached the copies.** Both vendored worlds still carried the original:
+
+```
+/// allowlist. The host checks the **resolved** authority, so a redirect
+/// cannot be used to escape the allowlist.
+```
+
+| File | Bytes | State |
+|---|---|---|
+| `wit/qqq-http.wit` | 4,746 | corrected |
+| `wit/app/deps/qqq-http/qqq-http.wit` | 3,144 | **stale — carried the retracted claim** |
+| `examples/orders-api/wit/deps/qqq-http/qqq-http.wit` | 3,144 | **stale — carried the retracted claim** |
+
+The two vendored copies were byte-identical to each other (sha `535C1F13…`), so this was one
+copy made twice, not two independent edits — which is why they agreed with each other and with
+nothing else.
+
+**Why it matters more than ordinary staleness.** A guest author's toolchain does not read
+`wit/`; it reads the vendored world under `deps/`. So the file **the reader actually has** told
+them a guarantee the runtime does not provide: that a redirect cannot escape the egress
+allowlist, in a capability-secure runtime whose entire value proposition is that its guarantees
+are real and checkable. The source of truth told the truth and the consumed artefact told a lie.
+
+### Why nothing caught it
+
+`tools/check_wit_bindings.py` enforces the relationship between `wit/` and the `qqq-abi`
+registry — every file embedded, every `include_str!` naming a real file, every declared package
+registered. It looks at `wit/*.wit` and the crate. **It does not look at `deps/`.** So every
+vendored copy sat outside every control, and `ABI-015`'s check reported the `wit/` directory
+consistent while the copies of it drifted — `§O-085`'s shape once more: a control that covers
+what it was pointed at and not what it was supposed to guarantee.
+
+### The fix, and the check on it
+
+Before copying, I verified the change was **documentation-only** rather than an interface change:
+stripping comments and comparing gave **identical** code — 46 lines each, same
+`package qqq:http@1.0.0`, same interfaces, `Compare-Object` empty. So the remedy is a copy.
+
+Both vendored copies now match the source byte-for-byte (all three at sha `DA34EB49…`, 4,746
+bytes, LF preserved). The two `app.wit` copies were already identical, so there was no second
+drift.
+
+### The guard
+
+`tools/check_wit_vendoring.py`, new: every `**/deps/**/*.wit` whose basename has a counterpart
+in `wit/` must be **byte-identical** to it. Byte-identity rather than a structural comparison is
+deliberate — the vendored file *is* a copy, the remedy is a copy, and a parsed comparison would
+accept a copy that had drifted in its **documentation**, which is precisely what happened here.
+
+Three design choices worth stating:
+
+- A vendored file with **no** counterpart (a third-party package such as `wasi:http`) is
+  **reported, not failed** — it is not ours to compare — so an unowned copy is visible rather
+  than silently skipped.
+- **Vacuity fails.** If no comparable pair exists, the check fails rather than passing, because a
+  checker that compares nothing has proved nothing and would go on passing after a layout change
+  moved the files out of its reach.
+- `--self-test` carries **8 cases** including both directions of drift (a copy ahead of and
+  behind its source), the third-party case, and two vacuity cases.
+
+**Fault-injected with the real defect, not a synthetic one:** re-inserting the retracted sentence
+into a vendored copy made the checker exit 1 with
+`has drifted from its source in `wit/` -- line 87: vendored b'  /// allowlist. The host checks the
+**resolved** authority, so a redi' != source b'  /// * **No resolved-address check. ...'`; restoring
+and touching the file made it exit 0 with all three copies byte-identical again.
+
+Registered in **both** gates, beside `check_wit_bindings.py` — `ci.yml` (the `wit` job) and
+`docker/entrypoint.sh`, each with its `--self-test` half.
+
+`ABI-015` is a ticked item whose text describes the check it shipped; it is a record of a past
+audit and is **not** amended. Its coverage gap is closed by a sibling checker instead, which is
+the honest form: the frozen sentence stays true for what it described.
+
+### A gap found while wiring it
+
+The repository's rule is *"add a checker to `ci.yml` **and** `docker/entrypoint.sh`"*, and the
+checklist repeats it a dozen times. **No checker enforces it.** Nothing verifies that the two
+gates run the same set, so the rule is discipline-only — and a checker wired into one gate is a
+control that covers one environment, which is the same shape as everything above. Recorded for a
+follow-up rather than fixed here.
+
+→ `wit/qqq-http.wit`, `wit/app/deps/qqq-http/qqq-http.wit`,
+`examples/orders-api/wit/deps/qqq-http/qqq-http.wit`, `tools/check_wit_vendoring.py`,
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`
+
+---
+
+## §O-271 — The linker is installed but nothing on `PATH` finds it; and the locale encoding reaches a script's own stdout
+
+**Found:** when `cargo test` could not run and `.scratch/run_ci_checkers.py` crashed while
+printing failures. **Anchors:** the shell environment, `.scratch/run_ci_checkers.py`.
+
+### The linker
+
+`cargo check` succeeded in 0.6 s, so the toolchain looked healthy. `cargo build` and `cargo test`
+then failed — and **not with a linker error at first**, because the run was executed from the
+wrong working directory:
+
+```
+error: key with no value, expected `=`
+ --> ..\..\..\..\..\..\..\..\Cargo.toml:1:5
+ 1 | use std::collections::HashSet;
+```
+
+That is a `.rs` file being parsed as a manifest. **Always `Push-Location E:\QQQ` explicitly**:
+each shell call is fresh, and a relative cargo invocation from the session workspace walks up the
+tree until it finds a `Cargo.toml` it then misreads.
+
+With the working directory right, the real error appeared:
+
+```
+LINK : fatal error LNK1104: cannot open file 'msvcrt.lib'
+```
+
+`link.exe` is **not on `PATH`**. Two MSVC toolchains are installed —
+`…\Visual Studio\2022\Preview\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64\link.exe` and a 2019
+BuildTools one — and a hand-built `LIB` pointing at the Windows SDK's `ucrt\x64` still failed,
+because **neither installed SDK ships `msvcrt.lib` at the path I guessed** (checked:
+`10.0.19041.0` and `10.0.22621.0` both absent). Guessing the environment is the mistake; the SDK
+knows its own layout.
+
+**The recipe that works** — let the toolchain describe itself:
+
+```powershell
+$env:PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL'   # so cmd.exe resolves
+$env:PATH    = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+               [Environment]::GetEnvironmentVariable('Path','User')
+Push-Location E:\QQQ
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Preview\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 -no_logo >nul 2>&1 && cargo test --workspace'
+```
+
+`VsDevCmd.bat` sets `PATH`, `LIB` and `INCLUDE` from the installation rather than from a guess.
+Verified: `cargo test -p qqq-core` → exit 0, tests passing.
+
+**This was not previously recorded, and it blocks the entire Rust half of the gate** — `cargo
+fmt`, `cargo clippy`, `cargo test`, `examples/orders-api`, and every checker that compiles
+(`fault_inject_guard.py`, `check_api_examples.py`) all depend on it. Reproducing CI's *command* is
+not enough when the environment that command runs in is missing (`§O-116`'s rule, one layer down).
+
+### The encoding, third face
+
+`.scratch/run_ci_checkers.py` reads each checker's output as UTF-8 **correctly** — and then
+crashed printing the last 600 characters of a failure:
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode character '\ufffd' in position 556
+```
+
+Its own **stdout** is cp1252. A checker that reports a non-ASCII byte renders it `U+FFFD`, and
+`cp1252` cannot encode that, so the crash lands exactly when the failure detail is needed. The fix
+is the same three lines as `§O-268`:
+
+```python
+for _stream in (sys.stdout, sys.stderr):
+    _stream.reconfigure(encoding="utf-8", errors="replace")
+```
+
+**Three faces of one class, now recorded:** a subprocess decoded with the locale encoding
+(`check_handoff.py`, `§O-268` — 43 sites in 27 tools), a script's own stdout
+(`run_ci_checkers.py`, here), and a script's stdout in a different harness (`grok-history.py`).
+The `§O-268` scan covers `tools/`; it does **not** cover `.scratch/`, which is gitignored and so
+cannot be enforced in CI — worth knowing when the checker is written, and worth stating in its
+docstring rather than leaving as a surprise.
+
+→ `.scratch/run_ci_checkers.py`, `tools/check_handoff.py`, `docs/AGENT-HANDBOOK.md` §3.2
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

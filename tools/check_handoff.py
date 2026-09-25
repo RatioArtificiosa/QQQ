@@ -462,14 +462,20 @@ def self_test() -> int:
     # The driver must reduce `current()`'s `{bytes, sha256}` mapping to digests before
     # handing it to the rule. Feeding the raw mapping in made the first version report
     # every document as drifted, because a dict is never equal to a hex string -- a bug
-    # that announced itself as `{'bytes': 40` where a digest belonged. Pinned both ways
-    # so the reduction cannot be dropped again without a case going red.
-    raw = current(ROOT)
+    # that announced itself as `{'bytes': 40` where a digest belonged.
+    #
+    # The shape is *synthetic*, not taken from the live tree. An earlier version of this
+    # case called `current(ROOT)` and `_recorded_digests()`, which made `--self-test`
+    # fail whenever the corpus was legitimately mid-edit -- conflating "the rule works"
+    # with "the tree is at rest". The second claim belongs to `run_checks`, which has its
+    # own digest rule; a self-test must be runnable on a dirty tree.
+    raw = {"A.md": {"bytes": 40, "sha256": "aaaa"}}
     reduced = {name: str(entry.get("sha256", "")) for name, entry in raw.items()}
-    check("the driver's digest reduction is what the rule accepts",
-          digest_problems(_recorded_digests(), reduced, reduced) == [])
+    check("the driver's digest reduction turns {bytes, sha256} into the digest",
+          reduced == {"A.md": "aaaa"}
+          and digest_problems({"A.md": "aaaa"}, reduced, reduced) == [])
     check("the RAW current() mapping is refused rather than silently passed",
-          digest_problems(_recorded_digests(), raw, raw) != [])
+          digest_problems({"A.md": "aaaa"}, raw, raw) != [])
 
     # 3. EOL: a working-tree file must be the EOL its attribute names. `git status`
     #    cannot see this, because it normalizes before comparing.

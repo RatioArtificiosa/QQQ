@@ -87,6 +87,11 @@ RE_EXPLICIT_ANCHOR = re.compile(r"\{#([a-zA-Z0-9\-_]+)\}\s*$")
 
 # Stub markers
 RE_STUB_MARKER = re.compile(r"QQQ-STUB\(([A-Z]{2,5}-\d{3})\)")
+
+# A file whose whole subject is fabricating references declares this and is skipped
+# by check [13]. A marker in the source rather than a list in this file, for the same
+# reason `checklist-citations-exempt` is: a list here drifts from the tree it describes.
+EXEMPT_MARKER = "observation-citations-exempt"
 RE_STUB_OBS = re.compile(r"^###\s+§S-\d{3}\b", re.MULTILINE)
 
 
@@ -388,6 +393,55 @@ def main() -> int:
         did = f"D-{m.group(1)}"
         if did not in obs_decisions:
             errors.append(f"[10] proposal cites Observations decision §{did}, which is not defined")
+
+    # ----------------------------------------------------------------------
+    # 13. Every observation cited from the corpus must exist.
+    #
+    # [10] catches the Proposal citing an undefined **decision**. This is the same
+    # rule for every observation family and every citing document, and it exists
+    # because the narrower rule was not enough: `§O-249` was cited by eleven
+    # references across the checklist, a checker and a budget table while the entry
+    # itself had never been written, and nothing reported it (`§O-266`).
+    #
+    # # Why the test is "appears anywhere" rather than "is a definitional heading"
+    #
+    # The stricter version -- require the citation to be a heading -- was measured
+    # against this corpus before being wired in, and produced four false positives
+    # and no true ones: definitions here appear as `### O-181:` with no sigil, and as
+    # table rows (`| `§Q-012` | ... |`). A rule that cannot tell a definition from a
+    # citation without structure is noise, and a noisy gate gets disabled. "The
+    # referent exists" is the weaker claim, but it is sound -- and sufficient: it
+    # reports `§O-249` when the entry is stripped, and nothing when it is present.
+    # ----------------------------------------------------------------------
+    citing: dict[str, set[str]] = {}
+    for rel, body in (("QQQ-Proposal-V1.md", proposal), ("QQQ-Checklist-V1.md", checklist)):
+        for m in re.finditer("§([ODCSQM]-\\d{3})", body):
+            citing.setdefault(m.group(1), set()).add(rel)
+    for src in root.rglob("*"):
+        if not src.is_file() or src.suffix not in {".rs", ".py", ".md", ".toml", ".wit", ".yml"}:
+            continue
+        if ".git" in src.parts or "target" in src.parts or "node_modules" in src.parts:
+            continue
+        # The canonical documents are handled above; walking them again would only
+        # re-add their own definitions, which reads as double coverage.
+        if src.name.startswith("QQQ-"):
+            continue
+        try:
+            content = src.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if EXEMPT_MARKER in content:
+            continue
+        for m in re.finditer("§([ODCSQM]-\\d{3})", content):
+            citing.setdefault(m.group(1), set()).add(str(src.relative_to(root)))
+
+    for cid in sorted(citing):
+        if ("§" + cid) not in observations:
+            where = ", ".join(sorted(citing[cid])[:4])
+            errors.append(
+                f"[13] §{cid} is cited by {where} but is not defined in Observations"
+            )
+
 
     # ----------------------------------------------------------------------
     # 10b. Every decision must be cited from the Proposal.

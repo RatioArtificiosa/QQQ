@@ -20611,4 +20611,96 @@ function's local `import subprocess` as a side effect of the match, leaving `_ru
 failed. This is the concrete case §O-229 argues for in the abstract: **one half passing is not
 evidence, and the half that fails is usually the one nobody runs.** The import is now module-level.
 
+## §O-249 - The `Budget::ALL` table cited ten files that never existed, and the gate
+checked only their shape
+
+**Found:** in the `PERF` walk. **Anchors:** `crates/qqq-bench/src/budget.rs` (`Budget::ALL`),
+`tools/check_bench_contract.py`. **Written retroactively:** the number was cited by eleven
+references across four files but the entry itself had never been written, which
+`§O-266` records as a defect in its own right.
+
+### What was wrong
+
+Every row of `Budget::ALL` carries a `method` field naming where its number comes from. All ten
+read `bench/<file>.rs::<symbol>`. **Not one of those files existed.** `crates/qqq-bench/src/`
+holds `budget.rs`, `lib.rs`, `loadgen.rs`, `methodology.rs`, `stats.rs` and `workload.rs`, and
+never had a `bench/` directory at any point in its history -- so ten rows named a measurement
+site that could not be opened, and the field told a reader that a benchmark existed where none
+did.
+
+The gate was green throughout. `tools/check_bench_contract.py` asserted the **shape** of the
+citation -- that the string began with `bench/` -- and never that it resolved to anything. The
+rule was satisfied by every one of the ten fabrications, and by any other string with the right
+prefix. **Asserting the shape of a citation is not asserting the citation**, which is the same
+error as `ARCH-011`'s three hand-written counts one layer down: a check that inspects the form of
+a claim instead of its content reports success while the claim is false.
+
+### The fix
+
+The ten citations now use one of three admitted forms, each of which resolves or says plainly
+that it does not:
+
+| form | count | meaning |
+|---|---|---|
+| `crate::<place::Symbol>` | 3 | a symbol this crate declares -- the row's number comes from a real measurement site |
+| `NOT_IMPLEMENTED::<symbol>` | 7 | no implementation exists; the marker names **what is missing**, so a reader learns the gap rather than a path |
+| a file under `crates/qqq-bench/src/` | 0 today | retained for rows whose site is a file rather than a symbol |
+
+`tools/check_bench_contract.py` resolves each form instead of pattern-matching it: a
+`NOT_IMPLEMENTED::` marker must name a non-empty symbol, a `crate::` citation must name a symbol
+the crate actually declares, and a file citation must name a file that exists. Its self-test
+injects a malformed marker (`NOT_IMPLEMENTED::   `) and a non-resolving citation, both of which
+must fail.
+
+Two Rust tests in `budget.rs` hold the same line from the other side:
+`every_crate_method_names_a_symbol_this_crate_declares` and
+`every_not_implemented_marker_names_what_is_missing`. The first asserts its own non-vacuity by
+confirming `pub const ALL` is present in the source it reads, so it cannot pass by finding
+nothing.
+
+### Why it is recorded rather than quietly repaired
+
+Because the same defect had a second head. Ten fabricated paths survived a green gate, and the
+reason was a rule that could not fail: `method.starts_with("bench/")`. A reader who trusts a gate
+that cannot fail is worse off than one who has no gate, so the entry names the rule that was
+wrong as well as the data it protected.
+
+**§O-266 — a citation of an observation that does not exist was invisible to every
+checker, and that is how three reserved numbers went missing.** `§O-249` is cited in
+**eleven** places -- seven in `QQQ-Checklist-V1.md`, three in `tools/check_bench_contract.py`,
+two in `crates/qqq-bench/src/budget.rs` -- and the entry itself had never been written. The
+sequence jumps from `§O-248` to `§O-252`, so `§O-249`, `§O-250` and `§O-251` were
+reserved and then skipped, while documents went on citing `§O-249` as though it held the
+reasoning it was cited for.
+
+**Nothing detected it.** `check_xrefs.py` validates the conventions it was built for -- stub
+markers against `§S-` entries, checklist IDs against the checklist, `OQ-nnn` against its
+definition -- and a citation of a non-existent **observation** was not among its rules. So the
+corpus reported itself internally consistent while eleven references pointed at nothing.
+
+Two consequences worth separating:
+
+- **`§O-250` and `§O-251` never had content.** Their intended subjects are recorded
+  elsewhere and are not lost: the shared-resource race in `serve_policy.rs` is covered by the
+  entries around `§O-250`'s neighbours (the readiness-probe shape at L17973 and the
+  ephemeral-port collision at L18894/L19137), and the local-gate-versus-CI gap by `§O-121`,
+  `§O-152` and L8906. They are unused numbers, not missing findings.
+- **`§O-249` did have content, and it mattered.** The entry is now written from the
+  citations that referenced it and from the artefacts it describes, after re-verifying each
+  claim on the current tree: `crates/qqq-bench/src/` has no `bench/` directory, the three
+  admitted citation forms are what the ten rows now use, and the checker resolves each form
+  rather than matching its prefix.
+
+**A summary asserted that all three had been appended.** They had not: `git log -S'O-249'`
+finds no commit that ever contained the string, and the file's history jumps from `§O-248`
+at `aa8e206` to `§O-252` at `d07abfa`. That is a reminder that a task summary is a claim
+about work, not a record of it -- the same distinction this whole document exists to preserve --
+and that the way to settle it is `git log -S` against the artefact rather than reading the
+summary.
+
+**The durable fix belongs in the checker, not in this paragraph.** A rule that every
+`§[ODCSQM]-nnn` cited anywhere in the corpus resolves to a defined heading would have
+reported eleven dangling references at the first run, and it is the same class as
+`check_xrefs.py`'s existing rule that a checklist ID cited by the Proposal must exist.
+
 *End of `QQQ-Observations-and-Memories.md`.*

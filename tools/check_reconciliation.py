@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
+# observation-citations-exempt
+#
+# This file's self-test fabricates `§C-007`, an entry that deliberately does
+# not exist, to prove the generator rejects a table naming an undefined correction.
+# Check [13] would otherwise report it, so the exemption is declared here -- in the
+# source, where the reason sits next to the fixture that needs it.
+
 """Verify `docs/reconciliation.md` matches Appendix A (`DOC-013`).
 
 A thin wrapper over `tools/gen_reconciliation.py --check`, with a self-test.

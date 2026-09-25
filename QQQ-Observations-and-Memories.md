@@ -22323,4 +22323,70 @@ narrow in both directions at once: it did not look at a file, and when it did, i
 
 ---
 
+## §O-283 — Phase B was entirely stale, and verifying that found a real defect inside the staleness
+
+**Found:** Phase B, all five items re-verified against HEAD before touching anything. **Anchors:**
+`crates/qqq-run/src/serve.rs`, `crates/qqq-host/src/guest_output.rs`,
+`crates/qqq-serve/src/server.rs`, `tools/check_bench_contract.py`, `QQQ-Checklist-V1.md`.
+
+### All five were already fixed, verified three independent ways
+
+The brief listed five "known-open defects that were never ticked". **None is open**, and each is
+confirmed by a *different* kind of evidence — because a comment claiming a fix is not a fix:
+
+| | Defect | Verified by |
+|---|---|---|
+| B2 | `--config` ignored by `serve` | **running the binary**: `serve --config does-not-exist.toml` → `error[QQQ-2001]: could not read 'does-not-exist.toml'`, so the flag is consumed |
+| B3 | `--tls` accepted but not applied | **running the binary**: `serve --tls` → `error[QQQ-7001]: --tls is not implemented…`, exit 2 |
+| B1 | guest stdout can forge access-log records | **running the tests**: `guest_output` 10 passed, `boundary` 35 passed |
+| B4 | body collected before route dispatch | **reading the code**: `serve_special_route` at L1554 now precedes `drain_body` at L1579, and `streaming_route` 6 passed |
+| B5 | `main()` duplicating `analyse()` | **reading the code**: `main()` calls `analyse(...)` and its docstring records the duplication it used to hold |
+
+Their checklist items are already ticked too: `CLI-011`, `SRV-004`, `SRV-005`, `SRV-007`, `SRV-008`.
+
+**The lesson is process rule 1's, earned again**: the list came from a scratch note
+(`.scratch/obs_append_180.md`) written at a point in time, and later commits fixed the defects *and*
+ticked the items — but nothing went back to close the note. A hand-off list is a snapshot, and
+`git log` is what the tree actually did. Reading the list as a work queue would have meant
+"fixing" five things that already work.
+
+### Which is how the real defect was found
+
+Verifying B3 by hand meant reading the refusal, and the remediation said:
+
+> *"terminate TLS in front of `qqqai serve` (a reverse proxy or a service mesh) **until `SRV-007`'s
+> configuration and accept path land**"*
+
+**`SRV-007` is ticked done** — *"Done: `qqq-serve::tls`. rustls 0.23 with an explicit cipher
+policy… Evidence: 35 unit tests; 21 end-to-end tests in `tests/tls.rs` that drive a real
+handshake."* So the refusal pointed an operator at a **finished item** as outstanding work.
+
+The underlying situation is coherent and the ticket boundary was simply drawn in the wrong place:
+**`SRV-007` is the TLS *library*, and it did land.** What has not landed is the **manifest
+`[server.tls]` section** and the **accept path in `serve.rs` that would read it** — two pieces, and
+**no checklist item owns either.** So a reader who followed the pointer would find a done row and no
+work item, which is worse than finding nothing: it looks like the work is already accounted for.
+
+Corrected to name the two missing pieces, state plainly that `SRV-007` is done and why, and say that
+no row owns the remainder. Verified by running it (`error[QQQ-7001]`, exit 2) and by
+`cargo test -p qqq-run serve` (35 passed).
+
+### The rule
+
+**A remediation string is a claim, and nothing checks it.** Every other claim in this repository has
+a guard — counts have resolvers, paths have `check_coderabbit_config.py`, lifecycle statuses have a
+crate test — and a sentence telling an operator *what to wait for* is validated by nobody, so it
+drifts exactly as prose does. This one drifted in the most consequential direction: it named a
+**completed** dependency, which reads as *"nothing to do here"* rather than as *"this is unowned"*.
+
+The gap it revealed is real and is recorded rather than rushed: adding a checklist item for the
+accept path would change the corpus's stated totals (586 items, and the per-area tables in §1),
+which is a change with its own arithmetic to get right. Naming it in an observation is the honest
+intermediate step; inventing a row number without updating the tables would be the defect this goal
+exists to remove.
+
+→ `crates/qqq-run/src/serve.rs`, `QQQ-Checklist-V1.md`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

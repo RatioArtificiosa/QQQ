@@ -232,8 +232,12 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
              while reporting TLS",
         )
         .with_remediation(
-            "terminate TLS in front of `qqqai serve` (a reverse proxy or a service mesh) \
-             until `SRV-007`'s configuration and accept path land",
+            "terminate TLS in front of `qqqai serve` (a reverse proxy or a service mesh). \
+             `SRV-007` is **done** — it implemented `qqq-serve::tls`: rustls 0.23, the explicit \
+             cipher policy, ALPN, and 21 end-to-end handshake tests. What has not landed is the \
+             **manifest `[server.tls]` section** and the **accept path in this command that \
+             would read it**, and no checklist item owns either. That is why this remediation \
+             names the two missing pieces instead of a row to wait for",
         ));
     }
     // `--workers > 1` was refused here until the instance pool landed, and the refusal

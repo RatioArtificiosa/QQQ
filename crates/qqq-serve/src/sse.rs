@@ -298,40 +298,29 @@ fn fold_newlines(s: &str) -> String {
 /// Split on `\r\n`, `\n` or a lone `\r`, as the specification requires, **keeping every
 /// empty field**.
 ///
-/// A single `\r` terminates a line in SSE, which is not true of most text formats and
-/// is the reason this is a named function. `str::lines` splits on `\n` and strips a
-/// trailing `\r`, so it would treat a lone `\r` as ordinary data and produce an event
-/// whose payload contains a raw `\r` — which the *client* then splits on, arriving at
-/// a different payload than the server encoded.
+/// A single `\r` terminates a line in SSE, which is not true of most text formats and is the
+/// reason this is a named function. `str::lines` splits on `\n` and strips a trailing `\r`, so
+/// it would treat a lone `\r` as ordinary data and produce an event whose payload contains a
+/// raw `\r` — which the *client* then splits on, arriving at a different payload than the
+/// server encoded. Splitting on both terminators in one pass, as an earlier version did, also
+/// turns `"a\r\nb"` into three fields with a spurious empty one between; the loop below
+/// consumes `\r\n` as a single break.
 ///
 /// # Why empty fields are kept
 ///
-/// The client joins the data lines with `"\n"` and removes the trailing one, so an empty
-/// field is not information *by itself* — but the **number** of fields is information, and
-/// it is how a trailing line break is carried. Dropping empty fields collapses
-/// `data("a")`, `data("a\n")` and `data("a\n\n")` onto the same wire form, so at most one
-/// of the three can survive the round trip.
+/// The client joins the data lines with `"\n"` and removes the trailing one, so an empty field
+/// is not information *by itself* — but the **number** of fields is information, and it is how
+/// a trailing line break is carried. The earlier version filtered them out
+/// (`s.split(['\n', '\r']).filter(|l| !l.is_empty())`), which looked harmless and silently
+/// dropped the trailing empty line a payload ending in a line break produces: `data("a\n")`
+/// encoded as one `data:` line, and the client's mandatory trim of one trailing break left
+/// `"a"`. Dropping empty fields collapses `data("a")`, `data("a\n")` and `data("a\n\n")` onto
+/// the same wire form, so at most one of the three could survive the round trip.
 ///
-/// The earlier version dropped them to stop a newline-only payload emitting a bare blank
-/// line — a real defect, produced by an earlier version still. The encoder's "at least one
-/// `data:` line" rule fixes that without discarding line structure, so the two concerns are
-/// not a trade-off and were only ever a pair because the first fix chose the wrong lever
-/// (`§O-278`).
-/// Split a payload into lines the way the specification's "split a string on line breaks"
-/// step does: `\r\n`, a lone `\n`, and a lone `\r` each end a line.
-///
-/// **Empty lines are kept, and that is the whole point of this function.** The previous
-/// version filtered them out — `s.split(['\n', '\r']).filter(|l| !l.is_empty())` — which
-/// looked harmless and silently dropped the trailing empty line that a payload ending in a
-/// line break produces. `data("a\n")` therefore encoded as one `data:` line, and the
-/// client's mandatory trim of one trailing break left `"a"`. The filter existed to stop a
-/// newline-only payload emitting a bare blank line; that concern is real, and the encoder
-/// handles it with its "at least one `data:` line" rule instead — which does not require
-/// discarding line structure (`§O-278`).
-///
-/// Splitting on both terminators in one pass, as the old version did, also turns `"a\r\nb"`
-/// into three fields with a spurious empty one between; the loop here consumes `\r\n` as a
-/// single break.
+/// The filter existed to stop a newline-only payload emitting a bare **blank line** — a real
+/// defect, produced by an earlier version still. The encoder's "at least one `data:` line" rule
+/// handles that, so the two concerns were never a trade-off; they were a pair only because the
+/// first fix chose the wrong lever (`§O-278`).
 fn split_lines(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out: Vec<&str> = Vec::new();
@@ -704,13 +693,16 @@ mod tests {
 
     // -- line splitting, directly -----------------------------------------
 
-    /// The splitter handles every form, including the empty string.
+    /// The splitter handles every form, and **keeps every empty field**.
     ///
-    /// Empty fields are dropped, including for `""` itself — the encoder's "at least
-    /// one `data:` line" rule is what covers those cases, so the splitter does not
-    /// need to and must not pretend to. A first version of this test asserted `[""]`
-    /// for `""` and `"\n"`, which was my guess about `str::split` rather than its
-    /// behaviour, and the splitter was right.
+    /// The empty cases are the point. `""` yields one empty field and `"\n"` yields two,
+    /// because that is how a trailing line break is carried to the client.
+    ///
+    /// This doc used to read *"Empty fields are dropped, including for `""` itself"* — the
+    /// opposite of what the expectations three lines below assert — and was left behind when
+    /// the filter that caused `data("a\n")` to arrive as `"a"` was removed (`§O-278`). **A
+    /// comment that contradicts the assertions beside it is worse than no comment**: it is
+    /// exactly what would stop a reader noticing the bug the assertions were supposed to catch.
     #[test]
     fn the_line_splitter_handles_every_form() {
         let cases: [(&str, Vec<&str>); 8] = [

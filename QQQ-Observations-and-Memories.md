@@ -20786,10 +20786,14 @@ document describes a *rule*, check the rule exists in the form the document name
 
 ### What this cost, and what would have caught it
 
-Nothing was leaked — no `.env.*` file has ever been tracked (`git ls-files` is clean of them),
-so the gap was latent rather than realised. But it was one habit away from being realised, and
-the reason it survived is that **the same sentence both described the protection and created
-the false confidence in it.**
+Nothing was leaked — **no credential-bearing `.env.*` file has ever been tracked**
+(`git ls-files` shows only `docs/.env.example`, which is the values-free template the rules
+deliberately un-ignore). The narrower claim is the true one: `.env.example` **does** match
+`.env.*`, so *"no `.env.*` file has ever been tracked"* was false as first written, and its own
+cited evidence (`git ls-files`) contradicts it — the review that found this is recorded as
+`§O-285`. So the gap was latent rather than realised, but it was one habit away from being
+realised, and the reason it survived is that **the same sentence both described the protection
+and created the false confidence in it.**
 
 `tools/check_coderabbit_config.py` validates `path_instructions` *globs* and
 `knowledge_base.filePatterns`, but not filenames named in prose — so it could not have caught
@@ -22470,6 +22474,84 @@ validates. That is a coherent unit of work, not a line to append at the end of a
 observation above is its honest placeholder.
 
 → `tools/gen_llms_txt.py`, `llms.txt`
+
+---
+
+## §O-285 — The independent review found nine findings, and five of them were defects in my own work
+
+**Found:** Phase D — CodeRabbit over the whole change set (`--base-commit c6905eb`).
+**Anchors:** `tools/check_handoff.py`, `tools/check_coderabbit_config.py`,
+`crates/qqq-serve/src/sse.rs`, `docs/.env.example`, `QQQ-Checklist-V1.md`,
+`QQQ-Observations-and-Memories.md`.
+
+### The run
+
+`doctor` 9 passed / 0 failed. One review over the change set — **42 files**, comfortably inside the
+300-file cap, so no partitioning was needed and the run took 528 s. The `complete` line:
+
+```
+"status": "review_completed", "outcome": "completed", "findings": 9,
+"reviewedFiles": [ … all 42 … ]          ← no unreviewedFileCount
+```
+
+**Every changed file was reviewed**, and the outcome is `completed` rather than
+`completed_with_warnings` — the distinction the plan insists on reading.
+
+### Nine findings, six distinct
+
+Three were the same issue reported from two angles. Each was **verified before being accepted**, per
+the standing rule that a finding is a lead and not an authority — and this time **five of the six
+were defects I introduced in earlier rounds of this goal.**
+
+| | Finding | Verified how |
+|---|---|---|
+| F5 | `check_handoff._git` returns `(stdout + stderr)`, so stderr is hashed as content | read the code: any git warning changes the digest of an unchanged document |
+| F3/F9 | `check_coderabbit_config` hardcoded `11 of 11` in its success message | made dynamic — and it now reports **12**, so the literal was **already wrong** |
+| F4 | `sse.rs` carries **two merged doc comments** for `split_lines`, and its test doc says *"Empty fields are dropped"* beside expectations asserting the opposite | read both: `("", vec![""])` and `("\n", vec!["", ""])` |
+| F6/F7 | §O-267 claims *"no `.env.*` file has ever been tracked"* | `git ls-files` shows `docs/.env.example`; `check-ignore` is empty — **the claim's own cited evidence contradicts it** |
+| F1/F8 | the `DOC-018` entry says *"Two resolvers exist"* and *"no document currently carries a claim"* | the checker reports **eight** resolvers and **five** claims |
+| F2 | `docs/.env.example` used `KEY =` with spaces | not valid shell assignment syntax; five assignments corrected |
+
+### What F5 is, precisely
+
+My round-1 fix decoded git's bytes as UTF-8 instead of letting the locale codec mangle them — the
+right fix for a real false failure. It then returned `p.stdout + p.stderr`, which **puts git's own
+diagnostics into the bytes `_committed_digests` hashes.** A CRLF notice, a dubious-ownership line, a
+rename-detection message: any of them changes the digest of a document that did not change, and the
+gate reports drift against a correct tree.
+
+**That is the same false failure the fix was written to remove, arriving by a second route.** The
+symptom was fixed and the mechanism re-created it, because the fix was aimed at *how the bytes were
+decoded* rather than at *which bytes are the content*. Now `stdout` alone, and only on a zero exit,
+with stderr dropped (no caller printed it) and the return code preserved.
+
+### And F3 is an instance of the goal's own subject, in my own change
+
+I added a twelfth self-test case to `check_coderabbit_config.py` and updated the success message to
+say *"11 of 11"*. **Making it dynamic reveals 12.** So the literal was wrong the moment it was
+written — the exact defect `§O-275` and `§O-284` record twice in `gen_llms_txt.py`, committed by me,
+in a file I was editing *because* it is a guard against that class.
+
+**A goal about stale claims does not end; it becomes a discipline.** Each round of fixing produces
+new prose, and new prose is new claims. Five of these six were written by me in this session, and
+every one is a shape the corpus already had a name for:
+
+- a literal in prose that nothing re-derives (F3) — `§O-275`
+- a comment contradicting the code beside it (F4) — the Phase E shape, six times over
+- a claim its own cited evidence refutes (F6) — `§O-249`
+- a record of a state that has since changed (F1) — `§O-236`'s "the date is the claim"
+
+### The method note
+
+Two of my checks in this round were wrong before they were right, and both for a tooling reason this
+session had already recorded: **`Select-Object -Last 1` on a multi-line verdict shows a note, not the
+verdict.** `check_coderabbit_config --self-test` prints its verdict *then* its notes, so `-Last 1`
+read `4 knowledge-base guidelines`. `§O-284` was written about exactly this an hour earlier, which is
+the useful part: **a recorded lesson does not prevent the mistake; only the habit does.** Grepping
+for the verdict line is the habit.
+
+→ `tools/check_handoff.py`, `tools/check_coderabbit_config.py`, `crates/qqq-serve/src/sse.rs`,
+`docs/.env.example`, `QQQ-Checklist-V1.md`, `QQQ-Observations-and-Memories.md`
 
 ---
 

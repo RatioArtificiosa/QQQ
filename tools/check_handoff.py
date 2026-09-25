@@ -238,7 +238,19 @@ def _git(*args: str) -> tuple[int, str]:
     changes the digest, so it surfaces as drift rather than passing silently.
     """
     p = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, check=False)
-    return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace")
+    # **`stdout` alone, and only on success.** The first version of this fix decoded
+    # `stdout + stderr` together, which put git's own diagnostics into the bytes that
+    # `_committed_digests` hashes: a warning on stderr — a CRLF notice, a dubious-ownership
+    # line, a rename-detection message — changes the digest of a document that did not change,
+    # and the gate reports drift against a correct tree. That is the *same false failure* the
+    # decoding fix was written to remove, arriving by a second route (`§O-268`, `§O-285`).
+    #
+    # stderr is dropped rather than returned: no caller prints it, and the two that could fail
+    # (`rev-parse origin/main`, `show HEAD:<path>`) are checked by return code, which is
+    # preserved. A caller that ever needs the diagnostic can take it as a parameter.
+    if p.returncode != 0:
+        return p.returncode, ""
+    return p.returncode, p.stdout.decode("utf-8", errors="replace")
 
 
 def _committed_digests() -> dict[str, str]:

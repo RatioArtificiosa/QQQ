@@ -417,20 +417,26 @@ Items are grouped below by **phase**, because dependency order matters more than
     number printed beside a tool that re-derives it."*
   → `tools/check_doc_claims.py` implements that. A claim is **opt-in** and names a *resolver*
     rather than a number:
-    `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->`. Two resolvers exist
-    (`workspace-tests`, `crate-files`), each already measured elsewhere in the tooling. Naming
-    the resolver is what makes the check possible — the document says *which fact* it asserts,
-    and a number in prose that is not a claim is left alone, so the check has no false positives
-    to be disabled over.
-  → Marked: **no document currently carries a claim**, and that is the measured state rather
-    than an oversight. Both candidates this item produced were already re-derived elsewhere:
-    `docs/unsafe-audit.md`'s `.rs` file count is checked by `tools/audit_unsafe.py --check-doc`
+    `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->`. **Eight** resolvers exist —
+    `crate-files`, `tools-python`, `workspace-tests`, `wit-files`, `wit-packages`,
+    `wit-interfaces`, `wit-functions`, `wit-types` — each measured elsewhere in the tooling.
+    Naming the resolver is what makes the check possible — the document says *which fact* it
+    asserts — and a number in prose that is not a claim is left alone, so the check has no
+    false positives to be disabled over.
+  → **Five claims are now marked**, and this is the state as of 2026-09-25:
+    `docs/stability.md` declares `wit-files`, and the `DOC-017` entry above declares
+    `wit-packages`, `wit-interfaces`, `wit-functions` and `wit-types`. Verified by fault
+    injection — changing one produces ``STALE  QQQ-Checklist-V1.md:386  `wit-types` says 54,
+    the tree has 53`` and a non-zero exit. The WIT counts are **derived by the generator that
+    renders them** rather than re-parsed (`§O-272`), because a hand count of the rendered page
+    gave 61 functions and 72 types while the page itself said 80 and 53.
+  → **Historical, dated 2026-09-25 and retained because it records a decision rather than an
+    omission.** Before those markers existed, **no document carried a claim**, and that was the
+    measured state: both candidates this item produced were already re-derived elsewhere —
+    `docs/unsafe-audit.md`'s `.rs` file count by `tools/audit_unsafe.py --check-doc`
     (`SEC-020`, with its own self-test), and the error-catalogue count by
     `tools/gen_error_catalogue.py --check` (`DOC-019`). Marking either would have been a second
-    mechanism for one number, which this entry's own concluding sentence forbids. The scan found
-    no prose count without an owner; `check_doc_claims.py` keeps its resolvers, its marker syntax
-    and its self-tests ready for the next one, and reports `no document declares a checkable
-    count` so the empty state is visible rather than implied.
+    mechanism for one number, which this entry's own concluding sentence forbids.
   → **A drift table has one re-derivable column and one frozen one, and the first edit conflated
     them.** Marking the `The entry said` column made the checker fail correctly on `2305` and
     `2249` — numbers that are *supposed* to be stale, because they record what was claimed at

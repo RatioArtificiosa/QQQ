@@ -465,6 +465,14 @@ def self_test() -> int:
     """
     text = read_config(CONFIG)
     failures: list[str] = []
+    # **Counted, not written down.** The success message used to say `11 of 11` as a literal,
+    # which is the same defect this file's own sibling `gen_llms_txt.py` had twice (`§O-275`,
+    # `§O-284`): a number in prose that nothing re-derives, so it survives every later change to
+    # the case list. `injections` counts `expect` calls only, which excludes the passing control
+    # in the `widened` case below — that one asserts a *non*-failure and is not an injection
+    # (`§O-285`).
+    injections = 0
+    caught = 0
 
     def expect(kind: str, mutate, config_path: Path = CONFIG, expect_change: bool = True) -> None:
         """Assert that `mutate` makes the check fail -- **and that it changed anything**.
@@ -475,6 +483,8 @@ def self_test() -> int:
         silently does not apply is a test that certifies nothing, which is the failure
         `check_bench_contract.py` names as *"the injection did not apply"* (`§O-274`).
         """
+        nonlocal injections, caught
+        injections += 1
         before = copy.copy(text)
         mutated = mutate(copy.copy(before))
         if expect_change and mutated == before:
@@ -483,6 +493,7 @@ def self_test() -> int:
         try:
             check(mutated, config_path)
         except Failure as exc:
+            caught += 1
             print(f"  caught {kind}: {exc}")
             return
         failures.append(kind)
@@ -600,7 +611,7 @@ def self_test() -> int:
         print(f"SELF-TEST FAILED: {len(failures)} injection(s) were not caught: {failures}")
         return 1
 
-    print(f"SELF-TEST OK -- 11 of 11 injections caught; the real config passes")
+    print(f"SELF-TEST OK -- {caught} of {injections} injection(s) caught; the real config passes")
     for note in notes:
         print(f"  {note}")
     return 0

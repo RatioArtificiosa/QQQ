@@ -19052,4 +19052,71 @@ reuse is now stated in `serve_one`'s doc, next to the `Instance::create` that ma
 The 322-second figure is the tell worth remembering: a test whose *failure* path costs minutes
 while its success path costs under a second is a test that is waiting, not working.
 
+## §O-233 — A stability fix that moved the panic one level down instead of
+removing it
+
+**Found:** 2026-09-25, by CI on macOS. **Fixed and verified:** same session. **Anchors:**
+`§O-232` (the pool panic), `SRV-024`.
+
+### What happened
+
+§O-232 fixed `serve_policy`'s helper so a failed socket write returns a sentence rather than
+panicking:
+
+```rust
+let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+    return "<no connection>".to_owned();
+};
+```
+
+`TcpStream::connect` still returned `ConnectionRefused` under CI load, so the raw helpers only
+**partially** solved it: `status_of` then did
+
+```rust
+.unwrap_or_else(|| panic!("no status line in: {response:?}"))
+```
+
+against a response that now read `<no connection>` — and the test still panicked, one frame
+deeper:
+
+```
+thread 'a_manifest_that_forgets_default_auth_refuses_its_routes' panicked at
+  crates/qqq-run/tests/serve_policy.rs:218:28
+```
+
+CI reported it on **macOS only**, because that is where the accept window lost the race this time.
+
+### Why the partial fix was not obviously partial
+
+The raw helpers were made total, and the file's own comments said so. What was missed is that
+**totality has to reach the last helper in the chain**: `request` returning a sentence is only
+useful if `status_of` can express "there is no status", and it could not, because its signature
+returned `u16`.
+
+That is the general shape: a fix applied where the failure was *observed* rather than where the
+failure is *possible*. The observation was a panic at a socket call, so the socket call was fixed;
+the panic that the socket fix would relocate was not looked for.
+
+### The fix
+
+`status_of` returns `Option<u16>`, and a `status(...)` convenience panics with the whole response
+for the nine assertion sites. Now a lost socket produces a failure that names `<no connection>`,
+which is the diagnostic the next person needs, rather than a bare "no status line".
+
+### The rule
+
+**When a fix converts a failure into a value, every consumer of that value must be able to
+represent it.** Grep for the consumers before believing the fix; a helper that cannot express
+`None` will re-introduce the panic its caller just removed.
+
+This is the second time this session a stability fix needed a second pass (`§O-232` records
+the first, where the readiness probe's shape was the cause), and both times the intermediate
+version looked complete and passed locally — because the local machine wins the race that CI
+loses.
+
+### Verification
+
+`cargo test -p qqq-run --test serve_policy --test worker_pool`, six consecutive runs: all green,
+13 tests each. `clippy -D warnings` clean. CI on the fix read separately.
+
 *End of `QQQ-Observations-and-Memories.md`.*

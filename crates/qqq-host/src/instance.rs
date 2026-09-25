@@ -256,6 +256,73 @@ impl<'a> Instance<'a> {
     /// * `QQQ-6003` — the component imports something the linker does not
     ///   provide. The message names the missing import.
     /// * `QQQ-3001`, `QQQ-3002` — the limits could not be applied.
+    ///
+    /// # Examples
+    ///
+    /// The linker is built from `grants` alone, so a component that imports an
+    /// interface the grant set does not justify is **absent, not denied**: there
+    /// is nothing to call and instantiation fails naming the import. Start from
+    /// empty grants, then grant the capability and watch the same bytes
+    /// instantiate.
+    ///
+    /// ```
+    /// use qqq_cap::{Capability, GrantSet, Layer, Manifest, Overlay};
+    /// use qqq_host::{Instance, LimitSet, PreparedComponent};
+    ///
+    /// let mut config = wasmtime::Config::new();
+    /// config.wasm_component_model(true);
+    /// // The instance enforces its budget through fuel.
+    /// config.consume_fuel(true);
+    /// let engine = wasmtime::Engine::new(&config).expect("engine must build");
+    ///
+    /// // A component whose single import is `qqq:clock/monotonic`.
+    /// let wasm = r#"
+    ///     (component
+    ///       (import "qqq:clock/monotonic" (instance $clock
+    ///         (export "now-nanos" (func (result u64)))))
+    ///       (core module $m (func (export "f") (result i32) (i32.const 7)))
+    ///       (core instance $i (instantiate $m))
+    ///       (func (export "f") (result u32) (canon lift (core func $i "f")))
+    ///     )
+    /// "#;
+    /// let prepared = PreparedComponent::compile(&engine, wasm.as_bytes())
+    ///     .expect("a well-formed component compiles");
+    ///
+    /// let limits = LimitSet {
+    ///     memory_bytes: 16 * 1024 * 1024,
+    ///     fuel: 10_000_000,
+    ///     epoch_deadline_ms: 5_000,
+    ///     max_open_handles: 64,
+    ///     max_subrequests: 8,
+    /// };
+    ///
+    /// // Nothing granted: the import has no implementation to bind to.
+    /// let empty = GrantSet::empty();
+    /// let err = Instance::create(&engine, &prepared, &empty, limits)
+    ///     .expect_err("an ungranted import must not instantiate");
+    /// assert_eq!(err.code, qqq_core::ErrorCode::ComponentLoadFailed);
+    /// assert_eq!(err.code.id(), "QQQ-6003");
+    ///
+    /// // Grant the clock the component asks for. Only the manifest may grant,
+    /// // so the set is derived from one rather than built up by hand.
+    /// let manifest = Manifest::parse(
+    ///     "[package]\nname = \"clocker\"\nversion = \"1.0.0\"\n\
+    ///      [capabilities.clock]\nmonotonic = true\n",
+    /// )
+    /// .expect("a minimal manifest parses");
+    /// let granted = GrantSet::from_manifest(&manifest);
+    /// assert!(granted.grants(Capability::ClockMonotonic));
+    ///
+    /// // Narrowing is allowed; widening is not, and the pipeline proves it.
+    /// let narrowed = granted.narrow(&Overlay::deny(
+    ///     Layer::Platform,
+    ///     [Capability::ClockMonotonic],
+    ///     "the clock is withdrawn at deploy time",
+    /// ));
+    /// let still_refused = Instance::create(&engine, &prepared, &narrowed, limits)
+    ///     .expect_err("narrowing it away must refuse it again");
+    /// assert_eq!(still_refused.code, qqq_core::ErrorCode::ComponentLoadFailed);
+    /// ```
     pub fn create(
         engine: &'a wasmtime::Engine,
         prepared: &PreparedComponent,

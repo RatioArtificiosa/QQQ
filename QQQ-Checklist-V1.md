@@ -3428,26 +3428,30 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **DX-015** Implement the CI check that every public API has a compiling example.
   → §12.3 The DX commitments (measurable, in CI)
   → **The check is built and wired; the standard is far from met, and the item stays open.**
-    Measured on 2026-09-25: **2,116 public declarations across the 11 crates, and 8 doctests
+    Measured on 2026-09-25: **2,116 public declarations across the 11 crates, and 9 doctests
     running** — 0.4% against §12.3's 100% target. Recording that plainly is the point:
     `§O-219`'s shape is an item that looks done, and this one would look done if the check
     existed and nobody read its number.
   → `tools/check_api_examples.py` measures the surface and enforces a **ratchet**. `ci.yml` runs
-    it with `--allow 2108`, which is the visible distance to the target: a *regression* — an
+    it with `--allow 2107`, which is the visible distance to the target: a *regression* — an
     example lost — fails immediately, and the allowance is lowered as examples land. A check
-    demanding 2,108 new examples in one commit would be red forever, and a permanently red gate is
+    demanding 2,107 new examples in one commit would be red forever, and a permanently red gate is
     one people learn to skip.
-  → The eight: `qqq-core` carries four (`PackageName` construction, a positioned rejection, why a
+  → The nine: `qqq-core` carries four (`PackageName` construction, a positioned rejection, why a
     trailing separator is its own error rather than a generic one, and `Version`'s one-directional
     compatibility relation plus a parse failure that names the offending component) with a fifth
     marked `ignore`; `qqq-bench` one; `qqq-cap` one — `GrantSet::narrow`, which shows both modes
     removing authority from an empty set and proves the manifest is the only layer that can grant;
-    `qqq-host` one — `PreparedComponent::compile`, driving a real Wasmtime engine through both a
-    successful compile and the `QQQ-1002` refusal of a core module.
+    `qqq-host` two — `PreparedComponent::compile`, driving a real Wasmtime engine through both a
+    successful compile and the `QQQ-1002` refusal of a core module, and `Instance::create`, which
+    instantiates a component that imports the clock under empty grants and gets `QQQ-6003`, then
+    shows the same bytes refused again after an overlay narrows the clock away. That second one
+    states "absent, not denied" on the real path rather than in prose.
     Each new one is **fault-injected**: disabling the character guard, deleting the directional
-    comparison, replacing `narrow`'s intersection with a union, and replacing `compile`'s artifact
-    rejection with an accept-anything fallback each made the corresponding example fail, with
-    byte-for-byte restore from SHA-256 verified.
+    comparison, replacing `narrow`'s intersection with a union, replacing `compile`'s artifact
+    rejection with an accept-anything fallback, and asserting the wrong error id in the `create`
+    example each made the corresponding example fail, with byte-for-byte restore from SHA-256
+    verified.
   → **A `no_run` fence counts and asserts nothing** (`§O-236`). The `qqq-host` example was first
     written with `no_run` on the reasoning that Wasmtime compilation is expensive, and the fault
     injection above left it **green** — rustdoc had compiled it and never run a line. The fence now

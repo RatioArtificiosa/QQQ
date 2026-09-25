@@ -19263,4 +19263,42 @@ When an example is expensive enough to want `no_run`, either make it cheap enoug
 the assertion into a `#[test]`. A fence that cannot fail is not evidence, and the number it
 increments is a documentation count, not a correctness one.
 
+## §O-237 — `Instance::create` takes a `StoreLimits` the crate does not export under that
+## name, so the example could only be written by reading the re-export list
+
+Writing a doctest for `qqq-host`'s `Instance::create` required three attempts, and every failure
+was the API disagreeing with its own presentation rather than the example being careless:
+
+1. `use qqq_host::StoreLimits;` — `error[E0432]: unresolved import`. The struct is defined in
+   `config.rs` as `StoreLimits` and the signature reads `limits: StoreLimits`, but `lib.rs`
+   re-exports it as `LimitSet`:
+
+       pub use config::{ ..., EngineConfig, StoreLimits as LimitSet, };
+
+   So the name a caller must write appears nowhere in the constructor's signature or its docs.
+   `Instance::create`'s parameter list is the first thing an embedder reads, and it names a type
+   they cannot import.
+2. `err.code()` — `error[E0599]: no method named 'code'`. It is a public **field**, and the
+   compiled error's own hint says "field, not a method".
+3. `err.code.as_str()` — `error[E0599]: no method named 'as_str'`. That method belongs to
+   `ErrorClass`, which happens to live in the same file; the `QQQ-nnnn` string for an `ErrorCode`
+   comes from `ErrorCode::id()`, which returns a `String`.
+
+**Why this is worth recording rather than just fixing in the example.** A doctest is the cheapest
+possible consumer of the public API: no build system, no dependency management, no state. When
+three consecutive attempts fail on *names* rather than on concepts, the API surface is harder to
+use than its own documentation implies, and a Rust embedder meets the same three failures with a
+slower feedback loop. The findings are also the kind that a written summary would have hidden: I
+would have written "`Instance::create` takes limits" and been wrong about the import path.
+
+None of the three was changed. Renaming a public re-export is a breaking change and needs its own
+decision; the example now uses the exported names, and this entry is the record that the
+constructor's signature and the crate root disagree about one of them.
+
+### Verification
+
+`cargo test --doc -p qqq-host`: 2 passed. The `create` example is fault-injected — asserting
+`QQQ-9999` where the code returns `QQQ-6003` fails with `left: "QQQ-6003" right: "QQQ-9999"`, and
+the file restores byte-for-byte (SHA-256 `4d0d09899d2b2010bb41bc1856169d13a4c72665c55897f285e3acb63ad24615`).
+
 *End of `QQQ-Observations-and-Memories.md`.*

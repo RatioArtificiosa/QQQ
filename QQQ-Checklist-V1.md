@@ -4363,8 +4363,42 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §9.1 The honest benchmark position
 - [ ] **PERF-003** Meet the warm-instance-acquire budget (≤100 µs p99).
   → §9.2 The performance budget
+  → **Measured and not met — the measurement does not exist.** `Budget::ALL` declares
+    this row against `bench/warm_acquire.rs::warm_instance_acquire`, and that file
+    **does not exist**: `crates/qqq-bench/src/` holds `budget.rs`, `lib.rs`,
+    `loadgen.rs`, `methodology.rs`, `stats.rs` and `workload.rs`, with no `bench/`
+    directory and no such function anywhere in the repository (`§O-249`).
+  → The row's citation now reads `NOT_IMPLEMENTED::warm_instance_acquire`, which
+    `tools/check_bench_contract.py` accepts as an honest declaration and which fails
+    the gate if a fabricated path replaces it.
+  → **The socket harness cannot produce this number**: it is an in-process timer
+    around pool acquisition, and `qqqai bench` reaches the system through a listening
+    socket by design (`crates/qqq-run/src/bench.rs`). `§O-248` records what that run
+    did reach — 10 workloads, 4 budget verdicts.
+  → **§9.2 also records a measured baseline and it is favourable**, from an
+    independent probe: instantiating a compiled component into a fresh `Store` per
+    sample, **with no pooling allocator at all**, measured min 700 ns / p50 800 ns /
+    p99 2.1 µs over 500 samples against a 100 µs budget. That is a different
+    measurement from this item's (unpooled, probe crate, not the harness) and is
+    cited as context rather than claimed as this row's verdict.
+  → Note `ARCH-011` step 6: no instance is actually reused in V1, so the "warm"
+    acquire path this budget names does not exist yet — `Acquired::pooled` means the
+    idle count was non-zero, not that a guest instance was reused.
 - [ ] **PERF-004** Meet the cold-instantiate budgets (≤5 ms cached, ≤150 ms from `.wasm`).
   → §9.2 The performance budget
+  → **Measured and not met — the harness produces no verdict for this row.**
+    `Budget::ALL` cites `bench/cold.rs::cold_instantiate_cached`, a file that does
+    not exist (`§O-249`); the citation now reads
+    `NOT_IMPLEMENTED::cold_instantiate_cached`.
+  → **The engine-level fact is recorded in §9.2** and is the one that matters for the
+    design: `Component::deserialize` on a precompiled artifact **304.8 µs for a
+    1.2 MB component**, after up-front `/d` builds on 6.8 ms — two orders inside the
+    5 ms budget, which is why the caching design is viable. `Module::new` from
+    `.wasm` is 3.8 ms, inside the 150 ms path.
+  → Those are single-machine engine figures from a probe, not the harness's verdict
+    on the reference application, so this item stays open. Reading them as this
+    item's measurement would be the substitution of a nearby number for the named
+    one.
 - [x] **PERF-005** Measure and publish the real ABI-crossing costs, replacing the estimates in §9.3.
   → §9.3 The ABI cost, quantified honestly
   → Done: **the estimate is replaced by a measurement of a real component boundary.** All six §9.3 rows plus one control row were measured across compiled, instantiated, *called* Wasmtime 48.0.2 components — not a synthetic stand-in. The harness is `crates/qqq-bench/tests/abi_cost.rs`; the published numbers and environment are `docs/abi-cost-measured.md`; §9.3's table now shows estimate and measurement side by side.
@@ -4381,12 +4415,62 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Also unblocks: **`PERF-006`** (validating §4.5's batch-first rule *with measurements showing its effect*) now has the per-crossing cost to measure against — the "one crossing versus N crossings" comparison it needs is priced by the ~900 ns fixed cost established here.
 - [ ] **PERF-006** Validate the batch-first design rule with measurements showing its effect.
   → §4.5 The ABI boundary — what crosses and at what cost
+  → **Measured and not met as stated — the measurements exist, and they do not yet show
+    the effect this item asks for.** The rule (cross the boundary once with a batch,
+    not once per item) has supporting numbers from `PERF-005`'s work: crossing at all
+    costs **900 ns p50 / 1 800 ns p99** for a `u64` argument and return, while a
+    `list<u32>` of **1 000 elements crosses at 1 600 ns p50 / 2 000 ns p99** — so 1,000
+    values cost **~1.8× a single value**, which is the batch-first argument in one line.
+  → **What is missing is the comparison the item names**: a measurement of the *same*
+    workload crossing once-per-item versus batched. The published figures contrast two
+    *different* shapes (scalar vs list), which supports the rule but does not isolate
+    it — a 1,000× per-item loop was never run to produce the counterfactual.
+  → Recorded as not met rather than ticked because "the numbers are consistent with the
+    rule" and "the rule is validated by measurement of its effect" are different claims,
+    and `PERF-005`'s `docs/abi-cost-measured.md` is careful to state which it is.
 - [ ] **PERF-007** Meet the AOT cache performance target.
   → §9.4 Specific optimizations planned
+  → **Measured and not met — no harness row and no verdict.** `Budget::ALL` cites
+    `bench/cold.rs::aot_cache_roundtrip`, which does not exist (`§O-249`); the
+    citation now reads `NOT_IMPLEMENTED::aot_cache_roundtrip`. No `qqqai bench`
+    workload measures an AOT round trip, and no published document states one.
+  → **What does exist is the deserialize path, measured**: `Component::deserialize`
+    on a precompiled 1.2 MB component is **304.8 µs**, against 6.8 ms for an
+    up-front `/d` build. That is the mechanism the AOT target depends on, recorded
+    here as context.
+  → The item stays open because "the mechanism is measured" and "the target is met"
+    are different claims, and this project's `§M-006` shape is exactly a control
+    believed live that is not.
 - [ ] **PERF-008** Meet the idle RSS budget (≤25 MB).
   → §9.2 The performance budget
+  → **Measured and not met.** A freshly started `qqqai serve --listen
+    127.0.0.1:3111 --config qqq.toml` on the reference application, after 12 s
+    settling and with **one** `GET /healthz` proving it was serving (HTTP 200),
+    reports **RSS 27.6 MB** against a ≤ 25 MB budget — **2.6 MB over**. Measured
+    with `Get-Process -Id <pid> | WorkingSet64`.
+  → **The liveness check is part of the measurement, not decoration.** A dead
+    process also has a resident set, and reading RSS without confirming the server
+    answers would measure a corpse. RSS read again after the request: 27.63 MB, so
+    the figure is stable rather than a startup transient.
+  → **`WorkSet64` is the resident set, which is the quantity §9.2 names** ("`rss`
+    after 60 s idle"). Two honest qualifications: this is a **12-second** settle, not
+    60, and the platform is `windows x86_64` on a 12-core machine rather than the
+    reference profile (`§O-248`).
+  → **The harness still has no row for this**, and `Budget::ALL`'s citation says so:
+    `NOT_IMPLEMENTED::idle_host_rss` (`§O-249`). The number above comes from a direct
+    process read, which is what the item asks for; instrumenting it as a harness row
+    is what the citation marks as outstanding.
 - [ ] **PERF-009** Meet the 1000-idle-instance RSS budget (≤350 MB).
   → §9.2 The performance budget
+  → **Measured and not met — not measured at all.** `Budget::ALL` cites
+    `bench/memory.rs::thousand_idle_instances_rss`, which does not exist (`§O-249`);
+    the citation now reads `NOT_IMPLEMENTED::thousand_idle_instances_rss`. Nothing in
+    the repository instantiates 1,000 idle instances and reads the resident set.
+  → **The item cannot be honesty-claimed from a nearby number.** `PERF-008`'s 27.6 MB
+    is one idle host with **one** loaded component, and `ARCH-011` step 6 records that
+    V1 does not actually reuse instances — so `Acquired::pooled` counts idle
+    *slots*, not 1,000 live guests. Producing this number needs the pooling path
+    built first, which is the dependency the citation states.
 - [ ] **PERF-010** Meet the throughput budget (≥60k RPS).
   → §9.2 The performance budget
   → **Measured and not met.** `qqqai bench --listen 127.0.0.1:3000 --json` against
@@ -4423,8 +4507,37 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Full table in `§O-248`.
 - [ ] **PERF-012** Meet the per-instance memory budget (≤256 KB).
   → §9.2 The performance budget
+  → **Measured and not met — no verdict.** `Budget::ALL` cites
+    `bench/memory.rs::per_instance_pooled`, which does not exist (`§O-249`); the
+    citation now reads `NOT_IMPLEMENTED::per_instance_pooled`.
+  → **A measured figure exists and is reported here with its true meaning**, because
+    the item asks for one: at 27.6 MB RSS for one idle host with one loaded
+    component, a single component's **marginal** cost is a fraction of that — but it
+    is not the quantity §9.2 names. That budget is *"Pooled slot accounting"*, and
+    `ARCH-011` step 6 records that **V1 does not pool**: no instance is reused, so
+    there is no pooled slot to account for and no per-instance figure to publish.
+  → The honest disposition is therefore not-met-for-a-named-reason: the number this
+    row wants cannot exist until `Pool` actually reuses an instance, which is the
+    same gap `PERF-003` records from the acquire side.
 - [ ] **PERF-013** Meet the build-time budget (≤20 s for 10k LOC).
   → §9.2 The performance budget
+  → **Measured and not met.** A cold release build of the reference application —
+    `CARGO_TARGET_DIR` outside the repository so nothing is incremental,
+    `cargo build --release` in `examples/orders-api` — took **25.34 s** wall clock
+    (`Finished \`release\` profile ... in 25.26s`), against the ≤ 20 s budget.
+  → **The comparison is worth stating exactly, because it is unfavourable to the
+    budget's premise.** The reference application is **2,513 lines across 6 files**,
+    not 10,000, so it is **four times smaller** than the subject this budget names
+    and still **27% over** the limit. If the budget scales with LOC, the measured
+    figure implies well over 100 s at 10k LOC.
+  → **What the 25.34 s actually measures, stated rather than left implicit:** the
+    reference app plus its full dependency graph (`wit-component`, `wit-bindgen`,
+    wasm tooling) compiled from an empty target directory. That is a genuine
+    developer experience — "clone and build the example" — and it is what the
+    command produces; it is not a per-LOC rate.
+  → `Budget::ALL`'s citation remains `NOT_IMPLEMENTED::reference_app_clean_build`
+    (`§O-249`): the number above comes from a timed command, and instrumenting it as
+    a harness row is what the citation marks as outstanding.
 - [ ] **PERF-014** Evaluate the io_uring backend and publish whether it earns its complexity.
   → §4.2 Process and thread model
 - [ ] **PERF-015** Validate the async-single-threaded guest default against a shared-memory alternative.

@@ -546,9 +546,10 @@ fn config_serves_the_manifest_it_names() {
     // race rather than a defect in the code under test.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if Instant::now() >= deadline {
-            panic!("`qqqai serve --config prod.toml` never bound 127.0.0.1:{port}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "`qqqai serve --config prod.toml` never bound 127.0.0.1:{port}"
+        );
         if let Ok(Some(_)) = serving.child.try_wait() {
             // Our server exited without binding; the deadline above reports it.
             std::thread::sleep(Duration::from_millis(25));

@@ -700,13 +700,16 @@ mod tests {
             // first `::` is only the place/symbol boundary for the file form: a
             // `crate::` path is rooted, so its first segment is the crate name and
             // splitting there would read the location as the literal `crate`.
-            let symbol = method.rsplit_once("::").map(|(_, s)| s).unwrap_or_else(|| {
-                panic!(
-                    "{} method `{method}` is not `place::symbol`; the field must say \
-                     where the number comes from",
-                    budget.item.id()
-                )
-            });
+            let symbol = method.rsplit_once("::").map_or_else(
+                || {
+                    panic!(
+                        "{} method `{method}` is not `place::symbol`; the field must \
+                         say where the number comes from",
+                        budget.item.id()
+                    )
+                },
+                |(_, s)| s,
+            );
 
             assert!(!budget.item.id().is_empty());
             assert!(!budget.item.metric().is_empty());

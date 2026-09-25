@@ -46,6 +46,7 @@ so a claim in a generated answer can be checked against the source file.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -495,6 +496,52 @@ def first_heading(path: pathlib.Path) -> str:
     return ""
 
 
+def count_jobs(text: str) -> int | None:
+    """Jobs defined by a workflow's `jobs:` block, or `None` when there is no such key.
+
+    Pure, so the self-test can exercise it on synthetic text: nested keys (`steps:`, a
+    step's `run:`) are indented further and must not be counted, and the next top-level
+    key ends the block. Both are real ways this could over-count.
+    """
+    head = re.search(r"^jobs:\s*$", text, re.MULTILINE)
+    if head is None:
+        return None
+    count = 0
+    for line in text[head.end():].split("\n"):
+        if line and not line[0].isspace():
+            break  # the next top-level key ends the block
+        if re.match(r"^  [A-Za-z][A-Za-z0-9_-]*:\s*$", line):
+            count += 1
+    return count or None
+
+
+def ci_job_count() -> int | None:
+    """How many jobs `.github/workflows/ci.yml` defines.
+
+    # Derived, not written down
+
+    This row said **"Nine jobs"** as a literal while `ci.yml` defined **ten**, and
+    `--check` could not see it: the comparison is generated output against the tree's
+    listing, and a hand-written constant sits on **both sides** of it. A generated index
+    carrying a literal number carries it forever, and reports `LLMS FILES OK` while it is
+    wrong -- the shape `§O-249` names, where a check asserted the *form* of a claim
+    instead of the claim (`§O-275`).
+
+    Counting the keys under `jobs:` is the narrow, derivable half. The *run* count is a
+    different referent -- the `rust` job is a 3-platform matrix and `dco` is
+    pull-request-only, so a push run executes more jobs than are defined -- and the row
+    now says which referent it means rather than leaving it to be inferred (`§O-269`).
+
+    `None` when the file is unreadable, so a missing workflow is reported rather than
+    rendered as zero jobs.
+    """
+    try:
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return count_jobs(text)
+
+
 def render_index() -> str:
     """`llms.txt` — the curated index."""
     out: list[str] = []
@@ -545,7 +592,9 @@ def render_index() -> str:
     out.append("| `docs/` | Documentation. `docs/README.md` indexes it. |")
     out.append("| `tools/` | Checkers and generators, each with a `--self-test`. |")
     out.append("| `docker/` | The Linux verification bridge. |")
-    out.append("| `.github/workflows/ci.yml` | The gate. Nine jobs. |")
+    jobs = ci_job_count()
+    gate = f"The gate. {jobs} jobs defined." if jobs else "The gate. (job count unavailable)"
+    out.append(f"| `.github/workflows/ci.yml` | {gate} |")
     out.append("")
     return "\n".join(out)
 
@@ -725,6 +774,31 @@ def self_test() -> int:
                 print(f"        {detail}")
 
     print("gen_llms_txt self-test")
+
+    # 5. The `ci.yml` row's job count is derived, and the counting rule is narrow in two
+    # ways that each over-count if got wrong: a nested key (`steps:`, a step's `run:`) is
+    # indented further than a job key, and the next top-level key ends the block. The
+    # literal that used to sit in that row said "Nine jobs" while `ci.yml` defined ten,
+    # and `--check` could not see it -- a hand-written constant is on both sides of the
+    # comparison it makes. A generated index must not carry a hand-written number.
+    expect(
+        "a workflow with three jobs counts three",
+        count_jobs("jobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n  c:\n    runs-on: x\n") == 3,
+    )
+    expect(
+        "nested keys are not counted as jobs",
+        count_jobs("jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n") == 1,
+    )
+    expect(
+        "a top-level key after `jobs:` ends the block",
+        count_jobs("jobs:\n  a:\n    runs-on: x\nother:\n  key: y\n") == 1,
+    )
+    expect("no `jobs:` key resolves to None", count_jobs("name: x\n") is None)
+    expect("an empty `jobs:` block resolves to None", count_jobs("jobs:\n") is None)
+    expect(
+        "the real ci.yml yields a positive job count",
+        isinstance(ci_job_count(), int) and (ci_job_count() or 0) > 0,
+    )
 
     saved_curated = list(CURATED)
     saved_excluded = set(EXCLUDED)

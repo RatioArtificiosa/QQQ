@@ -101,25 +101,36 @@ def internal_consistency() -> tuple[bool, str]:
     """
     text = TARGET.read_text(encoding="utf-8")
     header = re.search(
-        r"\*\*(\d+) package\(s\), (\d+) interface\(s\), (\d+) function\(s\)\.\*\*", text
+        r"\*\*(\d+) package\(s\), (\d+) interface\(s\), (\d+) function\(s\), "
+        r"(\d+) type\(s\)\.\*\*",
+        text,
     )
     if not header:
-        return False, "the header's package/interface/function line is missing"
+        return False, "the header's package/interface/function/type line is missing"
     stated = int(header.group(3))
+    stated_types = int(header.group(4))
 
-    rows = re.findall(r"^\| `([^`]+)` \| \[`([^`]+)`\]\(#[^)]*\) \| (\d+) \|$", text, re.M)
+    rows = re.findall(
+        r"^\| `([^`]+)` \| \[`([^`]+)`\]\(#[^)]*\) \| (\d+) \| (\d+) \|$", text, re.M
+    )
     if not rows:
         return False, "the interfaces table has no rows"
-    total = sum(int(n) for _pkg, _iface, n in rows)
+    total = sum(int(n) for _pkg, _iface, n, _types in rows)
+    total_types = sum(int(types) for _pkg, _iface, _n, types in rows)
 
     if stated != total:
         return False, (
             f"the header says {stated} function(s); the table's own column sums to {total}"
         )
+    if stated_types != total_types:
+        return False, (
+            f"the header says {stated_types} type(s); the table's own Types column "
+            f"sums to {total_types}"
+        )
 
     # A row of zero must be true: the section for that interface must declare no methods
     # either. This is the assertion that would have caught the original defect directly.
-    for pkg, iface, n in rows:
+    for pkg, iface, n, _types in rows:
         if int(n) != 0:
             continue
         section = re.search(
@@ -132,7 +143,10 @@ def internal_consistency() -> tuple[bool, str]:
                 f"`{pkg}`/`{iface}` is listed with 0 functions but its section lists methods"
             )
 
-    return True, f"{len(rows)} interface row(s), header total {stated} matches the column"
+    return True, (
+        f"{len(rows)} interface row(s), header totals {stated} function(s) / "
+        f"{stated_types} type(s) match the columns"
+    )
 
 
 def run_check() -> tuple[int, str]:

@@ -380,8 +380,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → 10/10 self-test cases.
   → §0.4 How to read the cross-references
 - [x] **DOC-017** Generate the WIT reference documentation from `wit/` into Markdown, with per-language examples.
-  → Done: `docs/wit-reference.md` — 15 packages, 22 interfaces, **80 functions** and
-    53 types, generated from `wit/` by `tools/gen_wit_reference.py` and verified by
+  → Done: `docs/wit-reference.md` — <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages,
+    <!-- qqq:claim wit-interfaces -->22<!-- /qqq:claim --> interfaces,
+    **<!-- qqq:claim wit-functions -->80<!-- /qqq:claim --> functions** and
+    <!-- qqq:claim wit-types -->53<!-- /qqq:claim --> types, generated from `wit/` by
+    `tools/gen_wit_reference.py` and verified by
     `tools/check_wit_reference.py` in CI and in the bridge. The page states its own
     counts in its first line, so these are read from there rather than carried: this
     entry said 13/20/71/47 until 2026-09-23, and only the entry was wrong.

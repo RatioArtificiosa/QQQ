@@ -306,18 +306,36 @@ def render(records: list[dict[str, object]]) -> str:
         for r in records
         for i in r["interfaces"]  # type: ignore[union-attr]
     )
+    # Types are counted here too, and that is not decoration. `DOC-017`'s checklist entry
+    # says of these numbers *"the page states its own counts in its first line, so these
+    # are read from there rather than carried"* -- and the types count was the one number
+    # the line did **not** state, so that sentence was true for three of four. A method
+    # claim that overstates its own coverage is the defect class this corpus keeps
+    # finding; the fix is to make the claim true rather than to weaken it (`§O-275`).
+    total_types = sum(
+        len(i["types"])
+        for r in records
+        for i in r["interfaces"]  # type: ignore[union-attr]
+        if isinstance(i.get("types"), list)
+    )
     parts.append(
         f"**{len(records)} package(s), {total_ifaces} interface(s), {total_funcs} "
-        f"function(s).**\n"
+        f"function(s), {total_types} type(s).**\n"
     )
 
     parts.append("## Interfaces\n")
-    parts.append("| Package | Interface | Functions |")
-    parts.append("|---|---|---|")
+    # The Types column exists so the header's type count has arithmetic to answer to, the
+    # way the function count answers to the Functions column. `check_wit_reference.py`
+    # holds this page to sums it can perform on the page alone -- a number in the header
+    # with nothing beneath it to add up would be a stated number with no owner, which is
+    # the defect the checker was written for in the first place.
+    parts.append("| Package | Interface | Functions | Types |")
+    parts.append("|---|---|---|---|")
     for r in records:
         for i in r["interfaces"]:  # type: ignore[union-attr]
+            n_types = len(i["types"]) if isinstance(i.get("types"), list) else 0
             parts.append(
-                f"| `{r['package']}` | [`{i['name']}`](#{str(r['package']).replace(':', '').replace('@', '').replace('.', '')}-{i['name']}) | {interface_calls(i)} |"  # type: ignore[arg-type]
+                f"| `{r['package']}` | [`{i['name']}`](#{str(r['package']).replace(':', '').replace('@', '').replace('.', '')}-{i['name']}) | {interface_calls(i)} | {n_types} |"  # type: ignore[arg-type]
             )
     parts.append("")
 

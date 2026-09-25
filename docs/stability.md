@@ -136,7 +136,7 @@ A promise with no check is a wish. Each row above names a mechanism:
 | Surface | Enforced by |
 |---|---|
 | Crate tiers | `tools/check_tiers.py` (this document's own source), `tools/check_topology.py` |
-| WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, 17 `.wit` files validating |
+| WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, <!-- qqq:claim wit-files -->17<!-- /qqq:claim --> `.wit` files validating |
 | Manifest | `schema/qqq-toml.schema.json`, `tools/gen_schemas.py --check` |
 | Lockfile | `schema/qqq-lock.schema.json`, the same check |
 | CLI JSON | `schema/cli-envelope.schema.json`, the error catalogue's round-trip test |

@@ -54,6 +54,7 @@ named resolver is unambiguous, and a document that has no markers is *unchecked*
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import subprocess
 import sys
@@ -78,30 +79,88 @@ def documents() -> list[Path]:
     return sorted({p for p in found if p.is_file()})
 
 
+def _load_wit_generator():
+    """The WIT generator, loaded so the WIT counts come from the thing that renders them.
+
+    `§O-272`: a hand count of `docs/wit-reference.md` gave 61 functions and 72 types,
+    matching neither the page nor any tool, because the `**Types**` and `**Functions**`
+    sections appear in either order per interface. The generator is the authority for the
+    numbers the generator produces, so this asks it rather than re-parsing the WIT.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "gen_wit_reference", ROOT / "tools" / "gen_wit_reference.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["gen_wit_reference"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_WIT_TOTALS: dict[str, int] | None = None
+
+
+def wit_totals() -> dict[str, int]:
+    """`packages` / `interfaces` / `functions` / `types`, from the generator's own parse.
+
+    Memoised: four resolvers share one parse, and the page is small enough that the first
+    call is the only cost.
+    """
+    global _WIT_TOTALS
+    if _WIT_TOTALS is None:
+        gen = _load_wit_generator()
+        totals = {"packages": 0, "interfaces": 0, "functions": 0, "types": 0}
+        for path in sorted((ROOT / "wit").glob("*.wit")):
+            record = gen.parse_wit(path)
+            totals["packages"] += 1 if record.get("package") else 0
+            for iface in record.get("interfaces") or []:
+                totals["interfaces"] += 1
+                totals["functions"] += gen.interface_calls(iface)
+                if isinstance(iface.get("types"), list):
+                    totals["types"] += len(iface["types"])
+        _WIT_TOTALS = totals
+    return _WIT_TOTALS
+
+
+def _workspace_tests() -> int | None:
+    p = subprocess.run(
+        ["cargo", "test", "--workspace"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=3600,
+    )
+    total = 0
+    for line in (p.stdout + p.stderr).split("\n"):
+        m = re.search(r"test result: ok\. (\d+) passed", line)
+        if m:
+            total += int(m.group(1))
+    # Zero is a failure rather than an answer: a run that produced no results has not
+    # counted anything, and reporting 0 would make every claim fail.
+    return total if total > 0 else None
+
+
+# One owner per fact. A resolver is the *only* way a number enters a document, so a
+# document that declares a claim names which fact it asserts and this table says how to
+# obtain it. Adding a name here without a document that uses it is harmless; adding a
+# number to a document without a name here is what the whole mechanism exists to prevent.
+RESOLVERS = {
+    "crate-files": lambda: len(list((ROOT / "crates").rglob("*.rs"))),
+    "workspace-tests": _workspace_tests,
+    "tools-python": lambda: len(list((ROOT / "tools").glob("*.py"))),
+    "wit-files": lambda: len(list((ROOT / "wit").rglob("*.wit"))),
+    "wit-packages": lambda: wit_totals()["packages"],
+    "wit-interfaces": lambda: wit_totals()["interfaces"],
+    "wit-functions": lambda: wit_totals()["functions"],
+    "wit-types": lambda: wit_totals()["types"],
+}
+
+
 def resolve(name: str) -> int | None:
     """The current value for a named resolver. `None` when the resolver is unknown."""
-    if name == "crate-files":
-        return len(list((ROOT / "crates").rglob("*.rs")))
-
-    if name == "workspace-tests":
-        p = subprocess.run(
-            ["cargo", "test", "--workspace"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=3600,
-        )
-        total = 0
-        for line in (p.stdout + p.stderr).split("\n"):
-            m = re.search(r"test result: ok\. (\d+) passed", line)
-            if m:
-                total += int(m.group(1))
-        # Zero is a failure rather than an answer: a run that produced no results has not
-        # counted anything, and reporting 0 would make every claim fail.
-        return total if total > 0 else None
-
-    return None
+    fn = RESOLVERS.get(name)
+    return fn() if fn else None
 
 
 def claims_in(text: str) -> list[tuple[str, int, int]]:

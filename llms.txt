@@ -60,4 +60,4 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 | `docs/` | Documentation. `docs/README.md` indexes it. |
 | `tools/` | Checkers and generators, each with a `--self-test`. |
 | `docker/` | The Linux verification bridge. |
-| `.github/workflows/ci.yml` | The gate. Nine jobs. |
+| `.github/workflows/ci.yml` | The gate. 10 jobs defined. |

@@ -3370,6 +3370,33 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §12.3 The DX commitments (measurable, in CI)
 - [ ] **DX-015** Implement the CI check that every public API has a compiling example.
   → §12.3 The DX commitments (measurable, in CI)
+  → **The check is built and wired; the standard is far from met, and the item stays open.**
+    Measured on 2026-09-25: **2,116 public declarations across the 11 crates, and 4 doctests
+    running** — 0.2% against §12.3's 100% target. Recording that plainly is the point:
+    `§O-219`'s shape is an item that looks done, and this one would look done if the check
+    existed and nobody read its number.
+  → `tools/check_api_examples.py` measures the surface and enforces a **ratchet**. `ci.yml` runs
+    it with `--allow 2113`, which is the visible distance to the target: a *regression* — an
+    example lost — fails immediately, and the allowance is lowered as examples land. A check
+    demanding 2,112 new examples in one commit would be red forever, and a permanently red gate is
+    one people learn to skip.
+  → Four doctests now run, up from three: `PackageName` (construction, a positioned rejection,
+    and why a trailing separator is its own error rather than a generic one) and `Version` (the
+    one-directional compatibility relation the deprecation policy rests on, plus a parse failure
+    that names the offending component). Both were **fault-injected**: disabling the character
+    guard and deleting the directional comparison each made the corresponding example fail, with
+    byte-for-byte restore from SHA-256 verified.
+  → Two counting bugs were found by the checker's own self-test and fixed, both of which had
+    made the measurement wrong: `pub const NAME` was missed because `const` sat in the modifier
+    group rather than as a keyword, and a **closing** fence counted as an opening one, doubling
+    every block. The first reported 1,937 items where the truth is 2,116.
+  → **What remains, stated so the next reader does not have to rediscover it.** 2,110 of 2,116
+    declarations have no example. `qqq-serve` alone has 676; `qqq-host` 461. The highest-value
+    next targets are the public entry points a Rust embedder calls first — `qqq-host`'s
+    `PreparedComponent` / `Instance` / `Linker` construction and `qqq-cap`'s `GrantSet` — rather
+    than working down each crate in file order, because an example on an internal helper teaches
+    nobody. `python tools/check_api_examples.py --list` names every file with items and no example.
+
 - [x] **DX-016** Implement `qqqai doctor` with environment diagnosis and remediation.
   → §5.2 The command surface
 

@@ -158,6 +158,25 @@ def documented_sentence(checklist_src: str) -> str | None:
     return m.group(1) if m else None
 
 
+def documented_not_done(checklist_src: str) -> int | None:
+    """The number in the entry's "N of the fifteen steps are not done" sentence.
+
+    # The sentence the crate test cannot reach and this checker did not read
+
+    `the_documented_counts_match_the_table` covers the module. This checker covers the
+    checklist's `Measured:` line. **Neither read the sentence next to it** — and that
+    sentence said **"five"** in the same bullet as a `Measured:` line that made it twelve.
+    Two readings of one table, one of them owned (`§O-277`).
+
+    It is extracted by its own typographic marker, like the counts sentence, so a rewrite
+    that drops it is *reported* rather than silently becoming unchecked. The number is a
+    numeral and not a word on purpose: "five" cannot be compared to anything without a
+    number-word parser, and a value that cannot be compared is a value with no owner.
+    """
+    m = re.search(r"because\s+(\d+)\s+of the fifteen steps are not done", checklist_src)
+    return int(m.group(1)) if m else None
+
+
 def analyse(lifecycle_src: str, checklist_src: str) -> list[str]:
     """The checker's decision procedure, as a pure function.
 
@@ -203,6 +222,22 @@ def analyse(lifecycle_src: str, checklist_src: str) -> list[str]:
                 f"the `ARCH-011` entry states `{normalised}` and the `STAGES` table "
                 f"produces `{want}`. One of them is stale (`§O-244`)"
             )
+
+    # The headline claim, which is the same table read a second way.
+    not_done = total - len(counts["implemented"])
+    stated_not_done = documented_not_done(checklist_src)
+    if stated_not_done is None:
+        errors.append(
+            "the `ARCH-011` entry states no `because N of the fifteen steps are not "
+            "done` sentence, so its headline claim cannot be checked against the table"
+        )
+    elif stated_not_done != not_done:
+        errors.append(
+            f"the `ARCH-011` entry says {stated_not_done} of the fifteen steps are not "
+            f"done, and the `STAGES` table leaves {not_done} not implemented. The "
+            f"sentence and the `Measured:` line beside it describe the same table, so "
+            f"they must agree (`§O-277`)"
+        )
 
     return errors
 
@@ -316,6 +351,36 @@ def self_test() -> int:
         print("HARNESS FAIL: the untaught-variant injection did not apply")
         return 1
     cases.append(("a Status variant the fold omits", untaught, checklist_src, True))
+
+    # 5. The headline sentence disagreeing with the `Measured:` line beside it. This is the
+    #    defect as it shipped: the entry said "five" while the line under it made it twelve,
+    #    and nothing compared the two. The comparison and the thing compared are both new
+    #    here, so the case is the reason the rule exists rather than a decoration on it.
+    headline = re.sub(
+        r"because\s+\d+\s+of the fifteen steps are not done",
+        "because 5 of the fifteen steps are not done",
+        checklist_src,
+        count=1,
+    )
+    if headline == checklist_src:
+        print("HARNESS FAIL: the headline-count injection did not apply")
+        return 1
+    cases.append(
+        ("a headline count the table does not produce", lifecycle_src, headline, True)
+    )
+
+    # 6. The headline sentence removed. A comparison that silently skips an absent
+    #    sentence would pass forever after a rewrite dropped it.
+    gone = re.sub(
+        r"because\s+\d+\s+of the fifteen steps are not done",
+        "because the item is open",
+        checklist_src,
+        count=1,
+    )
+    if gone == checklist_src:
+        print("HARNESS FAIL: the headline-removal injection did not apply")
+        return 1
+    cases.append(("no headline count to compare", lifecycle_src, gone, True))
 
     # --- The control ---------------------------------------------------------
     cases.append(("the real files (control)", lifecycle_src, checklist_src, False))

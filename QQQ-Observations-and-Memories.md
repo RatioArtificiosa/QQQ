@@ -21754,4 +21754,107 @@ hypothesis; the tree is the evidence.**
 
 ---
 
+## §O-277 — A step that documented its own deviation reported as complete, and a sentence the guard beside it could not read
+
+**Found:** Phase F, both verified live at HEAD. **Anchors:**
+`crates/qqq-serve/src/lifecycle.rs`, `tools/check_lifecycle_counts.py`, `QQQ-Checklist-V1.md`.
+
+### D1 — `Implemented` beside a comment recording the gap
+
+Step 10 read `status: Status::Implemented, gap: ""`, and the comment directly above it said:
+
+> *"§4.4 says the host 'runs it async'; the async machinery exists in full, but the production
+> dispatch path uses the synchronous entry points."*
+
+So the row asserted completion in the one field a reader checks and recorded a deviation in the one
+field a reader skips. `Status::is_done` counts only `Implemented` as done, and the module's prose
+published `| **Implemented** | 2, 8, 10 |` — so the prose repeated it. CodeRabbit raised it twice.
+
+**Decision: `Partial`, not the async route.** §4.4 specifies a *shape* and production takes the
+synchronous entry points, which is exactly what `Partial` means in this module's own taxonomy —
+and routing production dispatch through `create_async`/`run_async` would change the serving path's
+behaviour for shape conformance with no functional gain. The gap string is now
+`"production dispatch uses the synchronous entry points; §4.4 specifies async"`, and the step
+appears as the fifth of the module's *"honest gaps, named"*.
+
+**The crate test drove it.** `the_documented_counts_match_the_table` failed immediately:
+
+```
+the module documentation carries no `| 2, 8 |` row, which is the step list the `STAGES` table
+produces for `Implemented`. The table and the prose have drifted apart; correct whichever is wrong.
+```
+
+Correcting the prose to that message is the whole fix — the guard stated the remedy. Counts moved
+`3 → 2` implemented and `10 → 11` partial, and `check_lifecycle_counts.py` caught the checklist the
+moment step 10 changed.
+
+### D2 — and the brief was wrong about the guard
+
+The brief said *"`the_documented_counts_match_the_table` asserts `lifecycle.rs`'s **own** prose
+against the rendered counts, and **NOTHING checks the checklist's**."*
+
+**That is false.** `tools/check_lifecycle_counts.py` exists, is registered in `ci.yml` (twice, plus
+its `--self-test`), and `§O-244` records it as closing *"the half a crate test cannot reach"*. It
+reads the checklist's `**Measured:**` line and compares it against the same `STAGES` fold. It fired
+on my step-10 change within seconds:
+
+```
+FAIL  the `ARCH-011` entry states `3 implemented, 10 partial, 1 built-unwired, 1 absent` and the
+`STAGES` table produces `2 implemented, 11 partial, 1 built-unwired, 1 absent`.
+```
+
+**The real gap was one sentence narrower than the brief described.** That checker read the
+`Measured:` line and never read the headline claim **beside it** — which said *"five of the fifteen
+steps are not done"* in the same bullet as a line that made it twelve. Two readings of one table,
+one of them owned. Fifth instance of the shape this goal keeps meeting: **a guard that stops one
+field short.**
+
+Extended with `documented_not_done()`, extracted by its own marker so a rewrite that *drops* the
+sentence is reported rather than silently unchecked. Self-test **7 injections, up from 5**.
+Fault-injected: putting "5" back produces
+``FAIL  the `ARCH-011` entry says 5 of the fifteen steps are not done, and the `STAGES` table
+leaves 13 not implemented.``
+
+### My own mistake, caught before it shipped
+
+I began by adding `lifecycle-implemented` / `lifecycle-partial` / … resolvers to
+`check_doc_claims.py` — a **second derivation** of the same fact, from the same table, in a second
+language. That is precisely `§O-244`'s defect: *"one number written in three places, which
+drifted"*. **Duplicating the derivation is worse than duplicating the number**, because two
+derivations can disagree while each looks authoritative, and nothing compares them to each other.
+
+Found by searching for the checker instead of writing one — process rule #7, arrived at one step
+late. The resolvers were removed, with a comment in the table recording *why*: the lifecycle counts
+belong to `check_lifecycle_counts.py`, which reads the checklist directly rather than through a
+marker.
+
+### And a third count, in prose the crate test did not read either
+
+Fixing D2 exposed one more: the module's own narrative said the pipeline verdict *"would have been
+false for **twelve** of the fifteen"* — not covered, because the crate test checks the four table
+rows and the summary line and stops. It needed to say thirteen.
+
+Covered now, by extending the same crate test. And the extension forced a second change worth
+naming: the sentence read **"thirteen"** as a word, which cannot be compared to anything without a
+number-word parser. **A value that cannot be compared is a value with no owner** — so the numeral
+is now `13`, the same change the checklist sentence needed, for the same reason.
+
+Fault-injected: restoring the word panics with
+``the module documentation must state `false for **13** of the fifteen`: the `STAGES` table leaves
+13 of 15 steps unimplemented``.
+
+### The rule
+
+**A number that cannot be compared is a number with no owner.** Three counts in this one item were
+unowned for the same reason at three different levels — a word instead of a numeral, a sentence
+beside the sentence being checked, and a field asserted as complete beside a comment recording a
+gap. Each was fixed by making the fact *comparable* rather than by adding a parallel mechanism, and
+the difference matters: a parallel mechanism adds an owner that can disagree, while making the fact
+comparable lets the existing owner see it.
+
+→ `crates/qqq-serve/src/lifecycle.rs`, `tools/check_lifecycle_counts.py`,
+`tools/check_doc_claims.py`, `QQQ-Checklist-V1.md`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

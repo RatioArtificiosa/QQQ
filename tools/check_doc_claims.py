@@ -145,6 +145,13 @@ def _workspace_tests() -> int | None:
 # document that declares a claim names which fact it asserts and this table says how to
 # obtain it. Adding a name here without a document that uses it is harmless; adding a
 # number to a document without a name here is what the whole mechanism exists to prevent.
+#
+# The `ARCH-011` lifecycle counts are deliberately NOT here. `check_lifecycle_counts.py`
+# already owns them, reading the same `STAGES` table, and it reads the checklist entry
+# directly rather than through a marker. A second derivation of one fact is the "one
+# number written in three places" defect `§O-244` exists to prevent -- duplicating the
+# *derivation* is worse than duplicating the number, because the two can disagree while
+# both look authoritative (`§O-277`).
 RESOLVERS = {
     "crate-files": lambda: len(list((ROOT / "crates").rglob("*.rs"))),
     "workspace-tests": _workspace_tests,

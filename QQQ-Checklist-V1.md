@@ -930,13 +930,13 @@ Items are grouped below by **phase**, because dependency order matters more than
     than a mechanism.
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
-  → **Partial, and the item stays open because five of the fifteen steps are not done.** What
+  → **Partial, and the item stays open because 13 of the fifteen steps are not done.** What
     landed is the honest accounting rather than a claim: `crates/qqq-serve/src/lifecycle.rs`
     carries `STAGES` — all fifteen of §4.4's steps, each with the file and symbol that performs
     it, a `Status`, and the `gap` that says what is missing — plus a test that verifies every
     named symbol still exists in the file it names, so a rename or a move cannot leave the table
     pointing at nothing.
-  → **Measured: 3 implemented, 10 partial, 1 built-unwired, 1 absent.** The numbers are
+  → **Measured: 2 implemented, 11 partial, 1 built-unwired, 1 absent.** The numbers are
     **derived, never hand-written**: `Summary::of` folds the table into `Counts`, `Counts`
     renders both the numbers and the step lists, and `the_documented_counts_match_the_table`
     asserts the module's prose against that rendering. Change one row's `Status` and the test

@@ -15,13 +15,15 @@
 //!
 //! The first version of this module was going to state that the pipeline is
 //! implemented. Auditing each step against the tree, one at a time, showed that
-//! would have been false for **twelve** of the fifteen, so the table reports a
-//! [`Status`] per step instead of a verdict.
+//! would have been false for **13** of the fifteen, so the table reports a
+//! [`Status`] per step instead of a verdict. The numeral is deliberate: a number
+//! written as a word cannot be compared to anything without a number-word parser,
+//! and a value that cannot be compared is a value with no owner (`§O-277`).
 //!
 //! **The four counts below are derived, never hand-written.** [`Summary::of`] folds
 //! [`STAGES`] into them, [`Summary::Display`] renders them, and
 //! `the_documented_counts_match_the_table` compares the prose against that
-//! rendering — which is **3 implemented, 10 partial, 1 built-unwired, 1 absent**.
+//! rendering — which is **2 implemented, 11 partial, 1 built-unwired, 1 absent**.
 //! A previous version of this module hand-wrote the same four numbers in three
 //! places, and they disagreed: the table below said steps 2, 6, 8, 10, 14 were
 //! implemented, the checklist entry said `5 implemented, 9 partial, 1 built-unwired,
@@ -30,8 +32,8 @@
 //!
 //! | Kind | Steps | What is actually true |
 //! |---|---|---|
-//! | **Implemented** | 2, 8, 10 | The named symbol performs the step |
-//! | **Partial** | 1, 3, 5, 6, 7, 9, 11, 12, 13, 14 | Something performs the step, but not the whole of what §4.4 describes |
+//! | **Implemented** | 2, 8 | The named symbol performs the step |
+//! | **Partial** | 1, 3, 5, 6, 7, 9, 10, 11, 12, 13, 14 | Something performs the step, but not the whole of what §4.4 describes |
 //! | **Built, unwired** | 15 | A complete implementation with no production caller |
 //! | **Absent** | 4 | No implementation exists |
 //!
@@ -41,7 +43,7 @@
 //! the file it names.** That is the property a later edit can break, and it is the
 //! one an omission cannot hide from.
 //!
-//! # The four honest gaps, named
+//! # The five honest gaps, named
 //!
 //! These are the findings, and each is a decision or a debt rather than an
 //! oversight:
@@ -71,6 +73,15 @@
 //!    [`Pool::release`](qqq_host::Pool::release) returns it, while the instance
 //!    itself is created and dropped per request. `Acquired::pooled` means the idle
 //!    count was non-zero — not that a guest instance was reused.
+//! 5. **Step 10, `GUEST ENTRY` — the production path is synchronous where §4.4 says
+//!    async.** [`call_handler`](qqq_host::call::call_handler) resolves the handler
+//!    once per component and calls it, and the async machinery exists in full —
+//!    but the dispatch path the server actually takes uses the synchronous entry
+//!    points. This row read `Implemented` with an empty `gap` while the comment
+//!    above it recorded the deviation, which is the shape `§O-219` names: the step
+//!    looked finished because the thing that would notice was the thing describing
+//!    it. CodeRabbit raised it twice. It is `Partial` now, and the Status, the gap
+//!    and this list agree (`§O-277`).
 //!
 //! # Instrumentation
 //!
@@ -267,11 +278,17 @@ pub const STAGES: [Stage; 15] = [
         name: "GUEST ENTRY",
         file: Some("qqq-host/src/call.rs"),
         symbol: Some("call_handler"),
-        // The handler is resolved once per component and called. §4.4 says the
-        // host "runs it async"; the async machinery exists in full, but the
-        // production dispatch path uses the synchronous entry points.
-        status: Status::Implemented,
-        gap: "",
+        // The handler is resolved once per component and called. §4.4 says the host
+        // "runs it async"; the async machinery exists in full, but the production
+        // dispatch path uses the synchronous entry points.
+        //
+        // **That is a deviation, so this step is `Partial` and not `Implemented`.**
+        // Reporting it complete while the comment above records a gap is the shape
+        // `§O-219` names: an item that looks finished because the thing that would
+        // notice is the thing being described. CodeRabbit raised it twice before the
+        // Status agreed with the prose.
+        status: Status::Partial,
+        gap: "production dispatch uses the synchronous entry points; §4.4 specifies async",
     },
     Stage {
         step: 11,
@@ -1062,6 +1079,23 @@ mod tests {
         assert!(
             src.contains(summary),
             "the module documentation must state `{summary}` verbatim"
+        );
+
+        // The narrative sentence above the table states the same fact a third way — "would
+        // have been false for **N** of the fifteen" — and it was the one reading of this
+        // table with **no owner**: the four table rows and the summary line were compared,
+        // the sentence was not. It said `twelve` while step 10 was `Implemented`; moving
+        // step 10 to `Partial` made it need `thirteen`, and nothing would have said so.
+        // A count in prose that nothing compares is exactly the defect this test exists for
+        // (`§O-277`), so it is compared here too.
+        let not_done = STAGES.len() - Counts::measured().summary.implemented as usize;
+        let narrative = format!("false for **{not_done}** of the fifteen");
+        assert!(
+            src.contains(&narrative),
+            "the module documentation must state `{narrative}`: the `STAGES` table leaves \
+             {not_done} of {} steps unimplemented, and the sentence above the table states \
+             that same fact in prose. Correct whichever is wrong.",
+            STAGES.len()
         );
     }
 

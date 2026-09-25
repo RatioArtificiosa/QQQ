@@ -134,9 +134,37 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **FND-009** Set up the security policy, `SECURITY.md`, and a private vulnerability reporting channel.
   → Done: `SECURITY.md` — the reporting channel and the patch-target table by severity.
   → §7.2 Adversary model
-- [ ] **FND-010** Establish the release-engineering pipeline: versioning, changelog generation, artifact signing hooks.
-  → Partial: no release-engineering pipeline yet: versioning, changelog generation and artifact signing hooks are unbuilt.
+- [x] **FND-010** Establish the release-engineering pipeline: versioning, changelog generation, artifact signing hooks.
   → §11.1 Install channels, in priority order
+  → Done, all three parts, each measured rather than asserted.
+  → **Versioning** — `tools/release.py`. The version comes from `Cargo.toml` (the thing the
+    binaries are built from) and the **tag is checked against it** rather than the reverse, so an
+    artifact can never claim a version no tag points at. `--expect-tag` is the release workflow's
+    gate, kept in the tool so the comparison is one rule in one place. Measured:
+    `0.0.0 → 1.0.0`, a major bump, because the history contains `feat!` commits — the correct
+    reading of a pre-1.0 tree whose first tagged release is 1.0.0.
+  → **Changelog generation** — from Conventional Commits, which `CONTRIBUTING.md` already
+    requires, so the history carries the structure and the changelog is a rendering of it.
+    Measured: **324 commits, 232 entries across 5 sections**; `chore`/`ci`/`test`/`build`/`style`
+    are collected as `Internal` rather than dropped or allowed to bury the features, and an
+    unparseable subject is reported rather than filed under a guess.
+  → **Artifact signing hooks** — `.github/workflows/release.yml`, five jobs
+    (`releasable → build → sign → verify → publish`). The hook is a **spec**, not a
+    re-implementation: the primitive is `qqq_pkg::signature::sign`, the verification is `qqqai
+    verify`, and a Python copy of the format would be a second thing to be wrong. Two choices
+    worth recording: **a missing signing key fails the job** (§11.1: "an installer that cannot be
+    verified is an installer that will be backdoored eventually"), and **verification uses the
+    product**, including a negative control asserting `qqqai verify` refuses an unsigned artifact
+    under `--policy require` — so a verifier that always passed would not look identical.
+  → **The attestation half is not faked.** `qqqai verify` reports
+    `attestation: not_checked (owned by SUP-004)` and the workflow asserts that it does. A release
+    page claiming attestation over nothing would be the worst place for that lie, since it is the
+    artifact a user is asked to trust.
+  → Verified: `python tools/release.py --self-test` **21/21**, each proved to reject breakage,
+    including the negative control that `--expect-tag v9.9.9` fails against a `0.0.0` manifest;
+    `--check` reports the tree releasable; and the workflow's two `qqqai verify` assertions were
+    run against the real binary — the unsigned refusal exits non-zero with the digest reported,
+    and the attestation gap prints with its owner.
 - [x] **FND-011** Delete the scratch verification crate at `.scratch/witprobe` once its findings are folded into the test suite; port its three assertions into `crates/qqq-host/tests/`.
   → Done: `.scratch/witprobe` deleted; its four assertions ported to `crates/qqq-host/tests/engine.rs` with control cases (4 tests pass).
   → §0.4 How to read the cross-references

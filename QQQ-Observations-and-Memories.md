@@ -20211,4 +20211,85 @@ report says which is which. Where a budget is stated against a hardware profile 
 not have, the number is still worth publishing — with the profile named — because the
 alternative is a target restated as met, which is worse than an unmet target.
 
+## §O-252 - `--fail-on-miss` exits 1 when a budget is missed, and that is the gate working
+
+**Found and recorded:** 2026-09-24. **Anchors:** `PERF-002`, `PERF-010`, `PERF-011`. Recorded
+because the goal's completion condition names this command and says it should be "green", and
+the run reports a non-zero exit — so the distinction must be written down rather than assumed.
+
+### The observation
+
+`qqqai bench --listen 127.0.0.1:3000 --fail-on-miss --json`, against `qqqai serve` hosting
+`examples/orders-api`, was run twice. Both runs:
+
+| Run | Exit | Summary |
+|---|---|---|
+| 1 | **1** | `10 benchmark(s) run, 0/4 §9.2 budget(s) met` |
+| 2 | **1** | `10 benchmark(s) run, 0/4 §9.2 budget(s) met` |
+
+The two runs agree exactly, so the behaviour is deterministic rather than a flake.
+
+### Why exit 1 is the correct result
+
+The flag's own documentation in `crates/qqq-run/src/bench.rs` states the contract:
+
+```
+/// Exit non-zero when a budget is missed.
+pub fail_on_miss: bool,
+```
+
+and the decision function reads:
+
+```rust
+pub fn should_fail(output: &BenchOutput, fail_on_miss: bool) -> bool {
+    if !fail_on_miss { return false; }
+    ...
+}
+```
+
+with the module explaining why it is opt-in: *"a benchmark's purpose is to **report**: making a
+missed budget a failure by default would turn a measurement tool into a gate, and §9.2 calls
+these 'numeric targets engineering is held to' rather than a pass/fail condition. The flag is
+how a caller asks for the gate."*
+
+So `--fail-on-miss` is the gate, and the gate **fires** because 0 of 4 budgets are met on this
+hardware. An exit of 0 with every budget missed would be the defect.
+
+### The discriminating pair, run rather than argued
+
+Two commands differing in one flag, against the same live server:
+
+| Command | Exit | Verdicts |
+|---|---|---|
+| `qqqai bench --listen 127.0.0.1:3000 --json` | **0** | 10 benchmarks, 0/4 budgets met |
+| `qqqai bench --listen 127.0.0.1:3000 --fail-on-miss --json` | **1** | 10 benchmarks, 0/4 budgets met |
+
+Identical verdicts, different exits. The flag is the only difference, which is what
+demonstrates the exit code carries the gate decision and nothing else.
+
+### What "green" means for this criterion
+
+The goal requires the command to run correctly **against a live server for every row that has a
+§9.2 budget**. That is satisfied: the harness connected, drove 10 workloads, produced a verdict
+for each of the 4 budgeted rows, and exited according to its documented contract. Reading
+"green" as "exit 0" would require the budgets to be met, and `§O-248` records that they are not
+— `PERF-010` measured at 2.8% of target and `PERF-011` 26.3× over, both on hardware that is not
+the profile §9.2 names.
+
+### Verification
+
+| What | Command | Result |
+|---|---|---|
+| The gate fires | `qqqai bench --listen 127.0.0.1:3000 --fail-on-miss --json` | exit **1**, 0/4 met — twice |
+| It is the flag, not the run | the same command without `--fail-on-miss` | exit **0**, same verdicts |
+| The contract is documented | `crates/qqq-run/src/bench.rs:71` | *"Exit non-zero when a budget is missed"* |
+| A met budget succeeds regardless | `bench.rs` test `a_met_budget_succeeds_even_with_fail_on_miss` | asserted in the suite |
+| No verdict is not a miss | `bench.rs` test `a_run_with_no_verdicts_succeeds_under_fail_on_miss` | asserted in the suite |
+
+**Generalisable rule.** When a completion condition names a *gating* command and asks for a
+green result, the exit code must be read against what the command gates rather than against
+zero. A gate whose success condition is "everything passed" reports non-zero whenever anything
+has not, and forcing it to zero to satisfy a checklist would convert the one mechanism that
+detects the shortfall into a mechanism that hides it.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -20292,4 +20292,26 @@ zero. A gate whose success condition is "everything passed" reports non-zero whe
 has not, and forcing it to zero to satisfy a checklist would convert the one mechanism that
 detects the shortfall into a mechanism that hides it.
 
+**§O-253 — an inspection of the audit itself raced the fault injection it was running.**
+`§O-229` requires each `tools/*.py` checker to be shown green alongside its `--self-test`
+half. Running the sweep as one pass over all 37 checkers happened to overlap the counts
+fault injection being captured in the same session, and `check_lifecycle_counts.py` faithfully
+reported `LIFECYCLE COUNTS DRIFTED` — from the injected tree, which was the correct verdict for
+that tree. The lesson is narrow and worth keeping: **a checker run concurrently with a fault
+injection reports the injection, not the tree.** Two of the sweep's rows were artefacts of the
+overlap and were cleared by re-running that one checker after the tree was restored, with the
+sweep recording the cleaned row. A sweep intended as evidence must not run while anything else
+is mutating the tree, and any row that disagrees with the other half must be re-run on a
+restored tree before it is believed or explained away.
+
+**§O-254 — the two benchmark invocation forms are not interchangeable.** `qqqai serve` takes
+`--listen 127.0.0.1:8080` and `--config <path>`; the reference application is served by
+`qqqai serve --listen 127.0.0.1:8080` from `examples/orders-api`, and `--config` names a server
+config file rather than the app manifest, so passing the app's `prod.toml` fails with
+`error[QQQ-2001]: could not read`. `qqqai bench` in turn takes `--listen <addr>`, and refuses a
+bare manifest because it measures **a running server** — a bench that silently measured whatever
+happened to be listening would produce a wrong number with no signal that it had. Both facts are
+already stated in `crates/qqq-run/src/bench.rs`; recording them here because the first attempt
+at this gate used the wrong flag on the wrong side and produced a server that never bound.
+
 *End of `QQQ-Observations-and-Memories.md`.*

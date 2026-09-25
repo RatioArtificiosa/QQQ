@@ -43,6 +43,18 @@ diagram and an ```` ```ignore ```` block is explicitly not built, so neither cou
 would inflate coverage with content that proves nothing, which is the mistake the first
 measurement of this surface made (38 fences, none compiling).
 
+# What the count does *not* say: `no_run` compiles an example and never runs it
+
+`no_run` is in the accepted list because rustdoc builds it, and a built example is genuine
+documentation coverage. It is not evidence that the assertions inside it hold. Sized directly:
+the first example written for `qqq-host`'s `PreparedComponent::compile` was `no_run`, and
+replacing that function's artifact rejection with a fallback that accepts any bytes left the
+doctest **green** - because rustdoc had never executed a line of it (`§O-236`).
+
+The count therefore reports `no_run` fences separately, so a rising coverage number cannot be
+read as "this many examples are executed". It is not an error to write one; it is an error to
+believe it proves behaviour, and the split is what keeps the claim honest.
+
 # What counts as a public item
 
 `pub fn`, `pub struct`, `pub enum`, `pub trait`, `pub type`, `pub union`, `pub const`, `pub mod` -
@@ -90,6 +102,10 @@ PUB_DECL = re.compile(
 # first version of this pattern matched only `///`, so it reported zero compiling fences for a
 # crate that has one. Measured: `cargo test --doc` runs 3 doctests while this counted 0.
 COMPILING_FENCE = re.compile(r"^\s*//[/!]\s*```(?:rust|no_run|should_panic|compile_fail)?\s*$")
+
+# A compiling fence that rustdoc will *build and not run*. Counted, and reported apart from the
+# rest, because it documents an API without proving its behaviour (`§O-236`).
+NO_RUN_FENCE = re.compile(r"^\s*//[/!]\s*```no_run\s*$")
 
 # Any other fence, which may be prose-only but marks the start of a non-compiling block.
 ANY_FENCE = re.compile(r"^\s*//[/!]\s*```")
@@ -152,8 +168,8 @@ def items_in(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def fences_in(text: str) -> tuple[int, int]:
-    """(compiling fences, other fences) in a file's doc comments.
+def fences_in(text: str) -> tuple[int, int, int]:
+    """(compiling fences, no_run fences, other fences) in a file's doc comments.
 
     # Why this tracks opening and closing, rather than matching every fence line
 
@@ -163,9 +179,10 @@ def fences_in(text: str) -> tuple[int, int]:
     fences instead of 1, because the closers matched too.
 
     So the scan is stateful: inside a block, a fence *closes*; outside, a fence *opens*, and only
-    an opening fence is counted.
+    an opening fence is counted. `no_run` fences are a subset of the compiling ones, returned
+    separately so the report can say how many examples are documented but not executed.
     """
-    compiling = other = 0
+    compiling = no_run = other = 0
     in_block = False
     for line in text.split("\n"):
         if not ANY_FENCE.match(line):
@@ -176,9 +193,11 @@ def fences_in(text: str) -> tuple[int, int]:
         in_block = True
         if COMPILING_FENCE.match(line):
             compiling += 1
+            if NO_RUN_FENCE.match(line):
+                no_run += 1
         else:
             other += 1
-    return compiling, other
+    return compiling, no_run, other
 
 
 def measure() -> dict:
@@ -194,14 +213,15 @@ def measure() -> dict:
     """
     per: dict[str, dict] = {}
     for crate in crates():
-        files = items = comp = other = documented_files = 0
+        files = items = comp = no_run = other = documented_files = 0
         for f in sorted((crate / "src").rglob("*.rs")):
             files += 1
             text = f.read_text(encoding="utf-8")
             file_items = items_in(text)
-            c, o = fences_in(text)
+            c, nr, o = fences_in(text)
             items += len(file_items)
             comp += c
+            no_run += nr
             other += o
             if file_items and c > 0:
                 documented_files += 1
@@ -209,6 +229,7 @@ def measure() -> dict:
             "files": files,
             "items": items,
             "compiling": comp,
+            "no_run": no_run,
             "other": other,
             "documented_files": documented_files,
         }
@@ -253,13 +274,17 @@ def run_check(args) -> int:
     per = measure()
     total_items = sum(v["items"] for v in per.values())
     total_comp = sum(v["compiling"] for v in per.values())
+    total_no_run = sum(v["no_run"] for v in per.values())
 
-    print(f"{'crate':14} {'files':>6} {'public items':>13} {'compiling fences':>17} {'other':>6}")
-    print("-" * 62)
+    print(f"{'crate':14} {'files':>6} {'public items':>13} {'compiling fences':>17} {'no_run':>7} {'other':>6}")
+    print("-" * 70)
     for name, v in per.items():
-        print(f"{name:14} {v['files']:6} {v['items']:13} {v['compiling']:17} {v['other']:6}")
-    print("-" * 62)
-    print(f"{'TOTAL':14} {sum(v['files'] for v in per.values()):6} {total_items:13} {total_comp:17} {sum(v['other'] for v in per.values()):6}")
+        print(f"{name:14} {v['files']:6} {v['items']:13} {v['compiling']:17} {v['no_run']:7} {v['other']:6}")
+    print("-" * 70)
+    print(
+        f"{'TOTAL':14} {sum(v['files'] for v in per.values()):6} {total_items:13} "
+        f"{total_comp:17} {total_no_run:7} {sum(v['other'] for v in per.values()):6}"
+    )
 
     ran = doctests_run()
     outstanding = max(total_items - ran, 0)
@@ -267,6 +292,12 @@ def run_check(args) -> int:
     print()
     print(f"doctests cargo runs: {ran}")
     print(f"outstanding:         {outstanding} of {total_items} public declarations")
+    if total_no_run:
+        print(
+            f"of the {total_comp} compiling fence(s), {total_no_run} are `no_run`: built and never "
+            "executed,\n                     so they document an API without proving its behaviour "
+            "(§O-236)."
+        )
 
     allowance = args.allow if args.allow is not None else allowance_from_ci()
     if allowance is None:
@@ -283,7 +314,7 @@ def run_check(args) -> int:
             for f in sorted((crate / "src").rglob("*.rs")):
                 text = f.read_text(encoding="utf-8")
                 items = items_in(text)
-                comp, _ = fences_in(text)
+                comp, _, _ = fences_in(text)
                 if items and comp == 0:
                     rel = f.relative_to(ROOT)
                     kinds = ", ".join(sorted({k for k, _ in items}))
@@ -354,9 +385,24 @@ mod tests {
 /// not built
 /// ```
 """
-    comp, other = fences_in(fences)
+    comp, no_run, other = fences_in(fences)
     expect("compiling fences", comp, 1)
+    expect("no_run fences", no_run, 0)
     expect("other fences", other, 2)
+
+    # `no_run` is a compiling fence that is never executed, and is reported apart from the rest.
+    no_run_only = """
+/// ```no_run
+/// let x = 1;
+/// ```
+/// ```rust
+/// let y = 2;
+/// ```
+"""
+    comp, no_run, other = fences_in(no_run_only)
+    expect("no_run counts as compiling", comp, 2)
+    expect("no_run is counted separately", no_run, 1)
+    expect("no_run is not an 'other' fence", other, 0)
 
     # The gate: over the allowance fails, at it passes.
     class A:

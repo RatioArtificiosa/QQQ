@@ -19217,4 +19217,50 @@ belongs in a frozen column with no marker, and the two must not share a cell.
 `python tools/check_doc_claims.py` after updating both cells: `2 claim(s) match the tree`.
 The failure was reproduced from the CI log for run `36087065310` before the fix was written.
 
+## §O-236 — A `no_run` doctest counts as an example and asserts nothing, because
+## rustdoc compiles it and never executes it
+
+The `DX-015` ratchet counts compiling fences, and the first example written for
+`qqq-host`'s `PreparedComponent::compile` was fenced ```` ```no_run ```` on the reasoning that
+real Wasmtime compilation is expensive. The fence counted, the crate built, `cargo test --doc
+-p qqq-host` reported `1 passed`, and every assertion inside it — the digest is stable, a core
+module is refused with `QQQ-1002` — had never run.
+
+The fault injection is what exposed it. Replacing `compile`'s artifact rejection with a fallback
+that accepts *any* bytes and substitutes a hard-coded minimal component left the doctest **green**:
+
+    --- doctest with artifact rejection replaced by a fallback ---
+    test crates\qqq-host\src\instance.rs - instance::PreparedComponent::compile (line 91) - compile ... ok
+    FAIL: the doctest PASSED while invalid artifacts were accepted
+
+A test that passes while the shipped code is broken is worse than no test (`§O-229`'s rule), and
+this one had the specific property that makes it hard to notice: `cargo test --doc` prints
+`1 passed`, so the suite looks like it is doing work. The tell is `--ignored`:
+
+    running 0 tests
+    test result: ok. 0 passed; ...; 1 filtered out
+
+`no_run` means the code is type-checked and discarded. Nothing in the default output distinguishes
+it from an executed test.
+
+**This is not only an authoring mistake — the ratchet has the same blind spot.**
+`tools/check_api_examples.py` classifies a fence as compiling by its info string, and `no_run`
+appears in the list of accepted forms, so a `no_run` example increments the counter while proving
+nothing about behaviour. The counter measures documentation coverage, which is what `DX-015`
+literally asks for; it does not measure whether an example *runs*. Two numbers would be needed to
+say both, and conflating them would repeat `§O-235`.
+
+### Fix
+
+The fence lost its `no_run`. The test now takes ~1.9s instead of ~0.15s, which is the direct
+evidence that Wasmtime is actually compiling: an executing doctest is measurably different from a
+compiled one. With the fence removed, the injection above fails the test and the file restores
+byte-for-byte (SHA-256 `1cb2686d32980c10c1b599779dc746b94a8d348e0214eb0568e18a18acae15b5`).
+
+### Rule
+
+When an example is expensive enough to want `no_run`, either make it cheap enough to run or move
+the assertion into a `#[test]`. A fence that cannot fail is not evidence, and the number it
+increments is a documentation count, not a correctness one.
+
 *End of `QQQ-Observations-and-Memories.md`.*

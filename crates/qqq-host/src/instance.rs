@@ -81,6 +81,50 @@ impl PreparedComponent {
     /// Returns `QQQ-1002` when the bytes are not a valid component, naming the
     /// underlying parse failure. This is a **build-time** error class because
     /// it is the user's artifact that is wrong, not the host's state.
+    ///
+    /// # Examples
+    ///
+    /// Compiling is the expensive step, and it happens once: the digest is what
+    /// a cache keys on and what the audit record names, so two compilations of
+    /// the same bytes must agree on it.
+    ///
+    /// `no_run` was the first version of this fence, and it was wrong: rustdoc
+    /// *compiled* it and never executed it, so every assertion below was
+    /// decorative — replacing the artifact rejection with a fallback that
+    /// accepts anything still left the test green (`§O-236`). The fence runs.
+    ///
+    /// ```
+    /// use qqq_host::PreparedComponent;
+    ///
+    /// let mut config = wasmtime::Config::new();
+    /// config.wasm_component_model(true);
+    /// let engine = wasmtime::Engine::new(&config).expect("engine must build");
+    ///
+    /// // A minimal component: a core module lifted through `canon lift`.
+    /// let wasm = r#"
+    ///     (component
+    ///       (core module $m (func (export "f") (result i32) (i32.const 7)))
+    ///       (core instance $i (instantiate $m))
+    ///       (func (export "f") (result u32) (canon lift (core func $i "f")))
+    ///     )
+    /// "#;
+    ///
+    /// let prepared = PreparedComponent::compile(&engine, wasm.as_bytes())
+    ///     .expect("a well-formed component compiles");
+    ///
+    /// // The digest is the artifact's identity, and it is stable.
+    /// let again = PreparedComponent::compile(&engine, wasm.as_bytes())
+    ///     .expect("the same bytes compile the same way");
+    /// assert_eq!(prepared.digest(), again.digest());
+    ///
+    /// // A core module is not a component, and is refused as a user error
+    /// // naming where the artifact came from rather than as a host panic.
+    /// let core_module = b"\0asm\x01\0\0\0";
+    /// let err = PreparedComponent::compile(&engine, core_module)
+    ///     .expect_err("a core module is not a component");
+    /// assert_eq!(err.code, qqq_core::ErrorCode::InvalidComponentArtifact);
+    /// assert_eq!(err.code.id(), "QQQ-1002");
+    /// ```
     pub fn compile(engine: &wasmtime::Engine, bytes: &[u8]) -> Result<Self> {
         let component = Component::new(engine, bytes).map_err(|e| {
             Error::new(

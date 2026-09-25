@@ -13,7 +13,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## What is built, and what was learned building it
 
-- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 586 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
+- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 587 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
 - [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (large)
 
 ## The machine contracts (for an agent)

@@ -29,7 +29,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
 | `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
-| `SRV` | HTTP/application server | 20 | Systems engineer |
+| `SRV` | HTTP/application server | 21 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
 | `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
 | `DX` | Developer experience, CLI ergonomics, errors | 20 | DX engineer |
@@ -52,7 +52,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 586 items.**
+**Total: 587 items.**
 
 ### Status legend
 
@@ -3302,6 +3302,22 @@ Items are grouped below by **phase**, because dependency order matters more than
     `a_per_tenant_entry_keyed_by_the_peer_address_is_applied` with the control
     `a_per_tenant_entry_for_another_address_is_not_applied` in `qqq-serve`. Fault-injected
     by removing the key check: **detected** in both `qqq-cap` and `qqq-run`. See `§O-185`.
+- [ ] **SRV-021** Model the `[server.tls]` manifest section and wire a TLS-terminating accept path into `qqqai serve`.
+  → §6.4 `qqq-serve` — the HTTP and application server
+  → **This row exists because its absence was found by reading a remediation string** (`§O-283`).
+    `SRV-007` delivered the TLS **library** — `qqq-serve::tls`, rustls 0.23, the explicit cipher
+    policy, TLS 1.3 preferred with 1.2 permitted, ALPN, and 21 end-to-end tests that drive a real
+    handshake — and it is ticked on that basis, correctly. What has never existed is the
+    **manifest section that would configure it** and the **accept path in `serve.rs` that would
+    read that section**, so `qqqai serve --tls` is refused at parse time rather than honoured.
+  → **Nothing owned the remainder, and that was the defect.** The refusal's remediation used to
+    read *"until `SRV-007`'s configuration and accept path land"* — pointing an operator at a
+    **ticked item** as outstanding work. A reader who followed it found a done row and no work
+    item, so the gap looked accounted for rather than unowned. The remediation now names the two
+    missing pieces, and this row is their owner.
+  → Unblocks: `crates/qqq-run/src/serve.rs` refuses `--tls` with `error[QQQ-7001]`; the refusal is
+    deleted — with nothing else moving — once both halves land, and `crates/qqq-serve/tests/tls.rs`
+    already proves the library it would call.
 - [x] **ABI-001** Author `qqq:http@1.0` with routing, streaming and client.
   → Done: `wit/qqq-http.wit` — 103 lines, 2 interface(s), 3 function(s).
     Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
@@ -4977,7 +4993,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
 | P0 Foundation | M0 | 79 |
 | P1 Heartbeat | M1 | 58 |
 | P2 Capability engine | M2 | 46 |
-| P3 HTTP | M3 | 36 |
+| P3 HTTP | M3 | 37 |
 | P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 40 |
 | P6 Packages | M6 | 36 |
@@ -4985,7 +5001,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
 | P8 Perf/determinism/obs | continuous | 61 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 34 |
-| **Total** | | **586** |
+| **Total** | | **587** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

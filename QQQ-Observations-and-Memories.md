@@ -20703,4 +20703,101 @@ summary.
 reported eleven dangling references at the first run, and it is the same class as
 `check_xrefs.py`'s existing rule that a checklist ID cited by the Proposal must exist.
 
+## §O-267 — The credential ignore rules were narrower than the file that documented them, and a normal habit fell through the gap
+
+**Found:** while chasing `A1` — a missing `docs/.env.example` that two documents asserted was
+tracked. **Anchors:** `.gitignore`, `docs/.env`, `docs/.env.example`, `.coderabbit.yaml`.
+**Also closes:** the same missing-file claim, by creating the file rather than deleting the
+claim.
+
+### What was wrong
+
+Two independent defects sat beside each other, and either one alone would have been easy to
+dismiss.
+
+**First, the rules were narrower than their own description.** `docs/.env`'s header said:
+
+> `# NEVER COMMIT THIS FILE. It is covered by the root .gitignore (rules \`.env\`,`
+> `# \`.env.*\` and \`**/.env\`), verified with \`git check-ignore -v docs/.env\`.`
+
+The middle rule did not exist. `.gitignore` carried only:
+
+```
+.env
+.env.local
+.env.*.local
+```
+
+So the statement was true of the file it was written in and false of the family it named.
+Measured with `git check-ignore`, before the fix:
+
+| Path | Ignored? |
+|---|---|
+| `docs/.env` | ✅ yes |
+| `docs/.env.local` | ✅ yes |
+| `docs/.env.production` | ❌ **no** |
+| `docs/.env.bak` | ❌ **no** |
+| `docs/.env.foo` | ❌ **no** |
+
+**Second, the gap is reachable by ordinary behaviour, not by carelessness.** Copying a `.env`
+to `.env.bak` before editing it is what people do. Renaming it to `.env.production` when
+starting a deploy is what people do. Neither is a mistake a reviewer would flag, because the
+file *looks* protected — a rule literally names `.env` a few lines above it. `docs/.env` holds
+five live credentials, and `gitleaks` is enabled in `.coderabbit.yaml` for exactly this
+concern; gitleaks would only see the leak if it reached a diff that got reviewed.
+
+The two defects are the same defect: **a claim about a control, written where the control
+cannot read it.** The `.env` header is prose; prose does not ignore files. And the narrow rules
+were, in effect, a control that stopped one case short of the thing it existed for — which is
+the shape `§O-245` records in `lifecycle::audit` and this repository records in a dozen forms.
+
+### The fix
+
+`.gitignore` now expresses the family, not two of its members:
+
+```
+.env
+.env.*
+!.env.example
+```
+
+with the negation last so `.env.example` is trackable — that ordering is load-bearing, and
+`git check-ignore -v` printing `!.env.example` for the example is the negation working, not the
+file being ignored. `git status --short` reporting `?? docs/.env.example` is the authoritative
+check: an ignored file is omitted from `status` entirely.
+
+**A note on reading `git check-ignore`.** With `-v` it prints the *last matching pattern*,
+including negative ones, and exits 0 when a pattern matched at all. That makes it possible to
+read "IGNORED" next to a `!` rule and conclude the opposite of the truth. The reliable pair is
+`git status --short` (does it appear as `??`) and `git add --dry-run` (does git accept it).
+
+### Created, rather than un-claimed
+
+`docs/.env.example` now exists. Both `.coderabbit.yaml` (`path_instructions: docs/**`) and
+`docs/AGENT-HANDBOOK.md` §9 directed a reader at it, and neither had ever been able to open it.
+It carries every variable name, the docs link for each service, and what breaks without it —
+and no values. **Whether a missing file is fixed by writing it or by deleting the claim is a
+judgement, and the judgement here is that the claim was right and the file was the omission:**
+a credential set that no one can discover is a worse artefact than a template that names it.
+
+The generalisable test: when a document refers to a file, check the file exists. When a
+document describes a *rule*, check the rule exists in the form the document names. The first is
+`A1`; the second is this entry, and it was hiding behind the first.
+
+### What this cost, and what would have caught it
+
+Nothing was leaked — no `.env.*` file has ever been tracked (`git ls-files` is clean of them),
+so the gap was latent rather than realised. But it was one habit away from being realised, and
+the reason it survived is that **the same sentence both described the protection and created
+the false confidence in it.**
+
+`tools/check_coderabbit_config.py` validates `path_instructions` *globs* and
+`knowledge_base.filePatterns`, but not filenames named in prose — so it could not have caught
+`docs/.env.example` either. Extending a checker to resolve prose-referenced paths is the durable
+form of this entry, and is tracked as the guard half of `A2`.
+
+→ `.gitignore`, `docs/.env.example`, `docs/.env`, `.coderabbit.yaml`, `docs/AGENT-HANDBOOK.md`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -27,9 +27,20 @@ yarn-error.log*
 /out/
 
 # Environment — never commit secrets
+#
+# `.env.*` covers EVERY variant. The narrow rules that used to be here
+# (`.env.local`, `.env.*.local`) left `.env.production`, `.env.bak` and every other
+# copy **unignored** — and copying a `.env` before editing it is a normal thing to
+# do, so the gap was reachable by accident rather than by carelessness. `docs/.env`'s
+# own header asserted a `.env.*` rule existed; it did not. See `§O-267`.
+#
+# `.env.example` is the single exception and IS tracked: it is the template that
+# makes the credential set discoverable without the credentials. `docs/.env.example`
+# is referenced by `.coderabbit.yaml` and `docs/AGENT-HANDBOOK.md`; this rule is what
+# makes those references true.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 *.key
 *.pem
 !tests/**/fixtures/**/*.pem

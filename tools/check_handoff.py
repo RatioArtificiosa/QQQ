@@ -105,6 +105,35 @@ def digest_problems(
     return problems
 
 
+def eol_problems(rows: list[tuple[str, str, str]]) -> list[str]:
+    """Problems from `git ls-files --eol`, as `(path, working, wanted)` triples.
+
+    # Why this is a hand-off invariant
+
+    This catches a working-tree file whose bytes differ from the committed blob in a way
+    `git status` cannot see. `.gitattributes` pins `eol=lf` for tracked text, so git
+    normalizes on commit and on comparison: a file rewritten with CRLF on disk is
+    reported by `git status --porcelain` as **clean**, while the local bytes are not the
+    bytes CI validated. That is round 1's failure in a different disguise -- "a canonical
+    document 10 bytes ahead of the CI-validated blob" is the same divergence, a local
+    copy that is not what was checked -- and `git status` is exactly the instrument that
+    misses it.
+
+    It also has a live cause on this project: `Path.write_text` translates `\\n` to
+    `os.linesep`, so a fault-injection script that restores a file through it leaves CRLF
+    behind on Windows. That is `write_text_lf`'s documented trap, and it caught this
+    file's author. The check is cheap, so it runs every hand-off.
+    """
+    problems = []
+    for path, working, wanted in rows:
+        if working != wanted:
+            problems.append(
+                f"{path}: the working tree is {working} but the attribute wants {wanted} "
+                f"-- run `python tools/normalize_eol.py`"
+            )
+    return problems
+
+
 def marker_problems(found: list[tuple[str, str, str]]) -> list[str]:
     """Problems from applied fault-injection markers: (marker, file, source)."""
     return [
@@ -204,6 +233,32 @@ def _committed_digests() -> dict[str, str]:
         code, text = _git("show", f"HEAD:{name}")
         out[name] = hashlib.sha256(text.encode("utf-8")).hexdigest() if code == 0 else ""
     return out
+
+
+EOL_RE = re.compile(
+    r"^i/(\S+)\s+w/(\S+)\s+attr/(\S+)(?:\s+eol=(\S+))?\s+(.+)$"
+)
+
+
+def _eol_rows() -> list[tuple[str, str, str]]:
+    """`(path, working eol, wanted eol)` for every tracked file, from git.
+
+    `want` falls back to `lf` when the attributes name no `eol=`: `eol=lf` and
+    `text=auto` both mean the committed form is LF in this repository, so a working-tree
+    file that is not LF is a divergence either way.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "--eol"], cwd=str(ROOT),
+        capture_output=True, text=True, check=False,
+    )
+    rows: list[tuple[str, str, str]] = []
+    for line in out.stdout.splitlines():
+        m = EOL_RE.match(line)
+        if not m:
+            continue
+        _indexed, working, _attrs, want, path = m.groups()
+        rows.append((path, working, (want or "lf").lower()))
+    return rows
 
 
 def _recorded_digests() -> dict[str, str]:
@@ -326,19 +381,25 @@ def run_checks(include_ci: bool = True, quiet: bool = False) -> int:
     problems += digests
     say(f"  {'ok  ' if not digests else 'FAIL'}  recorded digests match the tree and HEAD")
 
-    # 4. No applied injection.
+    # 4. Working-tree EOL agrees with the attributes, so the bytes on disk are the bytes
+    #    git would commit -- which `git status` cannot tell you, because it normalizes.
+    eol = eol_problems(_eol_rows())
+    problems += eol
+    say(f"  {'ok  ' if not eol else 'FAIL'}  every tracked file's EOL matches its attribute")
+
+    # 5. No applied injection.
     markers = _applied_markers()
     mprob = marker_problems(markers)
     problems += mprob
     say(f"  {'ok  ' if not mprob else 'FAIL'}  no fault injection is left applied")
 
-    # 5. No stale lock.
+    # 6. No stale lock.
     stale = LOCK.exists()
     if stale:
         problems.append(f"a stale lock is present: {LOCK.name} (a sweep was killed)")
     say(f"  {'ok  ' if not stale else 'FAIL'}  no stale sweep lock")
 
-    # 6. CI green for HEAD.
+    # 7. CI green for HEAD.
     if include_ci:
         jobs, event, note = _ci_jobs()
         if note and not jobs:
@@ -410,7 +471,18 @@ def self_test() -> int:
     check("the RAW current() mapping is refused rather than silently passed",
           digest_problems(_recorded_digests(), raw, raw) != [])
 
-    # 3. markers.
+    # 3. EOL: a working-tree file must be the EOL its attribute names. `git status`
+    #    cannot see this, because it normalizes before comparing.
+    check("a matching LF file passes", eol_problems([("a.rs", "lf", "lf")]) == [])
+    check("a matching CRLF file passes (the .ps1 case)",
+          eol_problems([("b.ps1", "crlf", "crlf")]) == [])
+    check("an LF file rewritten as CRLF is caught",
+          eol_problems([("a.rs", "crlf", "lf")]) != [])
+    check("a CRLF file rewritten as LF is caught",
+          eol_problems([("b.ps1", "lf", "crlf")]) != [])
+    check("a mixed file is caught", eol_problems([("a.rs", "mixed", "lf")]) != [])
+
+    # 4. markers.
     check("no markers passes", marker_problems([]) == [])
     # The token is deliberately not an `AREA-NNN` shape. `marker_problems` is a rule about
     # strings, so a synthetic marker exercises it fully, and keeping a real injected ID

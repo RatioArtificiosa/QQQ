@@ -20549,4 +20549,66 @@ compromise: the check needs a *completed* run for HEAD, and while the run for HE
 no such run exists. CI runs the `--self-test` half, which exercises every rule including the
 justified-skip rule against the real workflow file.
 
+**§O-264 — line endings are a third place a working tree can disagree with what CI
+validated, and `git status` is structurally unable to see it.** Three separate findings, all in
+the same class, and all found by adding one rule to the hand-off gate.
+
+### The class
+
+`git status --porcelain` compares the working tree to the index **after applying the attribute
+conversion**. `.gitattributes` pins `eol=lf` for tracked text, so a file rewritten with CRLF on
+disk normalizes back to LF for the comparison and is reported **clean** while its local bytes are
+not the bytes CI checked out. The same is true in the other direction. So "the tree is clean" and
+"the local bytes are the validated bytes" are different claims, and only the first was being
+tested -- which is round 1's failure (`a canonical document 10 bytes ahead of the CI-validated
+blob`) in a second disguise.
+
+`tools/check_handoff.py` now asserts the second claim directly, using `git ls-files --eol` as the
+oracle: for every tracked file, the working-tree EOL must equal the EOL its attribute names. The
+rule takes `(path, working, wanted)` triples, so its self-test injects a CRLF-in-an-LF-file,
+an LF-in-a-CRLF-file and a mixed file, and asserts a matching pair passes -- including the
+legitimate `.ps1` case, which is CRLF on purpose.
+
+### The trap caught its own auditor
+
+`Path.write_text` translates `\n` to `os.linesep`, so a fault-injection script that restores a
+file through it leaves CRLF behind on Windows. That is exactly what `write_text_lf`'s docstring
+exists to warn about, and a script written **for this goal** fell into it: after the marker-flag
+injection, `tools/self_test_xrefs.py` was CRLF on disk while its committed bytes were LF. The
+committed artifact was unaffected -- git normalized on commit -- which is precisely why git could
+not report it and why only the new rule found it.
+
+### A pre-existing defect the rule found on first run
+
+`tools/fault_inject_body.ps1` was stored **LF on disk where `.gitattributes` pins `*.ps1` to
+`eol=crlf`** (`i/lf w/lf attr/text eol=crlf`). Its two siblings were correct (`bootstrap.ps1` and
+`qqqdev.ps1`, both `w/crlf`), so it was the odd one out, and the direction matters: the comment
+above that attribute line reads *"(PowerShell, cmd) is inconsistent about bare LF in some
+contexts"* -- the repo pins CRLF for these types **because** bare LF misbehaves in them. So the
+file was in exactly the state the rule was written to prevent.
+
+`normalize_eol.py` cannot see it and was never going to: its `KEEP_CRLF` set excludes `.ps1`, so it
+only ever converts CRLF to LF and has no operation for this direction. Fixed in the working tree
+(153 bare LF to 153 CRLF; the blob is unchanged because `eol=crlf` means LF is the committed form,
+so this needs no commit and no digest re-record).
+
+### And a git behaviour worth writing down
+
+Rewriting a file's bytes changes the index's cached `stat`, so `git status` reported `M` for
+**both** the `.ps1` and `self_test_xrefs.py` even though `git diff --numstat` found no content
+change in either and an explicit normalized comparison of blob against disk returned equal. Worse,
+`git update-index --refresh` reported `needs update` for both and did **not** clear them. What
+cleared them was `git add` on the two paths, which is a no-op when the content is truly identical:
+the staged diff against `HEAD` came back empty and the worktree went clean. **A `M` from
+`git status` is a claim about the stat cache, not about content; `git diff` is the content
+authority, and a no-op `git add` is the way to settle the difference.**
+
+**§O-265 — the two-halves sweep caught a regression the single-half run would have missed.**
+An edit to `check_xrefs.py` -- inserting the `sandbox` context manager above `_run` -- deleted that
+function's local `import subprocess` as a side effect of the match, leaving `_run` to raise
+`NameError` on every invocation. `python tools/check_xrefs.py` (the `--check` half) does not call
+`_run`, so it stayed green; only `python tools/check_xrefs.py --self-test` exercised the path and
+failed. This is the concrete case §O-229 argues for in the abstract: **one half passing is not
+evidence, and the half that fails is usually the one nobody runs.** The import is now module-level.
+
 *End of `QQQ-Observations-and-Memories.md`.*

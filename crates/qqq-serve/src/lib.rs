@@ -100,6 +100,9 @@ pub mod conn;
 pub mod cors;
 pub mod h2;
 pub mod http1;
+/// The fifteen-step request lifecycle of Proposal §4.4, with each step's measured
+/// completeness (`ARCH-011`).
+pub mod lifecycle;
 /// Per-tenant request limits, and the accounting that enforces them.
 pub mod limits;
 /// The default metric set, per Proposal §10.2.

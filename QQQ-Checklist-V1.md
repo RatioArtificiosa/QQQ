@@ -927,6 +927,39 @@ Items are grouped below by **phase**, because dependency order matters more than
     than a mechanism.
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
+  → **Partial, and the item stays open because five of the fifteen steps are not done.** What
+    landed is the honest accounting rather than a claim: `crates/qqq-serve/src/lifecycle.rs`
+    carries `STAGES` — all fifteen of §4.4's steps, each with the file and symbol that performs
+    it, a `Status`, and the `gap` that says what is missing — plus a test that verifies every
+    named symbol still exists in the file it names, so a rename or a move cannot leave the table
+    pointing at nothing.
+  → **Measured: 5 implemented, 9 partial, 1 built-unwired, 1 absent.** The numbers come from the
+    table itself (`Summary::of`), and a test asserts the pipeline is *not* complete, so a later
+    commit cannot quietly flip the claim.
+  → **The four findings, each a decision or a debt rather than an oversight.**
+    • **Step 4 `TENANT RESOLVE` — absent.** §4.4 maps *host/path → tenant → component ID +
+    manifest rev*. There is no such mapping anywhere in the workspace: the router is **path-only**
+    (`Route` has no host field), and the only tenant derivation in `qqq-serve` is `tenant_of`,
+    which keys on the **client IP** for per-tenant limits. §4.4's claim that step 4 is the only
+    place routing state lives currently describes intent.
+    • **Step 15 `AUDIT APPEND` — built and unwired.** `AuditStream::record` is complete,
+    hash-chained and append-only, and its only callers are its own tests. This is the gap that
+    matters most for §4.4's security story: step 13 meters and step 15 records, and the
+    recording half does not run.
+    • **Steps 6 and 14 are accounting, not reuse.** §4.4's "pooled instance (≈µs)" and "linear
+    memory is reset, not freed" do not hold: `Pool::acquire` charges a slot and `release` returns
+    it, while the instance is created and dropped per request. `Acquired::pooled` means the idle
+    count was non-zero, not that a guest was reused.
+    • **Step 3 is path-only and allocates**, against §4.4's "no allocation on the hot path"; and
+    steps 9 and 12 buffer the body into a `Vec<u8>`, so "body becomes a stream" and "streams pass
+    through" are not true on the guest path.
+  → **The instrumented half is real where the pipeline is not**, and its own gap is stated:
+    `HttpMetrics::record_request` records latency, bytes and connections, and
+    `qqq_host::Metrics::note_execution` records fuel, traps and peak memory, but **they are two
+    registries with no common key**, and no handle peak reaches telemetry — so step 13 is
+    three-quarters done.
+  → Verified: 10 tests green; `clippy -D warnings` clean; the named-symbol audit passes against
+    the real tree and has a **positive control** proving it reports a symbol that does not exist.
 - [x] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
   → Done: `crates/qqq-host/src/arch012.rs` — `AUDITED` (8 measured rows),
     `Enforcement`, `AuditFinding`, `scan`, `audit`. **14 tests**, all green.

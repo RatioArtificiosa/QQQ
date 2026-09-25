@@ -20314,4 +20314,21 @@ happened to be listening would produce a wrong number with no signal that it had
 already stated in `crates/qqq-run/src/bench.rs`; recording them here because the first attempt
 at this gate used the wrong flag on the wrong side and produced a server that never bound.
 
+**§O-255 — `DCO` is skipped on a `push` by design, and the check that proves it is a
+`pull_request` run.** Verification of this goal reads the CI run behind the final commit, and a
+run read only from `main` reports `DCO` as `skipped`, which is easy to mistake for a job that
+failed to start. It is not. `.github/workflows/ci.yml` defines the job as
+`dco: if: github.event_name == 'pull_request'`, and the comment above it states the reason:
+
+> A push to `main` is either a merge of an already-checked pull request or a maintainer's direct
+> commit, and the DCO is a contributor certification — requiring it on a revert or a merge
+> commit would fail on commits nobody signed, which is how a check gets disabled.
+
+So a `push` run executes **11** of the 12 declared jobs and skips `DCO` deliberately, while a
+`pull_request` run executes all **12**. The honest way to show the whole workflow green is to
+read a `pull_request` run over the same commit rather than to describe the skip in prose, and
+that is recorded here so a later reader does not have to re-derive it. Two consequences worth
+keeping: the skip is not a failure to investigate, and "all jobs green" is a different sentence
+on the two event types — 11 of 12 versus 12 of 12.
+
 *End of `QQQ-Observations-and-Memories.md`.*

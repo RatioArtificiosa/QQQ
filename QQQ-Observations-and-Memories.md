@@ -21326,4 +21326,108 @@ every reader of it.
 
 ---
 
+## §O-273 — All five generators wrote CRLF on Windows, and the helper that explains why said one true thing and one false one
+
+**Found:** by accident. Running `tools/gen_wit_reference.py` during reconnaissance to read its
+summary line **regenerated a tracked file**, and the hand-off gate then failed with
+`docs/wit-reference.md: the working tree is crlf but the attribute wants lf`. **Anchors:**
+`tools/gen_*.py`, `tools/check_xrefs.py::write_text_lf`, `.gitattributes`.
+
+### The defect
+
+All five generators wrote their output with
+
+```python
+TARGET.write_text(generated, encoding="utf-8")
+```
+
+`Path.write_text` passes `newline=None` to `open`, and that **translates every `\n` to
+`os.linesep`** — `\r\n` on Windows. This repository pins `eol=lf` for tracked text, so on Windows
+each generator produces a file that violates `.gitattributes`.
+
+Measured on this platform, writing `"a\nb\n"`:
+
+| form | bytes written | CRLF |
+|---|---|---|
+| `Path.write_text(...)` (default `newline=None`) | `b'a\r\nb\r\n'` | **2** |
+| `io.open(..., newline="")` | `b'a\nb\n'` | 0 |
+| `io.open(..., newline="\n")` | `b'a\nb\n'` | 0 |
+| `Path.write_bytes(text.encode("utf-8"))` | `b'a\nb\n'` | 0 |
+
+Affected, one per generated document — which is why the set is exactly the five documents
+`check_doc_claims.py` names as generated:
+
+```
+tools/gen_error_catalogue.py:380   docs/errors.md
+tools/gen_glossary.py:205          docs/glossary.md
+tools/gen_reconciliation.py:190    docs/reconciliation.md
+tools/gen_verified_facts.py:358    docs/verified-facts.md
+tools/gen_wit_reference.py:434     docs/wit-reference.md
+```
+
+**Why it survived.** CI runs on Linux, where `os.linesep` is `\n` and the generators are correct,
+so every `--check` half passes there. The defect can only be observed **on the platform that has
+the bug**, which is the same shape as `§O-268`: a control that cannot fail where it is tested.
+
+**And the fix already existed.** `tools/check_xrefs.py` has a dedicated `write_text_lf()` whose
+docstring explains this exact trap and which writes bytes to avoid it. It was written for the
+xref harness and never reached the generators. That is `§O-268`'s shape again — a solved pattern
+in one place, absent in five — and `§O-270`'s — a control that covers what it was pointed at.
+
+### The second defect, inside the explanation
+
+`write_text_lf`'s docstring said:
+
+> *"`newline=""` is the other candidate and it is wrong here: it means **translate `\n` to the
+> platform terminator**, which is the same behaviour. Only bytes are exact."*
+
+**That is false for the write direction**, and the table above measures it: `newline=""` writes
+`b'a\nb\n'`. CPython's `open` documentation is explicit — *"If newline is `''` or `'\n'`, no
+translation takes place."* The paragraph was explaining the right decision with a wrong reason,
+in the one helper whose entire subject is newline semantics. A wrong reason there is worse than no
+reason: a reader who trusts it will conclude `newline=""` is unusable, and at least two tools in
+this repository use it correctly (`check_wit_style.py:380`, `release.py:367`).
+
+Corrected to state the measurement and to give the honest, narrower justification for bytes —
+that it removes the text layer rather than relying on a flag whose default is the surprising one.
+
+### The fix, and the proof
+
+All five generators now use `TARGET.write_bytes(generated.encode("utf-8"))`, each carrying a short
+comment naming the trap. Verified three ways:
+
+1. **Regeneration is now idempotent on Windows.** Running `gen_wit_reference.py` writes
+   `CRLF=0, LF=593`, and `git status -- docs/` reports **nothing** — the tree is clean after a
+   generator run, which before the fix it could never be.
+2. **Every `--check` half still exits 0** (`gen_wit_reference`, `gen_error_catalogue`,
+   `gen_glossary`, `gen_reconciliation`, `gen_verified_facts`).
+3. `grep 'write_text(' tools/gen_*.py` returns nothing.
+
+The working-tree CRLF that my own reconnaissance created was repaired with
+`python tools/normalize_eol.py`, which is the tool the gate's own message names.
+
+### The trap I hit, and the class it belongs to
+
+**`gen_*.py` without `--check` MUTATES the tree.** The handbook's §5 lists generators with their
+`--check` halves; the reason both exist is that the writer half is destructive when all you want
+is to know what it would produce. During reconnaissance, always use `--check`, or read the
+generator rather than running it. I ran a writer to read a summary line and paid for it with a
+dirty tree, a failed gate, and this round's detour.
+
+This is the **third** instance of one class, and the class is worth naming once:
+
+> **A Python default that differs on Windows.** `locale.getpreferredencoding()` is `cp1252`
+> (`§O-268`, `§O-271`); a text stream's `newline=None` translates `\n` (`§O-273`); a pipe's stdout
+> cannot encode what was read (`§O-271`). Each is invisible in CI, each produces a *plausible*
+> wrong result rather than an exception, and each was solved locally by bytes somewhere in this
+> repository before being solved generally. When a tool reads or writes text on this platform,
+> specify the encoding **and** the newline behaviour explicitly, and prefer bytes at any boundary
+> whose output is compared to something.
+
+→ `tools/gen_error_catalogue.py`, `tools/gen_glossary.py`, `tools/gen_reconciliation.py`,
+`tools/gen_verified_facts.py`, `tools/gen_wit_reference.py`, `tools/check_xrefs.py`,
+`.gitattributes`, `docs/wit-reference.md`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

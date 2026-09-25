@@ -763,9 +763,14 @@ def write_text_lf(path: Path, text: str, encoding: str = "utf-8") -> None:
     `tools/normalize_eol.py --check` rejects. Writing bytes keeps the
     transformation and drops the translation.
 
-    `newline=""` is the other candidate and it is wrong here: it means *translate
-    `\n` to the platform terminator*, which is the same behaviour. Only bytes are
-    exact.
+    `newline=""` is the other candidate. It is **correct** -- measured on this platform,
+    `open(p, "w", newline="")` writes `b'a\nb\n'` where the default writes
+    `b'a\r\nb\r\n'`, so it does not translate. Bytes are still preferred, for a narrower
+    reason than this docstring used to give: `write_bytes` removes the text layer rather
+    than relying on a flag whose default is the surprising one. An earlier version of this
+    paragraph asserted that `newline=""` "means translate `\n` to the platform
+    terminator", which is false for the write direction, and a wrong reason in a helper
+    about newline semantics is worse than no reason (`§O-273`).
 
     The counterpart of this is `Path.read_text`: reads here are already exact,
     because the default newline handling translates `\r\n` *back* to `\n` and

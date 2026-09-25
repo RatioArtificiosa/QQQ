@@ -187,7 +187,11 @@ def main() -> int:
         )
         return 0
 
-    TARGET.write_text(updated, encoding="utf-8")
+    # `write_bytes`, not `write_text`: the latter passes `newline=None` to `open`, which
+    # translates every `\n` to `os.linesep` -- `\r\n` on Windows. This repository pins
+    # `eol=lf` for tracked text, so a Windows regeneration would leave a file that
+    # `git diff` reports as unchanged and `normalize_eol.py --check` rejects. `§O-273`.
+    TARGET.write_bytes(updated.encode("utf-8"))
     print(f"wrote {TARGET.relative_to(ROOT)} with {len(rows)} correction(s)")
     return 0
 

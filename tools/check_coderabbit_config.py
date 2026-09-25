@@ -279,6 +279,123 @@ def check_guidelines(sections: dict[str, list[str]]) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Prose references: a file named in the instructions must exist.
+#
+# The globs were checked and the prose was not. `path_instructions` names files in
+# backticks — `tools/check_spdx.py`, `QQQ-Checklist-V1.md`, `.env.example` — and the
+# `docs/**` block said *"Only `.env.example` is tracked"* about a file that **did not
+# exist**. Both that claim and the same one in `docs/AGENT-HANDBOOK.md` §9 pointed a
+# reader at a path nobody could open, and every existing check passed: the globs matched
+# real files, and nothing looked at the names.
+#
+# **Measured against this corpus before being wired in**, the way `check_xrefs.py`
+# check `[13]` was. The first version of the pattern required a leading word character,
+# so it could not match `.env.example` at all — a guard unable to express the case it
+# exists for. The second matched a bare extension, and reported the `` `.md` `` in the
+# `**/*.md` block — prose *about a format*, not a reference to a file — as an unresolved
+# path. Requiring a stem before the dot removes it. Final measurement: 7 candidates, 7
+# resolving, 0 false positives; removing `docs/.env.example` produces exactly one
+# failure, naming it (`§O-274`).
+# ---------------------------------------------------------------------------
+
+PROSE_PATH = re.compile(r"`(\.?[A-Za-z0-9_][A-Za-z0-9_./-]*)`")
+
+# Extensions that make a bare token path-like rather than prose about a format.
+PROSE_EXT = frozenset({
+    "md", "toml", "py", "rs", "yaml", "yml", "json", "jsonl", "env", "example",
+    "txt", "sh", "ps1", "wit", "lock", "ts", "js", "mjs", "css", "html", "c", "cpp", "h",
+})
+
+
+def instruction_blocks(text: str) -> list[tuple[str, str]]:
+    """`(path glob, instructions prose)` for every `path_instructions` entry."""
+    out: list[tuple[str, str]] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        head = re.match(r'\s*- path:\s*"?([^"]+?)"?\s*$', lines[i])
+        if not head:
+            i += 1
+            continue
+        glob = head.group(1)
+        j = i + 1
+        prose: list[str] = []
+        started = False
+        while j < len(lines):
+            if re.match(r"\s*- path:", lines[j]):
+                break
+            if re.match(r"\s*instructions:\s*\|", lines[j]):
+                started = True
+                j += 1
+                continue
+            if started:
+                # The block ends at the next key at or left of `path:`, which sits at
+                # six spaces. Prose is indented past that; the per-file instructions
+                # contain their own unindented-looking markdown, so the boundary is
+                # indentation, not blankness.
+                if lines[j].strip() and re.match(r"^\s{0,6}\S", lines[j]):
+                    break
+                prose.append(lines[j])
+            j += 1
+        out.append((glob, "\n".join(prose)))
+        i = j
+    return out
+
+
+def glob_base(glob: str) -> str:
+    """`docs/**` -> `docs`; `crates/**/*.rs` -> `crates`.
+
+    The longest literal prefix, which is the directory the instructions are *about* and
+    therefore the directory a bare filename in them is relative to.
+    """
+    keep: list[str] = []
+    for part in glob.split("/"):
+        if any(ch in part for ch in "*?"):
+            break
+        keep.append(part)
+    return "/".join(keep)
+
+
+def prose_paths(prose: str) -> list[str]:
+    """Backticked tokens in `prose` that name a file rather than describe a format."""
+    found: list[str] = []
+    for m in PROSE_PATH.finditer(prose):
+        tok = m.group(1)
+        has_slash = "/" in tok
+        ext = tok.rsplit(".", 1)[-1].lower() if "." in tok else ""
+        # A bare extension is prose about a file *type* — the `**/*.md` block says
+        # "`.md`", meaning the format — so a stem is required before the dot. That is
+        # what separates `.env.example` (a filename) from `.md` (an extension), and it is
+        # the difference between a rule with one false positive and a rule with none.
+        if not (has_slash or (ext in PROSE_EXT and len(tok) > len(ext) + 1)):
+            continue
+        found.append(tok)
+    return found
+
+
+def check_prose_paths(text: str) -> int:
+    """Every file named in `path_instructions` prose must exist. Returns the number checked."""
+    checked = 0
+    missing: list[str] = []
+    for glob, prose in instruction_blocks(text):
+        base = glob_base(glob)
+        for tok in sorted(set(prose_paths(prose))):
+            checked += 1
+            candidates = [ROOT / tok]
+            if base:
+                candidates.append(ROOT / base / tok)
+            if not any(c.exists() for c in candidates):
+                tried = ", ".join(c.relative_to(ROOT).as_posix() for c in candidates)
+                missing.append(f"`{tok}` in the `{glob}` instructions (tried {tried})")
+    if missing:
+        raise Failure(
+            "`path_instructions` names a file that does not exist, so the reviewer was told "
+            "about a path nothing can open: " + "; ".join(missing)
+        )
+    return checked
+
+
 def check(text: str, config_path: Path) -> list[str]:
     """Every check, returning the notes worth printing."""
     check_name(config_path)
@@ -308,6 +425,7 @@ def check(text: str, config_path: Path) -> list[str]:
     check_path_filters(sections)
     check_instructions(text, sections)
     check_guidelines(sections)
+    prose_checked = check_prose_paths(text)
 
     # A gitleaks passthrough for `docs/.env`, which is gitignored and must never be
     # indexed. The config is the only place that declares this intent.
@@ -328,6 +446,7 @@ def check(text: str, config_path: Path) -> list[str]:
 
     return [
         f"{len(REQUIRED_PATTERNS)} path_instructions patterns, each matching real files",
+        f"{prose_checked} file(s) named in `path_instructions` prose, each resolving",
         f"{len(sections.get('path_filters', []))} path filters",
         f"{len(sections.get('filePatterns', []))} knowledge-base guidelines",
     ]
@@ -347,17 +466,30 @@ def self_test() -> int:
     text = read_config(CONFIG)
     failures: list[str] = []
 
-    def expect(kind: str, mutate, config_path: Path = CONFIG) -> None:
-        """Assert that `mutate` makes the check fail."""
+    def expect(kind: str, mutate, config_path: Path = CONFIG, expect_change: bool = True) -> None:
+        """Assert that `mutate` makes the check fail -- **and that it changed anything**.
+
+        The second half is not decoration. Case 12 originally replaced a sentence in the
+        `docs/**` prose; a later edit rewrote that prose, the `replace` matched nothing,
+        and the case became a no-op that passed for the wrong reason. A mutation that
+        silently does not apply is a test that certifies nothing, which is the failure
+        `check_bench_contract.py` names as *"the injection did not apply"* (`§O-274`).
+        """
+        before = copy.copy(text)
+        mutated = mutate(copy.copy(before))
+        if expect_change and mutated == before:
+            failures.append(f"{kind} (the injection did not apply -- its anchor text is gone)")
+            return
         try:
-            check(mutate(copy.copy(text)), config_path)
+            check(mutated, config_path)
         except Failure as exc:
             print(f"  caught {kind}: {exc}")
             return
         failures.append(kind)
 
     # 1. The file is renamed. CodeRabbit reads only the exact name.
-    expect("a renamed config", lambda t: t, ROOT / ".coderabbit.yml")
+    # `expect_change=False`: this case mutates the *path*, not the text.
+    expect("a renamed config", lambda t: t, ROOT / ".coderabbit.yml", expect_change=False)
 
     # 2. The whole file is emptied -- no sections at all.
     expect("an empty config", lambda t: "")
@@ -424,6 +556,38 @@ def self_test() -> int:
 
     # 11. gitleaks removed, so nothing declares the secret-scanning intent.
     expect("no gitleaks key", lambda t: t.replace("    gitleaks:", "    not-gitleaks:"))
+
+    # 12. A file named in the PROSE does not exist. This is `A1`: the `docs/**` block
+    # said "Only `.env.example` is tracked" while no such file existed. Every glob
+    # matched a real file, so every check above this one passed while the instruction
+    # sent the reviewer to a path nobody could open.
+    #
+    # Anchored on the block header rather than on a sentence inside it. The first version
+    # replaced prose, and a later prose edit silently disarmed it.
+    expect(
+        "a prose reference to a file that does not exist",
+        lambda t: t.replace(
+            '    - path: "docs/**"\n      instructions: |\n',
+            '    - path: "docs/**"\n      instructions: |\n        See `docs/.env.absent`.\n',
+        ),
+    )
+
+    # 13. And the converse, which is why the rule is narrow rather than eager. A bare
+    # extension in prose is a statement about a file *type*, not a reference to a file:
+    # the `**/*.md` block writes "`.md`" meaning the format. The first version of this
+    # rule reported it as an unresolved path, which is a false positive and the reason
+    # the rule requires a stem before the dot. Asserted as a passing case so a future
+    # widening of the pattern fails here instead of in a reviewer's inbox.
+    widened = copy.copy(text).replace(
+        "Every checker in `tools/` follows one contract",
+        "Markdown (`.md`) and YAML (`.yaml`) are checked. Every checker in `tools/` follows one contract",
+    )
+    try:
+        check(widened, CONFIG)
+    except Failure as exc:
+        failures.append(f"a bare extension in prose was treated as a path: {exc}")
+    else:
+        print("  ok    a bare extension in prose is not treated as a path")
 
     # And the real file must still pass, or every injection above proved nothing.
     try:

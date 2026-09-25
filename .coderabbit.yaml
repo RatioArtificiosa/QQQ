@@ -170,8 +170,10 @@ reviews:
     - path: "docs/**"
       instructions: |
         `docs/.env` is gitignored and must never be committed or indexed — it holds
-        Context7 credentials. Only `.env.example` is tracked. A change that adds real
-        credentials to any tracked file is a security defect.
+        **five** live credentials (Cloudflare Browser Run ×2, Browser Use Cloud,
+        Context7 ×2). `.env.example` is the tracked template: it names every variable
+        and carries no value. A change that adds real credentials to any tracked file
+        is a security defect.
 
 knowledge_base:
   code_guidelines:

@@ -21430,4 +21430,100 @@ This is the **third** instance of one class, and the class is worth naming once:
 
 ---
 
+## §O-274 — The guard stopped one field short, and two versions of the fix could not have caught the thing they were written for
+
+**Found:** auditing `.coderabbit.yaml` (`A2`). **Anchors:** `.coderabbit.yaml`,
+`tools/check_coderabbit_config.py`, `docs/.env.example`, `docs/AGENT-HANDBOOK.md` §9.
+
+### The gap
+
+`tools/check_coderabbit_config.py` checked the **globs**: every `path_instructions` pattern must
+match real files, and every `knowledge_base.filePatterns` entry must exist. It did not check the
+**prose** those patterns carry. So this instruction passed every check:
+
+```yaml
+    - path: "docs/**"
+      instructions: |
+        `docs/.env` is gitignored ... Only `.env.example` is tracked.
+```
+
+`docs/.env.example` **did not exist**. The glob `docs/**` matched real files, the checker
+reported `5 path_instructions patterns, each matching real files`, and the reviewer was being
+told about a path nothing could open. That is the same defect the checker's own docstring
+records catching once before — a `knowledge_base` entry naming an `AGENTS.md` that did not
+exist — in the half of the file it was not reading.
+
+### Measuring the fix before wiring it
+
+`check_xrefs.py` check `[13]` sets the precedent: its strict form was measured against this
+corpus first and produced *"four false positives and no true ones"*, so the narrow form shipped.
+The same step was taken here, and it changed the rule twice.
+
+| Version | What it matched | Result |
+|---|---|---|
+| 1 | `^[A-Za-z0-9_]…` — a leading word character | **Could not match `.env.example` at all.** A guard unable to express the case it exists for. |
+| 2 | + an optional leading dot | 8 candidates, **1 false positive**: the `` `.md` `` in the `**/*.md` instructions — prose *about a format*, not a reference to a file. |
+| 3 | + a **stem required before the dot** | **7 candidates, 7 resolving, 0 false positives.** |
+
+The stem requirement is what separates `.env.example` (a filename: 4 characters before
+`.example`) from `.md` (an extension: nothing before `.md`). Version 1 is the part worth
+remembering: **a rule that cannot match its own motivating example will pass forever and catch
+nothing**, and only running it against the real corpus revealed that.
+
+**Fault-injected against the real defect**, not a synthetic one: moving `docs/.env.example` aside
+produces exactly one failure, naming it —
+
+```
+`path_instructions` names a file that does not exist, so the reviewer was told about a path
+nothing can open: `.env.example` in the `docs/**` instructions
+(tried docs/.env.example, docs/docs/.env.example)
+```
+
+— and restoring it returns the check to 7 of 7. Wired into `check_coderabbit_config.py`, which is
+already registered in both gates. Self-test: **11 of 11 injections caught**, up from 10.
+
+### Then the self-test caught me
+
+The prose above was rewritten in the same change — it said `.env` holds *"Context7 credentials"*
+when it holds **five** (Cloudflare Browser Run ×2, Browser Use Cloud, Context7 ×2), so the
+security instruction understated its own subject. Fixing that removed the sentence my new case
+12 anchored on, and the case became a **silent no-op**:
+
+```
+SELF-TEST FAILED: 1 injection(s) were not caught: ['a prose reference to a file that does not exist']
+```
+
+Two changes came out of it, and the second is the generalisable one:
+
+1. The mutation now anchors on the **block header** (`- path: "docs/**"`), which is part of the
+   checker's own subject, rather than on a sentence that is prose and legitimately editable.
+2. **`expect()` now asserts that its mutation changed the text**, and reports
+   *"the injection did not apply -- its anchor text is gone"* as a failure in its own right.
+
+Proven by disarming case 12 on purpose (`.scratch/prove_applied_guard.py`): the self-test exits
+1 and names the disarmed injection. Before this, a mutation whose anchor was edited away would
+have **passed**, certifying nothing.
+
+This repository already named the failure — `check_bench_contract.py` carries the harness message
+*"HARNESS FAIL: the proposal row injection did not apply"*. It simply had not been raised to a
+property of the self-test harness itself.
+
+### The rule
+
+**A self-test mutation must prove it applied.** An injection that silently does not apply is
+worse than a missing case: a missing case is visibly absent from the list, whereas a disarmed one
+appears in the count and in the green output. The two-line guard — compare before and after,
+fail if unchanged — converts the whole self-test from *"these cases ran"* to *"these cases
+exercised the code"*.
+
+And its sibling, from version 1 above: **run a new guard against the real corpus before wiring
+it, and check that it fires on the defect it was written for.** Measuring for false positives is
+half of that; measuring for *true* positives is the other half, and the first version here would
+have failed it.
+
+→ `.coderabbit.yaml`, `tools/check_coderabbit_config.py`, `.scratch/measure_prose_paths.py`,
+`.scratch/prove_applied_guard.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

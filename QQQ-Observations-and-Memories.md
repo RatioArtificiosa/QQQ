@@ -18806,4 +18806,93 @@ and the read of the actual log was required to find it. `§O-129` established th
 in one sequence after the last edit; this entry adds that the sequence must contain the *strongest*
 form of each check, not merely one form of it.
 
+## §O-230 — `--workers` sizes a pool now, and the test that proved it was flaky
+for a reason worth keeping
+
+**Found and fixed:** 2026-09-24. **Anchors:** `CLI-011` (the `serve` flags), `SRV-024`,
+`§O-226` (a `contains` asserting more than the claim).
+
+### What was missing
+
+`--workers` was parsed, validated, capped at 128 and **reported with no effect**: `--workers 4`
+was accepted and the process ran one. A refusal stood in its place, naming `[limits]
+max_instances` as the ceiling that did exist, and the module doc recorded the condition for
+deleting it: *"A refusal is the honest shape while the flag has nothing to size; when a pool
+lands, the check is deleted and the number acquires its meaning."*
+
+### The seam
+
+Three links, and the third was absent:
+
+```
+--workers <n>  →  ServeOptions.workers  →  GuestApp::with_capacity  →  Pool::new
+```
+
+`qqq_host::pool::Pool` already existed, fully tested — including
+`a_full_pool_refuses_rather_than_queueing` and `concurrent_acquires_never_exceed_capacity`. What
+did not exist was anything joining it to the command. `GuestApp::with_capacity` builds the pool,
+`handle_request` acquires **before** instantiating and releases on every exit path, and
+`build_dispatch` returns the capacity so the report can carry what the pool installed rather than
+what the operator typed.
+
+### The design facts worth having
+
+**What the capacity bounds is concurrent guest instances, not connections.** Measured while trying
+to saturate it: a connection holding a partial body does *not* hold a slot, because
+`serve_connection` reads the body before dispatching, so the pool is acquired only for the guest
+call itself. The bound is therefore on concurrent *execution*, which is what the report says
+(`concurrent instance(s)`) and what an operator reaching for the flag wants.
+
+**It is not `[limits] max_instances`.** That limit is the per-store ceiling on how many Wasmtime
+instances one *instantiation* may create — a property of the artifact (`§O-154`: three core
+modules, four instantiation sites). The pool bounds how many *requests* hold a guest across the
+process. The refusal this replaced conflated them by pointing the flag at the wrong one.
+
+### The flaky test, and why the flakiness was the interesting part
+
+The proof that the number reaches the **pool** rather than the report is a fault injection: make
+`with_capacity` ignore its argument and always build `Pool::new(1)`. The test failed with *"the
+report must carry the capacity the pool installed, not a default"*, so the chain is genuine —
+the report reads from the pool.
+
+But the assertion was flaky: **two runs in six** failed, and the failure was mine. It read
+
+```rust
+assert!(one.contains('1') && !one.contains('4'));
+```
+
+and the server had correctly reported
+
+```
+127.0.0.1:59274: 1 route(s), 1 concurrent instance(s), guest loaded
+```
+
+— a line containing a `4` **in the ephemeral port**. The assertion searched for a digit anywhere
+in a string that carries a port number.
+
+This is `§O-226`'s shape a third time, after a JSON document and a generated report. The fix is
+the same and is now stated three times in this document: **parse the field the claim is about.**
+`capacity_in` takes the token before `concurrent instance(s)` and parses it, so a port cannot be
+mistaken for a capacity. Six consecutive runs after the fix were green.
+
+Worth separating from the other two instances: those failed *silently* (the assertion passed when
+it should not). This one failed *noisily and randomly*, which is the more dangerous of the two in a
+different way — a flaky test trains people to re-run rather than read, and re-running is how a
+real failure gets dismissed.
+
+### Verification
+
+| What | Result |
+|---|---|
+| `cargo test -p qqq-run` | 627 passed, 0 failed |
+| `worker_pool` integration test, 6 consecutive runs | all green |
+| Fault injection: `with_capacity` ignores its argument | caught, restored byte-for-byte from SHA-256 |
+| `qqqai serve --workers 4` against the reference app | `200 OK`; reports `4 concurrent instance(s)` |
+| `cargo clippy -D warnings`, `cargo fmt --check` | clean |
+
+The integration test drives the **real binary** against the **real 167 KB reference component**,
+placed where `find_artifact` looks (`target/wasm32-wasip2/release/orders_api.wasm`) — not
+`target/qqq/`, which is where a different command stages its output and where the first version of
+the fixture put it, earning a correct `503 not_built`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

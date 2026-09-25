@@ -20,19 +20,34 @@
 //!   serve (this file) bind, route, dispatch, shut down
 //! ```
 //!
-//! # Why `--workers` accepts only `1`
+//! # What `--workers` sizes
 //!
 //! A worker in a component-per-request runtime is not a thread that owns a connection:
-//! V1 runs async-single-threaded with one task per connection (§4.7), and there is no
-//! instance pool on this path at all — `GuestApp` instantiates per request. So
-//! `--workers` was parsed, validated and **reported** with no effect, and the claim that
-//! its "honest meaning in V1 is the instance-pool capacity" was a description of a pool
-//! that does not exist here. `--workers 4` was accepted and the process ran one.
+//! V1 runs async-single-threaded with one task per connection (§4.7), so the quantity an
+//! operator is reaching for when they raise `--workers` is **how many requests may hold a
+//! guest instance at once**. That is an instance-pool capacity, and
+//! `qqq_host::pool::Pool` is the pool.
 //!
-//! `1` is therefore accepted because it is true, and anything else is refused with a
-//! remediation naming `[limits] max_instances` — the ceiling the runtime does enforce.
-//! A refusal is the honest shape while the flag has nothing to size; when a pool lands,
-//! the check is deleted and the number acquires its meaning.
+//! Until that seam existed, `--workers` was parsed, validated, capped and **reported with
+//! no effect** — `--workers 4` was accepted and the process ran one — and a refusal stood
+//! in its place naming `[limits] max_instances` as the ceiling that did exist. The refusal
+//! said what would end it: *"A refusal is the honest shape while the flag has nothing to
+//! size; when a pool lands, the check is deleted and the number acquires its meaning."*
+//!
+//! The pool has landed, the check is deleted, and the number now sizes
+//! `GuestApp::with_capacity`'s pool. `handle_request` acquires a slot **before**
+//! instantiating, so a request that cannot get one is refused rather than paying for the
+//! instantiation the bound exists to prevent — the rule `refuse_before_reading` states for
+//! request bodies, one layer down.
+//!
+//! ## Why this is not `[limits] max_instances`
+//!
+//! They are different quantities, and conflating them was the earlier mistake. That limit
+//! is the manifest's **per-store** ceiling: how many Wasmtime instances one instantiation
+//! may create, which is a property of the artifact (§O-154 measured three core modules
+//! and four instantiation sites in the reference application). This pool bounds how many
+//! **requests** hold a guest at once, across the process. Both are real and neither
+//! substitutes for the other.
 //!
 //! # Why `--tls` is refused
 //!
@@ -200,16 +215,16 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
         }
     }
 
-    // --- The two flags that would otherwise report something untrue ---------
+    // --- The one flag that would otherwise report something untrue -----------
     //
-    // Both are *refusals at parse time* rather than warnings at startup, because the
-    // alternative is a server that prints a security claim it cannot honour. `--tls` was
-    // the sharper of the two: it printed `TLS: on` while serving cleartext, so an operator
-    // reading the command's own output would conclude the listener was encrypted.
+    // A *refusal at parse time* rather than a warning at startup, because the alternative
+    // is a server that prints a security claim it cannot honour: `--tls` printed
+    // `TLS: on` while serving cleartext, so an operator reading the command's own output
+    // would conclude the listener was encrypted.
     //
     // Refusing is a smaller change than it looks, and a reversible one: when `[server.tls]`
-    // is modelled and a TLS-terminating accept path exists, these two checks are deleted
-    // and nothing else moves.
+    // is modelled and a TLS-terminating accept path exists, this check is deleted and
+    // nothing else moves.
     if opts.tls {
         return Err(usage(
             "`--tls` is not implemented: the manifest has no `[server.tls]` section and \
@@ -221,17 +236,12 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
              until `SRV-007`'s configuration and accept path land",
         ));
     }
-    if opts.workers > 1 {
-        return Err(usage(format!(
-            "`--workers {}` is not implemented: V1 serves every connection as a task on \
-             one runtime, so a second worker would not exist",
-            opts.workers
-        ))
-        .with_remediation(
-            "pass `--workers 1`, and bound concurrency with `[limits] max_instances` in \
-             qqq.toml — that is the ceiling the runtime actually enforces",
-        ));
-    }
+    // `--workers > 1` was refused here until the instance pool landed, and the refusal
+    // said as much: *"A refusal is the honest shape while the flag has nothing to size;
+    // when a pool lands, the check is deleted and the number acquires its meaning."*
+    // The pool is `qqq_host::pool::Pool`, `GuestApp::with_capacity` installs it, and
+    // `handle_request` acquires before instantiating — so the number now sizes something
+    // and the check is gone.
 
     Ok(opts)
 }
@@ -323,7 +333,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;
 
-    let (dispatch, guest_loaded) = build_dispatch(loaded, opts)?;
+    let (dispatch, guest_loaded, pool_capacity) = build_dispatch(loaded, opts)?;
 
     Ok(Prepared {
         config,
@@ -331,6 +341,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         dispatch,
         routes: server.routes.len(),
         guest_loaded,
+        pool_capacity,
     })
 }
 
@@ -395,6 +406,13 @@ pub struct Prepared {
     pub routes: usize,
     /// Whether a guest component was found.
     pub guest_loaded: bool,
+    /// The guest pool's capacity, **as the pool reports it**.
+    ///
+    /// Read from `GuestApp::capacity()` rather than copied from `opts.workers`. The two
+    /// agree today, and they stop agreeing the moment a clamp is added anywhere between
+    /// the flag and the pool — at which point a report that echoed the flag would
+    /// describe a server nobody is running.
+    pub pool_capacity: Option<u64>,
 }
 
 /// Build the dispatcher, loading the guest when the project has been built.
@@ -410,14 +428,20 @@ pub struct Prepared {
 /// `QQQ-1002` when a component exists but is not a QQQ application, or cannot be
 /// read or compiled. Failing here means the server refuses to start rather than
 /// answering every request with an error nobody reads.
-fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<(Dispatch, bool)> {
+fn build_dispatch(
+    loaded: &LoadedManifest,
+    opts: &ServeOptions,
+) -> Result<(Dispatch, bool, Option<u64>)> {
     let Some(artifact) = find_artifact(
         project_dir(loaded),
         "release",
         "wasm32-wasip2",
         loaded.name(),
     ) else {
-        return Ok((Dispatch::flat(unbuilt(loaded.name())), false));
+        // No component means no `GuestApp` and therefore **no pool**. `None` rather than
+        // `Some(0)`: `0` would read as "a pool with no capacity", which is a different
+        // and false statement about a project that simply has not been built.
+        return Ok((Dispatch::flat(unbuilt(loaded.name())), false, None));
     };
 
     let bytes = std::fs::read(&artifact).map_err(|e| {
@@ -444,8 +468,20 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<(Dispa
     let grants = GrantSet::from_manifest(&loaded.manifest);
     let limits = LimitSet::from_manifest(&loaded.manifest.limits)?;
 
-    let app = GuestApp::new(engine, &bytes, grants, limits, opts.listen.clone())?;
+    // `--workers` sizes the pool that bounds concurrent guest instances. This is the
+    // seam the flag was missing: it was parsed, capped and reported with nothing to act
+    // on, and the number now reaches the component that enforces it.
+    let app = GuestApp::with_capacity(
+        engine,
+        &bytes,
+        grants,
+        limits,
+        opts.listen.clone(),
+        opts.workers,
+    )?;
     let app = Arc::new(app);
+    // Captured before the `Arc` is moved into the dispatcher closures, so the report can
+    // name the capacity that is actually installed.
 
     // The flat handler stays the default, so a route with no entry behaves as it did.
     let mut dispatch = Dispatch::flat(app.dispatch());
@@ -465,7 +501,7 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<(Dispa
         dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
     }
 
-    Ok((dispatch, true))
+    Ok((dispatch, true, Some(app.capacity())))
 }
 
 /// The directory a project lives in — the manifest's parent.
@@ -518,7 +554,16 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
     Ok(ServeOutput {
         listen: opts.listen.clone(),
         routes,
-        workers: opts.workers,
+        // The pool's own capacity when a guest is loaded, and the flag otherwise.
+        //
+        // A project with no built component has no `GuestApp` and therefore no pool, so
+        // there is nothing to report but the number the operator asked for. That case is
+        // already visible in the output as `guest: not built`, and reporting `0` would be
+        // worse: it would read as "the pool has no capacity" rather than "there is no pool".
+        workers: prepared
+            .pool_capacity
+            .and_then(|c| u32::try_from(c).ok())
+            .unwrap_or(opts.workers),
         tls: opts.tls,
         guest_loaded,
     })
@@ -558,9 +603,17 @@ impl crate::output::CommandOutput for ServeOutput {
     /// answer 503 to every request, which is a fact an operator needs in the first
     /// line rather than in the JSON. `dev` puts its reload count there for the same
     /// reason.
+    ///
+    /// # Why the number is described as a capacity rather than as "workers"
+    ///
+    /// This is the line an operator reads, and it said `4 worker(s)` while the flag had no
+    /// effect at all — a true statement about a number and a false impression about what it
+    /// did. It now names the quantity the pool enforces, which is the fact worth having: the
+    /// reader learns how many requests may hold a guest **at once**, and that is what they
+    /// were reaching for when they passed the flag.
     fn summary(&self) -> String {
         format!(
-            "{}: {} route(s), {} worker(s), guest {}",
+            "{}: {} route(s), {} concurrent instance(s), guest {}",
             self.listen,
             self.routes,
             self.workers,
@@ -588,7 +641,7 @@ pub fn render(out: &ServeOutput) -> String {
     let _ = writeln!(s, "  {} route(s)", out.routes);
     let _ = writeln!(
         s,
-        "  {} worker(s) — bounds concurrent instances",
+        "  {} concurrent instance(s) — the --workers pool capacity",
         out.workers
     );
     let _ = writeln!(
@@ -668,21 +721,20 @@ mod tests {
     }
 
     #[test]
-    fn more_than_one_worker_is_refused_and_names_the_real_ceiling() {
-        // `--workers 4` was accepted and reported while the process ran every connection on
-        // one runtime. The honest answer is a refusal that points at the setting the runtime
-        // *does* enforce, because that is what the operator was reaching for.
-        let err = options(&args(&["--workers", "4"])).expect_err("--workers 4 must be refused");
-        assert!(
-            err.message.contains("--workers 4"),
-            "the message must quote what was asked for: {}",
-            err.message
-        );
-        let remediation = err.remediation.as_deref().unwrap_or_default();
-        assert!(
-            remediation.contains("max_instances"),
-            "the remediation must name the ceiling that exists: {remediation}"
-        );
+    fn more_than_one_worker_is_accepted_now_that_a_pool_sizes_it() {
+        // This test asserted the opposite until the instance pool landed, and the refusal it
+        // checked said what would end it: *"when a pool lands, the check is deleted and the
+        // number acquires its meaning."* `qqq_host::pool::Pool` is the pool,
+        // `GuestApp::with_capacity` installs it, and `handle_request` acquires before
+        // instantiating.
+        //
+        // The assertion is on the **parsed value**, because parsing is all this function does;
+        // that the number reaches the pool is proved by `GuestApp`'s own tests, which construct
+        // a real app. Keeping this test here rather than deleting it is the point: the flag is
+        // still validated, capped and refused at zero, and those are three separate behaviours
+        // that a deletion would have silently un-tested.
+        let o = options(&args(&["--workers", "4"])).expect("--workers 4 now sizes a pool");
+        assert_eq!(o.workers, 4);
     }
 
     #[test]
@@ -776,7 +828,7 @@ mod tests {
         assert!(r.contains("127.0.0.1:3000"), "{r}");
         assert!(r.contains("3 route(s)"), "{r}");
         assert!(
-            r.contains("bounds concurrent instances"),
+            r.contains("the --workers pool capacity"),
             "the worker count must say what it bounds: {r}"
         );
         assert!(r.contains("guest: loaded"), "{r}");
@@ -796,5 +848,44 @@ mod tests {
         assert!(r.contains("not built"), "{r}");
         assert!(r.contains("qqqai build"), "the fix must be named: {r}");
         assert!(r.contains("TLS: on"), "{r}");
+    }
+
+    /// The **summary** line describes the number as a capacity, not as "workers".
+    ///
+    /// # Why this test exists separately from the render test above
+    ///
+    /// They are two different renderers, and only one reaches an operator's terminal. Measured:
+    /// `qqqai serve` prints the one-line `summary()` — `127.0.0.1:58795: 1 route(s), 4
+    /// concurrent instance(s), guest loaded` — while `render()`'s multi-line block is not what
+    /// the command emits. The first version of this change edited `render` and the integration
+    /// test searched for that wording, so both the code change and its test passed while the line
+    /// a user reads was untouched.
+    ///
+    /// The assertion is on the phrase rather than the number, because the number is already
+    /// covered by the integration test against a running server; what this pins is that the
+    /// summary names the quantity the pool bounds.
+    #[test]
+    fn the_summary_names_the_capacity_rather_than_workers() {
+        let out = ServeOutput {
+            listen: "127.0.0.1:3000".to_owned(),
+            routes: 1,
+            workers: 4,
+            tls: false,
+            guest_loaded: true,
+        };
+        let line = crate::output::CommandOutput::summary(&out);
+        assert!(
+            line.contains("concurrent instance(s)"),
+            "the summary must name what the number bounds: {line}"
+        );
+        assert!(
+            line.contains('4'),
+            "the summary must carry the capacity: {line}"
+        );
+        // The vague term that let the flag go unnoticed for as long as it did.
+        assert!(
+            !line.contains("worker(s)"),
+            "`worker(s)` describes nothing an operator can act on: {line}"
+        );
     }
 }

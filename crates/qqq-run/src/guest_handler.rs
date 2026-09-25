@@ -40,6 +40,7 @@ use qqq_host::abi;
 use qqq_host::call::call_handler;
 use qqq_host::instance::Instance;
 use qqq_host::invoke::HandlerHandle;
+use qqq_host::pool::Pool;
 use qqq_host::{LimitSet, PreparedComponent};
 use qqq_serve::http1::RequestHead;
 use qqq_serve::response::Response;
@@ -48,11 +49,30 @@ use crate::guest_bridge;
 
 /// A compiled guest, ready to answer requests.
 ///
-/// Holds the three things every request needs and none of the per-request state:
-/// the engine, the compiled component, and the resolved handle. An
-/// `Instance` is created per request, which is the §4.2 isolation model — the
+/// Holds the four things every request needs and none of the per-request state:
+/// the engine, the compiled component, the resolved handle, and the **pool**.
+/// An `Instance` is created per request, which is the §4.2 isolation model — the
 /// expensive work (compilation) happens once and the cheap work (instantiation)
 /// happens per request.
+///
+/// # Why the pool is here, and what it bounds
+///
+/// `qqqai serve --workers <n>` sizes this pool. Before it did, `--workers` was a
+/// number the command validated, capped and **reported without acting on** — the
+/// module doc in `serve.rs` described its "honest meaning in V1" as the
+/// instance-pool capacity, which was a description of a pool that did not exist
+/// on this path.
+///
+/// What the capacity bounds is **concurrent live instances**, not threads. V1 runs
+/// async-single-threaded with one task per connection (§4.7), so a "worker" is not
+/// a thread that owns connections; the quantity the operator is reaching for when
+/// they raise it is *how many requests may hold a guest instance at once*. That is
+/// a bound this pool enforces and can report, which is what makes the flag's effect
+/// observable rather than nominal.
+///
+/// The isolation model is unchanged: acquiring a slot does not reuse a guest's
+/// state, because `Instance::create` still runs per request. The pool bounds
+/// *concurrency*, and reuse is the optimisation a later tier adds.
 pub struct GuestApp {
     engine: wasmtime::Engine,
     prepared: PreparedComponent,
@@ -61,6 +81,14 @@ pub struct GuestApp {
     limits: LimitSet,
     /// The authority every guest-visible URL is built from. See the module docs.
     authority: String,
+    /// Bounds how many requests may hold an instance at once.
+    pool: Pool,
+    /// Completed requests per second, for the pool's `Retry-After` estimate.
+    ///
+    /// Kept at `0.0`, which the pool reads as "no rate known" and answers with its
+    /// floor. Measured throughput is `qqq-serve`'s metric and inventing a number
+    /// here would be a second, disagreeing estimate of the same quantity.
+    completion_rate: f64,
 }
 
 impl std::fmt::Debug for GuestApp {
@@ -68,6 +96,7 @@ impl std::fmt::Debug for GuestApp {
         f.debug_struct("GuestApp")
             .field("handle", &self.handle.to_string())
             .field("authority", &self.authority)
+            .field("pool_capacity", &self.pool.capacity())
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +123,35 @@ impl GuestApp {
         grants: GrantSet,
         limits: LimitSet,
         authority: impl Into<String>,
+    ) -> Result<Self> {
+        Self::with_capacity(engine, bytes, grants, limits, authority, 1)
+    }
+
+    /// Prepare a guest whose request concurrency is bounded to `workers` instances.
+    ///
+    /// # Why `workers` and not `max_instances`
+    ///
+    /// They are different quantities and the distinction is what `--workers` was
+    /// missing. `[limits] max_instances` is the manifest's **per-store** ceiling:
+    /// how many Wasmtime instances one instantiation may create, which is a property
+    /// of the artifact (`§O-154` measured three core modules and four instantiation
+    /// sites in the reference application). This capacity is how many **requests may
+    /// hold a guest at once** across the process.
+    ///
+    /// Conflating them was the first fix's mistake in `§O-154`, and it is the same
+    /// conflation the refusal text used to make by pointing `--workers` at
+    /// `max_instances`. Both are real; neither substitutes for the other.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_capacity(
+        engine: wasmtime::Engine,
+        bytes: &[u8],
+        grants: GrantSet,
+        limits: LimitSet,
+        authority: impl Into<String>,
+        workers: u32,
     ) -> Result<Self> {
         let authority = authority.into();
         if authority.is_empty() {
@@ -135,6 +193,12 @@ impl GuestApp {
             grants,
             limits,
             authority,
+            // `Pool::new` treats 0 as 1 and says why: a pool that can hand nothing out
+            // is a deadlock rather than a configuration. `serve::options` already
+            // refuses `--workers 0`, so this is a second line of defence rather than
+            // the check.
+            pool: Pool::new(u64::from(workers)),
+            completion_rate: 0.0,
         })
     }
 
@@ -154,6 +218,10 @@ impl GuestApp {
     ///
     /// # Errors
     ///
+    /// * Every slot is busy, or the pool is draining — `QQQ-6001` from
+    ///   [`Pool::acquire`], carrying the capacity and a `retry-after`. This is the
+    ///   refusal `--workers` now produces, and it is a **capacity** fact rather than
+    ///   a guest fault, which is why it is distinguishable by code.
     /// * The instance could not be created (a grant or limit problem).
     /// * The method cannot be expressed to a guest (`guest_bridge::to_guest`).
     /// * The guest trapped, or returned a value that is not a response.
@@ -161,6 +229,43 @@ impl GuestApp {
         // The body is what the caller read; the head only declares its length.
         let request = guest_bridge::request_from_head(head, &self.authority, body)?;
 
+        // --- The capacity gate ------------------------------------------------
+        //
+        // Acquired **before** the instance is created, which is the whole point: the
+        // expensive thing this bounds is instantiation, so a check after it had
+        // happened would have already paid the cost the bound exists to prevent. That
+        // ordering is the same rule `qqq-serve`'s `refuse_before_reading` states for
+        // request bodies, applied one layer down.
+        //
+        // `Acquired` reports whether a warm instance was reused. It is read and
+        // discarded here rather than ignored: V1 creates a fresh instance per request
+        // (`§4.2` isolation), so `pooled` is false on this path, and the structural
+        // `_ =` would invite a reader to think the field was unused. It becomes
+        // meaningful when a later tier reuses instances, and the accessor is where
+        // that change lands.
+        let acquired = self.pool.acquire(self.completion_rate)?;
+        debug_assert!(
+            !acquired.pooled,
+            "V1 instantiates per request; a pooled hit would mean reuse landed without \
+             its isolation test"
+        );
+
+        // Released on every exit path, including the error ones. `Instance::create` and
+        // `run` both return `Result`, and a slot leaked on failure would shrink the
+        // capacity monotonically — a server that gets slower the more it errors is a
+        // worse failure than the error itself.
+        let outcome = self.serve_one(&request);
+        self.pool.release();
+
+        Ok(to_served(&outcome?))
+    }
+
+    /// Create an instance for `request`, call the guest, and return its answer.
+    ///
+    /// Extracted so [`Self::handle_request`] can hold the pool slot across exactly this
+    /// work with one release site rather than one per early return — the ordering rule
+    /// `§O-184` records for `serve_special_route` and `drain_body`.
+    fn serve_one(&self, request: &abi::Request) -> Result<abi::Response> {
         let instance = Instance::create(&self.engine, &self.prepared, &self.grants, self.limits)?;
 
         // The guest's answer travels out of the closure in a slot: `Instance::run`
@@ -168,21 +273,36 @@ impl GuestApp {
         // reason with a trap summary. `call`'s own tests document that shape.
         let mut outcome: Option<Result<abi::Response>> = None;
         instance.run(|store, wasm| {
-            outcome = Some(call_handler(&mut *store, wasm, &self.handle, &request));
+            outcome = Some(call_handler(&mut *store, wasm, &self.handle, request));
             // The closure itself succeeds: the trap machinery is for the *guest's*
             // execution, and a host-side decode failure is not one.
             Ok(())
         })?;
 
-        let response = outcome.ok_or_else(|| {
+        outcome.ok_or_else(|| {
             Error::new(
                 ErrorCode::InternalInvariantViolated,
                 "the guest call produced no outcome",
             )
             .with_remediation("this is a QQQ bug; please report it")
-        })??;
+        })?
+    }
 
-        Ok(to_served(&response))
+    /// How many requests may hold a guest instance at once.
+    ///
+    /// Public so `qqqai serve` can report the capacity it actually installed rather
+    /// than the number the operator typed. Those are the same number today, and
+    /// reporting the pool's own value is what keeps them the same if a clamp is ever
+    /// added — a report that echoes the flag cannot notice a clamp.
+    #[must_use]
+    pub fn capacity(&self) -> u64 {
+        self.pool.capacity()
+    }
+
+    /// Requests currently holding an instance.
+    #[must_use]
+    pub fn in_flight(&self) -> u64 {
+        self.pool.in_use()
     }
 
     /// Build a `Dispatch` handler that calls this guest.

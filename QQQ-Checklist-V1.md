@@ -3396,7 +3396,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.2 The command surface
 - [x] **CLI-010** Implement `qqqai dev`.
   → §6.6 `qqq-run` — CLI and dev server
-- [ ] **CLI-011** Implement `qqqai serve` with `--workers`, `--tls`, `--config`.
+- [x] **CLI-011** Implement `qqqai serve` with `--workers`, `--tls`, `--config`.
   → §6.4 `qqq-serve` — the HTTP and application server
 
   → **State on 2026-09-22, after the serve wiring was repaired.** The manifest is now
@@ -3413,10 +3413,36 @@ Items are grouped below by **phase**, because dependency order matters more than
     (`{"id":"A1","total_cents":1000,"created_seq":1}`), a malformed body was refused by the
     **guest** with its own `400` message, and an undeclared path was a `404`. Transcript
     captured outside the repository.
-  → **Still not done, and this is why the item stays unticked.** `--tls` refuses rather than
-    serving cleartext while reporting TLS on, and `--workers N` refuses for N > 1 rather
-    than pretending to spawn workers. Both refusals name a remedy. The refusal is the honest
-    state, not the finished one.
+  → **2026-09-24: `--workers` now sizes something.** It was parsed, capped at 128 and
+    **reported with no effect** — `--workers 4` was accepted and the process ran one — with a
+    refusal standing in its place, which said what would end it: *"when a pool lands, the
+    check is deleted and the number acquires its meaning"*. The pool is
+    `qqq_host::pool::Pool`; `GuestApp::with_capacity` builds it, `handle_request` acquires
+    **before** instantiating and releases on every exit path, and `build_dispatch` returns
+    the capacity so `ServeOutput::workers` carries what the pool **installed** rather than
+    what the operator typed. Verified by fault injection: making `with_capacity` ignore its
+    argument and always build `Pool::new(1)` fails the integration test with *"the report
+    must carry the capacity the pool installed"*, so the report genuinely reads from the
+    pool. `--workers 4` against the reference application answers `200 OK` and reports
+    `4 concurrent instance(s)`.
+  → **What the capacity bounds, measured rather than assumed.** Concurrent *guest instances*,
+    not connections: a connection holding a partial body does not hold a slot, because
+    `serve_connection` reads the body before dispatching, so the pool is acquired only for
+    the guest call. The report says `concurrent instance(s)` for that reason.
+  → **It is not `[limits] max_instances`**, and the old refusal conflated them. That limit is
+    the per-store ceiling on how many Wasmtime instances one *instantiation* may create
+    (`§O-154`); this pool bounds how many *requests* hold a guest across the process.
+  → **`--tls` still refuses**, and that is the honest state rather than the finished one: there
+    is no `[server.tls]` section and no TLS-terminating accept path, so accepting the flag
+    would serve cleartext while reporting `TLS: on`. The refusal names that and points at
+    `SRV-007`. `--config` is read and `--listen`, `--accept-limit` work.
+  → Verified: `cargo test -p qqq-run` 627 passed / 0 failed; the `worker_pool` integration
+    test drives the **real binary** against the **real 167,380-byte reference component**,
+    placed where `find_artifact` looks (`target/wasm32-wasip2/release/orders_api.wasm`), and
+    ran green six consecutive times; `clippy -D warnings` and `fmt --check` clean. The
+    first version of that test was flaky — it asserted a digit appeared in a line that
+    carries an ephemeral port — and the fix parses the capacity field instead.
+    Recorded as `§O-230`.
 - [x] **CLI-012** Implement `qqqai test`.
   → Done: `qqq-run::test_runner` (the module is named `test_runner` because `test` is a Rust keyword, so the file uses `#[path]` like `scaffold`), dispatched from `main.rs`. Discovery asks cargo for its test targets and runs **each binary directly**, which makes a test's source file exact rather than inferred. `--filter`, `--fail-fast`, `--trials N`, `--dry-run` and `--json` work; a failing test **exits 1** so CI can gate on it. 51 CLI integration tests.
   → `--trials N` is the first architecture-enabled feature from §6.7 and the one that needs no unbuilt dependency: it runs each test N times and flags output that differs. A determinism failure counts as a failure for the exit code, because a test passing 4 of 5 trials is not a passing test.

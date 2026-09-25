@@ -16288,8 +16288,8 @@ produces it.
 |---|---|---|---|
 | `DOC-017` | 13 packages, 20 interfaces, 71 functions, 47 types | **15 / 22 / 80 / 53** | the generated page's own first line, and `check_wit_reference.py` |
 | `DX-013` | `--help` is 39 lines after the fix | **40** | `qqqai --help`; the item's own limit is `≤ 40`, so the item passes and the sentence was off by one |
-| `PERF-001` | 2305 passed | **2460** | the gate's `cargo test --workspace`, summed |
-| `SRV-018` | 2249 passed | **2460** | the same command |
+| `PERF-001` | 2305 passed | **<!-- qqq:claim workspace-tests -->2546<!-- /qqq:claim -->** | the gate's `cargo test --workspace`, summed |
+| `SRV-018` | 2249 passed | **<!-- qqq:claim workspace-tests -->2546<!-- /qqq:claim -->** | the same command |
 | `CON-009` | 73 functions, 13 interfaces | **82 / 15** | `check_wit_errors.py` |
 | `CON-010` | 40 source files | **73** | `check_no_ambient.py` |
 
@@ -16303,6 +16303,19 @@ accurate when written. `DOC-017`'s counts were true of the `wit/` tree at the ti
 interfaces were added afterwards. `PERF-001` and `SRV-018` counted a workspace that has since
 gained tests -- including 26 added by this goal. The failure is not the original number; it is
 that nothing re-derives a number printed beside a tool that re-derives it.
+
+**That is no longer true for the two rows above.** They carry a
+`<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->` marker, and
+`tools/check_doc_claims.py` re-derives each one by running the same command the table's
+own "where the truth is" column names — so a value that drifts now fails CI instead of
+waiting to be noticed. The marker is opt-in and names a **resolver** rather than a number,
+which is what makes the document say *which fact* it asserts. **Only the `Measured` column
+carries a marker**, and the first version of this edit marked both: the `The entry said`
+column records a historical fact that must *never* change, so marking it made the checker
+fail correctly on a number that was right. A drift table has one re-derivable column and one
+frozen one, and conflating them is the same error as conflating a claim with its correction. The WIT-count rows are not
+marked here because `check_wit_reference.py` and `check_wit_errors.py` already re-derive
+them; a second mechanism for one number would be two answers to one question (`DOC-018`).
 
 **The durable fix is in how the entries are phrased.** Each corrected claim now names the
 command that produces it -- `check_wit_errors.py`, `check_no_ambient.py`, `qqqai --help`, the

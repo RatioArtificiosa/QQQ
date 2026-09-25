@@ -945,6 +945,16 @@ cmd_checks() {
         echo "SKIP: DX-004 needs a built qqqai (cargo build -p qqq-run); not present"
     fi
 
+    # DOC-018: a hand-written document asserting a count the tree no longer produces. The
+    # workspace-tests resolver runs the suite, so this is gated like DX-004 above: without a
+    # build there is nothing to resolve against.
+    if [ -d target ]; then
+        python3 tools/check_doc_claims.py
+    else
+        echo "SKIP: DOC-018's workspace-tests resolver needs a build; not present"
+    fi
+    python3 tools/check_doc_claims.py --self-test
+
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired
     # the corpus and then died on it (`§O-191`). This drives the real function against

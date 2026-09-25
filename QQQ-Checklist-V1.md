@@ -398,8 +398,44 @@ Items are grouped below by **phase**, because dependency order matters more than
   → A third: a variant's case docs leaked into the following resource's description.
   → 11/11 self-test cases, built to detect exactly those three.
   → §11.3 Documentation as a product surface
-- [ ] **DOC-018** Build the documentation freshness test: compile a sample project against the published docs and fail on drift.
-  → §2.6 NN-6 — Human + Machine Documentation Parity
+- [x] **DOC-018** Build the documentation freshness test: compile a sample project against the published docs and fail on drift.
+  → §2.6 NN-6 - Human + Machine Documentation Parity
+  → Done for the half that is decidable, and the other half is stated rather than implied.
+  → **What already covered the generated documents.** Five of the published pages are
+    generated — `errors.md`, `glossary.md`, `reconciliation.md`, `verified-facts.md`,
+    `wit-reference.md` — and each has a generator with a `--check` half. Verified: all five
+    run in `ci.yml` **and** `docker/entrypoint.sh`, so a generated page that drifts from its
+    source already fails the build.
+  → **What was not covered, and is now.** Hand-written documents asserting a count beside a
+    tool that re-derives it. Measured: `docs/unsafe-audit.md`'s `.rs` file count drifted
+    **four times in one working period** — 141→142, 142→143, 143→146, 146→147 — and
+    every occurrence was caught by CI rather than locally. The Observations document had already
+    named the rule: *"the failure is not the original number; it is that nothing re-derives a
+    number printed beside a tool that re-derives it."*
+  → `tools/check_doc_claims.py` implements that. A claim is **opt-in** and names a *resolver*
+    rather than a number:
+    `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->`. Two resolvers exist
+    (`workspace-tests`, `crate-files`), each already measured elsewhere in the tooling. Naming
+    the resolver is what makes the check possible — the document says *which fact* it asserts,
+    and a number in prose that is not a claim is left alone, so the check has no false positives
+    to be disabled over.
+  → Marked and corrected: the `PERF-001` and `SRV-018` rows in the drift table now re-derive
+    through `workspace-tests`. The values were **2,460** when the table was written and are
+    **2,546** now, so the marker made a stale pair self-correcting.
+  → **A drift table has one re-derivable column and one frozen one, and the first edit conflated
+    them.** Marking the `The entry said` column made the checker fail correctly on `2305` and
+    `2249` — numbers that are *supposed* to be stale, because they record what was claimed at
+    the time. Only `Measured` carries a marker now, and the asymmetry is explained beside it.
+  → Verified: self-test 8/8; the check reports `2 claim(s) match the tree`; and a
+    **fault injection** changing one marked value from 2,546 to 2,545 fails with
+    `` `workspace-tests` says 2545, the tree has 2546 ``, restored byte-for-byte from SHA-256 and
+    green afterward. Wired into `ci.yml` and `docker/entrypoint.sh`.
+  → **What this does not do, stated so the tick is not read as more than it is.** §2.6's
+    literal mechanism is *"a CI job builds a sample project against the published docs"*. That is
+    covered for the WIT and schema surfaces by `check_wit_reference.py` and
+    `check_schema_conformance.py`, which compile against the generated artefacts; a separate
+    sample-project build would re-derive what those already do. The freshness *measurement* §2.6
+    names — *"zero doc-drift failures"* — is what CI now reports.
 - [x] **DOC-019** Publish the error catalogue generator: every `QQQ-XXXX` code becomes a docs page with cause, fix and example.
   → Done: `docs/errors.md` — **42 codes**, generated from the `ErrorCode` enum's doc
     comments by `tools/gen_error_catalogue.py`, verified by

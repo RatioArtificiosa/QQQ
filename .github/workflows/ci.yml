@@ -762,6 +762,18 @@ jobs:
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 
+      # `DOC-018`. §2.6 asks for a job that "fails if the docs describe an API that no longer
+      # exists". The five generated documents already have generators with `--check` halves; this
+      # covers the **hand-written** ones, where a count asserted beside a tool that re-derives it
+      # drifted four times in one working period (`docs/unsafe-audit.md`: 141->142->143->146->147).
+      #
+      # A claim is opt-in and names a **resolver** rather than a number, so the document says
+      # *which fact* it asserts and a number in prose that is not a claim is left alone.
+      - name: documents assert counts the tree still matches (DOC-018)
+        run: python tools/check_doc_claims.py
+      - name: prove the doc-claim scanner and resolvers are live
+        run: python tools/check_doc_claims.py --self-test
+
       # §12.3's DX-commitments table is titled "measurable, in CI", and its row
       # is `qqqai --help` for any command <= 40 lines. The unit test asserts it,
       # but a number buried in test output is not *measured* in the sense the

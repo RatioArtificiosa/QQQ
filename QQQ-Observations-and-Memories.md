@@ -22698,4 +22698,71 @@ orphan. **When a filter returns an unordered set and you need a specific member,
 
 ---
 
+## §O-288 — Seven checkers the bridge was silently skipping, and thirteen reasons it legitimately skips
+
+**Found:** closing the guard gap `§O-286` measured. **Anchors:** `docker/entrypoint.sh`,
+`.github/workflows/ci.yml`.
+
+### The measurement, then the classification
+
+`ci.yml` invoked **84** checker commands; `docker/entrypoint.sh` invoked **65** — **20 in one and
+not the other**, plus **1** in the other and not the one. The repository's rule is *"when you add a
+checker, add it to BOTH"*, stated about a dozen times and enforced by nothing.
+
+`§O-286` recorded the numbers and refused to classify them, because classifying by reasoning is what
+this session has spent a dozen rounds calling in. **Running them settled it in one command.** Seven
+pass in the image and had no reason to be absent at all — pure Python, no build, no tree
+requirement, no artifact:
+
+| Checker | In the image |
+|---|---|
+| `check_checklist_counts.py` (+ `--self-test`) | rc=0, *"32 area(s), 587 item(s), §1 and §14 agree"* |
+| `check_lifecycle_counts.py` (+ `--self-test`) | rc=0 |
+| `gen_llms_txt.py --self-test` | rc=0 |
+| `check_wit_since.py` | rc=0 |
+| `audit_unsafe.py --check-doc` | rc=0, *"148 file(s), 11 crate root(s)"* |
+
+All seven are now in the bridge. **Divergence: 20 → 13.**
+
+### The thirteen, and the one whose reason nobody had written down
+
+Two were documented in the handbook (`check_sbom.py sbom` needs a CI artifact;
+`audit_requirements.py` needs a clean tree). Eleven were not, and one of those turned out to have a
+reason no comment anywhere stated:
+
+```
+$ python3 tools/check_wit.py
+wasm-tools not found on PATH.
+Install it with:  cargo install wasm-tools --locked
+Skipping WIT validation would mean shipping unparsed interface definitions, so this is a failure
+rather than a warning.
+```
+
+**The bridge cannot validate WIT *parsing* at all** — the image does not install `wasm-tools`. What it
+runs instead (`check_wit_reference.py`, `check_wit_style.py`, `check_wit_since.py`) parse WIT in
+Python, which is a different claim about the same files. That is worth knowing on its own, and no
+document said it.
+
+The rest: `check_api_examples.py` compiles and runs doctests from every public declaration, and the
+eight `fault_inject_*.py` each recompile a crate with a mutation applied.
+
+All thirteen are now **written down** in `entrypoint.sh` as a declared list, each with its reason,
+because **a divergence nobody decided is how a second gate quietly becomes a weaker gate.**
+
+### What makes the declaration durable rather than decorative
+
+The list is placed where a checker can read it, and the comment says what to do with it: *"If this
+list and `ci.yml` disagree beyond these thirteen, that is the defect — not the divergence itself."*
+That is the same shape as `check_checklist_counts.py`, which validates both the arithmetic **and**
+the declaration against the document. The parity checker is not written yet; this is the data it
+would consume, in the form it would consume it.
+
+Verified in the image: `bash -n docker/entrypoint.sh` → **SYNTAX OK**, and each of the seven exits
+**0** when run through the same path. The change was then re-verified end to end by a full bridge
+run, because **modifying a gate is exactly when a gate must be re-run.**
+
+→ `docker/entrypoint.sh`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

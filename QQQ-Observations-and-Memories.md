@@ -20417,4 +20417,16 @@ and the honest form of that statement is this observation plus the recorded not-
 measure" statement, which is a **required** field on the result type (`NonClaims`, `§O-155`) and
 is populated with three entries on every run.
 
+**§O-259 — counting `FAILED` as a substring is not counting failures.** While reporting the
+workspace suite, a filter for lines matching `FAILED` returned **61** and was read for a moment as
+61 failing tests. It was not: the matches were 54 `test result: ok. … 0 failed` lines (the word
+appears in `0 failed` and inside the phrase `test result`), six test *names* that contain it
+(`failed_requests_are_visible_in_the_summary`, `only_failed_is_a_problem`, and four more), and one
+log line whose `"stream":"handler_failed"` field is a legitimate trace attribute. The decisive
+count is the one that parses the number rather than matching the word: `test result:.*[1-9]\d*
+failed` occurred **0** times, and the pass total was **2,577** across 54 blocks. Two lessons, both
+about the same habit: a plausible-looking grep is not a measurement, and a number that *equals*
+another number in the same report (61 matches, 54 blocks) is worth an extra look before it is
+quoted, because coincidence and correlation look identical at that distance.
+
 *End of `QQQ-Observations-and-Memories.md`.*

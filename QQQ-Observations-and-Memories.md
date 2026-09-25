@@ -22555,4 +22555,72 @@ for the verdict line is the habit.
 
 ---
 
+## §O-286 — The two gates do not run the same checkers, and nothing says which differences are deliberate
+
+**Found:** closing the last recorded guard gap — *"nothing enforces the rule 'add it to `ci.yml`
+**and** `docker/entrypoint.sh`'"*. **Anchors:** `.github/workflows/ci.yml`,
+`docker/entrypoint.sh`, `QQQ-Checklist-V1.md`.
+
+### The measurement
+
+The rule is stated about a dozen times across the checklist and the handbook, and nothing checks it.
+Comparing the two gates by invocation:
+
+| | Invocations |
+|---|---|
+| `ci.yml` | **84** |
+| `docker/entrypoint.sh` | **65** |
+| **in `ci.yml`, absent from the bridge** | **20** |
+| in the bridge, absent from `ci.yml` | **1** (`check_sbom.py --self-test`) |
+
+The twenty, and whether a *stated* reason exists for each:
+
+| Invocation | Stated reason? |
+|---|---|
+| `check_sbom.py sbom` | ✅ the handbook: *"needs a CI artifact"* |
+| `audit_requirements.py` | ✅ the handbook: *"needs a clean tree"* |
+| 8 × `fault_inject_*.py`, `check_api_examples.py` (×2) | ✗ plausible — they compile Rust — but unstated |
+| `audit_unsafe.py --check-doc` | ✗ |
+| `check_checklist_counts.py` (×2), `check_lifecycle_counts.py` (×2) | ✗ **pure Python, no build, no tree requirement** |
+| `check_wit.py`, `check_wit_since.py` | ✗ |
+| `gen_llms_txt.py --self-test` | ✗ |
+
+**`entrypoint.sh` has a section headed *"What it deliberately does not cover"* — and it is about the
+source guard, not about which checkers run.** So there is no declared list of legitimate
+divergences anywhere; the only two named are in the handbook's prose. Everything else is divergence
+by accumulation, which is how a second gate quietly becomes a weaker gate.
+
+### Why this one was not fixed, when the others were
+
+**The bridge is a Linux container, and I cannot run it from here.** Adding the five cheap pure-Python
+checkers to `entrypoint.sh` is the obvious repair and it is *probably* right — but "probably" is the
+loan this session has spent twelve rounds calling in:
+
+- `audit_requirements.py` needs a **clean tree**, and the bridge runs against a bind mount of a
+  working tree that is usually dirty. That is why it is excluded, and it is the proof that a checker
+  can look bridge-safe and be bridge-fatal.
+- Two of the twenty are compile-dependent; whether the container's toolchain is ready for them is a
+  fact about the image, not about the script.
+
+A checker added to a gate I cannot execute is a change I cannot verify, and if one of them fails
+inside the container I would have **broken the bridge silently** — the failure mode this whole goal
+is about. So the divergence is measured and recorded rather than guessed at.
+
+### What would settle it, and what to build then
+
+**Run the bridge and see which of the twenty fail.** `docker/entrypoint.sh` is executable and the
+Docker daemon is up; one run turns each divergence into an **empirical** reason rather than a
+plausible one, and the ones that pass can simply be added.
+
+The checker to write afterwards is a **parity checker with a declared exclusion list**, where each
+entry carries the reason it diverges and a **stale entry is itself a failure** — an excluded checker
+that has since been added to both gates should not stay on the list. That is the same shape as
+`check_checklist_counts.py`: the arithmetic is validated *and* the declaration is validated against
+the document. Deviation, honestly declared and mechanically enforced, is the difference between a
+weaker gate and a *differently scoped* one.
+
+→ `.github/workflows/ci.yml`, `docker/entrypoint.sh`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

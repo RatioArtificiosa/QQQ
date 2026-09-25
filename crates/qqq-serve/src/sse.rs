@@ -241,24 +241,40 @@ impl Event {
             && self.data.is_empty();
 
         if !comment_only {
-            // One `data:` line per non-empty line of the payload, and **at least one**
-            // whenever the event carries data at all.
+            // One `data:` line per line of the payload — **empty lines included** — and one
+            // extra empty `data:` line when the payload ends with a line break.
             //
-            // The "at least one" is what makes `data("")`, `data("\n")` and
-            // `data("\n\n")` encode to the *same bytes*, which they must: the client's
-            // assembler joins the data lines with `"\n"` and removes the final one, so
-            // all three dispatch `""`. Without it, a newline-only payload emitted no
-            // `data:` line, and the message became a bare blank line — an event with
-            // no fields, which a strict client ignores and which no reader can tell
-            // from a stray separator.
-            let mut wrote = false;
+            // # Why the extra line
+            //
+            // The client's assembler joins the `data:` lines with `"\n"` and then removes
+            // **one** trailing break, as the specification requires. A payload has to
+            // survive that trim, so the wire form must carry one break more than the
+            // payload does: `data("a\n")` is three `data:` lines, which join to `"a\n\n"`
+            // and trim to `"a\n"`.
+            //
+            // The previous version dropped empty lines and then supplied a single `data:`
+            // line if none remained. That handled the concern it was written for — a
+            // newline-only payload must not emit a bare blank line, which an earlier
+            // version did — but it also threw away the line structure, so **every payload
+            // ending in a line break lost it**: `data("a\n")` dispatched `"a"`. Its comment
+            // argued the loss was required, claiming `data("")`, `data("\n")` and
+            // `data("\n\n")` "must" encode identically. They must not: identical bytes
+            // cannot carry three different payloads (`§O-278`).
+            //
+            // A **comment-only** event still emits no `data:` line at all, and that
+            // distinction is what separates a keep-alive from a message: a keep-alive
+            // carrying `data:` would be dispatched by the client as an empty message,
+            // waking every listener on an idle connection — the opposite of what it is
+            // for.
             for line in split_lines(&self.data) {
                 let _ = writeln!(out, "data:{}", escape_leading_space(line));
-                wrote = true;
             }
-            if !wrote {
+            if self.data.ends_with(['\n', '\r']) {
                 out.push_str("data:\n");
             }
+            // No "at least one line" fallback is needed: `split_lines` never returns an
+            // empty sequence, so `data("")` writes `data:\n` above rather than a bare
+            // blank line.
         }
 
         // The blank line dispatches the event. Without it the fields accumulate and
@@ -279,8 +295,8 @@ fn fold_newlines(s: &str) -> String {
         .collect()
 }
 
-/// Split on `\r\n`, `\n` or a lone `\r`, as the specification requires, dropping
-/// empty fields.
+/// Split on `\r\n`, `\n` or a lone `\r`, as the specification requires, **keeping every
+/// empty field**.
 ///
 /// A single `\r` terminates a line in SSE, which is not true of most text formats and
 /// is the reason this is a named function. `str::lines` splits on `\n` and strips a
@@ -288,18 +304,56 @@ fn fold_newlines(s: &str) -> String {
 /// whose payload contains a raw `\r` — which the *client* then splits on, arriving at
 /// a different payload than the server encoded.
 ///
-/// # Why empty fields are dropped, and why the caller still writes one `data:` line
+/// # Why empty fields are kept
 ///
-/// The client joins the data lines with `"\n"` and removes the trailing one, so
-/// `data:a` and `data:a\ndata:` are the *same* event — an empty field carries no
-/// information and dropping it loses nothing. What must not be lost is the `data:`
-/// line itself: a payload of `"\n"` splits into two empty fields, both dropped here,
-/// and the encoder's "at least one" rule supplies the single `data:` line that makes
-/// the wire form identical to `data("")`. The two rules are a pair, and separating
-/// them is what produced the first version of this file, which emitted a bare blank
-/// line for a newline-only payload.
-fn split_lines(s: &str) -> impl Iterator<Item = &str> {
-    s.split(['\n', '\r']).filter(|l| !l.is_empty())
+/// The client joins the data lines with `"\n"` and removes the trailing one, so an empty
+/// field is not information *by itself* — but the **number** of fields is information, and
+/// it is how a trailing line break is carried. Dropping empty fields collapses
+/// `data("a")`, `data("a\n")` and `data("a\n\n")` onto the same wire form, so at most one
+/// of the three can survive the round trip.
+///
+/// The earlier version dropped them to stop a newline-only payload emitting a bare blank
+/// line — a real defect, produced by an earlier version still. The encoder's "at least one
+/// `data:` line" rule fixes that without discarding line structure, so the two concerns are
+/// not a trade-off and were only ever a pair because the first fix chose the wrong lever
+/// (`§O-278`).
+/// Split a payload into lines the way the specification's "split a string on line breaks"
+/// step does: `\r\n`, a lone `\n`, and a lone `\r` each end a line.
+///
+/// **Empty lines are kept, and that is the whole point of this function.** The previous
+/// version filtered them out — `s.split(['\n', '\r']).filter(|l| !l.is_empty())` — which
+/// looked harmless and silently dropped the trailing empty line that a payload ending in a
+/// line break produces. `data("a\n")` therefore encoded as one `data:` line, and the
+/// client's mandatory trim of one trailing break left `"a"`. The filter existed to stop a
+/// newline-only payload emitting a bare blank line; that concern is real, and the encoder
+/// handles it with its "at least one `data:` line" rule instead — which does not require
+/// discarding line structure (`§O-278`).
+///
+/// Splitting on both terminators in one pass, as the old version did, also turns `"a\r\nb"`
+/// into three fields with a spurious empty one between; the loop here consumes `\r\n` as a
+/// single break.
+fn split_lines(s: &str) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' || bytes[i] == b'\r' {
+            out.push(&s[start..i]);
+            i += if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                2
+            } else {
+                1
+            };
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    // The text after the final break, which is `""` when the payload ends with one. This
+    // unconditional push is why the sequence is never empty.
+    out.push(&s[start..]);
+    out
 }
 
 /// Add the second space a payload with a leading space needs.
@@ -660,17 +714,17 @@ mod tests {
     #[test]
     fn the_line_splitter_handles_every_form() {
         let cases: [(&str, Vec<&str>); 8] = [
-            ("", vec![]),
+            ("", vec![""]),
             ("a", vec!["a"]),
             ("a\nb", vec!["a", "b"]),
             ("a\r\nb", vec!["a", "b"]),
             ("a\rb", vec!["a", "b"]),
-            ("\n", vec![]),
-            ("a\n", vec!["a"]),
-            ("\n\n", vec![]),
+            ("\n", vec!["", ""]),
+            ("a\n", vec!["a", ""]),
+            ("\n\n", vec!["", "", ""]),
         ];
         for (input, want) in cases {
-            let got: Vec<&str> = split_lines(input).collect();
+            let got: Vec<&str> = split_lines(input);
             assert_eq!(got, want, "splitting {input:?}");
         }
     }
@@ -682,14 +736,46 @@ mod tests {
     /// It matters because the client cannot tell them apart either: its assembler
     /// joins the data lines and drops the trailing one, so every one of these
     /// dispatches `""`.
+    /// A payload's line structure survives the encoder, including a trailing line break.
+    ///
+    /// # This test used to assert the opposite
+    ///
+    /// It was `a_newline_payload_is_the_same_event_as_an_empty_one`, and it required
+    /// `data("")`, `data("\n")`, `data("\n\n")`, `data("\r")` and `data("\r\n")` to encode
+    /// to **identical bytes**, on the argument that the client's assembler trims one
+    /// trailing break and so all of them dispatch `""`. The argument is self-defeating:
+    /// identical bytes cannot carry five different payloads, so the claim amounts to saying
+    /// a trailing line break is not transmittable. It is — by emitting one `data:` line
+    /// more than the payload has lines — and asserting otherwise is what kept the encoder
+    /// wrong while its tests stayed green (`§O-278`).
     #[test]
-    fn a_newline_payload_is_the_same_event_as_an_empty_one() {
+    fn a_trailing_line_break_survives_the_encoder() {
         let empty = encoded(&Event::data(""));
-        for payload in ["\n", "\n\n", "\r", "\r\n"] {
+        let one = encoded(&Event::data("\n"));
+        let two = encoded(&Event::data("\n\n"));
+        assert_ne!(empty, one, "`data(\"\")` and `data(\"\\n\")` must differ");
+        assert_ne!(
+            one, two,
+            "`data(\"\\n\")` and `data(\"\\n\\n\")` must differ"
+        );
+
+        // The specification's assembler rule — join the `data:` lines with `"\n"`, then
+        // drop **one** trailing break — applied to the encoder's own output. This is the
+        // property the encoder has to satisfy, and it is checked here rather than only
+        // in an integration test because a sender's contract is about the bytes it writes.
+        for payload in ["", "\n", "\n\n", "a", "a\n", "a\nb", "a\n\nb", "a\n\n"] {
+            let wire = encoded(&Event::data(payload));
+            let mut joined = wire
+                .split('\n')
+                .filter_map(|line| line.strip_prefix("data:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.ends_with('\n') {
+                joined.pop();
+            }
             assert_eq!(
-                encoded(&Event::data(payload)),
-                empty,
-                "payload {payload:?} must dispatch the same event as an empty one"
+                joined, payload,
+                "payload {payload:?} did not survive the encoder"
             );
         }
     }

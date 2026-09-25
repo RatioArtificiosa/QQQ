@@ -564,6 +564,20 @@ async fn a_chunked_body_past_the_cap_is_cut_off() {
     }
     let _ = stream.flush().await;
 
+    // **Complete the request before asserting anything.** Without the chunk's trailing
+    // CRLF and the terminating zero-length chunk, this is not a well-formed chunked body:
+    // it is a truncated one. A server that ignored `max_request_bytes` completely would
+    // still produce no `200`, because it would be waiting for bytes that never arrive — so
+    // the assertion below could not tell *rejected for exceeding the cap* from *never
+    // completed*, which is the only distinction this test exists to make. Sending the
+    // terminator makes the request valid, so a `200` is now a real failure.
+    //
+    // Write errors stay ignored: the server is expected to close mid-stream, and a broken
+    // pipe here is the expected outcome rather than a test failure.
+    let _ = stream.write_all(b"\r\n").await;
+    let _ = stream.write_all(b"0\r\n\r\n").await;
+    let _ = stream.flush().await;
+
     let response = read_all(&mut stream).await;
     // Either an error response or a close is acceptable — the server may have
     // closed before writing. What is NOT acceptable is a 200 for a body over the

@@ -1088,7 +1088,7 @@ mod tests {
         // step 10 to `Partial` made it need `thirteen`, and nothing would have said so.
         // A count in prose that nothing compares is exactly the defect this test exists for
         // (`§O-277`), so it is compared here too.
-        let not_done = STAGES.len() - Counts::measured().summary.implemented as usize;
+        let not_done = STAGES.len() - Counts::measured().summary.implemented;
         let narrative = format!("false for **{not_done}** of the fifteen");
         assert!(
             src.contains(&narrative),

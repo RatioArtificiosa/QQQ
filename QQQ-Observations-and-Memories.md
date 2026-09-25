@@ -21857,4 +21857,117 @@ comparable lets the existing owner see it.
 
 ---
 
+## §O-278 — Phase E begins: a test that could not fail, and a test that was right about a code bug the spec argues for
+
+**Found:** the first two CodeRabbit findings reproduced against HEAD. **Anchors:**
+`crates/qqq-serve/tests/socket.rs`, `crates/qqq-serve/tests/sse.rs`,
+`crates/qqq-serve/src/sse.rs`.
+
+### C1 — the fixture never finished the request it was testing
+
+`a_chunked_body_past_the_cap_is_cut_off` wrote the head with a declared chunk size of 3 MiB, then
+pushed the payload — and **never sent the chunk's trailing CRLF, nor the terminating zero-length
+chunk**. So the request was not a well-formed chunked body at all: it was a truncated one. The only
+assertion was *"not a `200`"* — and a server that ignored `max_request_bytes` entirely would also
+produce no `200`, because it would be waiting for bytes that never arrive.
+
+**The test could not distinguish *rejected for exceeding the cap* from *never completed*, which is
+the only distinction it exists to make.** It passed for the wrong reason, and would have kept
+passing if the cap were deleted.
+
+Fixed by sending `\r\n` and `0\r\n\r\n` after the payload, keeping the ignored write errors (a
+broken pipe mid-stream is the *expected* outcome) and the `200`-rejection assertion.
+
+**Fault-injected by raising `MAX_REQUEST_BYTES` from 2 MiB to 64 MiB**: the test now fails with
+`a body over max_request_bytes must not be accepted`. It could not have done that before — the
+injection would have produced no response and the assertion would have passed.
+
+### C8 — the fixture was right; the code was wrong, and the spec says so
+
+The finding said `a_leading_space_survives_encode_and_parse` should cover `"a\n"` and `"\n"`, and
+proposed fixing the **parser**: *"join data_lines without popping a character so trailing newlines
+survive"*.
+
+Adding the two payloads reproduced a real failure immediately:
+
+```
+assertion `left == right` failed: payload "a\n" was mangled
+  left: "a"
+  right: "a\n"
+```
+
+**But the proposed fix is wrong.** The SSE specification requires the client to *"remove the last
+character from the data buffer if it is a U+000A LINE FEED"* — the parser's `pop` is mandated, and
+removing it would make `data:a\ndata:b\n\n` parse as `"a\nb\n"` instead of `"a\nb"`, breaking every
+multi-line event. A finding is a lead, not an authority.
+
+The bug was in the **encoder**:
+
+```rust
+fn split_lines(s: &str) -> impl Iterator<Item = &str> {
+    s.split(['\n', '\r']).filter(|l| !l.is_empty())   // drops the trailing empty line
+}
+```
+
+For a payload ending in a line break, the split yields a trailing empty field, the filter removes
+it, and **the break is gone**. The fix is the opposite of the finding's: `split_lines` keeps every
+field, and the encoder emits **one extra `data:` line when the payload ends with a line break**, so
+that the specification's mandatory trim restores it. `data("a\n")` is now three `data:` lines,
+which join to `"a\n\n"` and trim to `"a\n"`.
+
+Splitting on both terminators in one pass was also wrong for `"a\r\nb"` — `['\n', '\r']` produces
+three fields with a spurious empty one between — so the new splitter consumes `\r\n` as a single
+break.
+
+### What kept it wrong: three artefacts agreeing on the bug
+
+Three separate things asserted the lossy behaviour as a **requirement**, which is why a failing
+round-trip never surfaced as a defect:
+
+1. The doc comment on the encoder argued it was necessary — *"the "at least one" is what makes
+   `data("")`, `data("\n")` and `data("\n\n")` encode to the *same bytes*, which they must"*.
+   **They must not.** Identical bytes cannot carry three different payloads; the claim amounts to
+   saying a trailing line break is not transmittable.
+2. The doc comment on `split_lines` explained *why empty fields are dropped* and called the two
+   rules *"a pair"*.
+3. A unit test **named the bug as a contract**:
+   `a_newline_payload_is_the_same_event_as_an_empty_one`.
+
+**A test that passes for the wrong reason usually has a comment, and often a test name, asserting
+the wrong thing as a requirement.** The code was wrong; the prose defended it; the test enforced
+it. Changing the fixture alone would have made the suite fail without saying which of the three was
+load-bearing — the reproduction is what showed that the *parser* was the one piece that was right.
+
+Replaced with `a_trailing_line_break_survives_the_encoder`, which applies the specification's
+assembler rule to the encoder's own output and requires the payload back.
+
+**Fault-injected by disarming the extra-line rule (`if false`)**: the round-trip test panics.
+Restored: `sse` 9 passed, `socket` 15 passed, and the whole crate at **681 lib tests + every
+integration suite, 0 failures**.
+
+### A verification gap of my own, from round 7
+
+`cargo clippy` on the changed crate reported `unnecessary_cast` (`usize` → `usize`) in the
+`lifecycle.rs` assertion added in round 7. **I did not catch it then**, because round 7's
+verification ran `cargo fmt --all -- --check` and the Python checker gate — and **the Python gate
+does not compile Rust.** Definition of done #3 asks for both `fmt` and `clippy`, and I ran one.
+
+Fixed (`STAGES.len() - Counts::measured().summary.implemented`), and the lesson is that *"the gate
+passed"* is only as strong as the gate's coverage. `fmt` checks formatting; it says nothing about
+lints, and a lint is a **new** rule arriving with each Rust release — which is Phase C's whole
+subject.
+
+### Remaining from Phase E
+
+C2 (`socket.rs`, the head-size test not sending what it describes), C3/C4 (`metrics_wiring.rs`, the
+connection ceiling and the readiness-probe baseline), C5/C6 (`streaming_route.rs`, an unobserved
+`HandlerFailed` claim and a `tx.send(())` that can succeed before the handler runs), C7
+(`tls.rs`, the exact rustls error text). All are the same shape and now reachable, since the crate
+builds and tests locally.
+
+→ `crates/qqq-serve/tests/socket.rs`, `crates/qqq-serve/tests/sse.rs`,
+`crates/qqq-serve/src/sse.rs`, `crates/qqq-serve/src/lifecycle.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

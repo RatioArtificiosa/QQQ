@@ -239,7 +239,7 @@ fn a_multiline_payload_round_trips_through_the_client_parser() {
 /// other catches this — a matching pair of bugs would agree and pass.
 #[test]
 fn a_leading_space_survives_encode_and_parse() {
-    for payload in [" leading", "  two spaces", "no-space", "", " "] {
+    for payload in [" leading", "  two spaces", "no-space", "", " ", "a\n", "\n"] {
         let wire = serve_events(&[Event::data(payload)]);
         let (_, _, body) = split_response(&wire);
         let events = parse(&String::from_utf8_lossy(&body));

@@ -426,6 +426,22 @@ jobs:
       - name: Verify the crate topology
         run: python tools/check_topology.py
 
+      # ARCH-010: every crate's declared stability tier, checked against Proposal
+      # §4.3. `check_topology.py` above verifies the *order* of §4.3's table; this
+      # verifies the tier each crate promises. Nothing compared them until this
+      # check existed, so a crate could be switched from beta to stable in its
+      # manifest -- the line a publisher reads before making a semver promise --
+      # with every gate green and the specification saying the opposite.
+      #
+      # Its first run found a real divergence in both directions: `qqq-bench` and
+      # `qqq-sys` are built and carry a tier but have no row in §4.3's table,
+      # while `qqq-registry` and `qqq-fabric` have rows and are not built here.
+      # Both classes are reported on every run rather than tolerated silently.
+      - name: Verify the crate stability tiers (ARCH-010)
+        run: python tools/check_tiers.py
+      - name: prove the tier check and its parsers are live
+        run: python tools/check_tiers.py --self-test
+
       # A validator that cannot fail manufactures false confidence. This harness
       # deliberately breaks the corpus and asserts each injection is caught; it
       # prints the count it achieved, so the number is never restated here where

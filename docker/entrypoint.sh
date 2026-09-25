@@ -869,6 +869,9 @@ cmd_checks() {
     cmd_lint_ci
 
     python3 tools/check_topology.py
+    # ARCH-010: the stability tier each crate declares, against Proposal §4.3.
+    python3 tools/check_tiers.py
+    python3 tools/check_tiers.py --self-test
     python3 tools/check_no_ambient.py
     python3 tools/gen_schemas.py --check
     python3 tools/gen_llms_txt.py --check
@@ -948,9 +951,10 @@ cmd_checks() {
     # DOC-018: a hand-written document asserting a count the tree no longer produces. This used
     # to be gated on a build, because the `workspace-tests` resolver ran the suite. That marker
     # was removed -- a resolved count that is *supposed* to grow made a table about a past audit
-    # fail whenever a test was added (`§O-238`) -- and the live claim is now `crate-files`, a
-    # `.rs` file count that needs no build. So the check runs unconditionally, and gating it here
-    # would skip a check that can always run.
+    # fail whenever a test was added (`§O-238`) -- and every counted fact in this corpus now has
+    # its own owner, so the checker currently resolves no claim and reports that state. It runs
+    # unconditionally, because it needs no build and gating it here would skip a check that can
+    # always run.
     python3 tools/check_doc_claims.py
     python3 tools/check_doc_claims.py --self-test
 

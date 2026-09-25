@@ -419,10 +419,15 @@ Items are grouped below by **phase**, because dependency order matters more than
     the resolver is what makes the check possible — the document says *which fact* it asserts,
     and a number in prose that is not a claim is left alone, so the check has no false positives
     to be disabled over.
-  → Marked: `docs/unsafe-audit.md`'s `.rs` file count now re-derives through `crate-files`. That
-    is the number this check was built for — it drifted **four times in one working period**
-    (141→142→143→146→147), and each drift was caught by CI rather than locally. Measured: the
-    resolver reports `147`, matching the tree.
+  → Marked: **no document currently carries a claim**, and that is the measured state rather
+    than an oversight. Both candidates this item produced were already re-derived elsewhere:
+    `docs/unsafe-audit.md`'s `.rs` file count is checked by `tools/audit_unsafe.py --check-doc`
+    (`SEC-020`, with its own self-test), and the error-catalogue count by
+    `tools/gen_error_catalogue.py --check` (`DOC-019`). Marking either would have been a second
+    mechanism for one number, which this entry's own concluding sentence forbids. The scan found
+    no prose count without an owner; `check_doc_claims.py` keeps its resolvers, its marker syntax
+    and its self-tests ready for the next one, and reports `no document declares a checkable
+    count` so the empty state is visible rather than implied.
   → **A drift table has one re-derivable column and one frozen one, and the first edit conflated
     them.** Marking the `The entry said` column made the checker fail correctly on `2305` and
     `2249` — numbers that are *supposed* to be stale, because they record what was claimed at
@@ -889,8 +894,37 @@ Items are grouped below by **phase**, because dependency order matters more than
     drift is a poor way to prevent it — at the cost of a larger blast radius,
     mitigated by the process being test-enforced rather than crate-enforced.
   → §4.3 Crate topology
-- [ ] **ARCH-010** Publish the crate stability tiers and the API-stability contract per tier.
+- [x] **ARCH-010** Publish the crate stability tiers and the API-stability contract per tier.
   → §4.3 Crate topology
+  → Done, and the check found a real divergence on its first run.
+  → **`docs/stability.md`** publishes the three tiers (`stable`, `beta`, `exception`), what each
+    promises about breaking changes and notice, which crate is which, and the four surfaces with
+    their own contracts (`CON-017`): WIT interfaces, the manifest, the lockfile, and CLI JSON —
+    including the rule that `error.code` is permanent because agents match on it.
+  → **The tier was an unverified declaration until this item.** Every crate carries a `# Tier:`
+    line in the workspace manifest, and §4.3 carries a table, and **nothing compared them**:
+    `check_topology.py` verifies the *order* of the table and reads `cargo metadata`, not the
+    comments. A crate could be switched from `beta` to `stable` — the line a publisher reads
+    before making a semver promise — with every gate green and the specification saying the
+    opposite. `tools/check_tiers.py` now compares the two and fails on any disagreement.
+  → **What its first run found.** `qqq-bench` and `qqq-sys` are built, declare a tier, and have
+    **no row in §4.3's table**; `qqq-registry` and `qqq-fabric` have rows and are not built here.
+    Both classes are recorded and reported on every run rather than tolerated silently, and one
+    further error is fixed: the tier vocabulary is closed, so `experimental` or `alpha` is
+    rejected rather than accepted as a promise nobody agreed to.
+  → The `exception` tier is checked against the **artifact the process requires**,
+    `crates/qqq-sys/SAFETY.md`, rather than the label — so it is a reviewed state, not a word in a
+    comment. `qqq-sys` is designated for `unsafe` and currently contains none, because `nix` and
+    `seccompiler` supply the primitives as safe functions.
+  → Verified: `check_tiers.py` reports 11 crates, every tier matching; self-test 14/14; two
+    **fault injections** (flipping `qqq-pkg` to `stable`, and deleting a `# Tier:` line) each
+    fail with the specific message and restore byte-for-byte from SHA-256. Wired into `ci.yml`
+    and `docker/entrypoint.sh`.
+  → **Stated plainly:** the workspace is `0.0.0`, so these tiers describe the contract that comes
+    into force at 1.0. Until then every crate is technically beta; the tier records the reviewed
+    intent, which is why it is worth stating before it is enforceable. `CON-015` (deprecation
+    mechanics) remains open, so `stable`'s "one minor release of notice" is a convention rather
+    than a mechanism.
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
 - [x] **ARCH-012** Implement the defence-in-depth re-check of grants at host-call time.
@@ -1701,8 +1735,30 @@ Items are grouped below by **phase**, because dependency order matters more than
     the machine contract for no stated reason — **a measurement that produces no
     change is still a measurement.**
   → §8.3 The machine contract layer
-- [ ] **CON-017** Publish the contract-stability promise for each surface (WIT, manifest, lockfile, CLI JSON).
+- [x] **CON-017** Publish the contract-stability promise for each surface (WIT, manifest, lockfile, CLI JSON).
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
+  → Done: **`docs/stability.md`**, which states a separate promise per surface because they are
+    not consumed the same way. Each is a table of what is stable, what counts as an *additive*
+    change, and what counts as a *breaking* one:
+    • **WIT** — interface names and function signatures stable within a major version; adding an
+    interface or a function is minor. The dependency direction is why this matters: an already-built
+    artifact runs on a host that supports those interfaces, so a break is a break for every guest
+    ever compiled against them.
+    • **Manifest** — a manifest that parses today parses later with the same meaning. The
+    security-relevant row is that **an unknown key is a parse error, not a warning**: a capability
+    key that produced a warning would read as granted to a human and as absent to the runtime.
+    • **Lockfile** — a lockfile written by one version resolves identically under any later one;
+    byte-identical output for identical inputs.
+    • **CLI JSON** — `error.code` (`QQQ-nnnn`) is **permanent**, because agents match on it; new
+    fields and new variants are minor; codes are retired, never recycled.
+  → **Each promise names the mechanism that enforces it**, which is what separates a promise from
+    a wish: the tier table by `check_tiers.py`, WIT by `check_wit_style.py` / `check_wit_reference.py`,
+    the manifest and lockfile by their published JSON Schemas via `gen_schemas.py --check`, and the
+    error codes by the catalogue's round-trip test.
+  → **What is not covered, named rather than implied:** `CON-015` (deprecation mechanics in WIT)
+    is open, so the `stable` tier's notice period is a convention rather than a mechanism; the
+    workspace is `0.0.0`, so every tier describes intent that becomes enforceable at 1.0; and
+    `qqq-registry` and `qqq-fabric` have no tier because they are not built in this repository.
 - [x] **CON-018** Implement the "no hidden global state" architecture test across all host interfaces.
   → Done: `tools/check_no_ambient.py` enforces §2.5's rule across the runtime
     crates — no environment-variable reads, no CWD dependencies, no process-wide

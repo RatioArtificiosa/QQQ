@@ -118,6 +118,7 @@ asking rather than assuming.
 | [`advisories/`](advisories/README.md) | The public security-advisory register (`SEC-023`) |
 | [`wasmtime-advisory-process.md`](wasmtime-advisory-process.md) | The 72-hour patched-engine commitment |
 | [`unsafe-audit.md`](unsafe-audit.md) | The zero-`unsafe` result and how it is verified (`SEC-020`) |
+| [`stability.md`](stability.md) | The stability tier of every crate and the change-promise per surface (`ARCH-010`, `CON-017`) |
 | [`development-bridge.md`](development-bridge.md) | The Linux verification environment and its one-way rule |
 
 `docs/.env` holds local credentials and is **gitignored** — it is never committed and

@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **<!-- qqq:claim crate-files -->147<!-- /qqq:claim -->** |
+| `.rs` files scanned under `crates/` | **147** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |

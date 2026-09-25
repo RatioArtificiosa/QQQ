@@ -16322,12 +16322,11 @@ the checker failed correctly on a number that was right. A drift table has one r
 column and one frozen one, and conflating them is the same error as conflating a claim with its
 correction.
 
-`tools/check_doc_claims.py` keeps the resolver and the marker syntax. The `crate-files` marker
-sits on `docs/unsafe-audit.md`'s `.rs` file count — the number that drifted **four times in one
-working period** (141→142→143→146→147) and is a fact about *now* that nothing else re-derives.
-The WIT-count rows are unmarked because `check_wit_reference.py` and
-`check_wit_errors.py` already re-derive them; a second mechanism for one number would be two
-answers to one question (`DOC-018`).
+`tools/check_doc_claims.py` keeps the resolver and the marker syntax. It currently resolves no
+claim, because every counted fact in this corpus already has an owner: `docs/unsafe-audit.md`'s
+`.rs` count by `audit_unsafe.py --check-doc`, the error catalogue by `gen_error_catalogue.py
+--check`, and the WIT counts by `check_wit_reference.py` and `check_wit_errors.py`. A marker on
+any of them would be two answers to one question (`DOC-018`).
 
 **The durable fix is in how the entries are phrased.** Each corrected claim names the
 command that produces it -- `check_wit_errors.py`, `check_no_ambient.py`, `qqqai --help`, the
@@ -19329,11 +19328,26 @@ different thing from CI, and the difference is invisible until someone reads the
 
 **The fix, and how it differs from the previous one.** The markers are gone from both rows. The
 cells now carry the audit-time value, 2,546, with the command beside them, which is what that
-section's own "durable fix" paragraph already required of every other row. The checker was left
-with **zero** claims by that removal — `crate-files` existed as a resolver with no marker using
-it — so the marker moved to the number it was actually built for, `docs/unsafe-audit.md`'s `.rs`
-file count, which had drifted four times and is a fact about *now*. The resolver, the marker
-syntax and the self-tests are unchanged.
+section's own "durable fix" paragraph already required of every other row.
+
+**And the removal left the checker with zero claims, which is the honest end state.** The next
+move was to mark `docs/unsafe-audit.md`'s `.rs` file count, on the reasoning that it had drifted
+four times and `crate-files` existed for it. That marker failed CI immediately, and the failure
+was the useful part:
+
+    DRIFT: the `files scanned` row is missing or has lost its `**bold**` count
+
+`tools/audit_unsafe.py --check-doc` (`SEC-020`) already re-derives that exact number, and its
+self-test already proves it catches a stale value. So the marker was a **second mechanism for one
+number** — the thing the paragraph above forbids — and it also broke the row's required shape.
+The second candidate, the error-catalogue count, is re-derived by `tools/gen_error_catalogue.py
+--check` (`DOC-019`) for the same reason. **No prose count in this corpus lacks an owner**, so
+`check_doc_claims.py` legitimately checks nothing today and says so. Its resolvers, marker syntax
+and self-tests stay, and they are what the next genuinely unowned number will use.
+
+The intermediate commit is left in the history: `9a18906` marked a number that was already
+checked, and CI caught it on all three platforms. The resolver, the marker syntax and the
+self-tests are unchanged.
 
 **The rule, stated so the next reader does not have to derive it.** A marker belongs on a claim
 about the present. If the sentence around a number describes what was measured at a point in time,
@@ -19346,5 +19360,52 @@ project's *progress* — adding tests — fail its own build.
 no stale values. The failure was reproduced from the CI log for run `36088254708` before the second
 fix was written, and the two runs that exposed it (`36087065310`, 2546 vs 2547, and `36088254708`,
 2547 vs 2549) are both quoted above.
+
+## §O-239 — A checker whose subject already has an owner: marking a number that `SEC-020`
+## was already re-deriving
+
+Removing `DOC-018`'s live marker from the drift table (`§O-238`) left `check_doc_claims.py` with
+no claims, and the next move was to mark `docs/unsafe-audit.md`'s `.rs` file count — the number
+that drifted four times in one working period, and the one `crate-files` was evidently built for.
+That marker failed CI on all three platforms at once:
+
+    DRIFT: the `files scanned` row is missing or has lost its `**bold**` count
+    Update the table in `docs/unsafe-audit.md` to match this scan.
+
+`tools/audit_unsafe.py --check-doc` already re-derives that exact count, and its own self-test
+already proves it rejects a stale value (it writes a fixture with `**85**` and requires the
+failure). So the marker was a **second mechanism for one number** — the precise thing
+`DOC-018`'s own concluding paragraph says it will not do: *"a second mechanism for one number
+would be two answers to one question"*. The marker also broke the row's required `**bold**`
+shape, which is how the duplication announced itself.
+
+The second candidate was the error-catalogue count, and it is owned for the same reason:
+`tools/gen_error_catalogue.py --check` generates `docs/errors.md` from the enum and fails on
+drift, wrapped by `check_error_catalogue.py` (`DOC-019`). A scan of every `**N <noun>**` claim in
+the corpus found no counted fact without an owner.
+
+**What the honest end state is.** `check_doc_claims.py` resolves zero claims, and it says so on
+every run rather than printing a bare success:
+
+    DOC CLAIMS OK -- no document declares a checkable count
+    Add `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->` to make one checkable.
+
+That is a different message from "two claims match the tree", and the difference is the point: a
+check with nothing to check is not evidence that documents are fresh, and a report that read
+"This passes" would claim coverage it does not have. The resolvers, the marker syntax and the
+8-case self-test stay in place, because they are what the next genuinely unowned number uses.
+
+**The general rule, and it extends `§O-235`.** Before adding a check for a fact, search for an
+existing one. Two checkers on one number do not double the confidence; they make the number
+appear verified twice while introducing a second place to update and a way for the two to
+disagree. The corpus already had this rule written down, and I violated it by reasoning from
+"this number drifted" to "this number needs a checker" without asking who was already watching.
+
+### Verification
+
+`python tools/check_doc_claims.py` → `no document declares a checkable count` (exit 0).
+`python tools/audit_unsafe.py --check-doc` → `UNSAFE AUDIT DOC OK -- 147 file(s), 11 crate
+root(s) carrying forbid(unsafe_code)`. The failure is quoted from run `36089665606`, and the
+commit that introduced it (`9a18906`) is left in the history rather than rewritten.
 
 *End of `QQQ-Observations-and-Memories.md`.*

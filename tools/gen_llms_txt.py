@@ -52,6 +52,39 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+
+def checklist_item_count() -> int | None:
+    """How many items `QQQ-Checklist-V1.md` declares, or `None` if it cannot be read.
+
+    # The second hand-written number in this generator
+
+    `llms.txt` said *"The 586 tracked items"* as a **literal** in the `CURATED` table below, and
+    `--check` could not see it drift for the same reason it could not see the job count drift
+    (`§O-275`): the comparison is the generated file against the tree's *file listing*, and a
+    constant sits on **both sides** of it.
+
+    The number is correct today — `check_checklist_counts.py` reports 586 items across 32 areas
+    and its own self-test covers the arithmetic — so nothing is visibly wrong. What is wrong is
+    that **nothing would notice when it stops being 586**: adding one checklist item, which is
+    the ordinary way this document grows, makes this line stale with the gate green (`§O-284`).
+
+    Derived here from the document itself rather than from a copy of the count, because the
+    checklist's own arithmetic is already the authority and `check_checklist_counts.py` owns
+    checking it.
+    """
+    try:
+        text = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    n = len(re.findall(r"^\s*- \[[ x!]\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE))
+    return n or None
+
+
+def checklist_phrase() -> str:
+    """`The 586 tracked items`, or a phrase that makes no claim when the count is unknown."""
+    n = checklist_item_count()
+    return f"The {n} tracked items" if n else "The tracked items"
+
 # ---------------------------------------------------------------------------
 # The curation: what to read, and in what order
 # ---------------------------------------------------------------------------
@@ -82,7 +115,7 @@ CURATED: list[tuple[str, str, str, str]] = [
     # --- What is actually built -------------------------------------------
     (
         "QQQ-Checklist-V1.md",
-        "The 586 tracked items, each citing the Proposal section that governs "
+        f"{checklist_phrase()}, each citing the Proposal section that governs "
         "it, with the evidence for each completed one.",
         "both",
         "status",

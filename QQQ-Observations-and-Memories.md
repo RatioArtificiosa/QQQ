@@ -22389,4 +22389,88 @@ exists to remove.
 
 ---
 
+## §O-284 — The same generator held a second hand-written number, and a filter of mine hid the game that would have caught it
+
+**Found:** while measuring whether a checklist item could safely be added for the unowned TLS
+accept path (Phase B's residual). **Anchors:** `tools/gen_llms_txt.py`, `llms.txt`,
+`tools/check_checklist_counts.py`, `QQQ-Checklist-V1.md`.
+
+### The second literal in the same file
+
+`§O-275` fixed *"The gate. Nine jobs."* — a hand-written number inside `gen_llms_txt.py` whose
+drift `--check` could not see, because the comparison is generated output against the tree's file
+listing and a constant sits on **both sides**. Sixteen lines earlier in the same `CURATED` table
+sat a second one:
+
+```python
+    (
+        "QQQ-Checklist-V1.md",
+        "The 586 tracked items, each citing the Proposal section that governs "
+        "it, with the evidence for each completed one.",
+```
+
+**The number is correct today.** `check_checklist_counts.py` reports *"32 area(s), 586 item(s), §1
+and §14 agree"*, and that checker is thorough — its docstring records finding eight separate
+discrepancies, including five per-area counts that disagreed with the document they summarise.
+
+**So nothing is visibly wrong, and that is the whole problem.** Adding one checklist item — the
+ordinary way this document grows, and precisely what I was about to do — makes this line stale
+**with the gate green**. `check_checklist_counts.py` would keep the totals honest and `llms.txt`
+would keep saying 586.
+
+Fixed by deriving it, the same way and in the same file as the job count: `checklist_item_count()`
+counts `- [**AREA-NNN**]` items in the document, and `checklist_phrase()` returns a phrase that
+makes **no claim at all** when the count cannot be read (`"The tracked items"` rather than a wrong
+number or `None`).
+
+**Fault-injected**: inserting a probe item makes the line say **587** on the next regeneration.
+
+**Two literals in one generator is a pattern, not two accidents.** Both were prose that *described*
+the tree, written once and never re-derived. A general guard — "a generator's description text may
+not contain a bare count" — would need to separate prose from code inside Python, which is
+`check_doc_claims.py`'s problem in a new language. Recorded as a candidate rather than built, since
+both known instances are now derived.
+
+### And a conclusion of mine that the measurement overturned
+
+While injecting, I ran `gen_llms_txt.py --check` with a *stale* `llms.txt` (587) against a restored
+checklist (586) and read **`LLMS FILES OK`**. I began writing up a guard gap: *`--check` compares
+sizes and paths but not description prose, so a derived number is unguarded.*
+
+**That was wrong**, and the decisive measurement said so immediately: hand-editing the number to
+`999` produces
+
+```
+DRIFT: llms.txt does not match the tree. Run `python tools/gen_llms_txt.py` to regenerate.
+```
+
+exit 1. **`--check` compares content correctly.**
+
+The apparent pass was **my own output filter**. I had summarised the run with
+`Select-Object -Last 1`, which shows the *last* line — and `--check` prints a per-file verdict, with
+`llms.txt`'s DRIFT line **above** `llms-full.txt`'s OK line. So the failure was present and I
+printed the line after it.
+
+**A filter that shows the last line of a multi-line verdict hides the failure at the top.** I have
+used `-Last 1` throughout this session to condense checker output, and it is safe for the
+single-line verdicts most of them print. It is not safe for `gen_llms_txt.py`, whose verdict is a
+list, and the repo documents the same hazard for its own tooling — `gen_llms_txt.py`'s own comment
+notes that a document edited every round crosses every size bucket eventually.
+
+The near-miss is worth recording because of its direction: I was about to **file a defect against a
+working checker**, on evidence produced by my own summarisation. The corrective was one command, and
+the only reason it happened is that the claim was cheap to test.
+
+### The residual, restated
+
+The TLS accept path still has **no checklist item**, and adding one is still correct — but it is a
+change to the corpus's arithmetic (586 → 587 items, plus the per-area row that would own it and the
+§14 phase total), and the numbers it would touch are exactly the ones `check_checklist_counts.py`
+validates. That is a coherent unit of work, not a line to append at the end of a round, and the
+observation above is its honest placeholder.
+
+→ `tools/gen_llms_txt.py`, `llms.txt`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

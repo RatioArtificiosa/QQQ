@@ -24,6 +24,7 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -181,7 +182,23 @@ async fn read_within(stream: &mut TcpStream, window: Duration) -> String {
 /// The signal is what makes this a *streaming* test rather than a buffering one: the
 /// harness only fires it after the client has already read the first event, so if any
 /// layer held the body until the handler returned, the handler would never return.
-fn gated_handler(gate: oneshot::Receiver<()>) -> qqq_serve::stream::StreamingHandler {
+///
+/// # The counter, and why `tx.send(()).is_ok()` was not enough
+///
+/// The 404 test below asserts this handler never ran, and it used to prove that with
+/// `tx.send(()).is_ok()` — *"the gate must still be pending"*. **That argument does not
+/// hold.** `send` succeeds whenever the receiver has not been **dropped**, which includes
+/// the case where the handler already took the receiver, parked on it, and is about to
+/// complete. So the assertion passes whether or not the handler ran, which is the one
+/// thing it was there to distinguish.
+///
+/// `invocations` is incremented as the handler's first instruction, so the 404 test can
+/// assert **zero** — a claim about what happened rather than a claim about a channel's
+/// state (`§O-279`).
+fn gated_handler(
+    gate: oneshot::Receiver<()>,
+    invocations: Arc<AtomicUsize>,
+) -> qqq_serve::stream::StreamingHandler {
     let gate = Arc::new(tokio::sync::Mutex::new(Some(gate)));
     Arc::new(
         move |_head: &RequestHead,
@@ -191,7 +208,9 @@ fn gated_handler(gate: oneshot::Receiver<()>) -> qqq_serve::stream::StreamingHan
             Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>,
         > {
             let gate = Arc::clone(&gate);
+            let invocations = Arc::clone(&invocations);
             Box::pin(async move {
+                invocations.fetch_add(1, Ordering::SeqCst);
                 w.write_now(b"data: first\n\n")
                     .await
                     .map_err(|e| StreamError::Transport(e.to_string()))?;
@@ -225,7 +244,9 @@ fn flat_handler() -> Handler {
 #[tokio::test]
 async fn a_streaming_route_delivers_an_event_before_the_handler_returns() {
     let (tx, rx) = oneshot::channel();
-    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
     let server = Server::start(dispatch).await;
 
     let mut client = server.open("/events").await;
@@ -235,6 +256,16 @@ async fn a_streaming_route_delivers_an_event_before_the_handler_returns() {
     assert!(
         got.contains("data: first"),
         "the first event must arrive while the handler is still running: {got:?}"
+    );
+
+    // **The positive control for the 404 test's counter.** That test asserts the handler
+    // was invoked zero times; this asserts it was invoked once on the path that matches.
+    // Two assertions on one instrument, and the pair is what makes it an instrument: a
+    // counter that always read zero would satisfy the 404 test and prove nothing there.
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "the matching route must have invoked the handler exactly once"
     );
     assert!(
         got.contains("Transfer-Encoding: chunked"),
@@ -275,7 +306,8 @@ async fn a_streaming_route_delivers_an_event_before_the_handler_returns() {
 #[tokio::test]
 async fn a_streaming_route_does_not_read_the_request_body() {
     let (tx, rx) = oneshot::channel();
-    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::new(AtomicUsize::new(0))));
     let server = Server::start(dispatch).await;
 
     let mut client = server.open_declaring("/events", 4096).await;
@@ -354,22 +386,55 @@ async fn a_route_without_a_streaming_handler_uses_the_flat_one() {
 #[tokio::test]
 async fn an_unknown_path_is_still_a_404_with_streaming_configured() {
     let (tx, rx) = oneshot::channel();
-    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", gated_handler(rx));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
     let server = Server::start(dispatch).await;
 
     let mut client = server.open("/nope").await;
     let got = read_until(&mut client, "\r\n\r\n").await;
 
     assert!(got.contains("404"), "{got:?}");
-    // And the gate was never consumed, because the streaming handler never ran.
+    // **The handler never ran**, asserted on a counter rather than on the channel.
+    //
+    // `assert!(tx.send(()).is_ok())` used to stand here, documented as *"the gate was never
+    // consumed, because the streaming handler never ran"*. The conclusion does not follow
+    // from the premise: `send` succeeds whenever the receiver has **not been dropped**,
+    // which is also true when the handler took the receiver and parked on it. So the
+    // assertion passes in the very case it was written to exclude. The counter is
+    // incremented at the handler's first instruction, so zero invocations means zero
+    // invocations (`§O-279`).
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "the streaming handler must not run for a path that matched no route"
+    );
+    // The gate is still open. A weaker signal than the counter, kept because it is the
+    // property the other two tests depend on.
     assert!(tx.send(()).is_ok(), "the gate must still be pending");
 }
 
-/// **A streaming handler that fails mid-body is recorded as `HandlerFailed`.**
+/// **A streaming handler that fails mid-body leaves the client a truncated body, not a
+/// fabricated error.**
 ///
 /// The status is already on the wire and cannot be changed, so the only honest signal
 /// left is the log. This drives a handler that returns `Handler` after one write and
-/// asserts the client got what was sent — a truncated body, not a fabricated error.
+/// asserts the client got what was sent.
+///
+/// # What this test does *not* observe, and where that is covered instead
+///
+/// It used to be titled *"A streaming handler that fails mid-body is recorded as
+/// `HandlerFailed`"* — and it never observed that. `StreamOutcome::HandlerFailed` is
+/// produced inside the server's dispatch loop (`server.rs`) and is **not reachable from an
+/// integration test**: no public handle exposes it. It is verified where it can be —
+/// `stream.rs`'s own unit tests assert that `HandlerFailed`'s level is `Error` and its
+/// label is `handler_failed` — and the **consequence** a caller can see, that a failed
+/// stream is classified `ClientClosed` rather than `Ok`, is asserted in
+/// `metrics_wiring.rs`.
+///
+/// A claim in a title that the test cannot check is the defect `§O-125` names. The title
+/// now states the property this test actually establishes, and the unobservable outcome is
+/// named with its real home rather than left as an implied assertion (`§O-279`).
 #[tokio::test]
 async fn a_handler_that_fails_mid_body_truncates_rather_than_lies() {
     let handler: qqq_serve::stream::StreamingHandler = Arc::new(

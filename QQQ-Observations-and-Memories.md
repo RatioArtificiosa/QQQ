@@ -21970,4 +21970,94 @@ builds and tests locally.
 
 ---
 
+## §O-279 — Phase E, second batch: three findings, and all three were claims the test could not observe
+
+**Found:** C2, C5 and C6 reproduced against HEAD. **Anchors:** `crates/qqq-serve/tests/socket.rs`,
+`crates/qqq-serve/tests/streaming_route.rs`, `crates/qqq-serve/tests/metrics_wiring.rs`,
+`crates/qqq-serve/src/stream.rs`.
+
+**The shape repeated exactly.** In C1 and C8 the *fixture* was wrong. In all three of these the
+fixture is fine and the **prose** describes something the test never sees — a directory of
+findings that is really a directory of documentation defects.
+
+### C2 — the comment described a fixture that does not exist
+
+`a_head_that_is_large_without_many_headers_is_refused` said:
+
+> *"A hundred `x-pad-NNNN: <64 KiB>` headers is 100 headers (inside `MAX_HEADERS`) and megabytes of
+> head (far past `MAX_HEAD_BYTES`)."*
+
+The fixture sends **60 headers of 2 KiB**. Measured against the constants:
+
+| | Comment | Fixture | Limit |
+|---|---|---|---|
+| headers | 100 | **60** | `MAX_HEADERS` = 100 |
+| per header | `<64 KiB>` | **2 KiB** | `MAX_HEADER_BYTES` = 8 KiB |
+| total head | "megabytes" | **≈121 KiB** | `MAX_HEAD_BYTES` = 64 KiB |
+
+So the described fixture is not merely different, it is **worse**: 100 headers is *exactly*
+`MAX_HEADERS`, so a reader checking the claim would conclude the fixture sits *at* the count limit
+rather than inside it; and a 64 KiB header value is eight times `MAX_HEADER_BYTES`, so those headers
+would have been refused by the **per-header** check — the precise confusion the test's own
+preconditions exist to prevent, and the mistake its history records making once already.
+
+**The fixture was right; the arithmetic was wrong.** The paragraph now states the numbers as
+arithmetic over the constants, so the next reader can check it against `http1.rs` instead of taking
+it on trust.
+
+### C5 — the title claimed an outcome the test cannot reach
+
+*"A streaming handler that fails mid-body is recorded as `HandlerFailed`."* The test asserts what
+reached the client and that the status was already 200. **It never observes a `StreamOutcome`.**
+
+**And it cannot.** `StreamOutcome::HandlerFailed` is constructed inside the server's dispatch loop
+(`server.rs`) and no public handle exposes it. Verified where it *is* reachable: `stream.rs`'s unit
+tests assert `HandlerFailed`'s level is `Error` and its label is `handler_failed`; the consequence a
+caller can see — a failed stream classifying as `ClientClosed` rather than `Ok` — is asserted in
+`metrics_wiring.rs`. The title now states the property this test establishes, and the unobservable
+one is named with its real home rather than left as an implied assertion.
+
+**A claim in a test's *name* is the hardest kind to notice**, because the name is read as a label
+rather than as a sentence that can be false.
+
+### C6 — an instrument that could not discriminate
+
+The 404 test proved the streaming handler never ran with:
+
+```rust
+assert!(tx.send(()).is_ok(), "the gate must still be pending");
+```
+
+**That does not follow.** `send` succeeds whenever the receiver has **not been dropped** — which is
+also true after the handler has taken the receiver and parked on it. So the assertion passes in the
+very case it was written to exclude.
+
+Replaced with a shared `AtomicUsize` incremented as the handler's first instruction, and — the part
+that makes it an instrument rather than a second assertion — **the counter is asserted in both
+directions**: `1` in the test whose route matches, `0` in the test whose route does not. A counter
+that always read zero would satisfy the 404 test and prove nothing.
+
+**Fault-injected**: pointing the 404 test at the matching route (and dropping its `404` assertion, so
+only the counter remains) produces
+``assertion `left == right` failed: the streaming handler must not run for a path that matched no
+route``. The old form could not have failed that way — it would have passed, which is the whole
+finding.
+
+### The rule
+
+**A test asserts two things: what it checks, and what it says it checks.** Four of the eight Phase E
+findings so far are about the second: a fixture that could not fail (C1), a doc comment that
+*argued for* the bug (C8), a comment describing a different fixture (C2), a title claiming an
+unreachable outcome (C5), and an assertion whose explanation was false (C6). The code was wrong in
+only two of those.
+
+That is worth stating plainly because it inverts the usual reading of a test **failing**: here the
+tests *passed*, and the defect was in what they, and the prose around them, asserted about
+themselves. A suite that is green and whose comments are unchecked is green in a smaller sense than
+it appears.
+
+→ `crates/qqq-serve/tests/socket.rs`, `crates/qqq-serve/tests/streaming_route.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

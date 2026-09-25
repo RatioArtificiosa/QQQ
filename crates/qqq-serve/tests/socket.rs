@@ -712,10 +712,24 @@ async fn shutdown_is_graceful() {
 /// `MAX_HEAD_BYTES` path was verified by injection to leave that test passing —
 /// correctly, and the finding is what this test is the response to.
 ///
-/// The attack this one covers is the other axis: **few headers, enormous
-/// values**. A hundred `x-pad-NNNN: <64 KiB>` headers is 100 headers (inside
-/// `MAX_HEADERS`) and megabytes of head (far past `MAX_HEAD_BYTES`). A server
-/// that only counted headers would buffer all of it.
+/// The attack this one covers is the other axis: **fewer headers than the cap
+/// allows, each well inside the per-header limit, summing past the total.** The
+/// fixture sends `HEADERS` (60) headers of `2 KiB` — roughly 121 KiB of head,
+/// which is **inside** `MAX_HEADERS` (100), **inside** `MAX_HEADER_BYTES`
+/// (8 KiB) on every line, and **past** `MAX_HEAD_BYTES` (64 KiB). The refusal can
+/// therefore only come from the total-bytes ceiling, which is the limit this test
+/// names.
+///
+/// **This paragraph used to describe a different fixture.** It read *"a hundred
+/// `x-pad-NNNN: <64 KiB>` headers"*, which is neither the count nor the value the
+/// test sends: 100 headers is **exactly** `MAX_HEADERS`, so a reader checking the
+/// claim against the constant would conclude the fixture sits *at* the limit
+/// rather than inside it, and `<64 KiB>` per header is eight times
+/// `MAX_HEADER_BYTES` — those headers would have been refused by the per-header
+/// check, which is precisely the confusion the preconditions below are written to
+/// prevent. A description of a fixture that no longer exists is the shape
+/// `§O-125` names: a claim the test cannot observe. The numbers are now stated as
+/// arithmetic over the constants rather than as prose (`§O-279`).
 ///
 /// So the assertion is the same property — refused, and the server survives —
 /// applied to the input shape that reaches the *other* limit. Two tests, two

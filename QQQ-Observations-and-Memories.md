@@ -16288,8 +16288,8 @@ produces it.
 |---|---|---|---|
 | `DOC-017` | 13 packages, 20 interfaces, 71 functions, 47 types | **15 / 22 / 80 / 53** | the generated page's own first line, and `check_wit_reference.py` |
 | `DX-013` | `--help` is 39 lines after the fix | **40** | `qqqai --help`; the item's own limit is `≤ 40`, so the item passes and the sentence was off by one |
-| `PERF-001` | 2305 passed | **<!-- qqq:claim workspace-tests -->2547<!-- /qqq:claim -->** | the gate's `cargo test --workspace`, summed |
-| `SRV-018` | 2249 passed | **<!-- qqq:claim workspace-tests -->2547<!-- /qqq:claim -->** | the same command |
+| `PERF-001` | 2305 passed | **2546** | the gate's `cargo test --workspace`, summed |
+| `SRV-018` | 2249 passed | **2546** | the same command |
 | `CON-009` | 73 functions, 13 interfaces | **82 / 15** | `check_wit_errors.py` |
 | `CON-010` | 40 source files | **73** | `check_no_ambient.py` |
 
@@ -16304,27 +16304,32 @@ interfaces were added afterwards. `PERF-001` and `SRV-018` counted a workspace t
 gained tests -- including 26 added by this goal. The failure is not the original number; it is
 that nothing re-derives a number printed beside a tool that re-derives it.
 
-**That is no longer true for the two rows above.** They carry a
-`<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->` marker, and
-`tools/check_doc_claims.py` re-derives each one by running the same command the table's
-own "where the truth is" column names — so a value that drifts now fails CI instead of
-waiting to be noticed. The marker is opt-in and names a **resolver** rather than a number,
-which is what makes the document say *which fact* it asserts. **Only the `Measured` column
-carries a marker**, and the first version of this edit marked both: the `The entry said`
-column records a historical fact that must *never* change, so marking it made the checker
-fail correctly on a number that was right. A drift table has one re-derivable column and one
-frozen one, and conflating them is the same error as conflating a claim with its correction. The WIT-count rows are not
-marked here because `check_wit_reference.py` and `check_wit_errors.py` already re-derive
-them; a second mechanism for one number would be two answers to one question (`DOC-018`).
+**The markers were tried on those two rows and removed again, which is the more useful
+finding.** `DOC-018` re-derives an opt-in claim by naming a **resolver** rather than a number,
+and the first version of this edit put a `workspace-tests` marker on both rows — so a value
+that drifts fails CI instead of waiting to be noticed. It failed CI on the very next two pushes:
+2546 became 2547 when the audit's own follow-up work added an example, and 2549 one commit
+later. The checker was correct every time. **The marker was in the wrong place**, because a
+drift table's `Measured` column records what an audit found, and the workspace test count is a
+number that is *supposed* to grow. Pinning it made every future test addition break a build over
+a sentence about the past. The rows now carry the audit-time value (2,546) with the command
+beside it, which is what the "durable fix" paragraph below says every other row does.
+`§O-235` and `§O-238` record the two rounds of that mistake.
 
-**What the marked cell means, stated so the marker is not read as history.** The `Measured`
-column is the *current* size of the workspace test run, and it is expected to grow — the
-marker turns "this number is what the command yields right now" into a checkable fact, and a
-new test bumps it deliberately in the same commit that adds the test. The two numbers it
-replaced (2305, 2249) were *historical*: each was true when its entry was written and neither
-claimed otherwise. Both readings appeared in the document at once, which is `§O-235`'s subject.
+The mirror-image error had already been caught in the same section: the first version marked the
+`The entry said` column as well, which records a historical fact that must *never* change, so
+the checker failed correctly on a number that was right. A drift table has one re-derivable
+column and one frozen one, and conflating them is the same error as conflating a claim with its
+correction.
 
-**The durable fix is in how the entries are phrased.** Each corrected claim now names the
+`tools/check_doc_claims.py` keeps the resolver and the marker syntax. The `crate-files` marker
+sits on `docs/unsafe-audit.md`'s `.rs` file count — the number that drifted **four times in one
+working period** (141→142→143→146→147) and is a fact about *now* that nothing else re-derives.
+The WIT-count rows are unmarked because `check_wit_reference.py` and
+`check_wit_errors.py` already re-derive them; a second mechanism for one number would be two
+answers to one question (`DOC-018`).
+
+**The durable fix is in how the entries are phrased.** Each corrected claim names the
 command that produces it -- `check_wit_errors.py`, `check_no_ambient.py`, `qqqai --help`, the
 sum of the `test result:` lines, the generated page's first line -- so the next reader runs
 something rather than trusting a figure. A number with its command beside it survives an
@@ -19300,5 +19305,46 @@ constructor's signature and the crate root disagree about one of them.
 `cargo test --doc -p qqq-host`: 2 passed. The `create` example is fault-injected — asserting
 `QQQ-9999` where the code returns `QQQ-6003` fails with `left: "QQQ-6003" right: "QQQ-9999"`, and
 the file restores byte-for-byte (SHA-256 `4d0d09899d2b2010bb41bc1856169d13a4c72665c55897f285e3acb63ad24615`).
+
+## §O-238 — Fixing the stale claim by updating the number postponed the failure by one
+## commit, and the second CI run is what showed it
+
+`§O-235` recorded that `DOC-018`'s `workspace-tests` marker asserted a live count inside a table
+describing a past audit. The response was to update the two cells from 2546 to 2547. The next CI
+run failed on the same two lines:
+
+    workspace-tests: 2549
+    STALE  QQQ-Observations-and-Memories.md:16291  `workspace-tests` says 2547, the tree has 2549
+    STALE  QQQ-Observations-and-Memories.md:16292  `workspace-tests` says 2547, the tree has 2549
+
+2547 was correct when it was written; the commit that carried the fix also added two doctests, so
+the value had already moved. **Updating a number is not fixing a claim.** The first response
+treated the symptom — a value that no longer matched — and left the cause standing: a marker whose
+resolved value is designed to grow, attached to a sentence whose subject is a finished audit.
+
+What made this visible rather than a slow annoyance is that CI runs the check on the merged tree.
+A local run before the commit would have shown 2547 and agreed with the cell; only the pushed
+tree exposes the drift. That is the same asymmetry `§O-232` names — the local machine measures a
+different thing from CI, and the difference is invisible until someone reads the actual log.
+
+**The fix, and how it differs from the previous one.** The markers are gone from both rows. The
+cells now carry the audit-time value, 2,546, with the command beside them, which is what that
+section's own "durable fix" paragraph already required of every other row. The checker was left
+with **zero** claims by that removal — `crate-files` existed as a resolver with no marker using
+it — so the marker moved to the number it was actually built for, `docs/unsafe-audit.md`'s `.rs`
+file count, which had drifted four times and is a fact about *now*. The resolver, the marker
+syntax and the self-tests are unchanged.
+
+**The rule, stated so the next reader does not have to derive it.** A marker belongs on a claim
+about the present. If the sentence around a number describes what was measured at a point in time,
+the number is data and must be frozen; marking it converts a record into a gate and makes the
+project's *progress* — adding tests — fail its own build.
+
+### Verification
+
+`python tools/check_doc_claims.py`: `driver` resolves the `crate-files` claim against the tree with
+no stale values. The failure was reproduced from the CI log for run `36088254708` before the second
+fix was written, and the two runs that exposed it (`36087065310`, 2546 vs 2547, and `36088254708`,
+2547 vs 2549) are both quoted above.
 
 *End of `QQQ-Observations-and-Memories.md`.*

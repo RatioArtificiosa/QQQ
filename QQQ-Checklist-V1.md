@@ -419,16 +419,24 @@ Items are grouped below by **phase**, because dependency order matters more than
     the resolver is what makes the check possible — the document says *which fact* it asserts,
     and a number in prose that is not a claim is left alone, so the check has no false positives
     to be disabled over.
-  → Marked and corrected: the `PERF-001` and `SRV-018` rows in the drift table now re-derive
-    through `workspace-tests`. The values were **2,460** when the table was written and are
-    **2,546** now, so the marker made a stale pair self-correcting.
+  → Marked: `docs/unsafe-audit.md`'s `.rs` file count now re-derives through `crate-files`. That
+    is the number this check was built for — it drifted **four times in one working period**
+    (141→142→143→146→147), and each drift was caught by CI rather than locally. Measured: the
+    resolver reports `147`, matching the tree.
   → **A drift table has one re-derivable column and one frozen one, and the first edit conflated
     them.** Marking the `The entry said` column made the checker fail correctly on `2305` and
     `2249` — numbers that are *supposed* to be stale, because they record what was claimed at
-    the time. Only `Measured` carries a marker now, and the asymmetry is explained beside it.
-  → Verified: self-test 8/8; the check reports `2 claim(s) match the tree`; and a
-    **fault injection** changing one marked value from 2,546 to 2,545 fails with
-    `` `workspace-tests` says 2545, the tree has 2546 ``, restored byte-for-byte from SHA-256 and
+    the time.
+  → **The `workspace-tests` marker was then put on the `Measured` column, and removed after it
+    failed CI twice.** Its value is a live count that is *supposed* to grow: 2546 became 2547 when
+    the follow-up added an example, and 2549 one commit later, so a table recording what an audit
+    found became a gate that failed whenever the project added a test. Updating the number only
+    postponed it by one commit. The rows now carry the audit-time value with the command beside
+    them, which is what every other row in that table does. `§O-235` and `§O-238` record both
+    rounds.
+  → Verified: self-test 8/8; the check reports `1 claim(s) match the tree`; and a **fault
+    injection** changing the marked value from 147 to 146 fails with
+    `` `crate-files` says 146, the tree has 147 ``, restored byte-for-byte from SHA-256 and
     green afterward. Wired into `ci.yml` and `docker/entrypoint.sh`.
   → **What this does not do, stated so the tick is not read as more than it is.** §2.6's
     literal mechanism is *"a CI job builds a sample project against the published docs"*. That is

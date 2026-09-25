@@ -274,17 +274,34 @@ async fn body_bytes_are_recorded() {
     );
 }
 
-/// **The peer IP is not used raw as a metric label.**
+/// **The peer address becomes one series key, not one per request.**
 ///
 /// `tenant_of` returns the peer's address, so recording it directly would create one time
 /// series per client — §10.2's cardinality violation in its worst form, because the value
-/// is entirely attacker-chosen. `TenantLabels` bounds it: past 64 distinct peers, further
-/// ones collapse into one `other` series.
+/// is entirely attacker-chosen.
 ///
-/// This is asserted through the real path rather than on `TenantLabels` alone, because the
-/// defect was in the *wiring* — the closed set was correct and unused.
+/// # What this test asserts, and what it does not
+///
+/// It asserts the **wiring**: a request is recorded under the peer address, and one client
+/// produces **one** series rather than one per request — that the closed set is *applied*
+/// rather than merely defined, which is where the defect was (the set was correct and
+/// unused).
+///
+/// It does **not** exercise the ceiling. It was titled `the_peer_ip_is_a_bounded_label` and
+/// its comment said *"past 64 distinct peers, further ones collapse into one `other`
+/// series"* — and this fixture can show neither: it sends one request from one client, and
+/// reaching the ceiling over real sockets would need 65 distinct source addresses. The
+/// assertion `series_count() == 1` is about the *lower* bound, so a reader was being told
+/// the test covered a bound it verifies the opposite edge of.
+///
+/// **The ceiling is covered where it can be.** `metrics.rs`'s unit tests
+/// `tenants_past_the_ceiling_collapse_to_other`,
+/// `an_existing_tenant_keeps_its_label_past_the_ceiling`, `the_tenant_ceiling_is_enforced`
+/// and `the_ceiling_boundary_is_exact` drive `TenantLabels` directly and assert the
+/// collapse, the retention, and both sides of the boundary. The title now claims what the
+/// fixture establishes (`§O-280`).
 #[tokio::test]
-async fn the_peer_ip_is_a_bounded_label() {
+async fn the_peer_ip_is_one_series_key_not_one_per_request() {
     let server = Server::start().await;
 
     server
@@ -367,27 +384,48 @@ async fn a_connection_opens_and_closes_once() {
 async fn a_client_disconnect_is_recorded_as_such() {
     let server = Server::start().await;
 
+    // **Settle the baseline before measuring a delta.** `Server::start`'s readiness probe
+    // opens and closes a connection of its own, and that close is recorded
+    // **asynchronously** — so a baseline read immediately after `start` returns is taken
+    // *before* the probe's own `ClientClosed` lands, and the next increase is the probe's
+    // rather than this test's.
+    //
+    // That is not a hypothesis: the first version of this fix read the baseline once and
+    // compared, and the fault injection below — *delete the test's connection entirely* —
+    // still **passed**. A delta against an unsettled baseline attributes nothing, and only
+    // running the injection says so (`§O-280`). So the baseline waits for the count to stop
+    // moving, which is the only way to know the probe is accounted for.
+    let mut baseline = server.metrics.connections_for(Outcome::ClientClosed);
+    for _ in 0..100 {
+        let before = server.metrics.connections_for(Outcome::ClientClosed);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        baseline = server.metrics.connections_for(Outcome::ClientClosed);
+        if baseline == before {
+            break;
+        }
+    }
+
     // Connect and close without sending anything.
     let stream = TcpStream::connect(server.addr).await.expect("connect");
     drop(stream);
 
+    let mut after = baseline;
     for _ in 0..100 {
-        let total = server.metrics.connections_for(Outcome::Ok)
-            + server.metrics.connections_for(Outcome::ClientClosed);
-        if total > 0 {
+        after = server.metrics.connections_for(Outcome::ClientClosed);
+        if after > baseline {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // `Server::start`'s readiness probe opens and closes a connection of its own, so the
-    // absolute count is not one. What matters is the **classification**: the vanished
-    // client is a `ClientClosed` and never an `Ok`, because a connection that served no
-    // request must not be counted as a success. A first version asserted exactly 1 and
-    // failed at 2 -- the count was right and the expectation was wrong.
+    // The absolute count is not the assertion — the readiness probe is a connection too.
+    // What matters is the **classification**, measured as a delta from the settled
+    // baseline: the vanished client is a `ClientClosed` and never an `Ok`, because a
+    // connection that served no request must not be counted as a success.
     assert!(
-        server.metrics.connections_for(Outcome::ClientClosed) >= 1,
-        "a vanished client is a client close, not a success"
+        after > baseline,
+        "the vanished client must add a `ClientClosed` on top of the settled {baseline}; \
+         the count is still {after}"
     );
     assert_eq!(
         server.metrics.connections_for(Outcome::Ok),

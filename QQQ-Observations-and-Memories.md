@@ -22060,4 +22060,75 @@ it appears.
 
 ---
 
+## §O-280 — Phase E, third batch: a test asserting the opposite edge of the bound it named, and a fix the injection proved was not a fix
+
+**Found:** C3 and C4 reproduced against HEAD. **Anchors:** `crates/qqq-serve/tests/metrics_wiring.rs`,
+`crates/qqq-serve/src/metrics.rs`.
+
+### C3 — the title named a bound, and the assertion measured the other edge
+
+`the_peer_ip_is_a_bounded_label` said:
+
+> *"`TenantLabels` bounds it: **past 64 distinct peers, further ones collapse into one `other`
+> series**."*
+
+The fixture sends **one** request from **one** client and asserts `series_count() == 1`. That is a
+statement about the **lower** edge — one client must not produce one series per request — while the
+title and the comment promise the **upper** edge, the collapse past `MAX_TENANTS`. A reader was told
+the test covered a bound whose opposite side it verifies.
+
+Reaching the ceiling through real sockets is not possible here: it would need 65 distinct source
+addresses. **The bound is covered where it can be** — `metrics.rs`'s unit tests drive `TenantLabels`
+directly and assert the collapse, the retention of an existing label past the ceiling, the
+enforcement, and both sides of the boundary (`the_ceiling_boundary_is_exact`). So the honest fix is
+the second of the two the finding offered: the test is now
+`the_peer_ip_is_one_series_key_not_one_per_request`, and its comment states what the fixture
+establishes — the **wiring**, the closed set being *applied* rather than merely defined, which is
+where the original defect was — and names the four unit tests that own the ceiling.
+
+### C4 — and my first fix for it was not a fix
+
+The test asserted `connections_for(ClientClosed) >= 1` while its own comment already recorded the
+hazard: *"`Server::start`'s readiness probe opens and closes a connection of its own, so the absolute
+count is not one."* **Naming a confound is not controlling for it** — the `>= 1` could be satisfied
+entirely by the probe.
+
+My first fix read a baseline before connecting and asserted a delta. **It looked right and attributed
+nothing.** Re-running the injection — *delete the test's own connection* — **still passed**, because
+`Server::start`'s probe closes **asynchronously**: a baseline read immediately after `start` returns
+is taken *before* the probe's own `ClientClosed` lands, so the next increase is the probe's. The
+delta measured the confound it was written to exclude.
+
+The fix that works waits for the count to **stop moving** before taking the baseline. The same
+injection then fires:
+
+```
+the vanished client must add a `ClientClosed` on top of the settled 1; the count is still 1
+```
+
+`settled 1` is the probe; the injection removes the only other connection, and the assertion
+correctly refuses.
+
+### The rule
+
+**A fault injection that does not fire means the fix does not control what it claims to.** The first
+C4 fix was plausible, matched the finding's own prescription (*"compare against a BASELINE"*), and
+would have passed any review done by reading. It was wrong in a way only execution could show, and
+the injection was already written — the cost of finding out was one command.
+
+That is the value of the repository's rule 5 stated as a negative: injecting is not a formality
+performed after the fix is believed, it is **the measurement that decides whether the fix is a
+fix**. A green injection is evidence *for* the fixture; a green injection on a fixture whose defect
+has been deleted is evidence *against* it.
+
+### Phase E status
+
+Seven of eight closed: C1, C2, C3, C4, C5, C6, C8. **C7 remains** — `tls.rs`, which asks to confirm
+the exact rustls error text and then assert a version-floor failure and a server-side certificate
+failure in both `Required` client-auth tests.
+
+→ `crates/qqq-serve/tests/metrics_wiring.rs`, `crates/qqq-serve/src/metrics.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

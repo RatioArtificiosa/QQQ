@@ -875,12 +875,21 @@ cmd_checks() {
     python3 tools/check_no_ambient.py
     python3 tools/gen_schemas.py --check
     python3 tools/gen_llms_txt.py --check
+    # `--self-test` too: the `--check` half only compares the generated files to the tree, so a
+    # generator that stopped emitting a file, or emitted it empty, would pass. The self-test is
+    # what proves the check can fail. It was in `ci.yml` and had never been here (`§O-286`).
+    python3 tools/gen_llms_txt.py --self-test
     python3 tools/normalize_eol.py --check
     python3 tools/normalize_eol.py --self-test
     python3 tools/check_wit_errors.py
+    python3 tools/check_wit_since.py
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py
     python3 tools/audit_unsafe.py --self-test
+    # The register half: `audit_unsafe.py` counts `unsafe` blocks, `--check-doc` asserts that
+    # `docs/unsafe-audit.md` states the numbers it measured. Only the first ran here, so the
+    # bridge verified the count and not the document that publishes it (`§O-286`).
+    python3 tools/audit_unsafe.py --check-doc
     python3 tools/check_advisories.py
     python3 tools/check_advisories.py --self-test
     python3 tools/check_sbom.py --self-test
@@ -892,6 +901,21 @@ cmd_checks() {
     python3 tools/check_glossary.py --self-test
     python3 tools/check_reconciliation.py
     python3 tools/check_reconciliation.py --self-test
+
+    # # The corpus arithmetic, and why these four were absent
+    #
+    # `check_checklist_counts.py` validates the checklist's own totals against its items, and
+    # `check_lifecycle_counts.py` validates the `ARCH-011` entry against the `STAGES` table. Both
+    # ran in `ci.yml` and neither had ever run here — and there is no reason for that: they are
+    # pure Python, they read only the workspace, and they need no build.
+    #
+    # Measured, not assumed (`§O-286`): run against this image they exit **0** with their
+    # self-tests, exactly as they do in CI. A second gate that skips them is a weaker gate, and
+    # the divergence had accumulated without anyone deciding it.
+    python3 tools/check_checklist_counts.py
+    python3 tools/check_checklist_counts.py --self-test
+    python3 tools/check_lifecycle_counts.py
+    python3 tools/check_lifecycle_counts.py --self-test
     python3 tools/check_error_catalogue.py
     python3 tools/check_error_catalogue.py --self-test
     python3 tools/check_wit_reference.py
@@ -1003,6 +1027,34 @@ cmd_checks() {
     python3 tools/self_test_xrefs.py --check-clean
     python3 tools/normalize_eol.py --check
 }
+
+# # What this bridge does NOT run, and why each one is legitimate
+#
+# The repository's rule is *"when you add a checker, add it to BOTH `ci.yml` and
+# `docker/entrypoint.sh`"*, stated a dozen times and enforced by nothing. Measured on
+# 2026-09-25: `ci.yml` invoked **84** checker commands and this file invoked **65**, with
+# **20** in one and not the other and **1** in the other and not the one.
+#
+# Seven of the twenty were simply missing — pure Python, no build, no tree requirement — and
+# were run against this image to prove it before being added here (`§O-286`). The remaining
+# thirteen are listed below with the reason each one has, so the divergence is *declared*
+# rather than accumulated. A divergence nobody decided is how a second gate quietly becomes a
+# weaker gate.
+#
+#   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
+#                                          of a working tree that is usually dirty
+#   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
+#   tools/check_wit.py                     needs `wasm-tools` on PATH; the image does not
+#                                          install it, so WIT *parsing* is unverified here
+#   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
+#                                          declaration — a cargo build of the whole workspace
+#   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;
+#                                          they belong to CI's Rust jobs, and this file's
+#                                          `test` command already builds and runs the suite
+#
+# If this list and `ci.yml` disagree beyond these thirteen, that is the defect — not the
+# divergence itself. A parity checker would be the durable form; it needs this list as data,
+# which is why the list is here rather than in a comment somewhere else.
 
 # Run clippy with the toolchain version CI actually uses.
 #

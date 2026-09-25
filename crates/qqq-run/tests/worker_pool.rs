@@ -75,22 +75,23 @@ fn qqqai() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_qqqai"))
 }
 
-/// A port nothing is listening on, taken and released so the OS assigns one.
+/// A port nothing is listening on, **with the reservation held** until the caller spawns.
 ///
-/// # Why the caller retries rather than trusting this
+/// # Why this returns the listener rather than just the number
 ///
-/// Between this releasing its probe listener and `serve` binding, another process — including
-/// another test binary running in parallel, which is what `cargo test` does — can take the port.
-/// Measured: `the_pool_capacity_reaches_the_guest_and_is_reported` passed alone and failed inside
-/// a full-crate run at the "serve must exit" assertion, because the server it started had lost the
-/// race and never bound.
+/// The first version bound a probe, read the port, and dropped the socket — leaving a window
+/// between the drop and `serve`'s bind in which a sibling test binary could take the port.
+/// Measured: `the_pool_capacity_reaches_the_guest_and_is_reported` spent **322 seconds** failing
+/// all 16 attempts, each waiting its full 20-second deadline, because the port was repeatedly
+/// claimed by the other test file running concurrently.
 ///
-/// So this returns a *candidate*, and [`start_once`] reports whether the server actually came up.
-fn free_port() -> u16 {
+/// Holding the reservation until the caller is about to spawn removes almost all of that window.
+/// `SO_REUSEADDR` semantics mean the bind still succeeds immediately afterwards on Windows and
+/// Linux alike — the kernel does not hold a closed listening socket in `TIME_WAIT`.
+fn reserve_port() -> (TcpListener, u16) {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind a probe");
     let p = l.local_addr().expect("addr").port();
-    drop(l);
-    p
+    (l, p)
 }
 
 /// A child process that is killed on drop, so a failing test cannot leave a server behind.
@@ -128,8 +129,8 @@ fn reference_component() -> Option<Vec<u8>> {
 
 /// Start `qqqai serve` in `sandbox` with `workers`, and wait until it accepts.
 ///
-/// Retried on a fresh port for the reason [`reported_capacity`] records: `free_port` can lose the
-/// race to a sibling test binary, and a lost race is not a defect in the pool.
+/// Retried on a fresh port for the reason [`reported_capacity`] records: a reservation can still
+/// be lost to a sibling test binary, and a lost race is not a defect in the pool.
 fn start(sandbox: &Sandbox, workers: u32) -> Server {
     for _ in 0..16 {
         if let Some(server) = start_once(sandbox, workers) {
@@ -140,8 +141,13 @@ fn start(sandbox: &Sandbox, workers: u32) -> Server {
 }
 
 /// One attempt, returning `None` when the server did not bind this port.
+///
+/// Readiness is probed by **binding**, for the reason [`reported_capacity_once`] documents: a
+/// connect probe is an accept, and the accept bound counts those. This helper starts a server
+/// with no bound, so the probe would not consume anything here — but using one mechanism for both
+/// is what keeps the next edit from reintroducing the trap in whichever copy it touches.
 fn start_once(sandbox: &Sandbox, workers: u32) -> Option<Server> {
-    let port = free_port();
+    let (reservation, port) = reserve_port();
     let child = Command::new(qqqai())
         .args([
             "serve",
@@ -155,14 +161,13 @@ fn start_once(sandbox: &Sandbox, workers: u32) -> Option<Server> {
         .stderr(Stdio::piped())
         .spawn()
         .expect("qqqai serve must start");
+    drop(reservation);
 
     let server = Server { child, port };
 
-    // Wait for the listener rather than sleeping a fixed amount: a fixed sleep is either
-    // flaky or slow, and this is neither.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        if TcpListener::bind(("127.0.0.1", port)).is_err() {
             return Some(server);
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -248,9 +253,9 @@ fn place_component(sandbox: &Sandbox, bytes: &[u8]) {
 /// until killed. `2` is the smallest bound that completes: this function makes the two requests
 /// itself, and the server exits on its own rather than being killed.
 fn reported_capacity(sandbox: &Sandbox, workers: u32) -> Option<String> {
-    // Retried on a fresh port, because `free_port` can lose the race to another test binary and
-    // a single attempt would make this flaky rather than wrong. Sixteen attempts is the same
-    // bound `qqq-serve`'s own accept-bound test uses for the same reason.
+    // Retried on a fresh port, because a reservation can still be lost to another test binary
+    // and a single attempt would make this flaky rather than wrong. Sixteen attempts is the
+    // same bound `qqq-serve`'s own accept-bound test uses for the same reason.
     for _ in 0..16 {
         if let Some(line) = reported_capacity_once(sandbox, workers) {
             return Some(line);
@@ -260,8 +265,30 @@ fn reported_capacity(sandbox: &Sandbox, workers: u32) -> Option<String> {
 }
 
 /// One attempt, returning `None` when the server failed to bind this port.
+///
+/// # Why the readiness probe **binds** rather than connects
+///
+/// This is the trap `serve_policy`'s own comment documents, and the first version of this
+/// function walked into it: `--accept-limit N` counts connections **accepted**, and a
+/// `TcpStream::connect` readiness probe *is* an accept. So a probe plus two requests consumed
+/// three accepts against a limit of two, the server exited early, and the second request's write
+/// failed. Measured in CI: `serve_policy::a_route_that_does_not_exist_is_a_404_and_not_a_403`
+/// panicked at its `write_all`, on two platforms, in the same runs as this file.
+///
+/// Attempting to **bind** the same port is free: while the server holds it the bind fails with
+/// `AddrInUse`, and nothing is accepted or counted. A probe that changes the thing it is
+/// observing is not a probe.
+///
+/// # Why the limit is `REQUESTS` and not `REQUESTS + 1`
+///
+/// Because the probe no longer consumes one. The bound now equals exactly the connections this
+/// function sends, so the server exits by itself after the last one rather than being killed.
+const REQUESTS: u32 = 2;
+
 fn reported_capacity_once(sandbox: &Sandbox, workers: u32) -> Option<String> {
-    let port = free_port();
+    // The reservation is held until the last moment before the spawn, which is what closes the
+    // window a sibling test binary could otherwise take the port in.
+    let (reservation, port) = reserve_port();
     let mut child = Command::new(qqqai())
         .args([
             "serve",
@@ -270,34 +297,37 @@ fn reported_capacity_once(sandbox: &Sandbox, workers: u32) -> Option<String> {
             "--workers",
             &workers.to_string(),
             "--accept-limit",
-            "2",
+            &REQUESTS.to_string(),
         ])
         .current_dir(&sandbox.path)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("qqqai serve must start");
+    drop(reservation);
 
-    // Wait for the listener, then use the two accepts the bound allows.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Readiness by bind: the port is ours when a bind against it fails.
+    //
+    // Five seconds rather than twenty, because this is per *attempt* and a lost race should cost
+    // seconds: measured, a 20-second deadline across 16 attempts spent 322 seconds failing.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut up = false;
     while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        if TcpListener::bind(("127.0.0.1", port)).is_err() {
             up = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     if !up {
-        // The port was taken by someone else, or the server refused to start. Either way this
-        // attempt proves nothing, so it reports that rather than panicking.
         let _ = child.kill();
         let _ = child.wait();
         return None;
     }
 
-    let _ = request(port, "/healthz");
-    let _ = request(port, "/healthz");
+    for _ in 0..REQUESTS {
+        let _ = request(port, "/healthz");
+    }
 
     // The server signals its own shutdown after the bounded accepts, so this returns. A timeout
     // is a failure rather than a hang: an unbounded wait here would make the test end by being

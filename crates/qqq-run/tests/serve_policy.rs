@@ -131,10 +131,24 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
     // a server that never bound left a live process behind on a port the next test then
     // failed to claim. The `Serving`'s `Drop` owns the child's whole lifetime, which is
     // also why no `wait()` appears here for `clippy::zombie_processes` to find.
-    let serving = Serving { child, port };
+    let mut serving = Serving { child, port };
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
+        // # Why the child's liveness is checked, not only the port's
+        //
+        // `bind().is_err()` proves *some* process holds the port. It does not prove **ours**
+        // does, and `cargo test` runs test binaries concurrently - so another test's server
+        // holding this port satisfies the probe, this helper returns believing its own server is
+        // up, and the caller writes to a server whose lifecycle it does not own.
+        //
+        // Measured: `a_route_that_does_not_exist_is_a_404_and_not_a_403` panicked at its
+        // `write_all` on two CI platforms, in the same runs that introduced a second test binary
+        // spawning servers. The child exiting is the signal that the port is not ours, and
+        // `try_wait` reads it without consuming the child.
+        if let Ok(Some(_)) = serving.child.try_wait() {
+            continue; // still unwinding: the loop's deadline will report a real failure
+        }
         if TcpListener::bind(("127.0.0.1", port)).is_err() {
             return serving;
         }
@@ -148,13 +162,22 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
 /// Raw bytes rather than an HTTP client, because the assertions are about the exact status
 /// line and header spelling the server writes — a client library would normalise away the
 /// thing under test.
+///
+/// # Why a failed write returns a sentence rather than panicking
+///
+/// Measured: this panicked at `write_all` on two CI platforms when a sibling test binary held the
+/// port, and the message named `write the request` — which sends a reader looking at the request
+/// rather than at the port. A caller's assertion reports what it saw, and `<write failed>` is
+/// that; a panic here replaces the assertion the test is about with a message about plumbing.
 fn request(port: u16, raw: &str) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .expect("set a read timeout");
-    stream.write_all(raw.as_bytes()).expect("write the request");
-    stream.flush().expect("flush");
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return "<no connection>".to_owned();
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    if stream.write_all(raw.as_bytes()).is_err() {
+        return "<write failed>".to_owned();
+    }
+    let _ = stream.flush();
 
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];

@@ -87,6 +87,36 @@ pub struct ComponentId(String);
 /// Deliberately strict. A name that is valid here is valid as a crates.io
 /// package, a directory name on every supported OS, and a URL path segment —
 /// which prevents a whole class of platform-specific bug.
+///
+/// # Examples
+///
+/// Construction returns a `Result` rather than panicking, and the error names the
+/// **offset** of the offending character so it can be pointed at:
+///
+/// ```
+/// use qqq_core::ids::{IdError, PackageName};
+///
+/// let name = PackageName::new("orders-api").expect("a valid name");
+/// assert_eq!(name.as_str(), "orders-api");
+///
+/// // Uppercase is refused, and the error says which character and where.
+/// let err = PackageName::new("Orders-Api").expect_err("uppercase is not allowed");
+/// assert!(matches!(err, IdError::InvalidCharacter { ch: 'O', at: 0 }));
+/// assert_eq!(err.to_string(), "contains invalid character 'O' at byte offset 0");
+///
+/// // A trailing separator is its own error, not a generic "invalid character":
+/// // the fix a caller needs differs, so the variant does too.
+/// assert!(matches!(
+///     PackageName::new("orders-"),
+///     Err(IdError::TrailingSeparator { ch: '-' })
+/// ));
+/// ```
+///
+/// # Why this example exists
+///
+/// It is the pattern the rest of the crate follows — validate at the boundary, return a
+/// positioned error, and make the rejection *matchable* rather than a string to compare
+/// against. A caller that has to parse an error message cannot tell the cases apart.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PackageName(String);

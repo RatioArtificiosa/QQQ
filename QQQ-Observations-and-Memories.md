@@ -18970,4 +18970,86 @@ consequence of a deliberate choice: the scan is broad so the safety claim's samp
 broad sample moves whenever the tree does. One command resolves it
 (`python tools/audit_unsafe.py --check-doc` prints the disagreeing pair).
 
+## §O-232 — `qqqai serve` answered one request and panicked on the second
+
+**Found:** 2026-09-25, by CI failing twice, then by reading the server's own stderr.
+**Fixed and verified:** same session. **Anchors:** `CLI-011`, `SRV-024`, `§O-230`.
+
+### The defect
+
+`GuestApp::handle_request` acquired a pool slot and then asserted the acquisition was not pooled:
+
+```rust
+let acquired = self.pool.acquire(self.completion_rate)?;
+debug_assert!(
+    !acquired.pooled,
+    "V1 instantiates per request; a pooled hit would mean reuse landed without its isolation test"
+);
+```
+
+`Acquired::pooled` is true when the pool's **idle count was above zero** at acquisition, not when a
+guest instance was reused. `release()` increments the idle count, so **every request after the
+first** reported `pooled: true`, the assertion fired, and the server died:
+
+```
+thread 'main' panicked at crates\qqq-run\src\guest_handler.rs:247:9:
+V1 instantiates per request; a pooled hit would mean reuse landed without its isolation test
+```
+
+Measured: `qqqai serve --workers 4` answered the first request `200 OK` and the second got
+nothing, because the process had panicked.
+
+### Why it reached CI rather than a unit test
+
+Nothing in `qqq-host`'s 30-plus pool unit tests could see it: they test `Pool` against its own
+contract, and `Pool::acquire` behaves exactly as documented. Nothing in `qqq-run`'s unit tests
+could see it either, because a `GuestApp` needs a compiled component and the unit tests have none.
+
+**Two sequential requests through a real server** is what exercises it, and that is what the
+`worker_pool` integration test does. It found a defect in shipped production code on its second run.
+
+### How it presented, and why the presentation was misleading
+
+The test reported only `the report must name it` after **322 seconds** — sixteen attempts, each
+waiting its full deadline. That reads as a port-contention flake, and it is what sent the first two
+diagnoses down the wrong path:
+
+1. **First diagnosis: the accept-limit probe.** `worker_pool` used `TcpStream::connect` for
+   readiness, and a connect *is* an accept, so the probe consumed one of the server's bounded
+   accepts. That was a real bug in the test and was fixed — but it was not this one.
+2. **Second diagnosis: port contention.** `serve_policy` panicked at its `write_all` in the same CI
+   runs, which looked like sibling test binaries fighting over ports. That too was real and was
+   fixed with a held reservation. Still not this.
+
+**The third step is the one that worked: capture the server's stderr.** The test discarded it
+(`Stdio::null()`), so the panic was invisible; reproducing one attempt by hand with stderr piped
+printed it immediately. The lesson is narrow and worth keeping: *when a spawned process fails,
+read the process's own output before theorising about the harness.*
+
+### The generalisable rules
+
+**A `debug_assert!` that fires on correct behaviour is worse than no assertion.** It kills the
+process in debug builds, which is where every test runs, so the failure appears as a server that
+cannot serve rather than as a broken assertion. The premise here — *"the pool would only report
+pooled if reuse landed"* — was invented rather than read from `Pool`'s documentation, which states
+plainly that `pooled` is decided by the free list.
+
+**Two facts in one comment were conflated.** The block said *"V1 creates a fresh instance per
+request, so `pooled` is false on this path"*. The first clause is true; the second does not follow
+from it, because `pooled` is about the free list rather than about instantiation. The absence of
+reuse is now stated in `serve_one`'s doc, next to the `Instance::create` that makes it so.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `qqqai serve --workers 4`, two sequential requests, stderr piped | `200 OK`, `200 OK`, clean stderr |
+| `cargo test -p qqq-run --test serve_policy --test worker_pool`, six runs | all green, 13 tests each |
+| `worker_pool` wall clock | 322 s → **0.45 s** |
+| `cargo test -p qqq-run` | 627 passed, 0 failed |
+| `cargo clippy -D warnings`, `cargo fmt --check` | clean |
+
+The 322-second figure is the tell worth remembering: a test whose *failure* path costs minutes
+while its success path costs under a second is a test that is waiting, not working.
+
 *End of `QQQ-Observations-and-Memories.md`.*

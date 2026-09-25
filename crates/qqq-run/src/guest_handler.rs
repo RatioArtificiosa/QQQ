@@ -237,17 +237,30 @@ impl GuestApp {
         // ordering is the same rule `qqq-serve`'s `refuse_before_reading` states for
         // request bodies, applied one layer down.
         //
-        // `Acquired` reports whether a warm instance was reused. It is read and
-        // discarded here rather than ignored: V1 creates a fresh instance per request
-        // (`§4.2` isolation), so `pooled` is false on this path, and the structural
-        // `_ =` would invite a reader to think the field was unused. It becomes
-        // meaningful when a later tier reuses instances, and the accessor is where
-        // that change lands.
+        // # What `pooled` means, and the assertion that was wrong about it
+        //
+        // `Acquired::pooled` is true when the pool's **idle count was above zero** at
+        // acquisition — not when a guest instance was reused. Nothing in V1 reuses an
+        // instance: `serve_one` calls `Instance::create` on every request, so isolation is
+        // structural rather than promised here.
+        //
+        // The first version of this code asserted `!acquired.pooled`, on the reasoning that a
+        // pooled hit would mean reuse had landed without its isolation test. That premise was
+        // false and the assertion **panicked the server on the second request**, because
+        // `release()` increments the idle count and so every subsequent acquire reports
+        // `pooled: true`. Measured: `qqqai serve --workers 4` answered the first request `200`
+        // and died on the second with
+        // `V1 instantiates per request; a pooled hit would mean reuse landed without its
+        // isolation test`.
+        //
+        // A `debug_assert` that fires on correct behaviour is worse than none: it kills the
+        // process in debug builds, which is where every test runs. The field is now read for the
+        // one thing it is true of, and the absence of reuse is stated where a reader looks for it
+        // — in `serve_one`'s own doc, next to the `Instance::create` that makes it so.
         let acquired = self.pool.acquire(self.completion_rate)?;
         debug_assert!(
-            !acquired.pooled,
-            "V1 instantiates per request; a pooled hit would mean reuse landed without \
-             its isolation test"
+            acquired.capacity >= 1,
+            "a pool hands out at least one slot or refuses"
         );
 
         // Released on every exit path, including the error ones. `Instance::create` and

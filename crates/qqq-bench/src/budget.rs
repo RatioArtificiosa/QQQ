@@ -127,7 +127,25 @@ pub struct Budget {
     pub direction: Direction,
     /// What the target is expressed in.
     pub unit: Unit,
-    /// The name of the measurement method in `bench/`, as `§9.2` requires.
+    /// Where the number is produced, as `path::symbol`.
+    ///
+    /// # Why this field is no longer `bench/<file>.rs`
+    ///
+    /// It used to read `bench/routed.rs::routed_request_overhead` and nine more like
+    /// it, and **not one of those files existed**: `crates/qqq-bench/src/` holds
+    /// `budget.rs`, `lib.rs`, `loadgen.rs`, `methodology.rs`, `stats.rs` and
+    /// `workload.rs`, and never had a `bench/` directory. The field told a reader
+    /// where each measurement is taken and every answer was wrong — `§O-249`.
+    ///
+    /// `tools/check_bench_contract.py` validated the *shape* of these citations
+    /// (must start with `bench/`) and never that they resolve, so the gate reported
+    /// OK for as long as the defect existed. That rule now requires the file to
+    /// exist, which is what caught this.
+    ///
+    /// Each value now names code that is really there. Where the measurement is
+    /// **not implemented**, the value says so in the string rather than pointing at
+    /// a plausible-looking path: `NOT_IMPLEMENTED` is greppable and honest, and a
+    /// fabricated path is neither.
     pub method: &'static str,
 }
 
@@ -240,70 +258,70 @@ impl Budget {
             target: 60.0,
             direction: Direction::AtMost,
             unit: Unit::Micros,
-            method: "bench/routed.rs::routed_request_overhead",
+            method: "crate::workload::BenchmarkName::Hello",
         },
         Self {
             item: Item::Perf003,
             target: 100.0,
             direction: Direction::AtMost,
             unit: Unit::Micros,
-            method: "bench/warm_acquire.rs::warm_instance_acquire",
+            method: "NOT_IMPLEMENTED::warm_instance_acquire",
         },
         Self {
             item: Item::Perf004,
             target: 5.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "bench/cold.rs::cold_instantiate_cached",
+            method: "NOT_IMPLEMENTED::cold_instantiate_cached",
         },
         Self {
             item: Item::Perf007,
             target: 5.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "bench/cold.rs::aot_cache_roundtrip",
+            method: "NOT_IMPLEMENTED::aot_cache_roundtrip",
         },
         Self {
             item: Item::Perf008,
             target: 25.0,
             direction: Direction::AtMost,
             unit: Unit::Megabytes,
-            method: "bench/memory.rs::idle_host_rss",
+            method: "NOT_IMPLEMENTED::idle_host_rss",
         },
         Self {
             item: Item::Perf009,
             target: 350.0,
             direction: Direction::AtMost,
             unit: Unit::Megabytes,
-            method: "bench/memory.rs::thousand_idle_instances_rss",
+            method: "NOT_IMPLEMENTED::thousand_idle_instances_rss",
         },
         Self {
             item: Item::Perf010,
             target: 60_000.0,
             direction: Direction::AtLeast,
             unit: Unit::RequestsPerSecond,
-            method: "bench/throughput.rs::reference_app_eight_cores",
+            method: "crate::workload::BenchmarkName::Json",
         },
         Self {
             item: Item::Perf011,
             target: 2.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "bench/throughput.rs::reference_app_tail_p99",
+            method: "crate::workload::BenchmarkName::TailP99",
         },
         Self {
             item: Item::Perf012,
             target: 256.0,
             direction: Direction::AtMost,
             unit: Unit::Kilobytes,
-            method: "bench/memory.rs::per_instance_pooled",
+            method: "NOT_IMPLEMENTED::per_instance_pooled",
         },
         Self {
             item: Item::Perf013,
             target: 20.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "bench/build.rs::reference_app_clean_build",
+            method: "NOT_IMPLEMENTED::reference_app_clean_build",
         },
     ];
 
@@ -661,18 +679,166 @@ mod tests {
 
     #[test]
     fn every_budget_cites_an_item_and_a_method() {
-        // The §9.2 claim: "each has a measurement method in bench/". A row
-        // without a method violates the sentence the table introduces itself with.
+        // The §9.2 claim: "each has a measurement method". A row without a method
+        // violates the sentence the table introduces itself with.
+        //
+        // **This test used to assert `method.starts_with("bench/")` and nothing
+        // else, and that is how ten fabricated paths survived** (`§O-249`):
+        // `crates/qqq-bench/src/` has no `bench/` directory, so every row named a
+        // file that did not exist while the assertion passed. Asserting the *shape*
+        // of a citation is not asserting the citation.
+        //
+        // So there are three admitted forms and each is checked for what it claims:
+        //
+        //   * `NOT_IMPLEMENTED::<what>` — the measurement is unbuilt. Honest, and
+        //     greppable. It must name what is missing, not be a bare marker.
+        //   * `crate::<path>::<Symbol>`  — an in-crate symbol that must resolve.
+        //   * `<file>::<symbol>`         — a repo-relative path that must exist.
         for budget in Budget::ALL {
+            let method = budget.method;
+            // The SYMBOL is always the last segment, whichever form this is. The
+            // first `::` is only the place/symbol boundary for the file form: a
+            // `crate::` path is rooted, so its first segment is the crate name and
+            // splitting there would read the location as the literal `crate`.
+            let symbol = method.rsplit_once("::").map(|(_, s)| s).unwrap_or_else(|| {
+                panic!(
+                    "{} method `{method}` is not `place::symbol`; the field must say \
+                     where the number comes from",
+                    budget.item.id()
+                )
+            });
+
+            assert!(!budget.item.id().is_empty());
+            assert!(!budget.item.metric().is_empty());
             assert!(
-                budget.method.starts_with("bench/"),
-                "{} must name a method under bench/, found {}",
+                !symbol.trim().is_empty(),
+                "{} method `{method}` names no symbol",
+                budget.item.id()
+            );
+
+            if method.starts_with("NOT_IMPLEMENTED::") {
+                continue;
+            }
+
+            // An in-crate module path, e.g. `crate::workload::BenchmarkName::Json`.
+            // The module must be a real file under this crate's `src/`.
+            if let Some(rest) = method.strip_prefix("crate::") {
+                // `crate::workload::BenchmarkName::Hello` is a module path followed
+                // by a type and a variant, so the module is not simply "everything
+                // before the last `::`". Walk the prefixes outward and accept the
+                // first that names a real module — the same shape as resolving a
+                // path against a module tree, which is what this is.
+                let segments: Vec<&str> = rest.split("::").collect();
+                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+                let resolved = (1..segments.len()).rev().any(|n| {
+                    let rel = segments[..n].join("/");
+                    dir.join(format!("{rel}.rs")).is_file()
+                        || dir.join(&rel).join("mod.rs").is_file()
+                });
+                assert!(
+                    resolved,
+                    "{} method `{method}` points into `crate::{rest}`, whose module \
+                     prefix is not a module of qqq-bench",
+                    budget.item.id()
+                );
+                continue;
+            }
+
+            // A repo-relative file path, which must exist.
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("crates/<name>/ has two parents");
+            let place = method.split_once("::").expect("checked above").0;
+            let candidate = root.join(place);
+            assert!(
+                candidate.is_file(),
+                "{} method `{method}` names a file that does not exist: {}",
+                budget.item.id(),
+                candidate.display()
+            );
+        }
+    }
+
+    /// Every `.rs` file under this crate's `src/`, concatenated.
+    ///
+    /// Read from disk at test time rather than embedded, because the assertion it
+    /// serves is "the cited symbol is declared in this crate" and a build-time
+    /// snapshot would drift from the tree the test is checking.
+    fn crate_bench_sources() -> String {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        out.push_str(&text);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = String::new();
+        walk(&src, &mut out);
+        assert!(
+            out.contains("pub const ALL"),
+            "the source walk found nothing; the assertion it serves would be vacuous"
+        );
+        out
+    }
+
+    /// The symbols the `crate::` methods name really exist in this crate.
+    ///
+    /// The companion to the test above: a method can point at a module that exists
+    /// and a symbol that does not, and only this catches that.
+    #[test]
+    fn every_crate_method_names_a_symbol_this_crate_declares() {
+        let tree = crate_bench_sources();
+        for budget in Budget::ALL {
+            let Some(rest) = budget.method.strip_prefix("crate::") else {
+                continue;
+            };
+            let symbol = rest.rsplit("::").next().expect("a symbol");
+            assert!(
+                tree.contains(symbol),
+                "{} method `{}` names `{symbol}`, which is declared nowhere in \
+                 qqqq-bench::src",
                 budget.item.id(),
                 budget.method
             );
-            assert!(!budget.item.id().is_empty());
-            assert!(!budget.item.metric().is_empty());
         }
+    }
+
+    /// Every `NOT_IMPLEMENTED` marker names the measurement that is missing.
+    ///
+    /// The marker is the honest form for an unbuilt measurement; a bare marker
+    /// states nothing and would let a row claim a citation it does not have.
+    #[test]
+    fn every_not_implemented_marker_names_what_is_missing() {
+        let mut count = 0;
+        for budget in Budget::ALL {
+            let Some(rest) = budget.method.strip_prefix("NOT_IMPLEMENTED::") else {
+                continue;
+            };
+            count += 1;
+            assert!(
+                !rest.trim().is_empty(),
+                "{} carries a bare `NOT_IMPLEMENTED::` marker, which names nothing",
+                budget.item.id()
+            );
+        }
+        // A control on the loop: if the marker form were never used, the assertions
+        // above would never run and the test would pass vacuously.
+        assert!(
+            count > 0,
+            "no row uses the `NOT_IMPLEMENTED` form; if every measurement is now \
+             built, delete this test rather than leaving it vacuous"
+        );
     }
 
     #[test]

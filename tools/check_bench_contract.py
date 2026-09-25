@@ -281,12 +281,15 @@ def self_test() -> int:
             target: 60.0,
             direction: Direction::AtMost,
             unit: Unit::Micros,
-            method: "bench/routed.rs::routed_request_overhead",
+            method: "crate::workload::BenchmarkName::Hello",
         },
 """,
         "",
         1,
     )
+    if without_routed == real_budget:
+        print("HARNESS FAIL: the removed-row injection did not apply")
+        return 1
     cases.append(
         (
             "a §9.2 row with no decision",
@@ -306,11 +309,36 @@ def self_test() -> int:
         ("an invented checklist citation", invented, proposal_text, True)
     )
 
-    # 4. A method that does not name a path under bench/.
+    # 4. A method that names a file which does not exist. This is the rule that was
+    #    MISSING until `§O-249`: the checker used to verify only that the string
+    #    started with `bench/`, and all ten rows cited `bench/*.rs` files that had
+    #    never existed. The injection here is the defect as it actually shipped.
     bad_method = real_budget.replace(
-        '"bench/routed.rs::routed_request_overhead"', '"somewhere/else.rs::fn"', 1
+        '"crate::workload::BenchmarkName::Hello"', '"bench/nope.rs::nothing_here"', 1
     )
-    cases.append(("a method outside bench/", bad_method, proposal_text, True))
+    if bad_method == real_budget:
+        print("HARNESS FAIL: the dangling-method injection did not apply")
+        return 1
+    cases.append(("a method naming a file that does not exist", bad_method, proposal_text, True))
+
+    # 4b. A `crate::` method naming a symbol the crate does not declare.
+    bad_symbol = real_budget.replace(
+        "BenchmarkName::TailP99", "BenchmarkName::NoSuchWorkload", 1
+    )
+    if bad_symbol == real_budget:
+        print("HARNESS FAIL: the bad-symbol injection did not apply")
+        return 1
+    cases.append(("a crate method naming a symbol that is not there", bad_symbol, proposal_text, True))
+
+    # 4c. A `NOT_IMPLEMENTED` marker with nothing after it. The marker is honest; a
+    #     bare marker states nothing about what is missing, so it is refused.
+    bare_marker = real_budget.replace(
+        '"NOT_IMPLEMENTED::idle_host_rss"', '"NOT_IMPLEMENTED::   "', 1
+    )
+    if bare_marker == real_budget:
+        print("HARNESS FAIL: the bare-marker injection did not apply")
+        return 1
+    cases.append(("a NOT_IMPLEMENTED marker naming nothing", bare_marker, proposal_text, True))
 
     # 5. A §9.2 row the checker has not been taught. This rule used to live in
     #    `main` only, so the self-test could not see it. Injecting it here is what
@@ -477,8 +505,46 @@ def analyse(
         if item_id not in checklist_src:
             errors.append(f"{item_id} is cited but absent from the checklist")
         method = row.get("method", "")
-        if not method.startswith("bench/"):
-            errors.append(f"{item_id} method '{method}' is not under bench/")
+        if method.startswith("NOT_IMPLEMENTED::"):
+            # An honest marker rather than a path. `§O-249` records why: the ten rows
+            # used to cite `bench/*.rs` files that never existed, and a reader
+            # following them found nothing. A row whose measurement is unbuilt now
+            # says `NOT_IMPLEMENTED` and names what is missing, which is greppable
+            # and cannot be mistaken for a location.
+            #
+            # Asserted to carry a symbol after the marker, so the field is never just
+            # the marker with nothing said.
+            if len(method.split("::", 1)[1].strip()) == 0:
+                errors.append(f"{item_id} method '{method}' names no missing symbol")
+        elif method.startswith("crate::"):
+            # An in-crate symbol. The last segment must exist as an identifier in the
+            # `qqq-bench` source, which is the check the old shape never performed.
+            symbol = method.rsplit("::", 1)[-1]
+            crate_src = "\n".join(
+                p.read_text(encoding="utf-8", errors="replace")
+                for p in sorted((ROOT / "crates" / "qqq-bench" / "src").rglob("*.rs"))
+            )
+            if f" {symbol}" not in crate_src and f"\n{symbol}" not in crate_src:
+                errors.append(
+                    f"{item_id} method '{method}' names `{symbol}`, which is not "
+                    "declared anywhere in crates/qqq-bench/src"
+                )
+        elif not (ROOT / "crates" / "qqq-bench" / "src" / method.split("::")[0]).is_file():
+            # A file path that must RESOLVE, not merely be shaped like one.
+            #
+            # This rule previously checked only the `bench/` prefix, and passed for as
+            # long as every row named a file that did not exist: `crates/qqq-bench/src/`
+            # holds budget.rs, lib.rs, loadgen.rs, methodology.rs, stats.rs and
+            # workload.rs, and has no `bench/` directory at all. So `Budget::ALL` told
+            # a reader where each number is produced and every answer was wrong, while
+            # the gate that exists to check exactly this reported OK.
+            #
+            # `§O-249`. The shape of a citation is not the citation: the same defect
+            # `§O-126` records for an invented checklist id, one level down.
+            errors.append(
+                f"{item_id} method '{method}' names a file that does not exist: "
+                f"crates/qqq-bench/src/{method.split('::')[0]}"
+            )
 
     if not cited:
         errors.append("no checklist items extracted; the citation check is vacuous")

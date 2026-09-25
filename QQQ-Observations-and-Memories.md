@@ -20096,4 +20096,119 @@ number of defects behind a single red job is unknown until it is fixed. Fix the 
 failure first and re-run, rather than assuming one failure means one defect — and when a gate
 that runs late in a job is the thing being repaired, check what it was hiding.
 
+## §O-248 — The `PERF` block measured on the real path: 10 workloads, 4 budget verdicts, 0 met
+
+**Found and recorded:** 2026-09-24. **Anchors:** `PERF-002`, `PERF-003`, `PERF-004`,
+`PERF-007`–`PERF-013`, `PERF-020`–`PERF-027`. This is the Phase 1 measurement round, and the
+entry is the evidence base for the checklist states recorded with it.
+
+### The run, on the real entry path
+
+The harness was driven against a **live server hosting the reference application**, not against
+a mock. The sequence, exactly as performed:
+
+```powershell
+# 1. the reference application, served by the real command
+cd E:\QQQ\examples\orders-api
+qqqai serve --listen 127.0.0.1:3000 --config qqq.toml
+# 2. a real request through the real socket
+GET http://127.0.0.1:3000/healthz  ->  HTTP 200 "ok"
+# 3. the measurement harness against it
+qqqai bench --listen 127.0.0.1:3000 --json
+```
+
+The server bound, loaded the guest component, routed, and answered. `qqqai openapi` confirms
+the application declares **10 paths and 10 operations**, which is the same ten `§9.1` names the
+harness drives.
+
+### The measured numbers
+
+Two runs, same verdicts on all four budgeted rows. Run 1, loopback, one developer machine:
+
+| Workload | p50 | p99 | RPS | Budget | Target | Verdict |
+|---|---|---|---|---|---|---|
+| `hello` | 694.3 µs | 915.1 µs | 1,133.5 | `PERF-002` ≤ 60 µs | 60 µs | **miss** (15.3×) |
+| `json` | 758.8 µs | 1,098.6 µs | 1,118.4 | `PERF-010` ≥ 60,000 RPS | 60k RPS | **miss** (53.6×) |
+| `route` | 701.8 µs | 2,128.7 µs | 1,164.8 | — | — | not budgeted |
+| `db` | 700.3 µs | 1,529.0 µs | 1,112.3 | — | — | not budgeted |
+| `crypto` | 3,332.7 µs | 3,888.7 µs | 286.6 | — | — | not budgeted |
+| `template` | 1,392.7 µs | 1,858.2 µs | 648.1 | — | — | not budgeted |
+| `cpu` | 693.7 µs | 901.4 µs | 1,171.6 | — | — | not budgeted |
+| `multi` | 4,433.2 µs | 18,024.2 µs | 1,679.1 | `PERF-010` ≥ 60,000 RPS | 60k RPS | **miss** (35.7×) |
+| `tailp99` | 38,459.9 µs | 52,661.5 µs | 1,719.4 | `PERF-011` ≤ 2 ms | 2 ms | **miss** (26.3×) |
+| `cold` | 805.0 µs | 805.0 µs | 1,167.5 | — | — | not budgeted |
+
+Machine, as the harness read it rather than as it was asserted: `windows x86_64`, kernel
+`windows`, **12 physical cores**, CPU `Intel64 Family 6 Model 79 Stepping 1, GenuineIntel`.
+Summary line, both runs: **`10 benchmark(s) run, 0/4 §9.2 budget(s) met`**.
+
+### Why 4 budget verdicts and not 10 — and why that is correct rather than a gap
+
+`Budget::ALL` declares **10** rows. The socket harness produced verdicts for **4**. The other
+six are not a defect; they are budgets about **the host process**, which no socket can observe.
+The module documentation in `crates/qqq-run/src/bench.rs` states this before the fact: *"none
+of those is observable in-process. So this connects to a listening socket."*
+
+| Row | What it measures | Where it is measurable |
+|---|---|---|
+| `PERF-002` | routed request overhead | **socket** — driven |
+| `PERF-010` | throughput, reference app | **socket** — driven (`json`, `multi`) |
+| `PERF-011` | p99 at 10k RPS | **socket** — driven (`tailp99`) |
+| `PERF-003` | warm instance acquire | in-process (`bench/warm_acquire.rs`) |
+| `PERF-004` | cold instantiate | in-process (`bench/cold.rs`) |
+| `PERF-007` | AOT cache roundtrip | in-process (`bench/cold.rs`) |
+| `PERF-008` | idle host RSS | process RSS (`bench/memory.rs`) |
+| `PERF-009` | 1000-idle-instance RSS | process RSS (`bench/memory.rs`) |
+| `PERF-012` | per-instance pooled memory | in-process (`bench/memory.rs`) |
+| `PERF-013` | clean build time | wall clock (`bench/build.rs`) |
+
+**The completion condition's "every row that has a §9.2 budget" is therefore satisfiable only
+for the three rows reachable from a socket**; claiming the other seven from this run would be
+the exact overstatement the goal's caveat clause exists to prevent. Each is recorded in the
+checklist in one of the two permitted terminal states with this distinction stated.
+
+### `PERF-010`/`PERF-011` cannot be honestly met here, and are recorded as such
+
+`§9.2` states these against *"the reference application, 8 cores"* and a stated hardware
+profile over real network I/O. This machine reports **12 physical cores** and the run is
+**loopback with `Connection: close`**, which the harness's own `does_not_measure` field names:
+*"every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse"*. A
+loopback number on a different profile is a different claim:
+
+- `PERF-010`: measured **1,679 RPS** peak (`multi`) against a 60,000 RPS target — 2.8% of the
+  target, and it is a *different* measurement (a developer machine over loopback, not the
+  reference profile).
+- `PERF-011`: measured **52.66 ms** p99 against a 2 ms target — 26× over, same profile caveat.
+
+Both are recorded as **measured and not met**, with the measured value and the profile mismatch
+as the reason. Restating either as met would be the failure the objective names explicitly.
+
+### The caveat plumbing, verified populated
+
+`does_not_measure` is a required field on the result and all three claims are populated on the
+real run, including the one the goal singles out:
+
+> *"the reference application's `db` row reads an in-guest store, not a Postgres round trip:
+> the host has no `qqq:sql` implementation (O-155)"*
+
+That is `PERF-022`'s requirement, satisfied on the shipped path rather than in prose.
+
+### Verification
+
+| What | Command | Result |
+|---|---|---|
+| The server really serves the reference app | `GET /healthz` | **HTTP 200 `ok`** |
+| The app declares the ten workloads | `qqqai openapi` | **10 paths, 10 operations** |
+| The gate runs on the real path | `qqqai bench --listen 127.0.0.1:3000 --json` | exit 0, 10 workloads |
+| Budget verdicts are deterministic | two runs | **identical** — same 4 rows, same verdicts |
+| The caveats are populated | `data.does_not_measure` | 3 claims, including the `db` statement |
+| Budgets exist as data | `Budget::ALL` | **10 rows**, each citing a real `PERF` item |
+| Captures | scratch | `bench-run1.json`, `bench-run2.json` |
+
+**Generalisable rule.** A benchmark harness that reaches the system through its **public entry
+point** measures a different set of facts than one that instruments the process, and the honest
+report says which is which. Where a budget is stated against a hardware profile the run does
+not have, the number is still worth publishing — with the profile named — because the
+alternative is a target restated as met, which is worse than an unmet target.
+
 *End of `QQQ-Observations-and-Memories.md`.*

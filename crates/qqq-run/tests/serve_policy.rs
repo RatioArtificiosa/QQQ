@@ -523,8 +523,37 @@ fn config_serves_the_manifest_it_names() {
 
     // Bound-based readiness again: see `start` for why connecting would consume the accept
     // budget this test needs for its one real request.
+    //
+    // # Why this loop checks the child, and why it panics on the deadline
+    //
+    // This test had its own copy of the readiness loop and it drifted from `start`'s in two
+    // ways, which together produced a failure that named nothing useful:
+    //
+    //  1. **No child-liveness check.** `bind().is_err()` proves *a* process holds the port,
+    //     not that it is *ours* -- and `cargo test` runs the eleven tests in this file
+    //     concurrently, each calling `free_port()`. Another test's server holding this port
+    //     satisfied the probe, so this test proceeded to write to a server whose lifecycle
+    //     it did not own. `start` reads `try_wait` for exactly this reason; this copy did
+    //     not.
+    //  2. **The deadline fell through instead of failing.** When 30 seconds elapsed the
+    //     `while` simply ended and the test went on to `get()` against a port with no
+    //     listener, so the report was `no status line in: "<no connection>"` -- a sentence
+    //     about an empty response, when the real condition was "our server never bound".
+    //     `start` panics with the address and the tag; this copy said nothing.
+    //
+    // Measured: passes alone in 0.46 s, fails inside the full file after 32 s. A green run
+    // in isolation with a red run under parallelism is the signature of a shared-resource
+    // race rather than a defect in the code under test.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
+    loop {
+        if Instant::now() >= deadline {
+            panic!("`qqqai serve --config prod.toml` never bound 127.0.0.1:{port}");
+        }
+        if let Ok(Some(_)) = serving.child.try_wait() {
+            // Our server exited without binding; the deadline above reports it.
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
         if TcpListener::bind(("127.0.0.1", port)).is_err() {
             break;
         }

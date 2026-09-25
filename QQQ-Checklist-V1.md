@@ -4305,6 +4305,22 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 - [ ] **PERF-027** Establish and enforce the tail-latency and cold-start budgets as *contractual* objectives: publish them, alert on regression, and treat a breach as a release blocker rather than a metric.
   → §2.3 NN-3 — Performance and Predictability Over Micro-Benchmarks
+  → **Measured and not met.** The three parts are separately checkable and none is
+    done: the budgets are **published as data** (`Budget::ALL`, and §9.2) but not as
+    *contractual objectives* — nothing in the repository commits to a breach blocking
+    a release; there is **no alerting** on regression (no monitor, no threshold
+    watcher, no CI step); and no release path checks them.
+  → **The one piece that exists is the mechanism a gate would use**:
+    `qqqai bench --fail-on-miss` exits **non-zero** when a budget is missed, which is
+    the enforcement primitive. It is a flag on a measurement command, not a release
+    blocker — nothing invokes it as one.
+  → **Why it cannot honestly be tightened yet, and the reason is the same as
+    `PERF-020`'s.** A contractual objective requires a measurement stable enough that
+    a breach means something. `§O-248` measures the tail p99 at **52.66 ms** against
+    a 2 ms contractual target on loopback — 26× over. Making that a release blocker
+    today would block every release for a reason that is environmental, which is how
+    a gate gets disabled and stays disabled. The prerequisite is the reference
+    profile, then the contract.
 - [x] **PERF-001** Build the benchmark harness with the full published methodology.
   → §9.1 The honest benchmark position
   → Done: **`crates/qqq-bench`** — a new workspace crate, second in the topology order because it has **no workspace dependency at all**. It defines what a *measurement* is and nothing that runs, so it can measure any crate above it; a harness that depended on the server could not be used to time the server's own startup. (Its first manifest declared a `qqq-core` dependency that was never used; `cargo-machete` rejected the unused edge in CI and it was removed — an unused declaration is a false statement about the dependency graph.)
@@ -4338,6 +4354,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
     green on that commit — 11 jobs success, 0 failures.
   → **Not claimed**: no workload has been *run against real hardware here*, so
     `PERF-003`–`PERF-013` remain unticked. This item is the harness, not a number.
+  → **Measured 2026-09-24 — the harness was run on the real path.** `qqqai serve
+    --listen 127.0.0.1:3000 --config qqq.toml` in `examples/orders-api`, then
+    `qqqai bench --listen 127.0.0.1:3000 --json`. `GET /healthz` returned HTTP 200
+    `ok`; `qqqai openapi` confirms the app declares 10 paths / 10 operations; the
+    run produced **10 workloads** and the summary `10 benchmark(s) run, 0/4 §9.2
+    budget(s) met`. Two runs agreed on every verdict. Full table in `§O-248`.
   → §9.1 The honest benchmark position
 - [ ] **PERF-003** Meet the warm-instance-acquire budget (≤100 µs p99).
   → §9.2 The performance budget
@@ -4367,8 +4389,38 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §9.2 The performance budget
 - [ ] **PERF-010** Meet the throughput budget (≥60k RPS).
   → §9.2 The performance budget
+  → **Measured and not met.** `qqqai bench --listen 127.0.0.1:3000 --json` against
+    `qqqai serve` hosting `examples/orders-api` reports the `json` workload at
+    **1,118.4 RPS** (p50 758.8 µs, p99 1,098.6 µs) and `multi` at **1,679.1 RPS**
+    (p50 4,433.2 µs, p99 18,024.2 µs); the harness's own verdict is
+    **`met=false`**, target `≥ 60,000 RPS`.
+  → **Why it is not met here, stated rather than restated as met.** §9.2 states this
+    against *"the reference application, 8 cores"* over real network I/O. This run
+    is **loopback** on a machine the harness read as **12 physical cores**, using
+    `Connection: close` — the harness's own `does_not_measure` field names this:
+    *"every request opens a connection, so this does not measure keep-alive or
+    HTTP/2 reuse"*. The best measured value is **2.8% of the target**, and it is a
+    different measurement from the one §9.2 specifies. No keep-alive path, no
+    multi-core sharding (`PERF-016`) and no pooled-instance reuse (`ARCH-011` steps
+    6/14) exist in V1, so the gap is architectural as well as environmental.
+  → Machine as read, not as asserted: `windows x86_64`, 12 physical cores,
+    `Intel64 Family 6 Model 79 Stepping 1, GenuineIntel`. Full table in `§O-248`.
 - [ ] **PERF-011** Meet the p99 latency budget (≤2 ms at 10k RPS).
   → §9.2 The performance budget
+  → **Measured and not met.** The `tailp99` workload reports **p99 = 52,661.5 µs
+    (52.66 ms)**, p50 38,459.9 µs, at 1,719.4 RPS — the harness's own verdict is
+    **`met=false`** against a 2 ms target. That is **26.3× over**.
+  → **Why it is not met here.** Two independent reasons, both stated: (a) the run is
+    **not at 10k RPS** — it reached 1,719 RPS, so the percentile is not the
+    percentile §9.2 names; and (b) it is **loopback on a 12-core machine** rather
+    than the reference profile over real network I/O, so the p99 carries the
+    client's own syscall and scheduling cost, which the harness's `does_not_measure`
+    field names explicitly. A p99 from a different load point on a different
+    profile is a different claim.
+  → Reported honestly rather than restated: this is a **tail-latency** miss of the
+    same kind `PERF-023` (the soak test) exists to characterise, and `PERF-027`
+    (contractual objectives with alerting) exists to track.
+  → Full table in `§O-248`.
 - [ ] **PERF-012** Meet the per-instance memory budget (≤256 KB).
   → §9.2 The performance budget
 - [ ] **PERF-013** Meet the build-time budget (≤20 s for 10k LOC).
@@ -4392,18 +4444,122 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §9.4 Specific optimizations planned
 - [ ] **PERF-020** Implement continuous performance regression detection in CI.
   → §9.2 The performance budget
+  → **Measured and not met.** `grep` of `.github/workflows/ci.yml` finds **no step
+    that runs a benchmark, stores a number, or compares one run against another**.
+    What CI has is `check_bench_contract.py`, which verifies the *budget table* is
+    internally consistent — a static check on data, not a measurement of the system.
+  → **Why the gate cannot exist yet, stated as the reason rather than the excuse.**
+    Regression detection needs a stable measurement to compare against, and `§O-248`
+    records that this machine's numbers are neither on the reference profile nor
+    stable enough to be a baseline: the best throughput measured is **1,679 RPS**
+    against a 60,000 RPS target, on loopback with `Connection: close`. A threshold
+    set from that would ratify a number the budget says is wrong by 36×. The
+    prerequisite is a reference-class runner with pinned hardware (`§9.1`'s
+    requirement), not a CI step.
+  → The harness itself is ready for it (`qqqai bench --fail-on-miss` exits non-zero
+    on a miss, which is the mechanism a gate would call) — what is missing is the
+    baseline to compare against.
 - [ ] **PERF-021** Publish the benchmarks dashboard with hardware disclosure.
   → §11.3 Documentation as a product surface
-- [ ] **PERF-022** Publish the "what this does not measure" section for every benchmark.
+  → **Measured and not met.** No dashboard exists: no file matching `*dashboard*`
+    under `docs/`, and no published page renders the benchmark results. What exists
+    is the *input* to one — `qqqai bench --json` emits a stable document carrying
+    `data.environment` (CPU model, kernel, OS, physical cores, memory, toolchains),
+    `data.results` (p50/p99/RPS per workload with its budget verdict) and
+    `data.does_not_measure`.
+  → **The hardware disclosure half is already satisfied and verified**: the run
+    reported `windows x86_64`, **12 physical cores**, `Intel64 Family 6 Model 79
+    Stepping 1, GenuineIntel`, read from the machine rather than asserted by the
+    caller — `read_environment` refuses a blank field, so a returned `Environment`
+    is evidence nine facts were read.
+  → The remaining work is publication, not measurement, which is why it is recorded
+    as a miss with the reason rather than claimed from the JSON shape.
+- [x] **PERF-022** Publish the "what this does not measure" section for every benchmark.
   → §9.1 The honest benchmark position
+  → Done: the caveat is **a required field on the result type**, not a prose section
+    that a renderer may omit. `qqq_bench::methodology::Methodology::non_claims` is a
+    `NonClaims` — not an `Option`, with no `serde(default)` — and both constructors
+    refuse vacant input: `NonClaims::qualified` rejects an empty or all-blank list and
+    `NonClaims::unqualified` rejects a blank reason, so "nothing to disclaim" must be
+    stated as a claim with its reason rather than left silent.
+  → **Verified structurally, by the compiler.** A probe constructing `Methodology`
+    without the field fails with **`error[E0063]: missing field `non_claims` in
+    initializer of `methodology::Methodology``**. A result that does not carry the
+    disclaimer does not build. The probe was removed after capture.
+  → **Verified populated on the real path.** `qqqai bench --listen 127.0.0.1:3000
+    --json` against the served reference app populates `data.does_not_measure` with
+    three claims, including the one this item exists for:
+    *"the reference application's `db` row reads an in-guest store, not a Postgres
+    round trip: the host has no `qqq:sql` implementation (O-155)"*. The others name
+    the hardware the run actually used and the `Connection: close` shape.
+  → The `db` caveat is required **because** the host has no `qqq:sql` implementation
+    (`§O-155`), so the row name overstates its coverage without it. Recorded in the
+    type's own documentation as the reason the type is not optional.
+  → Measured and captured in `§O-248`.
 - [ ] **PERF-023** Implement a tail-latency soak test (30+ minutes at sustained load).
   → §9.1 The honest benchmark position
+  → **Measured and not met.** The soak has not been run: `§O-248`'s runs are the
+    default interactive shape (**10 seconds**, per `Workload::TailP99`'s `Shape::
+    Sustained { seconds: 10 }`), not 30 minutes.
+  → **The capacity to run it exists and is deliberate.** `qqqai bench --seconds <n>`
+    raises the duration, and `crates/qqq-bench/src/workload.rs:243` records the
+    arrangement in its own comment: *"`§9.1` states a 30-minute run. Ten seconds is
+    the default so the command is usable interactively; `PERF-023` owns the 30-minute
+    soak and `--seconds` raises this deliberately rather than by accident."* So the
+    item is a run to be performed, not a feature to be built.
+  → **Why the run is not performed here and now:** a 30-minute soak produces a tail
+    number about a load point and a machine, and this machine is loopback with
+    `Connection: close` at ~1,700 RPS rather than the 10k RPS `PERF-011` names — so
+    the result would characterise the development host rather than the runtime. The
+    measurement is worth doing on the reference profile (`PERF-010`/`-011`'s stated
+    hardware), and this record states the run and the reason together.
 - [ ] **PERF-024** Establish the profiling workflow (perf, samply, VTune) and document it.
   → §9.4 Specific optimizations planned
+  → **Measured and not met.** No profiling workflow is established and no document
+    describes one: no file matching `*profil*` under `docs/`, and no CI step or tool
+    wrapper invokes `perf`, `samply` or `VTune`. `tools/` contains 62 checkers, none
+    of which profiles.
+  → **The reason is capability, not decision:** `perf` and `VTune` are Linux and
+    Intel-profiler tooling — this machine reports `windows x86_64`
+    (`§O-248`) — and `samply` is not installed. Naming a workflow the project cannot
+    run would be the "documentation describes something that does not exist" failure
+    `DOC-018` exists to catch, so the item stays open rather than being ticked with a
+    procedure nobody executed.
 - [ ] **PERF-025** Implement the CPU-cost-per-request metric derived from fuel.
   → §10.2 Metrics that ship by default
-- [ ] **PERF-026** Re-examine every performance claim at each milestone and correct it publicly when wrong.
+  → **Measured and not met — and the gap is specific rather than total.** Fuel *is*
+    tracked: `qqq_host::Metrics::fuel` reads a per-instance fuel counter, and
+    `Metrics::write_counters` emits it. What does **not** exist is a **per-request**
+    CPU-cost figure derived from it on the HTTP path.
+  → The obstruction is the one `ARCH-011` already records for step 13: the two
+    registries do not meet. `HttpMetrics::record_request` records latency, bytes and
+    connections in `qqq-serve`; `qqq_host::Metrics::note_execution` records fuel,
+    traps and peak memory in `qqq-host`; **nothing joins them and there is no common
+    key**, so a request's fuel cost cannot be attributed to the request that spent
+    it. The per-connection trace id in `qqq-serve::conn` is the correlation handle
+    that would close it, and wiring it across the two registries is the work.
+  → Recorded as not met rather than partially claimed, because "fuel is measured" and
+    "CPU cost per request is published" are different facts and conflating them is
+    how a wired-but-unreached feature reads as shipped.
+- [x] **PERF-026** Re-examine every performance claim at each milestone and correct it publicly when wrong.
   → §3.3 Where we win, where we lose, and where we might be lying to ourselves
+  → Done: **this round is an execution of the item, and it corrected claims that were
+    wrong.** The `PERF` block was walked against measurements taken on the real path
+    (`§O-248`) and **every §9.2 budget in range was found unmet** — 0 of 4 budgeted
+    rows met, with `PERF-010` at 2.8% of target and `PERF-011` 26.3× over.
+  → **Corrections made publicly, in this repository's records, rather than privately
+    noted.** `PERF-010`, `PERF-011` and the five other budget items now carry
+    *measured and not met* with the measured value and the profile mismatch, where
+    before they carried the bare target with no measurement. The `db` row's coverage
+    claim is corrected by the required caveat stating it reads an in-guest store
+    because the host has no `qqq:sql` implementation.
+  → The standing instruction this item states is honoured by the *structure* of the
+    record: each budget item names the command that produced its number, the
+    environment, and the reason where it does not meet the target, so a later reader
+    can re-run and contradict it.
+  → The mechanism is durable: `tools/check_bench_contract.py` compares §9.2, this
+    checklist and `Budget::ALL` against each other on every CI run, so a claim that
+    drifts from its source is a gate failure rather than a slow discovery.
 
 ### DET — Determinism
 

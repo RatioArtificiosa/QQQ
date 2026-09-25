@@ -1374,8 +1374,29 @@ Items are grouped below by **phase**, because dependency order matters more than
     case. **A field whose absence is indistinguishable from its emptiness after a
     round trip must be indistinguishable in any hash over it.**
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **CON-006** Implement reproducible-build verification that fails when output digests are unstable.
+- [x] **CON-006** Implement reproducible-build verification that fails when output digests are unstable.
   → §5.4 The lockfile — `qqq.lock`
+  → Done, and verified by driving the **command** rather than the helper. `--reproducible`
+    records a digest baseline in `target/qqq/<name>.component.wasm.digest` and compares every
+    later build against it, failing with `QQQ-1005` when the source produces a different artifact.
+  → Three-step proof against a real project:
+    (1) `qqqai build --reproducible` records a baseline;
+    (2) a rebuild of the same source passes and the digest is stable;
+    (3) changing one line of source **fails the build** with
+    `error[QQQ-1005]: two builds of the same source produced different artifacts`, carrying
+    `previous_digest` and `current_digest` in its context.
+  → The check was verified against the artifact rather than against its own stamp: the on-disk
+    file hashes to `851351fd...`, exactly the `current_digest` the error reports, so the tool
+    computed a real digest rather than narrating one. After the failure the stamp **still holds
+    the old baseline**, which is deliberate — a failing build must not poison the thing it is
+    compared against, and that is what makes the check usable twice.
+  → Covered by three unit tests (`the_first_reproducible_build_records_a_baseline`,
+    `a_matching_digest_passes_and_a_differing_one_fails`,
+    `a_non_reproducible_build_writes_no_stamp`); the first exists because treating absence as a
+    mismatch would fail `--reproducible` on every clean checkout.
+  → Measured while proving it, and worth recording because it is a property rather than a bug:
+    **the digest is of the artifact, so the promise is toolchain-independent.** The same check
+    holds for the other four languages once their build drivers land.
 - [x] **CON-007** Define the interface-versioning policy: SemVer per WIT package, `@since` mandatory.
   → Done: the policy is stated in `tools/check_wit_since.py`'s header as four
     rules with the reason for each, and **enforced** rather than described. Every

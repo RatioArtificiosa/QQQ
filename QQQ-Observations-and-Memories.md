@@ -20944,4 +20944,112 @@ and neither is the platform's to choose.
 
 ---
 
+## §O-269 — I called a correct number wrong, because I compared two numbers that count different things
+
+**Found:** while auditing the corpus for stale claims. **Anchors:** `.github/workflows/ci.yml`,
+`docs/AGENT-HANDBOOK.md`, `llms.txt`, `CHANGELOG.md`. **Cost:** none to the tree — the wrong
+"correction" was caught before it was committed. **Caught by:** asking what a number *counts*,
+one step before writing it down as fact.
+
+### What I did
+
+The corpus asserts *"11/11 jobs green"* in at least six places — `docs/AGENT-HANDBOOK.md` (the
+step list in §2 and the green list in §12), `QQQ-Observations-and-Memories.md` (`§O-198` and four
+other entries), `QQQ-Checklist-V1.md`, and `CHANGELOG.md`. `llms.txt:63` says *"The gate. Nine
+jobs."*
+
+I counted the keys under `jobs:` in `ci.yml` and got **10**. Three different numbers for one
+thing, none of them 10 twice — a textbook stale-count defect, exactly the class `DOC-018` exists
+to catch and A4 in the goal I was working from.
+
+I then **edited the gitignored handbook to say 10**, wrote a whole §12 section titled *"A number
+that was never true, and how it spread"*, and traced the defined-job count through all 63
+revisions of `ci.yml` to prove 11 had never existed (the history is 3, 4, 5, 6, 7, 8, 9, **10**).
+The archaeology was sound. The conclusion was false.
+
+### Why it was false
+
+`ci.yml` **defines 10 jobs**, and one of them is not one job:
+
+```yaml
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+```
+
+A matrix expands: that one definition becomes **three** entries in a run, so a run has **12**.
+And `dco` carries `if: github.event_name == 'pull_request'`, so on a **push** run it is skipped and
+**11** jobs execute.
+
+> **"11/11 jobs green" is the push-run execution count, and it is correct. It always was.**
+
+`llms.txt`'s *"Nine jobs"* is a **defined-jobs** count, written when the file defined nine, and not
+re-derived since. Also correct, for its referent, at its time.
+
+Three numbers, three referents, three right answers:
+
+| Referent | Value | Derivation |
+|---|---|---|
+| Jobs **defined** in `ci.yml` | 10 | count the keys under `jobs:` |
+| Job **entries in a run** | 12 | `rust` is a 3-platform matrix |
+| Entries that **run on a push** | 11 | `dco` is pull-request-only |
+
+### The mistake, named
+
+I compared a count of *definitions* against a count of *executions* and called the difference a
+defect. Nothing was stale. **The numbers were unlabelled, and I supplied a label rather than
+looking for one.**
+
+This repository already has the rule, twice over. `§O-235`: *"a marker on a number asserts a claim
+about now; a sentence about a past audit is data and must be frozen."* `§O-238`: *"Updating a
+number is not fixing a claim."* And `.coderabbit.yaml`'s reviewed-only list names *"a check aimed
+at a nearby property that is easy to assert instead of the property that matters."* I aimed at a
+nearby property — arithmetic on the YAML — and never asked the property that mattered: **what does
+"11" count?**
+
+The tell was available and I walked past it. `ci.yml` says `name: Rust (${{ matrix.os }})` on the
+same line as the job key, forty lines above the matrix block. And the Observations entry at
+L12831 spells the arithmetic out:
+
+> *"**11/11 green.** The count stays 11 because the new job replaced nothing and was added to the
+> ten that existed; the `dco` job is skipped rather than failing."*
+
+**A document I had already read explained the number correctly, and I treated it as part of the
+error instead of as the answer.** That is the same failure as `§O-249` — a claim asserted without
+checking its referent — and it is the third time in this session that I have published a finding
+before reading what the corpus already said about it (the other two were retracted during the
+audit that produced the goal, and are recorded in the goal's own retraction notes).
+
+### What changed
+
+- The handbook's step list now spells the referent out: *10 defined, 12 in a run, 11 executing on
+  a push*, and says plainly that *"11/11"* is correct.
+- §12's section is retitled **"One number, two referents — and the correction it invited"**, and
+  records that a reader who assumes the wrong referent will "fix" a correct statement. That
+  correction was made and then withdrawn in the same round.
+- §13's *"CI is green — all 11 jobs"* is **unchanged**, because it is right.
+
+The durable form of the fix is not a corrected number. It is the rule now written beside it:
+**write the referent next to the number.** *"10 defined, 11 executing on a push run"* cannot be
+misread. *"11/11 jobs green"* can, and was.
+
+### What it would have cost
+
+Nothing was committed, so no history was rewritten. Had it been, the cost would have been a
+*regression in the hand-off document*: a class of error where the corpus is made less accurate by
+someone trying to make it more accurate, and the next reader — trusting a document that now
+carries a false proof — repeats it.
+
+**Generalisable rule:** before calling a number wrong, establish what it counts and when it was
+counted. Two numbers that disagree are frequently both right, and the disagreement is the finding
+only after the referents are known to match.
+
+→ `.github/workflows/ci.yml`, `docs/AGENT-HANDBOOK.md`, `llms.txt`, `CHANGELOG.md`,
+`QQQ-Observations-and-Memories.md` (L12831, `§O-198`)
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

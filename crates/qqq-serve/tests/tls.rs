@@ -522,6 +522,28 @@ async fn a_client_below_the_version_floor_cannot_connect() {
         "a server offering only 1.3 and a client offering only 1.2 have no version \
          in common, so no session may be established"
     );
+
+    // **And it failed for the version reason.** `version == "none"` says only that *a*
+    // handshake did not complete; on its own it is satisfied by any other cause — a cipher
+    // mismatch, a certificate problem, an ALPN disagreement. C7 asked for the exact rustls
+    // text, so it was **measured rather than guessed** (`.scratch/probe_tls_reason.py`),
+    // and the two sides report it differently:
+    //
+    //   server: `peer is incompatible: Tls12NotOfferedOrEnabled`
+    //   client: `received fatal alert: ProtocolVersion`
+    //
+    // Both are asserted because they are independent evidence — the server's reason names
+    // the version it was *offered*, and the client's names the *alert* it received. A test
+    // checking only one could pass with the other half broken (`§O-281`).
+    let why = handshake.why();
+    assert!(
+        why.contains("Tls12NotOfferedOrEnabled"),
+        "the failure must name the version as its reason, not merely be a failure: {why}"
+    );
+    assert!(
+        why.contains("ProtocolVersion"),
+        "the client must have received a ProtocolVersion alert: {why}"
+    );
 }
 
 /// TLS 1.2 is permitted, and is negotiated when it is the only thing both ends
@@ -870,6 +892,27 @@ async fn required_client_auth_refuses_a_client_with_no_certificate() {
         handshake.peer.is_none(),
         "there must be no peer identity without a peer certificate"
     );
+
+    // **And the server said why.** `version == "none"` establishes only that no session
+    // completed; a version mismatch or an ALPN disagreement would satisfy it equally, so on
+    // its own it does not show that `Required` refused at all. C7 asked for the server-side
+    // reason, so it was **measured rather than guessed**
+    // (`.scratch/probe_tls_mtls.py`):
+    //
+    //   `the server rejected the handshake: peer sent no certificates`
+    //
+    // The server's own report is the right one to assert, because the server is the side
+    // that enforces `Required` — the client's alert only says it was refused, not why
+    // (`§O-281`).
+    let why = handshake.why();
+    assert!(
+        why.contains("the server rejected the handshake"),
+        "the reason recorded must be the server's, since the server enforces Required: {why}"
+    );
+    assert!(
+        why.contains("peer sent no certificates"),
+        "the refusal must be about the absent certificate: {why}"
+    );
 }
 
 /// **[`ClientAuth::Optional`] accepts a client that presents no certificate**, and
@@ -1004,6 +1047,25 @@ async fn required_client_auth_refuses_an_untrusted_client_certificate() {
         handshake.negotiated.version, "none",
         "a certificate that does not chain to the configured trust root must be \
          refused; otherwise `Required` only means 'presented something'"
+    );
+
+    // **And the server said why, in terms that distinguish this from the test above.** The
+    // two refusals must not be the same string: *"a certificate was presented"* and *"a
+    // certificate was trusted"* are different facts, and this test exists precisely because
+    // a server checking only the first would accept any self-signed certificate. Measured:
+    //
+    //   `the server rejected the handshake: invalid peer certificate: UnknownIssuer`
+    //
+    // `UnknownIssuer` is the trust-chain failure specifically (`§O-281`).
+    let why = handshake.why();
+    assert!(
+        why.contains("UnknownIssuer"),
+        "the refusal must name the trust-chain failure, not merely be a failure: {why}"
+    );
+    assert!(
+        !why.contains("peer sent no certificates"),
+        "a certificate WAS presented here, so the refusal must be about trust rather than \
+         absence; otherwise this test and its sibling assert the same thing: {why}"
     );
 }
 

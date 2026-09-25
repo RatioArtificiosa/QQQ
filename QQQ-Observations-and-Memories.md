@@ -22131,4 +22131,96 @@ failure in both `Required` client-auth tests.
 
 ---
 
+## §O-281 — Phase E closes: three tests that asserted "it failed" and never "why", and an injection that took three attempts to become evidence
+
+**Found:** C7, the last Phase E finding. **Anchors:** `crates/qqq-serve/tests/tls.rs`.
+
+### The finding
+
+Three TLS tests asserted `handshake.negotiated.version == "none"` — *no session was established* —
+and nothing else. That is satisfied by **any** cause: a cipher mismatch, an ALPN disagreement, a
+certificate problem, or the version mismatch the test is named for. C7 asked for the exact rustls
+error text, so it was **measured rather than guessed**, which is the `§O-249` rule — a string
+asserted because it has the right shape is not a string that was checked.
+
+Two probes (`.scratch/probe_tls_reason.py`, `.scratch/probe_tls_mtls.py`) dumped `Handshake::why()`
+from each test:
+
+| Test | Server-side reason | Client-side |
+|---|---|---|
+| below the version floor | `peer is incompatible: Tls12NotOfferedOrEnabled` | `received fatal alert: ProtocolVersion` |
+| `Required`, no certificate | `peer sent no certificates` | — |
+| `Required`, untrusted certificate | `invalid peer certificate: UnknownIssuer` | — |
+
+All three now assert their reason. Two details worth keeping:
+
+- **The version-floor test asserts both sides.** They are independent evidence — the server's
+  reason names the version it was offered, the client's names the alert it received — and a test
+  checking one could pass with the other half broken.
+- **The untrusted-certificate test asserts a negative**: the reason must *not* be
+  `peer sent no certificates`. Without that, this test and its sibling could both be satisfied by
+  the same failure, and the distinction the test exists for — *a certificate was presented* versus
+  *a certificate was trusted* — would be unasserted. That is the same class as `§O-278`'s encoder:
+  two tests agreeing on a behaviour neither distinguishes.
+
+### The injection took three attempts, and only the third is evidence
+
+**Attempt 1 — inconclusive.** Reversing the version pair (server 1.2-only, client 1.3-only)
+produced the **same** failure text, so it never created a wrong-reason scenario. It exited 0.
+**An injection that does not change the outcome is inconclusive**, and its exit code looks
+identical to a passing one.
+
+**Attempt 2 — a compile error, which also exits 101.** Anchoring the trust-root swap on
+`let cert = CertFiles::generate(SERVER_CN);` matched the **first** occurrence — in a *different*
+test — so the injected line referred to a variable not in scope:
+`untrusted_root not found in this scope`. `cargo test` exits **101** for a build failure exactly as
+it does for a failing assertion, so the run *read* like the new assertion firing. It proved nothing.
+
+The consequence is now in the script: **the injected file must be shown to have compiled before
+its exit code is interpreted.**
+
+**Attempt 3 — decisive.** Every edit scoped to the version-floor test's own source range, the
+build asserted clean, and the assertion fired for the intended reason:
+
+```
+the failure must name the version as its reason, not merely be a failure:
+  the server rejected the handshake: received fatal alert: UnknownCA;
+  the client reported: invalid peer certificate: UnknownIssuer
+```
+
+A **certificate** failure is now caught in a test named *below the version floor* — which the old
+`version == "none"` assertion would have passed.
+
+### And the mtime trap, hit for real
+
+After the restore the suite still failed (`20 passed; 1 failed`). The file *was* restored; the
+**build artifact was not**. Restoring with `shutil.copy2` sets the mtime **backwards**, so cargo
+considered the injected artifact fresh and reused it — process rule 5's trap, exactly as documented,
+encountered by not doing the second half of it. Touching the file returns `21 passed`.
+
+### The rule
+
+**An injection is a measurement, and a measurement has to be checked for whether it measured
+anything.** Three attempts, three exit codes that a careless read accepts: `0` from an inert
+injection, `101` from a build failure, `101` from the assertion. Only the third is evidence, and the
+thing that distinguishes them is not the exit code — it is reading the output and confirming the
+premises (*did the outcome change? did it compile?*).
+
+That is `§O-280`'s rule sharpened. There, an injection that did not fire meant the fix was not a
+fix. Here, an injection that *appeared* to fire meant two different things that are not the same,
+and neither was the fix being tested.
+
+### Phase E is closed: 8 of 8
+
+C1, C2, C3, C4, C5, C6, C7, C8 — every finding either fixed with the fixture able to fail, or
+resolved by correcting the claim it made. **The durable finding about this codebase is the shape**:
+of the eight, only **two** had a broken fixture (C1, C8). The other six were tests whose *prose* —
+a comment, a title, an assertion message — asserted something the code never checked, which a
+passing suite made look verified.
+
+→ `crates/qqq-serve/tests/tls.rs`, `.scratch/probe_tls_reason.py`, `.scratch/probe_tls_mtls.py`,
+`.scratch/inject_tls_c7c.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

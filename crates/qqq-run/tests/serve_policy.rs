@@ -209,13 +209,33 @@ fn get(port: u16, path: &str) -> String {
     )
 }
 
-fn status_of(response: &str) -> u16 {
+/// The status code from a response, or `None` when there is no status line.
+///
+/// # Why this returns an `Option` rather than panicking
+///
+/// It used to `panic!("no status line in: {response:?}")`. That was fine while [`request`] could
+/// only return a real response — but `request` now returns `<no connection>` or `<write failed>`
+/// instead of panicking when the socket fails, precisely so a caller's assertion reports what it
+/// saw. With the panic still here, the failure simply moved one level down: measured in CI,
+/// `a_manifest_that_forgets_default_auth_refuses_its_routes` panicked here at line 218 on macOS
+/// rather than at the socket.
+///
+/// `None` lets the caller decide. Every call site asserts against a status, so a missing one
+/// fails with the response text in hand, which is the diagnostic that locating a lost port
+/// actually needs.
+fn status_of(response: &str) -> Option<u16> {
     response
         .lines()
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("no status line in: {response:?}"))
+}
+
+/// The status code, or a failure naming the whole response.
+///
+/// The convenience the tests want, with the message they need when there is no status.
+fn status(response: &str) -> u16 {
+    status_of(response).unwrap_or_else(|| panic!("no status line in: {response:?}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +258,7 @@ fn a_manifest_that_forgets_default_auth_refuses_its_routes() {
     let response = get(serving.port, "/healthz");
 
     assert_eq!(
-        status_of(&response),
+        status(&response),
         403,
         "a route with no `default_auth` must be refused, not served:\n{response}"
     );
@@ -268,14 +288,14 @@ fn an_explicitly_public_route_reaches_the_dispatcher() {
     let response = get(serving.port, "/healthz");
 
     assert_ne!(
-        status_of(&response),
+        status(&response),
         403,
         "`auth = \"none\"` must not be refused:\n{response}"
     );
     // No component is built in this sandbox, so the dispatcher answers 503. Reaching the
     // dispatcher is the property under test.
     assert_eq!(
-        status_of(&response),
+        status(&response),
         503,
         "a public route must reach the dispatcher, which answers `not built`:\n{response}"
     );
@@ -303,7 +323,7 @@ fn an_unimplemented_authenticator_refuses_and_names_itself() {
     let response = get(serving.port, "/orders");
 
     assert_eq!(
-        status_of(&response),
+        status(&response),
         403,
         "a route needing an authenticator that does not exist must be refused:\n{response}"
     );
@@ -325,7 +345,7 @@ fn a_route_that_does_not_exist_is_a_404_and_not_a_403() {
     let response = get(serving.port, "/not-declared");
 
     assert_eq!(
-        status_of(&response),
+        status(&response),
         404,
         "an undeclared path must be a 404, not a policy refusal:\n{response}"
     );
@@ -423,7 +443,7 @@ fn the_manifest_body_limit_is_enforced_on_a_real_request() {
     );
 
     assert_eq!(
-        status_of(&response),
+        status(&response),
         413,
         "a body over `max_body_bytes` must be refused:\n{response}"
     );
@@ -452,12 +472,12 @@ fn a_body_under_the_limit_is_not_refused_by_it() {
     );
 
     assert_ne!(
-        status_of(&response),
+        status(&response),
         413,
         "a body under the limit must not be refused by it:\n{response}"
     );
     assert_eq!(
-        status_of(&response),
+        status(&response),
         503,
         "it must reach the dispatcher instead:\n{response}"
     );
@@ -513,7 +533,7 @@ fn config_serves_the_manifest_it_names() {
 
     let response = get(serving.port, "/healthz");
     assert_eq!(
-        status_of(&response),
+        status(&response),
         503,
         "`--config prod.toml` must serve prod.toml, whose route is public:\n{response}"
     );

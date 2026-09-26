@@ -22765,4 +22765,66 @@ run, because **modifying a gate is exactly when a gate must be re-run.**
 
 ---
 
+## §O-289 — The bridge's source guard caught me committing during a run, which is the control working
+
+**Found:** verifying the seven checkers added in `§O-288` by re-running the whole bridge.
+**Anchors:** `docker/entrypoint.sh`, `docker/compose.yaml`.
+
+### What the verification showed
+
+| | OK verdicts | self-tests | verdict |
+|---|---|---|---|
+| bridge before the additions | 25 | 26 | `BRIDGE_EXIT=0` |
+| bridge after the additions | **28** | **28** | **`BRIDGE_EXIT=0`** |
+
+Three more `OK --` verdicts and two more self-tests, and every one of the four added
+verdict-producing checkers appears in the run:
+
+```
+CHECKLIST COUNTS OK -- 32 area(s), 587 item(s), §1 and §14 agree with the document
+LIFECYCLE COUNTS OK
+UNSAFE AUDIT DOC OK -- 148 file(s), 11 crate root(s) carrying `forbid(unsafe_code)`
+WIT VERSIONING POLICY PASSED
+```
+
+**`check_checklist_counts.py` reports 587** — the number `SRV-021` produced — so the whole chain is
+verified on Linux: the item, the arithmetic, and the document that states it.
+
+### And one run failed with `BRIDGE_EXIT=3`
+
+The first attempt at that verification exited **3**, which is the **source guard's** code, with:
+
+```
+!! SOURCE GUARD TRIPPED
+A command modified files under /workspace, which is a bind mount of the HOST working tree.
+Changed tracked files:
+                                          ← an empty list
+```
+
+**It was my own doing.** I committed the `§O-288` observation **while the run was in progress**, so
+the bind-mounted tree changed underneath it and the guard correctly refused to certify anything. The
+identical run, launched and left alone, passes.
+
+**The empty changed-file list is the tell.** The guard's start-of-run snapshot no longer matched, but
+by the time it enumerated the difference the tree was **consistent again** — because the change it
+detected had been *committed*, which is exactly the state it compares against. A trip with no named
+file means the tree moved and came back, which is what a commit during a run looks like from inside
+the container.
+
+### The rule
+
+**Do not write to the host tree while a bridge run is in progress.** The bind mount is live, so a
+commit mid-run is a write the guard is *right* to fail on — and its exit 3 is easy to misread as a
+checker failure, which is how I first read it. The run takes ~46 minutes (`§O-287`), which is long
+enough that committing "while I wait" is the natural thing to do and the wrong one.
+
+This is the second time this round that a control caught me rather than the code — `§O-287`'s repair
+path fixed the corpus my killed run left mutated, and this one refused to certify a tree I had
+changed. Both are controls doing precisely what they were built for, and both were easier to misread
+as failures than to read as successes.
+
+→ `docker/entrypoint.sh`, `docker/compose.yaml`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

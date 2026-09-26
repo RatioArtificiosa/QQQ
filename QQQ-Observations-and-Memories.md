@@ -23358,4 +23358,64 @@ picks up persistence first.
 
 ---
 
+## §O-298 — The public-API ratchet caught a number I measured before the change, and the fix was to publish less
+
+**Found:** CI, on the pushed `d910003`. **Anchors:** `crates/qqq-host/src/audit_export.rs`,
+`tools/check_api_examples.py`, `.github/workflows/ci.yml`.
+
+### What CI saw that the local gate did not
+
+The local gate had been **green** on `check_api_examples` — because I had measured **before** adding
+`audit_export.rs`:
+
+| | total | ran | outstanding | allowance |
+|---|---|---|---|---|
+| measured locally, before the module | 2139 | 18 | 2121 | 2121 ✅ |
+| CI, after the module | **2146** | 18 | **2128** | 2121 ❌ |
+| after this fix | 2142 | 21 | **2121** | 2121 ✅ |
+
+**A measurement taken before the change cannot certify the change.** The local run was real, correct,
+and about a different tree — and the seven public declarations the new module added were exactly the
+delta. `check_api_examples` failed in all three Rust jobs, which is also why the local green was not
+evidence: the *checker* was right both times and the *subject* had moved.
+
+### The fix was to publish less, then document what remained
+
+Raising `--allow 2121` was available and wrong. The checker's own output names the rule:
+
+> *"The target is 0. The allowance is a ratchet: lower it as examples land."*
+
+Raising it would be `§O-258`'s mistake in a new place — turning the one mechanism that detects the
+shortfall into one that hides it. So:
+
+**`sarif_level` and `sarif_rule` became private.** They are the *implementation* of the SARIF
+mapping, not the module's API: a consumer reads the rendered SARIF, and a caller that needed the
+mapping directly would be building its own document — the drift this module exists to prevent. **A
+public declaration that no caller should use is a public declaration that owes an example**, and
+the cheapest honest way to stop owing it is to stop publishing it.
+
+**`to_jsonl` and `record_json` were deleted as wrappers.** `AuditStream::to_jsonl` and
+`AuditRecord::to_json` are already public. The wrappers added a name and nothing else — the *"second
+answer to one question"* this module's own doc comment warns against, committed by the module that
+warns about it.
+
+**Three doctests were added** to `to_sarif`, `to_compliance_report` and the module, so the remaining
+public surface is documented by demonstration and the examples run in CI.
+
+### The generalisable rule
+
+**A growing public surface is a liability whose cost appears in a gate, and the first question is
+whether the surface should exist — not how to pay for it.** Three of the six additions were things
+no caller should call; deleting them was a better outcome than documenting them.
+
+And the process failure, which is the third instance of one shape: **I cited `§O-298` in the source
+before writing this entry, and `check_xrefs` check `[13]` failed the gate.** It happened in `§O-290`
+and `§O-291` too. The cause is now unambiguous — writing the code is the interesting part and the
+citation happens while I am in it — and so is the fix: **write the id and the entry in the same
+step, before the commit, never after.**
+
+→ `crates/qqq-host/src/audit_export.rs`, `tools/check_api_examples.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

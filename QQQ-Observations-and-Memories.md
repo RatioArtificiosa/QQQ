@@ -23418,4 +23418,82 @@ step, before the commit, never after.**
 
 ---
 
+## §O-299 — The audit record now survives a restart, and persistence needed a parser that refuses
+
+**Found:** Phase 1, `OBS-002` persistence. **Anchors:** `crates/qqq-host/src/audit_sink.rs`,
+`crates/qqq-host/src/audit.rs`, `crates/qqq-run/src/guest_handler.rs`, `crates/qqq-run/src/serve.rs`.
+
+### What `§O-297` left as the prerequisite, and what closed it
+
+`§O-297` recorded that the audit stream had a reader and **no persistence**, so a CLI invocation —
+being a different process — could never see a serving process's records. A report flag wired to the
+in-memory stream would have reported zero records on every real deployment: `§O-293`'s failure in a
+new place.
+
+Now: `qqqai serve --audit-log <path>` appends every served request to a JSON Lines file, **loading
+and verifying the history before the first request is served**.
+
+### The decisions worth recording
+
+**JSON Lines, not a JSON array.** The record is append-only, so a line can be appended with one
+`write` and no rewrite of what precedes it. An array requires rewriting the closing bracket on every
+record — a read-modify-write of the whole evidence file, where a crash mid-rewrite loses all of it.
+
+**A truncated FINAL line is dropped and reported; a malformed INTERIOR line is refused.** A process
+killed mid-write leaves a fragment, and that fragment was never a completed append — so dropping it
+is honest and repairing it would fabricate a record. But an append-only file **cannot** explain an
+interior malformed line, so nothing may absorb it. The asymmetry is the point, and the drop is
+*reported* because a non-zero `dropped_partial_line` is how an operator learns the previous process
+did not shut down cleanly — a fact the records alone cannot carry.
+
+**A resumed stream verifies before it is handed out.** A stream that resumed a broken chain would
+append to it, and every later record would commit to a predecessor that was already wrong: the
+corruption would be **extended rather than detected**, and the file would look healthy from the
+restart onward. Refusing at load is the only moment it can still be reported as what it is.
+
+**The write is synchronous, inside the append, while the stream lock is held.** Reading the last
+record after releasing the lock would race another request and could persist a *different* row than
+the one this call added — an evidence file that disagrees with the stream it came from.
+
+### The parser refuses rather than defaults
+
+`AuditRecord::from_json` requires **every** field. An unknown capability is refused rather than read
+as capability-less, because a record whose capability could not be read is not a record with no
+capability — treating it as one would silently drop the authority the row is *about*.
+
+And `function` is `&'static str` in the record, so a parsed value must be interned. **`Box::leak`
+would be a memory leak driven by file content** — an unbounded allocation an attacker controls — so
+an unknown function name is refused instead.
+
+### Three fault injections, all fired
+
+| Injection | Result |
+|---|---|
+| `resume` no longer refuses a broken chain | `a_tampered_file_is_refused_at_load` → *"a tampered chain must be refused, got Ok(…)"* |
+| the resumed head is genesis, not the last chain | `a_restart_continues_the_chain` → *"the resumed stream's head must be the last record's chain"* |
+| the write-through is removed | *"one served request must write exactly one line; got: `""`"* |
+
+### The ratchet, again, and this time the answer was examples
+
+The new module added **12 public declarations**: 2154 total, 2133 outstanding against an allowance
+of 2121. Two moves, in the order that matters:
+
+**First, publish less.** `load`, `AuditStream::resume` and `AuditRecord::from_json` became
+`pub(crate)` — they are the *implementation* of the module's entry points, not its API — and
+`AuditFile::path` was demoted as a getter no caller needs. `§O-298`'s rule applied again: a public
+declaration that no caller should use is one that owes an example.
+
+**Then, document what remained — seven examples, one per public declaration.** The target is *"100%
+of public APIs have a compiling example"*, and `outstanding = total − ran`, so each example that runs
+is a declaration covered. Measured: **doctests 21 → 29, outstanding 2133 → 2121, at the allowance.**
+
+**Raising `--allow` was never the answer, and it was available both times.** The checker's own output
+names the rule — *"the allowance is a ratchet: lower it as examples land"* — and the substantive work
+(examples that run in CI) is the thing the allowance exists to provoke.
+
+→ `crates/qqq-host/src/audit_sink.rs`, `crates/qqq-host/src/audit.rs`,
+`crates/qqq-run/src/guest_handler.rs`, `crates/qqq-run/src/serve.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

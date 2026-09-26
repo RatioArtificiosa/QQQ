@@ -106,6 +106,20 @@ pub struct GuestApp {
     /// before the response is written; if contention ever shows up in a measurement, that is
     /// the number to bring to the design rather than to guess at now.
     audit: std::sync::Mutex<qqq_host::AuditStream>,
+    /// Where the record is persisted, when the operator asked for a file — `OBS-002`.
+    ///
+    /// `None` means the stream is in memory only, which is the honest default: a server that wrote
+    /// an evidence file the operator did not ask for would be a surprise, and a *silent* one
+    /// because nothing in the response says a file was created.
+    ///
+    /// # Why the write is synchronous, inside the append
+    ///
+    /// Because the record's value is that it exists after a crash. A buffered or backgrounded write
+    /// gives a record that is present only when the process happens to exit cleanly, which is the
+    /// case a record is least needed for. The cost is one `write` syscall per served request, and
+    /// the honest way to avoid it is to not enable the file rather than to enable it and lose the
+    /// guarantee.
+    audit_file: Option<std::sync::Mutex<qqq_host::audit_sink::AuditFile>>,
     /// The component's identity, as the audit record states it — `OBS-002`.
     ///
     /// Computed **once**, at construction, because `ComponentDigest::new` validates that the
@@ -254,6 +268,7 @@ impl GuestApp {
             // The stream the served path appends to. `with_default_capacity` cannot fail —
             // the capacity is a non-zero constant and the check lives in `AuditStream::new`.
             audit: std::sync::Mutex::new(qqq_host::AuditStream::with_default_capacity()),
+            audit_file: None,
             // Computed above, before `grants` is moved into this struct.
             component_digest,
             grant_digest,
@@ -372,7 +387,7 @@ impl GuestApp {
             // `Append::Full` increments the stream's own `refused` counter, which the audit
             // report reads. A capacity that is reached is therefore visible in the report
             // rather than in a log line nobody reads.
-            let _ = stream.record(
+            let appended = stream.record(
                 None,
                 &self.component_digest,
                 &self.grant_digest,
@@ -380,6 +395,27 @@ impl GuestApp {
                 "handle_request",
                 outcome_kind,
             );
+
+            // Write through to the file when one is attached, **inside the same block** so the
+            // record written is the record appended. Reading the last record after releasing the
+            // lock would race another request and could persist a different row than the one this
+            // call added -- an evidence file that disagrees with the stream it came from.
+            if let (Some(file), qqq_host::Append::Recorded(_)) =
+                (self.audit_file.as_ref(), appended)
+            {
+                let mut file = file
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(record) = stream.records().last() {
+                    // A failed persist is reported rather than swallowed. The alternative --
+                    // continuing to serve while the evidence file silently stops growing -- is
+                    // the "control that reports healthy while measuring nothing" this whole
+                    // module exists against.
+                    if let Err(e) = file.append(record) {
+                        eprintln!("error: the capability audit record could not be persisted: {e}");
+                    }
+                }
+            }
         }
 
         Ok(to_served(&outcome?))
@@ -422,6 +458,70 @@ impl GuestApp {
     #[must_use]
     pub fn capacity(&self) -> u64 {
         self.pool.capacity()
+    }
+
+    /// Persist the capability-use record to `path`, resuming any history already there — `OBS-002`.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, when its records do not form a stream, or when it cannot be
+    /// opened for appending. **Every one of these refuses rather than falling back to memory-only**:
+    /// an operator who asked for a persistent record and silently got an in-memory one would
+    /// believe they had evidence they do not have, and would discover it at the worst moment.
+    ///
+    /// # Why this is a method and not a constructor argument
+    ///
+    /// Because attaching is the *decision to persist*, and it carries a load that can fail. A
+    /// constructor argument would make every existing caller pass `None` for a feature it does not
+    /// use, and would put a fallible file read inside the path that compiles a component — so a
+    /// malformed audit file would be reported as a component that cannot serve.
+    ///
+    /// # Example
+    ///
+    /// The file is read and verified **before** a single request is served, so a chain that is
+    /// already broken refuses the start rather than being extended:
+    ///
+    /// ```
+    /// # use qqq_run::guest_handler::GuestApp;
+    /// # use std::path::Path;
+    /// # fn attach(app: &mut GuestApp, path: &Path) -> Result<(), String> {
+    /// app.attach_audit_file(path).map_err(|e| e.message.clone())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn attach_audit_file(&mut self, path: &std::path::Path) -> Result<()> {
+        let (stream, loaded) = qqq_host::audit_sink::resume_or_start(
+            path,
+            qqq_host::audit::DEFAULT_CAPACITY,
+        )
+        .map_err(|e| {
+            Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
+                "point `--audit-log` at a writable path, or remove the flag to keep the record in \
+                 memory only",
+            )
+        })?;
+
+        // A dropped partial line means the previous process did not shut down cleanly. Reported
+        // here rather than swallowed: the records alone cannot state it, and an operator reading
+        // the record later has no other way to learn it.
+        if loaded.dropped_partial_line {
+            eprintln!(
+                "warning: the audit file {} ended mid-record; the incomplete line was dropped. \
+                 The process that wrote it did not shut down cleanly.",
+                path.display()
+            );
+        }
+
+        let file = qqq_host::audit_sink::AuditFile::open(path).map_err(|e| {
+            Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
+                "point `--audit-log` at a writable path, or remove the flag to keep the record in \
+                 memory only",
+            )
+        })?;
+
+        self.audit = std::sync::Mutex::new(stream);
+        self.audit_file = Some(std::sync::Mutex::new(file));
+        Ok(())
     }
 
     /// Requests currently holding an instance.
@@ -759,6 +859,114 @@ mod tests {
             "the replayed chain must verify: {replay:?}",
             replay = replay.verify_chain().err()
         );
+    }
+
+    /// **The record is persisted, and a second process continues the chain — `OBS-002`.**
+    ///
+    /// This is Gate 1's *"a request through `qqqai serve` produces a chained record that survives a
+    /// restart"*, at the level where the record is actually written. Before persistence the stream
+    /// lived in `GuestApp`'s memory and died with the process, so the record could not outlive the
+    /// server it was evidence about.
+    #[test]
+    fn the_audit_record_is_persisted_and_a_restart_continues_the_chain() {
+        let Some(mut first) = test_app() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("qqq-audit-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+
+        first.attach_audit_file(&path).expect("attach");
+        let head = head(qqq_serve::Method::Get, "/orders");
+        let _ = first.handle_request(&head, None);
+
+        let written = std::fs::read_to_string(&path).expect("the file exists after one request");
+        assert_eq!(
+            written.lines().count(),
+            1,
+            "one served request must write exactly one line; got: {written:?}"
+        );
+        let (before, _) = first.audit_snapshot();
+        assert_eq!(before.len(), 1);
+        let head_before = before[0].chain.clone();
+
+        // --- the "restart": a second app, attaching the same file -----------------
+        let Some(mut second) = test_app() else {
+            return;
+        };
+        second.attach_audit_file(&path).expect("resume");
+        let (resumed, _) = second.audit_snapshot();
+        assert_eq!(resumed.len(), 1, "the history was read back");
+        assert_eq!(
+            resumed[0].chain, head_before,
+            "the resumed history must be the history that was written"
+        );
+
+        let _ = second.handle_request(&head, None);
+        let (after, _) = second.audit_snapshot();
+        assert_eq!(
+            after.len(),
+            2,
+            "the second request appended to the resumed history"
+        );
+        assert_eq!(
+            after[1].previous, after[0].chain,
+            "the new record must chain from the one written by the previous process"
+        );
+        assert_eq!(
+            after[1].sequence, 2,
+            "the sequence continues across the restart"
+        );
+        assert!(
+            second.audit_snapshot().0.len() == 2
+                && std::fs::read_to_string(&path).unwrap().lines().count() == 2,
+            "and the file holds both, so the record outlived the process that made it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A chain-broken audit file refuses to attach, rather than being extended.**
+    ///
+    /// A server that resumed a broken chain would append to it, and every later record would
+    /// commit to a predecessor that was already wrong — so the corruption would be **extended
+    /// rather than detected**, and the file would look healthy from the restart onward.
+    #[test]
+    fn a_tampered_audit_file_refuses_to_attach() {
+        let Some(mut app) = test_app() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("qqq-audit-tamper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+
+        app.attach_audit_file(&path).expect("attach");
+        let head = head(qqq_serve::Method::Get, "/orders");
+        let _ = app.handle_request(&head, None);
+        let (records, _) = app.audit_snapshot();
+        let good = records[0].chain.clone();
+
+        // Rewrite the chain digest in the file, leaving the line well-formed JSON.
+        let text = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, text.replace(&good, &"0".repeat(good.len()))).expect("tamper");
+
+        let Some(mut victim) = test_app() else {
+            return;
+        };
+        let refused = victim.attach_audit_file(&path);
+        assert!(
+            refused.is_err(),
+            "attaching a tampered record must refuse, not resume -- got Ok"
+        );
+        let message = format!("{:?}", refused.err());
+        assert!(
+            message.contains("broken chain"),
+            "the refusal must name the broken chain, got: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

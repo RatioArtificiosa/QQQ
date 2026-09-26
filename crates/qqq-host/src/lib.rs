@@ -78,6 +78,7 @@ pub mod arch003;
 pub mod arch012;
 pub mod audit;
 pub mod audit_export;
+pub mod audit_sink;
 pub mod boundary;
 /// Calling a guest's handler: the request in, the response out.
 ///

@@ -112,6 +112,16 @@ pub struct ServeOptions {
     /// **an unbounded loop that cannot be bounded is a loop that cannot be
     /// verified.**
     pub accept_limit: Option<u64>,
+    /// `--audit-log <path>` — persist the capability-use record, resuming any history there.
+    ///
+    /// `None` keeps the record in memory, which is the honest default: a server that wrote an
+    /// evidence file nobody asked for would be a surprise, and a silent one, because nothing in a
+    /// response says a file was created.
+    ///
+    /// When set, the file is **loaded and verified before serving starts**. A malformed or
+    /// chain-broken file refuses the start rather than being absorbed — see
+    /// `GuestApp::attach_audit_file`.
+    pub audit_log: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -123,6 +133,7 @@ impl Default for ServeOptions {
             tls: false,
             config: None,
             accept_limit: None,
+            audit_log: None,
         }
     }
 }
@@ -195,6 +206,17 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             }
             "--config" => {
                 opts.config = Some(value_of(args, i, "--config")?);
+                i += 2;
+            }
+            "--audit-log" => {
+                let v = value_of(args, i, "--audit-log")?;
+                if v.is_empty() {
+                    return Err(usage("`--audit-log` needs a path").with_remediation(
+                        "pass the file the capability-use record is appended to, for example \
+                         `--audit-log /var/log/qqq/audit.jsonl`",
+                    ));
+                }
+                opts.audit_log = Some(v);
                 i += 2;
             }
             "--accept-limit" => {
@@ -475,7 +497,7 @@ fn build_dispatch(
     // `--workers` sizes the pool that bounds concurrent guest instances. This is the
     // seam the flag was missing: it was parsed, capped and reported with nothing to act
     // on, and the number now reaches the component that enforces it.
-    let app = GuestApp::with_capacity(
+    let mut app = GuestApp::with_capacity(
         engine,
         &bytes,
         grants,
@@ -483,6 +505,16 @@ fn build_dispatch(
         opts.listen.clone(),
         opts.workers,
     )?;
+
+    // `--audit-log` attaches the persisted capability-use record, **loading and verifying any
+    // history before a single request is served**. A malformed or chain-broken file refuses the
+    // start here rather than being absorbed, because a server that began serving and then
+    // discovered its evidence file was unusable would have already produced records it cannot
+    // keep.
+    if let Some(path) = &opts.audit_log {
+        app.attach_audit_file(std::path::Path::new(path))?;
+    }
+
     let app = Arc::new(app);
     // Captured before the `Arc` is moved into the dispatcher closures, so the report can
     // name the capacity that is actually installed.

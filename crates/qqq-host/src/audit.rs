@@ -376,6 +376,180 @@ impl fmt::Display for AuditRecord {
     }
 }
 
+/// Reverse [`json_escape`] for the escapes that function produces.
+///
+/// # Why this refuses rather than guessing
+///
+/// An unterminated escape, an unknown escape letter, or a lone surrogate is **not** repaired
+/// here — it returns `None`, and the caller refuses the record. This is a parser for an evidence
+/// record: a lenient one would let a corrupted line become a plausible-looking record, which is
+/// the failure the whole module exists to prevent. `\uXXXX` is decoded only for the control
+/// range `json_escape` emits, so the two are exact inverses over the values this type produces.
+fn json_unescape(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if hex.len() != 4 {
+                    return None;
+                }
+                let code = u32::from_str_radix(&hex, 16).ok()?;
+                out.push(char::from_u32(code)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Extract a JSON string field, or `None` when the key is absent or malformed.
+///
+/// # Why a hand-written scan and not a JSON library
+///
+/// Because the format is flat — every value is a number, `null`, or a string — and the parser must
+/// be an **exact inverse of `to_json`**, which is itself hand-written for the reason its own doc
+/// gives: a derived serialiser gives no cross-version stability guarantee, and a digest comparison
+/// depends on one. Pairing a hand-written writer with a library reader would put the stability
+/// guarantee on one side only.
+fn json_string_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = json.find(&needle)? + needle.len();
+    let rest = &json[start..];
+    // Walk to the closing quote, honouring escapes -- a value may contain `\"`.
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return json_unescape(&rest[..i]);
+        }
+    }
+    None
+}
+
+/// Extract a JSON integer field.
+fn json_u64_field(json: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\":");
+    let start = json.find(&needle)? + needle.len();
+    let rest = &json[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
+}
+
+impl AuditRecord {
+    /// Parse one record from its [`to_json`](Self::to_json) form.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the field that was absent, malformed, or unrepresentable. **Every field
+    /// is required** and an unknown capability or outcome is refused rather than defaulted: a
+    /// record whose capability could not be read is not a record with no capability, and treating
+    /// it as one would silently drop the authority a row is *about*.
+    ///
+    /// # Why `sequence` is checked here and the chain is not
+    ///
+    /// This function reads one record. Whether the records form an unbroken chain is
+    /// [`AuditStream::verify_chain`]'s job, over the whole set, because a single record cannot
+    /// answer it. Keeping the two separate is what lets a caller report *which* record broke the
+    /// chain rather than that one of them did.
+    pub(crate) fn from_json(json: &str) -> Result<Self, String> {
+        let sequence = json_u64_field(json, "sequence")
+            .ok_or_else(|| "an audit record must carry an integer `sequence`".to_owned())?;
+
+        // `tenant` is the one field that may be JSON `null`, so absence and nullness differ:
+        // `"tenant":null` is a legitimate unscoped record, while no `tenant` key at all is a
+        // malformed line. Checking for the key before the value keeps those apart.
+        if !json.contains("\"tenant\":") {
+            return Err(
+                "an audit record must carry a `tenant` key, even when it is null".to_owned(),
+            );
+        }
+        let tenant = if json.contains("\"tenant\":null") {
+            None
+        } else {
+            let raw = json_string_field(json, "tenant")
+                .ok_or_else(|| "`tenant` must be a string or null".to_owned())?;
+            Some(TenantId::new(&raw).map_err(|e| format!("`tenant` is invalid: {e}"))?)
+        };
+
+        let component = json_string_field(json, "component")
+            .ok_or_else(|| "an audit record must carry a `component` digest".to_owned())?;
+        let component =
+            ComponentDigest::new(&component).map_err(|e| format!("`component` is invalid: {e}"))?;
+
+        let grants = json_string_field(json, "grants")
+            .ok_or_else(|| "an audit record must carry a `grants` digest".to_owned())?;
+        let grants = GrantDigest::new(&grants).map_err(|e| format!("`grants` is invalid: {e}"))?;
+
+        let capability_name = json_string_field(json, "capability")
+            .ok_or_else(|| "an audit record must name its `capability`".to_owned())?;
+        let capability = Capability::from_name(&capability_name).ok_or_else(|| {
+            format!(
+                "`{capability_name}` is not a capability this build knows; refusing rather than \
+                 reading the record as capability-less"
+            )
+        })?;
+
+        let outcome_name = json_string_field(json, "outcome")
+            .ok_or_else(|| "an audit record must state its `outcome`".to_owned())?;
+        let outcome = Outcome::ALL
+            .into_iter()
+            .find(|o| o.as_str() == outcome_name)
+            .ok_or_else(|| format!("`{outcome_name}` is not an audit outcome"))?;
+
+        let function = json_string_field(json, "function")
+            .ok_or_else(|| "an audit record must name its `function`".to_owned())?;
+        // `function` is `&'static str` in the record, so a parsed value must be interned. The set
+        // of host function names is bounded by the interfaces' own WIT, and an unknown one is
+        // refused rather than leaked -- `Box::leak` here would be a memory leak driven by file
+        // content, which is an unbounded allocation an attacker controls.
+        let function = match function.as_str() {
+            "handle_request" => "handle_request",
+            other => {
+                return Err(format!(
+                    "`{other}` is not a host function this build records; refusing rather than \
+                     leaking a string whose length the file controls"
+                ))
+            }
+        };
+
+        let previous = json_string_field(json, "previous")
+            .ok_or_else(|| "an audit record must carry its `previous` digest".to_owned())?;
+        let chain = json_string_field(json, "chain")
+            .ok_or_else(|| "an audit record must carry its `chain` digest".to_owned())?;
+
+        Ok(Self {
+            sequence,
+            tenant,
+            component,
+            grants,
+            capability,
+            function,
+            outcome,
+            previous,
+            chain,
+        })
+    }
+}
+
 /// Hash one field with a length prefix, so the encoding is injective.
 fn field(h: &mut Sha256, value: &str) {
     h.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
@@ -506,6 +680,78 @@ impl AuditStream {
     #[must_use]
     pub fn with_default_capacity() -> Self {
         Self::new(DEFAULT_CAPACITY).expect("DEFAULT_CAPACITY is non-zero")
+    }
+
+    /// Continue an existing record — `OBS-002`, persistence.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the records cannot form a stream: an empty capacity, more records than the
+    /// capacity allows, a record out of sequence, or **a chain that does not verify**.
+    ///
+    /// # Why a resumed stream must verify before it is handed out
+    ///
+    /// A stream that resumed a broken chain would append to it, and every record it added would
+    /// commit to a predecessor that was already wrong — so the corruption would be **extended
+    /// rather than detected**, and the file would look healthy from the point the server
+    /// restarted. Refusing at load is the only moment the corruption can still be reported as
+    /// what it is.
+    ///
+    /// # Why `capacity` is checked against the length
+    ///
+    /// Because the alternative is a stream that silently refuses every new append while reporting
+    /// itself healthy — the same defect [`Self::new`] refuses for zero capacity. A history that
+    /// has outgrown its configured bound is a decision the operator has to make, not something to
+    /// absorb.
+    pub(crate) fn resume(records: Vec<AuditRecord>, capacity: usize) -> Result<Self, String> {
+        if capacity == 0 {
+            return Err(
+                "an audit stream must hold at least one record; a zero-capacity stream refuses \
+                 every append while reporting itself healthy"
+                    .to_owned(),
+            );
+        }
+        if records.len() > capacity {
+            return Err(format!(
+                "the existing record holds {} record(s) and the capacity is {capacity}; raise the \
+                 capacity or rotate the file rather than starting a stream that refuses every \
+                 append",
+                records.len()
+            ));
+        }
+
+        // Sequence numbers must be contiguous from 1, because a gap is exactly what an append-only
+        // record is supposed to make impossible. `verify_chain` checks the links; this checks the
+        // numbering, and the two are different claims.
+        for (i, record) in records.iter().enumerate() {
+            let expected = u64::try_from(i).unwrap_or(u64::MAX) + 1;
+            if record.sequence != expected {
+                return Err(format!(
+                    "record {expected} is missing: the file's {i}-th record carries sequence {}",
+                    record.sequence
+                ));
+            }
+        }
+
+        let head = records
+            .last()
+            .map_or_else(genesis_digest, |r| r.chain.clone());
+        let recorded = u64::try_from(records.len()).unwrap_or(u64::MAX);
+        let stream = Self {
+            capacity,
+            records,
+            counters: AppendCounters {
+                recorded,
+                refused: 0,
+            },
+            head,
+        };
+        if let Err((sequence, reason)) = stream.verify_chain() {
+            return Err(format!(
+                "refusing to resume a broken chain: record {sequence} does not verify -- {reason}"
+            ));
+        }
+        Ok(stream)
     }
 
     /// Record one capability use.

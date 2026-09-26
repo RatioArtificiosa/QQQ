@@ -322,61 +322,178 @@ fn every_tool_returns_structured_content() {
     }
 }
 
-/// **Every mutating tool takes `dry_run` and says so — `AGENT-020`, over all twelve.**
+/// **Three tools are WIRED, not advertised — Gate 2's bar.**
 ///
-/// # The partition, and why it is asserted rather than assumed
+/// # Why "three" is the number
 ///
-/// Eight tools read; four change the project. **The test asserts the two sets cover all twelve**, so
-/// adding a tool forces a decision about which side it is on rather than letting it default to
-/// read-only by omission.
+/// Because it is what the gate asks for, and because **one working tool is a demo while three is a
+/// server**. The three share a property worth naming: their backing is a **pure function** already in
+/// the process -- `ErrorCode::all()`, `command_schemas()`, `Namespace::all()` -- so none needs a build,
+/// a guest or a filesystem. **A tool whose backing is already a pure function is a tool that should be
+/// wired first.**
+#[test]
+fn three_tools_are_wired_and_structured() {
+    let replies = run_mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_errors_lookup","arguments":{"class":"70"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"qqq_schema","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qqq_caps_list","arguments":{}}}"#,
+    ]);
+    assert_eq!(replies.len(), 3, "one reply each: {replies:?}");
+
+    for (i, name) in ["qqq_errors_lookup", "qqq_schema", "qqq_caps_list"]
+        .iter()
+        .enumerate()
+    {
+        let reply = parse(&replies[i]);
+        let result = &reply["result"];
+        assert_eq!(
+            result["isError"], false,
+            "`{name}` must be WIRED, not advertised: {reply}"
+        );
+        let structured = &result["structuredContent"];
+        assert!(
+            structured["count"].as_u64().is_some_and(|c| c > 0),
+            "and it must carry a non-empty count -- a wired tool that finds nothing is a tool whose              backing is empty: {reply}"
+        );
+    }
+}
+
+/// **The MCP `dry_run` contract must agree with the command schemas — two places, one answer.**
+///
+/// # Why this test exists
+///
+/// `output::command_schemas()` already declares **`mutating`** and **`supports_dry_run`** for every
+/// command, and `mcp.rs` declares the same property for every tool. **Two places that answer one
+/// question is how they drift**, and `§O-282`'s rule is that a guard is only as wide as its extent --
+/// so this one reaches across the two surfaces rather than checking either alone.
+///
+/// A tool whose name is not a command is **not** a divergence: `qqq_errors_lookup` has no command. The
+/// test asserts the tools that DO map agree, and it asserts the mapping is not empty, so a rename that
+/// broke every mapping would fail rather than pass vacuously.
+#[test]
+fn the_tool_dry_run_contract_agrees_with_the_command_schemas() {
+    // The command schemas, as `qqq_schema` returns them.
+    let replies = run_mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_schema","arguments":{}}}"#,
+    ]);
+    let reply = parse(&replies[0]);
+    let commands = reply["result"]["structuredContent"]["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|c| {
+            (
+                c["command"].as_str().expect("a name").to_owned(),
+                c["supports_dry_run"].as_bool().expect("a bool"),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    // The MCP tools.
+    let replies = run_mcp(&[r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#]);
+    let reply = parse(&replies[0]);
+    let tools = reply["result"]["tools"].as_array().expect("tools");
+
+    let mut mapped = 0usize;
+    for tool in tools {
+        let name = tool["name"].as_str().expect("a name");
+        // `qqq_caps_list` -> `caps`, `qqq_build` -> `build`; a tool with no command simply has no entry.
+        let Some(command) = name.strip_prefix("qqq_").and_then(|c| commands.get(c)) else {
+            continue;
+        };
+        mapped += 1;
+        let tool_says = tool["inputSchema"]["properties"].get("dry_run").is_some();
+        assert_eq!(
+            tool_says, *command,
+            "`{name}` and the `{}` command disagree about `dry_run` -- two places, one answer: {tool}",
+            name.strip_prefix("qqq_").expect("a prefix")
+        );
+    }
+    assert!(
+        mapped >= 3,
+        "the mapping must not be vacuous: {mapped} tool(s) reached a command schema"
+    );
+}
+
+/// **Every mutating tool takes `dry_run` and says so -- `AGENT-020`, over all twelve.**
+///
+/// # The partition is DERIVED, and that is the point
+///
+/// The first version of this test carried a **hand-list** of which tools mutate. It named `qqq_run`,
+/// `qqq_test` and `qqq_bench`; **the runtime names none of them** -- `CommandName::is_mutating()` lists
+/// `Build` and not `Test`, `Run` or `Bench`, and `supports_dry_run()` IS `is_mutating()`. **The tools
+/// agreed with the hand-list rather than with the runtime.**
+///
+/// > **A hand-list is a second answer to a question the runtime already answers.**
+///
+/// So this version reads `output::command_schemas()` and maps a tool to its command by name. A tool
+/// whose name is not a command (`qqq_errors_lookup`) reads. **And the mapping is asserted non-vacuous**,
+/// so a rename that broke every mapping would fail rather than pass by finding nothing.
 #[test]
 fn every_mutating_tool_takes_dry_run_and_says_so() {
-    // The tools that can change the project or run it.
-    let mutating = ["qqq_build", "qqq_run", "qqq_test", "qqq_bench"];
-    // And the ones that cannot.
-    let reading = [
-        "qqq_manifest_get",
-        "qqq_manifest_validate",
-        "qqq_caps_explain",
-        "qqq_caps_list",
-        "qqq_audit",
-        "qqq_inspect",
-        "qqq_schema",
-        "qqq_errors_lookup",
-    ];
-    assert_eq!(
-        mutating.len() + reading.len(),
-        12,
-        "every published tool must be on one side of the partition or the other"
-    );
+    let replies = run_mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_schema","arguments":{}}}"#,
+    ]);
+    let reply = parse(&replies[0]);
+    let mutating: std::collections::HashMap<String, bool> = reply["result"]["structuredContent"]
+        ["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|c| {
+            (
+                c["command"].as_str().expect("a name").to_owned(),
+                c["mutating"].as_bool().expect("a bool"),
+            )
+        })
+        .collect();
 
-    let replies = run_mcp(&[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]);
+    let replies = run_mcp(&[r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#]);
     let reply = parse(&replies[0]);
     let tools = reply["result"]["tools"].as_array().expect("an array");
+    assert_eq!(tools.len(), 12, "all twelve are checked");
 
+    let mut mapped = 0usize;
     for tool in tools {
         let name = tool["name"].as_str().expect("a name");
         let description = tool["description"].as_str().expect("a description");
         let has_dry_run = tool["inputSchema"]["properties"].get("dry_run").is_some();
         let says_so = description.contains("dry_run");
 
-        if mutating.contains(&name) {
+        let command = name
+            .strip_prefix("qqq_")
+            .expect("every tool is `qqq_`-prefixed");
+        let mutates = match mutating.get(command) {
+            Some(m) => {
+                mapped += 1;
+                *m
+            }
+            // A tool with no command reads.
+            None => false,
+        };
+
+        if mutates {
             assert!(
                 has_dry_run,
-                "`{name}` changes the project and must accept `dry_run`: {tool}"
+                "`{name}` maps to a MUTATING command and must accept `dry_run`: {tool}"
             );
             assert!(
                 says_so,
-                "`{name}` accepts `dry_run` and its DESCRIPTION must say so -- a model reads the                  description first, and a tool that can be asked not to change things must announce it: {tool}"
+                "`{name}` accepts `dry_run` and its DESCRIPTION must say so: {tool}"
             );
         } else {
             assert!(
                 !has_dry_run,
-                "`{name}` cannot change anything, so a `dry_run` argument would be a promise it does                  not keep: {tool}"
+                "`{name}` maps to a command that does not mutate, so a `dry_run` argument would be \
+                 A PROMISE IT DOES NOT KEEP: {tool}"
             );
             assert!(!says_so, "and its description must not claim one: {tool}");
         }
     }
+    assert!(
+        mapped >= 3,
+        "the mapping must not be vacuous: {mapped} tool(s) reached a command schema"
+    );
 }
 
 /// **An empty line is skipped rather than answered.**

@@ -129,11 +129,11 @@ fn describe(name: &str) -> &'static str {
         "qqq_caps_explain" => "Explain what one capability grants and what it refuses.",
         "qqq_caps_list" => "List every capability the project declares, with its grants.",
         "qqq_build" => "Build the project's guest component for `wasm32-wasip2`. Takes `dry_run` to describe what would run without running it.",
-        "qqq_run" => "Run the guest component against a request, without serving. Takes `dry_run` to describe what would run without running it.",
-        "qqq_test" => "Run the project's conformance tests. Takes `dry_run` to describe what would run without running it.",
+        "qqq_run" => "Run the guest component against a request, without serving.",
+        "qqq_test" => "Run the project's conformance tests.",
         "qqq_audit" => "Read the capability audit and report the worst severity found.",
         "qqq_inspect" => "Report what a project is allowed to do, and what it is not.",
-        "qqq_bench" => "Run the benchmarks and report the measured numbers. Takes `dry_run` to describe what would run without running it.",
+        "qqq_bench" => "Run the benchmarks and report the measured numbers.",
         "qqq_schema" => "Return the JSON Schema for a QQQ command's arguments.",
         "qqq_errors_lookup" => "Look up QQQ error codes by class, with each code's meaning.",
         // Unreachable while `mcp_tool_names()` is the source of the names, and kept rather than
@@ -180,7 +180,11 @@ fn arguments_for(name: &str) -> Value {
             },
             "additionalProperties": false
         }),
-        "qqq_build" | "qqq_test" | "qqq_bench" => json!({
+        // **`build` alone, because `build` alone mutates.** `CommandName::is_mutating()` names
+        // `Build` and not `Test` or `Bench`, and `supports_dry_run()` IS `is_mutating()` -- so a
+        // `dry_run` on the other two would be **a promise the command does not keep**, which is what a
+        // cross-surface test found.
+        "qqq_build" => json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "The project directory. Defaults to the working directory." },
@@ -188,12 +192,22 @@ fn arguments_for(name: &str) -> Value {
             },
             "additionalProperties": false
         }),
+        "qqq_test" | "qqq_bench" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The project directory. Defaults to the working directory." }
+            },
+            "additionalProperties": false
+        }),
+        // **No `dry_run` here, and the absence is deliberate.** `output::command_schemas()` declares
+        // `supports_dry_run: false` for the `run` command, so a tool offering one would be
+        // **a promise the command does not keep** -- and a cross-surface test compares the two, which
+        // is how this was found.
         "qqq_run" => json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "request": { "type": "string", "description": "The request line, such as `GET /orders`." },
-                "dry_run": { "type": "boolean" }
+                "request": { "type": "string", "description": "The request line, such as `GET /orders`." }
             },
             "additionalProperties": false
         }),
@@ -294,6 +308,8 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
 
     match name {
         "qqq_errors_lookup" => Ok(errors_lookup(&arguments)),
+        "qqq_schema" => Ok(schema_lookup(&arguments)),
+        "qqq_caps_list" => Ok(caps_list()),
         other => Ok(unimplemented(other)),
     }
 }
@@ -330,7 +346,67 @@ fn errors_lookup(arguments: &Value) -> Value {
         }));
     }
 
-    let structured = json!({ "count": codes.len(), "codes": codes });
+    ok(&json!({ "count": codes.len(), "codes": codes }))
+}
+
+/// `qqq_schema` -- the command schemas, as structured content.
+///
+/// # Why this one is cheap, and what that says about the others
+///
+/// Because its backing is a **static registry**: `output::command_schemas()` needs no build, no guest and
+/// no filesystem. **A tool whose backing is already a pure function is a tool that should be wired
+/// first**, and the three wired so far share that property -- `ErrorCode::all()`, `command_schemas()`,
+/// `Namespace::all()`.
+///
+/// # The cross-check that falls out of it
+///
+/// Every schema carries **`mutating`** and **`supports_dry_run`**, which is `AGENT-020`'s contract **at
+/// the command level**. The tool descriptions assert the same property at the MCP level, and a test
+/// compares the two -- because **two places that answer one question is how they drift**.
+fn schema_lookup(arguments: &Value) -> Value {
+    let wanted = arguments.get("command").and_then(Value::as_str);
+    let schemas = crate::output::command_schemas();
+
+    let mut commands = Vec::new();
+    for s in &schemas {
+        if wanted.is_some_and(|w| w != s.command) {
+            continue;
+        }
+        commands.push(json!({
+            "command": s.command,
+            "summary": s.summary,
+            "mutating": s.mutating,
+            "supports_dry_run": s.supports_dry_run,
+            "data_schema": s.data_schema,
+        }));
+    }
+    ok(&json!({ "count": commands.len(), "commands": commands }))
+}
+
+/// `qqq_caps_list` -- the capability namespaces, as structured content.
+///
+/// # What this tool does NOT say, and why that is the honest scope
+///
+/// It lists the **namespaces the runtime defines** -- `sql`, `http`, `fs` and the rest. It does **not**
+/// say which of them a *project* declares; that needs a manifest, which needs a path, which is a
+/// different tool. **A tool that answered both would be answering a question about a project while
+/// appearing to answer one about the runtime**, and the difference is the whole of QQQ's model.
+fn caps_list() -> Value {
+    let namespaces: Vec<Value> = qqq_cap::capability::Namespace::all()
+        .into_iter()
+        .map(|n| json!({ "namespace": n.as_str() }))
+        .collect();
+    ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
+}
+
+/// Wrap a structured value as a successful tool result.
+///
+/// # Why this borrows
+///
+/// Because `json!` **reads** its operands rather than consuming them, so taking the value by ownership
+/// would be a signature promising a move it does not make. **Three tools go through this**, so the
+/// wrapper exists rather than three copies of the same four lines -- and the three agree by construction.
+fn ok(structured: &Value) -> Value {
     json!({
         "content": [ { "type": "text", "text": structured.to_string() } ],
         "structuredContent": structured,

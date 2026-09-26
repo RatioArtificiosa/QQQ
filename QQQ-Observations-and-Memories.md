@@ -26128,4 +26128,60 @@ Making a notification return `200` with a body: `a_notification_over_http_is_acc
 
 ---
 
+## §O-344 — Three tools wired, and a cross-surface test found three promises the commands do not keep
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### Gate 2's bar: three tools working
+
+`qqq_errors_lookup` was the only one; **`qqq_schema`** and **`qqq_caps_list`** join it. The three share a
+property worth naming — **their backing is a pure function already in the process**: `ErrorCode::all()`,
+`output::command_schemas()`, `Namespace::all()`.
+
+> **A tool whose backing is already a pure function is a tool that should be wired first.**
+
+**And `qqq_caps_list` says what it does *not* answer**: it lists the namespaces **the runtime defines**, not
+what a *project* declares. **A tool that answered both would be answering a question about a project while
+appearing to answer one about the runtime** — and that difference is the whole of QQQ's model.
+
+### Then the cross-surface test found three real divergences
+
+`output::command_schemas()` declares **`mutating`** and **`supports_dry_run`** per command; `mcp.rs`
+declares the same per tool. **Two places that answer one question is how they drift**, and the test
+compared them:
+
+```
+`qqq_run`   and the `run`   command disagree about `dry_run`
+`qqq_test`  and the `test`  command disagree about `dry_run`
+`qqq_bench` and the `bench` command disagree about `dry_run`
+```
+
+**The tools were wrong, and the runtime says so**: `CommandName::supports_dry_run()` **is literally
+`is_mutating()`**, and `is_mutating()` names `New, Init, Add, Remove, Install, Update, Build, Fmt, Lint,
+Migrate` — **so `run`, `test` and `bench` do not mutate**. A `dry_run` on them is **a promise the command
+does not keep**, in the exact words `AGENT-020`'s own test uses.
+
+### And my hand-list was the deeper defect
+
+The `AGENT-020` test carried a **hand-list** of which tools mutate — and **it agreed with me rather than
+with the runtime**: it named `qqq_run`, `qqq_test` and `qqq_bench` while the runtime names none of them.
+
+> **A hand-list is a second answer to a question the runtime already answers.**
+
+So the test now **derives** the partition from `command_schemas()`, maps a tool to its command by name, and
+**asserts the mapping is not vacuous** — so a rename that broke every mapping fails rather than passing by
+finding nothing.
+
+### The injection
+
+Making `qqq_test`'s description claim a `dry_run` it does not take:
+`every_mutating_tool_takes_dry_run_and_says_so` **FAILED** with *"and its description must not claim one"*.
+
+### Measured
+
+**13 MCP tests in 0.67 s** · three tools wired · `qqq_caps_list` returns **13 namespaces**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

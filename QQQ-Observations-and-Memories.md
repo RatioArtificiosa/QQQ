@@ -25310,4 +25310,54 @@ the held-port injection **inert on Windows** and recorded as such.
 
 ---
 
+## §O-330 — A partial gate run is a gate that reports what it happens to cover
+
+**Found:** CI on `6d26381`, failing on **all three platforms**. **Anchors:** `docs/unsafe-audit.md`,
+`.scratch/final_p10.cmd`, `.scratch/run_gate.cmd`.
+
+### The failure, and it was not the flake
+
+```
+Rust (macos-latest)   :: unsafe audit document matches the tree (SEC-020)
+Rust (ubuntu-latest)  :: unsafe audit document matches the tree (SEC-020)
+Rust (windows-latest) :: unsafe audit document matches the tree (SEC-020)
+
+DRIFT: `files scanned` says 157, the scan found 158
+```
+
+**The cause**: `crates/qqq-run/tests/common/mod.rs` is a **new `.rs` file**, so the scan went 157 → 158,
+and `docs/unsafe-audit.md` was not re-derived. **The third time this goal has met this exact drift.**
+
+### Why it escaped — and this is the finding
+
+**I ran `.scratch/final_p10.cmd` and not `.scratch/run_gate.cmd`.** `final_p10` covers fmt, clippy,
+workspace tests and the API ratchet; **`audit_unsafe --check-doc` is in the gate and not in it.**
+
+> **So the local check was green because it did not look.**
+
+**The DoD says *"run the whole gate"***, and a partial gate is a gate that reports **what it happens to
+cover**. This is `§O-282`'s rule in a new place:
+
+> **A guard is only as wide as its file list — and a gate run is only as wide as the checks it includes.**
+
+Four rounds ago the same shape appeared as a structural check that scanned one file, then one region;
+here it is a verification step that ran **four of eighty-eight checks** and was believed.
+
+### What changes
+
+`final_p10` is a useful **fast loop** and it stays. **The gate runs before the commit, always, and a fast
+loop is a pre-check rather than a substitute.**
+
+### Also noted
+
+Runs `f2b2f9a` and `f25a9f6` have shown **`in_progress` for many rounds**. **A run that never concludes
+is not a run that passed**, and it is worth reading before assuming green.
+
+### Measured
+
+`UNSAFE AUDIT DOC OK -- 158 file(s)`, 11 crate roots · local gate **88 ok / 2 failed** (both expected) ·
+`check_xrefs` PASSED · corpus re-recorded.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

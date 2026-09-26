@@ -62,6 +62,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # The code and the docs URL, as §12.2 part 2 requires both.
@@ -116,9 +127,7 @@ def run(binary: Path, args: list[str], cwd: Path) -> tuple[int, str]:
         cwd=cwd,
         capture_output=True,
         text=True,
-        errors="replace",
-        timeout=60,
-    )
+        timeout=60, encoding="utf-8", errors="replace")
     return p.returncode, p.stdout + p.stderr
 
 

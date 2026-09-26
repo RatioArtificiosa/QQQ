@@ -373,6 +373,17 @@ jobs:
       - name: Prove the toolchain check detects drift and a moving channel
         run: python tools/check_toolchain.py --self-test
 
+      # The rule *"add a checker to BOTH `ci.yml` and `docker/entrypoint.sh`"* is stated about a
+      # dozen times and was enforced by nothing. Measured 2026-09-25: 20 commands ran in one gate
+      # and not the other, and eighteen of them had no recorded reason -- the divergence had
+      # accumulated rather than been decided. This compares the two gates, reads the declared
+      # divergences out of `entrypoint.sh`, and **fails when a declaration goes stale** as well as
+      # when an undeclared one appears (`§O-286`, `§O-291`).
+      - name: Verify the two gates run the same checkers, beyond the declared divergences
+        run: python tools/check_gate_parity.py
+      - name: Prove the parity check detects an undeclared, a stale and a misdirected divergence
+        run: python tools/check_gate_parity.py --self-test
+
       # `.coderabbit.yaml` decides what the external reviewer is shown and which
       # rules it is told to apply, which makes it a control -- and a control that
       # silently stops working is worse than one never added, because the review

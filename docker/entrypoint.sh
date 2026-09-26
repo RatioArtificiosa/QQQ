@@ -882,6 +882,9 @@ cmd_checks() {
     python3 tools/normalize_eol.py --check
     python3 tools/normalize_eol.py --self-test
     python3 tools/check_wit_errors.py
+    # The real toolchain's parse, not a Python one. `wasm-tools` is installed in the image for
+    # this; without it the checker fails loudly rather than skipping (`§O-291`).
+    python3 tools/check_wit.py
     python3 tools/check_wit_since.py
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py
@@ -938,6 +941,8 @@ cmd_checks() {
     python3 tools/check_scope_table.py --self-test
     python3 tools/check_toolchain.py
     python3 tools/check_toolchain.py --self-test
+    python3 tools/check_gate_parity.py
+    python3 tools/check_gate_parity.py --self-test
     python3 tools/check_coderabbit_config.py
     python3 tools/check_coderabbit_config.py --self-test
     python3 tools/check_checklist_citations.py
@@ -1044,13 +1049,27 @@ cmd_checks() {
 #   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
 #                                          of a working tree that is usually dirty
 #   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
-#   tools/check_wit.py                     needs `wasm-tools` on PATH; the image does not
-#                                          install it, so WIT *parsing* is unverified here
 #   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
 #                                          declaration — a cargo build of the whole workspace
 #   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;
 #                                          they belong to CI's Rust jobs, and this file's
 #                                          `test` command already builds and runs the suite
+#
+# `tools/check_wit.py` used to be on this list — the image had no `wasm-tools`, so WIT *parsing*
+# was unverified on Linux while three Python WIT checkers passed. The toolchain is now installed in
+# the image and the checker now runs here, so the declaration was **removed rather than kept**:
+# this checker fails on a stale exemption, and a list that only grows stops meaning anything.
+#
+# And **one divergence in the other direction** — a command this bridge runs that CI does not:
+#
+#   tools/check_sbom.py --self-test        the bridge proves the checker can fail; CI does not
+#                                          repeat it because it runs the real `sbom` half in the
+#                                          job that produces the artifact. The bridge is allowed
+#                                          to be the wider gate, but not silently.
+#
+# The list is **parsed by `tools/check_gate_parity.py`**, which fails when the two gates diverge
+# beyond it *and* when an entry on it stops diverging — a stale exemption is a defect in its own
+# right, and a list that only grows is a list that stops meaning anything (`§O-291`).
 #
 # If this list and `ci.yml` disagree beyond these thirteen, that is the defect — not the
 # divergence itself. A parity checker would be the durable form; it needs this list as data,

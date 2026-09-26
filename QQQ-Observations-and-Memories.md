@@ -22908,4 +22908,60 @@ fired on the entry describing the guard.**
 
 ---
 
+## §O-291 — The gate-parity checker, and the three defects it found in itself before it found any in the gates
+
+**Found:** Phase 0.1 of the build goal — writing the checker that enforces *"add a checker to BOTH
+`ci.yml` and `docker/entrypoint.sh`"*. **Anchors:** `tools/check_gate_parity.py`,
+`docker/entrypoint.sh`, `.github/workflows/ci.yml`.
+
+### What it enforces
+
+Measured when it first ran: **`ci.yml` 84 invocations, the bridge 72, 13 in one and not the other,
+1 in the other and not the one.** The declaration in `entrypoint.sh` covered 13; the rule that a
+declaration must stay *true* was enforced by nothing.
+
+`tools/check_gate_parity.py` reads the declaration **out of `entrypoint.sh`** rather than keeping a
+second copy, and checks four things: an undeclared divergence in either direction, a **declared**
+divergence that no longer diverges (a stale exemption), a declared count that no longer matches what
+the declaration covers, and vacuity. Self-test: **12 cases**, all firing.
+
+### Three defects it found in itself, each caught by a different discipline
+
+**1. A parser that could not express its own input.** The first `DECLARED` pattern was
+`tools/[\w./*-]+\.py`, which cannot match `tools/check_sbom.py sbom` — a tool *with an argument*.
+Two real declarations were invisible to it, so the checker reported them as **undeclared** while
+they sat written in the file it was parsing. That is `§O-290`'s lesson from the other direction:
+there, a guard could not match the file it needed; here, a parser could not read the syntax it was
+written for. Fixed by allowing a trailing argument in the token.
+
+**2. Membership is not direction.** `tools/check_sbom.py sbom` is **ci-only** and
+`tools/check_sbom.py --self-test` is **bridge-only** — the same script, opposite claims. The first
+version of the checker treated every declaration as one set, so it accepted each in the other's
+section and then reported the pair as *stale*. The declaration now has two headings and the checker
+reads the direction from which heading an entry sits under, failing when a token diverges the other
+way: *"Direction is part of the claim."*
+
+**3. An unexercised rule, and it was not decoration.** The stale-exemption rule looked like a
+formality until it fired: `check_wit.py` had been declared ci-only *because the image had no
+`wasm-tools`*, and adding `wasm-tools` to the image made that declaration a lie — which the checker
+said, in those words, instead of accepting it.
+
+### And one piece of luck worth naming
+
+Fixing the 42 locale-encoded call sites, I wrote a script to splice
+`encoding="utf-8", errors="replace"` into every offending call by absolute character offset. **It
+corrupted 25 files** — the offset arithmetic was wrong — and the script's own closing
+`ast.parse` check caught every one before any of them ran. `git checkout -- tools/` restored all 25,
+verified by the corpus returning to `check_xrefs` clean.
+
+**The lesson is not "be careful with offsets".** It is that the script *checked its own output*
+before declaring success, and that a git-clean tree made the whole attempt free to lose. A
+mechanical edit across 26 files is only safe if it verifies the result and can be reverted — and
+both of those were decided before the edit, not after the failure.
+
+→ `tools/check_gate_parity.py`, `docker/entrypoint.sh`, `.github/workflows/ci.yml`,
+`.scratch/fix_encoding_sites.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

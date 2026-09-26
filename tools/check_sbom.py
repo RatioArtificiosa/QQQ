@@ -34,6 +34,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 # A minimal but valid CycloneDX document, shaped like real `cargo cyclonedx`
 # output: the SUBJECT lives in `metadata.component`, and `components` lists the
 # subject's *dependencies*. Anchored on a real generated file rather than on a

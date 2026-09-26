@@ -50,6 +50,17 @@ from pathlib import Path
 import os
 import time
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 CHECK = ROOT / "tools" / "check_xrefs.py"
 PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
@@ -61,7 +72,7 @@ def run_validator() -> tuple[int, str]:
     args = [sys.executable, str(CHECK)]
     if SANDBOX is not None:
         args.append(str(SANDBOX))
-    p = subprocess.run(args, capture_output=True, text=True, cwd=ROOT)
+    p = subprocess.run(args, capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
     return p.returncode, p.stdout + p.stderr
 
 
@@ -768,8 +779,7 @@ class _Lock:
             try:
                 out = subprocess.run(
                     ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                    capture_output=True, text=True, timeout=15, check=False,
-                ).stdout
+                    capture_output=True, text=True, timeout=15, check=False, encoding="utf-8", errors="replace").stdout
                 return str(pid) in out
             except (OSError, subprocess.SubprocessError):
                 return True
@@ -907,8 +917,7 @@ def _run(lock: _Lock) -> int:
     # against the documents that will actually be committed.
     hermetic = subprocess.run(
         [sys.executable, str(CHECK), "--self-test"],
-        capture_output=True, text=True, errors="replace", cwd=ROOT,
-    )
+        capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
     if hermetic.returncode != 0:
         print("FATAL: check_xrefs.py --self-test failed -- a rule is dead.")
         print((hermetic.stdout or hermetic.stderr)[-4000:])

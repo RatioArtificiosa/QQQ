@@ -38,6 +38,17 @@ _sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_xrefs import write_text_lf  # noqa: E402
 
 
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
+
 ROOT = Path(__file__).resolve().parent.parent
 ADVISORY_DIR = ROOT / "docs" / "advisories"
 INDEX = ADVISORY_DIR / "INDEX.md"

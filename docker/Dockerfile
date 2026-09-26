@@ -119,6 +119,31 @@ RUN cargo install cargo-fuzz --locked
 # commit, which is exactly what an SBOM consumer audits.
 RUN cargo install cargo-cyclonedx --locked
 
+# `wasm-tools`, for `tools/check_wit.py` — and its absence was a **silent hole in this bridge**.
+#
+# # Why it is here now
+#
+# `check_wit.py` parses every `.wit` file with the real toolchain, and it failed in this image with:
+#
+#     wasm-tools not found on PATH.
+#     Install it with:  cargo install wasm-tools --locked
+#     Skipping WIT validation would mean shipping unparsed interface definitions, so this is a
+#     failure rather than a warning.
+#
+# So the bridge ran `check_wit_reference.py`, `check_wit_style.py` and `check_wit_since.py` — three
+# checkers that parse WIT **in Python** — and never validated that the same files parse with the
+# toolchain a guest author actually uses. That is a weaker claim about the same files, and it was
+# declared as a divergence with a reason (`§O-288`) rather than fixed. Now it is fixed.
+#
+# It arrives on the critical path rather than ahead of it: `LANG-002` is *"Rust bindings generated
+# from `wit/` via `wit-bindgen`"*, and `wit-bindgen` is part of this same tool. Doing it here means
+# the Rust guest work does not stop to repair its own toolchain (`§O-291`).
+#
+# Pinned with `--locked` for the same reason as the two above: an unpinned parser is a component of
+# verification that changes without a commit.
+RUN cargo install wasm-tools --locked \
+    && wasm-tools --version
+
 # ---------------------------------------------------------------------------
 # Stage 2 — the environment the commands actually run in
 # ---------------------------------------------------------------------------

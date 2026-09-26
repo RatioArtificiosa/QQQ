@@ -50,6 +50,17 @@ import re
 import subprocess
 import sys
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -879,8 +890,7 @@ def self_test() -> int:
                 return ""
             return subprocess.run(
                 ["git", "ls-files", "-z"] + paths,
-                cwd=ROOT, capture_output=True, text=True, check=False,
-            ).stdout.strip("\0 \n")
+                cwd=ROOT, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace").stdout.strip("\0 \n")
 
         # --- check A: tracked exclusions must exist -----------------------
         #

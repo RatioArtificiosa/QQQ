@@ -42,6 +42,17 @@ import subprocess
 import sys
 import tempfile
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GEN = "tools/gen_schemas.py"
 
@@ -63,8 +74,7 @@ def run_generator(tree: pathlib.Path, check: bool) -> tuple[int, str]:
         cwd=tree,
         capture_output=True,
         text=True,
-        check=False,
-    )
+        check=False, encoding="utf-8", errors="replace")
     return proc.returncode, proc.stdout + proc.stderr
 
 

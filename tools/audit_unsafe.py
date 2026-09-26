@@ -36,6 +36,17 @@ import re
 import sys
 import tempfile
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = os.environ.get("QQQ_UNSAFE_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates"))
 # The page this scan is the evidence for. Checked by `--check-doc`; see `check_doc` for why
 # a hand-copied count in a safety document is a defect rather than a stale detail.

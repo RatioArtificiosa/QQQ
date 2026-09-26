@@ -17,6 +17,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 P = (ROOT / "QQQ-Proposal-V1.md").read_text(encoding="utf-8")
 C = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
@@ -96,8 +107,7 @@ for what, pat in (
 # number is printed every run, so 8 -> 7 would be noticed rather than absorbed.
 _self_test = subprocess.run(
     [sys.executable, "tools/self_test_xrefs.py"],
-    capture_output=True, text=True, cwd=ROOT,
-)
+    capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
 _injections = re.search(r"(\d+)/(\d+) fault injections detected", _self_test.stdout)
 if _injections:
     _label = f"validator self-test passes ({_injections.group(0).split(' fault')[0]})"
@@ -113,7 +123,7 @@ for script, label in (
     ("tools/check_wit.py", "every WIT interface parses"),
 ):
     p = subprocess.run([sys.executable, script], capture_output=True,
-                       text=True, cwd=ROOT)
+                       text=True, cwd=ROOT, encoding="utf-8", errors="replace")
 
     # A **missing tool** is reported as such, not as a validation failure.
     #
@@ -137,7 +147,7 @@ for script, label in (
 
 # --- Pushed to the right repository ------------------------------------------
 r = subprocess.run(["git", "remote", "get-url", "origin"],
-                   capture_output=True, text=True, cwd=ROOT)
+                   capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
 check("origin is the requested repo",
       "RatioArtificiosa/QQQ" in r.stdout,
       r.stdout.strip() or "no remote")
@@ -161,11 +171,11 @@ check("origin is the requested repo",
 # Both `diff` and `diff --cached` are checked, so a staged-but-uncommitted
 # change is caught too.
 r = subprocess.run(["git", "diff", "HEAD", "--stat"],
-                   capture_output=True, text=True, cwd=ROOT)
+                   capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
 unstaged_change = r.stdout.strip()
 
 r2 = subprocess.run(["git", "status", "--porcelain"],
-                    capture_output=True, text=True, cwd=ROOT)
+                    capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
 # Untracked files that would be committed are a real gap; the EOL-only churn is
 # not. `??` marks an untracked path.
 untracked = [

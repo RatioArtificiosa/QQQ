@@ -41,6 +41,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Extensions that are text and must be LF in the working tree. Derived from
@@ -61,8 +72,7 @@ def git_files() -> list[Path]:
     """
     out = subprocess.run(
         ["git", "ls-files", "-z"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    )
+        cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
     return [ROOT / p for p in out.stdout.split("\0") if p]
 
 
@@ -100,8 +110,7 @@ def untracked_would_be_wrong(limit: int = 40) -> list[tuple[Path, str]]:
     """
     out = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    )
+        cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
     findings: list[tuple[Path, str]] = []
     for rel in out.stdout.split("\0"):
         if not rel:
@@ -132,8 +141,7 @@ def core_autocrlf() -> str:
     """The repository's `core.autocrlf` setting, or `(unset)`."""
     out = subprocess.run(
         ["git", "config", "--get", "core.autocrlf"],
-        cwd=ROOT, capture_output=True, text=True,
-    )
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return out.stdout.strip() or "(unset)"
 
 
@@ -162,8 +170,7 @@ def index_eol_report() -> list[str]:
     """
     out = subprocess.run(
         ["git", "ls-files", "--eol"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    )
+        cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
     bad: list[str] = []
     for line in out.stdout.splitlines():
         # Format: `i/<index-eol> w/<worktree-eol> attr/<attrs>\t<path>`

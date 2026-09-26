@@ -51,6 +51,17 @@ _sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_xrefs import write_text_lf  # noqa: E402
 
 
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
+
 # A synthetic WIT source exercising the structures that broke the parser: a nested
 # record inside an interface, a resource with methods, and an `@since` attribute.
 FIXTURE_WIT = """\
@@ -162,8 +173,7 @@ def _regenerate_check() -> tuple[int, str]:
         [sys.executable, str(GEN), "--check"],
         capture_output=True,
         text=True,
-        cwd=ROOT,
-    )
+        cwd=ROOT, encoding="utf-8", errors="replace")
     return p.returncode, p.stdout + p.stderr
 
 

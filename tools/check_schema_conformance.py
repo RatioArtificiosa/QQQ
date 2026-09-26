@@ -56,6 +56,17 @@ import sys
 import time
 from dataclasses import replace
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schema"
 
@@ -320,7 +331,7 @@ def probe_envelope() -> int:
     schema = json.loads((SCHEMA_DIR / "cli-envelope.schema.json").read_text(encoding="utf-8"))
     failures = 0
     for label, args, expect_ok in ENVELOPE_PROBES:
-        r = subprocess.run([str(binary), *args], capture_output=True, text=True)
+        r = subprocess.run([str(binary), *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
         line = r.stdout.strip().splitlines()
         if not line:
             print(f"  {label}: no JSON on stdout (exit {r.returncode})", file=sys.stderr)
@@ -499,8 +510,7 @@ def self_test() -> int:
         print("  build  qqqai, which the exit_code injection needs")
         prep = subprocess.run(
             ["cargo", "build", "-p", "qqq-run", "--bin", "qqqai"],
-            capture_output=True, text=True, cwd=ROOT,
-        )
+            capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
         built = find_binary()
         if built is None or prep.returncode != 0:
             check(
@@ -536,8 +546,7 @@ def self_test() -> int:
                 )
                 rebuild = subprocess.run(
                     ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
-                    capture_output=True, text=True, cwd=ROOT,
-                )
+                    capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
                 if rebuild.returncode != 0:
                     check("caught: a constant exit_code in the success envelope", False,
                           "the injected build failed")
@@ -560,8 +569,7 @@ def self_test() -> int:
                 if profile == "release":
                     restore_args.append("--release")
                 restore = subprocess.run(
-                    restore_args, capture_output=True, text=True, cwd=ROOT
-                )
+                    restore_args, capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
             check(
                 "restored after the exit_code injection",
                 src.read_bytes() == original_src

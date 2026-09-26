@@ -28,6 +28,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 SRC = Path('crates/qqq-host/src/host_clock.rs')
 
 # The `timezone` body: swap the guarded form for a bare expression with the same
@@ -58,8 +69,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
         out = subprocess.run(
             ['cargo', 'test', '-p', 'qqq-host', '--lib', 'every_host_function'],
-            capture_output=True, text=True, errors='replace',
-        )
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
         combined = out.stdout + out.stderr
 
         if 'registers 5 host functions but only 4' in combined:

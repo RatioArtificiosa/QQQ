@@ -30,6 +30,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# This tool's own stdout must be able to encode what it prints. On a Windows console the stream
+# inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
+# raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - a replaced stream
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # (label, target file, find, replace, expected fragment in the checker's output)
@@ -107,8 +118,7 @@ INJECTIONS = [
 def run_checker() -> str:
     out = subprocess.run(
         [sys.executable, 'tools/check_wit_since.py'],
-        capture_output=True, text=True, errors='replace', cwd=ROOT,
-    )
+        capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
     return out.stdout + out.stderr
 
 
@@ -117,8 +127,7 @@ def parses(path: Path) -> bool:
         return True  # cannot check; the caller reports it
     out = subprocess.run(
         ['wasm-tools', 'component', 'wit', str(path)],
-        capture_output=True, text=True, cwd=ROOT,
-    )
+        capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
     return out.returncode == 0
 
 

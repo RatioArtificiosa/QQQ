@@ -449,6 +449,35 @@ fn emit_span(
 /// Because the two failures this covers want different fixes: a port below 1024 needs a privilege,
 /// and a port already in use needs a different number. The cause is the OS's own sentence, carried
 /// verbatim rather than paraphrased — a paraphrase of `EADDRINUSE` is a worse `EADDRINUSE`.
+/// Announce the address this server is **actually bound to** — `§O-326`'s route 2.
+///
+/// # Why the bound address and not the requested one
+///
+/// Because the two differ exactly when the request was for port `0`: [`ListenAddr::render`] then says
+/// `127.0.0.1:0`, which is a **true statement about the request and a useless one about the server**.
+/// **A caller that guesses a port races with every other process on the machine; a caller that reads
+/// this line does not.**
+///
+/// # Why it goes through the logger
+///
+/// So it inherits the level filter, the format and **§10.3's redaction** like every other line this
+/// server writes — a start-up line printed directly to stdout would be the one line that escapes the
+/// controls the rest of the server obeys.
+fn announce_bound(logger: &Logger, addr: std::net::SocketAddr) {
+    emit_record(
+        logger,
+        Record::new(
+            Level::Info,
+            TraceId::from_counter(0),
+            TraceId::from_counter(0),
+            "-",
+            "qqq-serve",
+            MANIFEST_REV_UNKNOWN,
+            format!("listening on {addr}"),
+        ),
+    );
+}
+
 /// The three handles every connection shares, taken from the config once.
 ///
 /// # Why they are taken together
@@ -541,6 +570,8 @@ pub async fn serve(
     let listener = Listener::bind(listener_config)
         .await
         .map_err(|e| bind_failed(&config.addr.render(), &e.to_string()))?;
+
+    announce_bound(&logger, listener.local_addr());
 
     let table = Arc::new(table);
     let ledger = ledger_for(&config);

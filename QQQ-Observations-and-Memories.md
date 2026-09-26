@@ -25121,4 +25121,66 @@ helper · 2 observed to flake on Ubuntu.
 
 ---
 
+## §O-327 — Route 2 is blocked by a deliberate refusal, and the refusal's premise has changed
+
+**Found:** Phase 1, taking `§O-326`'s route 2. **Anchors:** `crates/qqq-serve/src/server.rs`,
+`crates/qqq-io/src/listener.rs`.
+
+### What landed
+
+`serve` now emits **one start-up record** naming the address it **bound**, through the logger so it
+inherits the level filter, the format and **§10.3's redaction** like every other line the server writes:
+
+```
+{"level":"info","trace_id":"000…0","tenant":"-","component":"qqq-serve",…
+ "msg":"listening on 127.0.0.1:45997"}
+```
+
+Observed by running the binary with a real port. Extracted into `announce_bound` because `serve` is at
+its line budget and the call spans four lines otherwise.
+
+### A claim of mine that was wrong, corrected in the same round
+
+`§O-326` said *"`Listener::bind` already resolves `local_addr()`"*, and this round began by **adding**
+that accessor — which produced a duplicate definition, because **it already existed**:
+
+```
+/// The address actually bound.
+pub const fn local_addr(&self) -> SocketAddr { self.local }
+```
+
+**My grep looked for `pub|local:` on the field and missed the accessor on the impl.** The accessor was
+never the missing piece. The duplicate is removed and the original stands.
+
+### Route 2 is blocked, and by a deliberate refusal
+
+```
+error[QQQ-6002]: `--listen 127.0.0.1:0` is not a usable address:
+                port 0 does not name a port to listen on
+```
+
+So the six test files **cannot** use `--listen 127.0.0.1:0`, and **the race is inherent to the CLI's
+design, not to the tests**.
+
+### The finding: the refusal's premise has changed
+
+**Before this round the message was true** — port `0` named nothing the operator could find. **Now it
+does**: the OS picks a port and the server announces it.
+
+**Relaxing the refusal is therefore a product decision with a real argument on both sides** — *"a port
+you cannot name is a port you cannot firewall"* against *"let the OS choose, and tell me"* — and it is
+**recorded as one rather than taken unilaterally as a test workaround.**
+
+### What this does not fix
+
+**The six files still guess a port.** The interim is `§O-326`'s route 1 — one shared retrying helper in
+`tests/common` — and it **keeps the race**, which is why it is the interim.
+
+### Measured
+
+workspace **2660 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121, **unchanged** — no new
+public item) · `PUBLIC REACHABILITY OK` · the start-up line observed on a real run.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

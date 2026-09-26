@@ -24987,4 +24987,69 @@ finding — or reproduce locally under load.
 
 ---
 
+## §O-325 — The reproduction attempt measured nothing, and the flake does not reproduce locally
+
+**Found:** Phase 1, diagnosing `§O-324`'s flake without a fourth guess. **Anchors:**
+`crates/qqq-run/tests/metrics_endpoint.rs`.
+
+### A shell loop that reported a 100 % failure rate and measured nothing
+
+A `cmd` `for /L` loop over the test binary reported **`PASS=0 FAIL=20`** — which would have meant the
+flake was not a flake at all, and that every run on this machine fails.
+
+**Running the binary directly: 4 passed, 0 failed.** The loop's `set /a` inside a block, with delayed
+expansion off, never updated, and `errorlevel` was evaluated at parse time.
+
+> **The fifth instance of *"an injection is a measurement, and it must be checked for whether it
+> measured anything"*** — and the rule now has a **shell-loop form**: a counter that cannot increment
+> and a check that cannot fail look exactly like a total failure.
+
+It was caught by running the same command **once, directly**, and reading its output. That is the same
+habit that caught the previous four.
+
+### What the measurement did establish
+
+**The flake does not reproduce locally.** The suite and twenty direct runs are green here, so it is
+**load-dependent on the CI runner** — consistent with a port-allocation race, and **not** with a logic
+defect.
+
+### The fix, and what it is not
+
+`request_once` now **retries the whole attempt on a fresh port** when the client reads nothing, up to
+four times, then panics with a message that **names the race**:
+
+```
+attempt 1 of 4 read nothing; retrying on a fresh port
+...
+all 4 attempts read nothing. This is the port-allocation race this helper retries around, not an
+assertion failure -- the server answered no bytes, so there is nothing to assert about.
+```
+
+**That is honest about what it is: a bounded retry around a known-unreliable allocation, not a repair
+of it.**
+
+### The real repair, recorded rather than claimed
+
+`Listener::bind` **already resolves** `local_addr()`, but the summary prints `opts.listen` — so
+`--listen 127.0.0.1:0` reports a useless `:0`. **A server that reports the address it *bound* rather
+than the one it was asked for** would let these tests remove the allocation entirely. **That is the next
+step, and it is a product improvement rather than a test workaround.**
+
+### Why the retry lives in the helper
+
+Because **every assertion in that file is a `contains`, and `!contains(x)` is satisfied by nothing at
+all** — so an empty read must be handled **once, centrally**, or an absence assertion silently passes.
+That was `§O-314`'s finding; this round gives it a mechanism.
+
+**Fault-injected by making the client write nothing**: both tests that read fired, the four retries are
+visible, and the terminal message names the race. **Before this round, that injection failed one test
+with a message about a 404.**
+
+### Measured
+
+4 tests, 1.15 s · the retry's exhaustion path observed · the flake unreproduced locally over 20 direct
+runs.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

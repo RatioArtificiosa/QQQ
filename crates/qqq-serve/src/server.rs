@@ -85,6 +85,17 @@ pub struct ServerConfig {
     /// connection would give each connection its own counters, which is exactly what a
     /// shared registry exists to avoid and which looks like "the metric is always 1".
     pub metrics: Option<Arc<crate::metrics::HttpMetrics>>,
+    /// The path the registry is exposed on, or `None` to expose nothing — `OBS-013`.
+    ///
+    /// # Why this is a config field and not a route
+    ///
+    /// Because it is the **server's** path, not the application's: `serve::prepare` refuses a value
+    /// that collides with a declared route, so the two can never contend. Making it a route would
+    /// have put it in the table the manifest owns, where the application could shadow it.
+    ///
+    /// `None` is the honest default. The registry holds tenant names and traffic volume, and who
+    /// may read that is the operator's decision.
+    pub metrics_path: Option<String>,
     /// The per-tenant request limits, or `None` for none (`SRV-020`).
     ///
     /// **`Arc` for a reason the registry's does not share**: the rate windows are mutable
@@ -151,6 +162,7 @@ impl ServerConfig {
             // server pay for a feature it was not asked for; the recording sites are
             // `Option`-checked precisely so that absence is free.
             metrics: None,
+            metrics_path: None,
             // Likewise: a server whose manifest declared no `[server.limits]` applies none.
             // A built-in cap here would be a number this crate invented, silently changing
             // behaviour on upgrade -- see `qqq_cap::manifest::RequestLimits`.
@@ -387,7 +399,7 @@ pub async fn serve(
     // Cloned into every connection task rather than one clone per connection: a copy of the
     // *registry* would give each connection its own counters, and the metric would read 1
     // forever. The `Arc` is what makes "one registry, many connections" structural.
-    let metrics: Option<Arc<crate::metrics::HttpMetrics>> = config.metrics.clone();
+    let (metrics, metrics_path) = (config.metrics.clone(), config.metrics_path.clone());
     // Cloned into every connection task, which clones the `Arc`. The rate windows are shared
     // **mutable** state, so this is not merely an optimisation: a per-connection copy would
     // give each connection its own allowance and the limit would enforce nothing.
@@ -470,7 +482,7 @@ pub async fn serve(
             // Cloned per connection task, which clones only the `Arc` — the registry
             // itself stays one value. See `ServerConfig::metrics` for why that distinction
             // is the whole point.
-            let metrics = metrics.clone();
+            let (metrics, metrics_path) = (metrics.clone(), metrics_path.clone());
             // Cloned per task, which clones the `Arc` -- one limiter, many connections.
             let limits = limits.clone();
             // Cloned per task, which clones the `Arc` -- one policy, many connections.
@@ -543,6 +555,7 @@ pub async fn serve(
                     // default is what applies here.
                     idle_timeout: Some(connection_config.idle_timeout),
                     metrics: metrics.as_ref(),
+                    metrics_path: metrics_path.as_deref(),
                     limits: limits.as_ref(),
                     tenant_labels: &tenant_labels,
                 };
@@ -1136,6 +1149,82 @@ fn apply_cors(
 /// refusal status is safe to use here, unlike on a simple request, because a preflight
 /// has no application semantics: the browser is not calling the route, so there is no
 /// handler decision to misreport.
+/// Serve the metrics path when this request is for it — `OBS-013`.
+///
+/// # Why this is its own function
+///
+/// Because `serve_special_route` is a dispatch chain whose *order* is the part that matters — the
+/// docs above it explain why a `101` cannot follow a body and why a preflight must precede routing —
+/// and a branch that only decides *whether* to answer is a different kind of thing from the three
+/// that decide *how*.
+///
+/// Returns `None` when the request is not for the metrics path, so the caller falls through
+/// unchanged.
+async fn maybe_serve_metrics(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    span_seq: &mut u64,
+) -> Option<Served> {
+    let metrics_path = ctx.metrics_path?;
+    let metrics = ctx.metrics?;
+    if path != metrics_path {
+        return None;
+    }
+    // `HEAD` as well as `GET`: a scraper may probe with it, and `write_response` strips the body
+    // for a head request, so the length still reports what a `GET` would have returned.
+    if !matches!(
+        head.method,
+        crate::route::Method::Get | crate::route::Method::Head
+    ) {
+        return None;
+    }
+    *span_seq += 1;
+    Some(serve_metrics(stream, head, path, metrics, ctx, tenant, *span_seq).await)
+}
+
+/// Serve the Prometheus exposition — `OBS-013`.
+///
+/// # Why the body is rendered here rather than cached
+///
+/// Because a scrape is a snapshot: a cached body would report whatever was true when it was built,
+/// and reading the registry is the cheapest thing in this function.
+///
+/// # Why the content type names a version
+///
+/// `text/plain; version=0.0.4` is the exposition format's own identifier. A scraper uses it to
+/// decide how to parse the body, so omitting it makes the response unparseable by the tools this
+/// endpoint exists for — reachable and useless.
+async fn serve_metrics(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    metrics: &crate::metrics::HttpMetrics,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    span: u64,
+) -> Served {
+    let mut response = Response::text(200, metrics.render_prometheus());
+    response.set_header("content-type", "text/plain; version=0.0.4; charset=utf-8");
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    // Closed after the response, like the preflight: a scrape is one request, and keeping the
+    // connection alive would let an unauthenticated reader hold one open per scrape.
+    let keep_alive = false;
+    let bytes = response::write_response(&response, head.version, keep_alive, is_head(head));
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    let _ = stream.shutdown().await;
+    Served::HandlerClosed
+}
+
 async fn serve_preflight(
     stream: &mut TcpStream,
     head: &RequestHead,
@@ -1291,6 +1380,8 @@ pub struct ConnectionContext<'a> {
     pub logger: &'a Logger,
     /// The cross-origin policy, or `None` when the manifest declared none.
     pub cors: Option<&'a crate::cors::Cors>,
+    /// The path the registry is exposed on, or `None` — `OBS-013`.
+    pub metrics_path: Option<&'a str>,
     /// The per-route authentication policy, or `None` when the caller installed none.
     ///
     /// Borrowed from the `Arc` the accept loop cloned, so every connection consults the
@@ -1663,6 +1754,17 @@ async fn serve_special_route(
     buf: &mut Vec<u8>,
     span_seq: &mut u64,
 ) -> Option<Served> {
+    // §10.2's scrape endpoint — `OBS-013`.
+    //
+    // **First**, before CORS and before routing, because this is a *server*-owned path: the
+    // application's CORS policy, auth policy and route table are about the application's routes,
+    // and `serve::prepare` refuses a `--metrics-path` that collides with a declared one. Putting it
+    // after routing would make it reachable only where the table happened to have no entry, which
+    // is the opposite of owning it.
+    if let Some(served) = maybe_serve_metrics(stream, head, path, ctx, tenant, span_seq).await {
+        return Some(served);
+    }
+
     if head.method == crate::route::Method::Options {
         if let Some(requested) = head.header("access-control-request-method") {
             if let Some(cors) = ctx.cors {

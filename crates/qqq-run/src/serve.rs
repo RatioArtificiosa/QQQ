@@ -136,6 +136,25 @@ pub struct ServeOptions {
     /// a developer watching a terminal gets the readable encoding, and a server piped into a log
     /// collector gets the structured one.
     pub log_format: Option<String>,
+    /// `--metrics-path <path>` — expose the registry in the Prometheus exposition format.
+    ///
+    /// `None` exposes nothing, which is the honest default: the registry holds **tenant names and
+    /// traffic volume**, and who may read that is the operator's decision rather than the
+    /// framework's. `--audit-log` and `--redact-from` are the same shape for the same reason.
+    ///
+    /// # Why the path is checked against the manifest's routes
+    ///
+    /// Because a collision would silently **shadow** one of them — either the application's route
+    /// disappears, or the metrics do. Neither is visible from outside, so the collision is refused
+    /// at start-up, where an operator can act on it.
+    ///
+    /// # What this does not solve, and says so
+    ///
+    /// The endpoint is served on the **application** listener, so anyone who can reach the app can
+    /// read the metrics. A separate admin listener is the conventional answer; it needs a second
+    /// accept loop with its own TLS and shutdown, which is a larger change than this item and is
+    /// recorded rather than half-built.
+    pub metrics_path: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -150,6 +169,7 @@ impl Default for ServeOptions {
             audit_log: None,
             redact_from: None,
             log_format: None,
+            metrics_path: None,
         }
     }
 }
@@ -174,6 +194,28 @@ pub struct ServeOutput {
     pub guest_loaded: bool,
 }
 
+/// Read and validate `--metrics-path`'s value.
+///
+/// # Errors
+///
+/// A usage error when the value is empty or is not an absolute path.
+///
+/// # Why the shape is checked here
+///
+/// A relative path would never match a request target — the router matches on an absolute path — so
+/// the endpoint would exist, be named in the operator's command line, and never answer. That is the
+/// "looks configured" failure this repository refuses everywhere else, so it is refused here.
+fn metrics_path_of(args: &[String], i: usize) -> Result<String> {
+    let v = value_of(args, i, "--metrics-path")?;
+    if !v.starts_with('/') {
+        return Err(
+            usage(format!("`--metrics-path {v}` is not an absolute path"))
+                .with_remediation("it must start with `/`, for example `--metrics-path /metrics`"),
+        );
+    }
+    Ok(v)
+}
+
 /// Parse `qqqai serve`'s arguments.
 ///
 /// # Errors
@@ -182,6 +224,39 @@ pub struct ServeOutput {
 /// parse. Every one is a *usage* error: the command names what was wrong and what
 /// to write instead, because a server that starts with a flag silently ignored is
 /// worse than one that refuses to start.
+/// Read and validate `--workers`' value.
+///
+/// # Errors
+///
+/// A usage error when the value is not a whole number, is zero, or exceeds [`MAX_WORKERS`].
+///
+/// # Why this is its own function
+///
+/// Because `options` is at its line budget and this was its largest arm -- and because the two
+/// refusals below are a *policy* about worker counts, which reads better beside each other than
+/// between a match arm's braces.
+fn workers_of(args: &[String], i: usize) -> Result<u32> {
+    let v = value_of(args, i, "--workers")?;
+    let n: u32 = v.parse().map_err(|_| {
+        usage(format!("`--workers {v}` is not a number"))
+            .with_remediation("pass a whole number, for example `--workers 4`")
+    })?;
+    if n == 0 {
+        return Err(usage("`--workers 0` would serve nothing")
+            .with_remediation("pass at least 1; V1 runs one worker with one task per connection"));
+    }
+    if n > MAX_WORKERS {
+        return Err(usage(format!(
+            "`--workers {n}` exceeds the maximum of {MAX_WORKERS}"
+        ))
+        .with_remediation(
+            "the instance pool bounds concurrency; raise that rather than \
+                 the worker count",
+        ));
+    }
+    Ok(n)
+}
+
 /// Read and validate `--log-format`'s value.
 ///
 /// # Errors
@@ -221,26 +296,7 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                 i += 2;
             }
             "--workers" => {
-                let v = value_of(args, i, "--workers")?;
-                let n: u32 = v.parse().map_err(|_| {
-                    usage(format!("`--workers {v}` is not a number"))
-                        .with_remediation("pass a whole number, for example `--workers 4`")
-                })?;
-                if n == 0 {
-                    return Err(usage("`--workers 0` would serve nothing").with_remediation(
-                        "pass at least 1; V1 runs one worker with one task per connection",
-                    ));
-                }
-                if n > MAX_WORKERS {
-                    return Err(usage(format!(
-                        "`--workers {n}` exceeds the maximum of {MAX_WORKERS}"
-                    ))
-                    .with_remediation(
-                        "the instance pool bounds concurrency; raise that rather than \
-                         the worker count",
-                    ));
-                }
-                opts.workers = n;
+                opts.workers = workers_of(args, i)?;
                 i += 2;
             }
             "--tls" => {
@@ -249,6 +305,10 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             }
             "--config" => {
                 opts.config = Some(value_of(args, i, "--config")?);
+                i += 2;
+            }
+            "--metrics-path" => {
+                opts.metrics_path = Some(metrics_path_of(args, i)?);
                 i += 2;
             }
             "--log-format" => {
@@ -359,6 +419,34 @@ fn usage(message: impl Into<String>) -> Error {
 pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared> {
     let server = &loaded.manifest.server;
 
+    // A metrics path that collides with a declared route would silently shadow one of them, and
+    // neither failure is visible from outside -- so it is refused here, where the operator can act.
+    //
+    // **In `prepare` and not in `build_dispatch`**, which is where the first version put it: that
+    // function returns early when the project has no built artifact, so a bare manifest never
+    // reached the check and `serve` ran on with the collision in place. Measured by the hang it
+    // caused. This function runs unconditionally, and it is the one that already refuses a manifest
+    // declaring no routes.
+    if let Some(metrics_path) = &opts.metrics_path {
+        if loaded
+            .manifest
+            .server
+            .routes
+            .iter()
+            .any(|r| r.path == *metrics_path)
+        {
+            return Err(Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!("`--metrics-path {metrics_path}` is also a route in the manifest"),
+            )
+            .with_context("manifest", loaded.path.display().to_string())
+            .with_remediation(
+                "pick a path the application does not serve, for example `--metrics-path \
+                 /internal/metrics`",
+            ));
+        }
+    }
+
     if server.routes.is_empty() {
         return Err(Error::new(
             ErrorCode::ManifestSchemaViolation,
@@ -413,6 +501,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // what turns `qqq-serve`'s counters from tested-and-unreachable into reachable. The
     // registry allocates nothing until a request is recorded.
     config.metrics = Some(Arc::new(qqq_serve::metrics::HttpMetrics::new()));
+    config.metrics_path.clone_from(&opts.metrics_path);
 
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;
@@ -564,6 +653,8 @@ fn build_dispatch(
         opts.workers,
     )?;
 
+    // A metrics path that collides with a declared route would silently shadow one of them, and
+    // neither failure is visible from outside -- so it is refused here, where the operator can act.
     // `--audit-log` attaches the persisted capability-use record, **loading and verifying any
     // history before a single request is served**. A malformed or chain-broken file refuses the
     // start here rather than being absorbed, because a server that began serving and then

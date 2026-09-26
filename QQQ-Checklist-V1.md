@@ -4889,7 +4889,28 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.4 Distributed tracing
 - [ ] **OBS-012** Implement the OTLP exporter for traces, metrics and logs.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-013** Implement the Prometheus scrape endpoint.
+- [x] **OBS-013** Implement the Prometheus scrape endpoint.
+  → **Done — and the second attempt is the one that landed.** `qqqai serve --metrics-path <path>`
+    serves `HttpMetrics::render_prometheus()` on the **application** listener, opted into explicitly,
+    with a start-up refusal when the path collides with a declared route.
+  → **The three questions §O-308 left open, answered rather than deferred.** *Where*: the application
+    listener, because a separate admin port needs a second accept loop with its own TLS and shutdown
+    — a larger change, recorded rather than half-built, and the flag's own doc says what this does
+    not solve. *Opt-in*: yes, like `--audit-log` and `--redact-from`, because the registry holds
+    **tenant names and traffic volume** and who may read that is the operator's decision.
+    *Collision*: refused at start-up, because a silent shadow hides either an app route or the
+    metrics and neither is visible from outside.
+  → **Measured**: **4 tests over the real binary**, in **1.54 s** — against the first attempt, which
+    hung for a full timeout. **Fault-injected** by making `maybe_serve_metrics` return `None`:
+    *“the endpoint must answer 200: HTTP/1.1 404 Not Found”*.
+  → **The defect the second attempt found is the instructive one**: the collision check was placed in
+    `build_dispatch`, which **returns early when the project has no built artifact**, so a bare
+    manifest never reached it and `serve` started with the collision in place. Found by the probe
+    **hanging**. Moved to `prepare`, which runs unconditionally and already refuses a manifest that
+    declares no routes — the same kind of statement. *A check placed after an early return is a
+    check that does not run for the inputs that take the early path.*
+  → `§O-309` and `§O-310` record both attempts, including that **twice in two rounds a failing
+    assertion was mine rather than the code's** — found by printing the bytes and believing them.
   → **Half done, and it stays open rather than claiming otherwise.** The **renderer** is built:
     `HttpMetrics::render_prometheus()` reads the registry through its own accessors, so every
     number comes from the same source the recording path writes to, and the label values are the

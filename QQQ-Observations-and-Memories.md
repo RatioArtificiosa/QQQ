@@ -24125,4 +24125,59 @@ intact — which is the verified half.
 the renderer is done and tested; the endpoint is designed, was demonstrated, and needs its tests
 fixed and its dispatch extracted before it can be committed.
 
+## §O-310 — The metrics endpoint, second attempt: the check was placed after an early return, and a bare manifest never reached it
+
+**Found:** Phase 1, `OBS-013`'s endpoint. **Anchors:** `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/metrics_endpoint.rs`.
+
+### `§O-309`'s three findings, applied
+
+| Finding | Fix |
+|---|---|
+| the test asserted a lowercase `content-type:` | the assertion checks the **value** (`text/plain; version=0.0.4`), which is what a scraper uses |
+| the harness **hung** instead of failing | **every** socket read has a deadline, and the child is killed rather than waited on |
+| `too_many_lines` fired on three functions | the path is taken in the **same statement** that takes the registry, so `serve` is unchanged; and `--workers`' arm became `workers_of` |
+
+**Measured:** 4 tests, **1.54 s**. The first attempt hung for a full timeout.
+
+### The defect this round, and it is the instructive one
+
+The collision check was placed in **`build_dispatch`** — where the `--audit-log` anchor happened to
+sit — and that function **returns early when the project has no built artifact**:
+
+```rust
+let Some(artifact) = find_artifact(..) else {
+    return Ok((Dispatch::flat(unbuilt(loaded.name())), false, None));
+};
+```
+
+So for a manifest with no compiled component, the check **never ran**, and `serve` started with the
+collision in place. **The probe hung**, which is how it was found — and a hang is exactly the symptom
+`§O-309` said not to accept, so the test now kills its child rather than waiting on it.
+
+**Moved to `prepare`**, which runs unconditionally and already has both `loaded` and `opts` — and
+which is where the sibling refusal (*"this project declares no routes"*) already lives, because the
+two are the same kind of statement: *this configuration cannot serve what it says it serves.*
+
+**A check placed after an early return is a check that does not run for the inputs that take the
+early path.** The first attempt's version was also in the wrong function for a second reason: it
+could not see `routes`, the local, which is why it was written against the manifest instead.
+
+### And one assertion of mine was wrong about a working endpoint, again
+
+The first version asserted the exposition would contain **its own** scrape. It cannot: the body is
+rendered **before** this request's access record is emitted, so a count written afterwards is not in
+it. The test now asserts **that ordering explicitly** — no `qqq_http_requests_total{` line, and
+`duration_seconds_count 0` — which is a more useful statement than a self-count that cannot exist.
+
+**Twice in two rounds, a failing assertion was mine rather than the code's.** Both were found by
+reading the response instead of the assertion, and that is now the habit: print the bytes, then
+believe the bytes.
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · 4 endpoint tests over the
+real binary, **fault-injected** by making `maybe_serve_metrics` return `None` — *"the endpoint must
+answer 200: HTTP/1.1 404 Not Found"*.
+
 *End of `QQQ-Observations-and-Memories.md`.*

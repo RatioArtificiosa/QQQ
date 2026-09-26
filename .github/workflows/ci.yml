@@ -392,6 +392,19 @@ jobs:
       - name: Prove the cardinality lint refuses an unbounded key
         run: python tools/check_metric_cardinality.py --self-test
 
+      # Twelve rounds of this goal have found controls that were written, tested and never called,
+      # every one by grepping for callers. §O-311 found the mechanical cause: a `pub` item is
+      # reachable from outside the crate, so `clippy`'s `dead_code` does not apply -- `pub` disabled
+      # the one check that would have named it.
+      #
+      # `--allow 22` is the MEASURED baseline (2060 declarations, 22 referenced nowhere), not a round
+      # number. It is a ratchet: a new module with no caller raises it immediately, and lowering it
+      # is the work.
+      - name: Verify no public item is unreachable and uncalled
+        run: python tools/check_public_reachability.py --allow 22
+      - name: Prove the reachability check refuses an unreferenced `pub` in a private module
+        run: python tools/check_public_reachability.py --self-test
+
       # `.coderabbit.yaml` decides what the external reviewer is shown and which
       # rules it is told to apply, which makes it a control -- and a control that
       # silently stops working is worse than one never added, because the review

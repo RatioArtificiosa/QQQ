@@ -24412,4 +24412,68 @@ message about a 404.
 workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK`. Four endpoint tests,
 1.54 s.
 
+## §O-315 — The check that would have found all twelve rounds, built from the cause rather than the symptom
+
+**Found:** Phase 1, acting on `§O-311`. **Anchors:** `tools/check_public_reachability.py`,
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+### What it measures
+
+**2060 `pub` declarations; 22 referenced nowhere in the workspace.** Measured, not estimated — and 22
+is a number a human can review, which is what makes it usable.
+
+### The two rules, and why only one of them gates
+
+**Rule A — the intersection, and it refuses.** An item that is **both** unreferenced **and** inside a
+module that is not `pub`. Either condition alone has a legitimate reading:
+
+- a `pub` item in a private module that is *used* is merely redundantly `pub` — `dead_code` does not
+  fire because the item is live. **The tool's first version reported 7 of those as defects**, which
+  is exactly the false-positive class that makes a checker get worked around.
+- an unreferenced item that is genuinely exported is a judgement call about published API.
+
+**Both together** is the defect `§O-311` names: the `pub` cannot be reached from another crate *and*
+nothing calls the item — so `pub` silenced precisely the lint that would have said so. There are no
+false positives in that intersection. **The workspace currently has zero**, which is the honest
+report.
+
+**Rule B — a ratchet.** The count of unreferenced `pub` items must not grow past **22**, recorded in
+`ci.yml` the way `check_api_examples` records its allowance. A new module with no caller raises it
+immediately; lowering it is the work.
+
+**Fault-injected by adding one `pub fn` nothing calls** — the exact shape of round 12's span module:
+
+```
+referenced nowhere         : 23
+PUBLIC REACHABILITY FAILED -- 1 problem(s):
+  FAIL  23 public declaration(s) are referenced nowhere in the workspace, over the allowance of
+       22. Either wire the new one, or narrow it to `pub(crate)` — a `pub` item nothing calls is
+       what this check exists to find
+```
+
+**That is the tool that would have caught the span module automatically**, and every one of the twelve
+"written, tested, never called" instances before it — all of which were found by a human remembering
+to grep.
+
+### Two defects in the tool itself, both found by running it
+
+**1. It took minutes and timed the self-test out at the shell's 600 s cap.** The first version ran one
+regex per *(declaration, file)* pair — **2060 × 120**. Counting every identifier once per file turns
+each later lookup into a dict access, and the answer is identical because a reference is a whole
+identifier.
+
+**2. Rule A's first version had the false positives described above.** Found by *listing* what it
+reported: `exit::USAGE`, `exit::UNAVAILABLE`, `exit::INTERNAL` — three constants that are **used**, in a
+private module, and therefore not defects at all.
+
+**Both were found by running the tool rather than by reading it**, which is the same discipline the
+corpus applies to fault injections: *an injection is a measurement, and it must be checked for whether
+it measured anything.*
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · SPDX **241 files** ·
+`check_xrefs` PASSED · local gate **88 ok / 2 failed** (both expected) · `GATE PARITY OK` · self-test
+**11 of 11**.
+
 *End of `QQQ-Observations-and-Memories.md`.*

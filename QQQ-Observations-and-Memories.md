@@ -24293,4 +24293,65 @@ without a test noticing.
 workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121 at the allowance) ·
 local gate **86 ok / 2 failed** (both expected) · `GATE PARITY OK`.
 
+## §O-313 — A test I added last round is flaky on Linux, and CI caught it on a docs-only commit
+
+**Found:** reading CI on `af285ad` — the round-12 **observation-only** commit — which failed
+`Rust (ubuntu-latest) :: test` while macOS and Windows passed. **Anchors:**
+`crates/qqq-run/tests/metrics_endpoint.rs`, `nothing_is_exposed_without_the_flag`.
+
+### The failure
+
+```
+stack backtrace:
+   2: metrics_endpoint::nothing_is_exposed_without_the_flag
+   3: metrics_endpoint::nothing_is_exposed_without_the_flag::{closure#0}
+             at ./tests/metrics_endpoint.rs:202:41
+failures:
+    nothing_is_exposed_without_the_flag
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**It is my own test, added in round 11 (`§O-310`).** The very next commit `e2d2148` passed, so it is
+**intermittent**, not deterministic — and that is the worst kind to have in a suite that gates a
+merge.
+
+### Why it matters more than the flake
+
+**A docs-only commit failing CI is a signal about the suite, not about the change.** Nothing in
+`af285ad` touched a `.rs` file, so the failure had to be either environmental or a test that depends
+on something other than the code — and it was the second.
+
+**And it is the same class as `§O-309`.** That entry recorded a test harness that *hung rather than
+failed*, and named the rule: *a hang is not a diagnosis*. This is its sibling — **a test that passes
+on two platforms and fails on the third is not a passing test**, and the platform difference is the
+diagnosis. The three-OS matrix exists precisely to catch this, and it did.
+
+### What is known, and what is not
+
+**Known:** the failing test is `nothing_is_exposed_without_the_flag`; the panic is at
+`tests/metrics_endpoint.rs:202`; it passes on macOS and Windows and failed once on Ubuntu; the run
+was `36234652133`.
+
+**Not known, and deliberately not guessed:** which assertion fired, and why Linux differs. The
+message was not in the tail of the log I read, and `202:41` sits inside the helper `request_once`
+that this test calls — whose `spawn`/`wait_with_output`/`read_to_string` are candidates. **A
+diagnosis needs the panic line, and the next round should fetch it** (`gh run view
+36234652133 --log-failed` and read *around* line 202's frame, not the tail).
+
+### The standing rule this earns
+
+**A test that spawns a child process and reads from it has three ways to be non-deterministic — the
+spawn, the read, and the reap — and each needs its own bound.** `§O-309` bounded the read;
+`request_once` already bounds the spawn with a deadline and kills rather than waits on the reap. What
+is left is that **a killed child's output may be truncated or empty on one platform**, which would
+make an assertion about the *absence* of a string pass and an assertion about its *presence* fail —
+and `nothing_is_exposed_without_the_flag` asserts an absence.
+
+**That is a hypothesis, not a finding.** It is recorded as one.
+
+### Measured
+
+`e2d2148` — the commit after it — is **green**, so the tree is not broken. The flake is live and
+will recur.
+
 *End of `QQQ-Observations-and-Memories.md`.*

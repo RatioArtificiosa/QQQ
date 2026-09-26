@@ -286,7 +286,7 @@ pub const HELP_MAX_LINES: usize = 40;
 /// Because [`render_help`] and the brevity test both need it, and a test that
 /// rebuilt the groups independently could disagree with the renderer about what
 /// the help contains — the failure mode `§O-103` records for derived fixtures.
-const HELP_GROUPS: [(&str, &[CommandName]); 5] = [
+const HELP_GROUPS: [(&str, &[CommandName]); 4] = [
     (
         "Project",
         &[
@@ -322,13 +322,13 @@ const HELP_GROUPS: [(&str, &[CommandName]); 5] = [
             CommandName::Why,
             CommandName::Trace,
             CommandName::Doctor,
+            CommandName::AuditLog,
         ],
     ),
     (
         "Agents",
         &[CommandName::Mcp, CommandName::Schema, CommandName::Migrate],
     ),
-    ("Other", &[CommandName::Version, CommandName::Help]),
 ];
 
 /// Render the usage text.
@@ -459,12 +459,144 @@ fn main() -> ExitCode {
 /// pretending to work or silently succeeding. A stub that *looks* like it
 /// worked is worse than one that says it is missing — especially for an agent,
 /// which would otherwise proceed on a false success.
+/// Dispatch `qqqai audit-log <path>` — `OBS-003`, `OBS-004`, `OBS-016`.
+///
+/// # What this command reads, and why it is not `qqqai audit`
+///
+/// `qqqai audit <artifact>` reads the **artifact** and reports its security posture. This reads the
+/// **execution record** a running server wrote with `--audit-log`, and answers the question §10.1
+/// calls QQQ's fourth signal: *"prove what this code did"*. `§O-297` recorded the risk of
+/// conflating them — two documents sharing a format and nearly a name, where an operator reading
+/// one would be right to think they had the other.
+///
+/// # Why a missing or empty file is not an error
+///
+/// A server that has not served anything yet has an empty record, and that is a fact worth
+/// reporting rather than a failure. What *is* an error is a file that cannot be read, one whose
+/// records do not parse, or one whose chain does not verify — and those are refused, because a
+/// report rendered from a broken chain would assert something false in the document whose whole
+/// purpose is to be believed.
+fn dispatch_audit_log(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut sarif = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--sarif" => {
+                sarif = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("`{other}` is not a flag `qqqai audit-log` understands"),
+                )
+                .with_remediation("`qqqai audit-log <path> [--sarif]`");
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                return ExitCode::from(exit::USAGE);
+            }
+            other => {
+                if path.is_some() {
+                    let err = qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        "`qqqai audit-log` reads one file".to_owned(),
+                    )
+                    .with_remediation("pass a single path");
+                    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                    return ExitCode::from(exit::USAGE);
+                }
+                path = Some(other.to_owned());
+                i += 1;
+            }
+        }
+    }
+
+    let Some(path) = path else {
+        let err = qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`qqqai audit-log` needs the file `qqqai serve --audit-log` wrote".to_owned(),
+        )
+        .with_remediation("`qqqai audit-log /var/log/qqq/audit.jsonl`");
+        let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+        return ExitCode::from(exit::USAGE);
+    };
+
+    // Read and verify. A broken chain refuses here rather than being rendered -- the exporters
+    // enforce it too, but a refusal that names the file is more useful than one that names a
+    // record. `resume_or_start` returns the stream it verified, so there is no second resume.
+    let (stream, loaded) = match qqq_host::audit_sink::resume_or_start(
+        std::path::Path::new(&path),
+        qqq_host::audit::DEFAULT_CAPACITY,
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::InternalInvariantViolated,
+                format!("the capability audit record at {path} could not be read: {e}"),
+            )
+            .with_remediation(
+                "check the file is the one `qqqai serve --audit-log` wrote, and that it has not \
+                 been edited",
+            );
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    if loaded.dropped_partial_line {
+        eprintln!(
+            "warning: {path} ended mid-record; the incomplete line was dropped. The process that \
+             wrote it did not shut down cleanly."
+        );
+    }
+
+    if sarif {
+        match qqq_host::audit_export::to_sarif(&stream) {
+            Ok(document) => {
+                // SARIF goes out as its own document, not wrapped in an envelope: a consumer
+                // parsing the output as SARIF must receive SARIF and nothing else. The same rule
+                // `qqqai audit --sarif` states.
+                let _ = out.write_document(&document);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::InternalInvariantViolated,
+                    e.to_string(),
+                );
+                let _ = out.emit_error_with_exit(name, &err, exit::FAILURE);
+                ExitCode::from(exit::FAILURE)
+            }
+        }
+    } else {
+        match qqq_host::audit_export::to_compliance_report(&stream) {
+            Ok(report) => {
+                let _ = out.write_document(&report);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::InternalInvariantViolated,
+                    e.to_string(),
+                );
+                let _ = out.emit_error_with_exit(name, &err, exit::FAILURE);
+                ExitCode::from(exit::FAILURE)
+            }
+        }
+    }
+}
+
 fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCode {
     let format = flags.format();
     let mut out = Output::new(format, std::io::stdout());
 
     match name {
         CommandName::Schema => dispatch_schema(name, &mut out, args),
+        CommandName::AuditLog => dispatch_audit_log(name, &mut out, args),
         CommandName::Doctor => {
             // `doctor` has one flag of its own, `--fix`, and `--json` is
             // global. Anything else is a mistake worth naming: `--fix` itself

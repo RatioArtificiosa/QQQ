@@ -80,6 +80,16 @@ pub enum CommandName {
     Openapi,
     /// Full security posture.
     Audit,
+    /// Read the persisted capability-use record — `OBS-003`/`OBS-004`/`OBS-016`.
+    ///
+    /// # Why this is a separate command from `Audit`
+    ///
+    /// They are two documents that share a format and nearly a name, and `§O-297` recorded the
+    /// risk of conflating them. `Audit` reads an **artifact** and answers *"is this configured
+    /// safely?"* — capabilities, limits, supply chain, provenance. `AuditLog` reads an
+    /// **execution record** and answers *"what did this code do, and was it permitted?"*. The
+    /// first changes when the manifest changes; the second changes when the server runs.
+    AuditLog,
     /// Verify signature and attestation.
     Verify,
     /// Show effective grants.
@@ -129,6 +139,7 @@ impl CommandName {
             Self::Why,
             Self::Trace,
             Self::Doctor,
+            Self::AuditLog,
             Self::Mcp,
             Self::Schema,
             Self::Migrate,
@@ -162,6 +173,7 @@ impl CommandName {
             Self::Caps => "caps",
             Self::Why => "why",
             Self::Trace => "trace",
+            Self::AuditLog => "audit-log",
             Self::Doctor => "doctor",
             Self::Mcp => "mcp",
             Self::Schema => "schema",
@@ -198,6 +210,7 @@ impl CommandName {
             Self::Why => "Explain why a capability was granted or denied",
             Self::Trace => "Stream live traces from a running application",
             Self::Doctor => "Diagnose the environment and suggest fixes",
+            Self::AuditLog => "Read the persisted capability-use record a server wrote",
             Self::Mcp => "Run as a Model Context Protocol server for AI agents",
             Self::Openapi => "Emit an OpenAPI 3.0 description of the app's routes",
             Self::Schema => "Emit JSON Schema for every machine-readable surface",
@@ -919,6 +932,10 @@ pub fn command_schemas() -> Vec<CommandSchema> {
             | CommandName::Caps
             | CommandName::Why
             | CommandName::Trace
+        // `audit-log`'s payload is SARIF or a compliance report -- two text documents, not a JSON
+        // object. Declaring `{"type": "object"}` would be the lie this match's own comment warns
+        // about, so it is grouped with the permissive arm and says so here.
+        | CommandName::AuditLog
             | CommandName::Mcp
             | CommandName::Migrate
             | CommandName::Version

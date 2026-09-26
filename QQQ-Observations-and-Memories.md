@@ -23496,4 +23496,61 @@ names the rule — *"the allowance is a ratchet: lower it as examples land"* —
 
 ---
 
+## §O-300 — `qqqai audit-log`: the record gets a reader a human can run, and the help budget was the real constraint
+
+**Found:** Phase 1, closing `OBS-003`/`OBS-004`/`OBS-016` behind a CLI. **Anchors:**
+`crates/qqq-run/src/main.rs`, `crates/qqq-run/src/output.rs`, `crates/qqq-run/tests/audit_log.rs`.
+
+### What `§O-297` and `§O-299` left, and what closed it
+
+`§O-297` recorded that the stream export had **no CLI surface**, and `§O-299` recorded that it had no
+persistence — so a separate process could never see a serving process's records. Both are now closed:
+`qqqai serve --audit-log <path>` writes the record, and **`qqqai audit-log <path> [--sarif]`** reads
+it.
+
+### Why it is a separate command and not a flag on `audit`
+
+`§O-297` named the risk: two documents sharing a format and nearly a name. `qqqai audit <artifact>`
+reads an **artifact** and answers *"is this configured safely?"*; `qqqai audit-log <path>` reads an
+**execution record** and answers *"what did this code do, and was it permitted?"*. The first changes
+when the manifest changes; the second changes when the server runs. **The help text is where an
+operator finds out they differ**, so the summary says which one it reads.
+
+### The tests spawn the binary, and that is the point
+
+`serve_policy.rs` established the reasoning and earned it: every feature in that file had been
+implemented, unit-tested and **unreachable**. The parts of a command a unit test cannot reach are the
+ones that break — whether the name is registered, whether the flag parses, whether the document
+reaches stdout unwrapped. Five tests over the real binary, and the file is **built by the library**
+rather than checked in: a checked-in record would be a fixture whose chain a future change to the
+chain's *definition* would silently invalidate, and the failure would look like a regression in the
+command.
+
+**Fault-injected**: wrapping the SARIF document in a one-line preamble left every substring intact
+and only `sarif_is_the_whole_document` fired — *"SARIF must be the whole document, not wrapped"*.
+
+### The constraint that was not the command
+
+The command worked on the first build. What broke was **`help_fits_the_brevity_standard`** — §12.3's
+commitment that `qqqai --help` is **≤40 lines**, measured at **41** once the new command joined a
+group.
+
+The fix was not to hide the command. Rendering the help showed the real problem: **`Other:` listed
+`--version` and `--help`, and `options:` listed both again.** The same two flags appeared twice in
+one screen. Merging the redundant group removed three lines — **38 now** — and the duplication with
+them.
+
+**A budget that is enforced finds the redundancy a budget that is aspirational does not.** The
+command was the trigger; the defect was a group that restated what another section already said.
+
+### And the enum's own comment was the map
+
+`CommandName`'s doc says it has exactly two exhaustive matches "because both are exhaustive over this
+type". Adding a variant produced two `E0004` errors naming them, in `output.rs` — the compiler
+listed the sites to update, which is what that comment was promising a reader.
+
+→ `crates/qqq-run/src/main.rs`, `crates/qqq-run/src/output.rs`, `crates/qqq-run/tests/audit_log.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

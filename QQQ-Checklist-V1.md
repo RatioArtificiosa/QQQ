@@ -4740,11 +4740,43 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 - [ ] **OBS-001** Implement the capability-audit stream: granted, denied and attempted.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-002** Implement the append-only, hash-chained audit record.
+- [x] **OBS-002** Implement the append-only, hash-chained audit record.
+  → **Done, and the last piece was persistence.** `crates/qqq-run/src/guest_handler.rs` —
+    `GuestApp` holds `Mutex<AuditStream>` and appends on every served request, and
+    `attach_audit_file` persists it. `crates/qqq-host/src/audit_sink.rs` is the file: JSON Lines,
+    loaded and **verified before the first request is served**. `qqqai serve --audit-log <path>`.
+  → **Measured**: 7 sink tests + 7 `guest_handler` tests, and **three fault injections fired** —
+    a removed broken-chain refusal, a resumed head reset to genesis, and a removed write-through
+    (“one served request must write exactly one line; got: `""`”). Workspace 2612 passed.
+  → **The record outlives the process that made it**: a second `GuestApp` attaching the same file
+    resumes the history, and its next record chains from the one the previous process wrote.
+  → `§O-299` records the design: a truncated FINAL line is dropped and *reported*, a malformed
+    INTERIOR line is refused, and the parser refuses an unknown capability rather than reading the
+    record as capability-less.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-003** Implement SARIF export of the audit record.
+- [x] **OBS-003** Implement SARIF export of the audit record.
+  → **Done.** `crates/qqq-host/src/audit_export.rs` — `to_sarif` renders SARIF 2.1.0, and
+    `qqqai audit-log <path> --sarif` reaches it. **Only refusals and failures become `results`**:
+    a `granted` row is counted in the run's `properties` and omitted, because SARIF's `results`
+    array is *findings* and a document where every normal operation is a finding has no signal.
+  → **Measured**: 7 export tests + 5 CLI tests over the real binary. **Fault-injected twice** —
+    removing one closing brace left every substring assertion passing and only the parse test
+    firing (*“EOF while parsing an object”*), and wrapping the document in a preamble left every
+    fragment intact and only *“SARIF must be the whole document”* firing.
+  → Both exports **verify the chain and refuse rather than render**: a SARIF consumer does not
+    re-check a hash chain, so a corrupted stream rendered as valid SARIF becomes a plausible-
+    looking artefact. `§O-296`.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-004** Implement the compliance-report export.
+- [x] **OBS-004** Implement the compliance-report export.
+  → **Done.** `to_compliance_report` in the same module, reached by `qqqai audit-log <path>`.
+    It carries the **chain head** (a digest a reader cross-checks), the counts per capability and
+    outcome, every refusal individually, and **its own bound**: `Appends refused` is printed even
+    at zero, next to the capacity, so a bounded history is visible rather than implied.
+  → **An empty refusal list says what it does *not* prove**: *“a runtime with a grant set nobody
+    exercises also produces no refusals.”* An absence of refusals is not evidence of safety.
+  → **Measured**: `the_compliance_report_carries_the_chain_head`, `the_report_states_its_own_bound`,
+    `an_empty_refusal_list_says_what_it_does_not_prove`, and `the_report_is_rendered_from_a_real_record`
+    over the real binary.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OBS-005** Implement the default metric set.
   → §10.2 Metrics that ship by default
@@ -4774,7 +4806,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.4 Distributed tracing
 - [ ] **OBS-015** Implement per-tenant audit isolation and retention controls.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-016** Implement the "prove what this code did" report generator.
+- [x] **OBS-016** Implement the "prove what this code did" report generator.
+  → **Done — this is the compliance report.** §10.1 calls *“prove what this code did”* QQQ's
+    fourth signal and says no other runtime answers it structurally. `to_compliance_report` is that
+    answer: per-record evidence with the chain head, so a reader can recompute rather than trust.
+  → **What it still does not answer, named rather than implied**: the capability column is a
+    **stated placeholder** (`FsRead`), because the served seam sees one guest call and not the host
+    calls inside it. The per-capability rows are `OBS-001`, which needs the `ambient::require` seam.
+    A report that aggregated by capability today would be aggregating a constant.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OBS-017** Decide whether to contribute capability-audit semantic conventions to OpenTelemetry (open question `OQ-010`).
   → §10.4 Distributed tracing

@@ -1470,7 +1470,6 @@ name = "qqq-cap"
 version = "0.0.0"
 dependencies = [
  "qqq-core",
- "qqq-io",
  "serde",
  "serde_json",
  "sha2",

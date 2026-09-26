@@ -58,6 +58,7 @@ interface wall-clock {
   /// For **formatting only**. A guest computing what a timestamp *means* for a
   /// user must do so explicitly; a host that silently applied a timezone would
   /// make output depend on deployment configuration.
+  @since(version = 1.0.0)
   timezone: func() -> string;
 }
 

@@ -4874,6 +4874,18 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **OBS-013** Implement the Prometheus scrape endpoint.
   → §10.2 Metrics that ship by default
 - [ ] **OBS-014** Prove that a guest cannot influence sampling decisions.
+  → **Blocked by `OBS-011`, and the block is worth stating because the item reads as buildable.**
+    “Prove that a guest cannot influence sampling decisions” is a property **of a mechanism**, and
+    there is no sampling mechanism to have the property. Measured: `grep -i sampl` across
+    `crates/*/src/*.rs` returns only `qqq-bench`'s load-generator `Sample` — an unrelated type —
+    and `OBS-011` (*“Implement host-controlled sampling with a tail-sampling option”*) is open.
+  → **You cannot prove a property of something that does not exist**, and a test written against a
+    stub would assert that a stub is a stub. So this row stays open **behind `OBS-011`**, the same
+    way `LANG-004`/`LANG-012`/`LANG-020` stay open behind `TEST-010` — and for the same reason: the
+    suite, not the language, is what makes the claim checkable.
+  → **Not Gate 1's business**, despite an earlier plan of mine saying so: Gate 1 requires *“a
+    chained, redacted audit record that survives a restart”* plus `DOD-006`'s audit clause, and names
+    sampling nowhere. All three of its clauses are now satisfied.
   → §10.4 Distributed tracing
 - [ ] **OBS-015** Implement per-tenant audit isolation and retention controls.
   → §10.1 The three signals, plus one unique to QQQ

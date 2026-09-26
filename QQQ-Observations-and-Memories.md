@@ -24476,4 +24476,66 @@ workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` ·
 `check_xrefs` PASSED · local gate **88 ok / 2 failed** (both expected) · `GATE PARITY OK` · self-test
 **11 of 11**.
 
+## §O-316 — The allowance became a declaration, and reviewing the 22 found no behavioural defect
+
+**Found:** Phase 1, reviewing what `§O-315` surfaced. **Anchors:**
+`tools/public-reachability-allow.txt`, `tools/check_public_reachability.py`.
+
+### A number said *how many* and nothing about *which*
+
+`--allow 22` had a defect a count always has: **a new unreferenced item and a removed one cancel out.**
+The set could not be reviewed without re-deriving it, and nothing could tell a deliberate `pub` from a
+freshly-unwired one.
+
+The allowance is now **`tools/public-reachability-allow.txt`**, naming all 22 with a decision and a
+reason, and the checker **fails on a stale entry** — an item that has since gained a caller, or that no
+longer exists. **A stale exclusion is itself a defect**, which is the rule `check_checklist_counts.py`
+and `check_gate_parity.py` already apply to their own declarations: *validate the arithmetic **and** the
+declaration.*
+
+**Fault-injected in both directions:**
+
+```
+FAIL  STALE: `a_thing_that_was_deleted` in crates/qqq-serve/src/auth.rs is declared unreferenced
+      but is now referenced or gone -- remove its entry, because a stale exclusion is a claim
+      about a tree that has moved
+FAIL  UNDECLARED: `an_unwired_control` in crates/qqq-serve/src/auth.rs is referenced nowhere and is
+      not in tools/public-reachability-allow.txt -- wire it, narrow it to `pub(crate)`, or declare it
+```
+
+### The review, and what it did *not* find
+
+All 22 are **small accessors, predicates and thin wrappers**. **None is a behavioural defect** — and
+that is worth stating plainly, because the tool exists to find exactly that and this time it found
+dead surface instead.
+
+Two were checked first because they are security-adjacent:
+
+- **`auth.rs::is_public`** — `matches!(self, Self::Public)`, a predicate on `RouteAuth`. The policy is
+  consulted through **`decide`**, which the server does call (`server.rs:1943` matches on
+  `Decision::Refuse`). **The auth path works**; the predicate is unused.
+- **`tls.rs::requests_client_certificate`** — delegates to `self.client_auth.requests_certificate()`.
+  The mTLS setting is reachable through `client_auth` directly. **Not a bypass.**
+
+And the WebSocket pair, which looked most like a defect: **`send_text`/`send_binary` are thin wrappers
+over `WsSender::send`**, and the `Echo` handler uses `send(message.kind, &message.payload)`. **A
+WebSocket that cannot send is not what this is** — the general method is the one in use.
+
+**Six are marked `published-api` and sixteen `unreviewed`, and the checker prints the sixteen.** That
+distinction is the point: a reason in that file is a **description of the item, never a guess about its
+history**, and the count of undecided entries is on the output so a reviewed set cannot be confused
+with an unreviewed one.
+
+### Why the sixteen were not decided
+
+**Deciding them is a public-API judgement, one item at a time**, and each answer is *delete* or
+*keep deliberately* — there is no mechanical third option, because narrowing an item nothing uses is
+exactly what makes `dead_code` fire. Sixteen judgements in one round would have been sixteen guesses.
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · SPDX **241 files** ·
+`check_xrefs` PASSED · local gate **88 ok / 2 failed** (both expected) · `GATE PARITY OK` · self-test
+**11 of 11**.
+
 *End of `QQQ-Observations-and-Memories.md`.*

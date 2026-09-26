@@ -397,11 +397,12 @@ jobs:
       # reachable from outside the crate, so `clippy`'s `dead_code` does not apply -- `pub` disabled
       # the one check that would have named it.
       #
-      # `--allow 22` is the MEASURED baseline (2060 declarations, 22 referenced nowhere), not a round
-      # number. It is a ratchet: a new module with no caller raises it immediately, and lowering it
-      # is the work.
+      # The allowance is a DECLARATION -- `tools/public-reachability-allow.txt` names all 22 and
+      # gives each a reason -- not a number, because a number says how many and nothing about which,
+      # so a new item and a removed one cancel out. The checker FAILS ON A STALE ENTRY, the same rule
+      # check_checklist_counts and check_gate_parity apply to their own declarations.
       - name: Verify no public item is unreachable and uncalled
-        run: python tools/check_public_reachability.py --allow 22
+        run: python tools/check_public_reachability.py
       - name: Prove the reachability check refuses an unreferenced `pub` in a private module
         run: python tools/check_public_reachability.py --self-test
 

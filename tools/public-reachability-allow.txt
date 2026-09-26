@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every public declaration that nothing in the workspace references -- `check_public_reachability.py`.
+#
+# # What this file is
+#
+# The checker's allowance is a **declaration**, not a number: an item listed here is a deliberate
+# `pub` that no caller in this repository uses, and the checker **fails when an entry is stale** -- an
+# item that has since gained a caller, or that no longer exists. That is the same shape
+# `check_checklist_counts.py` and `check_gate_parity.py` use: validate the arithmetic *and* the
+# declaration, because a stale exclusion is itself a defect.
+#
+# # Why a number was not enough
+#
+# `--allow 22` said *how many* and nothing about *which*. A new unreferenced item and a removed one
+# cancelled out, and nobody could review the set without re-deriving it.
+#
+# # The decisions, and what they are not
+#
+# `published-api` means the item was **read** and is a deliberate surface for a consumer outside this
+# repository: an accessor on a type handed to application code, or a variant of a function that *is*
+# used. `unreviewed` means exactly that -- nobody has decided yet, and the checker prints the count so
+# it cannot be mistaken for a reviewed set.
+#
+# **A reason here is a description of the item, never a guess about its history.**
+#
+# Format: `<path>  <name>  <decision>  <reason>`
+
+crates/qqq-cap/src/resolve.rs  apply_all  unreviewed  applies every resolved rule
+crates/qqq-core/src/ids.rs  into_string  unreviewed  converts an id to its owned string form
+crates/qqq-host/src/call.rs  call_handler_raw  published-api  the raw variant of `call_handler`, which is used
+crates/qqq-host/src/instance.rs  fuel_remaining  unreviewed  reads the instance's remaining fuel
+crates/qqq-host/src/instance.rs  wasm_instance  unreviewed  borrows the underlying wasmtime instance
+crates/qqq-host/src/instance.rs  run_async_measured  published-api  `Instance::run_async` plus a measurement
+crates/qqq-host/src/instance.rs  note_yield  unreviewed  records a cooperative yield
+crates/qqq-host/src/invoke.rs  method_index  unreviewed  resolves a method name to its index
+crates/qqq-host/src/pool.rs  note_latency  unreviewed  records an instantiation's latency
+crates/qqq-run/src/verify.rs  digest_hex  unreviewed  renders a digest as lowercase hex
+crates/qqq-serve/src/auth.rs  is_public  published-api  a predicate on `RouteAuth`; the policy is consulted via `decide`
+crates/qqq-serve/src/h2/conn.rs  flow_mut  unreviewed  mutable access to flow control
+crates/qqq-serve/src/h2/conn.rs  streams_mut  unreviewed  mutable access to the stream registry
+crates/qqq-serve/src/h2/flow.rs  recv_mut  unreviewed  mutable access to the receive direction
+crates/qqq-serve/src/h2/hpack.rs  is_pseudo  unreviewed  whether a header name is a pseudo-header
+crates/qqq-serve/src/h2/hpack.rs  set_max_header_list_size  unreviewed  sets the header-list budget
+crates/qqq-serve/src/h2/stream.rs  RESERVED_BIT  unreviewed  the reserved bit of a stream id
+crates/qqq-serve/src/response.rs  is_server_fault  unreviewed  whether a status is the server's fault
+crates/qqq-serve/src/tls.rs  requests_client_certificate  published-api  a predicate on `TlsConfig`; `client_auth` is consulted directly
+crates/qqq-serve/src/ws_conn.rs  send_text  published-api  a thin wrapper over `send`, which the `Echo` handler uses
+crates/qqq-serve/src/ws_conn.rs  send_binary  published-api  a thin wrapper over `send`, which the `Echo` handler uses
+crates/qqq-serve/src/ws_conn.rs  supported_version  unreviewed  the WebSocket version this implementation speaks

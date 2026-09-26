@@ -172,6 +172,31 @@ def visibility_lies(unref: list[tuple[Path, str, str]]) -> list[tuple[Path, str]
     return out
 
 
+def check_declaration(
+    unref: list[tuple[Path, str, str]], declared_map: dict[tuple[str, str], str]
+) -> list[str]:
+    """Fail on a stale entry, and on an unreferenced item that is not declared.
+
+    Both directions, because either alone is half a check: a declaration that no longer applies is a
+    claim about a tree that has moved, and an item with no declaration is one nobody has decided
+    about.
+    """
+    problems: list[str] = []
+    live = {(str(p.relative_to(ROOT)).replace("\\", "/"), n) for p, _k, n in unref}
+    for key in sorted(set(declared_map) - live):
+        problems.append(
+            f"STALE: `{key[1]}` in {key[0]} is declared unreferenced but is now referenced or gone "
+            f"-- remove its entry, because a stale exclusion is a claim about a tree that has moved"
+        )
+    for key in sorted(live - set(declared_map)):
+        problems.append(
+            f"UNDECLARED: `{key[1]}` in {key[0]} is referenced nowhere and is not in "
+            f"tools/public-reachability-allow.txt -- wire it, narrow it to `pub(crate)`, or declare "
+            f"it with a reason"
+        )
+    return problems
+
+
 def check(unreferenced_count: int, lies: int, allowance: int) -> list[str]:
     """The decision procedure, as a pure function, so `--self-test` can drive it.
 
@@ -197,44 +222,65 @@ def check(unreferenced_count: int, lies: int, allowance: int) -> list[str]:
     return problems
 
 
-def allowance_from_ci() -> int | None:
-    """The recorded baseline, read from `ci.yml` so the number lives in one place."""
-    ci = ROOT / ".github" / "workflows" / "ci.yml"
-    m = re.search(
-        r"check_public_reachability\.py\s+--allow\s+(\d+)",
-        ci.read_text(encoding="utf-8", errors="replace"),
-    )
-    return int(m.group(1)) if m else None
+DECLARATION = ROOT / "tools" / "public-reachability-allow.txt"
+
+
+def declared() -> dict[tuple[str, str], str]:
+    """The declaration: `(path, name) -> decision`, read from the allow file.
+
+    # Why the allowance is a file and not a number
+
+    `--allow 22` said *how many* and nothing about *which*: a new unreferenced item and a removed one
+    cancelled out, and the set could not be reviewed without re-deriving it. The file names every
+    entry, so the checker can fail on a **stale** one -- an item that has since gained a caller, or
+    that no longer exists. **A stale exclusion is itself a defect**, which is the same rule
+    `check_checklist_counts.py` and `check_gate_parity.py` apply to their own declarations.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for line in DECLARATION.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        out[(parts[0], parts[1])] = parts[2]
+    return out
 
 
 def validate(listing: bool, override: int | None) -> int:
     unref = unreferenced()
     lies = visibility_lies(unref)
     total = len(declarations())
+    declared_map = declared()
 
-    allowance = override if override is not None else allowance_from_ci()
-    if allowance is None:
-        print("NOTE: no `--allow` in ci.yml and none passed, so this run only reports.")
+    unreviewed = sum(1 for d in declared_map.values() if d == "unreviewed")
 
     print(f"public declarations        : {total}")
     print(f"referenced nowhere         : {len(unref)}")
     print(f"`pub` in a non-`pub` module: {len(lies)}")
+    print(f"declared, with a reason    : {len(declared_map)} ({unreviewed} still `unreviewed`)")
     if listing:
         for path, kind, name in unref:
-            print(f"  {path.relative_to(ROOT)}  {kind} {name}")
+            key = (str(path.relative_to(ROOT)).replace("\\", "/"), name)
+            decision = declared_map.get(key, "UNDECLARED")
+            print(f"  {decision:12} {key[0]}  {kind} {name}")
         for path, what in lies:
-            print(f"  VISIBILITY  {path.relative_to(ROOT)}  {what}")
+            print(f"  VISIBILITY   {path.relative_to(ROOT)}  {what}")
 
-    problems = check(len(unref), len(lies), allowance if allowance is not None else len(unref))
+    problems = check_declaration(unref, declared_map)
+    problems += check(len(unref), len(lies), override if override is not None else len(unref))
+
     print("")
-    if problems and allowance is not None:
+    if problems:
         print(f"PUBLIC REACHABILITY FAILED -- {len(problems)} problem(s):")
-        for p in problems:
-            print(f"  FAIL  {p}")
+        for p_ in problems:
+            print(f"  FAIL  {p_}")
         return 1
-    if allowance is None:
-        return 0
-    print("PUBLIC REACHABILITY OK -- nothing new is unreachable")
+    print(
+        f"PUBLIC REACHABILITY OK -- {len(unref)} declared, none stale, "
+        f"{unreviewed} awaiting a decision"
+    )
     return 0
 
 
@@ -271,20 +317,22 @@ def self_test() -> int:
     # The real workspace must currently pass.
     real = unreferenced()
     lies = visibility_lies(real)
-    allowance = allowance_from_ci()
-    if allowance is None:
-        print("  DEAD  ci.yml carries no allowance for this check")
+    declared_map = declared()
+    problems = check_declaration(real, declared_map)
+    print(
+        f"  {'OK  ' if not problems else 'DEAD'}  the real workspace's declaration is not stale "
+        f"({len(real)} unreferenced, {len(declared_map)} declared, {len(lies)} lie(s))"
+    )
+    if problems:
         failures += 1
-    else:
-        problems = check(len(real), len(lies), allowance)
-        print(
-            f"  {'OK  ' if not problems else 'DEAD'}  the real workspace passes "
-            f"({len(real)} unreferenced, {len(lies)} lie(s), allowance {allowance})"
-        )
-        if problems:
-            failures += 1
-            for p in problems[:2]:
-                print(f"        {p}")
+        for p_ in problems[:2]:
+            print(f"        {p_}")
+
+    # Staleness, both directions, on synthetic input.
+    live = [(ROOT / "crates" / "a" / "src" / "x.rs", "fn", "live_one")]
+    case("a declared and live item is fine", check_declaration(live, {("crates/a/src/x.rs", "live_one"): "published-api"}), [])
+    case("a declared item that is now referenced is STALE", len(check_declaration([], {("crates/a/src/x.rs", "gone"): "published-api"})), 1)
+    case("an undeclared unreferenced item fails", len(check_declaration(live, {})), 1)
 
     total = 11
     print("")

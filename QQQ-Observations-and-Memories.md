@@ -25256,4 +25256,58 @@ injection reproduced the CI message exactly · `serve_policy` 11 tests in 0.64 s
 
 ---
 
+## §O-329 — The port race is *Windows-invisible*, and the retry condition took three measured attempts
+
+**Found:** Phase 1, extending `§O-326`'s route 1. **Anchors:** `crates/qqq-run/tests/common/mod.rs`,
+`crates/qqq-io/src/listener.rs`.
+
+### The finding that explains five rounds of failed reproduction
+
+**The injection that would prove the retry cannot fire on Windows** — and the tree already says why:
+
+```
+// `SO_REUSEADDR` is set by Tokio's `bind` on Unix already; on Windows it is
+// set with different semantics (it allows stealing a bound port), so it is
+// deliberately not forced here.
+```
+
+**Measured**: with the port **deliberately held** (`mem::forget` on the listener), the child **still
+binds** and every test passes.
+
+> **The race is invisible on the platform I develop on and real on the platform CI runs.** Every local
+> reproduction attempt was **doomed** — and that is now a recorded property of the platform rather than
+> a mystery.
+
+### The retry condition took three attempts, and each failure was measured
+
+| condition | what happened |
+|---|---|
+| `!text.is_empty()` | **inert** — the combined text carries the child's own output, so a server that *failed to bind* still produced text and the retry never fired |
+| `!answered(text)` (a status line is present) | **broke three files** — `log_format`, `spans` and `sampling_influence` observe the server's **log**, not its response; measured: 0 passed, 5 failed |
+| `lost_the_port_race(text)` = contains `QQQ-6002` | **correct** — the bind failure **names the race**, and both kinds of helper see it |
+
+> **A retry whose condition the failure does not satisfy is a retry that does not run.**
+
+The bind failure is the one signal a log-observing helper and a response-observing helper **share**, and
+it is the failure itself rather than a proxy for it.
+
+### What landed
+
+`log_format`, `spans`, `sampling_influence` and `redact_wiring` each gained the bounded retry;
+`metrics_endpoint` already used `common`; `serve_policy` got the connect retry in `§O-328`.
+`common/mod.rs` holds the policy, the deadline, `answered` and `lost_the_port_race`.
+
+### What is not claimed
+
+**The retry is unproven by injection on this platform**, because the failure it retries **cannot be
+produced here**. It is recorded as **unproven** rather than as verified, and the proof is CI history on
+Linux.
+
+### Measured
+
+`log_format` 3, `spans` 5, `sampling_influence` 4, `redact_wiring` 4 — all passing · workspace green ·
+the held-port injection **inert on Windows** and recorded as such.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

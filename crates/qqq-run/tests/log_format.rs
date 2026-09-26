@@ -18,6 +18,8 @@
 //! `Command` with a piped stdout is a non-terminal — which is precisely the production case — and
 //! there is no way to fake that in-process without testing a different thing.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -60,6 +62,31 @@ const MANIFEST: &str = "[package]\nname = \"logfmt-probe\"\nversion = \"0.1.0\"\
 
 /// Serve one request and return the server's combined output.
 fn serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
+    // **A bounded retry, because the port this helper asks for may be taken before the child binds.**
+    //
+    // `free_port()` binds a number, reads it, and **drops the listener** -- so between the drop and
+    // the child's bind the number is unowned. That is `§O-326`'s measured cause, and this file's
+    // helper had no retry while a sibling's did. **Six copies of one racy helper was the object all
+    // along**, and the fix belongs in each of them until they share one.
+    for attempt in 1..=common::ATTEMPTS {
+        let out = attempt_serve_once(sandbox, extra);
+        if !common::lost_the_port_race(&out) {
+            return out;
+        }
+        eprintln!(
+            "attempt {attempt} of {} read nothing; retrying on a fresh port",
+            common::ATTEMPTS
+        );
+    }
+    panic!(
+        "all {} attempts read nothing. This is the port-allocation race this helper retries around, \
+         not an assertion failure -- the server answered no bytes, so there is nothing to assert \
+         about.",
+        common::ATTEMPTS
+    );
+}
+
+fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
     let config = sandbox.write("qqq.toml", MANIFEST);
     let port = free_port();
     let child: Child = Command::new(env!("CARGO_BIN_EXE_qqqai"))

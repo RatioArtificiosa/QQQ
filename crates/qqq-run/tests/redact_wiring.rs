@@ -19,6 +19,8 @@
 //! and never called. The question that finds it is *"who calls this?"*, not *"does this work?"* —
 //! so this test spawns the binary, passes a real file, and reads a real log line.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -108,6 +110,34 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> String {
     )
 }
 
+/// Spawn, request and collect, **retrying the pair on a fresh port when the server produced nothing**.
+///
+/// # Why the pair and not each half
+///
+/// Because the lost race is *between* them: `free_port()` drops the listener and the child binds a
+/// moment later, so a retry that reused the same port would lose the same race again. `spawn` and
+/// `request_and_collect` are one attempt, and this is the retry around them — `§O-326`'s measured
+/// cause, and the four sibling files each gained the same guard.
+fn serve_and_collect(sandbox: &Sandbox, extra: &[&str], path: &str) -> String {
+    for attempt in 1..=common::ATTEMPTS {
+        let (child, port) = spawn(sandbox, extra);
+        let out = request_and_collect(child, port, path);
+        if !common::lost_the_port_race(&out) {
+            return out;
+        }
+        eprintln!(
+            "attempt {attempt} of {} produced no output; retrying on a fresh port",
+            common::ATTEMPTS
+        );
+    }
+    panic!(
+        "all {} attempts produced no output. This is the port-allocation race this helper retries \
+         around, not an assertion failure -- the server wrote nothing, so there is nothing to assert \
+         about.",
+        common::ATTEMPTS
+    );
+}
+
 /// **A secret in the request path is redacted by the running server — `OBS-008`.**
 ///
 /// This is the assertion the in-process test cannot make: it goes through the flag, the file, the
@@ -116,12 +146,11 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> String {
 fn the_served_log_line_redacts_a_declared_secret() {
     let sandbox = Sandbox::new("redacts");
     let secrets = sandbox.write("secrets.env", "TOKEN=s3cr3t-token\n");
-    let (child, port) = spawn(
+    let output = serve_and_collect(
         &sandbox,
         &["--redact-from", secrets.to_str().expect("utf8")],
+        "/orders?token=s3cr3t-token",
     );
-
-    let output = request_and_collect(child, port, "/orders?token=s3cr3t-token");
 
     assert!(
         output.contains("[redacted:"),
@@ -140,12 +169,11 @@ fn the_served_log_line_redacts_a_declared_secret() {
 fn the_start_up_message_reports_the_count_and_not_the_values() {
     let sandbox = Sandbox::new("count");
     let secrets = sandbox.write("secrets.env", "A=alpha-secret\nB=beta-secret\n");
-    let (child, port) = spawn(
+    let output = serve_and_collect(
         &sandbox,
         &["--redact-from", secrets.to_str().expect("utf8")],
+        "/orders",
     );
-
-    let output = request_and_collect(child, port, "/orders");
     assert!(
         output.contains("redacting 2 distinct secret value(s)"),
         "the count must be reported: {output}"

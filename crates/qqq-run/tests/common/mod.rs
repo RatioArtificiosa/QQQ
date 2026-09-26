@@ -127,6 +127,32 @@ pub fn serve_and_request(
     );
 }
 
+/// Whether this output is **the port race**, by the error the loser reports.
+///
+/// # Why the code and not emptiness
+///
+/// A child that **failed to bind** does not write nothing — it writes `QQQ-6002` and exits. So a retry
+/// keyed on emptiness never fires for the failure it exists to retry, and a retry keyed on a missing
+/// HTTP response cannot serve the files that observe the server's **log** rather than its response.
+///
+/// **The bind failure is the one signal both kinds of helper see**, and it names the race instead of
+/// inferring it. Measured twice: the first condition (`!text.is_empty()`) was inert, the second
+/// (`!answered`) broke three files that never see a status line.
+pub fn lost_the_port_race(text: &str) -> bool {
+    text.contains("QQQ-6002")
+}
+
+/// Whether the server **answered at all** — an HTTP status line is present.
+///
+/// # Why this and not `is_empty`
+///
+/// Because the combined text carries the child's own output, and a child that **failed to bind** —
+/// the exact shape of a lost port race — still writes an error. **A retry keyed on emptiness would
+/// never fire for the failure it exists to retry.**
+pub fn answered(text: &str) -> bool {
+    text.contains("HTTP/1.1 ")
+}
+
 /// One attempt: a fresh port, a fresh child, one request.
 fn attempt_once(sandbox: &Sandbox, manifest: &str, extra: &[&str], target: &str) -> Served {
     let config = sandbox.write("qqq.toml", manifest);

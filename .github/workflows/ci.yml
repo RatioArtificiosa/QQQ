@@ -620,6 +620,11 @@ jobs:
       - name: Prove the naming check detects a `qqq` binary
         run: python tools/fault_inject_naming.py
 
+      # The `xrefs` job's half of the pair. **A runner's TEMP is not shared**, so each job that runs a
+      # fault injector needs its OWN snapshot and verify.
+      - name: Verify the fault injectors returned the tree (xrefs)
+        run: python tools/check_fault_inject_restores.py --verify
+
       # The objective audit: does the deliverable set actually satisfy the
       # brief? It checks that all three documents exist and are English, that
       # the Proposal covers the required sections, that the Checklist is fully
@@ -673,6 +678,13 @@ jobs:
       # file triggers our rule. The checker keeps the rule as defence in depth,
       # and the harness says so rather than implying it is exercised.
       - name: Prove the WIT versioning check detects violations
+      # The `wit` job's half of the pair. **This is the step that was in the WRONG JOB**: `--snapshot`
+      # ran in `xrefs` and `--verify` here, on a different runner, and CI failed every commit since with
+      # `GATE TREE INCONCLUSIVE -- no snapshot`.
+      - name: Snapshot the tree before the fault injectors (wit)
+        run: python tools/check_fault_inject_restores.py --snapshot
+
+      - name: Prove the versioning check detects a missing `@since`
         run: python tools/fault_inject_wit_since.py
 
       # `CON-009`: every FALLIBLE host call returns a typed error rather than a
@@ -769,7 +781,7 @@ jobs:
 
       # And the tree must be back. **This is the step that would have caught `02903b7` before it was
       # pushed**, and it is cheap because it compares digests rather than re-running anything.
-      - name: Verify the fault injectors returned the tree
+      - name: Verify the fault injectors returned the tree (wit)
         run: python tools/check_fault_inject_restores.py --verify
       - name: Prove the restore check catches a checker that does not restore
         run: python tools/check_fault_inject_restores.py --self-test

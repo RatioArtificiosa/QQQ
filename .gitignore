@@ -151,8 +151,5 @@ fuzz/corpus/*/
 
 docs/TEMP-HANDOFF.md
 
-# `.commandcode/` is a TOOL's artefact directory -- it appeared in the tree from a CLI in this
-# environment, holds only `taste/taste.md`, and is not part of the project. Untracked, it makes
-# `check_handoff.py` report the tree dirty, which is a real signal being spent on something that is
-# not a change. Same treatment as `.scratch/`.
+# Local tool directories: ignored, not tracked, not part of the build.
 .commandcode/

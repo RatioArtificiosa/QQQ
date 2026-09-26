@@ -76,10 +76,11 @@ use qqq_core::{Error, ErrorCode, Result};
 use qqq_host::config::EngineConfig;
 use qqq_host::LimitSet;
 use qqq_io::{ListenAddr, Shutdown};
+use qqq_serve::access_log::Level;
 use qqq_serve::access_log::Logger;
-use qqq_serve::access_log::{Format, Level};
 use qqq_serve::response::Response;
 use qqq_serve::server::{Dispatch, Handler, ServerConfig};
+use std::io::IsTerminal as _;
 
 use crate::build::find_artifact;
 use crate::guest_handler::GuestApp;
@@ -129,6 +130,12 @@ pub struct ServeOptions {
     /// redacted *nothing* while appearing configured is the failure this flag exists to make
     /// visible — an operator who wants redaction must supply the values.
     pub redact_from: Option<String>,
+    /// `--log-format json|human` — overrides §10.3's TTY rule.
+    ///
+    /// `None` means *decide from the stream*, which is the documented default and the right one:
+    /// a developer watching a terminal gets the readable encoding, and a server piped into a log
+    /// collector gets the structured one.
+    pub log_format: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -142,6 +149,7 @@ impl Default for ServeOptions {
             accept_limit: None,
             audit_log: None,
             redact_from: None,
+            log_format: None,
         }
     }
 }
@@ -174,6 +182,33 @@ pub struct ServeOutput {
 /// parse. Every one is a *usage* error: the command names what was wrong and what
 /// to write instead, because a server that starts with a flag silently ignored is
 /// worse than one that refuses to start.
+/// Read and validate `--log-format`'s value.
+///
+/// # Errors
+///
+/// A usage error naming the flag when the value is not `json` or `human`.
+///
+/// # Why the value is validated here rather than at start-up
+///
+/// So a typo is a **usage** error naming the flag, which is what every other value-taking flag
+/// does. A server that silently ignored `--log-format jsonn` would emit the other encoding and look
+/// configured -- the same failure `--redact-from`'s refusals exist to avoid in their own domain.
+fn log_format_of(args: &[String], i: usize) -> Result<String> {
+    let v = value_of(args, i, "--log-format")?;
+    if qqq_serve::access_log::Format::parse(&v).is_err() {
+        return Err(usage(format!("`--log-format {v}` is not a log format"))
+            .with_remediation("use `json` or `human`"));
+    }
+    Ok(v)
+}
+
+/// Parse `qqqai serve`'s arguments.
+///
+/// # Errors
+///
+/// `QQQ-7001` for an unknown flag, a flag without a value, or a value that does not parse. Every
+/// one is a *usage* error: the command names what was wrong and what to write instead, because a
+/// server that starts with a flag silently ignored is worse than one that refuses to start.
 pub fn options(args: &[String]) -> Result<ServeOptions> {
     let mut opts = ServeOptions::default();
     let mut i = 0;
@@ -214,6 +249,10 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             }
             "--config" => {
                 opts.config = Some(value_of(args, i, "--config")?);
+                i += 2;
+            }
+            "--log-format" => {
+                opts.log_format = Some(log_format_of(args, i)?);
                 i += 2;
             }
             "--redact-from" => {
@@ -599,6 +638,15 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
     // A failure to read or parse the file REFUSES THE START. The alternative -- serving with an
     // empty redactor -- is a server that believes it redacts and does not, which is worse than one
     // that never claimed to: the operator has no signal, and the secret is in the logs.
+    // §10.3: "Structured JSON by default; human-readable in a TTY." The flag overrides; otherwise
+    // the stream decides. Before this, `Format::Human` was hardcoded, so a server piped into a log
+    // collector emitted the human encoding -- the rule inverted, in the direction that loses the
+    // structure the collector needs.
+    let format = match &opts.log_format {
+        Some(name) => qqq_serve::access_log::Format::parse(name).map_err(usage)?,
+        None => qqq_serve::access_log::Format::for_terminal(std::io::stdout().is_terminal()),
+    };
+
     let logger = match &opts.redact_from {
         Some(path) => {
             let text = std::fs::read_to_string(path).map_err(|e| {
@@ -616,9 +664,9 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
                 "redacting {} distinct secret value(s) from every log line",
                 redactor.len()
             );
-            Logger::new(Format::Human, Level::Info).with_redactor(redactor)
+            Logger::new(format, Level::Info).with_redactor(redactor)
         }
-        None => Logger::new(Format::Human, Level::Info),
+        None => Logger::new(format, Level::Info),
     };
 
     let routes = prepared.routes;

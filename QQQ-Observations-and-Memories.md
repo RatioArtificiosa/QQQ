@@ -23959,4 +23959,62 @@ to nothing and pass a naive check.
 
 ---
 
+## §O-307 — §10.3's log format was hardcoded to the *wrong* one, and the JSON renderer it needed already existed
+
+**Found:** Phase 1, `OBS-007`. **Anchors:** `crates/qqq-serve/src/access_log.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/log_format.rs`.
+
+### What §10.3 asks, and what the server did
+
+> *"Structured JSON by default; human-readable in a TTY."*
+
+`serve.rs` built `Logger::new(Format::Human, Level::Info)` — **unconditionally, in both branches of
+the redaction wiring**. So a server whose stdout is a **pipe into a log collector** emitted the
+human encoding. Not *missing* — **inverted**, and in the direction that loses the structure the
+collector needs.
+
+Everything else was already built and tested: `Record::render_json`, and
+`the_json_record_carries_every_mandatory_field` asserting §10.3's exact list — `level`, `trace_id`,
+`span_id`, `tenant`, `component`, `manifest_rev`, `msg`, and `code` absent when there is none.
+
+**So the item's remainder was one selection, not a renderer.** Invariant THREE for the seventh time,
+in its mildest form yet: the mechanism was complete and the *choice* was never made.
+
+### The fix separates the policy from the probe
+
+```rust
+pub const fn for_terminal(is_terminal: bool) -> Self {
+    if is_terminal { Self::Human } else { Self::Json }
+}
+```
+
+The **decision** is what §10.3 specifies, and whether a particular stream is a terminal is the
+environment's business. Splitting them means the policy is unit-testable — both branches asserted —
+while the probe stays one call at the place that has a stream to ask. `--log-format json|human`
+overrides, validated at **parse** time so a typo is a usage error naming both spellings rather than a
+server that looks configured and emits the other encoding.
+
+### The test has to be a child process, and that is the point
+
+`stdout().is_terminal()` cannot be faked in-process without testing a different thing, so
+`tests/log_format.rs` spawns the binary with a **piped** stdout — which *is* the production case —
+and asserts the served line is JSON with the mandatory fields.
+
+**Fault-injected by restoring the hardcoded `Format::Human`**: the output showed the original defect
+verbatim — `ERROR 00000000000000000000000000000001 0000000000000001 127.0.0…` — and only
+`a_piped_server_logs_json` fired.
+
+### Two clippy findings, both structural
+
+`options` crossed the 100-line budget, so the `--log-format` arm became a helper — which is also
+where *"a typo is a usage error"* belongs. And inserting that helper **stole `options`'s doc
+comment**, which `missing_docs` and `missing_errors_doc` both reported: the anchor was the function
+signature, and the doc comment above it belonged to the item being pushed down. A reminder that a
+mechanical insertion above a documented item moves its documentation with it.
+
+→ `crates/qqq-serve/src/access_log.rs`, `crates/qqq-run/src/serve.rs`,
+`crates/qqq-run/tests/log_format.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -645,6 +645,72 @@ pub enum Format {
     Human,
 }
 
+impl Format {
+    /// The format a stream should use — §10.3.
+    ///
+    /// > *"Structured JSON by default; human-readable in a TTY."*
+    ///
+    /// # Why the policy is a pure function of a boolean
+    ///
+    /// Because the *decision* is what §10.3 specifies, and whether a particular stream is a terminal
+    /// is the environment's business. Splitting them means the policy is unit-testable — a test can
+    /// assert both branches — while the probe stays a single call at the one place that has a
+    /// stream to ask.
+    ///
+    /// # Why this exists at all
+    ///
+    /// `qqqai serve` built `Logger::new(Format::Human, ..)` unconditionally, so a server whose
+    /// stdout was a pipe to a log collector emitted the **human** encoding: §10.3's rule inverted,
+    /// in the direction that loses the structure the collector needs. `§O-307` records it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_serve::access_log::Format;
+    ///
+    /// assert_eq!(Format::for_terminal(false), Format::Json, "a pipe is not a terminal");
+    /// assert_eq!(Format::for_terminal(true), Format::Human, "a terminal gets the readable one");
+    /// ```
+    #[must_use]
+    pub const fn for_terminal(is_terminal: bool) -> Self {
+        if is_terminal {
+            Self::Human
+        } else {
+            Self::Json
+        }
+    }
+
+    /// Parse a format from its CLI spelling.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the two accepted spellings, so a typo is answered rather than defaulted —
+    /// a server that silently ignored `--log-format jsonn` would emit the other one and look
+    /// configured.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_serve::access_log::Format;
+    ///
+    /// assert_eq!(Format::parse("json"), Ok(Format::Json));
+    /// assert_eq!(Format::parse("human"), Ok(Format::Human));
+    ///
+    /// // A typo names both spellings rather than falling back to one of them.
+    /// let err = Format::parse("jsonn").unwrap_err();
+    /// assert!(err.contains("`json` or `human`"), "{err}");
+    /// ```
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "json" => Ok(Self::Json),
+            "human" => Ok(Self::Human),
+            other => Err(format!(
+                "`{other}` is not a log format; use `json` or `human`"
+            )),
+        }
+    }
+}
+
 /// A logger: a format, a level filter, and a redactor.
 ///
 /// Holds no file handle. `qqq-serve` writes to stdout or to a caller-supplied sink;
@@ -1147,6 +1213,53 @@ mod tests {
         let hits = r.redact(&redactor);
         assert_eq!(hits, 0);
         assert_eq!(r.msg, "harmless", "the message must be untouched");
+    }
+
+    /// **§10.3's rule is a function of the stream, and both branches are asserted — `OBS-007`.**
+    ///
+    /// > *"Structured JSON by default; human-readable in a TTY."*
+    ///
+    /// `qqqai serve` hardcoded `Format::Human`, so a server piped into a log collector emitted the
+    /// human encoding: the rule **inverted**, in the direction that loses the structure the
+    /// collector needs. A policy with two branches and one assertion is a policy that can be
+    /// inverted without a test noticing, which is exactly what happened.
+    #[test]
+    fn the_format_follows_the_stream() {
+        assert_eq!(
+            Format::for_terminal(false),
+            Format::Json,
+            "a pipe is not a terminal, so the encoding must be the structured one"
+        );
+        assert_eq!(
+            Format::for_terminal(true),
+            Format::Human,
+            "a terminal gets the readable one"
+        );
+        assert_ne!(
+            Format::for_terminal(false),
+            Format::for_terminal(true),
+            "the two branches must differ -- a policy that ignores its input is not a policy"
+        );
+    }
+
+    /// **A typo in the format is refused, naming both spellings.**
+    ///
+    /// A server that silently ignored `--log-format jsonn` would emit the other encoding and look
+    /// configured, which is the failure `--redact-from`'s refusals exist to avoid in their own
+    /// domain.
+    #[test]
+    fn a_format_typo_is_refused() {
+        assert_eq!(Format::parse("json"), Ok(Format::Json));
+        assert_eq!(Format::parse("human"), Ok(Format::Human));
+        let err = Format::parse("jsonn").unwrap_err();
+        assert!(
+            err.contains("`json` or `human`"),
+            "the refusal must list them: {err}"
+        );
+        assert!(
+            Format::parse("JSON").is_err(),
+            "the spelling is exact, not case-folded"
+        );
     }
 
     /// **A line without `=` is refused, and the refusal names the line — `OBS-008`.**

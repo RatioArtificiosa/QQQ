@@ -4833,7 +4833,25 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → `§O-306` records all of it, including that `Tenant` is bounded by `MAX_TENANTS` rather than by
     `ALL`, so the rule is *“asserts a finite `ALL` **or** declares a `MAX_*` ceiling”*.
   → §10.2 Metrics that ship by default
-- [ ] **OBS-007** Implement structured JSON logging with trace and tenant correlation.
+- [x] **OBS-007** Implement structured JSON logging with trace and tenant correlation.
+  → **Done — and the renderer already existed; what was missing was the choice.**
+    `Record::render_json` and `the_json_record_carries_every_mandatory_field` (asserting §10.3's
+    exact list: `level`, `trace_id`, `span_id`, `tenant`, `component`, `manifest_rev`, `msg`, and
+    `code` absent when there is none) were implemented and tested. `serve.rs` built
+    `Logger::new(Format::Human, ..)` **unconditionally**, so §10.3's *“structured JSON by default;
+    human-readable in a TTY”* was **inverted** — a server piped into a log collector emitted the
+    human encoding, losing the structure the collector needs. §O-307.
+  → **The fix separates the policy from the probe.** `Format::for_terminal(is_terminal) -> Format`
+    is the *decision* §10.3 specifies; whether a stream is a terminal is the environment's business.
+    Splitting them makes the policy unit-testable — **both branches asserted**, which is what would
+    have caught the inversion — while the probe stays one call where a stream exists to ask.
+    `--log-format json|human` overrides, validated at **parse** time so a typo is a usage error
+    naming both spellings rather than a server that looks configured and emits the other encoding.
+  → **Measured**: 2 policy tests + **3 tests over the real binary** in
+    `crates/qqq-run/tests/log_format.rs`, which spawns the server with a **piped** stdout — the
+    production case — because `is_terminal()` cannot be faked in-process without testing a
+    different thing. **Fault-injected by restoring the hardcoded `Format::Human`**: the output showed
+    the original defect verbatim and only `a_piped_server_logs_json` fired.
   → §10.3 Logging
 - [x] **OBS-008** Implement host-side redaction using manifest-declared secret names.
   → **Done — and the mechanism was already complete; what was missing was the call.**

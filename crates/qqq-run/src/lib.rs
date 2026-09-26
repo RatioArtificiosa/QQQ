@@ -47,6 +47,7 @@ pub mod guest_bridge;
 pub mod guest_handler;
 pub mod install;
 pub mod manifest_loader;
+pub mod mcp;
 /// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.
 pub mod openapi;
 pub mod output;

@@ -25576,4 +25576,88 @@ workspace **2680 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` ·
 
 ---
 
+## §O-335 — The MCP server exists, and the first thing it found was a lie in its own output
+
+**Found:** Phase 2, `AGENT-004`. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### The defect this closes
+
+**`output::mcp_tool_names()` has listed twelve tools since before the module existed**, and `qqqai mcp`
+answered `QQQ-6004: not implemented yet`. **A published contract with no server is the shape this
+repository keeps finding** — a thing written, documented and never called. This is the server.
+
+### What is implemented
+
+| method | state |
+|---|---|
+| `initialize` | `protocolVersion`, `capabilities`, `serverInfo` |
+| `tools/list` | **all twelve**, from the same list the CLI publishes |
+| `tools/call` | a real registry — **`qqq_errors_lookup` is wired** |
+| `ping` | JSON-RPC's own |
+
+**Observed end to end over the real pipe**, not in a unit test. And **the transport's own failures are
+the ones a client sees first**, so they are what the tests hold:
+
+- a malformed line gets **`-32700` and the loop continues**;
+- an unknown method is JSON-RPC's own **`-32601`**, not a QQQ-specific spelling of *"no such method"*;
+- **a notification is not answered** — a `null`-id reply is a reply to a request the client never made.
+
+### `AGENT-019`'s shape, enforced rather than described
+
+An unrunnable tool returns **`isError: true`** with a `structuredContent` naming the tool — **a client
+branches on a boolean, not on the wording of a sentence**. A name that is not a tool is `-32602` and the
+refusal **names it**.
+
+### The finding, and it was in my own first version
+
+The `qqq_errors_lookup` result carried a field called `meaning`, and **running the tool showed it
+repeating the id**:
+
+```
+{"class":"70","id":"QQQ-7001","meaning":"QQQ-7001"}
+```
+
+**`ErrorCode`'s `Display` renders the id, and `ErrorCode` has no description accessor** — so the tool
+**cannot** carry a meaning at all.
+
+> **A field that says `meaning` and carries an id is a lie.**
+
+It now carries `docs`: the permanent URL every QQQ error prints, which is **where the meaning actually
+lives**. *Found by running the tool and reading its own output* — not by reading the code.
+
+### And the brief was wrong, measured
+
+It said *"7 `Mcp*` error codes exist"*. **There is one**: `McpArgumentInvalid = 7001`.
+
+> **The brief is a hypothesis; the tree is the evidence.**
+
+### The injection
+
+Making a malformed line end the server: `a_malformed_line_does_not_kill_the_loop` **FAILED** with `[]` —
+an empty reply list, which is exactly what a dead loop looks like.
+
+### And the ratchet caught a visibility lie that my own checker's Rule A missed
+
+The API ratchet went **seven over**, and the cause was not `mcp.rs`'s two public functions. **It was
+four `pub const`s inside a *private* module** — `§O-315`'s Rule A exactly: a `pub` item in a module that
+is not `pub` cannot be reached from outside, so the `pub` is a lie.
+
+**`check_public_reachability`'s Rule A is the *intersection* of "in a non-`pub` module" and "referenced
+nowhere"** — and these constants **are** referenced, inside `mcp.rs`. **The intersection is empty, so the
+rule stayed silent, and the ratchet caught it instead** by counting them as API that owes examples.
+
+**A rule defined as an intersection is silent on everything outside it.** The ratchet and the rule cover
+different halves, and this is the first time the ratchet has caught something the rule should have.
+
+The fix was `pub(super)`: **a private const in a *child* module is not visible to its parent** — Rust's
+privacy is "this module and its descendants", not its ancestors — and `pub(super)` is the narrowest
+correct visibility, which the ratchet excludes by name.
+
+### Measured
+
+workspace green · fmt 0 · clippy 0 · **9 MCP tests in 0.07 s** · the transport observed over a real pipe.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

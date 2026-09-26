@@ -668,6 +668,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
         CommandName::Update => dispatch_update(name, args, flags, &mut out),
         CommandName::Test => dispatch_test(name, args, flags, &mut out),
+        CommandName::Mcp => dispatch_mcp(name, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -679,6 +680,35 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             ));
             let _ = out.emit_error_with_exit(name, &err, exit::UNAVAILABLE);
             ExitCode::from(exit::UNAVAILABLE)
+        }
+    }
+}
+
+/// Dispatch `qqqai mcp` — `AGENT-004`.
+///
+/// # Why this command ignores the output formatter
+///
+/// Because its output **is** the protocol: JSON-RPC 2.0 messages on stdout, one per line. A
+/// human-readable summary would be a line no client can parse, and `--json` would be a second encoding
+/// of something that already has one. So `out` is taken for the error path only.
+///
+/// # Why the exit code is the loop's
+///
+/// Because the loop ends when **stdin ends**, which is how a client says *"done"*. An EOF is a clean
+/// shutdown, not a failure, and reporting one would make every client's happy path look like an error.
+fn dispatch_mcp(name: CommandName, out: &mut Output<std::io::Stdout>) -> ExitCode {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match qqq_run::mcp::serve_stdio(stdin.lock(), stdout.lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::InternalInvariantViolated,
+                format!("the MCP stdio transport failed: {e}"),
+            )
+            .with_remediation("check that stdout is writable and not closed by the client");
+            let _ = out.emit_error_with_exit(name, &err, exit::INTERNAL);
+            ExitCode::from(exit::INTERNAL)
         }
     }
 }

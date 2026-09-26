@@ -25417,4 +25417,69 @@ retries then names the race · 2 stray processes found and killed.
 
 ---
 
+## §O-332 — `OBS-010`'s inbound half: the flag is carried, the decision is not touched
+
+**Found:** Phase 1, building `OBS-010`. **Anchors:** `crates/qqq-serve/src/trace_context.rs`,
+`crates/qqq-serve/src/server.rs`.
+
+### The two halves of §10.4 are in different places, and that is the design
+
+**Propagation is correlation**: an inbound `traceparent` says *"this request belongs to a trace that
+started upstream"*. **Sampling is a decision**, and §10.4 forbids the guest a hand in it. The header
+carries a `sampled` bit and a conventional implementation **inherits** it — which would let a caller
+choose whether its own traffic is recorded.
+
+**So the module parses and carries the flag, and never obeys it.** `Flags::upstream_sampled` documents
+it as a *correlation hint*; the decision stays in `span::Sampler`, whose only input is a host-allocated
+`TraceId`. **`§O-321`'s guard enforces the separation at the source**: `span.rs` and every `emit_span`
+call must name no request field.
+
+### Wired, and observed end to end
+
+```
+{"…","msg":"GET /orders 403","method":"GET","path":"/orders","status":"403",
+ "upstream_sampled":"true","upstream_trace":"4bf92f3577b34da6a3ce929d0e0e4736"}
+```
+
+**And the record's own `trace_id` is still the host's counter (`…0001`)** — so the guest's flag was
+carried and the host's decision was untouched. **That is the whole security claim, visible in one log
+line.**
+
+### The parser is strict, and why
+
+A permissive parser is worse than none: a `traceparent` that half-parses produces a trace id that
+**looks** valid and joins nothing, and the failure is **invisible** because a trace that does not join
+is indistinguishable from a trace with one service in it.
+
+- four dash-separated fields, each length- and hex-checked;
+- **an all-zero trace or parent id is refused, because W3C defines it as invalid rather than as an id** —
+  accepting it would join every undecided request into one trace;
+- **an unknown higher version is accepted**, per W3C: a receiver that rejected `ff` would break every
+  future producer.
+
+### The outbound half is not wired, and it says so
+
+Continuing a trace **downstream** needs an outbound `wasi:http` request, which this server does not
+make. `to_header` exists for the path that will call it, and **its doctest is the caller until then** —
+stated in the method's own documentation rather than implied.
+
+### 15 new tests, and the injection
+
+Fault-injected by accepting an all-zero trace id: `an_all_zero_id_is_refused` **FAILED** with
+`right: Err(AllZero { field: "trace-id" })`.
+
+### And `§O-311`'s lesson fired again, in the round that built it
+
+Narrowing the module to `pub(crate)` made clippy report **`bits`, `parent` and `to_header` as never
+used** — because their only callers were the tests. **A test is not a caller.** Resolved by keeping the
+module public and giving **each** a doctest, because the outbound half is a real intended API awaiting
+its path, and an example is what the ratchet asks of a public item.
+
+### Measured
+
+workspace **2678 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121 at the allowance) ·
+the end-to-end record observed on a real socket.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

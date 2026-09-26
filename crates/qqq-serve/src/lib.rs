@@ -95,6 +95,7 @@ pub mod auth;
 pub mod body;
 pub mod body_bytes;
 pub mod span;
+pub mod trace_context;
 
 pub use body_bytes::{BodyBytes, BodyHandler};
 pub mod conn;

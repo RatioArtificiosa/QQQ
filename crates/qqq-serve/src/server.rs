@@ -885,6 +885,29 @@ pub fn access_record(
     .with_field("path", path)
     .with_field("status", status.to_string());
 
+    // --- Proposal §10.4's propagation half, `OBS-010` ---------------------
+    //
+    // An inbound `traceparent` says *"this request belongs to a trace that started upstream"*, and
+    // carrying it is what makes one trace out of many services. **It is recorded and never obeyed**:
+    // the sampling decision is `span::Sampler`'s, taken from a host-allocated trace id, and `OBS-014`
+    // is the item that proves a guest cannot reach it.
+    //
+    // A malformed header is **dropped rather than refused**, because correlation is not authority: a
+    // caller that sends nonsense should get its request served, not a 400. The refusal to parse is
+    // the parser's business and this is the server's.
+    let rec = match head
+        .header("traceparent")
+        .and_then(|h| crate::trace_context::TraceContext::parse(h).ok())
+    {
+        Some(upstream) => rec
+            .with_field("upstream_trace", upstream.trace().as_str())
+            .with_field(
+                "upstream_sampled",
+                upstream.flags().upstream_sampled().to_string(),
+            ),
+        None => rec,
+    };
+
     match error_code_of(response) {
         Some(c) => rec.with_code(c),
         None => rec,

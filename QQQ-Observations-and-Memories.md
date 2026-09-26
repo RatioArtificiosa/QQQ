@@ -24931,4 +24931,60 @@ argument for the annotation rather than a tick.
 the second is the one that survives the session — which is why this goal's DoD puts the `→ Done:` line
 first. **Building without recording is how a corpus goes stale while the tree stays green.**
 
+## §O-324 — The flake recurred a third time, so the accept-limit fix is wrong too
+
+**Found:** CI on `7cb7b61` — a **documentation-only** commit. **Anchors:**
+`crates/qqq-run/tests/metrics_endpoint.rs`.
+
+### Three hypotheses, three failures
+
+| round | hypothesis | fix | outcome |
+|---|---|---|---|
+| 14 (`§O-314`) | the read deadline was too short | 5 s → 30 s, plus a non-empty assertion | **recurred** |
+| 21 (`§O-322`) | the readiness probe consumed the accept limit | `--accept-limit 1` → `4` | **recurred** |
+| — | — | — | **this entry** |
+
+```
+Rust (ubuntu-latest) :: test
+test result: FAILED. 3 passed; 1 failed
+```
+
+**A docs-only commit failing the same job the same way** is the strongest possible signal that the
+change set is not the variable.
+
+### What the third failure rules out
+
+The **30 s deadline is not the cause** (`§O-322` established that: the server produced *nothing* for the
+full 30 s, so it is no read rather than a slow one), and the **accept limit is not the cause either** —
+the limit was raised and the flake survived.
+
+**Both fixes were reasonable and both were wrong**, which is worth stating plainly: *a plausible cause
+is not a measured one*, and each was recorded as a hypothesis rather than a fix precisely because
+neither had been proven.
+
+### What is left, and it is not a guess
+
+**The remaining structural candidate is `free_port()`**: it binds a port, reads it, **drops the
+listener**, and hands the number to a child that binds it moments later. Between the drop and the
+child's bind the number is unowned — so on a loaded runner **two tests can be handed the same port**, or
+another process can take it. That fits every observation:
+
+- the child may **fail to bind** and print an error to a pipe the helper reads *after* the client has
+  already given up;
+- or the client may **connect to the wrong server** — another test's — which answers with a different
+  response, or is already shutting down.
+
+**That is a hypothesis too**, and this entry does not repeat the mistake of the previous two by treating
+it as settled. **What is different is that it is testable without a CI round**: run the file's tests
+with a forced collision, or with `--test-threads=1`, and see whether the failure disappears.
+
+### The honest state
+
+**The merge gate has a live, unexplained flake on Ubuntu**, three fixes have failed, and the two things
+it is *not* are now measured. **The next round should not guess a fourth time**: it should get the
+child's full stdout on a failure — which the helper already captures and which was **empty**, itself a
+finding — or reproduce locally under load.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

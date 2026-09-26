@@ -1830,7 +1830,7 @@ V1.0 ships only when **every** item below is true and verifiable by a third part
 **Security**
 - [ ] Two independent external audits complete; all critical and high findings fixed
 - [ ] The hostile-guest suite (≥200 cases) passes with zero host memory-safety incidents
-- [ ] `qqqai audit --fail-on high` is clean on all first-party packages
+- [ ] `qqqai audit --fail-on error` is clean on all first-party packages
 - [ ] Threat model published, including explicit non-goals
 
 **Performance**

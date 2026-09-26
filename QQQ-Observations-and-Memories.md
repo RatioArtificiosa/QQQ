@@ -23819,4 +23819,68 @@ built its own `Logger` is exactly why this one survived four rounds of looking.
 
 ---
 
+## §O-305 — Two normative documents told the reader to run a flag value that the CLI refuses, and the measurement that proved it was already in this file
+
+**Found:** verifying Gate 1's third clause. **Anchors:** `QQQ-Checklist-V1.md` (DOD-006),
+`QQQ-Proposal-V1.md` (§16's DoD list), `crates/qqq-run/src/audit.rs`.
+
+### What the gate found
+
+Gate 1 requires *"`DOD-006`'s `qqqai audit --fail-on high` remains clean"*, so I ran it:
+
+```
+error[QQQ-2001]: `high` is not a severity; use `note`, `warning` or `error`
+```
+
+**The command the corpus tells a reader to run does not exist.** `Severity` is `Note | Warning |
+Error` — SARIF's own spellings, which is correct, because `as_str()` feeds the SARIF export
+directly. `high` is not a member and never was.
+
+And the claim is in **two normative documents**:
+
+- `QQQ-Checklist-V1.md:4885` — *"Confirm `qqqai audit --fail-on high` is clean on all first-party
+  packages."*
+- `QQQ-Proposal-V1.md:1833` — the same sentence in §16's Definition of Done.
+
+### The part that matters: the measurement was already here, and the conclusion was not
+
+This file, at line 18020, has a table of measurements taken against the shipped binary:
+
+| Claim | Command | Result |
+|---|---|---|
+| The flag is validated | `--fail-on high` | QQQ-7001 naming the three accepted spellings… |
+
+**A previous round ran the exact command, observed the exact refusal, wrote it down — and did not
+then ask whether anything else in the corpus still said `high`.** The evidence and the defect were
+in the same document, twenty thousand lines apart, and the entry's own subject was *"the tick mark
+is not the only evidence of state"*.
+
+That is the shape this goal exists for, and it is worth naming precisely: **a measurement recorded
+as evidence about a *command* is also evidence about every document that names that command.**
+Recording the observation closed the question it was asked and left the one it answered open.
+
+The entry stays as it is. It is accurate history — it records that `high` was tried and refused —
+and it is now also the proof that the two normative documents were wrong.
+
+### What was fixed
+
+Both documents now say `--fail-on error`, which is the highest severity and therefore what *"fail on
+high"* meant. Verified on the shipped binary, from the directory holding the manifest:
+
+```
+$ qqqai audit target/qqq/orders-api.component.wasm --fail-on error
+2 finding(s) over caps, limits, supply chain and provenance; worst severity: warning
+EXIT=0
+```
+
+So `DOD-006`'s intent is satisfied — the worst finding on the reference application is a `warning`
+(`qqq/exposed-posture`, and correctly so: the app declares `http.server`), and the gate passes.
+
+`grep 'fail-on high'` across every `.md` now returns **only the observation that measured the
+refusal**, which is where it belongs.
+
+→ `QQQ-Checklist-V1.md`, `QQQ-Proposal-V1.md`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

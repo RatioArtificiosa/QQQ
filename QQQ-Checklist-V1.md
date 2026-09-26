@@ -4882,7 +4882,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §16 — Definition of Done for V1
 - [ ] **DOD-005** Confirm the ≥200-case hostile-guest suite passes with zero host memory-safety incidents.
   → §16 — Definition of Done for V1
-- [ ] **DOD-006** Confirm `qqqai audit --fail-on high` is clean on all first-party packages.
+- [ ] **DOD-006** Confirm `qqqai audit --fail-on error` is clean on all first-party packages.
   → §16 — Definition of Done for V1
 - [ ] **DOD-007** Publish the threat model including explicit non-goals.
   → §16 — Definition of Done for V1

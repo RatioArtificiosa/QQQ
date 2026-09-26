@@ -57,6 +57,12 @@ use serde_json::{json, Value};
 /// The JSON-RPC version this server speaks. There is one, and it is not negotiable.
 const JSONRPC: &str = "2.0";
 
+/// The largest request body this server will read.
+///
+/// **Refused rather than allocated**: an unbounded read on a socket is how a server is made to allocate
+/// until it dies, and an MCP client has no reason to send a megabyte.
+const MAX_BODY: usize = 1 << 20;
+
 /// The MCP protocol revision this server implements.
 ///
 /// Named rather than inlined because a client reads it from `initialize` and decides how to talk to
@@ -393,4 +399,168 @@ pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Re
         }
     }
     Ok(())
+}
+
+/// The HTTP transport — `AGENT-005`.
+///
+/// # The shape, and why it is this one
+///
+/// MCP's Streamable HTTP transport is **one endpoint, one POST, one JSON-RPC message**. The client sends
+/// `POST /mcp` with a JSON body and gets the reply in the response body. **A notification gets `202
+/// Accepted` and no body**, because answering one would be a reply to a request the client never made --
+/// the same rule `answer` applies on stdio, and the two transports must agree or a client would need two
+/// mental models.
+///
+/// # Why blocking `std::net` and not the async server this crate already depends on
+///
+/// Because the exchange is **request/response with nothing in between**: the whole answer is computed
+/// before a byte is written. A runtime would buy concurrency this endpoint does not need, and it would
+/// make the transport **harder to test**, because a test would need a runtime to drive it.
+///
+/// # What this is not
+///
+/// It is **not** a general-purpose HTTP server: one request per connection, `Connection: close`, no
+/// chunked encoding, no SSE. **An MCP client that needs server-initiated messages over HTTP is not
+/// served by this**, and saying so is part of the contract rather than a gap discovered later.
+///
+/// # Errors
+///
+/// An I/O error from the listener or a connection. **A malformed request is not one**: it gets a `400`
+/// with a JSON-RPC parse error, for the same reason a malformed line on stdio does.
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::mcp::serve_http;
+/// use std::io::{Read, Write};
+///
+/// // A port the OS picks, released so the server can take it.
+/// let port = std::net::TcpListener::bind("127.0.0.1:0")
+///     .expect("bind")
+///     .local_addr()
+///     .expect("addr")
+///     .port();
+///
+/// std::thread::spawn(move || {
+///     let _ = serve_http(&format!("127.0.0.1:{port}"));
+/// });
+///
+/// // **Wait by connecting, not by sleeping** -- a sleep is a guess, and this is ready when it answers.
+/// let mut stream = None;
+/// for _ in 0..100 {
+///     if let Ok(s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+///         stream = Some(s);
+///         break;
+///     }
+///     std::thread::sleep(std::time::Duration::from_millis(20));
+/// }
+/// let mut stream = stream.expect("the server must accept a connection");
+///
+/// let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+/// write!(stream, "POST /mcp HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+///     .expect("write");
+///
+/// let mut out = String::new();
+/// stream.read_to_string(&mut out).expect("read");
+/// assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+/// assert!(out.contains("qqqai"), "and it is this server: {out}");
+/// ```
+pub fn serve_http(addr: &str) -> std::io::Result<()> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        // A connection that fails mid-exchange is one bad client, not a dead server.
+        let _ = handle_http(&mut stream);
+    }
+    Ok(())
+}
+
+/// One HTTP exchange.
+fn handle_http(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+    let mut length = 0usize;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            break;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        // Only `Content-Length` matters: there is no chunked encoding, and the method is checked below.
+        if let Some(v) = header
+            .strip_prefix("Content-Length:")
+            .or_else(|| header.strip_prefix("content-length:"))
+        {
+            length = v.trim().parse().unwrap_or(0);
+        }
+    }
+
+    // `POST` to any path, because the endpoint is the server rather than a route -- an MCP client
+    // points at a URL and the path is not part of the protocol.
+    if !request_line.starts_with("POST ") {
+        return write_http(
+            stream,
+            405,
+            "Method Not Allowed",
+            "{\"error\":\"POST only\"}",
+        );
+    }
+
+    if length > MAX_BODY {
+        return write_http(
+            stream,
+            413,
+            "Payload Too Large",
+            "{\"error\":\"body too large\"}",
+        );
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    let body = String::from_utf8_lossy(&body);
+
+    let reply = match serde_json::from_str::<Value>(&body) {
+        Ok(message) => answer(&message),
+        Err(e) => Some(error(
+            &Value::Null,
+            code::PARSE,
+            &format!("the body is not JSON: {e}"),
+        )),
+    };
+
+    match reply {
+        // **A notification is accepted and not answered** -- the same rule as stdio.
+        None => write_http(stream, 202, "Accepted", ""),
+        Some(reply) => {
+            let body = reply.to_string();
+            write_http(stream, 200, "OK", &body)
+        }
+    }
+}
+
+/// Write one HTTP/1.1 response with `Connection: close`.
+fn write_http(
+    stream: &mut std::net::TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()
 }

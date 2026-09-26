@@ -668,7 +668,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
         CommandName::Update => dispatch_update(name, args, flags, &mut out),
         CommandName::Test => dispatch_test(name, args, flags, &mut out),
-        CommandName::Mcp => dispatch_mcp(name, &mut out),
+        CommandName::Mcp => dispatch_mcp(name, args, &mut out),
         _ => {
             let err = qqq_core::Error::new(
                 qqq_core::ErrorCode::InternalInvariantViolated,
@@ -696,7 +696,41 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
 ///
 /// Because the loop ends when **stdin ends**, which is how a client says *"done"*. An EOF is a clean
 /// shutdown, not a failure, and reporting one would make every client's happy path look like an error.
-fn dispatch_mcp(name: CommandName, out: &mut Output<std::io::Stdout>) -> ExitCode {
+///
+/// # Why `--http` is a flag on the same command
+///
+/// Because the two transports serve **the same protocol**. A client picks one by how it connects, not by
+/// which program it runs, and a second command name would be a second spelling of one server.
+fn dispatch_mcp(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
+    // `--http <addr>` selects the HTTP transport -- `AGENT-005`. **The flag rather than a subcommand**,
+    // because the two transports serve the SAME protocol and a client picks one by how it connects,
+    // not by which program it runs.
+    if let Some(i) = args.iter().position(|a| a == "--http") {
+        let Some(addr) = args.get(i + 1) else {
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                "`--http` needs an address to listen on",
+            )
+            .with_remediation("for example: `qqqai mcp --http 127.0.0.1:8080`");
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        };
+        // **Binding is where a bad address is caught**, so the failure is reported before the loop
+        // rather than as a silent server that never answers.
+        return match qqq_run::mcp::serve_http(addr) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                let err = qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("cannot listen on `{addr}`: {e}"),
+                )
+                .with_remediation("check that the address is free and the port is above 1024");
+                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                ExitCode::from(exit::USAGE)
+            }
+        };
+    }
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     match qqq_run::mcp::serve_stdio(stdin.lock(), stdout.lock()) {

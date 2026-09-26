@@ -26077,4 +26077,55 @@ local gate 91 ok / 2 failed, both expected · `GATE PARITY OK` · `HAND-OFF OK`.
 
 ---
 
+## §O-343 — `AGENT-005`: the HTTP transport, and the two doors must not disagree
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_http.rs`.
+
+### The second door
+
+`AGENT-004` opened **stdio**; this opens **HTTP** — and it is **a flag on the same command** rather than a
+second command, because **the two transports serve the same protocol**: a client picks one by *how it
+connects*, not by *which program it runs*.
+
+**The shape**: MCP's Streamable HTTP transport is **one endpoint, one POST, one JSON-RPC message**. The
+client POSTs a JSON body and gets the reply in the response body.
+
+### The two transports must agree — and the tests assert it in *both* files, deliberately
+
+| rule | stdio | HTTP |
+|---|---|---|
+| a notification is **not answered** | no reply | **`202` and no body** |
+| a malformed message is **`-32700`** | and the loop continues | and the **next request is still served** |
+| an unknown method is **`-32601`** | ✓ | ✓ |
+
+> **A client that switched transports must not have to learn a second protocol.**
+
+### Why blocking `std::net`, and not the async server this crate already depends on
+
+Because the exchange is **request/response with nothing in between** — the whole answer is computed before
+a byte is written. A runtime would buy concurrency this endpoint **does not need**, and it would make the
+transport **harder to test**, because a test would need a runtime to drive it.
+
+### What it is *not*, stated rather than discovered later
+
+One request per connection, `Connection: close`, no chunked encoding, **no SSE**. **An MCP client that needs
+server-initiated messages over HTTP is not served by this**, and the doc comment says so.
+
+### And the one guard the transport needs
+
+A body larger than **1 MiB is refused with `413` rather than allocated** — **an unbounded read on a socket is
+how a server is made to allocate until it dies.**
+
+### The injection
+
+Making a notification return `200` with a body: `a_notification_over_http_is_accepted_and_not_answered`
+**FAILED** with *"a notification is 202: HTTP/1.1 200 OK"*.
+
+### Measured
+
+**7 HTTP tests over a real socket in 4.03 s** · fmt 0 · clippy 0 · `API EXAMPLES OK`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

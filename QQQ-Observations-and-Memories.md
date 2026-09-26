@@ -23679,4 +23679,65 @@ fails to compile is not a doctest that ran.
 
 ---
 
+## §O-303 — `OBS-008`'s mechanism is complete and unreachable, and the wiring has a real design question
+
+**Found:** investigating `OBS-008` (*"implement host-side redaction using manifest-declared secret
+names"*). **Anchors:** `crates/qqq-serve/src/access_log.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-host/src/host_secrets.rs`.
+
+### The item is accurately open, and the reason is narrow
+
+Almost all of `OBS-008` is already built, and built well:
+
+| Piece | State |
+|---|---|
+| `Redactor`, longest-first matching, `[redacted:N]` so two secrets stay distinguishable | **implemented**, ~10 tests |
+| `Redactor::from_values` | implemented, and **ignores empty values** — an unset variable resolves to `""`, and replacing that would insert a marker between every character |
+| `Logger.redactor` + `Logger::with_redactor` | implemented |
+| `Logger::emit` applies `record.redact(&self.redactor)` **before** the format branch | implemented, with the reason stated: redacting inside `render_human` *and* `render_json` is how one gets forgotten |
+| The manifest declares `secrets: Vec<String>` | implemented (`crates/qqq-cap/src/manifest.rs:458`) |
+
+**What is missing is one line of wiring and the value it needs.** `serve.rs:576` reads:
+
+```rust
+let logger = Logger::new(Format::Human, Level::Info);
+```
+
+— and `Logger::new` deliberately builds `Redactor::new()`, the empty one. **`server.rs:59` imports
+four types from `access_log` and omits the fifth:** `use crate::access_log::{Level, Logger, Record,
+TraceId};` — no `Redactor`. So the mechanism is implemented, tested, documented, and **unreachable**.
+
+This is invariant THREE's shape for the **fourth** time in this goal, and the pattern is now
+unmistakable: *a control that is written, tested and never called*.
+
+### Why this is recorded rather than wired in passing
+
+Because the missing value is not a plumbing detail — it is a design decision, and the corpus
+already states the constraint. `crates/qqq-host/src/host_secrets.rs` says:
+
+> *It does not **resolve** secrets from the environment or a file. Resolution is `qqq-cap`'s job
+> (`SecretRef` names a source like `env:ORDERS_DB_URL`) … would read the environment on every call,
+> **which §2.5 forbids** … this module touches no ambient state.*
+
+So `Redactor::from_values` needs values that are **already resolved**, resolution happens **once at
+deploy time**, and §2.5 forbids doing it per call. `serve` therefore has to obtain them at start-up
+from the manifest's `SecretRef` sources — and **which sources, resolved when, and what happens when
+one is unset** are three questions with security consequences:
+
+- an unset variable must produce **no redactor entry** (the empty-value guard exists for exactly
+  this, and a wiring that bypassed it would corrupt every log line);
+- a resolution failure must be a **start-up refusal**, not a silent run with redaction off — a
+  server that believes it redacts and does not is worse than one that never claimed to;
+- and the resolved values must not themselves be logged, which is the trap of "redact the secrets"
+  implemented by printing what they are.
+
+**Doing this at the end of a long round is how a security control gets wired in a way that passes
+its tests and misses one of those three.** So `OBS-008` stays open with its exact remainder
+recorded, and the next round starts from the design question rather than from the diff.
+
+→ `crates/qqq-serve/src/server.rs`, `crates/qqq-run/src/serve.rs`,
+`crates/qqq-host/src/host_secrets.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

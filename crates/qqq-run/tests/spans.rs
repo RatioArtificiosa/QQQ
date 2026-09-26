@@ -69,6 +69,11 @@ const MANIFEST: &str = "[package]\nname = \"span-probe\"\nversion = \"0.1.0\"\n\
 
 /// Serve `count` requests on one server and return everything it wrote.
 fn serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
+    serve_with(sandbox, MANIFEST, extra, count)
+}
+
+/// Serve `count` requests against a **manifest of the caller's choosing**, with the retry.
+fn serve_with(sandbox: &Sandbox, manifest: &str, extra: &[&str], count: u32) -> String {
     // **A bounded retry, because the port this helper asks for may be taken before the child binds.**
     //
     // `free_port()` binds a number, reads it, and **drops the listener** -- so between the drop and
@@ -76,7 +81,7 @@ fn serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
     // helper had no retry while a sibling's did. **Six copies of one racy helper was the object all
     // along**, and the fix belongs in each of them until they share one.
     for attempt in 1..=common::ATTEMPTS {
-        let out = attempt_serve(sandbox, extra, count);
+        let out = attempt_serve_with(sandbox, manifest, extra, count);
         if !common::lost_the_port_race(&out) {
             return out;
         }
@@ -93,8 +98,8 @@ fn serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
     );
 }
 
-fn attempt_serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
-    let config = sandbox.write("qqq.toml", MANIFEST);
+fn attempt_serve_with(sandbox: &Sandbox, manifest: &str, extra: &[&str], count: u32) -> String {
+    let config = sandbox.write("qqq.toml", manifest);
     let port = free_port();
     let mut child: Child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
         .args([
@@ -172,6 +177,43 @@ fn a_sampled_request_emits_a_span() {
         "and the step's name comes from `lifecycle`, so a span cannot invent one: {out}"
     );
     assert!(out.contains("micros="), "and it carries a duration: {out}");
+}
+
+/// **A second §4.4 stage emits its own span, and which stages a fixture reaches is not obvious.**
+///
+/// # What this test learned the hard way
+///
+/// `POLICY CHECK` (5) and `LIMIT BIND` (8) run **only when the manifest declares an auth policy or
+/// limits**. The permissive fixture in this file declares neither, so those stages never execute and
+/// their spans are correctly absent — **a test asserting them against that fixture would fail for a
+/// server that is right.**
+///
+/// So the stages are asserted against the fixtures that reach them:
+///
+/// | stage | needs |
+/// |---|---|
+/// | 3 `ROUTE MATCH` | a declared route — the permissive fixture, and `a_sampled_request_emits_a_span` covers it |
+/// | 5 `POLICY CHECK` | an auth policy, which `default_auth = "deny"` installs |
+/// | 8 `LIMIT BIND` | a limits declaration, which no fixture here has yet |
+///
+/// **`OBS-009` stays partial** for the same reason: the other twelve steps live inside the
+/// guest-invocation path, which an unbuilt project does not enter.
+#[test]
+fn a_denying_manifest_reaches_the_policy_stage() {
+    const DENYING: &str = "[package]\nname = \"span-deny\"\nversion = \"0.1.0\"\n\
+         [server]\ndefault_auth = \"deny\"\n\
+         [[server.routes]]\npath = \"/orders\"\nmethods = [\"GET\"]\nhandler = \"list\"\n";
+
+    let sandbox = Sandbox::new("stages-deny");
+    let out = serve_with(&sandbox, DENYING, &["--trace-sample", "on"], 1);
+    assert!(
+        out.contains("step=5"),
+        "a denying manifest installs a policy, so POLICY CHECK runs and emits: {out}"
+    );
+    assert!(
+        out.contains("name=POLICY CHECK"),
+        "and the name comes from `lifecycle`: {out}"
+    );
 }
 
 /// **Without the flag, no span is emitted — the default is quiet.**
@@ -252,7 +294,10 @@ fn the_tail_option_keeps_every_failure() {
         &["--trace-sample", "0.25", "--trace-keep-failures"],
         24,
     );
-    let sampled = out.matches("span step=").count();
+    // **Count REQUESTS, not spans**: one request now emits several stages' spans, so counting
+    // `span step=` would assert three times the requests and fail for a correct server. `ROUTE MATCH`
+    // is emitted exactly once per request that reaches dispatch.
+    let sampled = out.matches("name=ROUTE MATCH").count();
     assert_eq!(
         sampled, 24,
         "with the tail option on and every response a 503, every trace is a failure it keeps: \

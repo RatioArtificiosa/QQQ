@@ -384,6 +384,16 @@ pub enum Served {
 
 /// Serve requests on an address until shutdown.
 ///
+/// Microseconds since `start`, saturating rather than wrapping.
+///
+/// # Why a helper
+///
+/// Because every call site is inside a function with a line budget, and the conversion is four tokens
+/// of ceremony that say nothing about the stage being measured.
+fn micros_since(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 /// Emit one automatic span for a §4.4 step — `OBS-009`.
 ///
 /// # Why a span goes through the logger and not to a sink of its own
@@ -2107,7 +2117,12 @@ async fn refuse_before_reading(
                 );
             }
         }
-        if limits.check_and_record(tenant, Instant::now()).is_err() {
+        // §4.4 step 8, **on both outcomes**: a check that passed is a stage that ran, and emitting
+        // only on refusal would make the spans describe failures rather than the request.
+        let limit_started = Instant::now();
+        let over = limits.check_and_record(tenant, Instant::now()).is_err();
+        emit_span(ctx, tenant, 8, *span_seq, micros_since(limit_started), over);
+        if over {
             *span_seq += 1;
             return Some(refuse_limits(stream, head, path, tenant, ctx, *span_seq, true).await);
         }
@@ -2116,7 +2131,19 @@ async fn refuse_before_reading(
     // --- The route's authentication policy ---------------------------------
     if let Some(policy) = ctx.auth {
         if let Some(matched) = table.match_route(head.method, path) {
-            if let crate::auth::Decision::Refuse { mode } = policy.decide(&matched) {
+            // §4.4 step 5, **on both outcomes**, for the same reason as step 8 above.
+            let policy_started = Instant::now();
+            let decision = policy.decide(&matched);
+            let refused = matches!(decision, crate::auth::Decision::Refuse { .. });
+            emit_span(
+                ctx,
+                tenant,
+                5,
+                *span_seq,
+                micros_since(policy_started),
+                refused,
+            );
+            if let crate::auth::Decision::Refuse { mode } = decision {
                 *span_seq += 1;
                 return Some(refuse_auth(stream, head, path, tenant, ctx, *span_seq, mode).await);
             }

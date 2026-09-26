@@ -25482,4 +25482,57 @@ the end-to-end record observed on a real socket.
 
 ---
 
+## §O-333 — Three of the fifteen stages emit spans, and the *fixture* decides which
+
+**Found:** Phase 1, extending `OBS-009`. **Anchors:** `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/tests/spans.rs`.
+
+### What changed
+
+`OBS-009` asks for spans for the **fifteen** lifecycle steps. **One** emitted before this round.
+**Three** do now — step 3 `ROUTE MATCH`, step 5 `POLICY CHECK`, step 8 `LIMIT BIND` — each with its own
+measured duration, emitted **on both outcomes**, because *a check that passed is a stage that ran* and
+emitting only on refusal would make the spans describe failures rather than requests.
+
+### The finding, and it is why this took a round
+
+**Steps 5 and 8 run only when the manifest declares an auth policy or limits.** The permissive fixture
+these tests use declares **neither**, so those stages never execute and their spans are **correctly
+absent** —
+
+> **a test asserting them against that fixture would fail for a server that is right.**
+
+The stages are now asserted against the fixtures that reach them:
+
+| stage | needs |
+|---|---|
+| 3 `ROUTE MATCH` | a declared route — the permissive fixture |
+| 5 `POLICY CHECK` | an auth policy — `default_auth = "deny"` |
+| 8 `LIMIT BIND` | a limits declaration — **no fixture here has one yet** |
+
+### And the change broke a test for a reason worth recording
+
+`the_tail_option_keeps_every_failure` counted `span step=` occurrences to mean *"requests"*, and **one
+request now emits three spans** — so it asserted three times the requests and **would have failed for a
+correct server**. It *meant* to count requests, and it now counts `name=ROUTE MATCH`, which is emitted
+exactly once per request that reaches dispatch.
+
+> **A count of the thing that changed is a count that breaks when the thing changes.**
+
+### `OBS-009` stays partial, and says why
+
+**3 of 15.** The other twelve live inside the **guest-invocation path**, which an unbuilt project does
+not enter — the reason `§O-323` recorded and this round confirmed.
+
+### The injection
+
+Removing the `POLICY CHECK` emission: `a_denying_manifest_reaches_the_policy_stage` **FAILED** with the
+record printed. Restored and the file touched.
+
+### Measured
+
+workspace **2679 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · 6 span tests.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

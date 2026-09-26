@@ -18,6 +18,8 @@ false failure and teach the next person to weaken the test.
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -83,9 +85,9 @@ def main() -> int:
                 print(combined[-1000:])
                 code = 1
         finally:
-            shutil.copy(lib_backup, ROOT / LIB)
+            restore(lib_backup, ROOT / LIB)
             if safety_existed:
-                shutil.copy(Path(tmp) / 'SAFETY.md', ROOT / SAFETY)
+                restore(Path(tmp) / 'SAFETY.md', ROOT / SAFETY)
 
     # Verify the restore.
     if io.open(ROOT / LIB, encoding='utf-8').read() != lib_original:

@@ -21,6 +21,8 @@ on each injected file and refuses to count a detection whose input did not parse
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -120,7 +122,7 @@ def main() -> int:
                     print(f'  MISSED    {label}: expected `{expect}`')
                     failures.append(label)
             finally:
-                shutil.copy(backup, full)
+                restore(backup, full)
 
     # -- 3: edit the allowlist -------------------------------------------------
     label = 'stale allowlist entry'

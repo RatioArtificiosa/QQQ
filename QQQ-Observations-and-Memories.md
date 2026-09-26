@@ -25855,4 +25855,66 @@ injected dependency.
 
 ---
 
+## §O-339 — The restore that threw: a transient Windows error, and the bracket that was too narrow
+
+**Found:** Phase 2, diagnosing `§O-338`. **Anchors:** `tools/_fault_inject_io.py`,
+`tools/check_corpus_repair.py`.
+
+### The root cause, and the gate's own output had it
+
+`§O-336` and `§O-338` recorded the corruption and could not explain it. The gate's failure output did:
+
+```
+File "tools/fault_inject_architecture.py", line 230, in main
+    shutil.copy(backup, full)
+OSError: [Errno 22] Invalid argument: 'E:\QQQ\crates\qqq-cap\Cargo.toml'
+```
+
+**The restore threw.** The exception escaped `main`, the injected dependency stayed, and **three
+consequences followed from one defect**:
+
+- `fault_inject_wit_since`, `fault_inject_wit_errors` and `fault_inject_batch_first` **failed** — they run
+  `cargo`, and a broken `Cargo.toml` is a broken workspace;
+- a failing fault injector **leaves its own injection in place**, so the `@since` went too;
+- **`git add -A` committed all of it** — twice: `02903b7` and `29dbbcd`.
+
+**`Errno 22` writing a path that exists and is writable means something else held it for a moment** — a
+concurrent `cargo`, an indexer, a scanner. **The error is transient by nature, and a bare copy treats a
+momentary hold as fatal.**
+
+### The fix
+
+`tools/_fault_inject_io.py` — a restore that **retries**, and **re-raises the last error** so a restore
+that cannot happen stays **loud rather than silent**. **All eleven restore sites across eight checkers**
+now use it; the *backup* copies are untouched, because a failure there aborts before anything is injected.
+
+**Verified by running the gate**: all **eight** fault injectors pass, and the tree holds **only my
+changes**. `--verify` reports `GATE TREE AT REST` for that span.
+
+### And a second, wider gap — `§O-321`'s rule again
+
+The tree **still** held `tools/self_test_xrefs.py` with an injected `raise NameError(…)`, and its injector
+is **`tools/check_corpus_repair.py`** —
+
+> **which is not a `fault_inject_*` checker, so my snapshot/verify bracket missed it entirely.**
+
+**A guard is only as wide as its extent.** The bracket spans the eight checkers **whose names say they
+inject**; it must span **every checker that modifies a file**.
+
+**That is the third time this goal has met a guard whose *extent* was the defect** — `§O-321` (a file, then
+a region), `§O-330` (four of eighty-eight checks), and now this.
+
+### And `check_corpus_repair --self-test` was a victim, not a cause
+
+It **passes** once the leftover is reverted: **its failure was the leftover**. Its restore is careful and
+verifies byte-for-byte.
+
+### Measured
+
+gate **90 ok / 3 failed** — the three being `check_corpus_repair --self-test` (the leftover),
+`audit_requirements` and `check_sbom` (both expected) · all eight fault injectors pass · the tree holds
+only the intended changes.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

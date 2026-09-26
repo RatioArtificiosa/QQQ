@@ -23,6 +23,8 @@ Two properties this script exists to guarantee, both learned the hard way:
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -92,7 +94,7 @@ with tempfile.TemporaryDirectory() as tmp:
             print(combined[-1200:])
             code = 1
     finally:
-        shutil.copy(backup, SRC)
+        restore(backup, SRC)
 
 # Verify the restore, because a harness that leaves the tree modified on failure
 # is worse than no harness.

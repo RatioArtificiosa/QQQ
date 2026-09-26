@@ -18,6 +18,8 @@ build proves nothing about the check.
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -126,7 +128,7 @@ def main() -> int:
                     print(f'  MISSED    {label}: the check passed on violating input')
                     failures.append(label)
             finally:
-                shutil.copy(backup, full)
+                restore(backup, full)
 
             if io.open(full, encoding='utf-8').read() != original:
                 print(f'  RESTORE FAILED for {label}')

@@ -26,6 +26,8 @@ before a detection is counted.
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -159,7 +161,7 @@ def main() -> int:
                     print(f'  MISSED    {label}: expected `{expect}`')
                     failures.append(label)
             finally:
-                shutil.copy(backup, full)
+                restore(backup, full)
 
             if io.open(full, encoding='utf-8').read() != original:
                 print(f'  RESTORE FAILED for {label}')
@@ -193,7 +195,7 @@ def main() -> int:
                     else:
                         print(f'  CONTROL   {label}')
             finally:
-                shutil.copy(backup, full)
+                restore(backup, full)
 
     if 'PAIR RULE PASSED' not in run_checker():
         print('the checker fails after restore -- the tree is not clean')

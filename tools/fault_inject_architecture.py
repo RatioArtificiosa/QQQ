@@ -20,6 +20,8 @@ is gitignored and absent on a fresh checkout (§O-058f).
 """
 import io
 import shutil
+
+from _fault_inject_io import restore
 import subprocess
 import sys
 import tempfile
@@ -227,7 +229,7 @@ def main() -> int:
                     print(f'  MISSED    {label}: the test passed on violating code')
                     failures.append(label)
             finally:
-                shutil.copy(backup, full)
+                restore(backup, full)
 
             if io.open(full, encoding='utf-8').read() != original:
                 print(f'  RESTORE FAILED for {label} -- fix the tree')

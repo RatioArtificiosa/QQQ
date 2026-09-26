@@ -26026,4 +26026,55 @@ in 0.47 s**.
 
 ---
 
+## §O-342 — The pair was split across two runners, and the parser is not the validator
+
+**Found:** Phase 2, fixing CI. **Anchors:** `.github/workflows/ci.yml`,
+`tools/check_fault_inject_restores.py`.
+
+### The pair was in two jobs
+
+CI failed **every commit** since the guard landed — `40bd93e`, `bd2274c`, `7d30b1e` — at
+**`Verify the fault injectors returned the tree`**:
+
+```
+GATE TREE INCONCLUSIVE -- no snapshot; `--snapshot` must run before the checkers
+```
+
+**Not a leftover — the anti-vacuity guard.** The fault-inject steps span **two jobs**: `xrefs` (panic-guard,
+architecture, safety-arg, naming) and `wit` (versioning, typed-error, no-ambient, batch-first).
+**`--snapshot` ran in `xrefs` and `--verify` in `wit` — different runners, so the TEMP snapshot written by
+one is not there for the other.**
+
+> **The guard behaved exactly as designed**: it *refused* rather than passing on an absent baseline. **A
+> vacuous comparison certifies nothing**, and in CI it said so instead of reporting all-clear. **The bug
+> was the placement, and the guard is what named it.**
+
+**The fix**: each job brackets **its own** fault injectors. **A runner's TEMP is not shared.**
+
+### And then CI died a second way — the parser is not the validator
+
+`208cf58` failed with *"This run likely failed because of a workflow file issue"*.
+
+**My anchor was the `run:` line**, so inserting a whole step there left the original
+`- name: Prove the WIT versioning check detects violations` **with nothing under it.** A step needs a `run`
+or a `uses`.
+
+**And `yaml.safe_load` accepted it** — because **a mapping with one key IS valid YAML** — and
+**`GATE PARITY OK` passed too**, because that checker counts **commands** rather than validating the step
+list.
+
+> **The validator is not the parser.** A local gate that *parses* a workflow proves it is YAML, **not that
+> GitHub will run it**. And the failure is the worst kind: **every job in the run dies at once**, with a
+> message that names the file rather than the line.
+
+**The fix** is one deleted line, plus a **structural** check the parser cannot make: **every step in all ten
+jobs reaches a `run:` or a `uses:` before the next step** — 10 jobs, **0** bad.
+
+### Measured
+
+**CI `bc0074c` — SUCCESS**, the first fully green run in many rounds · 10 jobs, 0 steps with no run/uses ·
+local gate 91 ok / 2 failed, both expected · `GATE PARITY OK` · `HAND-OFF OK`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

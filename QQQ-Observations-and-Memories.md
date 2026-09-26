@@ -24242,4 +24242,55 @@ and to what — and build the sampler against that.
 8 tests passing; workspace **2655 passed, 0 failed suites**; the bucket injection fired with
 *"1/4 of 4000 traces should be roughly 1000, got 4000"*.
 
+## §O-312 — `check_api_examples` could measure nothing and report a number about the wrong thing, and now refuses to
+
+**Found:** closing `§O-295`'s hole. **Anchors:** `tools/check_api_examples.py`,
+`.scratch/run_gate.cmd`.
+
+### The hole, restated
+
+`outstanding` is `total_items - ran`, and `ran` is how many doctests `cargo` executed. **The
+doctests need `cargo`, and `cargo` needs the MSVC environment.** In a bare shell `ran == 0`, so the
+checker reported **2139** outstanding where the truth was **1** (`§O-295`).
+
+**The two numbers want opposite responses** — 2139 says *"the environment is wrong"*, 1 says *"add an
+example"* — and nothing in the output distinguished them. The line `doctests cargo runs: 0` was
+printed, but it reads as a **statistic** rather than as the input to the subtraction.
+
+### The fix, and why it is a refusal rather than a report
+
+`measured_nothing(total_items, ran)` is now a **pure function** returning `total_items > 0 and
+ran == 0`, and a true result **refuses the run** with a message naming the cause and the fix:
+
+```
+API EXAMPLES INCONCLUSIVE -- 2159 public declaration(s) and **0 doctests ran**.
+  `outstanding` is `total - ran`, so this run would report every declaration as undocumented.
+  The doctests need `cargo`, and `cargo` needs the MSVC environment. Run this through
+  `.scratch/run_gate.cmd`, which sets it up (§O-295).
+```
+
+**This is the anti-vacuity rule this repository already applies three times** —
+`check_checklist_counts.py` refuses a document with no items, `check_gate_parity.py` refuses a gate
+with no invocations, `check_wit_vendoring.py` refuses a scan with no copies — and it was **absent in
+the one checker whose number is a subtraction.**
+
+### The self-test asserts both branches
+
+Three cases, and the third is the one that matters:
+
+```
+OK   0 doctests and items is vacuous: True
+OK   0 doctests and no items is not: False
+OK   doctests ran is not vacuous: False
+```
+
+**Fault-injected by making the guard always return `False`**: *"FAIL 0 doctests and items is
+vacuous: False"*, `SELF-TEST FAILED`. A guard with one assertion is a guard that can be inverted
+without a test noticing.
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121 at the allowance) ·
+local gate **86 ok / 2 failed** (both expected) · `GATE PARITY OK`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

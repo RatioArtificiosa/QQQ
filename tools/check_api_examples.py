@@ -296,6 +296,21 @@ def run_check(args) -> int:
     )
 
     ran = doctests_run()
+    if measured_nothing(total_items, ran):
+        print()
+        print(
+            f"API EXAMPLES INCONCLUSIVE -- {total_items} public declaration(s) and "
+            f"**0 doctests ran**."
+        )
+        print(
+            "  `outstanding` is `total - ran`, so this run would report every declaration as"
+        )
+        print(f"  undocumented: {total_items} where the real number is unknown.")
+        print(
+            "  The doctests need `cargo`, and `cargo` needs the MSVC environment. Run this"
+        )
+        print("  through `.scratch/run_gate.cmd`, which sets it up (`§O-295`).")
+        return 1
     outstanding = max(total_items - ran, 0)
 
     print()
@@ -342,6 +357,26 @@ def run_check(args) -> int:
     return 0
 
 
+def measured_nothing(total_items: int, ran: int) -> bool:
+    """Whether a run executed no doctests, and therefore measured nothing.
+
+    # Why this is a refusal and not a report
+
+    `outstanding` is `total_items - ran`. With `ran == 0` the checker reports **every** public
+    declaration as undocumented -- **2139 where the truth was 1** (`§O-295`), because the doctests
+    need `cargo` and `cargo` needs the MSVC environment, which a bare shell does not have.
+
+    **The failure looks like a code defect and is an environment one**, and the two want opposite
+    responses: 2139 says *"the environment is wrong"*, 1 says *"add an example"*. A number that
+    cannot distinguish them is a number about the wrong thing.
+
+    This is the anti-vacuity rule the repository already applies in `check_checklist_counts.py`,
+    `check_gate_parity.py` and `check_wit_vendoring.py` -- a comparison of nothing certifies
+    nothing -- and it was **absent here**.
+    """
+    return total_items > 0 and ran == 0
+
+
 def self_test(args) -> int:
     """Prove the counters and the gate behave, on synthetic input."""
     failures = 0
@@ -364,6 +399,12 @@ pub const D: u32 = 1;
 pub type E = u32;
 """
     expect("public items counted", len(items_in(src)), 5)
+
+    # The vacuity guard -- both branches, because a guard with one assertion is one that can be
+    # inverted without a test noticing (`§O-295`).
+    expect("0 doctests and items is vacuous", measured_nothing(2139, 0), True)
+    expect("0 doctests and no items is not", measured_nothing(0, 0), False)
+    expect("doctests ran is not vacuous", measured_nothing(2139, 17), False)
     expect("pub(crate) excluded", any(n == "hidden" for _, n in items_in(src)), False)
     expect("pub(super) excluded", any(n == "also_hidden" for _, n in items_in(src)), False)
 

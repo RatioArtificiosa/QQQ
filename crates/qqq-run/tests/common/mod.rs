@@ -139,7 +139,15 @@ pub fn serve_and_request(
 /// inferring it. Measured twice: the first condition (`!text.is_empty()`) was inert, the second
 /// (`!answered`) broke three files that never see a status line.
 pub fn lost_the_port_race(text: &str) -> bool {
-    text.contains("QQQ-6002")
+    // **Two signals, because the helpers report the loss two ways.**
+    //
+    // A helper that observes the server's *log* returns it, so a child that failed to bind shows up as
+    // `QQQ-6002` in the text. A helper that observes the *response* returns empty when the read came
+    // back with nothing. The first version of this predicate covered only the code, so for the
+    // response-observing helpers it answered `false` on an empty result and the wrapper **returned the
+    // emptiness instead of retrying it** -- measured on CI as `spans::no_span_without_the_flag`
+    // failing at its own assertion.
+    text.is_empty() || text.contains("QQQ-6002")
 }
 
 /// Whether the server **answered at all** — an HTTP status line is present.

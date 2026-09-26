@@ -25360,4 +25360,61 @@ is not a run that passed**, and it is worth reading before assuming green.
 
 ---
 
+## §O-331 — A retry cannot retry what the attempt asserts about, and clippy caught a real leak
+
+**Found:** CI on `05bb898`, failing on `spans::no_span_without_the_flag`. **Anchors:**
+`crates/qqq-run/tests/spans.rs`, `crates/qqq-run/tests/common/mod.rs`.
+
+### The wrap from `§O-329` did not work for two of the four files
+
+Round 26 wrapped four helpers in a retry. **For `spans` and `sampling_influence` the wrap was inert**,
+because those helpers contained their own assertion:
+
+```
+the server answered nothing within 30s on request 1 of 1
+```
+
+**That is the attempt's own message, not the wrapper's.** The `assert!` fires *inside* the attempt, so
+the panic happens before the wrapper can inspect a result.
+
+> **A retry cannot retry what the attempt asserts about.**
+
+The two assertions became **returns**, so the wrapper receives an empty result and decides.
+
+### And the predicate went through two more iterations, each measured
+
+| predicate | what happened |
+|---|---|
+| `contains("QQQ-6002")` | correct for the **log**-observing helpers, wrong for the **response**-observing ones — which signal a lost read by returning **empty**, so the wrapper returned the emptiness instead of retrying |
+| `is_empty() \|\| contains("QQQ-6002")` | **both signals**, and both kinds of helper are covered |
+
+**Measured**: with the narrow predicate, `spans::no_span_without_the_flag` failed at its own assertion.
+With the wide one, the injection produces four retries and then names the race.
+
+### Clippy caught a real leak, not a lint
+
+The early `return` I added **skipped `child.kill()` and `wait_with_output()`**, leaving an unwaited
+child. `zombie_processes` is right, and **the stray processes were real**: two `qqqai` processes were
+alive afterwards, left by the injection run that exceeded the shell's cap.
+
+**Fixed with a flag and ONE return point after the reap**, so every path kills and waits.
+
+### `check_xrefs` scans `.scratch/`
+
+The corpus checker reported:
+
+```
+FAIL  [13] §O-331 is cited by .scratch\p27a.py but is not defined in Observations
+```
+
+**A gitignored scratch script is inside the checker's file list.** That is worth knowing: a citation in a
+scratch file can fail the corpus check, and the fix is to define the entry (which this is).
+
+### Measured
+
+workspace **2660 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · the injection produces four
+retries then names the race · 2 stray processes found and killed.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

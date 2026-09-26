@@ -114,6 +114,7 @@ fn attempt_serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut served = 0;
+    let mut lost = false;
     while served < count && Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = s.set_read_timeout(Some(READ_DEADLINE));
@@ -123,23 +124,33 @@ fn attempt_serve(sandbox: &Sandbox, extra: &[&str], count: u32) -> String {
             // **An empty read is a failure in itself, asserted here once rather than in each
             // caller.** `!contains(x)` is satisfied by an empty response, so an absence assertion
             // cannot tell a correct answer from no answer at all.
-            assert!(
-                !buf.is_empty(),
-                "the server answered nothing within {READ_DEADLINE:?} on request {} of {count}",
-                served + 1
-            );
+            // **Return empty so the wrapper can retry, rather than asserting here.**
+            //
+            // This was an `assert!`, and it made the retry above **inert for the one failure it
+            // exists to retry**: the panic happens *inside* the attempt, so the wrapper never sees a
+            // result to inspect. **A retry cannot retry what the attempt asserts about.** Measured on
+            // CI: `no_span_without_the_flag` failed with *"the server answered nothing within 30s on
+            // request 1 of 1"* -- this assertion, not the wrapper's message.
+            if buf.is_empty() {
+                // A lost race: stop probing, but let the reap below run. **A `return` here would
+                // leave the child unwaited** -- clippy's `zombie_processes` caught exactly that, and
+                // it is a real leak rather than a lint.
+                lost = true;
+                break;
+            }
             served += 1;
         }
     }
-    assert_eq!(
-        served, count,
-        "the server served {served} of {count} requests"
-    );
 
     // Killed rather than waited on: a server that did not exit would hang the test, and what this is
     // for is the bytes.
     let _ = child.kill();
     let out = child.wait_with_output().expect("reap");
+    // **The retry signal, decided after the reap** -- so every path kills and waits, and a lost race
+    // leaves no process behind.
+    if lost || served != count {
+        return String::new();
+    }
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

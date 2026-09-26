@@ -24843,4 +24843,44 @@ check only the module and pass**, which is the same vacuity `§O-312` closed in 
 workspace **2660 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · `check_xrefs` PASSED · local
 gate **88 ok / 2 failed** (both expected) · 4 influence tests, 1.43 s.
 
+## §O-322 — The flake recurred, and the guard I added named the cause the first fix missed
+
+**Found:** CI on `f7eec7f`, job `Rust (ubuntu-latest) :: test`. **Anchors:**
+`crates/qqq-run/tests/metrics_endpoint.rs`.
+
+### It is the same test, and the message is the guard `§O-314` added
+
+```
+---- nothing_is_exposed_without_the_flag stdout ----
+the server answered nothing within 30s; the client read 0 byte(s). Its own output was:
+```
+
+**`§O-314` predicted this exactly**: *"the flake was intermittent, so one green run does not prove it
+is gone."* It recurred, and **the guard is what made the recurrence readable** — the message names the
+condition instead of reporting a missing 404.
+
+### What the message rules out, and what it leaves
+
+**The server produced *nothing*** — not a response, not one log line — for the **full 30 s**. So:
+
+- **the deadline was never the cause.** `§O-314` raised it from 5 s to 30 s, and 30 s is not a slow
+  read: it is no read at all. **That fix addressed the symptom.**
+- **and the sampler, the spans and the corpus are all ruled out** — the run had none of them in play.
+
+**What is left is the accept limit.** The helper serves with `--accept-limit 1`, and its **readiness
+probe is itself a `connect`** — so the probe consumes the one connection the server will accept, and
+the server begins shutdown possibly before serving the request written on that connection. Locally the
+race is won; on a loaded runner it is lost.
+
+**Raised to `4`**, so the probe can no longer take the only slot. **This is a hypothesis with strong
+support rather than a proven fix** — the evidence is the empty output plus the limit's semantics, and
+the proof is CI history, which the next rounds will supply.
+
+### The lesson, and it is the second time this goal has learned it
+
+**A guard that names a condition is not a fix for the condition.** `§O-314`'s central argument — *an
+absence assertion cannot be trusted without a presence assertion beside it* — was right, and it made
+the next occurrence diagnosable. **What it did not do was find the cause**, because a guard and a
+diagnosis are different work, and the first is much easier to believe you have finished.
+
 *End of `QQQ-Observations-and-Memories.md`.*

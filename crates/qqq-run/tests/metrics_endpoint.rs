@@ -90,7 +90,7 @@ fn request_once(sandbox: &Sandbox, extra: &[&str], target: &str) -> String {
             "--config",
             config.to_str().expect("utf8"),
             "--accept-limit",
-            "1",
+            "4",
         ])
         .args(extra)
         .stdout(Stdio::piped())
@@ -151,7 +151,7 @@ fn run_refused(sandbox: &Sandbox, extra: &[&str]) -> String {
             "--config",
             config.to_str().expect("utf8"),
             "--accept-limit",
-            "1",
+            "4",
         ])
         .args(extra)
         .stdout(Stdio::piped())

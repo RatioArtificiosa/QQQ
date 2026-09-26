@@ -4882,10 +4882,39 @@ Each language has eight required items. The parity matrix makes any gap visible.
     design. Corrected, with the reason recorded in the doc itself.
   → §10.3 Logging
 - [ ] **OBS-009** Implement automatic spans for the fifteen lifecycle steps.
+  → **PARTIAL — 1 of the 15 steps emits a span, and the item is NOT ticked.** The shape is built and
+    proven: `emit_span` writes a span through the logger so it inherits the level filter, the format
+    and **§10.3's redaction**, for **step 3 ROUTE MATCH** — the one §4.4 step `qqqai serve` reaches
+    with an unambiguous boundary and a measurable duration.
+  → **The other fourteen need boundaries that do not exist yet, and the reason is specific.**
+    `INSTANCE ACQUIRE`, `CAPABILITY BIND`, `GUEST ENTRY`, `REQUEST ADAPT` and the rest live inside the
+    guest-invocation path, which an unbuilt project does not enter; and the special routes (CORS
+    preflight, WebSocket, streaming) are **not §4.4 steps at all**, so emitting for them would
+    mislabel a span rather than cover a step.
+  → **`LIMIT BIND` (8) and `POLICY CHECK` (5) do have boundaries** — the limit and auth refusals — but
+    only on the **refusal** path, where the duration is not a measurement of work done. **A span with
+    a fabricated duration is worse than a missing one**, so they wait for a boundary that measures
+    something.
+  → **Measured**: 5 span tests over the real binary, 2.61 s, fault-injected.
   → §10.4 Distributed tracing
 - [ ] **OBS-010** Implement W3C Trace Context propagation through `wasi:http`.
   → §10.4 Distributed tracing
-- [ ] **OBS-011** Implement host-controlled sampling with a tail-sampling option.
+- [x] **OBS-011** Implement host-controlled sampling with a tail-sampling option.
+  → **Done.** `qqq_serve::span::Sampler` — a head policy (`on` / `off` / a ratio) with §10.4's
+    **tail-sampling option**, wired to the span emission and reached by `qqqai serve --trace-sample`
+    and `--trace-keep-failures`.
+  → **Host-controlled, and it is a property of the signature rather than a check.** The decision's
+    only input is a `TraceId`, and every `TraceId` in the server is allocated by the host per
+    connection — so there is no parameter a guest can populate and no check to forget.
+  → **The tail option is a flag of its own, and that is a correction.** Measured: bundled into
+    `--trace-sample`, a `0.25` rate against a project whose every response is 503 sampled **24 of
+    24** — the rate was not the rate. *“Sample one in four”* is a rate; *“and keep the failures
+    anyway”* is an exception to it.
+  → **The ratio reduces to lowest terms**, because `0.25` and `0.250` are the same rate and must
+    sample identically — measured by a test that failed before the reduction.
+  → **Measured**: 5 tests over the real binary, 2.61 s; `the_tail_option_keeps_every_failure` asserts
+    the exception explicitly so the behaviour is **stated rather than accidental**. Fault-injected by
+    making the ratio policy always record: *“and must drop something: 24 spans for 24 requests”*.
   → §10.4 Distributed tracing
 - [ ] **OBS-012** Implement the OTLP exporter for traces, metrics and logs.
   → §10.1 The three signals, plus one unique to QQQ

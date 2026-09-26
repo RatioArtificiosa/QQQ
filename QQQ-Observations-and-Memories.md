@@ -24883,4 +24883,52 @@ absence assertion cannot be trusted without a presence assertion beside it* — 
 the next occurrence diagnosable. **What it did not do was find the cause**, because a guard and a
 diagnosis are different work, and the first is much easier to believe you have finished.
 
+## §O-323 — Two items were built, tested, injected and never recorded, and the corpus could not tell
+
+**Found:** Phase 1, closing out the tracing work. **Anchors:** `QQQ-Checklist-V1.md`.
+
+### The gap
+
+`OBS-011` (host-controlled sampling with a tail-sampling option) was **implemented, wired, tested and
+fault-injected** in round 19 — and its checklist entry still read `- [ ]`.
+
+**Three rounds of work left no trace in the item it satisfied.** The corpus is the memory, and the item
+that says *"this is done"* said nothing.
+
+### Why the existing checks could not catch it
+
+**Every checker passed.** `check_checklist_counts.py` validates the arithmetic against the document;
+`check_xrefs.py` validates that an entry is well-formed; `check_handoff.py` validates that the tree
+matches the recording. **None of them can tell that a *ticked* item should exist**, because that is a
+claim about work, and the checkers read documents.
+
+**A count cannot detect a missing row when the row was never written.** The only thing that could was
+reading the item, which is what happened.
+
+### `OBS-009` is partial, and saying so is the point
+
+`OBS-009` asks for **automatic spans for the fifteen lifecycle steps**. **One step emits a span** —
+step 3 `ROUTE MATCH`, the one §4.4 step `qqqai serve` reaches with an unambiguous boundary and a
+measurable duration.
+
+**The item stays unticked**, annotated with the specific reason, and the reason is not "not enough
+time":
+
+- `INSTANCE ACQUIRE`, `CAPABILITY BIND`, `GUEST ENTRY`, `REQUEST ADAPT` and the rest live inside the
+  **guest-invocation path**, which an unbuilt project does not enter;
+- the special routes (CORS preflight, WebSocket, streaming) are **not §4.4 steps at all**, so emitting
+  for them would **mislabel a span rather than cover a step**;
+- `LIMIT BIND` (8) and `POLICY CHECK` (5) *do* have boundaries — the limit and auth refusals — but only
+  on the **refusal** path, where the duration is not a measurement of work done. **A span with a
+  fabricated duration is worse than a missing one.**
+
+**Three of the fifteen could be emitted today and one of them would be a lie**, which is the whole
+argument for the annotation rather than a tick.
+
+### The rule this earns
+
+**An item is not done until the document says so.** The work and the record are two deliverables, and
+the second is the one that survives the session — which is why this goal's DoD puts the `→ Done:` line
+first. **Building without recording is how a corpus goes stale while the tree stays green.**
+
 *End of `QQQ-Observations-and-Memories.md`.*

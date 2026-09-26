@@ -23553,4 +23553,51 @@ listed the sites to update, which is what that comment was promising a reader.
 
 ---
 
+## §O-301 — I broke the `newline=` rule that was already written down, and the local gate could not see it
+
+**Found:** CI, on `d95fd3b`, after ticking four checklist items. **Anchors:** `QQQ-Checklist-V1.md`,
+`tools/check_corpus_at_rest.py`, `tools/normalize_eol.py`.
+
+### What happened
+
+A script ticked four items by rewriting the checklist with
+`p.write_text(text, encoding="utf-8")` — **and no `newline=`**. Python's text mode translates every
+`\n` to `os.linesep`, which is CRLF on Windows. Git then normalised the file to LF on commit, so:
+
+- the **working tree** was `CRLF=5047 LF=0`
+- the **committed blob** was `CRLF=0 LF=5047`
+- and `check_corpus_at_rest --record` had digested the **working tree**
+
+CI failed on *"Prove the corpus is byte-identical to its recorded digests"* — correctly, because the
+record described a file that no longer existed. `check_handoff.py` named it precisely: the digest and
+EOL assertions both failed.
+
+### The part worth recording
+
+**The rule was already in the process list — rule 8: *"Never `write_text` without `newline=`"*** — and
+it was earned by `§O-273`, which put CRLF into five generators. This is the **third** time this
+repository has paid for a line-ending assumption, and the second time for this exact one.
+
+**The local gate was green, and that is the interesting failure.** `--record` compares the working
+tree, which was internally consistent: the digest matched the bytes on disk. Only the *commit*
+changed them, and only CI compares the **committed** blob. So a rule that was written down, a checker
+that existed, and a local gate that passed all coexisted with the defect — because the local gate
+measures a different object than the one that ships.
+
+That is `§O-298`'s lesson in a new place: **a measurement taken before the change cannot certify the
+change**, and here the change was the commit itself.
+
+### The fix, and the standing rule
+
+`normalize_eol.py` brought the working tree to LF, the corpus was re-recorded from the normalised
+tree, and the hand-off's digest and EOL assertions both pass.
+
+The rule is not new; what is new is that it now has a **failure attached to it from this session**.
+A script that writes a tracked file must pass `newline=""` **and** re-record the corpus **after** the
+write, not before the commit.
+
+→ `QQQ-Checklist-V1.md`, `tools/check_corpus_at_rest.py`, `tools/normalize_eol.py`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -26235,4 +26235,59 @@ which is the usual outcome when the race is removed instead of retried.
 
 ---
 
+## §O-346 — Five tools wired, and the first two that can *fail*
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### Five tools work
+
+`qqq_errors_lookup`, `qqq_schema`, `qqq_caps_list`, **`qqq_manifest_get`**, **`qqq_manifest_validate`**.
+
+**The first three cannot fail. These two touch the filesystem**, so `AGENT-019`'s rule is tested **where it
+actually matters**.
+
+### The failure is structured, and it carries the QQQ error code
+
+```
+{"found":false,"path":"C:/qqq-does-not-exist\\qqq.toml","valid":false,
+ "error":{"code":"QQQ-2001","message":"QQQ-2001: could not read `C:/qqq-does-not-exist\\qqq.toml`"}}
+```
+
+and **`isError: true`**.
+
+> **A client branches on a code, not on a sentence** — and a tool that touched the filesystem and answered
+> a string would be **the one that makes the rule worth having fail first**.
+
+**A missing manifest is the normal case, not an exceptional one**: a directory without `qqq.toml` is what a
+client finds most of the time, so **the failure path is the one exercised in practice**.
+
+### One function, two questions
+
+`get` and `validate` are **one call with a flag**, because **a manifest that cannot be parsed has no content
+to report** — `get` on an invalid manifest must report the failure rather than an empty object, and that is
+the same load either way.
+
+### And the compiler found the accessor
+
+`Error` has **no `code()`**. It has **`id()`**, which is what the CLI's own error rendering uses.
+**Guessing the name cost one compile, which is cheaper than a wrong one that compiles.**
+
+### The injection, and the anchor trap firing twice more
+
+Replacing the error's `code` with prose: `the_manifest_tools_answer_structured_content_and_a_structured_
+failure` **FAILED** with *"must carry the QQQ error code, so a client branches on a CODE and not on a
+sentence"*.
+
+**And a Python heredoc's doc-comment anchor with an em-dash did not match, so nothing was written** — and
+the test run that followed reported **13 passing, which looked like success**. **Line-based surgery** (walk
+back from the `fn` line to its doc block) is the approach that works, and the `assert count == 1` is what
+turned **a silent no-op into a visible failure**.
+
+### Measured
+
+**14 MCP tests in 0.13 s** · five tools wired.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

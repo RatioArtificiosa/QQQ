@@ -415,6 +415,73 @@ fn the_tool_dry_run_contract_agrees_with_the_command_schemas() {
     );
 }
 
+/// **The manifest tools touch the filesystem, and a failure is STRUCTURED.**
+///
+/// # Why this is the test that matters for a tool with an input
+///
+/// The three pure tools cannot fail. **These can**: a path that does not hold a `qqq.toml` is the normal
+/// case, not an exceptional one, and `AGENT-019` says a tool returns **structured content, never
+/// prose-only**. So the failure must carry **the QQQ error code** --
+/// **a client branches on `QQQ-2001`, not on a sentence**, and a tool that touched the filesystem and
+/// answered a string would be the one that makes the rule worth having fail first.
+#[test]
+fn the_manifest_tools_answer_structured_content_and_a_structured_failure() {
+    // A project that exists, and a path that does not.
+    let dir = std::env::temp_dir().join(format!("qqq-mcp-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp project");
+    std::fs::write(
+        dir.join("qqq.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write");
+    // Forward slashes, because the path is embedded in a JSON string.
+    let good = dir.display().to_string().replace('\\', "/");
+
+    let good_request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"qqq_manifest_get","arguments":{{"path":"{good}"}}}}}}"#
+    );
+    let replies = run_mcp(&[
+        &good_request,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"qqq_manifest_get","arguments":{"path":"C:/qqq-does-not-exist"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qqq_manifest_validate","arguments":{"path":"C:/qqq-does-not-exist"}}}"#,
+    ]);
+    assert_eq!(replies.len(), 3, "{replies:?}");
+
+    // A real project: content, no error.
+    let found = parse(&replies[0]);
+    assert_eq!(found["result"]["isError"], false, "{found}");
+    assert_eq!(
+        found["result"]["structuredContent"]["found"], true,
+        "{found}"
+    );
+    assert_eq!(
+        found["result"]["structuredContent"]["name"], "probe",
+        "{found}"
+    );
+
+    // A missing project: still structured content, and the ERROR CODE is in it.
+    for (i, name) in ["qqq_manifest_get", "qqq_manifest_validate"]
+        .iter()
+        .enumerate()
+    {
+        let reply = parse(&replies[i + 1]);
+        let result = &reply["result"];
+        assert_eq!(
+            result["isError"], true,
+            "`{name}` must report the failure as a RESULT rather than a protocol error: {reply}"
+        );
+        assert_eq!(result["structuredContent"]["found"], false, "{reply}");
+        assert!(
+            result["structuredContent"]["error"]["code"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("QQQ-")),
+            "`{name}` must carry the QQQ error code, so a client branches on a CODE and not on a \
+             sentence: {reply}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Every mutating tool takes `dry_run` and says so -- `AGENT-020`, over all twelve.**
 ///
 /// # The partition is DERIVED, and that is the point

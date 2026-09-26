@@ -310,6 +310,8 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
         "qqq_errors_lookup" => Ok(errors_lookup(&arguments)),
         "qqq_schema" => Ok(schema_lookup(&arguments)),
         "qqq_caps_list" => Ok(caps_list()),
+        "qqq_manifest_get" => Ok(manifest(&arguments, false)),
+        "qqq_manifest_validate" => Ok(manifest(&arguments, true)),
         other => Ok(unimplemented(other)),
     }
 }
@@ -397,6 +399,49 @@ fn caps_list() -> Value {
         .map(|n| json!({ "namespace": n.as_str() }))
         .collect();
     ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
+}
+
+/// `qqq_manifest_get` and `qqq_manifest_validate` -- the first tools that touch the FILESYSTEM.
+///
+/// # Why these two are one function with a flag
+///
+/// Because they answer two questions about one file: *"what does it say"* and *"is it valid"*. **A
+/// manifest that cannot be parsed has no content to report**, so `get` on an invalid manifest must
+/// report the failure rather than an empty object -- and that is the same call either way.
+///
+/// # The error is STRUCTURED, which is the whole point of `AGENT-019`
+///
+/// A missing or invalid manifest sets **`isError: true`** and carries **the QQQ error code**, so a
+/// client branches on a code rather than on a sentence. **A tool that touched the filesystem and
+/// reported a string would be the tool that makes `AGENT-019` worth having fail first.**
+fn manifest(arguments: &Value, validate_only: bool) -> Value {
+    let dir = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
+    let path = std::path::Path::new(dir).join("qqq.toml");
+
+    match crate::manifest_loader::LoadedManifest::load(&path) {
+        Ok(loaded) => ok(&json!({
+            "found": true,
+            "path": loaded.path.display().to_string(),
+            "name": loaded.name(),
+            "valid": true,
+            // `validate` reports only the verdict; `get` also reports where it came from, because a
+            // client asking for content needs to know WHICH file answered.
+            "validated": validate_only,
+        })),
+        Err(e) => {
+            let structured = json!({
+                "found": false,
+                "path": path.display().to_string(),
+                "valid": false,
+                "error": { "code": e.id(), "message": e.to_string() },
+            });
+            json!({
+                "content": [ { "type": "text", "text": structured.to_string() } ],
+                "structuredContent": structured,
+                "isError": true
+            })
+        }
+    }
 }
 
 /// Wrap a structured value as a successful tool result.

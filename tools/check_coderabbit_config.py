@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import copy
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -308,6 +309,32 @@ PROSE_EXT = frozenset({
 })
 
 
+def gitignored(path: Path) -> bool:
+    """Whether git ignores `path` -- i.e. whether its absence from a checkout is deliberate.
+
+    # The defect this exists for, which only CI could show
+
+    The rule above requires a file named in `path_instructions` prose to exist, and it was
+    **wrong about `docs/.env`**. That path is gitignored, so a CI checkout does not contain it —
+    correctly, and the `docs/**` instruction is *about* that fact: *"`docs/.env` is gitignored and
+    must never be committed or indexed."* The check therefore passed on every developer machine,
+    where the untracked file is present, and **failed on the first CI run**, naming the one path
+    the instruction exists to warn about (`§O-290`).
+
+    A named path is satisfied if it exists **or** git ignores it. "Absent, not denied" is the
+    repository's own rule for permissions, and it applies to a *reference* too: a document may
+    legitimately name a file that is deliberately not in the tree, and the only way to tell that
+    from a stale name is to ask git.
+    """
+    p = subprocess.run(
+        ["git", "check-ignore", "-q", str(path)],
+        cwd=str(ROOT),
+        capture_output=True,
+        check=False,
+    )
+    return p.returncode == 0
+
+
 def instruction_blocks(text: str) -> list[tuple[str, str]]:
     """`(path glob, instructions prose)` for every `path_instructions` entry."""
     out: list[tuple[str, str]] = []
@@ -385,7 +412,7 @@ def check_prose_paths(text: str) -> int:
             candidates = [ROOT / tok]
             if base:
                 candidates.append(ROOT / base / tok)
-            if not any(c.exists() for c in candidates):
+            if not any(c.exists() or gitignored(c) for c in candidates):
                 tried = ", ".join(c.relative_to(ROOT).as_posix() for c in candidates)
                 missing.append(f"`{tok}` in the `{glob}` instructions (tried {tried})")
     if missing:
@@ -568,18 +595,22 @@ def self_test() -> int:
     # 11. gitleaks removed, so nothing declares the secret-scanning intent.
     expect("no gitleaks key", lambda t: t.replace("    gitleaks:", "    not-gitleaks:"))
 
+    # ```text
     # 12. A file named in the PROSE does not exist. This is `A1`: the `docs/**` block
     # said "Only `.env.example` is tracked" while no such file existed. Every glob
     # matched a real file, so every check above this one passed while the instruction
     # sent the reviewer to a path nobody could open.
     #
-    # Anchored on the block header rather than on a sentence inside it. The first version
-    # replaced prose, and a later prose edit silently disarmed it.
+    # Anchored on the block header rather than on a sentence inside it, and the inserted
+    # token is chosen so it is **not gitignored**: `.env.absent` matches the `.env.*` rule,
+    # so `gitignored()` would excuse it and this case would pass for the wrong reason.
+    # `qqq-absent.env` is ignored by nothing (`§O-290`).
+    # ```
     expect(
         "a prose reference to a file that does not exist",
         lambda t: t.replace(
             '    - path: "docs/**"\n      instructions: |\n',
-            '    - path: "docs/**"\n      instructions: |\n        See `docs/.env.absent`.\n',
+            '    - path: "docs/**"\n      instructions: |\n        See `docs/qqq-absent.env`.\n',
         ),
     )
 
@@ -599,6 +630,34 @@ def self_test() -> int:
         failures.append(f"a bare extension in prose was treated as a path: {exc}")
     else:
         print("  ok    a bare extension in prose is not treated as a path")
+
+    # 13b. A named path that git IGNORES is satisfied even when absent from the checkout.
+    #
+    # This is the CI failure the first version of this rule produced: `docs/.env` is gitignored, so
+    # a CI checkout does not contain it, and the rule named the one path the `docs/**` instruction
+    # exists to warn about. Asserted as a passing case, because the branch must *not* report (`§O-290`).
+    gitignored_case = copy.copy(text).replace(
+        "Only `.env.example` is tracked",
+        "`docs/.env` is the untracked file, and no `docs/.env.absent` exists",
+        1,
+    )
+    try:
+        check(gitignored_case, CONFIG)
+    except Failure as exc:
+        failures.append(f"a gitignored path was reported absent, which is what failed in CI: {exc}")
+    else:
+        print("  ok    a gitignored path satisfies the rule even when it is not checked out")
+
+    # And the converse: a path that is neither present nor ignored is still a failure. Anchored on
+    # the block header like case 12, and using a token nothing ignores, so the case exercises the
+    # absence branch rather than the gitignore branch (`§O-290`).
+    expect(
+        "a path that is absent and not gitignored",
+        lambda t: t.replace(
+            '    - path: "docs/**"\n      instructions: |\n',
+            '    - path: "docs/**"\n      instructions: |\n        See `docs/qqq-retired.env`.\n',
+        ),
+    )
 
     # And the real file must still pass, or every injection above proved nothing.
     try:

@@ -16,20 +16,55 @@
 //! asserted in both files, deliberately.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// A port that nothing is listening on, by binding and releasing one.
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind");
-    l.local_addr().expect("addr").port()
+/// Start `qqqai mcp --http 127.0.0.1:0` and read the port it **announced**.
+///
+/// # Why the port is READ rather than chosen
+///
+/// Because choosing one has a race. `free_port` binds port 0, reads the number and **releases it** --
+/// and between the release and the server's bind, another test can take it. **That is `§O-313`'s class,
+/// and it failed on Linux while passing on Windows**: the Linux run refused to connect, because two
+/// parallel tests had been handed the same port.
+///
+/// **A server that announces the port it bound has no window at all**, and `127.0.0.1:0` becomes a
+/// legitimate request -- *"any free port, and tell me which"* -- rather than a trick a test plays.
+fn start() -> Server {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
+        .args(["mcp", "--http", "127.0.0.1:0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("`qqqai mcp --http` must be runnable");
+
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+    // The announcement is the FIRST line, written before the accept loop -- so this cannot block on a
+    // connection the server has not made yet.
+    std::io::BufRead::read_line(&mut reader, &mut line).expect("the server must announce its port");
+    let port = line
+        .trim()
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("the announcement must end in a port: {line:?}"));
+
+    Server {
+        child,
+        port,
+        _stdout: reader,
+    }
 }
 
 /// A server that is killed when the test ends, whatever happens.
 struct Server {
     child: Child,
     port: u16,
+    /// Held so the pipe stays open: dropping it would close the child's stdout.
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl Drop for Server {
@@ -37,34 +72,6 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-/// Start `qqqai mcp --http`, waiting until it actually accepts a connection.
-///
-/// # Why the wait is a connect rather than a sleep
-///
-/// Because a sleep is a guess: too short and the test is flaky, too long and every run pays it. The
-/// server binds **before** its loop, so a successful connect means it is ready.
-fn start() -> Server {
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
-        .args(["mcp", "--http", &format!("127.0.0.1:{port}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("`qqqai mcp --http` must be runnable");
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Server { child, port };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let mut server = Server { child, port };
-    let _ = server.child.kill();
-    panic!("the HTTP server never accepted a connection on port {port}");
 }
 
 /// POST `body` to the server and return the whole raw response.

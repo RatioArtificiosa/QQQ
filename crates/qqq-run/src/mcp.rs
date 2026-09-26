@@ -510,7 +510,9 @@ pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Re
 /// use qqq_run::mcp::serve_http;
 /// use std::io::{Read, Write};
 ///
-/// // A port the OS picks, released so the server can take it.
+/// // **`port 0` asks the OS for a free one, and the server ANNOUNCES which it got** -- so there is no
+/// // window between picking a port and taking it. A doctest cannot read another thread's stdout, so
+/// // this one picks a port and retries the connect; the integration tests read the announcement.
 /// let port = std::net::TcpListener::bind("127.0.0.1:0")
 ///     .expect("bind")
 ///     .local_addr()
@@ -543,6 +545,12 @@ pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Re
 /// ```
 pub fn serve_http(addr: &str) -> std::io::Result<()> {
     let listener = std::net::TcpListener::bind(addr)?;
+    // **ANNOUNCE THE BOUND ADDRESS.** `127.0.0.1:0` asks the OS for any free port, and a caller has no
+    // other way to learn which one it got -- **a test that picks a port by binding and releasing it has
+    // a race, and this removes the race rather than narrowing it** (`§O-313`'s class).
+    if let Ok(local) = listener.local_addr() {
+        println!("listening on {local}");
+    }
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         // A connection that fails mid-exchange is one bad client, not a dead server.

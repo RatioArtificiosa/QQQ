@@ -26184,4 +26184,55 @@ Making `qqq_test`'s description claim a `dry_run` it does not take:
 
 ---
 
+## §O-345 — The HTTP tests chose a port and released it: the race that failed CI on Linux
+
+**Found:** Phase 2, fixing `1ebe173`'s CI. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_http.rs`.
+
+### The failure, and only on Linux
+
+```
+thread 'a_notification_over_http_is_accepted_and_not_answered' panicked
+connect: Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }
+```
+
+### The cause is `§O-313`'s class, and I wrote it into the test
+
+`free_port()` binds port 0, reads the number and **releases it** — so between the release and the server's
+bind, **another test can take the same port**. The tests run in parallel, so two of them were handed one
+port and one refused to connect.
+
+**Windows' timing masked it — and I masked it myself**: I ran the suite locally with `--test-threads=1`,
+**which is the one condition that hides a port race.**
+
+> **A test run that cannot fail is not evidence.**
+
+### The fix removes the window rather than narrowing it
+
+`serve_http` now **announces the address it bound**:
+
+```
+listening on 127.0.0.1:51234
+```
+
+and the test spawns `--http 127.0.0.1:0` and **reads that line**.
+
+> **`127.0.0.1:0` becomes a legitimate request — *"any free port, and tell me which"* — rather than a
+> trick a test plays**, and **a server that announces its port has no window at all.**
+
+### And it is faster
+
+**4.03 s → 0.56 s**, because the connect-polling is gone. **A race-free design was also the cheaper one**,
+which is the usual outcome when the race is removed instead of retried.
+
+**The doctest keeps the pick-and-retry form**, because a doctest cannot read another thread's stdout — and
+**it says so** rather than looking like the same code with the same flaw.
+
+### Measured
+
+**7 HTTP tests in parallel in 0.56 s** · workspace **2703 passed, 0 failed** · fmt 0 · clippy 0 ·
+`API EXAMPLES OK`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

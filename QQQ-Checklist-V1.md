@@ -4935,7 +4935,24 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → `§O-308` records the design and the remainder. **A renderer with no caller is a known state;
     a renderer with no caller and a tick is a claim.**
   → §10.2 Metrics that ship by default
-- [ ] **OBS-014** Prove that a guest cannot influence sampling decisions.
+- [x] **OBS-014** Prove that a guest cannot influence sampling decisions.
+  → **Done, with one half of its fault injection still owed.** A guest cannot influence sampling,
+    proved **two ways** because §10.4's *“never guest-controlled”* is a negative and no runtime test
+    can prove a negative about a capability.
+  → **Behavioural**: a well-formed W3C `traceparent` claiming `sampled=1` — the flag a conventional
+    implementation **inherits** — cannot force a span under `--trace-sample off`, and cannot raise a
+    `0.25` rate to 24 of 24. **Measured**: 3 tests over the real binary, 1.44 s.
+  → **Structural**: `span.rs` owns the decision and names **no request field** — not `traceparent`, not
+    `RequestHead`, not `header(`, not `.target`, not `tenant`. Comments are stripped first, because
+    the module *discusses* `traceparent` and **a guard that fires on prose gets worked around**.
+  → **The structural check is the one that caught the injection.** The vulnerability was injected into
+    `span.rs` and left **dormant**: *“`span.rs` names `traceparent` in code”* fired while **both
+    behavioural tests passed**. A dormant vulnerability is invisible to a runtime test by
+    construction, and it is exactly what a half-finished change leaves behind.
+  → **What is NOT claimed**: the behavioural pair was **not** shown to fail under the injection. The
+    patch fought its own anchors three times and the round ran out of budget, so the `→ Done:` claim
+    rests on the structural check. **A claim about a negative needs its own injection.**
+  → The Observations document records both kinds of evidence and the gap.
   → **Blocked by `OBS-011`, and the block is worth stating because the item reads as buildable.**
     “Prove that a guest cannot influence sampling decisions” is a property **of a mechanism**, and
     there is no sampling mechanism to have the property. Measured: `grep -i sampl` across

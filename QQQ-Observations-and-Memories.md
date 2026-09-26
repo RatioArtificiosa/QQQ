@@ -24724,4 +24724,59 @@ The remaining fourteen §4.4 steps are the same call at fourteen more boundaries
 (propagation) and `OBS-014` (proving a guest cannot influence the rate) now have the root they
 needed**: there is a span to propagate and a decision to attack.
 
+## §O-320 — `OBS-014` needed two kinds of evidence, and the structural one caught what the behavioural one missed
+
+**Found:** Phase 1, `OBS-014`. **Anchors:** `crates/qqq-run/tests/sampling_influence.rs`,
+`crates/qqq-serve/src/span.rs`.
+
+### Why a behavioural test alone is not enough
+
+A runtime test can show that a **particular** hostile input changes nothing. It cannot show that **no**
+guest-reachable input exists, because that is a claim about **what the code can read**. §10.4's sentence
+is *"sampling is host-controlled and **never** guest-controlled"*, and the second half is a negative.
+
+So the item is proved two ways:
+
+1. **Behavioural** — a well-formed W3C `traceparent` claiming `sampled=1`, the flag a conventional
+   implementation **inherits**, cannot force a span under `--trace-sample off` and cannot raise a `0.25`
+   rate to 24 of 24.
+2. **Structural** — `span.rs` owns the decision, and it must name **no request field**: not
+   `traceparent`, not `RequestHead`, not `header(`, not `.target`, not `tenant`. The comments are
+   stripped before the scan, because the module's own documentation *discusses* `traceparent` — and **a
+   guard that fires on prose is a guard that gets worked around.**
+
+### The measurement that justifies the second kind
+
+**The injection was the vulnerability itself**: make the decision honour the inbound `traceparent`.
+Injected into `span.rs` but left **dormant** (the call site was not yet patched):
+
+```
+test the_decision_module_reads_no_request_field ... FAILED
+  `span.rs` names `traceparent` in code. The sampling decision must be a function of host state
+  alone (§10.4, `OBS-014`)
+test result: FAILED. 2 passed; 1 failed
+```
+
+**The structural check caught it; the two behavioural tests passed.** A dormant vulnerability — present
+in the module, not yet reachable — is invisible to a runtime test by construction, and it is exactly
+the state a half-finished change leaves behind.
+
+**That is the argument for having both, and it was measured rather than argued.**
+
+### What is NOT claimed
+
+**The behavioural half was not shown to fail.** The injection was completed for the structural check
+and **not** for the behavioural ones: patching `emit_span`'s signature, its call and the `span.rs`
+helper fought its own anchors three times (a partial write left the helper taking `Option<&str>` while
+the call passed a `bool`), and the round ran out of budget.
+
+**So `OBS-014`'s `→ Done:` line says which test carried the injection**, and the behavioural pair is
+recorded as *measured against the clean build* rather than as *shown to fail under the injection*. A
+claim about a negative needs its own injection, and this one is not done.
+
+### Measured
+
+workspace **2659 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · `PUBLIC REACHABILITY OK` ·
+`check_xrefs` PASSED · unsafe-audit doc re-derived · 3 influence tests, 1.44 s.
+
 *End of `QQQ-Observations-and-Memories.md`.*

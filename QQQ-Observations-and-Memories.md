@@ -24180,4 +24180,66 @@ workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` ·
 real binary, **fault-injected** by making `maybe_serve_metrics` return `None` — *"the endpoint must
 answer 200: HTTP/1.1 404 Not Found"*.
 
+## §O-311 — `pub` hid dead code from `clippy`, and the API ratchet counted it as API
+
+**Found:** Phase 1, building `OBS-009`/`OBS-011`'s foundation. **Anchors:** `crates/qqq-serve/src/span.rs`
+(removed), `tools/check_api_examples.py`, `crates/qqq-serve/src/lib.rs`.
+
+### What was built, and why it was reverted
+
+A `span` module: `Sampler` with a head policy (`AlwaysOn` / `AlwaysOff` / `Ratio`), a **tail-sampling
+option**, and a `Span` type — with **8 tests, all fault-injected where they assert a rule**. The
+ratio's bucket was **reduced to lowest terms** after a test caught that `0.25` and `0.250` are the
+same rate but bucketed in different spaces, so the same rate behaved differently depending on how it
+was *written*.
+
+It was reverted because **nothing in the crate uses it**, and that only became visible when the
+surface was reduced:
+
+```
+error: enum `Decision` is never used
+error: methods `as_str` and `is_record` are never used
+error: enum `Policy` is never used
+error: associated functions `parse`, `gcd`, and `bucket` are never used
+```
+
+### The finding, which is worth more than the code
+
+The module was written with `pub` items. With `pub`:
+
+- **`clippy` said nothing** — a `pub` item is reachable from outside the crate, so `dead_code` does
+  not apply to it.
+- **the API ratchet counted 17 new declarations** and asked for 17 examples.
+
+With `pub(crate)`:
+
+- **`clippy` reported every item as unused** — because it is.
+
+**Two checks that together would have caught a module with no caller: one of them was silenced by
+`pub` and the other counted the module as a liability rather than as dead weight.** The ratchet was
+measuring *how much API this adds*; the lint would have measured *whether anything calls it* — and
+`pub` disabled exactly the one that mattered.
+
+**This is invariant THREE's cause, not another instance of it.** Eleven rounds of *"written, tested,
+never called"* have been found by grepping for callers; this round the compiler said it outright,
+and only because the visibility was narrowed first. **`pub` is what hides an unwired control from
+the tool that would name it.**
+
+### Why reverted rather than wired
+
+The consumer is `OBS-009`'s span emission, and wiring it means touching `serve_connection` — the
+function whose line budget cost round 10 an entire attempt (`§O-309`). **A foundation with no
+consumer is the thing this goal keeps finding, and shipping one deliberately would be the ninth
+instance.**
+
+`OBS-009`/`010`/`011`/`012`/`014` therefore form a **subtree with no root**: there is no span
+emission, so there is nothing to propagate, nothing to sample, and nothing for a guest to try to
+influence. The next attempt should **design the emission first** — decide where a span is written,
+and to what — and build the sampler against that.
+
+### Measured, before the revert
+
+8 tests passing; workspace **2655 passed, 0 failed suites**; the bucket injection fired with
+*"1/4 of 4000 traces should be roughly 1000, got 4000"*.
+
 *End of `QQQ-Observations-and-Memories.md`.*

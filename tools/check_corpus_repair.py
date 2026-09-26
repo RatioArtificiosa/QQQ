@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+
+from _fault_inject_io import write_bytes
 import sys
 import tempfile
 from pathlib import Path
@@ -360,14 +362,14 @@ def self_test() -> int:
     fault = "    raise NameError('injected: the verification loop was reached')\n" + anchor
     HARNESS.write_bytes(original_text.replace(anchor, fault, 1).encode("utf-8"))
     if b"injected: the verification loop was reached" not in HARNESS.read_bytes():
-        HARNESS.write_bytes(original)
+        write_bytes(HARNESS, original)
         print("  REFUSING: the fault did not land")
         return 1
 
     try:
         code = _run_cases_quiet()
     finally:
-        HARNESS.write_bytes(original)
+        write_bytes(HARNESS, original)
         restored = HARNESS.read_bytes()
         if restored != original:
             print("  FATAL: the restore is not byte-for-byte")

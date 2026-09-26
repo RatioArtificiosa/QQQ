@@ -53,6 +53,8 @@ import pathlib
 import re
 import subprocess
 import sys
+
+from _fault_inject_io import write_bytes
 import time
 from dataclasses import replace
 
@@ -468,7 +470,7 @@ def self_test() -> int:
             )
             caught = run() == 1
         finally:
-            path.write_bytes(original)
+            write_bytes(path, original)
         restored = path.read_bytes() == original
         check(f"caught: {desc}", caught)
         check(f"restored: {desc}", restored)
@@ -484,7 +486,7 @@ def self_test() -> int:
         )
         empty_caught = run() == 1
     finally:
-        path.write_bytes(original)
+        write_bytes(path, original)
     check("caught: an empty schema", empty_caught)
     check("restored after the empty-schema case", path.read_bytes() == original)
 
@@ -556,7 +558,7 @@ def self_test() -> int:
                         probe_envelope() == 1,
                     )
             finally:
-                src.write_bytes(original_src)
+                write_bytes(src, original_src)
                 # Touch, so the next build cannot reuse the injected artifact.
                 stamp = time.time()
                 os.utime(src, (stamp, stamp))

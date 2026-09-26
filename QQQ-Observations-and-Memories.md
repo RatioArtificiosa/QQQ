@@ -25917,4 +25917,56 @@ only the intended changes.
 
 ---
 
+## §O-340 — A checker's name is not its behaviour: the class, not the name
+
+**Found:** Phase 2, closing `§O-339`'s own recorded gap. **Anchors:** `tools/_fault_inject_io.py`,
+`tools/check_corpus_repair.py`, `tools/check_schema_conformance.py`.
+
+### `§O-339` recorded the gap and this closes it
+
+`§O-339` fixed the **eight** `fault_inject_*.py` restores and recorded that the tree **still** held
+`tools/self_test_xrefs.py` with an injected `raise NameError(…)` — whose injector is
+**`tools/check_corpus_repair.py`**:
+
+> **which is not a `fault_inject_*` checker, so the snapshot/verify bracket missed it entirely.**
+
+### The class, not the name
+
+A grep for every checker that **writes to a file it read** found **three** that inject and restore and are
+not named for it:
+
+| checker | restores |
+|---|---|
+| `check_corpus_repair.py` | 2 — `HARNESS.write_bytes(original)` |
+| `check_schema_conformance.py` | 3 — `path.write_bytes(original)`, `src.write_bytes(original_src)` |
+| `check_tiers.py` | **not in this class** — its only write is to a **temp** file |
+
+**All five** now go through `_fault_inject_io.write_bytes`, a retrying byte-write added beside the retrying
+file-copy.
+
+> **A checker's name is not its behaviour.** The bracket was drawn around the eight whose *names* say
+> `fault_inject`, and the one that actually left the tree dirty was named `check_corpus_repair`.
+
+### And a trap I fell into while checking
+
+`check_schema_conformance --self-test` failed in a bare shell, and I read `Select-Object -Last 1` — **which
+returned an empty line**. **`§O-284` records exactly this** (*"`-Last 1` hides a multi-line verdict"*), and
+I hit it **while the verdict was the thing I was looking for**.
+
+The real output said `SELF-TEST FAILED -- 2 of 21 case(s)`, both reading **`cargo build exited 101`** — the
+MSVC environment this shell lacks, **not a defect**. Under `VsDevCmd`: **21/21**.
+
+### And `§O-338`'s rule caught a file `git add -A` would have taken
+
+An untracked **`.commandcode/`** directory I did not create appeared in the tree. **The commit names its
+paths explicitly.**
+
+### Measured
+
+gate **91 ok / 2 failed**, both expected — **the first time this goal has seen the gate green apart from
+the two known exemptions** · `check_corpus_repair --self-test` PASSES · `check_schema_conformance
+--self-test` **21 cases** · the tree before `git add` held only the three intended files.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

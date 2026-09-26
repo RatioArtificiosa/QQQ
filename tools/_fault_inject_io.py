@@ -97,3 +97,31 @@ def restore_bytes(backup: Path, target: Path, attempts: int = ATTEMPTS) -> None:
         f"could not restore {target} after {attempts} attempts; the injected state is STILL IN THE TREE "
         f"and `git add -A` would commit it: {last}"
     )
+
+
+def write_bytes(target: Path, data: bytes, attempts: int = ATTEMPTS) -> None:
+    """Write `data` over `target`, retrying a transient `OSError`.
+
+    # Why this exists beside `restore_bytes`
+
+    Because a checker that captured the original **in memory** -- rather than copying it to a file --
+    has nothing to hand `restore_bytes`. Three of them do exactly that, and they were the ones my
+    snapshot/verify bracket **missed**, because they are not named `fault_inject_*`.
+
+    # Errors
+
+    The last `OSError` if every attempt fails. **A restore that cannot happen must be loud**: the
+    caller's `finally` is the only thing between an injection and a commit.
+    """
+    last: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            target.write_bytes(data)
+            return
+        except OSError as e:
+            last = e
+            time.sleep(DELAY * (attempt + 1))
+    raise OSError(
+        f"could not restore {target} after {attempts} attempts; the injected state is STILL IN THE TREE "
+        f"and `git add -A` would commit it: {last}"
+    )

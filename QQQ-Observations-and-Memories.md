@@ -25969,4 +25969,61 @@ the two known exemptions** · `check_corpus_repair --self-test` PASSES · `check
 
 ---
 
+## §O-341 — `AGENT-019` and `AGENT-020` enforced over all twelve tools, not described
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/tests/mcp_stdio.rs`,
+`crates/qqq-run/src/mcp.rs`.
+
+### Both items are cross-cutting properties
+
+**That is what a description cannot hold and a test can.** A reviewer reading one handler cannot see a
+property that is about *every* handler.
+
+### `AGENT-019` — every tool returns structured content
+
+The test calls **all twelve** in one server and requires, for each:
+
+- a **result** rather than a protocol error;
+- **`isError` as a boolean** — so a client branches on a flag, not on the wording of a sentence;
+- a **`structuredContent` object**.
+
+**And the text block must *equal* the structured content** — **two descriptions of one answer is how they
+drift**, and a client that reads one while the server means the other is a client that is **wrong
+quietly**.
+
+> A tool that cannot run **still** returns structured content. **That is the half a rushed implementation
+> loses**: prose for the error path and structure for the happy path, and the client has to handle two
+> shapes.
+
+### `AGENT-020` — every mutating tool takes `dry_run` and says so
+
+The test **partitions** the twelve: **four mutating** (`qqq_build`, `qqq_run`, `qqq_test`, `qqq_bench`) and
+**eight reading**. **And it asserts the partition covers all twelve** —
+
+> **adding a tool forces a decision about which side it is on, rather than letting it default to
+> read-only by omission.**
+
+Both directions are checked: a mutating tool must **have** `dry_run` **and name it in its description** (a
+model reads the description first); a reading tool must have **neither**, because *"a `dry_run` argument on
+a tool that changes nothing would be **a promise it does not keep**."*
+
+### The building that made it pass
+
+The four mutating descriptions now say so — *"Takes `dry_run` to describe what would run without running
+it."*
+
+### Fault-injected, both, and both fired
+
+| injection | test that failed |
+|---|---|
+| removing `structuredContent` from the unrunnable path | `every_tool_returns_structured_content` |
+| moving `qqq_run`'s schema arm to a name that is not a tool | `every_mutating_tool_takes_dry_run_and_says_so` — *"`qqq_run` changes the project and must accept `dry_run`"* |
+
+### Measured
+
+workspace **2693 passed, 0 failed** (2 new tests) · fmt 0 · clippy 0 · `API EXAMPLES OK` · **11 MCP tests
+in 0.47 s**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

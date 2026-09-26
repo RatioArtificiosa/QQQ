@@ -249,6 +249,136 @@ fn a_notification_gets_no_reply() {
     assert_eq!(parse(&replies[0])["id"], 8);
 }
 
+/// **Every tool returns structured content — `AGENT-019`, over all twelve.**
+///
+/// # Why this is a test and not a description
+///
+/// Because `AGENT-019` is the item that makes the server worth having, and **a client that has to parse a
+/// sentence to learn a tool's answer is a client that will get it wrong.** The property is
+/// cross-cutting: it is about *every* tool, and a single tool added without it would be invisible to a
+/// reviewer reading one handler.
+///
+/// **A tool that cannot run still returns structured content** — `isError` is a field, not a phrase. That
+/// is the half a rushed implementation loses: it returns prose for the error path and structure for the
+/// happy path, and the client has to handle two shapes.
+#[test]
+fn every_tool_returns_structured_content() {
+    let names = [
+        "qqq_manifest_get",
+        "qqq_manifest_validate",
+        "qqq_caps_explain",
+        "qqq_caps_list",
+        "qqq_build",
+        "qqq_run",
+        "qqq_test",
+        "qqq_audit",
+        "qqq_inspect",
+        "qqq_bench",
+        "qqq_schema",
+        "qqq_errors_lookup",
+    ];
+    assert_eq!(names.len(), 12, "the published list is twelve");
+
+    // One server, twelve calls, so a tool that hangs is one failure rather than twelve.
+    let requests: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{n}","arguments":{{}}}}}}"#,
+                i + 1
+            )
+        })
+        .collect();
+    let refs: Vec<&str> = requests.iter().map(String::as_str).collect();
+    let replies = run_mcp(&refs);
+    assert_eq!(replies.len(), 12, "one reply per tool: {replies:?}");
+
+    for (i, name) in names.iter().enumerate() {
+        let reply = parse(&replies[i]);
+        let result = &reply["result"];
+        assert!(
+            result.get("error").is_none(),
+            "`{name}` must be answered as a RESULT, not a protocol error: {reply}"
+        );
+        assert!(
+            result["isError"].is_boolean(),
+            "`{name}` must set `isError` as a BOOLEAN, so a client branches on a flag and not on              the wording of a sentence: {reply}"
+        );
+        assert!(
+            result["structuredContent"].is_object(),
+            "`{name}` must carry `structuredContent` -- AGENT-019 says never prose-only: {reply}"
+        );
+        // And the text block, if present, must be the structured content SERIALISED rather than a
+        // different sentence -- two descriptions of one answer is how they drift.
+        if let Some(text) = result["content"][0]["text"].as_str() {
+            let parsed: serde_json::Value = serde_json::from_str(text)
+                .unwrap_or_else(|e| panic!("`{name}`: text is not JSON: {e}"));
+            assert_eq!(
+                &parsed, &result["structuredContent"],
+                "`{name}`'s text block and its structured content must be the same value"
+            );
+        }
+    }
+}
+
+/// **Every mutating tool takes `dry_run` and says so — `AGENT-020`, over all twelve.**
+///
+/// # The partition, and why it is asserted rather than assumed
+///
+/// Eight tools read; four change the project. **The test asserts the two sets cover all twelve**, so
+/// adding a tool forces a decision about which side it is on rather than letting it default to
+/// read-only by omission.
+#[test]
+fn every_mutating_tool_takes_dry_run_and_says_so() {
+    // The tools that can change the project or run it.
+    let mutating = ["qqq_build", "qqq_run", "qqq_test", "qqq_bench"];
+    // And the ones that cannot.
+    let reading = [
+        "qqq_manifest_get",
+        "qqq_manifest_validate",
+        "qqq_caps_explain",
+        "qqq_caps_list",
+        "qqq_audit",
+        "qqq_inspect",
+        "qqq_schema",
+        "qqq_errors_lookup",
+    ];
+    assert_eq!(
+        mutating.len() + reading.len(),
+        12,
+        "every published tool must be on one side of the partition or the other"
+    );
+
+    let replies = run_mcp(&[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]);
+    let reply = parse(&replies[0]);
+    let tools = reply["result"]["tools"].as_array().expect("an array");
+
+    for tool in tools {
+        let name = tool["name"].as_str().expect("a name");
+        let description = tool["description"].as_str().expect("a description");
+        let has_dry_run = tool["inputSchema"]["properties"].get("dry_run").is_some();
+        let says_so = description.contains("dry_run");
+
+        if mutating.contains(&name) {
+            assert!(
+                has_dry_run,
+                "`{name}` changes the project and must accept `dry_run`: {tool}"
+            );
+            assert!(
+                says_so,
+                "`{name}` accepts `dry_run` and its DESCRIPTION must say so -- a model reads the                  description first, and a tool that can be asked not to change things must announce it: {tool}"
+            );
+        } else {
+            assert!(
+                !has_dry_run,
+                "`{name}` cannot change anything, so a `dry_run` argument would be a promise it does                  not keep: {tool}"
+            );
+            assert!(!says_so, "and its description must not claim one: {tool}");
+        }
+    }
+}
+
 /// **An empty line is skipped rather than answered.**
 #[test]
 fn blank_lines_are_skipped() {

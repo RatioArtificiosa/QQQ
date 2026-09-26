@@ -122,12 +122,12 @@ fn describe(name: &str) -> &'static str {
         }
         "qqq_caps_explain" => "Explain what one capability grants and what it refuses.",
         "qqq_caps_list" => "List every capability the project declares, with its grants.",
-        "qqq_build" => "Build the project's guest component for `wasm32-wasip2`.",
-        "qqq_run" => "Run the guest component against a request, without serving.",
-        "qqq_test" => "Run the project's conformance tests.",
+        "qqq_build" => "Build the project's guest component for `wasm32-wasip2`. Takes `dry_run` to describe what would run without running it.",
+        "qqq_run" => "Run the guest component against a request, without serving. Takes `dry_run` to describe what would run without running it.",
+        "qqq_test" => "Run the project's conformance tests. Takes `dry_run` to describe what would run without running it.",
         "qqq_audit" => "Read the capability audit and report the worst severity found.",
         "qqq_inspect" => "Report what a project is allowed to do, and what it is not.",
-        "qqq_bench" => "Run the benchmarks and report the measured numbers.",
+        "qqq_bench" => "Run the benchmarks and report the measured numbers. Takes `dry_run` to describe what would run without running it.",
         "qqq_schema" => "Return the JSON Schema for a QQQ command's arguments.",
         "qqq_errors_lookup" => "Look up QQQ error codes by class, with each code's meaning.",
         // Unreachable while `mcp_tool_names()` is the source of the names, and kept rather than

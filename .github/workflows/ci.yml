@@ -677,7 +677,6 @@ jobs:
       # NOT injected, because `wasm-tools` already rejects it and no parseable
       # file triggers our rule. The checker keeps the rule as defence in depth,
       # and the harness says so rather than implying it is exercised.
-      - name: Prove the WIT versioning check detects violations
       # The `wit` job's half of the pair. **This is the step that was in the WRONG JOB**: `--snapshot`
       # ran in `xrefs` and `--verify` here, on a different runner, and CI failed every commit since with
       # `GATE TREE INCONCLUSIVE -- no snapshot`.

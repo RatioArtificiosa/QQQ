@@ -22827,4 +22827,85 @@ as failures than to read as successes.
 
 ---
 
+## §O-290 — Twenty-four commits of locally-green work failed CI on its first run, because a guard required a gitignored file to exist
+
+**Found:** the first CI run on the pushed commit. **Anchors:** `tools/check_coderabbit_config.py`,
+`.coderabbit.yaml`, `.gitignore`.
+
+### What happened
+
+Run `36205577642` on `2f55a1e`: **10 jobs success, 1 failure, 1 skipped** (DCO, pull-request-only).
+The failure was **Cross-reference integrity**, at the step *"Verify the external-review configuration
+is live and specific"* — `check_coderabbit_config.py`, the prose-path guard added earlier in this
+session. **Every step after it was skipped**, so one check masked fourteen.
+
+```
+FAIL: `path_instructions` names a file that does not exist, so the reviewer was told about a path
+nothing can open: `docs/.env` in the `docs/**` instructions (tried docs/.env, docs/docs/.env)
+```
+
+### The cause, and why the local gate never saw it
+
+**`docs/.env` is gitignored, so a CI checkout does not contain it — correctly.** And the `docs/**`
+instruction is *about that fact*:
+
+> *"`docs/.env` is gitignored and must never be committed or indexed"*
+
+So the guard named **the one path the instruction exists to warn about**, and it passed on this
+machine for twenty-four commits because the untracked file is present here.
+
+**A check that depends on an untracked file is a check that cannot be verified locally.** The local
+gate was green the whole time; the file it needs is on the developer machine and not in the tree.
+This is precisely what Definition-of-done 6 means by *"CI green verified by reading the run, and not
+assumed"* — and it took the push to find it.
+
+### The fix, and the meaning of "exists"
+
+A named path is now satisfied if it **exists** *or* **git ignores it**:
+
+```python
+if not any(c.exists() or gitignored(c) for c in candidates):
+```
+
+That is the repository's own **"absent, not denied"** rule applied to a *reference*: a document may
+legitimately name a file that is deliberately not in the tree, and **asking git is the only way to
+tell a deliberately-absent file from a stale name.** Without it the rule cannot distinguish
+`docs/.env` (correctly absent) from `docs/.env.example` before it existed (`A1`, the defect the rule
+was written for).
+
+### Two dead self-test anchors, and the guard that caught them
+
+The `§O-274` applied-guard — which fails when a mutation does not change the text — fired on both:
+
+1. **Case 12's anchor was gone.** An earlier prose edit removed the sentence it replaced, and the
+   case had been passing as a no-op.
+2. **My first version of the new case used `.env.absent` — which is gitignored.** So `gitignored()`
+   excused it and the case would have **passed for the wrong reason** — a test that certifies the
+   opposite of what it claims, introduced while writing the guard against exactly that class.
+
+Both cases now anchor on the block header and use tokens nothing ignores (`qqq-absent.env`,
+`qqq-retired.env`). Self-test: **13 of 13**.
+
+### How it was reproduced before it was fixed
+
+The obvious simulation is wrong and worth recording: **`git archive` extracts no `.git`**, so
+`git check-ignore` cannot answer anything and the guard *appears to work* in the extracted tree. The
+faithful simulation is a **real clone** — `git clone --depth 1 file:///E:/QQQ` — because CI uses
+`actions/checkout`, which produces a working repository with a real index. In that clone `docs/.env`
+is absent and ignored by `.gitignore:41`, and the failure reproduces and then verifies as fixed.
+
+**A simulation that cannot reproduce the failure is not a reproduction**, and this one differed from
+CI in exactly the way that mattered.
+
+### And the write-up caught me too
+
+I cited `§O-290` in the tool's docstrings *before writing this entry*, and `check_xrefs` check
+`[13]` — *every `§ID` cited from a source tree must appear in the Observations* — failed the local
+gate four times over (two checkers, plus the two that skip when an earlier step fails). **The guard
+fired on the entry describing the guard.**
+
+→ `tools/check_coderabbit_config.py`, `.coderabbit.yaml`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

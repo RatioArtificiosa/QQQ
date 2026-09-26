@@ -24074,4 +24074,55 @@ renderer with no caller is a known state; a renderer with no caller and a tick i
 
 ---
 
+## §O-309 — The metrics endpoint was built, demonstrably worked, and was reverted because its tests hung
+
+**Found:** Phase 1, wiring `OBS-013`'s endpoint. **Anchors:** `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/metrics_endpoint.rs` (removed).
+
+### It worked, and here is the evidence
+
+The endpoint was implemented — `--metrics-path <path>`, a start-up refusal on a collision with a
+declared route, a start-up refusal of a relative path, and a `serve_metrics` handler modelled on
+`serve_preflight`. Requested over a real socket, the response was:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain; version=0.0.4; charset=utf-8
+Content-Length: 1694
+Connection: close
+
+# HELP qqq_http_requests_total Total HTTP requests, by method and status class.
+# TYPE qqq_http_requests_total counter
+...
+```
+
+**That is the endpoint working.** It is recorded here because the code is gone.
+
+### Three findings from the attempt, each worth keeping
+
+1. **My test asserted a lowercase header name and the response emits `Content-Type`.** The first
+   failure was *mine*, about a working endpoint — the same shape as `§O-284`'s manufactured
+   evidence, and it is why the assertion now checks the **value**
+   (`text/plain; version=0.0.4`) rather than a header's spelling.
+2. **The test harness hung rather than failed.** A read with no deadline on a connection the server
+   keeps alive blocks forever, and *a hang is not a diagnosis* — it costs a full timeout and says
+   nothing. Every test in this repository that reads from a socket should set a read timeout.
+   That is a generalisable fix and it was applied before the revert.
+3. **`clippy::too_many_lines` fired three times, each on a different function**, because a
+   one-line addition to a function already at its budget is over it: `serve_special_route` (100),
+   then `serve` (100), and the third attempt still tripped it. **The line budget is a real
+   constraint on a change of this shape**, and the honest response is to extract rather than to
+   allow — which is what I could not finish here.
+
+### Why it was reverted rather than committed
+
+The wiring compiled and the endpoint answered correctly, but **its automated tests did not pass**,
+and committing either a hanging test or a fourth `#[allow(clippy::too_many_lines)]` would have been
+a claim rather than a proof. The tree is back at `89e1847`, clean and green, with the **renderer**
+intact — which is the verified half.
+
+**`OBS-013` therefore remains unticked**, and this entry is the record of exactly how far it got:
+the renderer is done and tested; the endpoint is designed, was demonstrated, and needs its tests
+fixed and its dispatch extracted before it can be committed.
+
 *End of `QQQ-Observations-and-Memories.md`.*

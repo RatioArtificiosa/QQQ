@@ -22964,4 +22964,80 @@ both of those were decided before the edit, not after the failure.
 
 ---
 
+## §O-292 — Gate 0: the three carried-over items are done, and the encoding class had four faces rather than two
+
+**Found:** Phase 0 of the build goal. **Anchors:** `tools/check_gate_parity.py`,
+`tools/check_subprocess_encoding.py`, `docker/Dockerfile`, `docker/entrypoint.sh`, 65 files under
+`tools/`.
+
+### What Gate 0 required, and what it measured
+
+| Item | Before | After |
+|---|---|---|
+| 0.1 gate-parity checker | nothing enforced the "add it to BOTH" rule; 13 undeclared divergences accumulated | `GATE PARITY OK`, self-test **12/12**, registered in both gates |
+| 0.2 `wasm-tools` in the bridge | `check_wit.py` failed in the image, so **WIT parsing was unverified on Linux** | `WIT VALIDATION PASSED — 16/16`, and `check_wit.py` now runs in the bridge |
+| 0.3 locale-encoding class | 42 call sites in 26 tools, scanner gitignored in `.scratch/` | 0 sites, checker in `tools/`, registered in both gates |
+
+`§O-291` records 0.1 and the parity checker's own three defects. This entry records 0.2 and 0.3.
+
+### 0.2 — and the declaration had to be *removed*, not kept
+
+The image had no `wasm-tools`, so `check_wit.py` failed loudly in the bridge and its absence was
+**declared** as a divergence with a reason. Installing the tool made that declaration a lie, and the
+parity checker said so in those words: *"`tools/check_wit.py` is declared ci-only but no longer
+diverges — a stale exemption is a defect in its own right."*
+
+**A declaration that is only ever added to is a declaration that stops meaning anything.** The fix
+was to delete the entry, add the checker to the bridge, and let the guard verify both — which is the
+first time in this repository that a *guard's own subject* was a guard's declaration.
+
+### 0.3 — the class has four faces, and fixing one exposes the next
+
+The scan and the 42 sites are two of them. Two more surfaced only *because* the first was fixed:
+
+**Face 3 — a script's own stdout.** With reads made explicit, two tools began failing where they had
+failed silently:
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode character '\ufffd' in position 50
+```
+
+On a cp1252 console a tool cannot `print` the UTF-8 it just read. **28 of 29 tools** that capture and
+print child output were exposed — they had been printing mangled or empty output, which is why
+nobody noticed. All 65 are now explicit.
+
+**Face 4 — `ast.parse` is not a validity check.** This is the finding worth carrying:
+
+```python
+ast.parse('f(a=1, a=2)')              # fine
+compile('f(a=1, a=2)', 'x', 'exec')   # SyntaxError: keyword argument repeated: a
+```
+
+A mechanical edit added `encoding=`/`errors=` to calls that **already carried `errors=`**. The edit
+script verified its own output with `ast.parse`, reported success, and **eleven tools were
+un-runnable** — the gate went from 1 failure to **18**. The verification was the weaker of two
+available checks and nothing said so.
+
+The scanner now compiles as well as parses, and its docstring explains why. **When a mechanical edit
+verifies its own output, it must use the strongest check available, not the most convenient one.**
+
+### Four attempts at the edit, and each failure is a different assumption
+
+1. **Corrupted 25 files.** `src.splitlines(keepends=True)` splits on `\v`, `\f`, `\x85` and `U+2028`
+   as well as `\n`, so absolute offsets drifted past any such character. Caught by the script's own
+   `ast.parse`, and reverted with `git checkout -- tools/`.
+2. **Corrupted 25 again**, same arithmetic.
+3. **Broke 4 files.** CRLF-aware this time — `release.py` is committed with CRLF, so its line lengths
+   exceeded what `ast` counts — but the insertion before the closing paren needs a comma the call may
+   already have.
+4. **Fixed all 42.** Punctuation-aware, offset computed per-line rather than by summing.
+
+**Both failures were free to lose** because the tree was clean and every edit was revertible. That is
+not luck; it is the reason to attempt a mechanical edit only from a committed state.
+
+→ `tools/check_gate_parity.py`, `tools/check_subprocess_encoding.py`, `docker/Dockerfile`,
+`docker/entrypoint.sh`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

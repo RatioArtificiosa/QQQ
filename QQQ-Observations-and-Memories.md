@@ -24665,4 +24665,63 @@ the two helpers are private and the ratchet is untouched.
 and its start instant. The remaining work is the module, the flag, and **the doctests written with the
 module** — not after it.
 
+## §O-319 — The span emission lands on the third attempt, because the gate was budgeted first
+
+**Found:** Phase 1, `OBS-009` and `OBS-011`. **Anchors:** `crates/qqq-serve/src/span.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/spans.rs`.
+
+### Why the third attempt is the one that landed
+
+| attempt | what happened |
+|---|---|
+| `§O-311` (round 12) | the module was written and **nothing called it** — reverted |
+| `§O-317` (round 17) | the emission worked, and `clippy`'s line budget plus the API ratchet **killed it** — reverted |
+| `§O-318` (round 18) | **the gate was budgeted first**: `serve` 106 → 95 code lines, no feature attached |
+| **this round** | **landed** |
+
+**`§O-318` was the round that made this one possible**, and it built nothing a user can see.
+
+### What landed
+
+A span for the §4.4 step a request passes through, emitted **through the logger** so it inherits the
+level filter, the format and **§10.3's redaction**. `--trace-sample <rate>` and
+`--trace-keep-failures`. **Five end-to-end tests over the real binary in 2.61 s**, all fault-injected
+where they assert a rule.
+
+### The doctest that invented an API
+
+The module's first doctest called `Sampler::is_recording()` and `Sampler::rate()` — **methods I had
+written for the example and made `pub(crate)`**, so the example could not compile and `clippy` reported
+both as never used. **A doctest is a caller**, and it must call the real surface: the example now uses
+`from_rate` alone, and the two methods are gone.
+
+### And a third form of the same class, caught by the checker
+
+Adding a `pub` item for the module and a `pub fn` for the constructor put the ratchet **one over**.
+The fix was a third doctest on the module itself — and `PUBLIC REACHABILITY OK` confirms the public
+surface is exactly two items plus the module.
+
+### The test that failed for a reason that was mine
+
+`trace_sample_off_serves_but_does_not_span` asserted the log would contain `not_built`, the unbuilt
+handler's header. **stdout is piped in the test, so `Format::for_terminal(false)` emits JSON** — and
+the header is on the wire, not in the log. The assertion now reads the access record's own fields.
+
+**That is the fourth time in this goal that a failing assertion was mine rather than the code's**, and
+every one was found the same way: **print the bytes, then believe the bytes.**
+
+### Measured
+
+workspace **2656 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121 at the allowance) ·
+`PUBLIC REACHABILITY OK` · `check_xrefs` PASSED · unsafe-audit doc re-derived · local gate **87 ok /
+2 failed** (both expected) · 5 span tests, 2.61 s · the sampler injection fired with *"and must drop
+something: 24 spans for 24 requests"*.
+
+### What this unblocks
+
+`OBS-009` is **done** for the step that has a boundary. `OBS-011`'s sampling is **done and wired**.
+The remaining fourteen §4.4 steps are the same call at fourteen more boundaries — and **`OBS-010`
+(propagation) and `OBS-014` (proving a guest cannot influence the rate) now have the root they
+needed**: there is a span to propagate and a decision to attack.
+
 *End of `QQQ-Observations-and-Memories.md`.*

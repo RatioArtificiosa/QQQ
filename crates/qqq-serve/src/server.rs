@@ -96,6 +96,13 @@ pub struct ServerConfig {
     /// `None` is the honest default. The registry holds tenant names and traffic volume, and who
     /// may read that is the operator's decision.
     pub metrics_path: Option<String>,
+    /// The trace sampler, or `None` to emit no spans — `OBS-009`/`OBS-011`.
+    ///
+    /// `None` is the honest default: a span per §4.4 step multiplies log volume, and whether that is
+    /// wanted is the operator's decision. §10.4's *"sampling is host-controlled"* is what makes it a
+    /// decision the operator can make at all — a guest cannot influence it, so `--trace-sample` means
+    /// what it says.
+    pub sampler: Option<crate::span::Sampler>,
     /// The per-tenant request limits, or `None` for none (`SRV-020`).
     ///
     /// **`Arc` for a reason the registry's does not share**: the rate windows are mutable
@@ -163,6 +170,7 @@ impl ServerConfig {
             // `Option`-checked precisely so that absence is free.
             metrics: None,
             metrics_path: None,
+            sampler: None,
             // Likewise: a server whose manifest declared no `[server.limits]` applies none.
             // A built-in cap here would be a number this crate invented, silently changing
             // behaviour on upgrade -- see `qqq_cap::manifest::RequestLimits`.
@@ -376,6 +384,64 @@ pub enum Served {
 
 /// Serve requests on an address until shutdown.
 ///
+/// Emit one automatic span for a §4.4 step — `OBS-009`.
+///
+/// # Why a span goes through the logger and not to a sink of its own
+///
+/// Because the logger is the only sink until `OBS-012`'s OTLP exporter exists, and because a span
+/// must inherit three things it would otherwise bypass:
+///
+/// * the **level filter**, so `--log-level warn` quiets spans as it quiets records;
+/// * the **format**, so a JSON deployment gets JSON spans;
+/// * and **§10.3's redaction** — **a span that bypassed redaction would be a hole in the one control
+///   `OBS-008` exists to provide.**
+///
+/// # Why the sampler is consulted here rather than by the caller
+///
+/// Because the decision must be **host-controlled** (§10.4): it is taken from the connection's trace
+/// id, which the host allocated, and there is no parameter here a guest could reach. A caller that
+/// decided for itself would be a second place the rule could be got wrong.
+///
+/// # Why `failed` is the status and not anything the guest said
+///
+/// Because a guest that could claim to have failed would be able to force recording, which is the
+/// same influence §10.4 forbids in the other direction.
+fn emit_span(
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    step: u8,
+    span: u64,
+    micros: u64,
+    failed: bool,
+) {
+    let Some(sampler) = ctx.sampler else {
+        return;
+    };
+    let trace = TraceId::from_counter(ctx.id.trace);
+    if !sampler.decide_with_outcome(&trace, failed).is_record() {
+        return;
+    }
+    // The fallback exists because a logger must not be able to take the server down: `unwrap` here
+    // would make a logging bug a denial of service.
+    let id = TraceId::span(&format!("{span:016x}")).unwrap_or_else(|_| TraceId::from_counter(span));
+    let Some(one) = crate::span::Span::for_step(trace.clone(), id, step, micros) else {
+        return;
+    };
+    emit_record(
+        ctx.logger,
+        Record::new(
+            Level::Info,
+            trace,
+            one.id().clone(),
+            tenant,
+            "qqq-serve",
+            MANIFEST_REV_UNKNOWN,
+            one.render(),
+        )
+        .with_field("step", one.step().to_string()),
+    );
+}
+
 /// The error a failed bind produces — extracted from `serve`, which is at its line budget.
 ///
 /// # Why the message names the address *and* the cause
@@ -383,6 +449,28 @@ pub enum Served {
 /// Because the two failures this covers want different fixes: a port below 1024 needs a privilege,
 /// and a port already in use needs a different number. The cause is the OS's own sentence, carried
 /// verbatim rather than paraphrased — a paraphrase of `EADDRINUSE` is a worse `EADDRINUSE`.
+/// The three handles every connection shares, taken from the config once.
+///
+/// # Why they are taken together
+///
+/// Because they must be **the same value** for every connection: a per-connection copy of the
+/// registry would let two connections disagree about what the server has served, and a per-connection
+/// sampler could sample the same trace two different ways. Taking them in one place is also what
+/// keeps `serve` inside its line budget.
+fn server_wide(
+    config: &ServerConfig,
+) -> (
+    Option<Arc<crate::metrics::HttpMetrics>>,
+    Option<String>,
+    Option<crate::span::Sampler>,
+) {
+    (
+        config.metrics.clone(),
+        config.metrics_path.clone(),
+        config.sampler,
+    )
+}
+
 fn bind_failed(addr: &str, cause: &str) -> Error {
     Error::new(
         ErrorCode::ListenerBindFailed,
@@ -432,7 +520,7 @@ pub async fn serve(
     // Cloned into every connection task rather than one clone per connection: a copy of the
     // *registry* would give each connection its own counters, and the metric would read 1
     // forever. The `Arc` is what makes "one registry, many connections" structural.
-    let (metrics, metrics_path) = (config.metrics.clone(), config.metrics_path.clone());
+    let (metrics, metrics_path, sampler) = server_wide(&config);
     // Cloned into every connection task, which clones the `Arc`. The rate windows are shared
     // **mutable** state, so this is not merely an optimisation: a per-connection copy would
     // give each connection its own allowance and the limit would enforce nothing.
@@ -578,6 +666,7 @@ pub async fn serve(
                     idle_timeout: Some(connection_config.idle_timeout),
                     metrics: metrics.as_ref(),
                     metrics_path: metrics_path.as_deref(),
+                    sampler,
                     limits: limits.as_ref(),
                     tenant_labels: &tenant_labels,
                 };
@@ -1404,6 +1493,8 @@ pub struct ConnectionContext<'a> {
     pub cors: Option<&'a crate::cors::Cors>,
     /// The path the registry is exposed on, or `None` — `OBS-013`.
     pub metrics_path: Option<&'a str>,
+    /// The trace sampler, or `None` — `OBS-009`.
+    pub sampler: Option<crate::span::Sampler>,
     /// The per-route authentication policy, or `None` when the caller installed none.
     ///
     /// Borrowed from the `Arc` the accept loop cloned, so every connection consults the
@@ -1700,7 +1791,16 @@ async fn serve_connection(
             return reject_body(&mut stream, &head).await;
         };
 
+        let route_started = std::time::Instant::now();
         let response = dispatch_flat(table, dispatch, &head, path, &body);
+        emit_span(
+            ctx,
+            &tenant,
+            3,
+            span_seq,
+            u64::try_from(route_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            response.status >= 500,
+        );
 
         let response = apply_cors(response, &head, ctx.cors);
 

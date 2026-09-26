@@ -155,6 +155,28 @@ pub struct ServeOptions {
     /// accept loop with its own TLS and shutdown, which is a larger change than this item and is
     /// recorded rather than half-built.
     pub metrics_path: Option<String>,
+    /// `--trace-sample <rate>` — emit a span per §4.4 step, sampled by the host.
+    ///
+    /// `None` emits no spans. **A span per step multiplies log volume**, so whether that is wanted is
+    /// the operator's decision — and §10.4 is what makes it a decision the operator can make at all:
+    /// *"Sampling is host-controlled … and never guest-controlled."* A guest cannot influence the
+    /// rate, so `--trace-sample 0.1` means what it says.
+    ///
+    /// # Why the rate is host-chosen from the trace id
+    ///
+    /// Because a trace has many spans — one per step — and a per-span coin flip would record **part**
+    /// of a trace: the inbound request kept, the guest entry dropped, and a trace nobody can read.
+    /// The decision is taken from the trace id, so every span of one trace agrees.
+    pub trace_rate: Option<String>,
+    /// `--trace-keep-failures` — §10.4's *"tail sampling option"*, chosen rather than assumed.
+    ///
+    /// # Why this is a separate flag and not part of `--trace-sample`
+    ///
+    /// Because the two are different sentences. *"Sample one in four"* is a rate; *"and keep the
+    /// failures anyway"* is an exception to it. Bundled, `--trace-sample 0.25` against a server whose
+    /// responses are all 5xx sampled **everything** — measured — and a rate that is not the rate is
+    /// worse than no flag at all.
+    pub trace_keep_failures: bool,
 }
 
 impl Default for ServeOptions {
@@ -170,6 +192,8 @@ impl Default for ServeOptions {
             redact_from: None,
             log_format: None,
             metrics_path: None,
+            trace_rate: None,
+            trace_keep_failures: false,
         }
     }
 }
@@ -192,6 +216,23 @@ pub struct ServeOutput {
     pub tls: bool,
     /// Whether a guest component was found and loaded.
     pub guest_loaded: bool,
+}
+
+/// Read and validate `--trace-sample`'s value.
+///
+/// # Errors
+///
+/// A usage error when the value is not `on`, `off`, or a rate in `0..=1`.
+///
+/// # Why the value is validated HERE and the sampler built in `prepare`
+///
+/// So a typo fails **before a socket is opened**, and so the decision arithmetic never leaves
+/// `qqq-serve`. The rate is kept as the operator's own text.
+fn trace_rate_of(args: &[String], i: usize) -> Result<String> {
+    let v = value_of(args, i, "--trace-sample")?;
+    qqq_serve::span::Sampler::from_rate(&v, false)
+        .map(|_| v)
+        .map_err(|e| usage(e).with_remediation("use `on`, `off`, or a rate such as `0.25`"))
 }
 
 /// Read and validate `--metrics-path`'s value.
@@ -306,6 +347,14 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             "--config" => {
                 opts.config = Some(value_of(args, i, "--config")?);
                 i += 2;
+            }
+            "--trace-sample" => {
+                opts.trace_rate = Some(trace_rate_of(args, i)?);
+                i += 2;
+            }
+            "--trace-keep-failures" => {
+                opts.trace_keep_failures = true;
+                i += 1;
             }
             "--metrics-path" => {
                 opts.metrics_path = Some(metrics_path_of(args, i)?);
@@ -502,6 +551,12 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // registry allocates nothing until a request is recorded.
     config.metrics = Some(Arc::new(qqq_serve::metrics::HttpMetrics::new()));
     config.metrics_path.clone_from(&opts.metrics_path);
+    // Built once, here, from the validated text. `None` when the flag was absent, which is the honest
+    // default: a span per §4.4 step multiplies log volume.
+    config.sampler = opts
+        .trace_rate
+        .as_deref()
+        .and_then(|r| qqq_serve::span::Sampler::from_rate(r, opts.trace_keep_failures).ok());
 
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;

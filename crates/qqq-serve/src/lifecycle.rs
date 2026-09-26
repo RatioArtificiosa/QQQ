@@ -348,6 +348,18 @@ pub const STAGES: [Stage; 15] = [
     },
 ];
 
+/// The name of a §4.4 step, from its number — `OBS-009`.
+///
+/// # Why a span looks its name up rather than passing one
+///
+/// Because a span that could name its own step could name one that does not exist, or one whose
+/// number and name disagree — and the whole point of numbering the steps is that a reader can
+/// correlate a span against §4.4's diagram. `None` for a number outside the table.
+#[must_use]
+pub(crate) fn step_name(step: u8) -> Option<&'static str> {
+    STAGES.iter().find(|s| s.step == step).map(|s| s.name)
+}
+
 /// A row of [`STAGES`] that [`audit`] could not verify, and why.
 ///
 /// The `Unaccountable` variant is the one that used to be silent: `audit` skipped

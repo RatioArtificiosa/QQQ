@@ -25535,4 +25535,45 @@ workspace **2679 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` ·
 
 ---
 
+## §O-334 — The limits fixture `§O-333` owed, and all three stages are now *asserted*
+
+**Found:** Phase 1, paying `§O-333`'s owed half. **Anchors:** `crates/qqq-run/tests/spans.rs`.
+
+### What was owed, and why it mattered
+
+`§O-333` recorded that steps 5 and 8 run **only when the manifest declares a policy or limits**, and that
+round added the **policy** fixture while leaving **step 8 owed**. A stage that emits but is never
+**asserted** is a stage a future change can silently drop.
+
+### The fixture is the whole test
+
+The declaration is `[server.limits]` with a per-tenant entry, and **`tenant_of(peer)` gives
+`127.0.0.1` for a loopback connection** — so the entry applies to these tests' own client:
+
+| stage | fixture |
+|---|---|
+| 3 `ROUTE MATCH` | a declared route — the permissive fixture |
+| 5 `POLICY CHECK` | an auth policy — `default_auth = "deny"` |
+| 8 `LIMIT BIND` | `[server.limits]` + a `per_tenant` entry — **this round** |
+
+**All three are now asserted**, each with its own test, and **each test names the fixture it needs** so
+the next reader does not have to rediscover which declaration reaches which stage.
+
+### The injection
+
+Removing the `LIMIT BIND` emission: `a_manifest_with_limits_reaches_the_limit_stage` **FAILED** with the
+record printed. Restored and the file touched.
+
+### `OBS-009` stays partial, and says why
+
+**3 of 15.** The other twelve live inside the **guest-invocation path**, which an unbuilt project does not
+enter. **The three that have a boundary this server reaches are the three that emit, and they now emit
+under a test each.**
+
+### Measured
+
+workspace **2680 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · 7 span tests in 4.01 s.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

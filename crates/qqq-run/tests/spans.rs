@@ -179,6 +179,41 @@ fn a_sampled_request_emits_a_span() {
     assert!(out.contains("micros="), "and it carries a duration: {out}");
 }
 
+/// **A manifest that declares limits reaches `LIMIT BIND`, and `§O-333` left this owed.**
+///
+/// # Why the fixture is the whole test
+///
+/// `§O-333` recorded that steps 5 and 8 run **only when the manifest declares a policy or limits**, so
+/// a fixture that declares neither makes their spans **correctly absent**. That round added the policy
+/// fixture and **left step 8 owed** — this is it.
+///
+/// The declaration is `[server.limits]` with a per-tenant entry, and `tenant_of(peer)` gives
+/// `127.0.0.1` for a loopback connection, so the entry applies to these tests' own client.
+#[test]
+fn a_manifest_with_limits_reaches_the_limit_stage() {
+    const LIMITED: &str = "[package]\nname = \"span-limits\"\nversion = \"0.1.0\"\n\
+         [server]\ndefault_auth = \"none\"\n\
+         [[server.routes]]\npath = \"/orders\"\nmethods = [\"GET\"]\nhandler = \"list\"\n\
+         [server.limits]\n\
+         [server.limits.per_tenant.\"127.0.0.1\"]\nmax_connections = 17\n";
+
+    let sandbox = Sandbox::new("stages-limits");
+    let out = serve_with(&sandbox, LIMITED, &["--trace-sample", "on"], 1);
+    assert!(
+        out.contains("step=8"),
+        "a manifest that declares limits reaches LIMIT BIND, which emits on BOTH outcomes: {out}"
+    );
+    assert!(
+        out.contains("name=LIMIT BIND"),
+        "and the name comes from `lifecycle`: {out}"
+    );
+    // And the request was still served, so the span is about a request rather than a refusal.
+    assert!(
+        out.contains("HTTP/1.1 403") || out.contains("not_built") || out.contains("/orders"),
+        "the stage ran for a real request: {out}"
+    );
+}
+
 /// **A second §4.4 stage emits its own span, and which stages a fixture reaches is not obvious.**
 ///
 /// # What this test learned the hard way

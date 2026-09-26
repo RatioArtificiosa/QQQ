@@ -33,10 +33,30 @@
 //!
 //! A compliance report that was SARIF with nicer prose would be a second rendering of one
 //! document, and the two would drift.
+//!
+//! # Example
+//!
+//! Both exports take the stream and return a document, and **both refuse a broken chain** rather
+//! than rendering one:
+//!
+//! ```
+//! use qqq_cap::capability::Capability;
+//! use qqq_host::audit::{AuditStream, Outcome};
+//! use qqq_host::audit_export::{to_compliance_report, to_sarif};
+//! use qqq_host::tenant::{ComponentDigest, GrantDigest};
+//!
+//! let mut stream = AuditStream::with_default_capacity();
+//! let component = ComponentDigest::new("0011223344556677").expect("digest");
+//! let grants = GrantDigest::new("aabbccdd").expect("digest");
+//! let _ = stream.record(None, &component, &grants, Capability::FsRead, "read", Outcome::Granted);
+//!
+//! assert!(to_sarif(&stream).is_ok());
+//! assert!(to_compliance_report(&stream).is_ok());
+//! ```
 
 use std::fmt::Write as _;
 
-use crate::audit::{AuditRecord, AuditStream, LedgerError, Outcome};
+use crate::audit::{AuditStream, LedgerError, Outcome};
 
 /// Escape a string for embedding in a JSON string literal.
 ///
@@ -76,8 +96,15 @@ fn json_escape(s: &str) -> String {
 /// A **`granted`** row is the normal case and carries no severity at all: reporting every granted
 /// use as a finding would produce a document nobody reads, and a report with noise is one people
 /// stop reading.
-#[must_use]
-pub const fn sarif_level(outcome: Outcome) -> Option<&'static str> {
+///
+/// # Why this is private
+///
+/// It is the *implementation* of the SARIF mapping, not part of the module's API — a consumer
+/// reads the rendered SARIF, and a caller that needed the mapping directly would be building its
+/// own document, which is the drift this module exists to prevent. It became private when
+/// `check_api_examples` counted it: a public declaration that no caller should use is a public
+/// declaration that owes an example, and the honest fix was to stop publishing it (`§O-298`).
+const fn sarif_level(outcome: Outcome) -> Option<&'static str> {
     match outcome {
         Outcome::Denied | Outcome::Attempted => Some("warning"),
         Outcome::Failed => Some("note"),
@@ -86,8 +113,9 @@ pub const fn sarif_level(outcome: Outcome) -> Option<&'static str> {
 }
 
 /// A rule id per refusal class, so a consumer can filter rather than parse prose.
-#[must_use]
-pub const fn sarif_rule(outcome: Outcome) -> &'static str {
+///
+/// Private for the same reason as [`sarif_level`].
+const fn sarif_rule(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Denied => "qqq/capability-denied",
         Outcome::Attempted => "qqq/capability-absent",
@@ -110,6 +138,27 @@ pub const fn sarif_rule(outcome: Outcome) -> &'static str {
 /// Only refusals and failures become SARIF `results`. A `granted` row is counted in the run's
 /// `properties` and omitted from `results`, because SARIF's `results` array is *findings* — and a
 /// document where every normal operation is a finding has no signal left.
+///
+/// # Example
+///
+/// A refusal becomes a result with a rule id a consumer can filter on, and the document parses as
+/// SARIF:
+///
+/// ```
+/// use qqq_cap::capability::Capability;
+/// use qqq_host::audit::{AuditStream, Outcome};
+/// use qqq_host::audit_export::to_sarif;
+/// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+///
+/// let mut stream = AuditStream::with_default_capacity();
+/// let component = ComponentDigest::new("0011223344556677").expect("digest");
+/// let grants = GrantDigest::new("aabbccdd").expect("digest");
+/// let _ = stream.record(None, &component, &grants, Capability::FsWrite, "read", Outcome::Denied);
+///
+/// let sarif = to_sarif(&stream).expect("an intact chain renders");
+/// assert!(sarif.contains("qqq/capability-denied"));
+/// assert!(sarif.contains("\"version\":\"2.1.0\""));
+/// ```
 pub fn to_sarif(stream: &AuditStream) -> Result<String, LedgerError> {
     // Verify before rendering, for the reason the `# Errors` section gives.
     stream
@@ -236,6 +285,27 @@ pub fn to_sarif(stream: &AuditStream) -> Result<String, LedgerError> {
 ///    report that omitted that would read as a complete history. The `refusedAppends` count is
 ///    printed **even when zero**, so a reader learns the number exists before they need it to be
 ///    non-zero.
+///
+/// # Example
+///
+/// The chain head is in the document, which is what makes it cross-checkable rather than an
+/// assertion:
+///
+/// ```
+/// use qqq_cap::capability::Capability;
+/// use qqq_host::audit::{AuditStream, Outcome};
+/// use qqq_host::audit_export::to_compliance_report;
+/// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+///
+/// let mut stream = AuditStream::with_default_capacity();
+/// let component = ComponentDigest::new("0011223344556677").expect("digest");
+/// let grants = GrantDigest::new("aabbccdd").expect("digest");
+/// let _ = stream.record(None, &component, &grants, Capability::FsRead, "read", Outcome::Granted);
+///
+/// let report = to_compliance_report(&stream).expect("an intact chain renders");
+/// assert!(report.contains(stream.head()), "the head is printed verbatim");
+/// assert!(report.contains("Appends refused: 0"), "the bound is stated even at zero");
+/// ```
 pub fn to_compliance_report(stream: &AuditStream) -> Result<String, LedgerError> {
     if let Err((sequence, reason)) = stream.verify_chain() {
         return Err(LedgerError::ChainBroken { sequence, reason });
@@ -386,22 +456,6 @@ fn write_records(out: &mut String, stream: &AuditStream) {
     }
 }
 
-/// The per-record JSON, for a caller that wants the raw evidence rather than a rendering.
-///
-/// # Errors
-///
-/// [`LedgerError::ChainBroken`], because this is the path that produces the artefact an auditor
-/// keeps, and it must not be the path that loses the verification.
-pub fn to_jsonl(stream: &AuditStream) -> Result<String, LedgerError> {
-    stream.to_jsonl()
-}
-
-/// One record as a JSON object, reused by the exporters and the CLI's per-record output.
-#[must_use]
-pub fn record_json(record: &AuditRecord) -> String {
-    record.to_json()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,7 +596,7 @@ mod tests {
             "two refusals, two results -- and the granted row is not among them"
         );
 
-        let jsonl = to_jsonl(&s).expect("intact chain");
+        let jsonl = s.to_jsonl().expect("intact chain");
         for (i, line) in jsonl.lines().enumerate() {
             serde_json::from_str::<serde_json::Value>(line)
                 .unwrap_or_else(|e| panic!("JSON Lines line {i} must parse: {e}"));
@@ -598,6 +652,6 @@ mod tests {
             to_compliance_report(&s),
             Err(LedgerError::ChainBroken { sequence: 2, .. })
         ));
-        assert!(matches!(to_jsonl(&s), Err(LedgerError::ChainBroken { .. })));
+        assert!(matches!(s.to_jsonl(), Err(LedgerError::ChainBroken { .. })));
     }
 }

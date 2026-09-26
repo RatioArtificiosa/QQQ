@@ -23242,4 +23242,120 @@ pass) and it is **absent here**. Recorded for the next round rather than patched
 
 ---
 
+## §O-296 — The reader for the audit stream, and the one test the substring assertions structurally could not replace
+
+**Found:** Phase 1, `OBS-003`/`OBS-004`/`OBS-016`. **Anchors:**
+`crates/qqq-host/src/audit_export.rs`, `crates/qqq-host/src/audit.rs`.
+
+### What §O-293 left open, and what closed it
+
+`§O-293` found that the audit stream had a writer and **no reader**. This module is the reader:
+`to_sarif`, `to_compliance_report` and `to_jsonl`, in `qqq-host` beside the stream itself, because
+the stream's own `ledger()` and `records()` are the only sources any number in either document comes
+from. **A report cannot disagree with the stream it reports on**, and a second derivation would be a
+second answer to one question.
+
+Both exports **verify the chain first and refuse rather than render**. A SARIF consumer does not
+re-check a hash chain, so a corrupted stream rendered as valid SARIF becomes a plausible-looking
+artefact — worse than no artefact.
+
+### The design decisions worth recording
+
+**Only refusals and failures become SARIF `results`.** `granted` rows are counted in the run's
+`properties` and omitted from `results`, because SARIF's `results` array is *findings* — a document
+where every normal operation is a finding has no signal left. The granted count still appears, so
+*omitted from `results`* is not *omitted from the document*.
+
+**A refusal is `warning` and a failure is `note`** — the counter-intuitive ordering is the correct
+one. A refusal means the runtime worked: the guest asked for authority it did not have and was
+stopped. A failure means the guest *was* permitted and the operation did not succeed, which is the
+caller's business.
+
+**The compliance report prints its own bound.** `Appends refused` appears **even at zero**, next to
+the capacity, so a reader learns the number exists before they need it to be non-zero. And an empty
+refusal list says what it does *not* prove: *"a runtime with a grant set nobody exercises also
+produces no refusals."* An absence of refusals is not evidence of safety.
+
+### The test that mattered, and the seven that did not
+
+Six tests asserted **substrings**. They were all green — and a document can contain every expected
+substring and **not be parseable**, which is the only thing a SARIF consumer cares about. The
+seventh test asserts the property the format *is*:
+
+```rust
+let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("must parse as JSON");
+```
+
+**Fault-injection, and the two tests that fired were exactly the two validity ones.**
+Removing one closing brace from the document left every fragment intact, so all six substring
+assertions still passed, and:
+
+```
+the SARIF export must parse as JSON: Error("EOF while parsing an object", line: 1, column: 1727)
+```
+
+That is the whole argument for the test in a single run. **A fragment assertion is satisfied by a
+document that cannot be read by the tool the document is for** — and printing the rendered output
+once (rather than inferring its shape from the code) is how the misaligned `read:(unscoped)` column
+was found in the refusal list, which no assertion was watching.
+
+### Two clippy findings, both legitimate
+
+`too_many_lines` on `to_compliance_report` (116/100) and `literal with an empty format string` on a
+`{}` where the argument was the literal word `chain`. Both were real: the first split the report into
+five named sections (`write_preamble`, `write_integrity`, `write_ledger`, `write_refusals`,
+`write_records`), which is a better document *and* better code, and the second was a formatting value
+mistaken for a placeholder. **The lint found a structural improvement, which is the outcome that
+makes `-D warnings` worth the friction.**
+
+→ `crates/qqq-host/src/audit_export.rs`, `crates/qqq-host/src/audit.rs`
+
+---
+
+## §O-297 — `qqqai audit --sarif` is the posture report, and the two SARIF documents now need distinguishing
+
+**Found:** Phase 1, wiring the audit-stream export to a CLI surface. **Anchors:**
+`crates/qqq-run/src/audit.rs`, `crates/qqq-run/src/main.rs`, `crates/qqq-host/src/audit_export.rs`.
+
+### Two documents, one flag name
+
+`qqqai audit <artifact> --sarif` exists and emits SARIF — of the **security posture**: granted
+capabilities, limits, supply chain, provenance. The new export in `crates/qqq-host/src/audit_export.rs`
+emits SARIF of the **capability-use record**: what the code actually did, per request, hash-chained.
+
+They are different documents answering different questions, and they share a format and a near-shared
+name:
+
+| | `qqqai audit --sarif` (exists) | audit-stream SARIF (new) |
+|---|---|---|
+| Subject | the **artifact** — what it is permitted | the **execution** — what it did |
+| Source | `LoadedManifest` + lockfile | `AuditStream`'s own records |
+| Changes when | the manifest changes | the server runs |
+| Answers | *"is this configured safely?"* | *"was this request permitted?"* |
+
+**Nothing yet distinguishes them at the CLI**, and that is the finding: an operator reading
+`qqqai audit --sarif` would be right to think they had the evidence record, and they have the
+configuration review. The stream export has **no CLI surface at all** — it is reachable only from
+Rust.
+
+### Why this is recorded rather than wired in this round
+
+The stream **is not persisted**. `GuestApp` holds it in memory, and `qqqai serve` ends by process
+exit — so a CLI invocation is a *different process* and cannot see the serving process's records.
+Wiring a flag to the in-memory stream would produce a command that always reports zero records on a
+real deployment, which is the `§O-293` failure in a new place: a surface that reports healthy while
+measuring nothing.
+
+Persisting the record is the prerequisite, and it is a design decision with real consequences
+(where the file goes, who may read it, what happens on a full disk, whether a crash loses the tail).
+That belongs in `OBS-002`'s closure rather than in a flag added while passing by.
+
+**So: the exports are built, tested and fault-injected; the CLI surface is deliberately not.**
+`OBS-003`/`OBS-004`/`OBS-016` therefore stay **open** with the reason recorded, and the next round
+picks up persistence first.
+
+→ `crates/qqq-run/src/audit.rs`, `crates/qqq-host/src/audit_export.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

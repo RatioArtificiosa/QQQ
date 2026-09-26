@@ -661,6 +661,23 @@ impl AuditStream {
         }
         ledger
     }
+
+    /// Mutable access to the records, **for tests only**.
+    ///
+    /// # Why this exists rather than a `pub` accessor
+    ///
+    /// `audit_export`'s tests need to tamper with a chain to prove the exporters refuse a broken
+    /// one, and they live in a different module so they cannot reach the private field the way
+    /// this module's own tests do.
+    ///
+    /// The alternative was making `records` public, which would let any caller rewrite an
+    /// evidence record — in the type whose whole purpose is that rewriting is detectable. **A
+    /// test-only accessor is the narrower hole**, and `cfg(test)` means it does not exist in the
+    /// shipped library at all.
+    #[cfg(test)]
+    pub(crate) fn records_mut_for_test(&mut self) -> &mut Vec<AuditRecord> {
+        &mut self.records
+    }
 }
 
 /// Why an export could not be produced.

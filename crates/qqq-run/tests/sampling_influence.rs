@@ -215,3 +215,67 @@ fn the_decision_module_reads_no_request_field() {
         "the decision must take a `TraceId` and nothing else: {code}"
     );
 }
+
+/// **The span decision's inputs are host state alone — the guard widened twice by what injections
+/// taught.**
+///
+/// # Why this test exists, and both widenings were measured rather than imagined
+///
+/// **First widening**: the original guard scanned **`span.rs` alone**, and an injection proved that
+/// too narrow. A guest-forced decision introduced at the **call site** left the structural check
+/// *passing* while the behavioural tests caught it — `span.rs` was untouched, so the guard had nothing
+/// to say.
+///
+/// **Second widening**: the guard was then pointed at `emit_span`'s **definition**, and a second
+/// injection proved *that* too narrow — the vulnerability was at the **call**, one region over, and
+/// the guard passed again.
+///
+/// **A guard is only as wide as its file list, its pattern, *and* its extent.** The decision's inputs
+/// are what matters, so this scans **every region that supplies one**: `span.rs`, and the argument
+/// list of every `emit_span(...)` call in `server.rs`.
+///
+/// Comments are stripped throughout, because these files legitimately *discuss* `traceparent` — and a
+/// guard that fires on prose is a guard that gets worked around.
+#[test]
+fn the_span_decision_takes_host_state_alone() {
+    let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../qqq-serve/src/");
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // (1) The module that owns the decision.
+    let module = std::fs::read_to_string(format!("{base}span.rs")).expect("span.rs is readable");
+    let mut regions = vec![strip(&module)];
+
+    // (2) Every call site: the argument list is an *input* to the decision, so it is scanned too.
+    let server =
+        std::fs::read_to_string(format!("{base}server.rs")).expect("server.rs is readable");
+    let mut from = 0;
+    while let Some(at) = server[from..].find("emit_span(") {
+        let start = from + at;
+        let end = server[start..]
+            .find(");")
+            .map_or(server.len(), |e| start + e + 2);
+        regions.push(strip(&server[start..end]));
+        from = end;
+    }
+
+    for region in &regions {
+        for forbidden in ["traceparent", "head.header", ".target", "wasi:http"] {
+            assert!(
+                !region.contains(forbidden),
+                "a span-decision input names `{forbidden}`. The decision must be a function of host \
+                 state alone (§10.4, `OBS-014`): a call site that reads a request field can force or \
+                 suppress a span without the sampler knowing.\n{region}"
+            );
+        }
+    }
+
+    assert!(
+        regions.len() > 1,
+        "the call-site regions must have been found, or this guard checks only the module"
+    );
+}

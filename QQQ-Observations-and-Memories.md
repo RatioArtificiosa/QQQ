@@ -24779,4 +24779,68 @@ claim about a negative needs its own injection, and this one is not done.
 workspace **2659 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · `PUBLIC REACHABILITY OK` ·
 `check_xrefs` PASSED · unsafe-audit doc re-derived · 3 influence tests, 1.44 s.
 
+## §O-321 — The owed injection, and it took three attempts because two of them measured nothing
+
+**Found:** Phase 1, paying `OBS-014`'s owed half. **Anchors:**
+`crates/qqq-run/tests/sampling_influence.rs`.
+
+### The injection, and what it finally fired
+
+A guest-forced sampling decision — a caller whose `traceparent` claims `sampled=1` gets recorded
+anyway — introduced at the call site. **Three tests fire:**
+
+```
+FAILED  a_hostile_traceparent_cannot_force_sampling
+          a guest's `sampled=1` must not override `--trace-sample off`
+FAILED  a_hostile_traceparent_cannot_raise_the_rate
+          24 `sampled=1` headers must not yield 24 spans: the flag is a correlation hint, not a
+          decision: 24 spans
+FAILED  the_span_decision_takes_host_state_alone
+          a span-decision input names `traceparent`. The decision must be a function of host state
+          alone (§10.4, `OBS-014`)
+```
+
+**`OBS-014`'s `→ Done:` line is now true without a caveat**, and `§O-320`'s gap is closed.
+
+### Attempt 1 measured nothing, and it looked exactly like a caught injection
+
+The first patch's predicate was `ends_with("-1")` and the test's `traceparent` ends with **`-01`**. So
+the guest claim was **always false**, the vulnerability was inert, and **the tests passed**.
+
+> **An injection is a measurement, and it must be checked for whether it measured anything.** Exit `0`
+> from an inert injection and exit `0` from a *clean* build are the same byte.
+
+It was caught by asking **why** three tests passed against a vulnerability that should have broken two.
+
+### Attempt 2 measured nothing either, and this one was a compile error
+
+A one-point patch — the call-site argument without the parameter — failed to compile:
+
+```
+error[E0061]: this function takes 6 arguments but 7 were supplied
+T=101
+```
+
+**Exit `101` from a compile error and `101` from a failing assertion are the same byte too**, which is
+the other half of the same rule.
+
+### The guard was too narrow, twice, and both widenings were measured
+
+| guard | what it scanned | what the injection did |
+|---|---|---|
+| v1 | `span.rs` alone | subverted the decision **one file over** — **guard passed** |
+| v2 | `emit_span`'s **definition** | subverted it at the **call** — **guard passed** |
+| v3 | `span.rs` **and** every `emit_span(...)` argument list | **fires** |
+
+**A guard is only as wide as its file list, its pattern, *and* its extent.** The corpus already
+recorded the first two; **the third is this round's addition**, and it cost two injections to find.
+
+The v3 guard also asserts `regions.len() > 1` — **a guard that found no call sites would otherwise
+check only the module and pass**, which is the same vacuity `§O-312` closed in the API checker.
+
+### Measured
+
+workspace **2660 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · `check_xrefs` PASSED · local
+gate **88 ok / 2 failed** (both expected) · 4 influence tests, 1.43 s.
+
 *End of `QQQ-Observations-and-Memories.md`.*

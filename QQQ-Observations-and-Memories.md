@@ -24354,4 +24354,62 @@ and `nothing_is_exposed_without_the_flag` asserts an absence.
 `e2d2148` — the commit after it — is **green**, so the tree is not broken. The flake is live and
 will recur.
 
+## §O-314 — The flake was a read that expired, and an assertion about *absence* passed on an empty response
+
+**Found:** diagnosing `§O-313`'s flake. **Anchors:** `crates/qqq-run/tests/metrics_endpoint.rs`.
+
+### The panic message, which the previous round declined to guess
+
+```
+test nothing_is_exposed_without_the_flag ... FAILED
+thread 'nothing_is_exposed_without_the_flag' panicked at crates/qqq-run/tests/metrics_endpoint.rs
+and the path is simply not a route:
+```
+
+**The response was empty.** The assertion that fired was `response.contains("404")`, and the message
+printed the response — which was nothing at all.
+
+**And the assertion immediately before it PASSED:**
+
+```rust
+assert!(!response.contains("qqq_http_requests_total"), "...");   // passed -- an empty response
+assert!(response.contains("404"), "and the path is simply not a route: {response}");  // fired
+```
+
+**`!contains(x)` is satisfied by an empty response.** A test asserting the *absence* of something
+cannot tell *"the server answered correctly"* from *"the server answered nothing"* — so the first
+assertion was not a check at all, and the second one carried the whole test while reporting a cause
+it had not diagnosed.
+
+`§O-313` recorded this as a **hypothesis** and said so. It was right, and it was still worth not
+believing until the message was read.
+
+### Two fixes, and the second is the generalisable one
+
+**1. The deadline was too short.** `READ_DEADLINE` was **5 s**, which is enough on a developer machine
+and not under CI load, where four tests each spawn a server alongside the rest of the workspace. It
+is now **30 s**, with the measurement recorded on the constant: *a test that waits longer is better
+than one that flakes.*
+
+**2. An empty read is now a failure in itself, asserted centrally in `request_once`:**
+
+```
+the server answered nothing within 30s; the client read 0 byte(s). Its own output was: ...
+```
+
+**That is the fix that matters**, because it is not about this test. Every test in this file reads
+through one helper, and the helper now refuses to hand back nothing — so a timeout is diagnosed as
+a timeout rather than as a missing 404. **An absence assertion cannot be trusted without a presence
+assertion beside it**, and the place to put it is the helper, once.
+
+**Fault-injected by making the client send nothing**: *"the server answered nothing within 30s; the
+client read 0 byte(s)"*, and **both** tests that read fired — including the one whose absence
+assertion had passed silently. Before the fix, that injection would have failed one test with a
+message about a 404.
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK`. Four endpoint tests,
+1.54 s.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -34,7 +34,15 @@ use std::time::{Duration, Instant};
 
 /// How long any single read may block. **A deadline, not a hope**: without it a server that keeps
 /// the connection alive turns an assertion failure into a hang, and a hang tells you nothing.
-const READ_DEADLINE: Duration = Duration::from_secs(5);
+///
+/// # Why 30 s and not 5
+///
+/// 5 s was the first value and it was **too short under CI load**, where four tests each spawn a
+/// server alongside the rest of the workspace. Measured on Ubuntu: the read expired, the response
+/// came back **empty**, and — this is the part that matters — the test still *failed correctly* but
+/// for a reason its message did not name (`§O-313`). A test that waits longer is better than one
+/// that flakes.
+const READ_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Sandbox(PathBuf);
 
@@ -107,7 +115,25 @@ fn request_once(sandbox: &Sandbox, extra: &[&str], target: &str) -> String {
     // test, and what this function is for is the bytes on the wire.
     let mut child = child;
     let _ = child.kill();
+    let mut child = child;
+    let _ = child.kill();
     let out = child.wait_with_output().expect("reap");
+
+    // **An empty read is a failure in itself, and it is asserted HERE rather than in each caller.**
+    //
+    // `!response.contains("...")` is satisfied by an empty response, so a test asserting the
+    // *absence* of something cannot tell "the server answered correctly" from "the server answered
+    // nothing". That is how this test failed once on Ubuntu with a message about a missing 404 when
+    // the truth was a read that had expired (`§O-313`) -- and the assertion about absence passed.
+    assert!(
+        !response.is_empty(),
+        "the server answered nothing within {READ_DEADLINE:?}; the client read {} byte(s). \
+         Its own output was: {}{}",
+        response.len(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     response.push_str(&String::from_utf8_lossy(&out.stdout));
     response.push_str(&String::from_utf8_lossy(&out.stderr));
     response

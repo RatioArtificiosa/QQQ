@@ -444,6 +444,20 @@ impl GuestApp {
     /// whatever the caller does next. A clone of the records is O(n) in the record count and is
     /// the honest cost of not holding a lock while formatting a report. The capacity is 65,536
     /// by default, so the clone is bounded and known rather than unbounded and hoped for.
+    ///
+    /// # Reading the record
+    ///
+    /// The pair separates what was **recorded** from what was **refused**. A caller that looks
+    /// only at the records cannot tell a server that served nothing from one that served so much
+    /// the stream filled — and those two want opposite responses from an operator.
+    ///
+    /// ```
+    /// # use qqq_run::guest_handler::GuestApp;
+    /// # fn read(app: &GuestApp) -> (usize, u64, u64) {
+    /// let (records, counters) = app.audit_snapshot();
+    /// (records.len(), counters.recorded, counters.refused)
+    /// # }
+    /// ```
     #[must_use]
     pub fn audit_snapshot(&self) -> (Vec<qqq_host::AuditRecord>, qqq_host::AppendCounters) {
         let stream = self

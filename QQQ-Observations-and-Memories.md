@@ -23190,4 +23190,56 @@ comment claimed.
 
 ---
 
+## §O-295 — `check_api_examples` fails in a shell without `cargo`, for a reason that is not about API examples
+
+**Found:** Phase 1, clearing the local gate after `OBS-002`. **Anchors:**
+`tools/check_api_examples.py`, `.github/workflows/ci.yml`, `crates/qqq-run/src/guest_handler.rs`.
+
+### The apparent regression
+
+After adding one `pub fn`, the local gate reported:
+
+```
+API EXAMPLES OVER ALLOWANCE -- 2139 outstanding, allowance 2121
+doctests cargo runs: 0
+```
+
+Reading that as *"my change added 2 undocumented declarations"* would have been wrong twice over. The
+arithmetic is `outstanding = total_items - ran`, and **`ran` was 0**:
+
+| | total | ran | outstanding | allowance |
+|---|---|---|---|---|
+| CI at `e50f7c0` | 2138 | 17 | 2121 | 2121 ✅ |
+| my shell (no `cargo`) | 2139 | **0** | 2139 | 2121 ❌ |
+| with the VS environment | 2139 | **17** | **2122** | 2121 ❌ |
+| after adding one doctest | 2139 | **18** | **2121** | 2121 ✅ |
+
+**The run needs `cargo` to execute the doctests, and `cargo` needs the MSVC environment.** Without it
+the checker reports every declaration as undocumented — a failure of *2139* that looks nothing like
+the *1* it actually is. The gate had been run through `.scratch/run_gate.cmd`, which does set the
+environment; the direct invocation in this shell did not.
+
+**So the real delta was exactly `+1`, my own `pub fn` — and the honest fix was to add an example,
+not to raise the allowance.** The checker's own output says which: *"The target is 0. The allowance
+is a ratchet: lower it as examples land."* Raising it would have been the `§O-258` mistake in a new
+place — converting the one mechanism that detects the shortfall into one that hides it.
+
+### The generalisable part
+
+**A checker whose result depends on a toolchain the caller may not have will report a number about
+the wrong thing.** Here the failure count was 2139 when the truth was 1, and the two want different
+responses: 2139 says *"the environment is wrong"*, 1 says *"add an example"*. The output does print
+`doctests cargo runs: N`, but that line reads as a statistic rather than as the input to the
+subtraction.
+
+Two ways out, and the honest one is a *guard* on the input: a run where `ran == 0` while
+`total_items > 0` should refuse rather than report, because zero doctests executed means the
+measurement did not happen. That is the anti-vacuity rule this repository applies everywhere else
+(`check_checklist_counts.py`, `check_gate_parity.py`, `check_wit_vendoring.py` all refuse a vacuous
+pass) and it is **absent here**. Recorded for the next round rather than patched mid-change.
+
+→ `tools/check_api_examples.py`, `.github/workflows/ci.yml`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

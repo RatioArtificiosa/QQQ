@@ -24600,4 +24600,69 @@ The module is gone; the **findings are not**, and they are the part worth keepin
    and never applied — the tuple line had been reformatted.
 3. **`OBS-009` is the root**, and it is one refactor plus one wiring away.
 
+## §O-318 — `serve` was measured at 106 code lines, not 105, and the headroom is now 5
+
+**Found:** Phase 1, acting on `§O-317`'s lesson — *budget the gate, not the feature*.
+**Anchors:** `crates/qqq-serve/src/server.rs`.
+
+### The measurement that changed the plan
+
+`clippy`'s `too_many_lines` counts **code lines**, not total lines. `serve` is **221 lines** and only
+**106** of them are code — so **the extensive comments cost nothing against the budget**, and any
+plan to trim prose would have been wasted work.
+
+**Measured before and after, by the same script:**
+
+| | code lines | headroom |
+|---|---|---|
+| before | 106 | **−6** |
+| after | **95** | **+5** |
+
+### Two extractions, both verified to have applied
+
+1. **`bind_failed(addr, cause) -> Error`** — the bind-failure construction, 11 lines. The cause is
+   carried **verbatim**: *a paraphrase of `EADDRINUSE` is a worse `EADDRINUSE`.`*
+2. **`ledger_for(config)`** — the connection ledger, 4 lines. The ceiling and the per-tenant
+   allowance are read **once**, because a ledger that re-read them per admit could see two different
+   ceilings in one run.
+
+### The assertion that caught a silent no-op
+
+The first attempt **did not apply**, and the guard said so:
+
+```
+AssertionError: THE BIND BLOCK WAS NOT FOUND VERBATIM -- the edit would not apply
+```
+
+**`rustfmt` had re-indented a string continuation**, so my anchor missed. This is exactly the failure
+`§O-317` recorded — `server_wide` was written and **never applied** for the same reason — and
+the fix is the one that entry named: **assert the anchor, then re-anchor by line number.**
+
+### And the doc-comment trap, for the third time
+
+Inserting the helper above `pub async fn serve(` landed it **inside `serve`'s own doc comment**, which
+stole the function's documentation and made its `# Errors` list unindented:
+
+```
+error: doc list item without indentation
+error: docs for function returning `Result` missing `# Errors` section
+error: missing documentation for a function
+```
+
+**Third instance**: round 8's `options`, round 15's `STAGES`, now `serve`. **The rule: an insertion
+above a function must anchor on the function *including its doc comment*, not on its signature** —
+otherwise the new item is spliced into the old item's documentation.
+
+### Measured
+
+workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` · `check_xrefs` PASSED ·
+local gate **88 ok / 2 failed** (both expected) · `PUBLIC REACHABILITY OK` — **no new public item**, so
+the two helpers are private and the ratchet is untouched.
+
+### Next
+
+**`OBS-009` now has the room it needs**: +5 code lines covers the sampler field, the `emit_span` call
+and its start instant. The remaining work is the module, the flag, and **the doctests written with the
+module** — not after it.
+
 *End of `QQQ-Observations-and-Memories.md`.*

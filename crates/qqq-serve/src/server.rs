@@ -376,6 +376,39 @@ pub enum Served {
 
 /// Serve requests on an address until shutdown.
 ///
+/// The error a failed bind produces — extracted from `serve`, which is at its line budget.
+///
+/// # Why the message names the address *and* the cause
+///
+/// Because the two failures this covers want different fixes: a port below 1024 needs a privilege,
+/// and a port already in use needs a different number. The cause is the OS's own sentence, carried
+/// verbatim rather than paraphrased — a paraphrase of `EADDRINUSE` is a worse `EADDRINUSE`.
+fn bind_failed(addr: &str, cause: &str) -> Error {
+    Error::new(
+        ErrorCode::ListenerBindFailed,
+        format!("could not bind `{addr}`"),
+    )
+    .with_cause(cause.to_string())
+    .with_remediation(
+        "check the address is free and the port is above 1024, or that the \
+process may bind it",
+    )
+}
+
+/// The connection ledger for one server — extracted from `serve`, which is at its line budget.
+///
+/// # Why the ceiling and the per-tenant allowance are read here and not at admit time
+///
+/// Because they are **configuration**, and reading configuration once means every connection is
+/// admitted against the same numbers. A ledger that re-read them per admit could see two different
+/// ceilings in one run — which is the class of drift the shared `Arc` exists to prevent.
+fn ledger_for(config: &ServerConfig) -> Arc<tokio::sync::Mutex<ConnectionLedger>> {
+    Arc::new(tokio::sync::Mutex::new(ConnectionLedger::with_limits(
+        connection_ceilings(config),
+        config.connections_per_tenant,
+    )))
+}
+
 /// # Errors
 ///
 /// * `QQQ-6002` — the listener could not bind. The error names the address and
@@ -417,23 +450,12 @@ pub async fn serve(
     // clone: the logger is one configuration every connection reads, and a copy
     // per connection would be a value that could drift from the others.
     let logger = Arc::new(logger);
-    let listener = Listener::bind(listener_config).await.map_err(|e| {
-        Error::new(
-            ErrorCode::ListenerBindFailed,
-            format!("could not bind `{}`", config.addr.render()),
-        )
-        .with_cause(e.to_string())
-        .with_remediation(
-            "check the address is free and the port is above 1024, or that the \
-             process may bind it",
-        )
-    })?;
+    let listener = Listener::bind(listener_config)
+        .await
+        .map_err(|e| bind_failed(&config.addr.render(), &e.to_string()))?;
 
     let table = Arc::new(table);
-    let ledger = Arc::new(tokio::sync::Mutex::new(ConnectionLedger::with_limits(
-        connection_ceilings(&config),
-        config.connections_per_tenant,
-    )));
+    let ledger = ledger_for(&config);
     // Wrapped in an `Arc` so each connection task shares one immutable config
     // rather than cloning it per connection. `ConnectionConfig` is four small
     // fields, so this is not about size — it is about the closure being `FnMut`

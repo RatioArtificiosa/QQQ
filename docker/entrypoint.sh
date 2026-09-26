@@ -943,6 +943,8 @@ cmd_checks() {
     python3 tools/check_toolchain.py --self-test
     python3 tools/check_gate_parity.py
     python3 tools/check_gate_parity.py --self-test
+    python3 tools/check_metric_cardinality.py
+    python3 tools/check_metric_cardinality.py --self-test
     python3 tools/check_coderabbit_config.py
     python3 tools/check_coderabbit_config.py --self-test
     python3 tools/check_checklist_citations.py

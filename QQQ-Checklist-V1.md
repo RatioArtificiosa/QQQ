@@ -4806,7 +4806,32 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → **`drain_body` now returns `Option<u64>`** rather than discarding the count `discard` already produces, so `body_bytes` is the bytes that **crossed the socket** rather than the head's declaration. They agree for a well-formed request and disagree for a truncated one.
   → **Measured**: 25 registry tests + **9 integration tests over the real accept loop** (recorded at all; the server's *chosen* status is what gets counted, so a router 404 and a handler 201 land in different series; three requests on one keep-alive connection are three; bytes; latency; one open and one close; a disconnect classified as such; the peer IP is a bounded label; a server with no registry still serves). Workspace **2098 passed, 0 failed**.
   → **Still open, and named**: only the **HTTP row** of §10.2's table is implemented — the instance, execution, memory, capability, supply-chain and cost rows are not. Per-tenant *enforcement* (as opposed to accounting) is not done, and the registry is not exposed on any endpoint. `OBS-005` stays unticked until the set is complete.
-- [ ] **OBS-006** Implement the cardinality lint on metric definitions.
+- [x] **OBS-006** Implement the cardinality lint on metric definitions.
+  → **Done — and the lint found three unbounded maps on its first run.** §10.2 names it:
+    *“no metric label may take an unbounded value … Enforced by a lint on metric definitions.”*
+    `tools/check_metric_cardinality.py`, registered in **both** gates.
+  → **What it found**: `HttpMetrics`' doc comment said *“All per-request counters, keyed by the
+    bounded label sets”*, and **three of its six maps were keyed by `String`** — `body_bytes_in`,
+    `body_bytes_out`, `body_limit_hits`. The values come from `tenant_of`, which returns the **peer
+    IP address**, so an attacker chose the key: one series per source address, no ceiling, on three
+    maps. §10.2 calls that the violation *“in its worst form”*. `TenantLabels` — the mechanism that
+    bounds exactly this — existed and was used **only by its own tests**.
+  → **The fix makes the bound a property of the type.** `TenantLabels::index(name) -> u16` returns a
+    bounded key (0 default, 1..=MAX named, MAX+1 past the ceiling, reserved not allocated); the three
+    maps key on `u16` and `name_of` recovers the name. **No signature changed**, so no caller or test
+    moved — resolving through `TenantLabels` while keeping `String` keys would have left the bound a
+    property of the constructor that neither a reviewer nor a lint can check.
+  → **Measured**: 27 metrics tests + **9 self-test cases**. The flood test pushes **ten times the
+    ceiling** of distinct names and asserts each map is `<= MAX_TENANTS + 2` — a count alone would
+    pass for a small flood and say nothing about the next one — and asserts the past-the-ceiling
+    bucket is **non-zero**, so a “fix” that bounded the maps by refusing to count would fail it.
+    **Fault-injected by disabling the ceiling check**: *“body_bytes_in holds 640 entries for 640
+    distinct names; the ceiling is 66”*.
+  → **The lint's own first run had four false positives** (`ALL` lives in a separate `impl` block;
+    the key regex stopped at the comma inside a tuple). *A checker with false positives is one that
+    gets worked around.* Both fixed, and the self-test caught the stale expectation afterwards.
+  → `§O-306` records all of it, including that `Tenant` is bounded by `MAX_TENANTS` rather than by
+    `ALL`, so the rule is *“asserts a finite `ALL` **or** declares a `MAX_*` ceiling”*.
   → §10.2 Metrics that ship by default
 - [ ] **OBS-007** Implement structured JSON logging with trace and tenant correlation.
   → §10.3 Logging

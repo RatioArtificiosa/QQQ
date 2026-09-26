@@ -384,6 +384,14 @@ jobs:
       - name: Prove the parity check detects an undeclared, a stale and a misdirected divergence
         run: python tools/check_gate_parity.py --self-test
 
+      # §10.2: "no metric label may take an unbounded value (no raw paths, no user IDs, no full
+      # URLs). Enforced by a lint on metric definitions." The lint is this. It found three
+      # unbounded maps in `HttpMetrics` on its first run (`§O-306`).
+      - name: Verify every metric label is bounded
+        run: python tools/check_metric_cardinality.py
+      - name: Prove the cardinality lint refuses an unbounded key
+        run: python tools/check_metric_cardinality.py --self-test
+
       # `.coderabbit.yaml` decides what the external reviewer is shown and which
       # rules it is told to apply, which makes it a control -- and a control that
       # silently stops working is worse than one never added, because the review

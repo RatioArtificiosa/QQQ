@@ -317,6 +317,85 @@ impl TenantLabels {
             .len()
     }
 
+    /// Resolve a tenant name to a **bounded numeric key** — §10.2's cardinality discipline.
+    ///
+    /// # Why a number and not the name
+    ///
+    /// Because a `BTreeMap<String, _>` keyed by a name is *unbounded as a type*, and the bound is
+    /// then a property of the constructor that no reader — and no lint — can check. Three maps in
+    /// [`HttpMetrics`] were keyed that way, with values coming from `tenant_of`, which returns the
+    /// **peer IP address**: an attacker chose the key, and `§O-306` records that
+    /// `tools/check_metric_cardinality.py` is what found it.
+    ///
+    /// A `u16` in `0..=MAX_TENANTS + 1` is bounded by its own type, so the lint can prove it and a
+    /// reviewer can see it. The name is still recoverable from [`Self::name_of`] for rendering.
+    ///
+    /// The mapping is the same one [`Self::label`] uses, and it is **stable for the life of the
+    /// set**: a name already seen keeps its index even past the ceiling, so a series does not
+    /// change identity as a deployment grows.
+    ///
+    /// # Example
+    ///
+    /// The key space is bounded by the type, and the past-the-ceiling bucket is shared:
+    ///
+    /// ```
+    /// use qqq_serve::metrics::TenantLabels;
+    ///
+    /// let labels = TenantLabels::new();
+    /// assert_eq!(labels.index("default"), 0, "the shared default is reserved, not allocated");
+    /// assert_eq!(labels.index("acme"), 1);
+    /// assert_eq!(labels.index("acme"), 1, "and the mapping is stable");
+    /// assert_eq!(labels.index("globex"), 2);
+    ///
+    /// // Every index is inside a space the type bounds, which is the whole point.
+    /// assert!(labels.index("anything at all") <= TenantLabels::MAX_TENANTS as u16 + 1);
+    /// ```
+    #[must_use]
+    pub fn index(&self, name: &str) -> u16 {
+        // 0 is the shared default, 1..=MAX_TENANTS are named, MAX_TENANTS + 1 is everything past
+        // the ceiling. Reserved rather than allocated, so the space is bounded by construction.
+        if name.is_empty() || name == "default" {
+            return 0;
+        }
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = seen.iter().position(|s| s == name) {
+            return u16::try_from(i).unwrap_or(u16::MAX).saturating_add(1);
+        }
+        if seen.len() >= Self::MAX_TENANTS {
+            return u16::try_from(Self::MAX_TENANTS).unwrap_or(u16::MAX) + 1;
+        }
+        seen.push(name.to_owned());
+        u16::try_from(seen.len()).unwrap_or(u16::MAX)
+    }
+
+    /// The name behind an [`Self::index`], for rendering a series back to something readable.
+    ///
+    /// `None` for the past-the-ceiling bucket, whose members deliberately share one label.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_serve::metrics::TenantLabels;
+    ///
+    /// let labels = TenantLabels::new();
+    /// let acme = labels.index("acme");
+    /// assert_eq!(labels.name_of(acme).as_deref(), Some("acme"));
+    /// assert_eq!(labels.name_of(0).as_deref(), Some("default"));
+    ///
+    /// // An index past the ceiling names nobody, because its members share one label.
+    /// let past = u16::try_from(TenantLabels::MAX_TENANTS).expect("the ceiling fits u16") + 1;
+    /// assert_eq!(labels.name_of(past), None);
+    /// ```
+    #[must_use]
+    pub fn name_of(&self, index: u16) -> Option<String> {
+        if index == 0 {
+            return Some("default".to_owned());
+        }
+        let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let i = usize::from(index).checked_sub(1)?;
+        seen.get(i).cloned()
+    }
+
     /// Whether no names are tracked.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -418,18 +497,21 @@ impl Latency {
 pub struct HttpMetrics {
     /// One counter per (method, class).
     requests: Mutex<BTreeMap<(Method, StatusClass), u64>>,
-    /// Body bytes read, per tenant.
-    body_bytes_in: Mutex<BTreeMap<String, u64>>,
-    /// Body bytes written, per tenant.
-    body_bytes_out: Mutex<BTreeMap<String, u64>>,
+    /// Resolves a tenant name to a bounded index. The three per-tenant maps below key on that
+    /// index rather than on the name, which is what makes their size a property of the type.
+    tenants: TenantLabels,
+    /// Body bytes read, per tenant **index**.
+    body_bytes_in: Mutex<BTreeMap<u16, u64>>,
+    /// Body bytes written, per tenant **index**.
+    body_bytes_out: Mutex<BTreeMap<u16, u64>>,
     /// Connection closes, by outcome.
     connections: Mutex<BTreeMap<Outcome, u64>>,
     /// Open connections right now.
     open: AtomicU64,
     /// Request latency.
     latency: Latency,
-    /// Bodies refused for exceeding a limit, by tenant.
-    body_limit_hits: Mutex<BTreeMap<String, u64>>,
+    /// Bodies refused for exceeding a limit, per tenant **index**.
+    body_limit_hits: Mutex<BTreeMap<u16, u64>>,
 }
 
 impl HttpMetrics {
@@ -458,14 +540,14 @@ impl HttpMetrics {
                 .body_bytes_in
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *m.entry(tenant.to_owned()).or_insert(0) += bytes_in;
+            *m.entry(self.tenants.index(tenant)).or_insert(0) += bytes_in;
         }
         {
             let mut m = self
                 .body_bytes_out
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *m.entry(tenant.to_owned()).or_insert(0) += bytes_out;
+            *m.entry(self.tenants.index(tenant)).or_insert(0) += bytes_out;
         }
         self.latency.observe(latency_micros);
     }
@@ -483,7 +565,7 @@ impl HttpMetrics {
             .body_limit_hits
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *m.entry(tenant.to_owned()).or_insert(0) += 1;
+        *m.entry(self.tenants.index(tenant)).or_insert(0) += 1;
     }
 
     /// Record a connection opening.
@@ -541,7 +623,7 @@ impl HttpMetrics {
         self.body_bytes_in
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(tenant)
+            .get(&self.tenants.index(tenant))
             .copied()
             .unwrap_or(0)
     }
@@ -552,7 +634,7 @@ impl HttpMetrics {
         self.body_bytes_out
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(tenant)
+            .get(&self.tenants.index(tenant))
             .copied()
             .unwrap_or(0)
     }
@@ -563,7 +645,7 @@ impl HttpMetrics {
         self.body_limit_hits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(tenant)
+            .get(&self.tenants.index(tenant))
             .copied()
             .unwrap_or(0)
     }
@@ -718,6 +800,57 @@ mod tests {
     ///
     /// The bound §10.2 requires, measured: 500 tenants produce 64 named labels plus one
     /// overflow, so the count stays finite however many tenants exist.
+    /// **A flood of distinct tenant names cannot grow the per-tenant maps — `OBS-006`.**
+    ///
+    /// This is the property `tools/check_metric_cardinality.py` exists to keep, asserted at the
+    /// level a reader can act on. The values come from `tenant_of`, which returns the **peer IP
+    /// address**, so the names below stand in for an attacker opening connections from many
+    /// addresses: before the fix, each one added an entry to three `BTreeMap<String, _>`s, which
+    /// is §10.2's violation *"in its worst form, because an attacker chooses the value"*.
+    ///
+    /// The assertion is not *"the map has N entries"* but *"the map cannot exceed the ceiling plus
+    /// the two reserved buckets"* — a count alone would pass for a small flood and say nothing
+    /// about the next one.
+    #[test]
+    fn a_flood_of_tenant_names_cannot_grow_the_per_tenant_maps() {
+        let m = HttpMetrics::new();
+
+        // Ten times the ceiling, each name distinct -- every one a different "client address".
+        for i in 0..(TenantLabels::MAX_TENANTS * 10) {
+            let name = format!("10.0.{}.{}", i / 256, i % 256);
+            m.record_request(Method::Get, 200, 1, &name, 1, 1);
+            m.record_body_limit(&name);
+        }
+
+        // The space is the ceiling, plus `default` (index 0) and the shared past-the-ceiling
+        // bucket -- two reserved entries, not one per name.
+        let ceiling = TenantLabels::MAX_TENANTS + 2;
+        let in_ = m.body_bytes_in.lock().expect("lock").len();
+        let out = m.body_bytes_out.lock().expect("lock").len();
+        let hits = m.body_limit_hits.lock().expect("lock").len();
+        assert!(
+            in_ <= ceiling,
+            "body_bytes_in holds {in_} entries for {} distinct names; the ceiling is {ceiling}",
+            TenantLabels::MAX_TENANTS * 10
+        );
+        assert!(out <= ceiling, "body_bytes_out holds {out} entries");
+        assert!(hits <= ceiling, "body_limit_hits holds {hits} entries");
+
+        // And the flood was actually recorded rather than dropped: the past-the-ceiling bucket is
+        // non-zero, so the test would notice a "fix" that bounded the maps by refusing to count.
+        let past = u16::try_from(TenantLabels::MAX_TENANTS).expect("the ceiling fits u16") + 1;
+        assert!(
+            m.body_limit_hits
+                .lock()
+                .expect("lock")
+                .get(&past)
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the names past the ceiling must share one bucket that is actually counted"
+        );
+    }
+
     #[test]
     fn tenants_past_the_ceiling_collapse_to_other() {
         let labels = TenantLabels::new();

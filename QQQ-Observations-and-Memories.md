@@ -23883,4 +23883,80 @@ refusal**, which is where it belongs.
 
 ---
 
+## §O-306 — The cardinality lint found three unbounded maps, and the struct's own doc comment was false
+
+**Found:** Phase 1, `OBS-006`. **Anchors:** `tools/check_metric_cardinality.py`,
+`crates/qqq-serve/src/metrics.rs`, `.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+### §10.2 names a lint, and the lint did not exist
+
+> *"**Cardinality discipline:** no metric label may take an unbounded value (no raw paths, no user
+> IDs, no full URLs). **Enforced by a lint on metric definitions.**"*
+
+The design enforces the discipline *structurally* — `metrics.rs` says so itself: *"the labels here
+are **enums, not strings**"* — and a structural guarantee is only as good as its coverage. The lint
+is the thing that measures the coverage, and it did not exist.
+
+### What it found on its first run
+
+```rust
+pub struct HttpMetrics {
+    requests:       Mutex<BTreeMap<(Method, StatusClass), u64>>,  // bounded: 10 × 6 = 60
+    body_bytes_in:  Mutex<BTreeMap<String, u64>>,                 // UNBOUNDED
+    body_bytes_out: Mutex<BTreeMap<String, u64>>,                 // UNBOUNDED
+    connections:    Mutex<BTreeMap<Outcome, u64>>,                // bounded: 5
+    body_limit_hits: Mutex<BTreeMap<String, u64>>,                // UNBOUNDED
+}
+```
+
+**The struct's doc comment said *"All per-request counters, keyed by the bounded label sets."*** It
+was true of three of them.
+
+And the values come from `tenant_of`, which returns the **peer IP address** — so **an attacker chose
+the key**. Three maps, one time series per source address, no ceiling. §10.2 calls that the violation
+*"in its worst form"*.
+
+`TenantLabels` — the mechanism that bounds exactly this, at 64 names — **existed and was used only
+by its own tests.** That is invariant THREE for the **sixth** time in this goal.
+
+### The fix, chosen so the bound is a property of the type
+
+The obvious fix — resolve through `TenantLabels` before inserting, keeping `String` keys — would
+leave the map *unbounded as a type* and the bound a property of the constructor that neither a
+reviewer nor a lint can check. So instead:
+
+- `TenantLabels::index(name) -> u16` returns a **bounded numeric key** (`0` default, `1..=MAX` named,
+  `MAX+1` everything past the ceiling — reserved, not allocated).
+- The three maps key on `u16`, and `name_of` recovers the name for rendering.
+
+**No signature changed**, so no caller and no test moved — the bound became visible without an API
+break. A `u16` in `0..=66` is bounded by its own type, which is what makes the lint able to prove it.
+
+### The test asserts the bound, not a count
+
+`a_flood_of_tenant_names_cannot_grow_the_per_tenant_maps` pushes **ten times the ceiling** of
+distinct names and asserts each map is `<= MAX_TENANTS + 2`. A count alone would pass for a small
+flood and say nothing about the next one — and the test also asserts the past-the-ceiling bucket is
+**non-zero**, so a "fix" that bounded the maps by refusing to count would fail it.
+
+**Fault-injected by disabling the ceiling check**: *"body_bytes_in holds 640 entries for 640 distinct
+names; the ceiling is 66"*.
+
+### Two of my own bugs, both false positives
+
+The lint's first run reported **seven** problems: the three real ones and four false positives —
+`ALL` is declared in a separate `impl` block, and my regex stopped at the comma *inside* a tuple key
+so `(Method, StatusClass)` read as `(Method`. **A checker with false positives is one that gets
+worked around**, which is the opposite of what §10.2 asks for. Both fixed, and the self-test's
+expectation updated when the message changed — which is what caught the second one.
+
+Also: `Tenant` is bounded by `MAX_TENANTS`, not by `ALL`, so the rule "every label enum must have
+`ALL`" was wrong for it. The honest rule is *"asserts a finite `ALL` **or** declares a `MAX_*`
+ceiling"* — and the ceiling's own sanity is checked, because `MAX_TENANTS = 0` would bound the space
+to nothing and pass a naive check.
+
+→ `tools/check_metric_cardinality.py`, `crates/qqq-serve/src/metrics.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -4738,7 +4738,27 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 ### OBS — Observability
 
-- [ ] **OBS-001** Implement the capability-audit stream: granted, denied and attempted.
+- [x] **OBS-001** Implement the capability-audit stream: granted, denied and attempted.
+  → **Done, and it replaced a placeholder rather than adding to one.** The served path wrote one
+    row per request with `Capability::FsRead` as a *stated placeholder*, so a report aggregating by
+    capability was aggregating a **constant** — every request appeared to read a file. That row now
+    names `Capability::HttpServer`, the authority the served path genuinely exercises, and the
+    per-capability rows come from `ambient::require` — the seam where a capability is *consulted*.
+  → **Granted, denied and attempted are all recorded, and each is the variant its own docs define.**
+    `Granted` when the grant set allows the call, `Denied` when it does not — written **before** the
+    return, so a refusal is recorded even though the call fails. The served row uses `Attempted` when
+    `HttpServer` is absent, which is exactly the case `Outcome::Attempted` exists for: *“a component
+    was deployed that needs authority the manifest does not grant”*.
+  → **Measured**: 3 new tests in `ambient.rs` (444 host tests, up from 441). The assertion is not
+    *“a row was written”* but *“the row names the capability that was asked about”*, run for **two
+    different** capabilities because a single one cannot distinguish a real value from a fixed one.
+    **Fault-injected by hardcoding `FsRead`**: *“the granted row must name the capability that was
+    read”* fired — precisely the defect this item was.
+  → `without_a_handle_nothing_is_recorded` keeps `None` the honest default, which is why
+    `Instance::create_with_audit` is a second constructor rather than a parameter on `create`:
+    recording is a decision, not a default.
+  → `§O-302` records the design, and that the corpus had **already dispositioned** `recheck`'s
+    unreachability as correct-for-a-stub — so the seam chosen was the reachable one.
   → §10.1 The three signals, plus one unique to QQQ
 - [x] **OBS-002** Implement the append-only, hash-chained audit record.
   → **Done, and the last piece was persistence.** `crates/qqq-run/src/guest_handler.rs` —

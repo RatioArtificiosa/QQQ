@@ -37,6 +37,7 @@ use qqq_cap::capability::Capability;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
+use crate::audit::Outcome;
 use crate::linker::StoreData;
 
 /// The largest single `random.get` request the host will serve, in bytes.
@@ -399,11 +400,47 @@ impl HostCallError {
 
 /// Check that a capability is granted, returning a structured error if not.
 ///
+/// # The capability-use record — `OBS-001`
+///
+/// This is **the seam where a capability is consulted**, so it is where a per-capability row is
+/// written: `Granted` when the grant set allows the call, `Denied` when it does not. Recording
+/// anywhere else would mean recording a capability the caller *guessed at* rather than the one
+/// this function actually read — which is what the served path did before this, with a stated
+/// placeholder, so a report aggregating by capability was aggregating a constant.
+///
+/// The append happens **before** the return, so a denial is recorded even though the call fails:
+/// a refusal is the most interesting row in the stream (`Outcome::Denied`'s own doc says so), and
+/// a record written only on success would omit exactly the events an auditor wants.
+///
 /// # Errors
 ///
 /// `NotGranted` when the store's grants do not include `c`.
-pub fn require(data: &StoreData, c: Capability) -> Result<(), HostCallError> {
-    if data.grants.grants(c) {
+///
+/// # Why the function name is a parameter
+///
+/// Because this is a generic check and the row must name **the host function that made the call**.
+/// Hardcoding the one caller's name would be accurate until a second caller appeared and then
+/// silently wrong — a record that misattributes an authority use is worse than one that omits it,
+/// because it is evidence a reader would act on.
+pub fn require(
+    data: &StoreData,
+    c: Capability,
+    function: &'static str,
+) -> Result<(), HostCallError> {
+    let granted = data.grants.grants(c);
+    if let Some(audit) = &data.audit {
+        // The outcome is the *grant decision*, not the call's eventual success. A later failure
+        // inside the host function is `Outcome::Failed`, which is a different row written by the
+        // caller -- the two answer different questions and collapsing them would lose the
+        // distinction `Outcome`'s own docs spend a paragraph on.
+        let outcome = if granted {
+            Outcome::Granted
+        } else {
+            Outcome::Denied
+        };
+        let _ = audit.record(c, function, outcome);
+    }
+    if granted {
         Ok(())
     } else {
         Err(HostCallError::NotGranted(c))
@@ -421,7 +458,7 @@ pub fn hash_data(
     algorithm: &str,
     input: &[u8],
 ) -> Result<Vec<u8>, HostCallError> {
-    require(data, Capability::CryptoHash)?;
+    require(data, Capability::CryptoHash, "hash_data")?;
     let alg = HashAlgorithm::parse(algorithm)
         .ok_or_else(|| HostCallError::AlgorithmNotAllowed(algorithm.to_owned()))?;
     // The allowlist is enforced by the host, so a guest cannot use an algorithm
@@ -440,6 +477,124 @@ pub fn hash_data(
 mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
+
+    /// A store whose capability uses are recorded — `OBS-001`.
+    ///
+    /// Returns the store and the stream, because the assertion is about **what the seam wrote**,
+    /// and a test that could not read the stream would only be able to assert that `require`
+    /// returned what it always returned.
+    fn store_with_audit(
+        src: &str,
+    ) -> (
+        StoreData,
+        std::sync::Arc<std::sync::Mutex<crate::audit::AuditStream>>,
+    ) {
+        let m = Manifest::parse(src).expect("test manifest");
+        // The digest the pool key uses, derived from the same grant set the store gets.
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&m);
+        let mut data = StoreData::from_manifest(&m);
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&grants.digest()).expect("digest"),
+            None,
+        ));
+        (data, stream)
+    }
+
+    /// **The seam records the capability it actually read, not a constant — `OBS-001`.**
+    ///
+    /// This is the whole point of moving the record here. The served path used to write one row
+    /// per request with a stated placeholder capability, so a report aggregating by capability was
+    /// aggregating a constant. The assertion is therefore not *"a row was written"* but *"the row
+    /// names the capability that was asked about"* — and it is run for **two different**
+    /// capabilities, because a single one cannot distinguish a real value from a fixed one.
+    #[test]
+    fn the_seam_records_the_capability_it_read() {
+        let (data, stream) = store_with_audit(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+        );
+
+        // Granted: the manifest allows crypto.hash.
+        assert!(require(&data, Capability::CryptoHash, "hash_data").is_ok());
+        // Denied: it does not allow sql.query.
+        assert!(require(&data, Capability::SqlQuery, "hash_data").is_err());
+
+        let s = stream.lock().expect("lock");
+        let records = s.records();
+        assert_eq!(records.len(), 2, "one row per consultation, granted or not");
+        assert_eq!(
+            records[0].capability,
+            Capability::CryptoHash,
+            "the granted row must name the capability that was read"
+        );
+        assert_eq!(records[1].capability, Capability::SqlQuery);
+        assert_ne!(
+            records[0].capability, records[1].capability,
+            "two different capabilities must produce two different rows -- a constant would not"
+        );
+        assert_eq!(records[0].outcome, Outcome::Granted);
+        assert_eq!(
+            records[1].outcome,
+            Outcome::Denied,
+            "a refusal is recorded even though the call fails, because a refusal is the row an \
+             auditor most wants"
+        );
+        assert_eq!(records[0].function, "hash_data");
+        assert!(
+            s.verify_chain().is_ok(),
+            "the rows written by the seam must form a chain"
+        );
+    }
+
+    /// **With no handle attached, nothing is recorded.**
+    ///
+    /// `qqqai run`, `qqq-debug` and every test that calls `Instance::create` must not start writing
+    /// an evidence file. `None` is the honest default and this is the assertion that keeps it one.
+    #[test]
+    fn without_a_handle_nothing_is_recorded() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+        )
+        .expect("manifest");
+        let data = StoreData::from_manifest(&m);
+        assert!(data.audit.is_none(), "the default carries no handle");
+        assert!(require(&data, Capability::CryptoHash, "hash_data").is_ok());
+        // Nothing to assert on a stream that does not exist -- the assertion is the field itself,
+        // and the point is that `require` did not need one to work.
+    }
+
+    /// **Every name in `RECORDED_FUNCTIONS` survives a round trip through the file format.**
+    ///
+    /// The writer's allowlist and the reader's are the same list, and a name added to one and not
+    /// the other would produce a record the server writes and the CLI refuses to read -- a
+    /// persisted record that cannot be reported on, discovered at the worst moment.
+    #[test]
+    fn every_recorded_function_round_trips() {
+        for function in crate::audit::RECORDED_FUNCTIONS {
+            let component =
+                crate::tenant::ComponentDigest::new("0011223344556677").expect("digest");
+            let grants = crate::tenant::GrantDigest::new("aabbccdd").expect("digest");
+            let mut stream = crate::audit::AuditStream::with_default_capacity();
+            let _ = stream.record(
+                None,
+                &component,
+                &grants,
+                Capability::CryptoHash,
+                function,
+                Outcome::Granted,
+            );
+            let json = stream.records()[0].to_json();
+            let back = crate::audit::AuditRecord::from_json(&json)
+                .unwrap_or_else(|e| panic!("`{function}` must round-trip: {e}"));
+            assert_eq!(back.function, function);
+        }
+    }
 
     fn store_with(src: &str) -> StoreData {
         let m = Manifest::parse(src).expect("test manifest");
@@ -462,7 +617,7 @@ mod tests {
     #[test]
     fn a_missing_grant_is_refused() {
         let data = store_with("[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
-        let e = require(&data, Capability::CryptoHash).unwrap_err();
+        let e = require(&data, Capability::CryptoHash, "hash_data").unwrap_err();
         assert_eq!(e, HostCallError::NotGranted(Capability::CryptoHash));
         let err = e.to_error();
         assert_eq!(err.code, qqq_core::ErrorCode::CapabilityDenied);
@@ -472,10 +627,10 @@ mod tests {
     #[test]
     fn a_present_grant_is_accepted() {
         let data = crypto_store();
-        assert!(require(&data, Capability::CryptoHash).is_ok());
+        assert!(require(&data, Capability::CryptoHash, "hash_data").is_ok());
         // And a capability NOT granted on the same store is still refused —
         // so the check is per-capability, not per-store.
-        assert!(require(&data, Capability::SqlQuery).is_err());
+        assert!(require(&data, Capability::SqlQuery, "hash_data").is_err());
     }
 
     // -- Hashing -----------------------------------------------------------

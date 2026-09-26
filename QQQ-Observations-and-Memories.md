@@ -23600,4 +23600,83 @@ write, not before the commit.
 
 ---
 
+## §O-302 — `OBS-001` closed at the seam where a capability is consulted, and the corpus had already told me which seam to use
+
+**Found:** Phase 1, `OBS-001`. **Anchors:** `crates/qqq-host/src/ambient.rs`,
+`crates/qqq-host/src/audit.rs`, `crates/qqq-host/src/linker.rs`, `crates/qqq-host/src/instance.rs`,
+`crates/qqq-run/src/guest_handler.rs`.
+
+### I nearly filed a defect the corpus had already dispositioned
+
+Looking for the per-call seam I grepped `recheck` and found **exactly three call sites, all its own
+tests** — which is invariant THREE's shape: a defence implemented, documented, tested and
+unreachable. That is a plausible defect and I was about to write it down.
+
+The §O register already had it. The entry records the same three call sites, the same conclusion,
+and the reason it is **correct rather than alarming**: the interfaces that would call `recheck` are
+`qqq:fs`, `qqq:sql`, `qqq:http` — *precisely the ones the `QQQ-STUB(CON-009)` marker records as
+unbound*. A defence in depth with no enforcement point yet is the correct state for a stub.
+
+**READ BEFORE ASSERTING paid for itself here, and the rule was in `FACT.md` for exactly this
+reason.** A "new" finding that the corpus analysed months ago wastes a round and, worse, would have
+been written down as a defect.
+
+### The seam that *is* reachable
+
+`ambient::require(data, c)` — called from `hash_data`, a real host function. That is where a
+capability is actually **consulted**, so it is where a per-capability row belongs.
+
+`require` takes `&StoreData`, so it cannot own a stream. The arrangement that works: the stream
+behind an `Arc<Mutex<AuditStream>>`, and an `AuditHandle` whose `record` takes `&self`. The handle
+travels **in the store**, because the store is what the host function reads.
+
+### The placeholder is gone, and it was the whole point
+
+The served path wrote one row per request with `Capability::FsRead` as a **stated placeholder**, so a
+report aggregating by capability was aggregating a **constant** — every request appeared to read a
+file. That row now names `Capability::HttpServer`, which is the authority the served path genuinely
+exercises, and the per-capability rows come from the seam that reads the capability.
+
+**`Attempted`, not `Denied`, when the grant is absent.** `Outcome::Attempted`'s own documentation
+says it exists so that *"a component was deployed that needs authority the manifest does not grant"*
+leaves a record; `Denied` means the call-time re-check refused an instance built with the capability
+present, which is a much more alarming event. Using the variant for its documented purpose is what
+keeps the two apart in a report.
+
+### The assertion is not "a row was written"
+
+It is *"the row names the capability that was asked about"*, and it runs for **two different**
+capabilities — because a single one cannot distinguish a real value from a fixed one. **Fault
+injected by hardcoding `FsRead`** in the record call: the test fired with *"the granted row must
+name the capability that was read"*, which is precisely the defect `OBS-001` was.
+
+`without_a_handle_nothing_is_recorded` keeps `None` the honest default: `qqqai run`, `qqq-debug` and
+every `Instance::create` caller must not silently start writing an evidence file. That is why
+`create_with_audit` is a **second constructor** rather than a parameter on `create` — recording is a
+decision, and threading an `Option` through every caller would make "no record" something each one
+has to remember to ask for.
+
+### Three details that would have been bugs
+
+**`require` takes the function name as a parameter.** Hardcoding `"hash_data"` inside a generic check
+would be accurate until a second caller appeared and then **silently wrong** — a record that
+misattributes an authority use is worse than one that omits it, because a reader would act on it.
+
+**`RECORDED_FUNCTIONS` is shared by the writer and the reader.** `AuditRecord::function` is
+`&'static str`, and a parser that interned an arbitrary name would need `Box::leak` — a memory leak
+whose size **the file controls**. So both sides use one list, and
+`every_recorded_function_round_trips` fails if a name is added to one and not the other. Without it,
+the server could write a record the CLI refuses to read: a persisted record that cannot be reported
+on, discovered at the worst moment.
+
+**Two doctests failed on visibility I had just tightened** — `AuditHandle::record` is `pub(crate)`
+now, so an external doctest cannot call it, and `qqq_host::linker::GrantSet` is a private import. Both
+were my own examples, and the doctest count dropping **29 → 22** was how I noticed: a doctest that
+fails to compile is not a doctest that ran.
+
+→ `crates/qqq-host/src/ambient.rs`, `crates/qqq-host/src/audit.rs`,
+`crates/qqq-host/src/instance.rs`, `crates/qqq-run/src/guest_handler.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

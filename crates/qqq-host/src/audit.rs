@@ -517,19 +517,19 @@ impl AuditRecord {
 
         let function = json_string_field(json, "function")
             .ok_or_else(|| "an audit record must name its `function`".to_owned())?;
-        // `function` is `&'static str` in the record, so a parsed value must be interned. The set
-        // of host function names is bounded by the interfaces' own WIT, and an unknown one is
-        // refused rather than leaked -- `Box::leak` here would be a memory leak driven by file
-        // content, which is an unbounded allocation an attacker controls.
-        let function = match function.as_str() {
-            "handle_request" => "handle_request",
-            other => {
-                return Err(format!(
-                    "`{other}` is not a host function this build records; refusing rather than \
+        // `function` is `&'static str` in the record, so a parsed value must be interned. The set of
+        // host function names is bounded by the interfaces' own WIT, and an unknown one is refused
+        // rather than leaked -- `Box::leak` here would be a memory leak driven by file content,
+        // which is an unbounded allocation an attacker controls.
+        let function = RECORDED_FUNCTIONS
+            .into_iter()
+            .find(|f| *f == function)
+            .ok_or_else(|| {
+                format!(
+                    "`{function}` is not a host function this build records; refusing rather than \
                      leaking a string whose length the file controls"
-                ))
-            }
-        };
+                )
+            })?;
 
         let previous = json_string_field(json, "previous")
             .ok_or_else(|| "an audit record must carry its `previous` digest".to_owned())?;
@@ -632,6 +632,142 @@ impl AppendCounters {
     #[must_use]
     pub const fn has_gaps(self) -> bool {
         self.refused > 0
+    }
+}
+
+/// The host functions that may appear in a record — `OBS-001`.
+///
+/// # Why an allowlist and not any string
+///
+/// `AuditRecord::function` is `&'static str`, because the set of host functions is bounded by the
+/// interfaces' own WIT. A parser that interned an arbitrary name would need `Box::leak`, which is
+/// a memory leak whose size **the file controls** — an unbounded allocation an attacker can drive
+/// from a file the server reads at start-up. So the names are enumerated here, on both sides: the
+/// writer may only pass one of these, and the reader may only accept one.
+///
+/// Adding a host function that records means adding its name here, and the test
+/// `every_recorded_function_round_trips` fails until it is.
+pub(crate) const RECORDED_FUNCTIONS: [&str; 2] = ["handle_request", "hash_data"];
+
+/// A shared handle to the capability-use record, for the per-call seam — `OBS-001`.
+///
+/// # Why this exists rather than recording at the request level
+///
+/// The served path recorded one row per request with a **stated placeholder** capability, because
+/// `GuestApp`'s seam sees one guest call and not the host calls inside it. A report that aggregates
+/// by capability was therefore aggregating a constant.
+///
+/// `ambient::require` is the seam where a capability is actually **consulted**, and it takes
+/// `&StoreData` — so it cannot own a stream. This handle is the arrangement that works: the stream
+/// is shared behind an `Arc<Mutex<..>>`, and `record` takes `&self`, so a `&StoreData` host function
+/// can append without the store owning the record.
+///
+/// # Why the digests travel with it
+///
+/// Because a record states **which artifact** made the call and **against which grants**. Both are
+/// fixed for the life of the instance, so computing them per call would put two digests on a path
+/// that is already dominated by the ABI crossing — and, worse, a per-call re-derivation is a second
+/// answer to a question the pool key already answers (`§O-299`).
+///
+/// # Example
+///
+/// The handle shares a stream, so a row written through it lands in the same chain as any other.
+/// `record` is `pub(crate)` — only [`crate::ambient::require`] may call it, because a caller
+/// outside this crate would be recording a capability it guessed at — so this shows construction
+/// and the sharing:
+///
+/// ```
+/// use qqq_host::audit::{AuditHandle, AuditStream};
+/// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+/// use std::sync::{Arc, Mutex};
+///
+/// let stream = Arc::new(Mutex::new(AuditStream::with_default_capacity()));
+/// let handle = AuditHandle::new(
+///     Arc::clone(&stream),
+///     ComponentDigest::new("0011223344556677").expect("digest"),
+///     GrantDigest::new("aabbccdd").expect("digest"),
+///     None,
+/// );
+/// assert_eq!(stream.lock().expect("lock").len(), 0, "constructing writes nothing");
+/// drop(handle);
+/// ```
+#[derive(Clone, Debug)]
+pub struct AuditHandle {
+    stream: std::sync::Arc<std::sync::Mutex<AuditStream>>,
+    component: ComponentDigest,
+    grants: GrantDigest,
+    tenant: Option<TenantId>,
+}
+
+impl AuditHandle {
+    /// A handle over a shared stream.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditHandle, AuditStream};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let stream = Arc::new(Mutex::new(AuditStream::with_default_capacity()));
+    /// let handle = AuditHandle::new(
+    ///     Arc::clone(&stream),
+    ///     ComponentDigest::new("0011223344556677").expect("digest"),
+    ///     GrantDigest::new("aabbccdd").expect("digest"),
+    ///     None, // unscoped: the single-tenant `qqqai serve` path
+    /// );
+    /// assert_eq!(stream.lock().expect("lock").len(), 0, "nothing is written by constructing");
+    /// drop(handle);
+    /// ```
+    #[must_use]
+    pub fn new(
+        stream: std::sync::Arc<std::sync::Mutex<AuditStream>>,
+        component: ComponentDigest,
+        grants: GrantDigest,
+        tenant: Option<TenantId>,
+    ) -> Self {
+        Self {
+            stream,
+            component,
+            grants,
+            tenant,
+        }
+    }
+
+    /// Append one capability use.
+    ///
+    /// Returns the [`Append`] result so a caller can tell a recorded row from a refused one. It is
+    /// **not** `#[must_use]`: a host function that has already decided to proceed must not fail
+    /// because the record could not be written, and `Append::Full` increments the stream's own
+    /// `refused` counter, so a full stream is visible in the report rather than only here.
+    /// # Why this is `pub(crate)`
+    ///
+    /// Because the only caller is [`crate::ambient::require`], in this crate. A caller outside it
+    /// would be recording a capability it *guessed at* rather than one it consulted, which is
+    /// exactly the defect `OBS-001` closed — so the visibility is the guard as well as a way to
+    /// stop publishing a method nobody should use (`§O-298`).
+    pub(crate) fn record(
+        &self,
+        capability: Capability,
+        function: &'static str,
+        outcome: Outcome,
+    ) -> Append {
+        debug_assert!(
+            RECORDED_FUNCTIONS.contains(&function),
+            "`{function}` is not in RECORDED_FUNCTIONS; add it there and to the round-trip test"
+        );
+        let mut stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        stream.record(
+            self.tenant.as_ref(),
+            &self.component,
+            &self.grants,
+            capability,
+            function,
+            outcome,
+        )
     }
 }
 

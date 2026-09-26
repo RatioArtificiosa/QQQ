@@ -329,7 +329,91 @@ impl<'a> Instance<'a> {
         grants: &GrantSet,
         limits: StoreLimits,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits)?;
+        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, None)?;
+        let instance = instantiator(&ready.linker, &mut ready.store, prepared)
+            .map_err(|e| instantiation_error(&e, prepared, grants))?;
+        Ok(Self::finish(
+            ready,
+            instance,
+            limits,
+            engine,
+            ExecutionMode::Sync,
+        ))
+    }
+
+    /// Create an instance that records its capability uses — `OBS-001`.
+    ///
+    /// Identical to [`Instance::create`] except that `audit` is attached to the store, so
+    /// [`crate::ambient::require`] writes a per-capability row for every capability the guest
+    /// actually exercises.
+    ///
+    /// # Why a second constructor rather than a parameter on `create`
+    ///
+    /// Because recording is a **decision**, and most callers should not make it. `qqqai run`,
+    /// `qqq-debug` and the tests all call `create`; threading an `Option` through every one of them
+    /// would put a feature none of them use into their signatures, and — worse — would make
+    /// "no record" something each caller has to remember to ask for. `create` keeps its meaning:
+    /// it builds an instance and records nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::create`].
+    ///
+    /// # Example
+    ///
+    /// The difference from [`Instance::create`] is the handle: with one attached, the store
+    /// records every capability the guest consults.
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditHandle, AuditStream};
+    /// use qqq_cap::resolve::GrantSet;
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use qqq_host::{Instance, LimitSet, PreparedComponent};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let mut config = wasmtime::Config::new();
+    /// config.wasm_component_model(true);
+    /// config.consume_fuel(true);
+    /// let engine = wasmtime::Engine::new(&config).expect("engine");
+    ///
+    /// // A component with no imports, so it instantiates with an empty grant set.
+    /// let wasm = r#"(component
+    ///   (core module $m (func (export "f") (result i32) (i32.const 7)))
+    ///   (core instance $i (instantiate $m))
+    ///   (func (export "f") (result u32) (canon lift (core func $i "f")))
+    /// )"#;
+    /// let prepared = PreparedComponent::compile(&engine, wasm.as_bytes()).expect("compiles");
+    ///
+    /// let stream = Arc::new(Mutex::new(AuditStream::with_default_capacity()));
+    /// let handle = AuditHandle::new(
+    ///     Arc::clone(&stream),
+    ///     ComponentDigest::new("0011223344556677").expect("digest"),
+    ///     GrantDigest::new("aabbccdd").expect("digest"),
+    ///     None,
+    /// );
+    /// let limits = LimitSet {
+    ///     memory_bytes: 16 * 1024 * 1024,
+    ///     fuel: 10_000_000,
+    ///     epoch_deadline_ms: 5_000,
+    ///     max_open_handles: 64,
+    ///     max_subrequests: 8,
+    /// };
+    /// let instance = Instance::create_with_audit(
+    ///     &engine, &prepared, &GrantSet::empty(), limits, handle,
+    /// );
+    /// assert!(instance.is_ok(), "a component with no imports instantiates");
+    /// // The store holds the handle; nothing has consulted a capability yet.
+    /// assert_eq!(stream.lock().expect("lock").len(), 0);
+    /// ```
+    pub fn create_with_audit(
+        engine: &'a wasmtime::Engine,
+        prepared: &PreparedComponent,
+        grants: &GrantSet,
+        limits: StoreLimits,
+        audit: crate::audit::AuditHandle,
+    ) -> Result<Self> {
+        let mut ready =
+            ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, Some(audit))?;
         let instance = instantiator(&ready.linker, &mut ready.store, prepared)
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
         Ok(Self::finish(
@@ -358,7 +442,7 @@ impl<'a> Instance<'a> {
         grants: &GrantSet,
         limits: StoreLimits,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits)?;
+        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits, None)?;
         let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
             .await
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
@@ -871,9 +955,13 @@ impl ReadyStore {
         engine: &wasmtime::Engine,
         grants: &GrantSet,
         limits: StoreLimits,
+        audit: Option<crate::audit::AuditHandle>,
     ) -> Result<Self> {
         // -- Store state: grants, limits, and the limiter ----------------
-        let data = StoreData::new(grants.clone());
+        let mut data = StoreData::new(grants.clone());
+        // Attached here rather than in every host function: the seam that records is
+        // `ambient::require`, which reads the store, so the store is where the handle has to be.
+        data.audit = audit;
         let mut store = Store::new(engine, data);
 
         // StoreLimits is what enforces the memory ceiling *at runtime*, as

@@ -105,7 +105,7 @@ pub struct GuestApp {
     /// a real throughput cost, so the honest shape is a lock held for the append and released
     /// before the response is written; if contention ever shows up in a measurement, that is
     /// the number to bring to the design rather than to guess at now.
-    audit: std::sync::Mutex<qqq_host::AuditStream>,
+    audit: std::sync::Arc<std::sync::Mutex<qqq_host::AuditStream>>,
     /// Where the record is persisted, when the operator asked for a file — `OBS-002`.
     ///
     /// `None` means the stream is in memory only, which is the honest default: a server that wrote
@@ -267,7 +267,9 @@ impl GuestApp {
             pool: Pool::new(u64::from(workers)),
             // The stream the served path appends to. `with_default_capacity` cannot fail —
             // the capacity is a non-zero constant and the check lives in `AuditStream::new`.
-            audit: std::sync::Mutex::new(qqq_host::AuditStream::with_default_capacity()),
+            audit: std::sync::Arc::new(std::sync::Mutex::new(
+                qqq_host::AuditStream::with_default_capacity(),
+            )),
             audit_file: None,
             // Computed above, before `grants` is moved into this struct.
             component_digest,
@@ -354,30 +356,41 @@ impl GuestApp {
         //
         // # What this row says, and what it does not
         //
-        // It records **that the guest was invoked**, with the component's and the grant set's
-        // digests, at function `handle_request`. It does *not* name the individual capability
-        // exercised, and the capability field is therefore a **placeholder**, which is stated
-        // here rather than left for a reader to discover: this seam sees one guest call, not the
-        // host calls inside it, so it has no capability to report. The per-capability rows are
-        // `OBS-001`, which needs the `ambient::require` seam — the place where a capability is
-        // actually consulted — rather than this one.
+        // It records **that the app served a request**, at function `handle_request`, under the
+        // capability `HttpServer` — which is the authority a QQQ application exercises by being
+        // served at all.
         //
-        // `Capability::FsRead` is chosen because it is the least load-bearing one to be wrong
-        // about: it is a read, so a report that aggregates by capability under-claims authority
-        // rather than over-claiming it. Any placeholder is a liability; this one errs toward
-        // understating what the guest was permitted, which is the safe direction for a document
-        // a policy review reads.
+        // # Why this replaced a placeholder, and what the placeholder was
         //
-        // `Outcome::Granted` when the guest answered, `Outcome::Failed` when it did not. **Not
-        // `Denied` and not `Attempted`**: those mean an authority was refused, and a guest that
-        // reached `call_handler` at all was admitted. A `Failed` row is the honest one for a trap
-        // or a boundary rejection — the authority was exercised and the operation did not
-        // succeed, which is a different remediation from adding a grant.
+        // This row used to carry `Capability::FsRead` as a **stated placeholder**, because the seam
+        // sees one guest call and not the host calls inside it. A report that aggregates by
+        // capability was therefore aggregating a *constant*: every request appeared to read a file.
+        // `OBS-001` is now closed at the seam where a capability is actually consulted —
+        // `ambient::require`, which appends its own row naming the capability it read — so this row
+        // no longer has to guess, and `HttpServer` is not a guess: it is the authority the served
+        // path exercises.
+        //
+        // # Why `Attempted` and not `Denied` when the grant is absent
+        //
+        // Because that is the distinction `Outcome::Attempted`'s own documentation draws: it is
+        // *"the guest attempted the call and the capability was absent, so the attempt was refused
+        // before policy was consulted"*, and it exists precisely so that *"a component was deployed
+        // that needs authority the manifest does not grant"* leaves a record. `Denied` means the
+        // call-time re-check refused an instance that was built with the capability present, which
+        // is a different and much more alarming event.
+        //
+        // `Outcome::Granted` when the app is granted `HttpServer` and the guest answered,
+        // `Outcome::Failed` when it is granted and the call did not succeed. A `Failed` row is the
+        // honest one for a trap or a boundary rejection: the authority was exercised and the
+        // operation did not succeed, which is a different remediation from adding a grant.
         {
-            let outcome_kind = if outcome.is_ok() {
-                qqq_host::Outcome::Granted
-            } else {
-                qqq_host::Outcome::Failed
+            let serves = self
+                .grants
+                .grants(qqq_cap::capability::Capability::HttpServer);
+            let outcome_kind = match (serves, outcome.is_ok()) {
+                (false, _) => qqq_host::Outcome::Attempted,
+                (true, true) => qqq_host::Outcome::Granted,
+                (true, false) => qqq_host::Outcome::Failed,
             };
             let mut stream = self
                 .audit
@@ -391,7 +404,7 @@ impl GuestApp {
                 None,
                 &self.component_digest,
                 &self.grant_digest,
-                qqq_cap::capability::Capability::FsRead,
+                qqq_cap::capability::Capability::HttpServer,
                 "handle_request",
                 outcome_kind,
             );
@@ -427,7 +440,22 @@ impl GuestApp {
     /// work with one release site rather than one per early return — the ordering rule
     /// `§O-184` records for `serve_special_route` and `drain_body`.
     fn serve_one(&self, request: &abi::Request) -> Result<abi::Response> {
-        let instance = Instance::create(&self.engine, &self.prepared, &self.grants, self.limits)?;
+        // Built per request because the handle is cheap (an `Arc` clone and two digests that are
+        // already owned) and because the store is per instance. The stream behind it is shared, so
+        // a per-capability row and this request's row land in one chain.
+        let handle = qqq_host::audit::AuditHandle::new(
+            std::sync::Arc::clone(&self.audit),
+            self.component_digest.clone(),
+            self.grant_digest.clone(),
+            None,
+        );
+        let instance = Instance::create_with_audit(
+            &self.engine,
+            &self.prepared,
+            &self.grants,
+            self.limits,
+            handle,
+        )?;
 
         // The guest's answer travels out of the closure in a slot: `Instance::run`
         // treats any closure error as a trap, which would replace the guest's own
@@ -519,7 +547,7 @@ impl GuestApp {
             )
         })?;
 
-        self.audit = std::sync::Mutex::new(stream);
+        self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
         self.audit_file = Some(std::sync::Mutex::new(file));
         Ok(())
     }

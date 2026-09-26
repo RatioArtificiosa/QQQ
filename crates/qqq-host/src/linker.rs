@@ -56,6 +56,20 @@ use wasmtime::StoreLimits;
 /// counters, tenant identity) is layered on this in later work; keeping the
 /// security-critical path free of unnecessary state makes it auditable.
 pub struct StoreData {
+    /// The capability-use record, when one is attached — `OBS-001`.
+    ///
+    /// # Why the handle is here and not in the caller
+    ///
+    /// Because the seam that must record is [`crate::ambient::require`], which takes `&StoreData`
+    /// — a host function consulting a capability. Putting the handle in the store is what lets
+    /// that function append without the store owning the stream: the stream is shared behind an
+    /// `Arc<Mutex<..>>` and the handle's `record` takes `&self`.
+    ///
+    /// `None` means no record is being kept, which is the honest default: `Instance::create` is
+    /// used by `qqqai run`, by tests and by `qqq-debug`, and none of those should silently start
+    /// writing an evidence file. `Instance::create_with_audit` is the opt-in.
+    pub audit: Option<crate::audit::AuditHandle>,
+
     /// The grants this instance was created with.
     ///
     /// Retained so the call-time re-check has something authoritative to
@@ -235,6 +249,9 @@ impl Default for StoreData {
     fn default() -> Self {
         Self {
             grants: GrantSet::empty(),
+            // No record unless one is attached; see the field's own doc for why `None` is
+            // the honest default.
+            audit: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
@@ -281,6 +298,9 @@ impl StoreData {
             .expect("an empty environment cannot fail to build");
         Self {
             grants,
+            // No record unless one is attached; see the field's own doc for why `None` is
+            // the honest default.
+            audit: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
@@ -376,6 +396,9 @@ impl StoreData {
 
         Self {
             grants,
+            // No record unless one is attached; see the field's own doc for why `None` is
+            // the honest default.
+            audit: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes,

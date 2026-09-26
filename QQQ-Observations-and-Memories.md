@@ -25052,4 +25052,73 @@ runs.
 
 ---
 
+## §O-326 — The flake is not a test, it is a pattern in six files, and it moved to a second one
+
+**Found:** CI on `045c3aa`, the commit that fixed the first test. **Anchors:**
+`crates/qqq-run/tests/`.
+
+### The metrics fix held, and a second test failed instead
+
+```
+---- a_manifest_that_forgets_default_auth_refuses_its_routes stdout ----
+test result: FAILED. 10 passed; 1 failed
+```
+
+**A different test, in a different file** — `serve_policy.rs` — and the metrics test that `§O-313`/`§O-314`/
+`§O-322`/`§O-325` chased **passed**.
+
+### The scope, measured
+
+**Six test files carry the same `free_port()` helper**:
+
+```
+crates/qqq-run/tests/log_format.rs
+crates/qqq-run/tests/metrics_endpoint.rs
+crates/qqq-run/tests/redact_wiring.rs
+crates/qqq-run/tests/sampling_influence.rs
+crates/qqq-run/tests/serve_policy.rs
+crates/qqq-run/tests/spans.rs
+```
+
+**Five of them were written by this goal.** The flake is therefore **not a test to fix — it is a pattern
+in six places**, and each new test file I add carries it.
+
+### Why four rounds of fixes looked reasonable and were wrong
+
+Every fix was aimed at **the test that happened to fail**: its deadline, its accept limit, its retry.
+**The pattern was never the object.** Each fix was locally correct and globally irrelevant, because the
+next CI run simply picked a different file.
+
+**That is the same shape as the guard that was too narrow in `§O-321`** — v1 scanned one file, v2 one
+region, v3 the right extent — and it is the same shape as `§O-311`'s *"a check is only as wide as its
+file list"*. **This goal has now made that mistake in three different forms**, and each time the
+correction was to widen the object rather than to sharpen the fix.
+
+### What the right fix is, and it is not a fifth test patch
+
+**Six copies of a racy helper want to be zero.** Two routes, and the second is better:
+
+1. **One shared helper** — a `tests/common/mod.rs` with a `serve` that retries. Removes the duplication
+   and puts the retry in one place, but keeps the race.
+2. **Remove the allocation** — have `serve` report the address it **bound** rather than the one it was
+   asked for. `Listener::bind` already resolves `local_addr()`; the summary prints `opts.listen`. Then
+   every test uses `--listen 127.0.0.1:0` and reads the port from the start-up line. **The race does not
+   exist because nothing is guessed.**
+
+**Route 2 is a product improvement as well as a test fix**: a server asked for port `0` currently
+reports `:0`, which is a true statement about the request and a useless one about the server.
+
+### The honest state
+
+**Two of the six files have now flaked**, three fixes have failed, and **the object of the fix has
+finally been measured**. The next round should do **route 2** — and if it patches a test instead, it
+should say why.
+
+### Measured
+
+workspace **2660 passed, 0 failed** locally · the flake unreproduced locally · 6 files sharing the
+helper · 2 observed to flake on Ubuntu.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

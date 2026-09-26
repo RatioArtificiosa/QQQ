@@ -24538,4 +24538,66 @@ workspace **2648 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` ·
 `check_xrefs` PASSED · local gate **88 ok / 2 failed** (both expected) · `GATE PARITY OK` · self-test
 **11 of 11**.
 
+## §O-317 — The span emission was built, worked, and was reverted; the tail option made the rate not the rate
+
+**Found:** Phase 1, `OBS-009`/`OBS-011`. **Anchors:** `crates/qqq-serve/src/span.rs` (removed),
+`crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/spans.rs` (removed).
+
+### What was built, and it worked
+
+A span per §4.4 step, emitted **through the logger** so it inherits the level filter, the format and
+**§10.3's redaction** — *a span that bypassed redaction would be a hole in the one control `OBS-008`
+exists to provide*. `--trace-sample <rate>` and `--trace-keep-failures`, four end-to-end tests over
+the real binary, all fault-injected.
+
+### The defect this round, and it is a real one
+
+**`--trace-sample 0.25` sampled 24 of 24 requests.** Measured, by a test asserting that a 1-in-4 rate
+must drop *something*.
+
+The cause was mine: `trace_sample_of` turned the **tail option on for every policy**, and `emit_span`
+read a failure from `response.status >= 500`. The probe project answers **503 `not_built`** for every
+request — so *every* span was a "failure", the tail option kept all of them, and **the rate was not
+the rate.**
+
+**A rate that is not the rate is the "looks configured" failure this CLI refuses everywhere else**,
+and it was in the flag's own implementation. Fixed by making the tail option its own flag:
+*"sample one in four"* is a rate; *"and keep the failures anyway"* is an exception to it, and bundled
+they are not the same sentence. §10.4's *"head-based with tail sampling option"* is an **option, chosen.**
+
+### `§O-315`'s checker paid for itself in its first real use
+
+Widening the module to `pub` for `qqq-run` produced **three immediate failures**:
+
+```
+UNDECLARED: `always_on` in crates/qqq-serve/src/span.rs is referenced nowhere
+UNDECLARED: `decide_with_outcome` in crates/qqq-serve/src/span.rs is referenced nowhere
+UNDECLARED: `keeps_failures` in crates/qqq-serve/src/span.rs is referenced nowhere
+```
+
+**In the round that introduced them, not twelve rounds later.** `always_on` and `keeps_failures` were
+deleted; `decide_with_outcome` was **wired** — the tail option became a behaviour rather than a
+stored field. **That is the check working exactly as designed**, on the first real change it saw.
+
+### And `§O-312`'s vacuity guard fired
+
+On a build that failed, the API checker printed **`API EXAMPLES INCONCLUSIVE`** instead of reporting
+2,124 declarations as undocumented. **A guard built two rounds ago, firing unprompted, in anger.**
+
+### Why reverted
+
+The remaining work was `clippy`'s line budget on `serve` (105/100), two naming lints, and **three
+doctests for the API ratchet** — and the round ran out of budget. **A change that works but does not
+pass the gate is not a deliverable**, which is `§O-309`'s lesson and this is its second instance.
+
+The module is gone; the **findings are not**, and they are the part worth keeping.
+
+### Next — and the shape is now known
+
+1. **Budget the gate, not the feature.** The span emission needs ~6 lines of headroom in `serve`
+   *before* it is written, and the API ratchet needs its doctests written *with* the module.
+2. **Do the extraction first**: `serve` at 100 lines cannot take a feature. `server_wide` was written
+   and never applied — the tuple line had been reformatted.
+3. **`OBS-009` is the root**, and it is one refactor plus one wiring away.
+
 *End of `QQQ-Observations-and-Memories.md`.*

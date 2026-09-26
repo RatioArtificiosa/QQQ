@@ -4890,6 +4890,29 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **OBS-012** Implement the OTLP exporter for traces, metrics and logs.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OBS-013** Implement the Prometheus scrape endpoint.
+  → **Half done, and it stays open rather than claiming otherwise.** The **renderer** is built:
+    `HttpMetrics::render_prometheus()` reads the registry through its own accessors, so every
+    number comes from the same source the recording path writes to, and the label values are the
+    bounded enums' own `as_str` — **the exposition inherits §10.2's cardinality discipline rather
+    than restating it**, so a series cannot appear that the registry would refuse to hold.
+  → **The three rules the format makes easiest to get wrong are asserted.** Durations are
+    **seconds** (the registry counts micros; exporting micros under a `_seconds` name is a wrong
+    number that looks right); histogram buckets are **cumulative** (`le` means less-or-equal and
+    `Latency::buckets` returns per-bucket counts — fault-injected: *“bucket `le=0.002500` holds 0,
+    below the previous bucket's 1”*); and label values are **escaped** (unescaped, a tenant name
+    **forges a new label** — the same class as log injection).
+  → **The bound is asserted at the output, not just the registry**: the tenant walk goes **by
+    index**, so *“at most `MAX_TENANTS + 2` series”* is true of the exposition, and a flood of client
+    addresses produces **one** series labelled `other`.
+  → **What is NOT done: there is no endpoint.** A renderer is not a scrape endpoint, and shipping
+    one alone would be the **eighth** instance of *“written, tested, never called”* — the pattern
+    this goal keeps finding. The remainder is a design decision, not plumbing: **where the path
+    lives** (on the app port it can shadow an app route and exposes tenant names and traffic to
+    anyone who can reach the app; a separate admin port is conventional and larger), **opt-in or
+    always on** (`--audit-log` and `--redact-from` are both opt-ins), and **what a collision does**
+    (a silent shadow hides either an app route or the metrics, so a start-up refusal).
+  → `§O-308` records the design and the remainder. **A renderer with no caller is a known state;
+    a renderer with no caller and a tick is a claim.**
   → §10.2 Metrics that ship by default
 - [ ] **OBS-014** Prove that a guest cannot influence sampling decisions.
   → **Blocked by `OBS-011`, and the block is worth stating because the item reads as buildable.**

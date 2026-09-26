@@ -24017,4 +24017,61 @@ mechanical insertion above a documented item moves its documentation with it.
 
 ---
 
+## §O-308 — The Prometheus renderer is built and the endpoint is not, and the item stays open rather than claiming otherwise
+
+**Found:** Phase 1, `OBS-013`. **Anchors:** `crates/qqq-serve/src/metrics.rs`.
+
+### What was built, and why it is here rather than in a script
+
+`HttpMetrics::render_prometheus()` — the Prometheus text exposition format, reading the registry
+through its own accessors. **Every number comes from the same source the recording path writes to**;
+a second derivation would be a second answer to one question, which is the defect this repository
+keeps recording. The label values are the bounded enums' own `as_str`, so **the exposition inherits
+§10.2's cardinality discipline rather than restating it: a series cannot appear here that the
+registry would refuse to hold.**
+
+### The three rules the format makes easiest to get wrong
+
+1. **Durations are seconds.** The registry counts microseconds; Prometheus' convention is
+   `_seconds`. Exporting micros under a `_seconds` name is a wrong number that *looks* right — off by
+   six orders of magnitude, in the direction that makes every latency look catastrophic.
+2. **Histogram buckets are cumulative.** `le` means *less than or equal* and `Latency::buckets`
+   returns **per-bucket** counts, so exporting them directly yields a histogram that appears to
+   decrease. **Fault-injected by dropping the accumulation**: *"bucket `le=0.002500` holds 0, below
+   the previous bucket's 1: the export is per-bucket rather than cumulative"*.
+3. **Label values are escaped.** A tenant name is operator-supplied; unescaped it does not merely
+   look wrong, it **forges a new label** or splits one metric line into two. Same class as log
+   injection, which §10.3's redaction exists to prevent in its own domain.
+
+Plus the bound, asserted at the output rather than the registry: the tenant walk goes **by index**,
+not by name, which is what makes *"at most `MAX_TENANTS + 2` series"* true of the exposition rather
+than merely intended — and a flood of client addresses produces **one** series labelled `other`.
+
+**Measured:** 5 exposition tests + 26 other metrics tests, all fault-injected where they assert a
+rule.
+
+### What is NOT done, and why the item stays open
+
+**There is no endpoint.** §10.2 says *"Prometheus + OTLP"* and `OBS-013` says *"Implement the
+Prometheus scrape endpoint"* — a renderer is not an endpoint, and shipping the renderer alone would
+be **the eighth instance of the pattern this goal keeps finding**: a control that is written, tested
+and never called.
+
+The remainder is a real design decision, not plumbing, and it is named rather than guessed at:
+
+- **Where does the path live?** On the application port it can **shadow an app route** (or be
+  shadowed by one), and it exposes operational data — tenant names, traffic volume — to anyone who
+  can reach the app. A separate admin port is the conventional answer and a larger change.
+- **Opt-in or always on?** `--audit-log` and `--redact-from` are both explicit opt-ins, and this is
+  the same class of decision.
+- **What happens on a collision?** A silent shadow either hides an app route or hides the metrics,
+  so a start-up refusal is the shape the other two flags established.
+
+**So `OBS-013` stays unticked**, with its exact remainder written down here and in the checklist. A
+renderer with no caller is a known state; a renderer with no caller and a tick is a claim.
+
+→ `crates/qqq-serve/src/metrics.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -678,11 +678,414 @@ impl HttpMetrics {
             .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
+    /// The registry in the Prometheus text exposition format — `OBS-013`.
+    ///
+    /// # Why the renderer lives here and not in a script
+    ///
+    /// Because every number must come from the **same** source the recording path writes to, and a
+    /// second derivation would be a second answer to one question — the defect this repository
+    /// keeps recording. The label values are the bounded enums' own `as_str`, so the exposition
+    /// inherits §10.2's cardinality discipline rather than restating it: **a series cannot appear
+    /// here that the registry would refuse to hold.**
+    ///
+    /// # The three rules that are easy to get wrong
+    ///
+    /// 1. **Durations are seconds.** Prometheus' convention is `_seconds` and the registry counts
+    ///    **microseconds**. Converting at the edge keeps the internal unit exact and the exported
+    ///    one conventional; exporting micros under a `_seconds` name is a wrong number that looks
+    ///    right.
+    /// 2. **Histogram buckets are cumulative.** `le` means *less than or equal*, and
+    ///    [`Latency::buckets`] returns **per-bucket** counts. Exporting those directly produces a
+    ///    histogram that appears to decrease — which a server either rejects or, worse, accepts and
+    ///    renders as nonsense.
+    /// 3. **Label values are escaped.** A tenant name is operator-supplied and may contain a quote
+    ///    or a backslash; unescaped it does not merely look wrong, it **forges a new label** in the
+    ///    exposition. Same class as log injection, which §10.3's redaction exists to prevent in its
+    ///    own domain.
+    ///
+    /// # What is deliberately absent
+    ///
+    /// **No `tenant` label on the request counters.** Their key is `(method, class)`, and adding a
+    /// tenant dimension would multiply that space by the tenant ceiling for a question nobody
+    /// asks. The per-tenant series are the byte and refusal counters, which are the ones §10.2's
+    /// table names *"by tenant"*.
+    ///
+    /// A series with no observation is **omitted, not exported as zero**: absent means "not
+    /// observed" and zero is a claim that it was.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_serve::metrics::{HttpMetrics, Method};
+    ///
+    /// let m = HttpMetrics::new();
+    /// m.record_request(Method::Get, 200, 2_500_000, "acme", 10, 20);
+    ///
+    /// let text = m.render_prometheus();
+    /// assert!(text.contains("qqq_http_requests_total{method=\"GET\",class=\"2xx\"} 1"));
+    /// // Durations are SECONDS, and the registry counts microseconds.
+    /// assert!(text.contains("qqq_http_request_duration_seconds_sum 2.500000"));
+    /// // Every sample is a name, a value, and nothing else on the line.
+    /// assert!(text.contains("qqq_http_request_body_bytes_total{tenant=\"acme\"} 10"));
+    /// ```
+    #[must_use]
+    pub fn render_prometheus(&self) -> String {
+        let mut out = String::new();
+        write_request_counters(self, &mut out);
+        write_latency_histogram(self, &mut out);
+        write_connection_gauges(self, &mut out);
+        write_tenant_counters(self, &mut out);
+        out
+    }
+}
+
+/// -- requests, by (method, class) -----------------------------------
+fn write_request_counters(m: &HttpMetrics, out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "# HELP qqq_http_requests_total Total HTTP requests, by method and status class."
+    );
+    let _ = writeln!(out, "# TYPE qqq_http_requests_total counter");
+    for method in Method::ALL {
+        for class in StatusClass::ALL {
+            let n = m.requests_for(method, class);
+            if n == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "qqq_http_requests_total{{method=\"{}\",class=\"{}\"}} {n}",
+                prometheus_escape(method.as_str()),
+                prometheus_escape(class.as_str())
+            );
+        }
+    }
+}
+
+/// -- latency, a CUMULATIVE histogram in seconds ---------------------
+fn write_latency_histogram(m: &HttpMetrics, out: &mut String) {
+    use std::fmt::Write as _;
+    let latency = m.latency();
+    let _ = writeln!(
+        out,
+        "# HELP qqq_http_request_duration_seconds Request latency."
+    );
+    let _ = writeln!(out, "# TYPE qqq_http_request_duration_seconds histogram");
+    let per_bucket = latency.buckets();
+    let mut cumulative: u64 = 0;
+    for (i, upper_micros) in Latency::BOUNDS.iter().enumerate() {
+        cumulative += per_bucket.get(i).copied().unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "qqq_http_request_duration_seconds_bucket{{le=\"{}\"}} {cumulative}",
+            micros_as_seconds(*upper_micros)
+        );
+    }
+    // `+Inf` is every observation, which is the histogram's own count -- not a leftover, since
+    // a finite bucket's count is only ever an upper bound on what it holds.
+    let _ = writeln!(
+        out,
+        "qqq_http_request_duration_seconds_bucket{{le=\"+Inf\"}} {}",
+        latency.count()
+    );
+    let _ = writeln!(
+        out,
+        "qqq_http_request_duration_seconds_sum {}",
+        micros_as_seconds(latency.sum_micros())
+    );
+    let _ = writeln!(
+        out,
+        "qqq_http_request_duration_seconds_count {}",
+        latency.count()
+    );
+}
+
+/// -- connections ----------------------------------------------------
+fn write_connection_gauges(m: &HttpMetrics, out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "# HELP qqq_http_connections_total Connections closed, by outcome."
+    );
+    let _ = writeln!(out, "# TYPE qqq_http_connections_total counter");
+    for outcome in Outcome::ALL {
+        let n = m.connections_for(outcome);
+        if n == 0 {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "qqq_http_connections_total{{outcome=\"{}\"}} {n}",
+            prometheus_escape(outcome.as_str())
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP qqq_http_connections_open Connections open right now."
+    );
+    let _ = writeln!(out, "# TYPE qqq_http_connections_open gauge");
+    let _ = writeln!(out, "qqq_http_connections_open {}", m.open_connections());
+}
+
+/// -- per tenant, walked BY INDEX so the bound is the output's ------
+fn write_tenant_counters(m: &HttpMetrics, out: &mut String) {
+    use std::fmt::Write as _;
+    //
+    // The index space is what the registry bounds, so walking it is what makes "at most
+    // MAX_TENANTS + 2 series" true of the exposition rather than merely intended. `name_of`
+    // returns `None` for the shared past-the-ceiling bucket, which is labelled `other` -- the
+    // same collapse `Tenant::Other` performs, so a flood of client addresses produces ONE
+    // series here too.
+    let ceiling = u16::try_from(TenantLabels::MAX_TENANTS).unwrap_or(u16::MAX);
+    for (name, help, read) in [
+        (
+            "qqq_http_request_body_bytes_total",
+            "Request body bytes read, by tenant.",
+            0usize,
+        ),
+        (
+            "qqq_http_response_body_bytes_total",
+            "Response body bytes written, by tenant.",
+            1,
+        ),
+        (
+            "qqq_http_body_limit_hits_total",
+            "Bodies refused for exceeding a limit, by tenant.",
+            2,
+        ),
+    ] {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        for index in 0..=ceiling + 1 {
+            let label = m
+                .tenants
+                .name_of(index)
+                .unwrap_or_else(|| "other".to_owned());
+            let n = match read {
+                0 => m.body_bytes_in.lock(),
+                1 => m.body_bytes_out.lock(),
+                _ => m.body_limit_hits.lock(),
+            }
+            .map_or(0, |m| m.get(&index).copied().unwrap_or(0));
+            if n == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "{name}{{tenant=\"{}\"}} {n}",
+                prometheus_escape(&label)
+            );
+        }
+    }
+}
+
+/// Microseconds as the seconds a Prometheus `_seconds` metric carries.
+///
+/// Six decimal places, which is the microsecond resolution exactly: coarser would round a
+/// sub-millisecond latency to zero, and finer would invent precision the registry does not have.
+fn micros_as_seconds(micros: u64) -> String {
+    format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
+/// Escape a label value for the exposition format.
+///
+/// # Why this is not optional
+///
+/// A tenant name is operator-supplied and may contain `"`, `\` or a newline. Unescaped, it does not
+/// merely look wrong -- it **forges a new label** in the exposition, or splits one metric line into
+/// two. That is the same class as log injection, which §10.3's host-side redaction exists to
+/// prevent in its own domain.
+fn prometheus_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- the Prometheus exposition -- OBS-013 ---------------------------------
+
+    /// **Histogram buckets are CUMULATIVE in the exposition.**
+    ///
+    /// `le` means *less than or equal*, and `Latency::buckets` returns **per-bucket** counts.
+    /// Exporting those directly produces a histogram whose buckets appear to decrease, which a
+    /// Prometheus server either rejects or, worse, accepts and renders as nonsense. This is the
+    /// rule the format makes easiest to get wrong, so it is the first thing asserted.
+    #[test]
+    fn the_exposition_histogram_is_cumulative() {
+        let m = HttpMetrics::new();
+        // One observation in the first bucket and one in the last, so a non-cumulative export
+        // would produce a sequence that goes up then down.
+        m.record_request(Method::Get, 200, 1, "t", 0, 0);
+        m.record_request(Method::Get, 200, 60_000_000, "t", 0, 0);
+
+        let text = m.render_prometheus();
+        let mut previous = 0u64;
+        let mut seen = 0;
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("qqq_http_request_duration_seconds_bucket{le=\"")
+            else {
+                continue;
+            };
+            let (label, value) = rest.split_once("\"} ").expect("a bucket line has a value");
+            let value: u64 = value.parse().expect("a bucket count is an integer");
+            assert!(
+                value >= previous,
+                "bucket `le={label}` holds {value}, below the previous bucket's {previous}: the \
+                 export is per-bucket rather than cumulative"
+            );
+            previous = value;
+            seen += 1;
+        }
+        assert!(
+            seen > 2,
+            "the histogram must export its finite buckets: {text}"
+        );
+        assert_eq!(
+            previous, 2,
+            "the last finite bucket is not necessarily every observation, so check the count line"
+        );
+        assert!(
+            text.contains("qqq_http_request_duration_seconds_count 2"),
+            "the count line must carry the total: {text}"
+        );
+        assert!(
+            text.contains("le=\"+Inf\"} 2"),
+            "and `+Inf` is every observation: {text}"
+        );
+    }
+
+    /// **Durations are exported in SECONDS, and the conversion is exact.**
+    ///
+    /// The registry counts microseconds; Prometheus' convention is `_seconds`. Exporting micros
+    /// under a `_seconds` name is a wrong number that looks right — off by six orders of magnitude,
+    /// in the direction that makes every latency look catastrophic.
+    #[test]
+    fn the_exposition_converts_micros_to_seconds() {
+        assert_eq!(micros_as_seconds(0), "0.000000");
+        assert_eq!(micros_as_seconds(1), "0.000001");
+        assert_eq!(micros_as_seconds(1_500_000), "1.500000");
+        assert_eq!(micros_as_seconds(60_000_000), "60.000000");
+
+        let m = HttpMetrics::new();
+        m.record_request(Method::Get, 200, 2_500_000, "t", 0, 0);
+        let text = m.render_prometheus();
+        assert!(
+            text.contains("qqq_http_request_duration_seconds_sum 2.500000"),
+            "the sum must be in seconds: {text}"
+        );
+    }
+
+    /// **A tenant name containing a quote is ESCAPED, not interpolated.**
+    ///
+    /// Unescaped, it does not merely look wrong — it **forges a new label** in the exposition, or
+    /// splits one metric line into two. Same class as log injection, which §10.3's redaction exists
+    /// to prevent in its own domain.
+    #[test]
+    fn the_exposition_escapes_a_tenant_label() {
+        assert_eq!(prometheus_escape("plain"), "plain");
+        assert_eq!(prometheus_escape("a\"b"), "a\\\"b");
+        assert_eq!(prometheus_escape("a\\b"), "a\\\\b");
+        assert_eq!(prometheus_escape("a\nb"), "a\\nb");
+
+        let m = HttpMetrics::new();
+        // A name with a quote and a backslash, recorded as a real tenant would be.
+        m.record_request(Method::Get, 200, 1, "evil\" tenant", 5, 0);
+        let text = m.render_prometheus();
+        assert!(
+            !text.contains("tenant=\"evil\" tenant\""),
+            "an unescaped quote would forge a label: {text}"
+        );
+        assert!(
+            text.contains("tenant=\"evil\\\" tenant\""),
+            "the quote must be escaped: {text}"
+        );
+        // And every metric line must still have exactly one label list.
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            assert_eq!(
+                line.matches('{').count(),
+                line.matches('}').count(),
+                "a line with unbalanced braces is a forged label: {line}"
+            );
+        }
+    }
+
+    /// **The exposition's per-tenant series are bounded by the ceiling, like the registry's.**
+    ///
+    /// The renderer walks the *index* space rather than the names, which is what makes "at most
+    /// `MAX_TENANTS + 2` series" true of the output rather than merely intended — the same property
+    /// `a_flood_of_tenant_names_cannot_grow_the_per_tenant_maps` asserts one layer down.
+    #[test]
+    fn the_exposition_bounds_its_tenant_series() {
+        let m = HttpMetrics::new();
+        for i in 0..(TenantLabels::MAX_TENANTS * 10) {
+            let name = format!("10.0.{}.{}", i / 256, i % 256);
+            m.record_request(Method::Get, 200, 1, &name, 1, 1);
+        }
+        let text = m.render_prometheus();
+        let series = text
+            .lines()
+            .filter(|l| l.starts_with("qqq_http_request_body_bytes_total{"))
+            .count();
+        assert!(
+            series <= TenantLabels::MAX_TENANTS + 2,
+            "the exposition emitted {series} tenant series for {} names",
+            TenantLabels::MAX_TENANTS * 10
+        );
+        assert!(
+            text.contains("tenant=\"other\"}"),
+            "and the past-the-ceiling names share ONE series labelled `other`: {text}"
+        );
+    }
+
+    /// **Every non-comment line is a well-formed exposition sample.**
+    ///
+    /// The format is line-oriented and positional, so a malformed line is not a rendering blemish —
+    /// a scraper rejects the whole payload.
+    #[test]
+    fn every_exposition_line_is_well_formed() {
+        let m = HttpMetrics::new();
+        m.record_request(Method::Get, 200, 1_000, "acme", 10, 20);
+        m.record_body_limit("acme");
+        m.connection_opened();
+        m.connection_closed(Outcome::ClientClosed);
+
+        let text = m.render_prometheus();
+        let mut samples = 0;
+        for line in text.lines() {
+            if line.starts_with('#') {
+                assert!(
+                    line.starts_with("# HELP ") || line.starts_with("# TYPE "),
+                    "only HELP and TYPE are comments in this exposition: {line}"
+                );
+                continue;
+            }
+            assert!(!line.is_empty(), "a blank line is not a sample");
+            let (_, value) = line
+                .rsplit_once(' ')
+                .unwrap_or_else(|| panic!("a sample line is `name value`: {line}"));
+            assert!(
+                value.parse::<f64>().is_ok() || value == "+Inf",
+                "the value must be a number: {line}"
+            );
+            samples += 1;
+        }
+        assert!(samples >= 6, "the registry holds several series: {text}");
+        assert!(
+            text.contains("# TYPE qqq_http_request_duration_seconds histogram"),
+            "and the histogram declares its type: {text}"
+        );
+    }
 
     // -- the label spaces are closed ---------------------------------------
 

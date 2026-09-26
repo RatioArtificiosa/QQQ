@@ -23040,4 +23040,154 @@ not luck; it is the reason to attempt a mechanical edit only from a committed st
 
 ---
 
+## §O-293 — Wiring the audit stream found that the stream has no reader, and the corpus already said so in a `gap` string
+
+**Found:** Phase 1, `OBS-002`. **Anchors:** `crates/qqq-run/src/guest_handler.rs`,
+`crates/qqq-host/src/audit.rs`, `crates/qqq-serve/src/lifecycle.rs`,
+`crates/qqq-run/src/audit.rs`, `QQQ-Proposal-V1.md` §10.1.
+
+### What was built
+
+`AuditStream` was complete, hash-chained and append-only, and **its only callers were its own
+tests.** §4.4 step 15 `AUDIT APPEND` was the recorded gap: *"step 13 meters and step 15 records, and
+the recording half does not run."*
+
+`GuestApp` now holds the stream behind a `Mutex` and appends on every served request:
+
+- the **component digest** — sha256 of the compiled bytes, hex-encoded and validated by
+  `ComponentDigest::new`, which refuses a non-canonical spelling;
+- the **grant digest** — from `GrantSet::digest()`, deliberately *the same* digest the pool key
+  uses, because two derived values for one grant set would be a second answer to one question;
+- `Outcome::Granted` when the guest answered, `Outcome::Failed` when it did not — **not `Denied`
+  and not `Attempted`**, because those mean an authority was refused and a guest that reached
+  `call_handler` at all was admitted.
+
+Written **after** the call and **before** the response, for two different reasons: after, because the
+outcome is what the record exists to state; before, because a record a client can lose by
+disconnecting is not evidence.
+
+### The finding: the stream still has no reader
+
+Having appended, I went to find who *reads* it. **Nothing does.** The only non-test hits are the
+`qqq-host` re-export, the field I just added, and a doc comment.
+
+And `qqqai audit` — the command the goal's Gate 1 names — is **not this**: it reports the
+*security posture* (caps, limits, supply chain, provenance) and never touches `AuditStream`.
+
+**The corpus had already said so, in the `gap` string I had read and not registered:**
+
+```
+crates/qqq-serve/src/lifecycle.rs:347
+gap: "AuditStream has no production caller, so no capability-use record is written"
+```
+
+That string is *accurate* and I read it as a statement about the **writer**. It is also a statement
+about the **reader**, and the difference is the whole of `OBS-003`/`OBS-004`/`OBS-016`. This is
+process rule 1's shape again — the corpus had the answer and I had the passage in context.
+
+### The capability field is a stated placeholder
+
+This seam sees **one guest call**, not the host calls inside it, so it has no capability to report.
+The field carries `Capability::FsRead` and the code says in-place that it is a placeholder, why
+(`OBS-001` needs the `ambient::require` seam, where a capability is actually consulted), and why
+*that* value: a read under-claims authority rather than over-claiming it, which is the safe
+direction for a document a policy review reads.
+
+**A placeholder that is named is a debt; one that is not is a lie.** The corpus's own rule for stubs
+applies to a value as much as to a function.
+
+### Why this is recorded rather than rushed
+
+`OBS-002` asks to *"implement the append-only, hash-chained audit record"*. The record **is**
+implemented and the served path now appends to it. What is missing is the **export** — and the export
+is `OBS-003` (SARIF) and `OBS-004` (compliance report), separate items with their own gates, plus
+`OBS-016`'s *"prove what this code did"* report which §10.1 calls QQQ's fourth signal.
+
+Ticking `OBS-002` on the strength of an append with no reader would be exactly the failure this
+repository keeps recording: a control that reports healthy while measuring nothing. So the item stays
+open, its state is recorded here, and the next phase closes it with the export that makes the append
+observable.
+
+→ `crates/qqq-run/src/guest_handler.rs`, `crates/qqq-serve/src/lifecycle.rs`,
+`crates/qqq-run/src/audit.rs`
+
+---
+
+## §O-294 — The first version of the audit test asserted nothing, and clippy is what said so
+
+**Found:** Phase 1, `OBS-002`, while clearing `clippy -D warnings` on the change.
+**Anchors:** `crates/qqq-run/src/guest_handler.rs`.
+
+### The assertion that looked like a chain check
+
+`the_chain_verifies_after_serving` served two requests and then did this:
+
+```rust
+// The stream's own verifier, over the served records.
+let mut stream = qqq_host::AuditStream::with_default_capacity();
+assert!(stream.verify_chain().is_ok(), "...");
+```
+
+**It builds a fresh, empty stream and verifies it.** An empty chain has nothing to disagree with, so
+the assertion passes no matter what the served path wrote — and it is *labelled* as verifying the
+served records, which is what makes it dangerous rather than merely useless. The comment beside it
+even said *"an empty stream verifies trivially"*, which is true and was the reason to *not* write it
+that way.
+
+**`clippy` found it**, indirectly: `unused-mut` on the `let mut stream`, because `verify_chain` takes
+`&self`. A lint about a keyword led to the assertion. Nobody reading the test would have caught it —
+the shape is right, the names are right, and it passes.
+
+### What replaced it
+
+The served records are **replayed** into a fresh stream and the chains compared field by field:
+
+```rust
+let mut replay = qqq_host::AuditStream::with_default_capacity();
+for record in &records {
+    replay.record(record.tenant.as_ref(), &record.component, &record.grants,
+                  record.capability, record.function, record.outcome);
+}
+for (i, (served, again)) in records.iter().zip(replay.records()).enumerate() {
+    assert_eq!(served.chain, again.chain, "...");
+}
+```
+
+That is a stronger claim than "the chain verifies": it asserts **the chain is a function of the
+record's own fields**. A served path that wrote a chain not derivable from the contents it reports
+would produce evidence that cannot be independently recomputed — which is the whole point of a
+hash chain, and the old assertion could not have noticed.
+
+### And the fault injection was verified before it was believed
+
+The first injection attempt **did not apply** — a nested-`powershell` quoting mangling turned the
+PATHEXT repair into a parse error, the replacement anchor never matched, and the run reported
+`5 passed`. **An injection that does not apply reports success exactly like an injection that was
+caught.** Had I read the exit code instead of the output, I would have recorded a passing injection
+against an unmodified file.
+
+The tell was there: the injected run printed `exit=0` where `101` was expected, *and* printed
+`5 passed`. The second attempt — done with a tool that handles the text exactly — fired properly:
+
+```
+assertion `left == right` failed: one served request must append exactly one audit record; found 0
+test result: FAILED. 3 passed; 2 failed
+```
+
+Then re-injected after the strengthened assertion, to confirm the *new* one catches the real defect
+too rather than only the old one.
+
+### The rule
+
+**A test whose subject is provided by the fixture's own construction can pass without observing
+anything.** `§O-280`'s rule was "an injection that does not fire means the fix is not a fix"; this is
+its sibling — **an assertion over a freshly-built empty object means the assertion is about the
+constructor, not about the code under test.** And the corollary that found it: **run the lints on
+your own tests**, because `unused-mut` was the only signal that the binding was not doing what its
+comment claimed.
+
+→ `crates/qqq-run/src/guest_handler.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

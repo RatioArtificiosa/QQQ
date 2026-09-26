@@ -25183,4 +25183,77 @@ public item) · `PUBLIC REACHABILITY OK` · the start-up line observed on a real
 
 ---
 
+## §O-328 — The round-23 flake was a *connect* that failed, and `request` did not retry it
+
+**Found:** Phase 1, reading the panic message `§O-326` asked for. **Anchors:**
+`crates/qqq-run/tests/serve_policy.rs`, `crates/qqq-run/tests/common/mod.rs`.
+
+### The message, and it names a failure mode nobody had considered
+
+```
+---- a_manifest_that_forgets_default_auth_refuses_its_routes stdout ----
+panicked at ./tests/serve_policy.rs:238:43
+no status line in: "<no connection>"
+```
+
+**A different failure from the metrics one.** `§O-313`/`§O-314` chased a client that **connected** and
+read **no bytes**. This is a client that **could not connect at all** — and `"<no connection>"` is the
+helper's **own sentinel**, returned into an assertion that then reported a missing status line.
+
+> **A sentinel is not a response.**
+
+### The bug was an asymmetry inside one handshake
+
+`start` retries its probe; `request` did a **single** `TcpStream::connect` and returned the sentinel on
+failure. **The two halves of the same handshake disagreed about how hard to try**, so the probe could
+succeed while the listener went away before the request.
+
+### And the file was *already* hardened, with a measured rationale
+
+`serve_policy.rs`'s probe checks **the child's liveness, not only the port**, and its comment records an
+**earlier** flake (`a_route_that_does_not_exist_is_a_404_and_not_a_403` panicked at `write_all`). That
+fix was correct **and one layer in**; this failure is one layer out, at the connect.
+
+**A guard is only as wide as its extent** — `§O-321`'s lesson, met again in a handshake.
+
+### The fix, and the injection that confirms it
+
+A **bounded connect retry** (5 s) in `request`, with the sentinel kept for a port that is genuinely dead.
+**Fault-injected by pointing every connect at a port nothing listens on**: 11 of 11 tests fail, and the
+message is the **exact CI message on the same test**. The diagnosis is **confirmed rather than
+plausible**.
+
+### Route 2 is closed by design, and my argument for it was wrong
+
+`§O-327` claimed the port-0 refusal's *"premise has changed"* now that the server announces its bound
+address. **The refusal's own comment says otherwise:**
+
+```
+// Port 0 asks the OS for any free port. That is legitimate in a test harness and dangerous in a
+// manifest, because the deployed service would listen somewhere nobody knows. Refused here, and the
+// test helper uses an explicit high port instead.
+```
+
+**The reasoning is about deployment, not findability.** It **already says** port 0 is *"legitimate in a
+test harness"* and refuses it anyway, because `--listen` is also the manifest's flag. Announcing the
+bound address does not change that. **The design anticipated this exact situation and chose the
+manifest's safety over the harness's convenience — which is the right trade** — and it told the helper
+what to do.
+
+**Relaxing the refusal would trade a real deployment hazard for a test convenience.** Route 2 is closed.
+
+### Route 1 landed, partly
+
+`crates/qqq-run/tests/common/mod.rs` now holds the helper **once**: `Sandbox`, `free_port`,
+`serve_and_request` with the bounded retry, `run_refused` with a bounded wait. `metrics_endpoint.rs`
+uses it. **Five files remain** (`log_format`, `redact_wiring`, `sampling_influence`, `serve_policy`,
+`spans`) — and the connect retry above is the fix that matters most for the one that flaked.
+
+### Measured
+
+workspace **2660 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121, unchanged) · the
+injection reproduced the CI message exactly · `serve_policy` 11 tests in 0.64 s.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

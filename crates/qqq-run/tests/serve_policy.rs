@@ -170,8 +170,23 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
 /// rather than at the port. A caller's assertion reports what it saw, and `<write failed>` is
 /// that; a panic here replaces the assertion the test is about with a message about plumbing.
 fn request(port: u16, raw: &str) -> String {
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
-        return "<no connection>".to_owned();
+    // **The CONNECT is retried, and it was not before.**
+    //
+    // Measured on Ubuntu: `no status line in: "<no connection>"` -- this helper's own sentinel for a
+    // connect that failed. `start` retries its probe and this did not, so the two halves of one
+    // handshake disagreed about how hard to try: the probe could succeed while the listener went away
+    // before the request, and the caller then asserted about a string the helper had invented.
+    //
+    // **A sentinel is not a response**, and returning one into an assertion is how a connect failure
+    // becomes a message about a missing status line. The retry is bounded, and the sentinel still
+    // exists for the case where the port is genuinely dead.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return "<no connection>".to_owned(),
+        }
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     if stream.write_all(raw.as_bytes()).is_err() {

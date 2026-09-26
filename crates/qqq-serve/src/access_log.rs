@@ -531,6 +531,84 @@ impl Redactor {
         self.values.len()
     }
 
+    /// Build from the text of a `NAME=value` file — `OBS-008`.
+    ///
+    /// # Why a file and not the environment
+    ///
+    /// §2.5 forbids environment reads **inside the runtime** (*"No hidden global state — No
+    /// environment-variable reads, no CWD dependencies, no implicit config discovery"*), and
+    /// §10.3 requires redaction to be *"applied by the host … using manifest-declared secret
+    /// names"*. So the values must arrive **explicitly**, once, before the server serves anything.
+    ///
+    /// A file whose path the operator passes is the mechanism that satisfies both: explicit rather
+    /// than discovered, read once rather than per call, and it keeps secret values out of the
+    /// process table where a command-line argument would put them.
+    ///
+    /// # The format, and the three decisions in it
+    ///
+    /// Blank lines and `#` comments are ignored — the convention this repository already uses for
+    /// `docs/.env`. Then:
+    ///
+    /// 1. **A line without `=` is refused**, not skipped. A file of secrets is one where a silent
+    ///    misparse means a secret is **not** redacted, and the operator has no way to notice: the
+    ///    server starts, logs look right, and the value is in them. Refusing names the line.
+    /// 2. **An empty value is skipped, not refused.** An unset variable in the file is a normal
+    ///    state, and `from_values` already ignores empties for the reason its own doc gives —
+    ///    replacing the empty string would insert a marker between every character.
+    /// 3. **The value is taken verbatim after the first `=`**, with only a trailing `\r` removed
+    ///    and one surrounding pair of double quotes stripped. Trimming would corrupt a secret that
+    ///    legitimately begins or ends with a space, and a corrupted secret is one that is **not**
+    ///    redacted while appearing to be configured.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the line number and what was wrong with it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_serve::access_log::Redactor;
+    ///
+    /// let redactor = Redactor::from_dotenv("TOKEN=s3cr3t\n# a comment\nUNSET=\n").expect("parses");
+    /// assert_eq!(redactor.len(), 1, "the empty value is not a secret to redact");
+    ///
+    /// // A line with no `=` is refused, naming the line -- a silent misparse would mean a secret
+    /// // is NOT redacted while the operator sees a server that started normally.
+    /// let err = Redactor::from_dotenv("GOOD=x\nNOT A PAIR\n").unwrap_err();
+    /// assert!(err.contains("line 2"), "{err}");
+    /// ```
+    pub fn from_dotenv(text: &str) -> Result<Self, String> {
+        let mut values = Vec::new();
+        for (i, raw) in text.lines().enumerate() {
+            let line = raw.trim_start();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=') else {
+                return Err(format!(
+                    "line {} has no `=`, so it names no secret: {line:?}",
+                    i + 1
+                ));
+            };
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(format!("line {} has an empty name before `=`", i + 1));
+            }
+            // A file written on Windows ends its lines with CRLF, and `str::lines` splits on `\n`
+            // while **keeping** the `\r`. A value with a stray `\r` would never match the secret it
+            // is meant to redact -- silently, which is the failure mode this whole function is
+            // arranged to avoid. (`§O-273`, `§O-301`: the third time this repository has paid for a
+            // line-ending assumption.)
+            let value = value.strip_suffix('\r').unwrap_or(value);
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            values.push(value.to_owned());
+        }
+        Ok(Self::from_values(values))
+    }
+
     /// Whether there is nothing to redact.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1071,7 +1149,84 @@ mod tests {
         assert_eq!(r.msg, "harmless", "the message must be untouched");
     }
 
-    /// Two secrets are distinguishable in the output.
+    /// **A line without `=` is refused, and the refusal names the line — `OBS-008`.**
+    ///
+    /// Not skipped. A file of secrets is one where a silent misparse means a secret is **not**
+    /// redacted and the operator has no way to notice: the server starts, the logs look right, and
+    /// the value is in them.
+    #[test]
+    fn a_dotenv_line_without_an_equals_is_refused() {
+        let err = Redactor::from_dotenv("GOOD=secret\nNOT A PAIR\n").unwrap_err();
+        assert!(
+            err.contains("line 2"),
+            "the refusal must name the line: {err}"
+        );
+        assert!(err.contains("no `=`"), "and what was wrong: {err}");
+    }
+
+    /// **An empty value is skipped rather than refused.**
+    ///
+    /// An unset variable in the file is a normal state, and `from_values` already ignores empties:
+    /// replacing the empty string would insert a marker between every character.
+    #[test]
+    fn a_dotenv_empty_value_is_skipped_not_refused() {
+        let r =
+            Redactor::from_dotenv("SET=value\nUNSET=\n").expect("an empty value is not an error");
+        assert_eq!(r.len(), 1, "only the set value is redacted");
+        let mut line = "unset is here".to_owned();
+        let replaced = r.apply(&mut line);
+        assert_eq!(
+            replaced, 0,
+            "an empty value must not be treated as a secret"
+        );
+        assert_eq!(line, "unset is here", "and the line must be untouched");
+    }
+
+    /// **A CRLF file still redacts — the `\r` does not survive into the value.**
+    ///
+    /// `str::lines` splits on `\n` and **keeps** the `\r`, so a value read from a Windows-written
+    /// file would carry a trailing `\r` and never match the secret it is meant to redact. Silently.
+    /// This is the third time this repository has paid for a line-ending assumption (`§O-273`,
+    /// `§O-301`), so it is asserted rather than assumed.
+    #[test]
+    fn a_dotenv_crlf_file_redacts() {
+        let r = Redactor::from_dotenv("TOKEN=s3cret\r\n").expect("parses");
+        assert_eq!(r.len(), 1);
+        let mut line = "the token is s3cret".to_owned();
+        assert_eq!(r.apply(&mut line), 1, "the CR must not stop the match");
+        assert_eq!(
+            line, "the token is [redacted:1]",
+            "a trailing CR must not become part of the value"
+        );
+    }
+
+    /// **Surrounding quotes are stripped; inner spaces are not.**
+    ///
+    /// Trimming the value would corrupt a secret that legitimately begins or ends with a space, and
+    /// a corrupted secret is one that is **not** redacted while appearing to be configured.
+    #[test]
+    fn a_dotenv_strips_quotes_but_not_inner_space() {
+        let r = Redactor::from_dotenv("QUOTED=\"quoted\"\nINNER=a b c\n").expect("parses");
+        assert_eq!(r.len(), 2);
+        let mut quoted = "say quoted".to_owned();
+        r.apply(&mut quoted);
+        assert_eq!(quoted, "say [redacted:1]");
+
+        let mut inner = "say a b c".to_owned();
+        r.apply(&mut inner);
+        assert_eq!(
+            inner, "say [redacted:2]",
+            "the inner spaces belong to the secret"
+        );
+    }
+
+    /// **Comments and blank lines are ignored.**
+    #[test]
+    fn a_dotenv_ignores_comments_and_blanks() {
+        let r = Redactor::from_dotenv("# a comment\n\n   \nKEY=v\n").expect("parses");
+        assert_eq!(r.len(), 1, "only the one assignment is a value");
+    }
+
     ///
     /// An operator debugging an auth failure needs to know *which* credential was
     /// used; a single `***` marker makes that unanswerable.

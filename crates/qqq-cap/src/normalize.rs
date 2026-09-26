@@ -376,8 +376,20 @@ impl fmt::Display for HostPattern {
 /// A reference to a secret, resolved without reading its value.
 ///
 /// The manifest writes `env:JWT_SIGNING_KEY`; this type records *which*
-/// environment variable that is, so the host can fetch it at the moment of use
-/// inside `qqq:secrets` — never storing it in configuration.
+/// environment variable that is, so the deployment can resolve it **once**, before the runtime
+/// starts.
+///
+/// # Why this no longer says "at the moment of use"
+///
+/// It used to: *"so the host can fetch it at the moment of use inside `qqq:secrets` — never storing
+/// it in configuration."* **§2.5 forbids that** — *"No hidden global state — No environment-variable
+/// reads, no CWD dependencies, no implicit config discovery"* — and `qqq-host`'s `host_secrets`
+/// says so explicitly: *"It does not resolve secrets from the environment … would read the
+/// environment on every call, which §2.5 forbids … this module touches no ambient state."*
+///
+/// So two doc comments described opposite mechanisms, and the one on the type that names the
+/// variable was the wrong one. A reader following it would have implemented a per-call environment
+/// read and believed they were implementing the documented design (`§O-304`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SecretRef {
     /// The logical name the guest uses, e.g. `JWT_SIGNING_KEY`.

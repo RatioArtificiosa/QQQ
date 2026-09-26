@@ -23740,4 +23740,83 @@ recorded, and the next round starts from the design question rather than from th
 
 ---
 
+## §O-304 — `OBS-008` wired, and the two doc comments that described opposite mechanisms
+
+**Found:** Phase 1, `OBS-008`. **Anchors:** `crates/qqq-serve/src/access_log.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-cap/src/normalize.rs`,
+`crates/qqq-run/tests/redact_wiring.rs`.
+
+### What `§O-303` left as a design question, and the answer the corpus already contained
+
+`§O-303` recorded that the redaction mechanism was complete and unreachable — `serve.rs` built
+`Logger::new(..)`, the empty redactor — and that the missing value was a **design decision** because
+§2.5 forbids the runtime reading the environment.
+
+The Proposal settles it, in two places read together:
+
+> **§2.5** *"No hidden global state — No environment-variable reads, no CWD dependencies, no implicit
+> config discovery."*
+>
+> **§10.3** *"Redaction is applied by the **host**, not the guest, using manifest-declared secret
+> names."*
+
+So the values must arrive **explicitly, once, before the server serves anything** — and
+`qqqai serve --redact-from <path>` is that arrival: a `NAME=value` file whose path the operator
+names. Explicit rather than discovered (§2.5), read once rather than per call, and it keeps values
+out of the process table where a command-line argument would put them.
+
+### The three consequences `§O-303` named became the design, not afterthoughts
+
+1. **An empty value is skipped, not refused** — `from_values` already ignores empties for the reason
+   its own doc gives: replacing the empty string would insert a marker between every character.
+2. **A malformed file REFUSES THE START**, naming the line. A file of secrets is one where a silent
+   misparse means a secret is *not* redacted and the operator has no signal — the server starts, the
+   logs look right, and the value is in them.
+3. **The values are never logged.** The start-up message reports the *count* and nothing else: a
+   message naming what is redacted would be the leak the redactor exists to prevent.
+
+Plus a fourth that is this repository's recurring tax: **a CRLF file would carry a `\r` into the
+value and never match the secret it is meant to redact** — silently. `str::lines` splits on `\n` and
+keeps the `\r`. That is the **third** time a line-ending assumption has cost this repository
+something (`§O-273`, `§O-301`), so it is asserted rather than assumed.
+
+### Two doc comments described opposite mechanisms
+
+`SecretRef`'s doc said the host fetches the value *"at the moment of use inside `qqq:secrets`"*.
+`host_secrets`' doc said the opposite — resolution is `qqq-cap`'s job, and a per-call environment
+read is *"which §2.5 forbids"*.
+
+**Both were in the tree, and the wrong one was on the type that names the variable.** A reader
+following it would have implemented a per-call environment read and believed they were implementing
+the documented design. Corrected, with the reason recorded in the doc itself rather than silently
+reworded — because the next reader deserves to know which of the two was wrong and why.
+
+### The test that mattered, and why the existing one could not replace it
+
+`qqq-serve/tests/access.rs` already redacts — by constructing the `Redactor` **in-process**:
+
+```ignore
+let logger = Logger::new(Format::Json, Level::Info)
+    .with_redactor(Redactor::from_values(["s3cr3t-token"]));
+```
+
+That proves the mechanism and says nothing about whether the server ever calls it. **It did not.**
+So `crates/qqq-run/tests/redact_wiring.rs` spawns the binary, passes a real file, makes a real
+request with the secret in the path, and reads a real log line.
+
+**Fault-injected by building the redactor and not attaching it**: the output showed the actual
+defect — a log line with the secret in it — and only the wiring test fired.
+
+### And the pattern, now five times
+
+**Invariant THREE — a control that is written, tested and never called — has appeared five times in
+this goal:** `AuditStream`, the exports, `recheck`, `Redactor`, and now the redaction *wiring*. Every
+one was found by asking **"who calls this?"** rather than *"does this work?"*. The existing test that
+built its own `Logger` is exactly why this one survived four rounds of looking.
+
+→ `crates/qqq-serve/src/access_log.rs`, `crates/qqq-run/src/serve.rs`,
+`crates/qqq-run/tests/redact_wiring.rs`, `crates/qqq-cap/src/normalize.rs`
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -4810,7 +4810,33 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.2 Metrics that ship by default
 - [ ] **OBS-007** Implement structured JSON logging with trace and tenant correlation.
   → §10.3 Logging
-- [ ] **OBS-008** Implement host-side redaction using manifest-declared secret names.
+- [x] **OBS-008** Implement host-side redaction using manifest-declared secret names.
+  → **Done — and the mechanism was already complete; what was missing was the call.**
+    `Redactor` (longest-first, `[redacted:N]`, empty-value guard), `Logger::with_redactor`, and
+    `emit` applying redaction *before* the format branch were all implemented and tested. `serve.rs`
+    built `Logger::new(..)` — the **empty** redactor — and `server.rs` imported four types from
+    `access_log` and omitted the fifth. §O-303 records the finding; §O-304 records the wiring.
+  → **`qqqai serve --redact-from <path>`** — a `NAME=value` file of resolved values, read **once**
+    at start-up. §2.5 forbids environment reads inside the runtime and §10.3 requires redaction to
+    be *“applied by the host, using manifest-declared secret names”*, so the values must arrive
+    explicitly; a file the operator names is explicit rather than discovered, is read once rather
+    than per call, and keeps values out of the process table where a flag would put them.
+  → **The three consequences are the design, not afterthoughts**: an empty value is *skipped*
+    (replacing `""` would insert a marker between every character); a malformed file **refuses the
+    start**, naming the line, because a silent misparse means a secret is not redacted while the
+    server looks healthy; and the start-up message reports the **count**, never a value.
+  → **Measured**: 5 parser tests + **4 tests over the real binary** in
+    `crates/qqq-run/tests/redact_wiring.rs`. **Fault-injected by building the redactor and not
+    attaching it** — the output showed the actual defect, a log line containing the secret, and only
+    the wiring test fired. The pre-existing `qqq-serve/tests/access.rs` test constructs its own
+    `Logger` in-process, so it proves the mechanism and could not have caught this.
+  → **A fourth consequence, this repository's recurring tax**: a CRLF file carries a `\r` into the
+    value and never matches the secret it is meant to redact, silently. Third time a line-ending
+    assumption has cost something here (§O-273, §O-301), so it is asserted rather than assumed.
+  → **Two doc comments described opposite mechanisms.** `SecretRef` said the host fetches *“at the
+    moment of use”*; `host_secrets` said that is *“which §2.5 forbids”*. The wrong one was on the
+    type that names the variable, so a reader following it would have implemented the forbidden
+    design. Corrected, with the reason recorded in the doc itself.
   → §10.3 Logging
 - [ ] **OBS-009** Implement automatic spans for the fifteen lifecycle steps.
   → §10.4 Distributed tracing

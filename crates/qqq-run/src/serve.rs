@@ -122,6 +122,13 @@ pub struct ServeOptions {
     /// chain-broken file refuses the start rather than being absorbed — see
     /// `GuestApp::attach_audit_file`.
     pub audit_log: Option<String>,
+    /// `--redact-from <path>` — a `NAME=value` file of secret values to redact from every line.
+    ///
+    /// `None` redacts nothing, which is the honest default: the values are not available to the
+    /// runtime by any other route (§2.5 forbids environment reads), so a server that silently
+    /// redacted *nothing* while appearing configured is the failure this flag exists to make
+    /// visible — an operator who wants redaction must supply the values.
+    pub redact_from: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -134,6 +141,7 @@ impl Default for ServeOptions {
             config: None,
             accept_limit: None,
             audit_log: None,
+            redact_from: None,
         }
     }
 }
@@ -206,6 +214,17 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             }
             "--config" => {
                 opts.config = Some(value_of(args, i, "--config")?);
+                i += 2;
+            }
+            "--redact-from" => {
+                let v = value_of(args, i, "--redact-from")?;
+                if v.is_empty() {
+                    return Err(usage("`--redact-from` needs a path").with_remediation(
+                        "pass the `NAME=value` file holding the secret values to redact, for \
+                         example `--redact-from /etc/qqq/secrets.env`",
+                    ));
+                }
+                opts.redact_from = Some(v);
                 i += 2;
             }
             "--audit-log" => {
@@ -573,7 +592,34 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
     // rather than inside `serve` so a caller could signal it; in V1 the only
     // signal is process shutdown.
     let shutdown = Shutdown::new();
-    let logger = Logger::new(Format::Human, Level::Info);
+    // §10.3: redaction is applied by the HOST, using the manifest-declared secret names. The
+    // values arrive from the file the operator named, read ONCE here -- §2.5 forbids the runtime
+    // reading the environment, and a per-call read is what `host_secrets`' own doc rules out.
+    //
+    // A failure to read or parse the file REFUSES THE START. The alternative -- serving with an
+    // empty redactor -- is a server that believes it redacts and does not, which is worse than one
+    // that never claimed to: the operator has no signal, and the secret is in the logs.
+    let logger = match &opts.redact_from {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                usage(format!("`--redact-from {path}` could not be read: {e}")).with_remediation(
+                    "point it at a readable `NAME=value` file, or remove the flag to redact nothing",
+                )
+            })?;
+            let redactor = qqq_serve::access_log::Redactor::from_dotenv(&text).map_err(|e| {
+                usage(format!("`--redact-from {path}` is malformed: {e}"))
+                    .with_remediation("each non-comment line must be `NAME=value`")
+            })?;
+            // The COUNT is reported, never the values: a start-up message naming what is redacted
+            // would be the leak the redactor exists to prevent.
+            eprintln!(
+                "redacting {} distinct secret value(s) from every log line",
+                redactor.len()
+            );
+            Logger::new(Format::Human, Level::Info).with_redactor(redactor)
+        }
+        None => Logger::new(Format::Human, Level::Info),
+    };
 
     let routes = prepared.routes;
     let guest_loaded = prepared.guest_loaded;

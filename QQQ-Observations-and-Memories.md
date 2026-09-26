@@ -25725,4 +25725,78 @@ pass · `check_xrefs` PASSED.
 
 ---
 
+## §O-337 — `§O-336`'s mechanism was WRONG, and the guard that replaced the guess
+
+**Found:** Phase 2, building the guard `§O-336` asked for. **Anchors:**
+`tools/check_fault_inject_restores.py`, `.github/workflows/ci.yml`.
+
+### The correction, and it is to my own entry
+
+`§O-336` said the corruption came from *"a restore that did not complete"* and implied a lossy restore.
+**That is wrong.** `fault_inject_wit_since.py` **verifies its restore** and returns `3` when the bytes
+differ:
+
+```python
+if io.open(full, encoding='utf-8').read() != original:
+    print(f'  RESTORE FAILED for {label}')
+    return 3
+```
+
+**And measured**: running all **eight** fault injectors and comparing **all 354 tracked files** before and
+after gives **`changed=0` for every one**. **So no fault injector leaves the tree modified** — at least
+not reproducibly.
+
+**The mechanism is therefore UNPROVEN**: an interrupted run, or a restore that never executed, is
+consistent with the evidence and so is something else entirely. **`§O-336` inferred a mechanism from a
+`git log -S` result and a plausible story, and the story was wrong.**
+
+> **A mechanism that explains the evidence is not the same as a mechanism the evidence establishes.**
+
+### The guard, and it is a *pair* rather than a re-run
+
+`tools/check_fault_inject_restores.py` takes a **snapshot** of every tracked file's digest, and a
+separate run **verifies** it:
+
+```
+--snapshot   # before the fault injectors
+--verify     # after them
+```
+
+**The first version re-ran every injector itself** — which the gate already runs — so the gate did the
+work twice and **timed out**. The pair costs **two file reads** and catches **any** checker that moves the
+tree rather than only the fault injectors.
+
+### My own anti-vacuity guard caught a bug in my own design
+
+The snapshot path first included `os.getpid()` — and `--snapshot` and `--verify` are **separate
+processes**, so `--verify` could not find what its predecessor wrote:
+
+```
+GATE TREE INCONCLUSIVE -- no snapshot; `--snapshot` must run before the checkers
+```
+
+**A comparison with no baseline certifies nothing**, and the guard **said so rather than passing.** That
+is the anti-vacuity rule this repository applies in four other checkers, firing on the checker that was
+written to enforce it.
+
+### Where it is registered, and why not everywhere
+
+**`ci.yml` only.** The bridge's own declaration says the fault injectors are a **declared divergence** —
+it never runs them — so a snapshot/verify pair there would compare a tree against itself. **A vacuous
+comparison certifies nothing**, so the checker is declared as a divergence in `entrypoint.sh` with that
+reason, and `GATE PARITY OK` accepts it.
+
+### And the snapshot lives in TEMP
+
+**Not beside the tree.** A checker whose own artefact becomes a change is a checker that **causes the
+defect it exists to catch** — which is `§O-336` in miniature.
+
+### Measured
+
+gate **91 ok / 2 failed** (both expected) · `GATE TREE AT REST -- 354 tracked file(s), none moved` ·
+self-test **4/4** · the injection fires: *"wit/qqq-clock.wit was MODIFIED and not restored"* ·
+`GATE PARITY OK` · SPDX 249 files.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

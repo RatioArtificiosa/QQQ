@@ -568,6 +568,16 @@ jobs:
       # It deliberately refuses to report success when the injected source fails
       # to *compile*: an injection that does not build proves nothing about the
       # check, which is the failure mode Observations §O-048c records.
+      # **A FAULT-INJECTION CHECKER MODIFIES THE TREE ON PURPOSE.** `02903b7` -- a commit about the
+      # MCP server -- deleted a `@since` line from `wit/qqq-clock.wit`, because the gate had run
+      # `fault_inject_wit_since` (whose INJECTION IS "remove the @since annotation") and `git add -A`
+      # took the injected state. **One missing annotation then failed three checkers.**
+      #
+      # So the tree is snapshotted before the fault injectors and verified after them. Two file reads,
+      # and it catches ANY checker that moves the tree rather than only the fault injectors.
+      - name: Snapshot the tree before the fault injectors
+        run: python tools/check_fault_inject_restores.py --snapshot
+
       - name: Prove the panic-guard check detects an unguarded host function
         run: python tools/fault_inject_guard.py
 
@@ -756,6 +766,13 @@ jobs:
 
       - name: Prove the batch-first check detects pair defects
         run: python tools/fault_inject_batch_first.py
+
+      # And the tree must be back. **This is the step that would have caught `02903b7` before it was
+      # pushed**, and it is cheap because it compares digests rather than re-running anything.
+      - name: Verify the fault injectors returned the tree
+        run: python tools/check_fault_inject_restores.py --verify
+      - name: Prove the restore check catches a checker that does not restore
+        run: python tools/check_fault_inject_restores.py --self-test
 
   # ---------------------------------------------------------------------------
   # Rust: format, lints, build, test.

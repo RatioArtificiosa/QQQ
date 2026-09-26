@@ -1058,6 +1058,12 @@ cmd_checks() {
 #   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;
 #                                          they belong to CI's Rust jobs, and this file's
 #                                          `test` command already builds and runs the suite
+#   tools/check_fault_inject_restores.py  snapshots the tree before the fault injectors and
+#                                          verifies it after — and the bridge runs NEITHER,
+#                                          so a snapshot/verify pair here would compare a tree
+#                                          against itself. A VACUOUS COMPARISON CERTIFIES
+#                                          NOTHING, which is the rule three other checkers in
+#                                          this repository already apply.
 #
 # `tools/check_wit.py` used to be on this list — the image had no `wasm-tools`, so WIT *parsing*
 # was unverified on Linux while three Python WIT checkers passed. The toolchain is now installed in

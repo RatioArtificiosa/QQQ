@@ -25660,4 +25660,69 @@ workspace green · fmt 0 · clippy 0 · **9 MCP tests in 0.07 s** · the transpo
 
 ---
 
+## §O-336 — The three failures were one missing line, and I committed it
+
+**Found:** Phase 2, diagnosing the three `fault_inject_*` failures `§O-335` pushed. **Anchors:**
+`wit/qqq-clock.wit`, `.scratch/run_gate.cmd`, `tools/fault_inject_wit_since.py`.
+
+### One omission caused all three
+
+`wit/qqq-clock.wit`'s `timezone` had **no `@since(version = 1.0.0)`**, while `resolution` immediately above
+it had one. That single line caused:
+
+| checker | its message |
+|---|---|
+| `fault_inject_wit_since` | *"the checker already fails on the pristine tree; fix that first"* |
+| `fault_inject_wit_errors` | *"injection point moved"* — its anchor is in the same files |
+| `fault_inject_batch_first` | *"injection point moved"* — likewise |
+
+### And `git log -S` traced it to my own commit
+
+```
+git log --oneline -S '@since(version = 1.0.0)' -- wit/qqq-clock.wit
+02903b7   ← the MCP commit, which has no business touching a WIT file
+be0345c
+```
+
+```
+wit/qqq-clock.wit | 1 -
+1 file changed, 1 deletion(-)
+```
+
+**My MCP commit deleted exactly one line** — the annotation — from a file it should never have touched.
+
+### The mechanism, and it is the gate
+
+`run_gate.cmd` runs **`fault_inject_wit_since`**, whose **injection is** *"remove the `@since`
+annotation"*. I ran the gate, then `git add -A` and committed —
+
+> **a restore that did not complete is indistinguishable, to `git add -A`, from a change I made.**
+
+### And the gate said `OK`
+
+Its line reads **`OK python tools/check_wit_since.py`** for a tree that checker **fails on** when run
+directly — **because the checker ran *before* the fault injection that broke the tree.**
+
+> **A gate that modifies the tree it is checking must verify the tree afterwards**, and this one reports
+> its verdicts in the order it runs them.
+
+### Two rules this earns, and the first is `§O-330`'s sharper form
+
+1. **After a gate run, `git status` before `git add`.** A file the change should not touch is a file a
+   fault injection left behind. **I checked the gate's exit code and not its effect.**
+2. **A checker that modifies its subject must restore it verifiably** — and the gate must re-check what
+   it disturbed, or report that it cannot.
+
+### The fix
+
+**One line, and it is the line that was deleted.** The gate is back to **88 ok / 2 failed, both
+expected**, and all three `fault_inject_*` checkers pass.
+
+### Measured
+
+local gate **88 ok / 2 failed** (both expected) · `check_wit_since` PASSED · all three `fault_inject_*`
+pass · `check_xrefs` PASSED.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -29,6 +29,10 @@ jobs:
     name: DCO
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # 10 min, from a measured n/a (skipped on push) on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
@@ -94,6 +98,10 @@ jobs:
   eol:
     name: Line endings
     runs-on: ubuntu-latest
+    # 10 min, from a measured 0.1 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -159,6 +167,10 @@ jobs:
   xrefs:
     name: Cross-reference integrity
     runs-on: ubuntu-latest
+    # 25 min, from a measured 3.1 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -649,6 +661,10 @@ jobs:
   wit:
     name: WIT interface validation
     runs-on: ubuntu-latest
+    # 25 min, from a measured 2.1 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -814,6 +830,10 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 45 min, from a measured 5.2 ubuntu / 6.5 macos / 9.8 windows on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -862,6 +882,10 @@ jobs:
         run: cargo build --workspace --all-features --verbose
 
       - name: test
+        # **This is the step that hung.** `d2fea05`'s ubuntu job sat here for 70+ minutes
+        # and the run never finished; a warm run is ~3-4 min. Bounded so a hang fails the
+        # step by name in 30 minutes rather than the job in six hours (`§O-355`).
+        timeout-minutes: 30
         run: cargo test --workspace --all-features --verbose
 
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
@@ -1090,6 +1114,10 @@ jobs:
   msrv:
     name: MSRV (1.97)
     runs-on: ubuntu-latest
+    # 30 min, from a measured 0.6 warm, but it builds the whole workspace cold on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -1165,6 +1193,10 @@ jobs:
   reference-app:
     name: Reference application (SRV-018)
     runs-on: ubuntu-latest
+    # 30 min, from a measured 0.7 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -1326,6 +1358,10 @@ jobs:
   supply-chain:
     name: Supply chain
     runs-on: ubuntu-latest
+    # 25 min, from a measured 0.4 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       # An explicit channel, because `@master` requires one: see the note in the
@@ -1447,6 +1483,10 @@ jobs:
   production-image:
     name: Production image (SEC-029)
     runs-on: ubuntu-latest
+    # 90 min, from a measured 3.5 cached; the bridge is ~46 min uncached on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 
@@ -1520,6 +1560,10 @@ jobs:
   fuzz-targets:
     name: Fuzz targets compile
     runs-on: ubuntu-latest
+    # 30 min, from a measured 5.8 on run 36296671757. There was
+    # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
+    # GitHub's 360-minute default instead of failing fast (`§O-355`).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 

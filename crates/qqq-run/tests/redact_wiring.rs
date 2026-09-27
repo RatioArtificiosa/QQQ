@@ -102,7 +102,10 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> String {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let out = child.wait_with_output().expect("wait");
+    // **Bounded, for the same reason as `log_format.rs`**: the child exits only after ACCEPTING a
+    // connection, so a connect loop that timed out leaves it running forever and a bare
+    // `wait_with_output()` never returns (`§O-355`).
+    let out = common::reap_bounded(child);
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

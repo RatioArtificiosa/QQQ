@@ -116,7 +116,11 @@ fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let out = child.wait_with_output().expect("wait");
+    // **Bounded, because this child exits only after ACCEPTING a connection** — and the connect loop
+    // above can time out without one, which is exactly the port race `free_port()` documents. A bare
+    // `wait_with_output()` blocks forever when that happens, and on CI that is a job that runs until
+    // GitHub's 360-minute default rather than a failing test (`§O-355`).
+    let out = common::reap_bounded(child);
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

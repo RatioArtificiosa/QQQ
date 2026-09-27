@@ -253,3 +253,70 @@ pub fn run_refused(sandbox: &Sandbox, manifest: &str, extra: &[&str]) -> String 
         String::from_utf8_lossy(&out.stderr)
     )
 }
+
+/// Reap a child **within a deadline**, killing it if it outlives one.
+///
+/// Returns the child's output and **whether it had to be killed** — the flag is what makes this
+/// testable without a test that hangs when the bound is removed (`§O-355`).
+///
+/// # What this prevents
+///
+/// `Child::wait_with_output()` has **no timeout**. Called on a child that never exits, it blocks
+/// forever — and on CI that is not a failing test, it is a job that runs until GitHub's 360-minute
+/// default. Measured: `d2fea05`'s `Rust (ubuntu-latest)` sat at the `test` step for **70+ minutes**
+/// with the run still `in_progress`, while the same job on `b141ca2` finished in **5.2 minutes**.
+///
+/// # The shape that hangs, and why it only bites on CI
+///
+/// `log_format.rs` and `redact_wiring.rs` each connected in a bounded loop and then waited
+/// **unboundedly**:
+///
+/// ```text
+/// while Instant::now() < deadline {              // 10 s to connect
+///     if let Ok(mut s) = TcpStream::connect(..) { ..; break; }
+///     sleep(50ms);
+/// }
+/// let out = child.wait_with_output().expect(..); // <- never returns if the loop timed out
+/// ```
+///
+/// The child is `qqqai serve --accept-limit 1`, which **exits only after accepting one connection**.
+/// So when the connect loop loses the port race, **nothing is accepted, the child never exits, and
+/// the wait never returns.** That race is `free_port()`'s documented gap — "between the drop and the
+/// child's bind the number is unowned" — and it is lost under CI load, which is why neither file
+/// failed on a developer machine.
+///
+/// # Why bound the wait rather than kill first
+///
+/// Because `log_format.rs` asserts on the **server's own log line** (`OBS-007`), written as the
+/// request is served. Killing immediately after the response can race that line out of existence.
+/// So a child that exits on its own is collected **with its output intact**, and only one that
+/// outlives the deadline is killed.
+pub fn reap_within(mut child: Child, deadline: Duration) -> (std::process::Output, bool) {
+    let until = Instant::now() + deadline;
+    let mut killed = false;
+    loop {
+        match child.try_wait() {
+            // **Two causes, one effect: stop waiting.** `Ok(Some(_))` is the child that finished on
+            // its own; `Err(_)` is `try_wait` itself failing, which is **not** a reason to fall
+            // through to an unbounded wait on a child we can no longer ask about — that is the very
+            // bug this helper exists to close. They share an arm because clippy is right that an arm
+            // existing only to repeat its neighbour is a place for the two to drift apart.
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if Instant::now() > until => {
+                // **Killed, and said so.** A helper that silently killed a stuck child would turn a
+                // hang into a pass with missing output, which is worse than the hang.
+                eprintln!("  the child did not exit within {deadline:?}; killing it");
+                let _ = child.kill();
+                killed = true;
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    (child.wait_with_output().expect("reap"), killed)
+}
+
+/// Reap with the module's standard deadline, discarding the kill flag.
+pub fn reap_bounded(child: Child) -> std::process::Output {
+    reap_within(child, READ_DEADLINE).0
+}

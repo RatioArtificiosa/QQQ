@@ -26868,4 +26868,142 @@ definition half**, which is the shape this register exists to catch.
 
 ---
 
+## §O-355 — The CI job that never finished: an unbounded wait sitting behind a bounded one
+
+**Found:** investigating why `d2fea05`'s `Rust (ubuntu-latest)` had not completed. **Anchors:**
+`crates/qqq-run/tests/log_format.rs`, `crates/qqq-run/tests/redact_wiring.rs`,
+`crates/qqq-run/tests/common/mod.rs`, `.github/workflows/ci.yml`.
+
+### The measurement that framed it
+
+The job sat at **step 8, `test`**, for **~70 minutes** while steps 1–7 (setup, checkout, Rust, cache,
+rustfmt, clippy, build) had all succeeded. **The same job on `b141ca2` finished in 5.2 minutes** — so this
+was ~13× normal, not a slow runner.
+
+**And nothing bounded it:** `timeout-minutes` appeared **0 times** in every workflow, so a hang burns
+GitHub's **360-minute** default. That is why "quite a long time" was 70 minutes rather than 30.
+
+### Two red herrings, named so they are not chased again
+
+- **The log returned `BlobNotFound` / HTTP 404.** That reads like a dead runner. It is not: GitHub uploads
+  a job's log **when the job completes**, so a job that has not completed has no log. The job was alive
+  and stuck, and the API's `steps` array is what said so.
+- **`--all-features` was not the cause.** CI runs `cargo test --workspace --all-features --verbose`, which
+  had never been run locally. Run locally: **`TEST_EXIT=0`**, the whole suite green. The difference was
+  not the flags.
+
+### The root cause: a bounded loop followed by an unbounded wait
+
+`log_format.rs` and `redact_wiring.rs` each did this:
+
+```text
+while Instant::now() < deadline {              // 10 s to connect -- BOUNDED
+    if let Ok(mut s) = TcpStream::connect(..) { ..; break; }
+    sleep(50ms);
+}
+let out = child.wait_with_output().expect(..); // UNBOUNDED
+```
+
+The child is **`qqqai serve --accept-limit 1`**, which **exits only after accepting one connection**. So
+when the connect loop exhausts its deadline, **nothing is accepted, the child never exits, and
+`wait_with_output()` never returns.**
+
+**The bound on the loop is what makes the failure reachable**: the loop is the only thing that would have
+produced the connection the child is waiting for. *A bounded wait followed by an unbounded one is not a
+bounded operation.*
+
+### Why it only bites on CI
+
+`free_port()` documents the gap itself: *"between the drop and the child's bind the number is unowned"*.
+Losing that race needs load, and a developer machine does not have it — which is why the file passed
+locally every time and why `common/mod.rs`'s doc already records two of these six files flaking **on
+Ubuntu** (`§O-326`).
+
+`common/mod.rs` **already avoided this** by killing the child before waiting. These two files had their
+own copies of the helper and did not.
+
+### The fix, and why it bounds rather than kills first
+
+`common::reap_within(child, deadline) -> (Output, bool)` polls `try_wait` to a deadline, kills on expiry,
+and **returns whether it had to kill**.
+
+**Killing first would have been wrong**: `log_format.rs` asserts on the **server's own log line**
+(`OBS-007`), written as the request is served, so killing immediately after the response can race that
+line out of existence. A child that exits on its own is collected **with its output intact**.
+
+### The kill FLAG is what makes it testable
+
+**The failure mode being prevented is a hang, not an assertion failure**, so a test that proved the bound
+by removing it would hang the suite — the incident rather than the test. Returning the decision instead
+lets both directions be asserted, and both be injected, **safely**:
+
+```
+run 1, sha=8cfad6d36604822e
+  INJECT A (stop setting the kill flag) -> a_child_that_never_exits_is_killed_and_the_reap_returns FAILED
+  INJECT B (always report killed)       -> a_child_that_exits_on_its_own_is_not_killed FAILED
+  RESTORED byte_identical=True   POST-RESTORE -> 2 passed
+
+run 2, on the FINAL revision, sha=94cfd017217824e1
+  INJECT A -> FAILED   INJECT B -> FAILED   RESTORED byte_identical=True   POST-RESTORE -> 2 passed
+```
+
+**And the injection was re-run, not assumed.** A clippy fix changed the file between the two runs, and
+**a source edit after an injection invalidates the injection** — the restored artifact is no longer the
+tested artifact. Re-running costs two minutes; assuming costs the guarantee.
+
+**Both directions are live.** Asserting only the first would be satisfied by `child.kill()` followed by an
+unconditional reap — the same defect mirrored.
+
+**And the test checks its own premise** (`§O-280`): a lost port race makes `serve` exit at once, leaving
+nothing to bound, so it retries on a fresh port and **fails naming the race** rather than reporting a
+bound it never exercised.
+
+### And the CI was hardened, from measurements rather than guesses
+
+`timeout-minutes` went from **0 to 11** — a job-level budget on all **10** jobs and a tighter one on the
+step that hung. Each is set from the **measured** duration of the green run, not from a guess:
+
+| job | measured | budget |
+|---|---|---|
+| `eol` | 0.1 min | 10 |
+| `supply-chain` | 0.4 min | 25 |
+| `msrv` | 0.6 min | 30 |
+| `reference-app` | 0.7 min | 30 |
+| `wit` | 2.1 min | 25 |
+| `xrefs` | 3.1 min | 25 |
+| `production-image` | 3.5 min cached | 90 |
+| `rust` | 5.2 ubuntu / 6.5 macos / 9.8 windows | 45, and **30 on `test` alone** |
+
+The step-level budget is the one that matters here: **it fails the step by name in 30 minutes rather than
+the job in six hours**, and it names `test` in the log instead of leaving a run that says `in_progress`
+and nothing else.
+
+### And adding one test file drifted a documented count — the checker caught it
+
+`audit_unsafe.py --check-doc` failed: `docs/unsafe-audit.md` records **162** `.rs` files scanned under
+`crates/`, and the scan now finds **163**, because `reap_bounded.rs` is one more file. **Nothing about
+`unsafe` changed** — the count is a property of the tree, and the tree moved.
+
+The page documents its own history of exactly this failure: *"the file count here said **85** while the
+tree held 139: true when written, never tied to the tree afterwards, and wrong in the direction that
+understates the sample."* This time the tie held, and the drift was caught **in the same round that
+caused it**. Updated to 163.
+
+**A number with a resolver is a number that tells you when it is stale** (`§O-277`). This one did.
+
+### The lesson
+
+**A deadline on one half of an operation is not a deadline on the operation.** The connect loop was
+bounded, reviewed, and correct; the wait after it had no bound at all, and the only thing that made the
+unbounded half reachable was the bounded half giving up.
+
+### Measured
+
+**~70 min** stuck → **5.2 min** on the next run · **0 → 11** `timeout-minutes` · **2** tests, **2**
+injections, **both** directions live, restore byte-identical (`94cfd017217824e1` on the final revision) ·
+`--all-features` locally **`TEST_EXIT=0`** · `reap_bounded` 2 passed · `log_format` 3 passed ·
+`redact_wiring` 4 passed · clippy clean on the pinned 1.98.1.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

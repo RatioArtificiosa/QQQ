@@ -986,6 +986,43 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p qqq-run --all-features --test lang002_bindings -- --ignored
 
+      # `LANG-003` -- "Rust project template with tests and CI".
+      #
+      # # What the scaffold produced, measured
+      #
+      # Six files, **no `wit/` tree**, and a source that defined its own `Request`/`Response`
+      # without implementing the world's export. `qqqai build` succeeded on it, and the artifact was
+      # a component that exported **nothing**:
+      #
+      #     $ wasm-tools component wit target/qqq/probe-app.component.wasm
+      #     package root:component;
+      #     world root {
+      #     }
+      #
+      # **A QQQ app is a component that exports `qqq:http/incoming-handler`.** One that exports
+      # nothing is a wasm module that happens to compile, and `qqqai serve` has nothing to call.
+      # The template's own comment said the ABI export was *"tracked separately"* (`§O-362`).
+      #
+      # It also shipped **no CI**, which is the other half of the item.
+      #
+      # # What this step runs
+      #
+      # The test scaffolds a project, runs the scaffold's **own CI steps** on it -- `cargo fmt
+      # --check`, `cargo clippy -D warnings`, `cargo test` -- and then asserts through `qqqai build`
+      # and `wasm-tools` that the artifact **exports** the handler. Running the scaffold's CI steps
+      # here is the difference between shipping a workflow and shipping a workflow that passes.
+      #
+      # The `wasm-tools` install above is its prerequisite too.
+      #
+      # # Why the budget is 20 minutes against a measured ~73 s locally
+      #
+      # Because the test drives **four** `cargo` invocations inside a project whose `target/` is in
+      # a temporary directory, so CI builds the scaffolded project's dependency tree from cold on
+      # every run. The local number is warm.
+      - name: a scaffolded project is a servable application that passes its own CI (LANG-003)
+        timeout-minutes: 20
+        run: cargo test -p qqq-run --all-features --test lang003_template -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a
@@ -1008,7 +1045,7 @@ jobs:
       #
       # **This number must be lowered, never raised.** Raising it records a step backwards.
       #
-      # # Why it is 2121 and not 2107
+      # # Why it is 2109 and not 2121
       #
       # The checker's own contract states that `--allow` "is set in `ci.yml` to the current
       # count". At `c46de27`, where 2107 was written, the count was exactly 2107 and the gate
@@ -1021,8 +1058,24 @@ jobs:
       # was skipped, so a red gate read as green. The correction is a catch-up to the
       # measured count, not a raising of the target: the target remains 0, and the distance
       # to it is now stated honestly rather than understated. Observations §O-247.
+      #
+      # # And why it went DOWN, to 2108
+      #
+      # Because the denominator was wrong. `items_in` scans text, so a `pub` declaration inside a
+      # **string literal or a comment** was counted as this crate's public API. Measured: **14**
+      # such declarations, twelve of them the scaffold templates' own `pub` items in
+      # `qqq-run/src/new.rs` and two a doc comment in `qqq-host/src/arch012.rs` quoting
+      # `pub const NAME: &str`.
+      #
+      # `mask_source` blanks string literals and comments before the scan, so **2163** declarations
+      # are counted instead of 2177, and **2108** are outstanding instead of 2122. That is a
+      # **lowering** of the allowance, which is the direction the rule requires -- and the count is
+      # now independent of what the templates contain, which it should always have been (`§O-362`).
+      #
+      # Both numbers are read from the tool: `python tools/check_api_examples.py --allow 3000`
+      # prints the table and the pair, and `--self-test` proves the counters behind them.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2121
+        run: python tools/check_api_examples.py --allow 2108
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

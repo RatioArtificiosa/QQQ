@@ -27644,4 +27644,223 @@ test **1 passed** in **24.7 s** · `ci.yml` **10 jobs, 163 steps, 0 steps with n
 
 ---
 
+## §O-362 — The scaffold built, and could not run: `world root { }`
+
+**Found:** measuring what `qqqai new` actually produces, rather than reading the template. **Anchors:**
+`crates/qqq-run/src/new.rs`, `crates/qqq-run/tests/lang003_template.rs`, `wit/app/app.wit`,
+`crates/qqq-abi/src/wit.rs`.
+
+### The measurement
+
+`qqqai new probe-app --language rust --template http` wrote **six files** — `.gitignore`,
+`Cargo.toml`, `qqq.toml`, `README.md`, `src/probe_app.rs`, `tests/smoke.rs` — and **no `wit/` tree**.
+`qqqai build` then succeeded:
+
+```text
+probe-app: target/qqq/probe-app.component.wasm (287062 bytes) for wasm32-wasip2
+```
+
+and the artifact was a component whose world was **empty**:
+
+```text
+$ qqqai inspect target/qqq/probe-app.component.wasm
+component (287062 bytes), 0 required capabilities
+This artifact imports nothing: it can reach no host capability.
+Posture: minimal
+
+$ wasm-tools component wit target/qqq/probe-app.component.wasm
+package root:component;
+world root {
+}
+```
+
+**A QQQ application is a component that exports `qqq:http/incoming-handler`.** One that exports
+nothing is a wasm module that happens to compile: `qqq-host::invoke` resolves the export by name,
+finds nothing, and `qqqai serve` has no function to call. The template's own comment knew —
+*"Closing that is the guest ABI export — the `qqq:http/incoming-handler` implementation a real
+project needs anyway — and it is tracked separately."*
+
+> **A scaffold that builds is not a scaffold that runs.**
+
+That is the worst version of this defect class, because the two commands a new user runs both say
+yes: `qqqai build` prints a byte count and exits 0, and `qqqai inspect` prints a posture word. Only
+the third command — reading the artifact's export table — says nothing is there.
+
+### And the other half of the item was simply absent
+
+`LANG-003` is *"Rust project template with **tests and CI**"*. Tests were always there (three inline
+plus a smoke test). **CI was not**: no workflow, no toolchain file, so a scaffolded project's tests
+ran only on the machine that wrote them.
+
+### The fix, and the two decisions inside it
+
+**The `wit/` tree comes from the sources of truth, not from copies.** The world is
+`include_str!("../../../wit/app/app.wit")` — the canonical file, embedded when *this crate* is
+built — and the interface is `qqq_abi::wit_source("qqq:http@1.0.0")`, the registry `qqqai schema`
+publishes. A scaffold cannot ship a stale copy of either, which is `§O-361`'s lesson applied one
+level down.
+
+**The toolchain file is the repository's own, embedded, and the CI channel is *parsed* out of it.**
+
+```rust
+const RUST_TOOLCHAIN_TOML: &str = include_str!("../../../rust-toolchain.toml");
+fn toolchain_channel() -> &'static str { /* reads `channel = "…"` out of it */ }
+```
+
+A scaffold that pinned a different channel from the runtime would reproduce `§O-121` in every
+project it creates — a lint that exists on one toolchain and not another.
+
+### And one value had to be WRITTEN, so a test holds it
+
+`LANG-002`'s test **reads** the `wit-bindgen` requirement from `examples/orders-api/Cargo.toml`,
+because a test runs inside this repository. A scaffold runs on a user's machine, where that file does
+not exist — so `new.rs` must **emit** a value, and an emitted value can drift.
+
+`the_scaffold_pins_the_same_wit_bindgen_as_the_reference_app` is the guard: it reads the constant out
+of `new.rs` and compares it with the reference application's requirement. It is **not** `#[ignore]`d —
+it is pure text, so it runs in the ordinary workspace suite.
+
+### The template keeps two layers, and the split is what makes both claims true
+
+`handle` stays a **pure function** over the template's own `Request`/`Response`; `Component` is a
+thin adapter that converts the guest ABI's request into it and back. The template's original comment
+argued for the pure layer — *"a handler written against the host ABI cannot be unit-tested without an
+instance, a grant set and a store"* — and that argument was right. **It was used to justify stopping
+one step short.** Both layers fit in the same file, and the adapter is itself testable.
+
+### And the manifest had to change with it
+
+A guest that implements the handler but whose manifest denies `http.server` cannot be served, and a
+guest whose routes are undeclared is unreachable by design (NN-5). So the `http` template now grants
+`http.server` and carries a `[server] routes` table matching the paths its own source answers. The
+other four templates grant nothing, and that is correct rather than unfinished: they are pure logic
+with no ABI export, so a grant would be a capability nothing can exercise.
+
+### Three injections, and the third is the one that matters
+
+```text
+INJECT A (no `wit/app.wit` written)
+  -> the scaffold must write `wit/app.wit`            FAILED
+INJECT B (no CI workflow written)
+  -> the scaffold must write `.github/workflows/ci.yml`  FAILED
+INJECT C (the template body reverted to the pure-lib one, world present)
+  -> the scaffolded application must EXPORT `qqq:http/incoming-handler@1.0.0`   FAILED
+RESTORED byte_identical=True  ->  1 passed, 72.76 s
+```
+
+**C is the historical defect exactly**, and it is the only injection that reaches the export
+assertion — because the `http` template cannot otherwise produce an artifact that exports nothing,
+since its source is written against the generated `exports` module. A and B fire earlier, on the file
+list.
+
+### What is honestly NOT done
+
+The other four templates — `worker`, `cli`, `lib`, `ai-tool` — remain **pure-logic libraries with no
+ABI export**. Their headers say so (*"testable without a broker"*, *"testable without a model or a
+grant"*), and `lib`'s has no entrypoint by design. Wiring them needs worlds for `qqq:queue`,
+`qqq:ai` and a CLI, and inventing those is not this item. They now carry CI and the toolchain pin,
+which is the part of `LANG-003` that is template-independent.
+
+### Measured
+
+Scaffold **6 → 11 files** (`.github/workflows/ci.yml`, `rust-toolchain.toml`, `wit/app.wit`,
+`wit/deps/qqq-http/qqq-http.wit`, and one more) · artifact **287062 → 429847 bytes** · the world went
+from `world root { }` to `export qqq:http/incoming-handler@1.0.0` · the scaffold passes
+`fmt 0`, `clippy 0`, `test 0` (**5** inline + **1** smoke) and `qqqai build 0` · **3** injections
+detected, restore byte-identical · test **1 passed** in **72.8 s**, plus the version guard in the
+ordinary suite · `ci.yml` **10 jobs, 164 steps, 0 steps with neither `run` nor `uses`**.
+
+---
+
+## §O-363 — The ratchet fired on a template's `pub` items: the denominator was counting text, not API
+
+**Found:** the `DX-015` ratchet failing on `LANG-003`, at
+`2122 outstanding, allowance 2121`. **Anchors:** `tools/check_api_examples.py`,
+`.github/workflows/ci.yml`, `crates/qqq-run/src/new.rs`, `crates/qqq-host/src/arch012.rs`.
+
+### What happened
+
+Adding `pub struct Component;` to the `http` template — **inside a Rust string literal in
+`new.rs`** — moved the reported count from 2121 to 2122 and turned the gate red.
+
+`items_in` scans a file's **text** with a regex, so a `pub` declaration inside a string literal or a
+comment was counted as this crate's public API. Measured across the workspace:
+
+| file | counted | real API | the difference |
+|---|---|---|---|
+| `qqq-run/src/new.rs` | 39 | 27 | **12** — the scaffold templates' own `pub` items |
+| `qqq-host/src/arch012.rs` | 11 | 9 | **2** — a doc comment quoting `pub const NAME: &str` |
+
+**14 declarations were being counted that are not API**, and the ratchet's denominator was inflated
+by all of them. The rule for that number is explicit — *"must be lowered, never raised"* — so
+raising it to 2122 would have recorded a step backwards to accommodate a false positive.
+
+> **A denominator is a measurement. An unmeasured one drifts in whichever direction the code
+> happens to grow, and a ratchet against it fires on the wrong thing.**
+
+The scaffolding made it visible because a template is the one place where a `pub` item is *data*
+rather than API — but the same class was already there, and `arch012.rs` had been inflating the
+count for as long as its doc comment existed.
+
+### The fix
+
+`mask_source` blanks the contents of string literals and comments before the scan. It handles raw
+strings with any number of hashes, normal strings with escapes, line and block comments, and
+**char literals** — the last of which is a bug story of its own.
+
+The count went **2177 → 2163** declarations, and outstanding **2122 → 2108**. The allowance was
+lowered from 2121 to **2108**, which is the direction the rule requires.
+
+It also makes the checker's brace tracking **exact**: a `{` or `}` inside a string can no longer
+move the `#[cfg(test)]` module depth. The old code carried a clamp for that, with a comment saying
+*"an unbalanced `}` in a string would otherwise carry the exclusion past the module's real end and
+hide real API"* — a workaround for the absence of a lexer.
+
+### And the first version of the fix removed real API
+
+The masker had **no char-literal case**, so a `'"'` in the source opened a phantom string and masked
+real code until the next `"`. Measured: it removed `wit_defines` and `wit_declares_function` from
+`qqq-host/src/arch003.rs`, which are real public functions.
+
+> **A measuring tool that removes real API is worse than the false positive it was written to
+> remove.**
+
+It was caught by **checking the instrument against the code before believing the number it
+produced** (`§O-280`): the first table said the delta was 6, and two of those six were functions
+that exist.
+
+### And one of the new self-test cases measured nothing
+
+The first fixture wrote:
+
+```rust
+pub const REAL: &str = "pub fn inside_a_plain_string() {}";
+```
+
+`PUB_DECL.search` returns the **first** match on a line, so it captured `REAL` and never reached the
+nested string. The case **passed with the mask removed** — the definition of an inert injection.
+Putting the string on a non-`pub` line (`let _s = "…";`) is what makes it fire.
+
+The injection now kills **five** cases, each with the mask removed:
+
+```text
+INJECT (remove `text = mask_source(text)`)
+  FAIL a template's struct is excluded
+  FAIL a template's fn is excluded
+  FAIL a comment's fn is excluded
+  FAIL a doc comment's quoted const is excluded
+  FAIL a plain string's fn is excluded
+RESTORED byte_identical=True  ->  SELF-TEST PASSED
+```
+
+### Measured
+
+**14** non-API declarations removed · **2177 → 2163** declarations · **2122 → 2108** outstanding ·
+allowance **2121 → 2108**, a lowering · `mask_source` handles raw strings, escapes, line and block
+comments, char literals and lifetimes · **9** new self-test cases, **5** of which fire under the
+injection · the instrument's own first version **removed two real functions**, which is how the
+char-literal case was found.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

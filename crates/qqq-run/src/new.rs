@@ -247,11 +247,11 @@ impl CommandOutput for NewOutput {
 
     fn summary(&self) -> String {
         format!(
-            "created {} ({}, {} files, {} capabilities granted)",
+            "created {} ({}, {} files, {})",
             self.directory,
             self.template,
             self.files.len(),
-            self.capabilities_granted
+            capabilities_phrase(self.capabilities_granted)
         )
     }
 
@@ -342,6 +342,21 @@ pub fn files_for(opts: &NewOptions) -> Vec<(String, String)> {
     files
 }
 
+/// `1 capability granted` / `0 capabilities granted`.
+///
+/// # Why this is a function rather than a literal inside two `format!`s
+///
+/// Because the `http` template made the **singular** reachable for the first time (`§O-362`). A
+/// scaffold that prints `1 capabilities granted` teaches the wrong thing in the first line a new
+/// user reads, and there are two places that print it.
+fn capabilities_phrase(count: usize) -> String {
+    if count == 1 {
+        "1 capability granted".to_owned()
+    } else {
+        format!("{count} capabilities granted")
+    }
+}
+
 /// The generated `qqq.toml`.
 ///
 /// # Why this file is mostly comments
@@ -349,15 +364,56 @@ pub fn files_for(opts: &NewOptions) -> Vec<(String, String)> {
 /// The manifest is the product (Proposal §5.3), and a new user's first encounter
 /// with it should teach the model rather than present an empty file. Every
 /// stanza the project might need is shown as a comment with an explanation,
-/// while the *active* configuration grants nothing.
+/// while the *active* configuration grants nothing — except for the one template
+/// that is an application, which grants the capability its own source implements.
 #[must_use]
 pub fn manifest_for(opts: &NewOptions) -> String {
+    // # Why the `http` template is the one that grants anything
+    //
+    // Because it is the one that is an application. A guest that implements the handler but whose
+    // manifest denies `http.server` cannot be served, and a guest whose routes are undeclared is
+    // unreachable by design (NN-5: nothing is discovered implicitly). A scaffold that builds and
+    // then cannot run is the defect this closes (`§O-362`).
+    //
+    // The other four templates grant nothing, and that is correct rather than unfinished: they are
+    // pure logic with no ABI export, so a grant would be a capability nothing can exercise.
+    let (granted, capability_block, server_block) = if opts.template == Template::Http {
+        (
+            1,
+            format!(
+                r"[capabilities.http]
+# This template's handler answers inbound requests, so the capability to receive one is granted.
+# Everything else stays denied: the project cannot read a file, open a socket or reach the
+# network. `{binary} why <capability>` prints the stanza that would change that.
+server = true
+",
+                binary = qqq_core::BINARY_NAME,
+            ),
+            format!(
+                r#"[server]
+# A route the guest can serve but the manifest does not declare is unreachable, so these two
+# match the paths `src/{crate_name}.rs` answers.
+routes = [
+  {{ path = "/",       methods = ["GET"], handler = "index" }},
+  {{ path = "/health", methods = ["GET"], handler = "health", auth = "none" }},
+]
+# `none`, not `deny`: a scaffold that answered only an authenticated request would need a token
+# before it did anything at all. An application holding real data should choose `deny`.
+default_auth = "none"
+"#,
+                crate_name = crate_name(&opts.name),
+            ),
+        )
+    } else {
+        (0, String::new(), String::new())
+    };
+
     format!(
         r#"# ─────────────────────────────────────────────────────────────────────────────
 # qqq.toml — the QQQ project manifest
 #
 # Everything here is explicit. Nothing is discovered implicitly.
-# Absent means DENIED: this project currently has 0 capabilities granted.
+# Absent means DENIED: this project currently has {granted}.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [package]
@@ -373,9 +429,6 @@ profile      = "release"
 reproducible = false
 
 # ── CAPABILITIES ─────────────────────────────────────────────────────────────
-# Nothing is granted yet, which is why your app cannot read a file, open a
-# socket or reach the network. That is the default, and it is the point.
-#
 # When you need something, `{binary} why <capability>` prints the exact stanza
 # to paste here, and `{binary} caps` lists what is currently granted.
 #
@@ -385,22 +438,24 @@ reproducible = false
 # Examples, commented out because you have not needed them yet:
 #
 # [capabilities.http]
-# server = true
 # client = ["api.example.com:443"]
 #
 # [[capabilities.fs]]
 # path = "/var/lib/{name}"
 # mode = "read-only"
-
+{capability_block}
 [limits]
 memory            = "128MiB"
 fuel              = 50000000
 epoch_deadline_ms = 5000
-"#,
+{server_block}"#,
+        granted = capabilities_phrase(granted),
         name = opts.name,
         language = opts.language.as_str(),
         binary = qqq_core::BINARY_NAME,
         suggests = opts.template.suggests(),
+        capability_block = capability_block,
+        server_block = server_block,
     )
 }
 
@@ -458,6 +513,130 @@ The answer includes the exact `qqq.toml` stanza to paste.
 /// committed sources and are machine-specific.
 const GITIGNORE: &str = "/target\n";
 
+/// The world a QQQ application declares, embedded from the canonical file at **compile time**.
+///
+/// # Why this is not a copy held in this source tree
+///
+/// Because a copy is a second definition of "what a QQQ app is", and a scaffold is the one place
+/// that definition reaches a user. `include_str!` reads `wit/app/app.wit` when *this crate* is
+/// built, so the bytes a scaffold writes are the bytes the runtime publishes.
+///
+/// `§O-361` is what a stale copy costs: a canonical interface the guest toolchain could not parse,
+/// while every guard in the repository stayed green.
+const APP_WORLD: &str = include_str!("../../../wit/app/app.wit");
+
+/// The repository's own toolchain pin, embedded for the same reason as the world.
+const RUST_TOOLCHAIN_TOML: &str = include_str!("../../../rust-toolchain.toml");
+
+/// The `wit-bindgen` requirement a scaffolded Rust project is given.
+///
+/// # Why this one is written out when `LANG-002`'s test reads it instead
+///
+/// `crates/qqq-run/tests/lang002_bindings.rs` reads `examples/orders-api/Cargo.toml`, because a test
+/// runs *inside* this repository. A scaffold runs on a user's machine, where that file does not
+/// exist — so the value has to be emitted, and an emitted value can drift.
+///
+/// The drift is closed by a test rather than by a comment:
+/// `the_scaffold_pins_the_same_wit_bindgen_as_the_reference_app` asserts this constant equals the
+/// reference application's requirement, so the two cannot disagree without a red build.
+const WIT_BINDGEN_REQUIREMENT: &str = "0.62";
+
+/// The channel a scaffolded project pins, parsed out of the embedded `rust-toolchain.toml`.
+///
+/// # Why it is parsed rather than written a second time
+///
+/// Because the scaffolded project's CI has to name a toolchain, and naming one by hand is a second
+/// copy of a pin. `§O-121` is what a moving toolchain costs: a lint that existed on one version and
+/// not another, a commit that was clean for three local verification passes, and a red CI run.
+fn toolchain_channel() -> &'static str {
+    const KEY: &str = "channel = \"";
+    let start = RUST_TOOLCHAIN_TOML
+        .find(KEY)
+        .expect("the embedded rust-toolchain.toml declares a channel")
+        + KEY.len();
+    let rest = &RUST_TOOLCHAIN_TOML[start..];
+    let end = rest.find('"').expect("the channel is quoted");
+    let channel = &rest[..end];
+    assert!(!channel.is_empty(), "the channel cannot be empty");
+    channel
+}
+
+/// The CI workflow a scaffolded Rust project gets.
+///
+/// # Why a scaffold ships CI at all
+///
+/// Because `LANG-003` is *"Rust project template with **tests and CI**"*, and because a project
+/// whose tests only run on the machine that wrote them is a project whose tests do not run.
+///
+/// # What it does NOT do, and why that is stated rather than left out
+///
+/// It does not run `{binary} build`. That command needs the QQQ CLI, which a user's runner does not
+/// have, and a step that installed it would be a step that fails for reasons unrelated to the
+/// user's code. `cargo build --target wasm32-wasip2` is the part of that path which needs nothing
+/// but Rust; `{binary} build` is what a developer runs locally.
+fn scaffold_ci() -> String {
+    let binary = qqq_core::BINARY_NAME;
+    format!(
+        r#"# CI for a QQQ project.
+#
+# Format, lint, test, and build for the guest target. Those four need nothing but Rust, so this
+# workflow runs anywhere. `{binary} build` is the local command: it also stages the artifact and
+# validates that it is a component, which needs the QQQ CLI installed.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # The channel is read from `rust-toolchain.toml`, which this project carries. Naming it here
+      # as well would be a second copy of a pin (`§O-121`).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "{channel}"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (warnings are errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-features
+
+      - name: build for wasm32-wasip2
+        run: cargo build --release --target wasm32-wasip2
+"#,
+        binary = binary,
+        channel = toolchain_channel(),
+    )
+}
+
+/// The `tests/smoke.rs` a scaffolded Rust project gets.
+///
+/// No `format!`: this template has no placeholders, and a `format!` with no arguments is a lint and
+/// a needless allocation.
+const SMOKE_TEST: &str = r"//! A smoke test that runs on the host, not in the sandbox.
+//!
+//! It proves the crate compiles and its pure logic behaves. Anything that
+//! touches a capability belongs in a component test, where the grant set is
+//! explicit.
+
+#[test]
+fn the_crate_builds() {
+    assert_eq!(1 + 1, 2);
+}
+";
+
 /// The language-specific source files.
 fn source_files(opts: &NewOptions, crate_name: &str) -> Vec<(String, String)> {
     match opts.language {
@@ -484,12 +663,35 @@ fn source_path_for(language: Language, crate_name: &str) -> String {
 }
 
 /// The Rust template sources.
-fn rust_sources(opts: &NewOptions, crate_name: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            "Cargo.toml".to_owned(),
-            format!(
-                r#"[package]
+/// The `Cargo.toml` a scaffolded Rust project gets.
+///
+/// # Why the `http` template carries `[dependencies]` and the others do not
+///
+/// Because `http` is the template that is a **QQQ application**: its source implements the world's
+/// exported handler, and implementing it is what `wit-bindgen` is for. The other four are pure
+/// logic — `worker`'s message type, `cli`'s argument handling, `lib`'s arithmetic, `ai-tool`'s
+/// prompt — deliberately written so they are testable without an instance, a grant set or a store.
+/// Giving them a bindings dependency they do not use would be a dependency that lies about what the
+/// project does.
+fn cargo_manifest(opts: &NewOptions, crate_name: &str) -> String {
+    let dependencies = if opts.template == Template::Http {
+        format!(
+            r#"
+[dependencies]
+# The bindings are generated from `wit/` at compile time by `generate!`.
+#
+# `macros` is required for the `generate!`/`export!` pair. Without it the error is
+# `use of unresolved module or unlinked crate exports`, which names neither the feature nor the
+# macro (`§O-147`).
+wit-bindgen = {{ version = "{WIT_BINDGEN_REQUIREMENT}", features = ["macros"] }}
+"#
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"[package]
 name    = "{name}"
 version = "0.1.0"
 edition = "2021"
@@ -516,7 +718,7 @@ path = "src/{crate_name}.rs"
 # tool. Declaring the root explicitly makes the scaffold independent of whatever
 # is above it, which is what a generated project must be.
 [workspace]
-
+{dependencies}
 [profile.release]
 opt-level = "s"
 lto       = true
@@ -527,43 +729,59 @@ lto       = true
 # no source line, and the developer's first debugging experience is reading
 # `offset 0x1a3`.
 #
-# `debug = true` is necessary and **not sufficient**: measured on this scaffold,
-# the artifact's DWARF names the Rust standard library and not `src/app.rs`,
-# because `lto = true` eliminates a crate whose symbols nothing references. The
-# template is a pure library with no exported entry point, so there is nothing
-# for the linker to keep.
+# `debug = true` is necessary and **not sufficient** for a source line in a trap:
+# `lto = true` eliminates a crate whose symbols nothing references. The `http`
+# template exports the world's handler, so its frames are kept; the four
+# pure-logic templates have no exported entry point, so theirs are not, and that
+# is a property of what they are rather than a defect to fix here.
 #
-# Closing that is the guest ABI export — the `qqq:http/incoming-handler`
-# implementation a real project needs anyway — and it is tracked separately.
-# Until then this setting is still right: it costs artifact size and buys source
-# lines for every dependency, which is where a stack overflow most often is.
-#
-# The cost is artifact size: a 14 KB component becomes roughly 265 KB. A project
-# that has measured its deploy sizes can set this to `false`.
+# The cost is artifact size. A project that has measured its deploy sizes can set
+# this to `false`.
 debug     = true
 "#,
-                name = opts.name
-            ),
-        ),
-        (format!("src/{crate_name}.rs"), rust_lib(opts)),
-        (
-            "tests/smoke.rs".to_owned(),
-            // No `format!`: this template has no placeholders, and a `format!`
-            // with no arguments is a lint and a needless allocation.
-            r"//! A smoke test that runs on the host, not in the sandbox.
-//!
-//! It proves the crate compiles and its pure logic behaves. Anything that
-//! touches a capability belongs in a component test, where the grant set is
-//! explicit.
-
-#[test]
-fn the_crate_builds() {
-    assert_eq!(1 + 1, 2);
+        name = opts.name,
+        crate_name = crate_name,
+        dependencies = dependencies,
+    )
 }
-"
-            .to_owned(),
+
+/// The Rust template sources.
+///
+/// # Why every Rust template now carries `rust-toolchain.toml` and a CI workflow
+///
+/// Because `LANG-003` is *"Rust project template with tests and CI"*. Tests were always there; CI
+/// was not, so a scaffolded project's tests ran only on the machine that wrote them.
+///
+/// The toolchain file is the repository's own, embedded — not a hand-written copy. A scaffold that
+/// pinned a different channel from the runtime would reproduce `§O-121` in every project it creates.
+fn rust_sources(opts: &NewOptions, crate_name: &str) -> Vec<(String, String)> {
+    let mut files = vec![
+        ("Cargo.toml".to_owned(), cargo_manifest(opts, crate_name)),
+        (format!("src/{crate_name}.rs"), rust_lib(opts)),
+        ("tests/smoke.rs".to_owned(), SMOKE_TEST.to_owned()),
+        (
+            "rust-toolchain.toml".to_owned(),
+            RUST_TOOLCHAIN_TOML.to_owned(),
         ),
-    ]
+        (".github/workflows/ci.yml".to_owned(), scaffold_ci()),
+    ];
+
+    // The `wit/` tree, and only for the template that has a world to declare.
+    //
+    // The interface comes from `qqq-abi`'s registry rather than from a file path, so the bytes a
+    // scaffold writes are the bytes `qqqai schema` publishes — the same source of truth, not a
+    // copy of it.
+    if opts.template == Template::Http {
+        files.push(("wit/app.wit".to_owned(), APP_WORLD.to_owned()));
+        files.push((
+            "wit/deps/qqq-http/qqq-http.wit".to_owned(),
+            qqq_abi::wit_source("qqq:http@1.0.0")
+                .expect("`qqq:http@1.0.0` is in the ABI registry, which is where this comes from")
+                .to_owned(),
+        ));
+    }
+
+    files
 }
 
 /// The generated Rust library body for a template.
@@ -588,12 +806,42 @@ fn rust_lib(opts: &NewOptions) -> String {
 }
 
 /// The `http` template body.
+///
+/// # Why this template is the one that implements the guest ABI
+///
+/// Because it is the one that is an **application**. A QQQ app is a component that exports
+/// `qqq:http/incoming-handler`; a project that exports nothing is a wasm module that happens to
+/// compile, and `qqqai serve` has nothing to call. The scaffold used to produce exactly that — a
+/// component whose `world root { }` was empty — while its own comment said the ABI export was
+/// *"tracked separately"* (`§O-362`).
+///
+/// The other four templates stay pure logic on purpose. Their own headers say so: the worker's
+/// message type is *"defined here so the logic is testable without a broker"*, and the AI tool's
+/// prompt is *"testable without a model or a grant"*. Giving them an export they do not implement
+/// would be the same defect in the other direction.
 const HTTP_SOURCE: &str = r#"//! An HTTP handler.
 //!
-//! The handler is a pure function of a request. Wiring it to a listener is the
-//! runtime's job, which is what keeps the logic testable without a socket.
+//! Two layers, and the split is the point:
+//!
+//! * [`handle`] is a **pure function** over this module's own `Request`/`Response`, so the routing
+//!   logic is unit-testable in milliseconds — no instance, no grant set, no store.
+//! * [`Component`] is the adapter the runtime actually calls. It converts the guest ABI's request
+//!   into the pure one and back.
+//!
+//! The bindings come from `wit/` via `wit-bindgen`, and `wit/app.wit` is the same world the runtime
+//! publishes — so this project is a QQQ **application**, not a wasm module that happens to compile.
 
-/// A minimal request, so this module has no dependency on the host ABI.
+wit_bindgen::generate!({
+    world: "app",
+    path: "wit",
+    generate_all,
+});
+
+use exports::qqq::http::incoming_handler::{
+    Guest, HttpError, Request as AbiRequest, Response as AbiResponse,
+};
+
+/// A minimal request, so the routing logic has no dependency on the host ABI.
 pub struct Request {
     /// The request path.
     pub path: String,
@@ -611,17 +859,63 @@ pub struct Response {
 ///
 /// # Why this takes a plain struct
 ///
-/// Because a handler written against the host ABI cannot be unit-tested
-/// without an instance, a grant set and a store. Keeping the logic pure means
-/// the interesting part is testable in milliseconds.
+/// Because a handler written against the host ABI cannot be unit-tested without an instance, a
+/// grant set and a store. Keeping the logic pure means the interesting part is testable in
+/// milliseconds.
 #[must_use]
 pub fn handle(request: &Request) -> Response {
     match request.path.as_str() {
-        "/" => Response { status: 200, body: "Hello from QQQ".to_owned() },
-        "/health" => Response { status: 200, body: "ok".to_owned() },
-        _ => Response { status: 404, body: "not found".to_owned() },
+        "/" => Response {
+            status: 200,
+            body: "Hello from QQQ".to_owned(),
+        },
+        "/health" => Response {
+            status: 200,
+            body: "ok".to_owned(),
+        },
+        _ => Response {
+            status: 404,
+            body: "not found".to_owned(),
+        },
     }
 }
+
+/// The path of an incoming request, without its query string.
+///
+/// The host hands over the full URL; the route table matches on the path alone. An authority-form
+/// target has no path, so the target itself is what the caller must match against.
+fn path_of(url: &str) -> &str {
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    let target = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => after_scheme,
+    };
+    match target.find('?') {
+        Some(i) => &target[..i],
+        None => target,
+    }
+}
+
+/// The component the runtime calls.
+pub struct Component;
+
+impl Guest for Component {
+    fn handle(req: AbiRequest) -> Result<AbiResponse, HttpError> {
+        let answer = handle(&Request {
+            path: path_of(&req.url).to_owned(),
+        });
+        Ok(AbiResponse {
+            status: answer.status,
+            headers: Vec::new(),
+            body: answer.body.into_bytes(),
+        })
+    }
+}
+
+export!(Component);
 
 #[cfg(test)]
 mod tests {
@@ -629,19 +923,55 @@ mod tests {
 
     #[test]
     fn the_root_route_greets() {
-        let r = handle(&Request { path: "/".to_owned() });
+        let r = handle(&Request {
+            path: "/".to_owned(),
+        });
         assert_eq!(r.status, 200);
         assert!(r.body.contains("QQQ"));
     }
 
     #[test]
     fn health_is_available() {
-        assert_eq!(handle(&Request { path: "/health".to_owned() }).body, "ok");
+        assert_eq!(
+            handle(&Request {
+                path: "/health".to_owned()
+            })
+            .body,
+            "ok"
+        );
     }
 
     #[test]
     fn an_unknown_route_is_404() {
-        assert_eq!(handle(&Request { path: "/nope".to_owned() }).status, 404);
+        assert_eq!(
+            handle(&Request {
+                path: "/nope".to_owned()
+            })
+            .status,
+            404
+        );
+    }
+
+    /// The query string is not part of the path, so `/health?x=1` still routes to `/health`.
+    #[test]
+    fn the_query_string_is_not_part_of_the_path() {
+        assert_eq!(path_of("https://probe.test/health?x=1"), "/health");
+        assert_eq!(path_of("https://probe.test/"), "/");
+    }
+
+    /// The adapter is exercised directly, because it is the part the runtime calls and the part a
+    /// unit test of `handle` cannot reach.
+    #[test]
+    fn the_exported_handler_answers_a_url() {
+        let answer = Component::handle(AbiRequest {
+            method: crate::qqq::http::http::Method::Get,
+            url: "https://probe.test/health".to_owned(),
+            headers: Vec::new(),
+            body: None,
+        });
+        let response = answer.expect("a routable request must be answered");
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8_lossy(&response.body), "ok");
     }
 }
 "#;
@@ -1625,12 +1955,22 @@ mod tests {
 
     // -- generated manifest ------------------------------------------------
 
-    /// **DX-002: a generated project grants nothing.** This is the safe-defaults
-    /// promise, and it is checked by parsing the generated manifest rather than
-    /// by inspecting the template string — so a template that grew a capability
-    /// would fail here regardless of how it was written.
+    /// **DX-002, restated: a generated project grants exactly what its template uses.** The
+    /// safe-defaults promise, checked by parsing the generated manifest rather than by inspecting
+    /// the template string — so a template that grew a capability would fail here regardless of how
+    /// it was written.
+    ///
+    /// # Why this is not "grants nothing"
+    ///
+    /// It was, until `§O-362`. The `http` template is a QQQ **application**: its source implements
+    /// the world's exported handler, and a guest whose manifest denies `http.server` cannot be
+    /// served. Asserting zero for every template encoded the scaffold's own defect as a contract.
+    ///
+    /// The other four are pure logic with no ABI export, so a grant there would be a capability
+    /// nothing can exercise — which is why this is per-template rather than uniform, and why it is
+    /// a stronger assertion than the one it replaces.
     #[test]
-    fn the_generated_manifest_grants_nothing_for_every_template() {
+    fn the_generated_manifest_grants_exactly_what_the_template_uses() {
         for t in Template::ALL {
             let o = NewOptions {
                 name: "app".to_owned(),
@@ -1641,10 +1981,11 @@ mod tests {
             let m = qqq_cap::manifest::Manifest::parse(&text).unwrap_or_else(|e| {
                 panic!("the {} template's manifest is invalid: {e}", t.as_str())
             });
+            let expected = usize::from(t == Template::Http);
             assert_eq!(
                 m.declared_capabilities().len(),
-                0,
-                "the {} template must grant nothing",
+                expected,
+                "the {} template must grant {expected}",
                 t.as_str()
             );
         }
@@ -1664,7 +2005,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("the {} manifest is invalid: {e}", l.as_str()));
             assert_eq!(m.build.language, l.as_str());
             assert_eq!(m.package.name, "app");
-            assert_eq!(m.declared_capabilities().len(), 0);
+            // The default template is `http`, which grants the one capability its own source
+            // implements. The per-template contract is asserted above; this test's subject is the
+            // **language** field, and the manifest must stay valid with a capability block present.
+            assert_eq!(m.declared_capabilities().len(), 1);
         }
     }
 
@@ -1995,7 +2339,8 @@ mod tests {
         };
         let out = create(&o, &parent).expect("must create");
         assert_eq!(out.project, "myapp");
-        assert_eq!(out.capabilities_granted, 0);
+        // The default template is `http`, which grants the capability its source implements.
+        assert_eq!(out.capabilities_granted, 1);
         assert!(!out.git_initialised, "--no-git must be honoured");
         assert!(out.warning.is_none(), "rust is buildable");
 
@@ -2042,7 +2387,8 @@ mod tests {
             ..Default::default()
         };
         let out = create(&o, &parent).expect("--force must proceed");
-        assert_eq!(out.capabilities_granted, 0);
+        // The default template is `http`, which grants the capability its source implements.
+        assert_eq!(out.capabilities_granted, 1);
         let written = std::fs::read_to_string(parent.join("taken").join("qqq.toml")).unwrap();
         assert!(written.contains("[package]"), "the file must be replaced");
         let _ = std::fs::remove_dir_all(&parent);
@@ -2090,15 +2436,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    /// The summary names the count in the singular when it is one.
+    ///
+    /// # Why the singular is asserted and not just the number
+    ///
+    /// Because the `http` template made it reachable for the first time (`§O-362`), and the first
+    /// line a new user reads said `1 capabilities granted`. A test that only checked the numeral
+    /// would have passed while the sentence was wrong.
     #[test]
-    fn the_summary_reports_zero_capabilities() {
+    fn the_summary_reports_the_granted_count_in_the_singular() {
         let o = opts("app");
         let parent = temp_dir("summary");
         let out = create(&NewOptions { no_git: true, ..o }, &parent).expect("must create");
         let s = out.summary();
-        assert!(s.contains("0 capabilities granted"), "got: {s}");
+        assert!(s.contains("1 capability granted"), "got: {s}");
+        assert!(
+            !s.contains("capabilities"),
+            "the plural must not appear: {s}"
+        );
         let j = out.to_json();
-        assert_eq!(j["capabilities_granted"], 0);
+        assert_eq!(j["capabilities_granted"], 1);
         assert!(j["next"].as_str().unwrap().contains("run"));
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -2322,21 +2679,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The created manifest must be valid and grant nothing, exactly as `new`'s
-    /// does — both commands generate from the same code, so this is a check
-    /// that the sharing actually happened.
+    /// The created manifest must be valid and grant what `new`'s does — both commands generate from
+    /// the same code, so this is a check that the sharing actually happened.
+    ///
+    /// # Why "grant what `new`'s does" replaced "grant nothing"
+    ///
+    /// Because `init` shares `manifest_for` with `new`, so the grant follows the **template**, which
+    /// is the user's declaration of intent (`--template lib` grants nothing). Asserting zero here
+    /// would have been asserting that `init` and `new` disagree, which is the opposite of this
+    /// test's purpose.
     #[test]
-    fn init_writes_a_valid_zero_capability_manifest() {
+    fn init_writes_a_valid_manifest_matching_new() {
         let dir = existing_dir(
             "init-manifest-zero",
             &[("Cargo.toml", "[package]\nname = \"a\"\n")],
         );
         let out = init(&dir, &InitOptions::default()).expect("must init");
-        assert_eq!(out.capabilities_granted, 0);
+        assert_eq!(out.capabilities_granted, 1);
 
         let text = std::fs::read_to_string(dir.join("qqq.toml")).unwrap();
         let m = qqq_cap::manifest::Manifest::parse(&text).expect("generated manifest must parse");
-        assert_eq!(m.declared_capabilities().len(), 0);
+        assert_eq!(m.declared_capabilities().len(), 1);
         assert_eq!(m.build.language, "rust");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -131,6 +131,112 @@ def crates() -> list[Path]:
     return sorted(p for p in CRATES.iterdir() if (p / "src").is_dir())
 
 
+def mask_source(text: str) -> str:
+    """Blank the contents of string literals and comments, preserving line structure.
+
+    # Why this exists, and what it was measured against
+
+    `items_in` scans **text**, so a `pub` declaration inside a string literal was counted as this
+    crate's public API. Measured before the fix:
+
+    | file | counted | real API |
+    |---|---|---|
+    | `qqq-run/src/new.rs` | 39 | 27 — the other **12** are the scaffold templates' own `pub` items |
+    | `qqq-host/src/arch012.rs` | 11 | 9 — the other **2** are a doc comment quoting `pub const NAME: &str` |
+
+    **14 declarations across the workspace were counted that are not API**, and the denominator the
+    ratchet is measured against was inflated by all of them.
+
+    # Why the first version of this function was wrong, and how
+
+    It had no **char-literal** case, so a `'"'` in the source opened a phantom string and masked
+    real code until the next `"`. Measured: it removed `wit_defines` and `wit_declares_function`
+    from `qqq-host/src/arch003.rs`, which are real public functions.
+
+    > **A measuring tool that removes real API is worse than the false positive it was written to
+    > remove.**
+
+    The instrument was checked against the code before the number it produced was believed
+    (`§O-280`). The char-literal case is what the check found.
+
+    # Why comments are masked too
+
+    Because a `"` inside a comment would otherwise open a phantom string, and because a doc comment
+    that *quotes* a declaration is prose rather than API. `fences_in` is deliberately left on the
+    **unmasked** text: doc comments are where doctests live, so masking them there would erase the
+    thing that function counts.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        # Line comment, which covers `///` and `//!` as well.
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        # Block comment.
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            out.append("  ")
+            i += 2
+            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+            out.append("  ")
+            i += 2
+            continue
+        # Raw string: `r"..."` or `r#"..."#` with any number of hashes.
+        if c == "r" and i + 1 < n and text[i + 1] in ('"', "#"):
+            j = i + 1
+            hashes = 0
+            while j < n and text[j] == "#":
+                hashes += 1
+                j += 1
+            if j < n and text[j] == '"':
+                closer = '"' + "#" * hashes
+                end = text.find(closer, j + 1)
+                end = n if end == -1 else end + len(closer)
+                for k in range(i, end):
+                    out.append("\n" if text[k] == "\n" else " ")
+                i = end
+                continue
+        # Char literal: `'x'`, `'\n'`, `'"'` -- but NOT a lifetime (`'a`, `'static`).
+        if c == "'":
+            j = i + 1
+            if j < n and text[j] == "\\":
+                j += 1
+                while j < n and text[j] != "'":
+                    j += 1
+                if j < n:
+                    out.append(" " * (j + 1 - i))
+                    i = j + 1
+                    continue
+            elif j + 1 < n and text[j + 1] == "'":
+                out.append("   ")
+                i += 3
+                continue
+            # Otherwise it is a lifetime: copy the `'` verbatim and carry on.
+        # Normal string, with escapes.
+        if c == '"':
+            out.append(" ")
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+            out.append(" ")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def items_in(text: str) -> list[tuple[str, str]]:
     """Public declarations in `text`, excluding anything inside a `#[cfg(test)]` module.
 
@@ -139,7 +245,15 @@ def items_in(text: str) -> list[tuple[str, str]]:
     A `#[cfg(test)] mod tests { ... }` block contains `pub fn` declarations that are not API. The
     first version of this file counted them, which inflated the denominator. Tracking the brace
     depth after the attribute is what removes them, and a regex cannot.
+
+    # And why the text is masked first
+
+    Because string literals and comments contain declarations that are not API — the scaffold
+    templates in `qqq-run/src/new.rs` are the largest instance, at twelve. Masking also makes the
+    brace tracking above exact: a `{` or `}` inside a string can no longer move the test-module
+    depth, which is the failure the clamp below was guarding against.
     """
+    text = mask_source(text)
     out: list[tuple[str, str]] = []
     lines = text.split("\n")
     i = 0
@@ -422,6 +536,68 @@ mod tests {
     expect("a test helper is excluded", "helper" in names, False)
     expect("a test fixture is excluded", "Fixture" in names, False)
     expect("the real item is kept", "real" in names, True)
+
+    # String literals and comments: a `pub` declaration in them is not this crate's API.
+    #
+    # The fixture is the shape that was measured, not a shape invented for the test: `new.rs`
+    # carries twelve `pub` items inside the scaffold templates, and `qqq-host/src/arch012.rs` has a
+    # doc comment that *quotes* `pub const NAME: &str`.
+    with_strings = '''
+pub fn real_one() {}
+
+const TEMPLATE: &str = r#"pub struct Fake {
+    pub fn also_fake() {}
+}
+"#;
+
+// A comment that mentions pub fn in_comment() {}
+
+/// A doc comment quoting `pub const QUOTED: &str = "x"`.
+pub fn real_two() {}
+
+pub const REAL: u32 = 1;
+
+fn not_public() {
+    let _s = "pub fn inside_a_plain_string() {}";
+}
+'''
+    names = [n for _, n in items_in(with_strings)]
+    expect("the real items are kept", names.count("real_one") + names.count("real_two"), 2)
+    expect("a real const is kept", "REAL" in names, True)
+    expect("a template's struct is excluded", "Fake" in names, False)
+    expect("a template's fn is excluded", "also_fake" in names, False)
+    expect("a comment's fn is excluded", "in_comment" in names, False)
+    expect("a doc comment's quoted const is excluded", "QUOTED" in names, False)
+    # # Why the plain string sits on a `let` and not on a `pub const`
+    #
+    # The first version wrote `pub const REAL: &str = "pub fn inside_a_plain_string() {}";`, and
+    # `PUB_DECL.search` returns the **first** match on a line -- so it captured `REAL` and the
+    # nested string was never reached. **The case passed with the mask removed**, which means it
+    # measured nothing. Putting the string on a non-`pub` line is what makes it fire (`§O-280`).
+    expect("a plain string's fn is excluded", "inside_a_plain_string" in names, False)
+
+    # The char-literal case, which is the bug the first version of `mask_source` had: a `'"'` opened
+    # a phantom string and masked real code until the next `"`. Measured on the real tree, it
+    # removed two public functions from `qqq-host/src/arch003.rs`.
+    with_char_literal = """
+pub fn before_the_quote() -> char { '"' }
+
+pub fn after_the_quote() {}
+"""
+    names = [n for _, n in items_in(with_char_literal)]
+    expect("a char literal does not open a string", "after_the_quote" in names, True)
+    expect("and the item before it survives", "before_the_quote" in names, True)
+
+    # And the same shape with a lifetime, so the char-literal rule does not eat `'a`.
+    with_lifetime = """
+pub struct Borrowed<'a> {
+    pub text: &'a str,
+}
+
+pub fn after_the_lifetime() {}
+"""
+    names = [n for _, n in items_in(with_lifetime)]
+    expect("a lifetime is not a char literal", "after_the_lifetime" in names, True)
 
     # Fences: compiling versus not.
     fences = """

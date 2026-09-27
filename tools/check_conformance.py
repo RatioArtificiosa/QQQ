@@ -298,6 +298,42 @@ def validate(fixture: dict, *, languages: list[str], supported: str,
         if not case.get("summary"):
             problems.append(f"case `{cid}` has no `summary`")
 
+        # `kind` separates an obligation the FIXTURE defines from one a built guest is RUN against
+        # (`TEST-016`). A definition case names the checker that enforces it; an execution case names
+        # the runner that executes it. These are different questions -- *is this enforced* versus
+        # *does a guest pass this* -- and a case that answers both would be a case that answers
+        # neither clearly.
+        #
+        # **The default is `definition`**, so the six cases that predate the field keep their meaning
+        # and a forgotten `kind` cannot silently become an execution case that nothing runs. The
+        # default is the safe one for the same reason a missing `enforced_by` is an error below.
+        kind = case.get("kind", "definition")
+        if kind not in ("definition", "execution"):
+            problems.append(
+                f"case `{cid}` has `kind` `{kind}`, which is neither `definition` nor `execution`"
+            )
+        if kind == "execution":
+            runner = case.get("runner")
+            if not runner:
+                problems.append(
+                    f"case `{cid}` is an execution case with no `runner`. **An obligation nothing "
+                    "executes is enforced by nobody** -- the same defect as a checker no gate "
+                    "invokes, one level down."
+                )
+            elif not (ROOT / runner).exists():
+                problems.append(f"case `{cid}` is run by `{runner}`, which does not exist")
+            if case.get("enforced_by"):
+                problems.append(
+                    f"case `{cid}` is an execution case and also names `enforced_by`. A case is one "
+                    "or the other: claiming both makes it look enforced twice while it may be run "
+                    "once, or not at all."
+                )
+            continue
+        if case.get("runner"):
+            problems.append(
+                f"case `{cid}` is a definition case and names `runner`. A case is one or the other."
+            )
+
         # 1. THE OBLIGATION IS ENFORCED, IN BOTH GATES.
         script = case.get("enforced_by")
         if not script:
@@ -485,6 +521,23 @@ def self_test(fixture: dict, ctx: dict) -> int:
     f["cases"] = []
     injections.append(("no cases at all (vacuity)", f, ctx))
 
+    # `TEST-016`. An execution case is run by a `runner`, not enforced by a checker, so the rule
+    # that catches an unenforced definition case does not reach it. This is the case that would
+    # otherwise be an obligation the fixture reports and nothing executes.
+    f = copy.deepcopy(fixture)
+    for case in f["cases"]:
+        if case.get("kind") == "execution":
+            del case["runner"]
+            break
+    injections.append(("an execution case with no runner", f, ctx))
+
+    f = copy.deepcopy(fixture)
+    for case in f["cases"]:
+        if case.get("kind") == "execution":
+            case["enforced_by"] = "tools/check_wit.py"
+            break
+    injections.append(("an execution case claiming a checker as well as a runner", f, ctx))
+
     f = copy.deepcopy(fixture)
     f["languages"].pop()
     injections.append(("a language missing from the matrix", f, ctx))
@@ -543,7 +596,12 @@ def main() -> int:
     print(f"  supported   : {supported} (from build::toolchain_for's own guard)")
     print(f"  capabilities: {len(packages)} package(s) under wit/, "
           f"{len(fixture.get('capabilities', []))} in the fixture")
-    print(f"  cases       : {len(fixture.get('cases', []))}, each naming its enforcing checker")
+    _cases = fixture.get("cases", [])
+    _definition = sum(1 for c in _cases if c.get("kind", "definition") == "definition")
+    print(
+        f"  cases       : {len(_cases)} ({_definition} definition, each naming its enforcing "
+        f"checker; {len(_cases) - _definition} execution, each naming its runner)"
+    )
     print(f"  exceptions  : {len(fixture.get('exceptions', []))}")
     print("-" * 60)
 

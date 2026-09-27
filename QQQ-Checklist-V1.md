@@ -4352,10 +4352,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
     status from `build::toolchain_for`'s own guard so the fixture cannot drift from the code, and
     requires every obligation's checker to be invoked in **both** gates. Wired into `ci.yml` and
     `docker/entrypoint.sh`, with **9 fault injections**, every one detected.
-    **What is missing is execution**: no conformance case is run *against a built guest*, because no
-    guest toolchain exists for four of the five languages. That needs the guest-execution runner
-    (`TEST-016`) and `LANG-009`…`LANG-040`. **Marking this `[x]` would claim the execution half from
-    the definition half.**
+    **The execution half now EXISTS for Rust and still does not for the other four.** `TEST-016`
+    landed as `crates/qqq-run/tests/conformance_exec.rs`: the fixture gained a `kind`
+    (`definition`|`execution`), two execution cases (`component-layer`, `qqq-imports-all-mapped`)
+    are run against the reference guest through `qqqai build` + `qqqai inspect --json`, wired into
+    the `rust` CI job, with a **non-ignored** drift guard that fails when the fixture declares an
+    execution case nothing implements. `check_conformance.py` now refuses an execution case with no
+    `runner`, or one that claims a checker as well. **What keeps this `[~]` is breadth, not
+    absence**: `LANG-009`…`LANG-040` are the four other languages, and a suite four fifths of which
+    is unexecuted reports gaps rather than results. **Marking this `[x]` would claim a
+    cross-language result from one language's pass.**
   → **And building it found a checker nobody had watched fail**: `tools/check_wit.py` had neither a
     `--self-test` nor a `fault_inject_*.py` harness, where three of the six WIT-surface checkers use a
     harness and two use `--self-test`. The missing half was added — it injects one missing semicolon,
@@ -4371,6 +4377,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **TEST-015** Implement the dead-code and unused-capability detector ("this app declares a capability it never uses").
   → §7.1 What we are defending, precisely
 - [ ] **TEST-016** Implement the conformance-suite runner as an independently usable tool.
+  → Partial: the runner **exists and executes**: `crates/qqq-run/tests/conformance_exec.rs` reads `conformance/suite.json`, filters `kind: execution`, and runs each case against the reference guest built by `qqqai build` and read by `qqqai inspect --json` -- wired into the `rust` CI job, with a non-ignored drift guard that fails when the fixture declares an execution case nothing implements. Two cases (`component-layer`, `qqq-imports-all-mapped`), both fault-injected and observed to fail the assertion. **What is not built is the standalone surface**: it is usable through `cargo test --test conformance_exec -- --ignored`, not as `qqqai conformance`, so it is not yet an *independently usable tool* in the sense the item asks for, and it runs the Rust row only.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **TEST-017** Publish the test-runner documentation with per-language examples.
   → §11.3 Documentation as a product surface

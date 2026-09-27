@@ -81,39 +81,59 @@
   "cases": [
     {
       "id": "wit-parses",
+      "kind": "definition",
       "capability": "core",
       "summary": "every wit/ interface parses, so every language can bind to it",
       "enforced_by": "tools/check_wit.py"
     },
     {
       "id": "wit-embedded-in-runtime",
+      "kind": "definition",
       "capability": "core",
       "summary": "every wit/ file is embedded in qqq-abi, so the runtime can serve what a language binds to",
       "enforced_by": "tools/check_wit_bindings.py"
     },
     {
       "id": "wit-versioned",
+      "kind": "definition",
       "capability": "core",
       "summary": "every interface carries @since, so a binding cannot silently track a moving contract",
       "enforced_by": "tools/check_wit_since.py"
     },
     {
       "id": "wit-typed-errors",
+      "kind": "definition",
       "capability": "core",
       "summary": "every fallible call returns a typed error, so a binding does not decode a status code",
       "enforced_by": "tools/check_wit_errors.py"
     },
     {
       "id": "wit-no-ambient-state",
+      "kind": "definition",
       "capability": "core",
       "summary": "no hidden global state, so a binding cannot read configuration the manifest never granted",
       "enforced_by": "tools/check_no_ambient.py"
     },
     {
       "id": "wit-style",
+      "kind": "definition",
       "capability": "core",
       "summary": "the six WIT style rules of Proposal 6.3, so five hand-written bindings stay comparable",
       "enforced_by": "tools/check_wit_style.py"
+    },
+    {
+      "id": "component-layer",
+      "kind": "execution",
+      "capability": "core",
+      "summary": "the artifact is a component rather than a core module, so the runtime can instantiate what the toolchain produced",
+      "runner": "crates/qqq-run/tests/conformance_exec.rs"
+    },
+    {
+      "id": "qqq-imports-all-mapped",
+      "kind": "execution",
+      "capability": "core",
+      "summary": "every qqq: interface the guest imports maps to a capability, so no import reaches past the capability model",
+      "runner": "crates/qqq-run/tests/conformance_exec.rs"
     }
   ],
   "exceptions": []

@@ -126,6 +126,7 @@ PARTIAL = {
     "CON-007": "WIT packages are semver'd `@1.0.0`; the `@since` policy is not enforced.",
     "FND-008": "branch protection is a repository setting, not a file; it is not verifiable from inside the tree.",
     "FND-010": "no release-engineering pipeline yet: versioning, changelog generation and artifact signing hooks are unbuilt.",
+    "TEST-016": "the runner **exists and executes**: `crates/qqq-run/tests/conformance_exec.rs` reads `conformance/suite.json`, filters `kind: execution`, and runs each case against the reference guest built by `qqqai build` and read by `qqqai inspect --json` -- wired into the `rust` CI job, with a non-ignored drift guard that fails when the fixture declares an execution case nothing implements. Two cases (`component-layer`, `qqq-imports-all-mapped`), both fault-injected and observed to fail the assertion. **What is not built is the standalone surface**: it is usable through `cargo test --test conformance_exec -- --ignored`, not as `qqqai conformance`, so it is not yet an *independently usable tool* in the sense the item asks for, and it runs the Rust row only.",
     "FND-012": "`wasm-tools` is used by the test fixtures, but no bootstrap script installs it.",
     "LIC-002": "no legal review has been obtained; this is an external action, not a repository artefact.",
 }

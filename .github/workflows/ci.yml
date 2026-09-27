@@ -1023,6 +1023,22 @@ jobs:
         timeout-minutes: 20
         run: cargo test -p qqq-run --all-features --test lang003_template -- --ignored
 
+      # `TEST-016`. `conformance/suite.json` defines obligations and `check_conformance.py` proves
+      # each one's checker runs in both gates -- which is all about the FIXTURE. None of it runs a
+      # case against a built guest, so `LANG-004` (*"Rust conformance-suite pass"*) had nothing to
+      # pass. This is the execution half: it builds the reference guest and runs every case the
+      # fixture marks `kind: execution` against the runtime's own reading of the artifact.
+      #
+      # # Why it runs here rather than in the checker job
+      #
+      # It drives `qqqai build` and `qqqai inspect`, so it needs the binary and the guest toolchain.
+      # The checker job has neither. Its **fast** half -- the guard that fails when the fixture
+      # declares an execution case nothing implements -- is *not* ignored, so it also runs in the
+      # workspace suite on every platform; only this half, which compiles a guest, is `--ignored`.
+      - name: every conformance execution case passes against the Rust guest (TEST-016)
+        timeout-minutes: 20
+        run: cargo test -p qqq-run --all-features --test conformance_exec -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a

@@ -28162,4 +28162,83 @@ makes a run *reportable*, which the execution half will need and did not have.
 
 ---
 
+## §O-367 — The conformance suite had a definition half and no execution half, and a matrix of obligations is not a result
+
+**Found:** Phase 3 of the build goal, taking `TEST-016`. **Anchors:** `conformance/suite.json`,
+`tools/check_conformance.py`, `crates/qqq-run/tests/conformance_exec.rs`,
+`.github/workflows/ci.yml`, `.scratch/inject_t16.py`.
+
+### What the suite could and could not say
+
+`conformance/suite.json` and `tools/check_conformance.py` make three of Proposal §2.4's commitments
+checkable, and all three are about the **fixture**: every obligation names the checker enforcing it,
+that checker runs in **both** gates, and every gap carries an owner and a date. Measured before this
+change: **six cases, all `definition`**, and no case executed against anything.
+
+`TEST-010` recorded the consequence itself — *"a matrix of gaps is not a published parity result"* —
+and `LANG-004` (*"Rust conformance-suite pass"*) had nothing to pass. **An obligation that is
+enforced is not an obligation that is met.**
+
+The fix is a `kind` field rather than a second document: `definition` (a checker enforces it) or
+`execution` (a runner runs it). One fixture, two questions.
+
+### The guard and the thing it guards cannot share a prerequisite
+
+The execution cases need a built guest and the binary, so they are `#[ignore]`d and run by the
+`rust` CI job. The **drift guard** — *the fixture declares an execution case nothing implements* —
+needs neither, so it is not ignored and runs in the workspace suite on every platform, in
+milliseconds.
+
+That split is the point. Without the guard, adding a case to the fixture would create an obligation
+reported by the fixture and executed by nobody, which is **the same defect as a checker no gate
+invokes, one level down** (`§O-365`). The guard is what makes the two halves impossible to drift.
+
+    A GUARD THAT SHARES A PREREQUISITE WITH ITS SUBJECT RUNS ONLY WHEN THE SUBJECT RUNS, WHICH IS
+    EXACTLY WHEN IT IS TOO LATE.
+
+### The vacuity guard is not the drift guard, and the reason is the split
+
+The `--ignored` test filters `kind: execution` and loops. If the fixture lost its execution cases,
+that loop would run zero times and **pass**, reporting a green `TEST-016`. The drift guard would
+catch it — but the drift guard runs in a *different* test, and the two are invoked separately, so in
+the job that runs `--ignored` there is nothing else. Hence an explicit non-empty assertion in the
+slow test as well. Two guards, one subject, different invocation paths.
+
+### The injection answered a question the green did not
+
+The slow half passed in **0.74 s**, and the built artifact's mtime was hours old — so it was not
+obvious the loop had run at all. Rather than reason about it, the two cases were fault-injected:
+`component-layer` was made to expect `core-module`, and `qqq-imports-all-mapped` was made to filter
+on `wasi:` (which a normal guest imports a dozen of, unmapped). The result:
+
+    2 of the fixture's execution cases failed against the Rust guest
+
+**Both** cases failed, which is the measurement that settles it — the loop ran twice and both
+results were real. A green says a loop finished; only an injection says the loop had a body.
+
+### A field validated in one direction only is half a rule
+
+`check_conformance.py` gained the `kind` rule, and the two ways it can be wrong are not the same
+rule: an execution case with **no runner** is an obligation nothing executes, and a case claiming
+**both** a runner and a checker makes a case look enforced twice while it may be run once, or not at
+all. Both are self-test injections now, and both are detected. **A validator that checks only that a
+required field is present cannot see a case that answers two questions and therefore neither.**
+
+### Measured
+
+Fixture cases **6 -> 8** (6 definition + 2 execution) · `check_conformance.py` **9 -> 11** injections,
+every one detected · `yamlcheck`: **10 jobs, 171 steps, 0 orphans** · gate parity **OK** · both
+injections **compiled** and failed at the assertion (`.scratch/inject_t16.py`,
+`VERIFIED RESTORED`), then passed again.
+
+### What this does NOT do
+
+It runs the **Rust row only**, and it is usable through
+`cargo test --test conformance_exec -- --ignored` rather than as `qqqai conformance`. So `TEST-016`
+is annotated **`→ Partial:`**, not ticked, and `TEST-010` stays `[~]` for **breadth, not absence**:
+`LANG-009`…`LANG-040` are the four other languages, and a suite four fifths of which is unexecuted
+reports gaps rather than results.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

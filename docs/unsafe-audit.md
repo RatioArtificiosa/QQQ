@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **164** |
+| `.rs` files scanned under `crates/` | **165** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -38,10 +38,11 @@ ceiling. The third is **143 → 146**, from three files in one session:
 `crates/qqq-run/src/style.rs`. The fourth is **146 → 147**, from
 `crates/qqq-run/tests/worker_pool.rs`.
 
-The most recent is **163 → 164**, from `crates/qqq-run/tests/lang001_rust_guest.rs`. It was caught
-by the **local** full gate **before** the commit rather than by CI after it, and that is the one
-difference worth recording: the four above were found by CI because the whole gate had not been run
-locally, and this one was found because it was.
+The most recent is **163 → 164**, from `crates/qqq-run/tests/lang001_rust_guest.rs`, and then
+**164 → 165**, from `crates/qqq-run/tests/lang002_bindings.rs`. Both were caught by the **local**
+full gate **before** the commit rather than by CI after it, and that is the one difference worth
+recording: the four above were found by CI because the whole gate had not been run locally, and
+these two were found because it was.
 
 **Four drifts in one working period, and every one was caught by CI rather than locally.** That
 is the mechanism working, and it is also a fact worth stating plainly: this number changes

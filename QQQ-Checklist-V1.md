@@ -4023,7 +4023,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **LANG-001** Rust toolchain integration: `wasm32-wasip2` build path, verified end to end.
   → Done: `qqqai build` drives `cargo build --target wasm32-wasip2` over `examples/orders-api` and emits `target/qqq/orders-api.component.wasm`. `crates/qqq-run/tests/lang001_rust_guest.rs` asserts the artifact's eight-byte preamble is `0d 00 01 00`, the component-model encoding, and not `01 00 00 00`, a core module — the two share the `\0asm` magic, so asserting `\0asm` alone would pass on exactly the failure this item exists to catch. The `rust` CI job runs it on all three platforms via `--ignored`.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-002** Rust bindings generated from `wit/` via `wit-bindgen`.
+- [x] **LANG-002** Rust bindings generated from `wit/` via `wit-bindgen`.
+  → Done: `crates/qqq-run/tests/lang002_bindings.rs` vendors **every** `wit/*.wit` into a probe and builds it with the `wit-bindgen` requirement read from `examples/orders-api/Cargo.toml`; the artifact imports `qqq:crypto/hashing@1.0.0`, which `qqqai inspect --json` maps to the `crypto.hash` capability. It found the pin at `0.44` could **not** bind the canonical tree at all — `invalid character in identifier '2'` at `wit/qqq-crypto.wit:118` (`aes-256-gcm`), a grammar `wit-parser` 0.236.1 refused and 0.259.0 accepts — while `tools/check_wit.py` stayed green because `wasm-tools` bundles the **newer** parser. Bumped to `0.62`; `examples/orders-api` builds and its 57 tests pass on the new pin.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-003** Rust project template with tests and CI.
   → §6.10 Language toolchains — one per target language

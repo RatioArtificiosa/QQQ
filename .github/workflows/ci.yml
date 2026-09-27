@@ -948,6 +948,44 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p qqq-run --all-features --test lang001_rust_guest -- --ignored
 
+      # `LANG-002` -- "Rust bindings generated from `wit/` via `wit-bindgen`".
+      #
+      # # What it found the first time it ran
+      #
+      # The test vendors **every** `wit/*.wit` into a probe and builds it with the pinned
+      # `wit-bindgen`. It failed:
+      #
+      #     invalid character in identifier '2'
+      #        --> ...\wit\deps\qqq-crypto\qqq-crypto.wit:118:5
+      #         |     aes-256-gcm,
+      #
+      # **`wit-bindgen` could not generate bindings from the canonical `wit/` at all.** The pin was
+      # `0.44`, whose `wit-parser` is 0.236.1, which requires every hyphen-separated segment of an
+      # identifier to start with a letter -- and the grammar was later relaxed to allow exactly
+      # that. `wit-bindgen` 0.62 (whose `wit-parser` is 0.259.0) accepts it.
+      #
+      # # The part worth keeping
+      #
+      # `tools/check_wit.py` validates `wit/` with `wasm-tools`, and it has always been **green** --
+      # `wasm-tools 1.259.0` bundles `wit-parser` 0.259.0. So the repository's WIT validator and
+      # its guest toolchain were parsing the same files with **different grammars**, and only one
+      # of them was on the critical path. **A guard that uses a different parser than the consumer
+      # measures a different language** (`§O-282`, one level up: not too narrow a file list, but
+      # too permissive a grammar).
+      #
+      # # Why it is a step and not part of the workspace tests
+      #
+      # Because it **compiles two guests**: the probe, and then the same probe with one deliberately
+      # unparseable interface, to prove the first build can fail. The `wasm-tools` install above is
+      # its prerequisite too -- the test reads the artifact's import table through
+      # `qqqai inspect`.
+      #
+      # The budget is 15 minutes against a measured ~25 s locally, because CI builds the probe's
+      # whole dependency tree from cold: the guest's `target/` is not in this job's cache.
+      - name: every canonical interface binds with the pinned wit-bindgen (LANG-002)
+        timeout-minutes: 15
+        run: cargo test -p qqq-run --all-features --test lang002_bindings -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a

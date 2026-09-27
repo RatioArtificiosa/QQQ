@@ -27499,4 +27499,149 @@ before any build · `wasm-tools 1.259.0` present locally, absent in the `rust` j
 
 ---
 
+## §O-361 — The guard and the consumer parsed the same WIT with different grammars
+
+**Found:** writing the `LANG-002` test, which vendored the canonical `wit/` into a probe and built
+it. **Anchors:** `examples/orders-api/Cargo.toml`, `wit/qqq-crypto.wit`, `tools/check_wit.py`,
+`crates/qqq-run/tests/lang002_bindings.rs`, `docker/Dockerfile`.
+
+### The failure, verbatim
+
+```text
+error: failed to resolve directory while parsing WIT for path [...\wit]
+  Caused by: failed to parse dependency directory: ...\wit\deps
+  Caused by: failed to parse package: ...\wit\deps\qqq-crypto
+  Caused by: invalid character in identifier '2'
+     --> ...\wit\deps\qqq-crypto\qqq-crypto.wit:118:5
+      |     aes-256-gcm,
+```
+
+**`wit-bindgen` could not generate bindings from the canonical `wit/` at all** — which is the whole
+of `LANG-002`. The repository pinned `wit-bindgen = "0.44"`, whose `wit-parser` is **0.236.1**, and
+0.236.1 requires every hyphen-separated segment of an identifier to start with a letter. `256` is
+its own segment.
+
+### And `check_wit.py` has always been green
+
+The repository's WIT validator runs `wasm-tools component wit` over every file in `wit/`, and it
+reports:
+
+```text
+OK    qqq-crypto.wit
+```
+
+`wasm-tools 1.259.0` bundles **`wit-parser` 0.259.0** — the same version `wit-bindgen 0.62.0` uses —
+and that parser **accepts** `aes-256-gcm`. The grammar was relaxed upstream to allow exactly this
+(`WebAssembly/component-model#345`), and the pin was simply older than the relaxation.
+
+| component | `wit-parser` | accepts `aes-256-gcm`? |
+|---|---|---|
+| `wasm-tools 1.259.0` — the **guard** | 0.259.0 | **yes** |
+| `wit-bindgen 0.44` — the **consumer** | 0.236.1 | **no** |
+| `wit-bindgen 0.62.0` — the consumer, current | 0.259.0 | **yes** |
+
+> **A guard that uses a different parser than the consumer is a guard that measures a different
+> language.**
+
+This is `§O-282` one level up. That observation is about a guard that is too narrow in its **file
+list**; this is a guard that is too permissive in its **grammar**. Both report a clean tree.
+
+**And `docker/Dockerfile` already claimed the opposite**: `wasm-tools` is described there as *"the
+toolchain a guest author actually uses"*. It is not. The toolchain a guest author uses is
+`wit-bindgen`, and the two bundled different parsers — so the sentence was true about the file list
+and false about the language.
+
+### The extent, measured lexically rather than by building
+
+Parsing aborts at the first bad package, so a build-per-file loop would have taken fifteen builds to
+answer "how many". A scanner for the grammar rule itself answered it in one pass: **exactly one**
+identifier in **17** `.wit` files under `wit/` has a digit-leading segment.
+
+### The fix is the pin, not the WIT
+
+The WIT is **valid** under the current grammar, so renaming `aes-256-gcm` would have been a
+workaround for a stale dependency — and it would have made this repository's WIT *less* standard
+than the ecosystem it is meant to serve. The pin moved to `0.62`, and the reference application was
+measured on it before the change was accepted:
+
+```text
+cargo build --release --target wasm32-wasip2   BUILD=0
+cargo test --all-features                      TEST=0   57 passed; 0 failed
+```
+
+**57 passed, 0 failed** — the same count as on `0.44`, with no source change to `src/lib.rs`. The
+generated layout `§O-153` documents at length is unchanged across the jump.
+
+### What `LANG-002`'s test actually asserts, and why it is not the reference app
+
+The reference application binds **one** interface — `qqq:http`, for its export's types — and
+imports **nothing**. A test of the app would have proved bindability for the single canonical file
+that happened to work, which is exactly how the defect survived.
+
+So the test vendors **every** `wit/*.wit` into a probe and builds it, and the probe's world
+**imports** a capability:
+
+```wit
+world bindings-probe {
+  export qqq:http/incoming-handler@1.0.0;
+  import qqq:crypto/hashing@1.0.0;
+}
+```
+
+and the artifact is read through the product's own surface:
+
+```text
+2 required capabilities
+  crypto.hash          from qqq:crypto/hashing@1.0.0
+  http.server          from qqq:http/http@1.0.0
+```
+
+**The import half is the half the export cannot demonstrate**, and it is the half a guest author
+reaches for first. It also makes the host's `qqq:crypto` implementation reachable from a real
+component for the first time — `host_crypto.rs` records that a `func_wrap` closure there *"cannot be
+tested — reaching it needs a compiled component importing `qqq:crypto/random`"*.
+
+The version is **read from `examples/orders-api/Cargo.toml`** rather than written into the test: a
+second copy of a version is a second copy that can drift, and the probe is a measurement instrument
+for that pin, not a second opinion about it.
+
+### And a `wit/` edit does not re-run the macro
+
+The test's second half adds one deliberately unparseable interface and requires the same build to
+**fail**. The first attempt did not fail:
+
+```text
+Finished `release` profile [optimized] target(s) in 0.13s
+```
+
+**`wit_bindgen::generate!` reads `wit/` while it expands, but `wit/` is not a declared dependency of
+the crate, so cargo's fingerprint does not include it.** A guest author who edits `wit/` and
+rebuilds gets a **stale artifact** and no warning. The injection therefore changes the *source* as
+well — adding a file the parser never looks at cannot make it run.
+
+### The injection is the defect restored verbatim
+
+```text
+INJECT (wit-bindgen 0.44, as it was)
+  -> `wit-bindgen` 0.44 must generate bindings for all 15 canonical interface(s).
+     invalid character in identifier '2'
+RESTORED byte_identical=True  ->  1 passed, 24.73 s
+```
+
+The injected defect is the historical one, so the test that catches it is the test that catches a
+downgrade. The second half's injection is a missing semicolon rather than `aes-256-gcm`, and the
+reason is stated rather than left implicit: **`aes-256-gcm` is valid under the current pin, so it
+can no longer make a build fail** — an injection that cannot fire is not a measurement (`§O-280`).
+
+### Measured
+
+**1** identifier in **17** `.wit` files · `wasm-tools` green on the same file throughout · pin
+`0.44 → 0.62` (`wit-parser` `0.236.1 → 0.259.0`) · `examples/orders-api` **BUILD=0**, **57 passed /
+0 failed**, unchanged from the old pin · probe artifact **78531 bytes**, a component, importing
+`qqq:crypto/hashing@1.0.0` → `crypto.hash` · injection **detected**, restore **byte-identical** ·
+test **1 passed** in **24.7 s** · `ci.yml` **10 jobs, 163 steps, 0 steps with neither `run` nor
+`uses`**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 #
-# The orders reference application — `SRV-018`.
+# The orders reference application â€” `SRV-018`.
 #
 # # Why this file declares an empty `[workspace]`
 #
@@ -15,14 +15,14 @@
 #
 # 1. It targets `wasm32-wasip2` while the host targets the native triple, so
 #    joining would make every `cargo build` in the repo also try to build a wasm
-#    artifact — or fail to, without the target installed.
+#    artifact â€” or fail to, without the target installed.
 # 2. It is a **guest**, so it must be built by the *guest* toolchain through
 #    `qqqai build`, exactly as a user's project would be. If it were a workspace
 #    member it would be built by the host's CI in a way no user's project is, and
 #    the reference app would stop being a reference for anything.
 #
 # The empty table terminates the upward search. This is the documented recipe
-# (`§O-147`) and it is not optional.
+# (`Â§O-147`) and it is not optional.
 [workspace]
 
 [package]
@@ -42,8 +42,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # `macros` is required for the `generate!`/`export!` pair. Without it the error is
 # `use of unresolved module or unlinked crate exports`, which names neither the
-# feature nor the macro — recorded in `§O-147`.
-wit-bindgen = { version = "0.44", features = ["macros"] }
+# feature nor the macro â€” recorded in `Â§O-147`.
+wit-bindgen = { version = "0.62", features = ["macros"] }
 
 # The benchmark workloads need JSON, SHA-256 and a prime sieve. All three are
 # implemented in-tree (`src/json.rs`, `src/hash.rs`, `src/compute.rs`) rather

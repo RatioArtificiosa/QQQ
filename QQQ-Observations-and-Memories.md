@@ -28239,6 +28239,12 @@ is annotated **`→ Partial:`**, not ticked, and `TEST-010` stays `[~]` for **br
 `LANG-009`…`LANG-040` are the four other languages, and a suite four fifths of which is unexecuted
 reports gaps rather than results.
 
+**`LANG-004` is ticked on the strength of it**, and that is the one item this observation closes. The
+distinction is the whole point of the split: `TEST-016` is the *runner* and is partial because it has
+no standalone surface; `LANG-004` is the *Rust row's result*, and the Rust row passes — measured,
+fault-injected, and wired into CI. **A row can pass a thin suite; that makes the result true and the
+suite weak, and those are different claims.**
+
 ---
 
 *End of `QQQ-Observations-and-Memories.md`.*

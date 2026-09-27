@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "target": "wasm32-wasip2",
+  "comment": [
+    "The cross-language conformance suite -- TEST-010, anchored at Proposal 2.4 (NN-4, 'Multi-Language by Design').",
+    "",
+    "Proposal 2.4 makes three commitments this file exists to make checkable:",
+    "  1. 'WIT is the source of truth' -- every language binds from wit/, so the WIT surface is a",
+    "     conformance obligation for every language, and each obligation names the checker that",
+    "     enforces it. A case whose checker is not registered in BOTH gates is a case nothing enforces.",
+    "  2. 'No privileged language' -- the reference application is implemented five times and all five",
+    "     must pass the identical suite.",
+    "  3. 'Parity is measured' -- 'Any gap requires a written exception with an owner and a date'.",
+    "",
+    "The third commitment is the one that decays. A gap with no owner is a gap nobody owns, and a",
+    "matrix that lists them without an owner is a document that reports a problem and assigns it to",
+    "no one. tools/check_conformance.py fails on exactly that, and on a status that disagrees with the",
+    "code that actually decides (build::toolchain_for).",
+    "",
+    "STATUS IS DERIVED, NOT DECLARED-AND-TRUSTED. 'supported' must agree with build::toolchain_for",
+    "returning Some; 'gap' must agree with it returning None. When LANG-009..040 land and a language",
+    "starts building, CI fails here until this file is updated -- which is the point of LANG-040."
+  ],
+  "languages": [
+    {
+      "id": "rust",
+      "status": "supported",
+      "conformance_item": "LANG-004",
+      "reason": "the one language with a working build driver (build::toolchain_for returns Some)"
+    },
+    {
+      "id": "ts",
+      "status": "gap",
+      "conformance_item": "LANG-012",
+      "owner": "Language toolchains -- AssemblyScript",
+      "target": "M5 (Language #2 and #3)",
+      "reason": "no AssemblyScript build path and no bindings generated from wit/ exist yet"
+    },
+    {
+      "id": "go",
+      "status": "gap",
+      "conformance_item": "LANG-020",
+      "owner": "Language toolchains -- TinyGo",
+      "target": "M5 (Language #2 and #3)",
+      "reason": "no TinyGo build path and no bindings generated from wit/ exist yet"
+    },
+    {
+      "id": "python",
+      "status": "gap",
+      "conformance_item": "LANG-028",
+      "owner": "Language toolchains -- CPython/WASI",
+      "target": "M8 (Language #4 and #5)",
+      "reason": "the CPython-to-WASI spike (LANG-025) has not been run, so size and cold start are unmeasured"
+    },
+    {
+      "id": "cpp",
+      "status": "gap",
+      "conformance_item": "LANG-036",
+      "owner": "Language toolchains -- clang/wit-bindgen",
+      "target": "M8 (Language #4 and #5)",
+      "reason": "no clang wasm32-wasip2 build path and no bindings generated from wit/ exist yet"
+    }
+  ],
+  "capabilities": [
+    "qqq:agent",
+    "qqq:ai",
+    "qqq:clock",
+    "qqq:crypto",
+    "qqq:dns",
+    "qqq:env",
+    "qqq:fs",
+    "qqq:http",
+    "qqq:kv",
+    "qqq:log",
+    "qqq:queue",
+    "qqq:secrets",
+    "qqq:sql",
+    "qqq:test",
+    "qqq:trace"
+  ],
+  "cases": [
+    {
+      "id": "wit-parses",
+      "capability": "core",
+      "summary": "every wit/ interface parses, so every language can bind to it",
+      "enforced_by": "tools/check_wit.py"
+    },
+    {
+      "id": "wit-embedded-in-runtime",
+      "capability": "core",
+      "summary": "every wit/ file is embedded in qqq-abi, so the runtime can serve what a language binds to",
+      "enforced_by": "tools/check_wit_bindings.py"
+    },
+    {
+      "id": "wit-versioned",
+      "capability": "core",
+      "summary": "every interface carries @since, so a binding cannot silently track a moving contract",
+      "enforced_by": "tools/check_wit_since.py"
+    },
+    {
+      "id": "wit-typed-errors",
+      "capability": "core",
+      "summary": "every fallible call returns a typed error, so a binding does not decode a status code",
+      "enforced_by": "tools/check_wit_errors.py"
+    },
+    {
+      "id": "wit-no-ambient-state",
+      "capability": "core",
+      "summary": "no hidden global state, so a binding cannot read configuration the manifest never granted",
+      "enforced_by": "tools/check_no_ambient.py"
+    },
+    {
+      "id": "wit-style",
+      "capability": "core",
+      "summary": "the six WIT style rules of Proposal 6.3, so five hand-written bindings stay comparable",
+      "enforced_by": "tools/check_wit_style.py"
+    }
+  ],
+  "exceptions": []
+}

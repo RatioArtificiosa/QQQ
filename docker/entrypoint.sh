@@ -885,7 +885,22 @@ cmd_checks() {
     # The real toolchain's parse, not a Python one. `wasm-tools` is installed in the image for
     # this; without it the checker fails loudly rather than skipping (`§O-291`).
     python3 tools/check_wit.py
+    # `§O-354`: this checker had **no demonstrated failure mode in either gate** -- not a
+    # `--self-test`, not a `fault_inject_*.py` harness. `tools/check_conformance.py` found it by
+    # requiring every conformance obligation's checker to prove it can fail, which is a question
+    # `check_gate_parity.py` does not ask.
+    python3 tools/check_wit.py --self-test
     python3 tools/check_wit_since.py
+    # `TEST-010`: the cross-language conformance fixture and the parity matrix. It requires each
+    # obligation's checker to be invoked in BOTH gates, so it belongs in both -- and its own
+    # `--self-test` injects nine faults, one per rule.
+    #
+    # **All three forms, because `check_gate_parity.py` compares INVOCATIONS, not scripts.** The
+    # first version ran `--matrix` here and the bare form in ci.yml, and parity failed on both
+    # directions at once -- the two gates ran the same file and different commands.
+    python3 tools/check_conformance.py
+    python3 tools/check_conformance.py --matrix
+    python3 tools/check_conformance.py --self-test
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py
     python3 tools/audit_unsafe.py --self-test

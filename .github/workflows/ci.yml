@@ -658,6 +658,29 @@ jobs:
       - name: Validate every interface with wasm-tools
         run: python tools/check_wit.py
 
+      # `§O-354`: this checker had **no demonstrated failure mode in either gate** -- not a
+      # `--self-test`, not a `fault_inject_*.py` harness. `tools/check_conformance.py` found it by
+      # requiring every conformance obligation's checker to prove it can fail, which is a question
+      # `check_gate_parity.py` does not ask: a checker can be in both gates and still be one
+      # nobody has watched fail.
+      #
+      # The injected defect is the subtle one -- one missing semicolon, which every structural
+      # assertion in `qqq-abi` accepts and only a parser rejects. That is the gap `check_wit.py`
+      # exists to close, so it is the gap the self-test injects. The valid half is asserted too,
+      # because a checker that rejects everything would also "detect" it.
+      - name: Prove the WIT validator rejects a one-character defect
+        run: python tools/check_wit.py --self-test
+
+      # `TEST-010`: the cross-language conformance fixture, its parity matrix, and the rule that
+      # every gap carries an owner and a date (Proposal §6.10). It also requires each obligation's
+      # checker to be invoked in BOTH gates, so it is a check on the gates as well as the fixture.
+      - name: Check the conformance fixture
+        run: python tools/check_conformance.py
+      - name: Print the language parity matrix
+        run: python tools/check_conformance.py --matrix
+      - name: Prove the conformance checker rejects an unowned gap and a drifting status
+        run: python tools/check_conformance.py --self-test
+
       # `check_wit.py` above proves each file PARSES. It cannot prove the
       # annotation policy is followed, and that was verified rather than
       # assumed: `wasm-tools` accepts a WIT file with no `@since` at all and

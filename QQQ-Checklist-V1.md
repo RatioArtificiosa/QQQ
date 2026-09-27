@@ -4110,8 +4110,19 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-039** Publish the language parity matrix, generated from CI, with every gap owned and dated.
   → §2.4 NN-4 — Multi-Language by Design
+  → **The mechanism now exists and is wired, but this item stays open because it is a LANG item and
+    the goal's sequencing forbids starting `LANG-009`…`LANG-040` before `TEST-010` lands.**
+    `tools/check_conformance.py --matrix` prints the matrix in **both** gates, and every gap in
+    `conformance/suite.json` carries an owner and a target (§O-354). What remains is the language
+    work itself: four of the five rows are gaps, and **a matrix of gaps is not a published parity
+    result**.
 - [ ] **LANG-040** Implement the CI job that fails when the parity matrix gains an unexplained gap.
   → §2.4 NN-4 — Multi-Language by Design
+  → **The mechanism now exists and is wired, but this item stays open for the same reason.**
+    `tools/check_conformance.py` fails on a gap with no `owner`/`target`/`reason`, and — the half
+    that matters for drift — it **fails when a declared status disagrees with
+    `build::toolchain_for`**, so the day a language starts building, CI goes red until the fixture
+    moves. Its `--self-test` injects both faults and detects both (§O-354).
 
 ---
 
@@ -4329,8 +4340,22 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.7 `qqqai test` — test runner
 - [ ] **TEST-009** Implement property tests with shrinking and replayable failures.
   → §6.7 `qqqai test` — test runner
-- [ ] **TEST-010** Implement the cross-language conformance suite and wire it into CI.
+- [~] **TEST-010** Implement the cross-language conformance suite and wire it into CI.
   → §2.4 NN-4 — Multi-Language by Design
+  → **Partial, and the gap is specific.** `conformance/suite.json` is the checked-in fixture and
+    `tools/check_conformance.py` is its runner: it prints the language × capability parity matrix
+    (`--matrix`), **fails on a gap with no owner or date** (Proposal §6.10), derives each language's
+    status from `build::toolchain_for`'s own guard so the fixture cannot drift from the code, and
+    requires every obligation's checker to be invoked in **both** gates. Wired into `ci.yml` and
+    `docker/entrypoint.sh`, with **9 fault injections**, every one detected.
+    **What is missing is execution**: no conformance case is run *against a built guest*, because no
+    guest toolchain exists for four of the five languages. That needs the guest-execution runner
+    (`TEST-016`) and `LANG-009`…`LANG-040`. **Marking this `[x]` would claim the execution half from
+    the definition half.**
+  → **And building it found a checker nobody had watched fail**: `tools/check_wit.py` had neither a
+    `--self-test` nor a `fault_inject_*.py` harness, where three of the six WIT-surface checkers use a
+    harness and two use `--self-test`. The missing half was added — it injects one missing semicolon,
+    which every structural assertion in `qqq-abi` accepts and only a parser rejects. `§O-354`.
 - [ ] **TEST-011** Implement snapshot testing with a reviewable diff format.
   → §6.7 `qqqai test` — test runner
 - [ ] **TEST-012** Implement test isolation guarantees: no test can observe another test's state.

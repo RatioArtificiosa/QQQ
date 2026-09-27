@@ -26781,4 +26781,91 @@ mode** · `lost_the_port_race` and `answered` **both unused at the retry site**.
 
 ---
 
+## §O-354 — The conformance suite found a checker nobody had watched fail
+
+**Found:** building `TEST-010`. **Anchors:** `conformance/suite.json`, `tools/check_conformance.py`,
+`tools/check_wit.py`, `.github/workflows/ci.yml`, `docker/entrypoint.sh`.
+
+### What was built
+
+The cross-language conformance suite of the goal's Phase 3, and the parity matrix that `LANG-039` and
+`LANG-040` ask for. Proposal §2.4 makes three commitments, and each is now checkable:
+
+1. **WIT is the source of truth** — six obligations, each naming the checker that enforces it, and that
+   checker must be invoked in **both** gates.
+2. **Parity is measured** — `--matrix` prints language × capability × supported.
+3. **Every gap is owned and dated** — `"Any gap requires a written exception with an owner and a date."`
+   An unowned gap **fails**.
+
+Measured: **5** languages (read from `Build::LANGUAGES`), **15** capabilities (read from `wit/`),
+**6** cases, **0** exceptions.
+
+### The status is DERIVED, not declared-and-trusted
+
+`supported` must agree with `build::toolchain_for` returning `Some`. That function's own guard
+(`if language != "rust"`) is **parsed**, and the parse is self-guarding: zero matches or more than one is
+a hard failure rather than a vacuous pass, because a reader that silently reads nothing measures nothing
+(`§O-280`).
+
+**So when `LANG-009`..`LANG-040` land and Go starts building, CI fails here until this fixture moves.**
+That is `LANG-040`'s job, and it now exists.
+
+### And the suite found a checker nobody had watched fail
+
+The rule *"every obligation's checker must demonstrate its own failure mode"* flagged
+`tools/check_wit.py`. Measured across the six WIT-surface checkers:
+
+| checker | failure mode demonstrated by |
+|---|---|
+| `check_wit.py` | **NOTHING** |
+| `check_wit_bindings.py` | `--self-test` |
+| `check_wit_since.py` | `fault_inject_wit_since.py` |
+| `check_wit_errors.py` | `fault_inject_wit_errors.py` |
+| `check_no_ambient.py` | `fault_inject_no_ambient.py` |
+| `check_wit_style.py` | `--self-test` |
+
+**Three by a harness, two by `--self-test`, one by neither.** `check_wit.py` is the checker that proves
+every WIT file **parses** — the gate the entire multi-language claim rests on — and **nothing had ever
+demonstrated that it can fail.**
+
+The missing half was added rather than the obligation dropped: a `--self-test` that injects **one missing
+semicolon**, which every structural assertion in `qqq-abi` accepts and only a parser rejects
+(`error: expected ';', found '}'`). **The valid half is asserted too**, because a checker that rejected
+everything would also "detect" it.
+
+### And the first version of that rule was wrong
+
+It required `--self-test` for every case, which flagged **three checkers that are correctly proven
+another way**. **The rule was written from the one example I had read**, not from the convention — so it
+was measured against the whole set before being kept. `§O-282`, in the direction that rejects good input.
+
+### And the first injection did not inject what it claimed
+
+The injection *"a case whose checker is not in both gates"* pointed at `check_advisories.py` and reported
+**NOT DETECTED** — correctly, because that script **is** in both gates. **The injection had not injected
+what it claimed**, which is `§O-280`'s rule applied to this file. It now **removes the invocation from the
+gate text**, which cannot decay the day someone adds that checker to the second gate. **9 injections, all
+detected.**
+
+### And gate parity caught the two gates running different commands
+
+The first wiring ran `--matrix` in `ci.yml` and the bare form in the bridge. `check_gate_parity.py` failed
+in **both directions at once** — the same file, different invocations. `check_gate_parity.py` compares
+**invocations**, not scripts, and the two gates now run all three forms.
+
+### Measured
+
+**5** languages · **15** capabilities · **6** cases · **0** exceptions · a 15 × 5 matrix · **9** fault
+injections all detected · `check_wit.py --self-test` accepts the valid half and rejects the one-character
+defect · gate parity **OK** (97 vs 83 invocations).
+
+### What TEST-010 still does not do, and why it is `[~]` rather than `[x]`
+
+The suite **defines** conformance and **measures** parity. It does not yet **execute** a conformance case
+against a built guest in each language — that needs the guest-execution runner (`TEST-016`) and the
+toolchains (`LANG-009`..`LANG-040`). **Marking it done would be claiming the execution half from the
+definition half**, which is the shape this register exists to catch.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

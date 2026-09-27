@@ -54,6 +54,12 @@ pub struct TestOptions {
     pub dry_run: bool,
     /// Emit machine-readable output.
     pub json: bool,
+    /// How to report the results.
+    ///
+    /// Distinct from [`Self::json`], which selects QQQ's *envelope*. A foreign report format
+    /// (`junit`, `tap`) is a document for another tool and must not be wrapped in that envelope,
+    /// so the two cannot be the same field — see [`TestFormat`].
+    pub format: TestFormat,
 }
 
 impl TestOptions {
@@ -935,6 +941,321 @@ impl crate::output::CommandOutput for TestOutput {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Report formats (`TEST-003`)
+// ---------------------------------------------------------------------------
+
+/// How `qqqai test` reports its results.
+///
+/// # Why this is not [`Format`](crate::output::Format)
+///
+/// `Format` is the **envelope's** format and every command shares it. `junit` and `tap` are not
+/// envelope formats: they are documents consumed by *other tools* — a CI reporter parses `JUnit`
+/// XML, a TAP harness parses TAP — and neither can read an envelope wrapped around the document
+/// it expects. Adding them to `Format` would offer every command two formats that none of them
+/// can produce, which is the shape this repository keeps recording: **a flag that parses and
+/// does nothing.**
+///
+/// So the test report has its own format, and the two foreign ones **bypass the envelope
+/// deliberately**. The precedent is `qqqai mcp`, whose output *is* the protocol and which
+/// therefore ignores the formatter for the same reason (`AGENT-004`).
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::TestFormat;
+///
+/// assert_eq!(TestFormat::parse("junit"), Some(TestFormat::Junit));
+/// assert_eq!(TestFormat::parse("juint"), None, "a typo is not a synonym");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TestFormat {
+    /// Human-readable text, for a terminal.
+    #[default]
+    Human,
+    /// QQQ's own envelope, for an agent.
+    Json,
+    /// `JUnit` XML, for a CI reporter.
+    Junit,
+    /// TAP version 13, for a TAP harness.
+    Tap,
+}
+
+impl TestFormat {
+    /// Every value `--format` accepts.
+    ///
+    /// `pub(crate)` rather than `pub`: the CLI reaches a format through [`Self::parse`] and asks
+    /// [`Self::is_foreign`], and nothing outside this crate enumerates them. A public list nobody
+    /// outside needs is a public promise, and `DX-015` counts every one of them.
+    pub(crate) const ALL: [Self; 4] = [Self::Human, Self::Json, Self::Junit, Self::Tap];
+
+    /// Parse a `--format` value.
+    ///
+    /// `None` rather than a fallback: an unrecognised format must be a **usage error**, because
+    /// silently printing human text for `--format juint` would let a CI job collect nothing and
+    /// still report success. A typo that produces no artifact is worse than one that fails.
+    ///
+    /// ```
+    /// # use qqq_run::TestFormat;
+    /// assert_eq!(TestFormat::parse("tap"), Some(TestFormat::Tap));
+    /// assert_eq!(TestFormat::parse("json"), Some(TestFormat::Json));
+    /// ```
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == value)
+    }
+
+    /// The spelling on the command line.
+    ///
+    /// `pub(crate)`: it exists so [`Self::parse`] and the usage error agree on one spelling, which
+    /// is a concern inside this crate.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Json => "json",
+            Self::Junit => "junit",
+            Self::Tap => "tap",
+        }
+    }
+
+    /// Whether this is a foreign document that must **not** be wrapped in the envelope.
+    ///
+    /// ```
+    /// # use qqq_run::TestFormat;
+    /// assert!(TestFormat::Junit.is_foreign());
+    /// assert!(!TestFormat::Json.is_foreign());
+    /// ```
+    #[must_use]
+    pub const fn is_foreign(self) -> bool {
+        matches!(self, Self::Junit | Self::Tap)
+    }
+}
+
+/// Escape the characters XML forbids in character data and attribute values.
+///
+/// # Why `&` is a `match` arm rather than a `replace` chain
+///
+/// A chain of `.replace()` calls has an ordering bug that only shows on input containing two of
+/// these characters: escaping `<` first introduces an `&`, and a later `.replace("&", "&amp;")`
+/// then escapes *that*, rendering `a<b` as `a&amp;lt;b`. A single pass cannot double-escape
+/// anything, so the bug is removed rather than ordered around.
+///
+/// Control characters other than tab/newline/carriage-return are **replaced, not encoded**,
+/// because XML 1.0 forbids them outright and offers no escape for them. Emitting one raw would
+/// produce a document no parser accepts — so the CI reporter would fail on the *report* rather
+/// than on the test, which is the most expensive way to learn a test name was odd.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' => out.push('?'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Collapse a string to one line, for a line-oriented format.
+///
+/// TAP is line-oriented: `ok 1 - <name>` ends at the newline, so a name containing one produces a
+/// second line that a harness reads as its own directive. TAP defines no escaping convention for
+/// this, and inventing a dialect would produce output no harness reads — so the character is
+/// replaced.
+fn tap_single_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
+/// Why a test is reported as failing, in one line.
+///
+/// Shared by both foreign formats so they cannot disagree about a test's fate — two renderers
+/// computing "did it fail" separately is how one of them ends up reporting a flaky test as a pass.
+/// `pub(crate)`: the renderers are the only callers, and a caller outside this crate would be a
+/// second opinion about a test's fate, which is the thing this function exists to prevent.
+pub(crate) fn failure_message(outcome: &OutcomeReport) -> String {
+    if outcome.nondeterministic {
+        let trials = outcome
+            .divergent_trials
+            .iter()
+            .map(|i| (i + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "nondeterministic: {} of {} trials passed, and trial(s) {} diverged from trial 1",
+            outcome.trials_passed, outcome.trials, trials
+        )
+    } else {
+        format!(
+            "{} of {} trials passed",
+            outcome.trials_passed, outcome.trials
+        )
+    }
+}
+
+/// Milliseconds as seconds, for a format that expresses duration in seconds.
+///
+/// The cast is lossy by *type* and exact for every value that can occur: an `f64` mantissa holds
+/// 53 bits, so it represents every whole millisecond below 2^53 — about 285,000 years. A test
+/// running longer than that would have been killed by a timeout long before this is reached, so
+/// the lint is about the conversion's shape rather than this program's values. Allowed here, with
+/// the reason, rather than silenced for the whole crate.
+#[allow(clippy::cast_precision_loss)]
+fn seconds_from_ms(ms: u128) -> f64 {
+    ms as f64 / 1000.0
+}
+
+/// Render the run as `JUnit` XML.
+///
+/// # Why a nondeterministic test is a `failure` here
+///
+/// `JUnit` has no "flaky" concept, so the choice is between reporting a test that passed 4 of 5
+/// trials as `ok` or as a failure. Reporting `ok` would show a **green build for the one thing
+/// `--trials` exists to catch**, which is the defect the exit code already refuses to commit
+/// (`failed + nondeterministic > 0`). The message names the divergent trials, so nothing the
+/// format cannot carry is silently dropped.
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::{to_junit, OutcomeReport, TestOutput};
+///
+/// let run = TestOutput {
+///     project: "app".to_owned(),
+///     discovered: 1,
+///     ran: 1,
+///     passed: 1,
+///     failed: 0,
+///     nondeterministic: 0,
+///     trials: 1,
+///     dry_run: false,
+///     outcomes: vec![OutcomeReport {
+///         name: "a::ok".to_owned(),
+///         file: "src/a.rs".to_owned(),
+///         passed: true,
+///         trials: 1,
+///         trials_passed: 1,
+///         nondeterministic: false,
+///         divergent_trials: Vec::new(),
+///         duration_ms: 5,
+///     }],
+/// };
+///
+/// let xml = to_junit(&run);
+/// assert!(xml.contains("tests=\"1\""));
+/// assert!(xml.contains("name=\"a::ok\""));
+/// ```
+#[must_use]
+pub fn to_junit(output: &TestOutput) -> String {
+    use std::fmt::Write as _;
+
+    let total = output.ran;
+    let failures = output.failed + output.nondeterministic;
+    let seconds = seconds_from_ms(output.outcomes.iter().map(|o| o.duration_ms).sum());
+    let project = xml_escape(&output.project);
+
+    let mut s = String::new();
+    let _ = writeln!(s, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    let _ = writeln!(
+        s,
+        "<testsuites name=\"{project}\" tests=\"{total}\" failures=\"{failures}\" errors=\"0\" \
+         skipped=\"0\" time=\"{seconds:.3}\">"
+    );
+    let _ = writeln!(
+        s,
+        "  <testsuite name=\"{project}\" tests=\"{total}\" failures=\"{failures}\" errors=\"0\" \
+         skipped=\"0\" time=\"{seconds:.3}\">"
+    );
+    for o in &output.outcomes {
+        let time = seconds_from_ms(o.duration_ms);
+        let name = xml_escape(&o.name);
+        let classname = xml_escape(&o.file);
+        if o.passed {
+            let _ = writeln!(
+                s,
+                "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\"/>"
+            );
+        } else {
+            let message = xml_escape(&failure_message(o));
+            let _ = writeln!(
+                s,
+                "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\">"
+            );
+            let _ = writeln!(s, "      <failure message=\"{message}\"/>");
+            let _ = writeln!(s, "    </testcase>");
+        }
+    }
+    let _ = writeln!(s, "  </testsuite>");
+    let _ = writeln!(s, "</testsuites>");
+    s
+}
+
+/// Render the run as TAP version 13.
+///
+/// The plan line comes before the first test line, which is what makes a truncated report
+/// detectable: a harness that reads `1..3` and then two tests knows the stream was cut short
+/// rather than concluding the run was small.
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::{to_tap, OutcomeReport, TestOutput};
+///
+/// let run = TestOutput {
+///     project: "app".to_owned(),
+///     discovered: 1,
+///     ran: 1,
+///     passed: 0,
+///     failed: 1,
+///     nondeterministic: 0,
+///     trials: 1,
+///     dry_run: false,
+///     outcomes: vec![OutcomeReport {
+///         name: "a::bad".to_owned(),
+///         file: "src/a.rs".to_owned(),
+///         passed: false,
+///         trials: 1,
+///         trials_passed: 0,
+///         nondeterministic: false,
+///         divergent_trials: Vec::new(),
+///         duration_ms: 5,
+///     }],
+/// };
+///
+/// let tap = to_tap(&run);
+/// assert!(tap.starts_with("TAP version 13\n1..1\n"));
+/// assert!(tap.contains("not ok 1 - a::bad"));
+/// ```
+#[must_use]
+pub fn to_tap(output: &TestOutput) -> String {
+    use std::fmt::Write as _;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "TAP version 13");
+    let _ = writeln!(s, "1..{}", output.ran);
+    for (i, o) in output.outcomes.iter().enumerate() {
+        let n = i + 1;
+        let name = tap_single_line(&o.name);
+        if o.passed {
+            let _ = writeln!(s, "ok {n} - {name}");
+        } else {
+            let file = tap_single_line(&o.file);
+            let message = tap_single_line(&failure_message(o));
+            let _ = writeln!(s, "not ok {n} - {name}");
+            let _ = writeln!(s, "  ---");
+            let _ = writeln!(s, "  file: {file}");
+            let _ = writeln!(s, "  message: {message}");
+            let _ = writeln!(s, "  ...");
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,5 +1905,185 @@ benches::throughput: benchmark
     #[test]
     fn the_tests_directory_is_beside_the_manifest() {
         assert!(tests_dir(Path::new("/proj")).ends_with("tests"));
+    }
+
+    // -- report formats (`TEST-003`) ----------------------------------------
+
+    /// A single-outcome report, so a renderer test states only what it is about.
+    fn one_outcome(
+        name: &str,
+        file: &str,
+        passed: bool,
+        nondeterministic: bool,
+        divergent: Vec<usize>,
+    ) -> TestOutput {
+        TestOutput {
+            project: "app".to_owned(),
+            discovered: 1,
+            ran: 1,
+            passed: usize::from(passed),
+            failed: usize::from(!passed && !nondeterministic),
+            nondeterministic: usize::from(nondeterministic),
+            trials: 3,
+            dry_run: false,
+            outcomes: vec![OutcomeReport {
+                name: name.to_owned(),
+                file: file.to_owned(),
+                passed,
+                trials: 3,
+                trials_passed: if passed { 3 } else { 2 },
+                nondeterministic,
+                divergent_trials: divergent,
+                duration_ms: 1500,
+            }],
+        }
+    }
+
+    #[test]
+    fn every_format_spelling_round_trips() {
+        for f in TestFormat::ALL {
+            assert_eq!(TestFormat::parse(f.as_str()), Some(f), "{f:?}");
+        }
+    }
+
+    /// A typo must be a usage error, not a silent fallback to human text.
+    ///
+    /// `--format juint` printing a summary would let a CI job collect no artifact
+    /// and still report success, which is the failure this whole area exists to
+    /// prevent.
+    #[test]
+    fn an_unrecognised_format_is_rejected_rather_than_defaulted() {
+        assert_eq!(TestFormat::parse("juint"), None);
+        assert_eq!(TestFormat::parse(""), None);
+        assert_eq!(TestFormat::parse("JUNIT"), None, "case is not a synonym");
+    }
+
+    #[test]
+    fn only_the_foreign_formats_bypass_the_envelope() {
+        assert!(TestFormat::Junit.is_foreign());
+        assert!(TestFormat::Tap.is_foreign());
+        assert!(!TestFormat::Human.is_foreign());
+        assert!(!TestFormat::Json.is_foreign());
+    }
+
+    #[test]
+    fn junit_reports_the_counts_and_names_the_test() {
+        let xml = to_junit(&one_outcome("a::ok", "src/a.rs", true, false, Vec::new()));
+        assert!(
+            xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"),
+            "{xml}"
+        );
+        assert!(xml.contains("tests=\"1\""), "{xml}");
+        assert!(xml.contains("failures=\"0\""), "{xml}");
+        assert!(xml.contains("name=\"a::ok\""), "{xml}");
+        assert!(xml.contains("classname=\"src/a.rs\""), "{xml}");
+        assert!(xml.contains("time=\"1.500\""), "{xml}");
+        assert!(xml.trim_end().ends_with("</testsuites>"), "{xml}");
+        assert!(
+            !xml.contains("<failure"),
+            "a passing test carries no failure: {xml}"
+        );
+    }
+
+    /// Every character XML forbids in an attribute value is escaped.
+    #[test]
+    fn junit_escapes_the_characters_xml_forbids() {
+        let xml = to_junit(&one_outcome(
+            "a<b&c>d\"e'f",
+            "src/a.rs",
+            true,
+            false,
+            Vec::new(),
+        ));
+        assert!(
+            xml.contains("name=\"a&lt;b&amp;c&gt;d&quot;e&apos;f\""),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains("a<b&c>"),
+            "the raw name must not survive: {xml}"
+        );
+    }
+
+    /// The double-escape ordering bug: escaping `<` first introduces an `&` that a
+    /// later `&`-replacement then escapes again, rendering `a<b` as `a&amp;lt;b`.
+    ///
+    /// A single pass cannot produce it. This test is what distinguishes the two
+    /// implementations rather than assuming the correct one was written.
+    #[test]
+    fn junit_does_not_double_escape_an_ampersand() {
+        let xml = to_junit(&one_outcome("a<b", "src/a.rs", true, false, Vec::new()));
+        assert!(xml.contains("a&lt;b"), "{xml}");
+        assert!(
+            !xml.contains("&amp;lt;"),
+            "the escape was applied twice: {xml}"
+        );
+    }
+
+    /// XML 1.0 forbids most control characters and has no escape for them, so one
+    /// must be replaced rather than encoded — otherwise the report itself is
+    /// unparseable and the CI reporter fails on the report, not the test.
+    #[test]
+    fn junit_replaces_a_control_character_xml_cannot_express() {
+        let xml = to_junit(&one_outcome("a\u{1}b", "src/a.rs", true, false, Vec::new()));
+        assert!(
+            !xml.contains('\u{1}'),
+            "a raw control character survived: {xml:?}"
+        );
+        assert!(xml.contains("name=\"a?b\""), "{xml}");
+    }
+
+    /// `JUnit` has no "flaky" concept, and reporting `ok` for a test that passed 4 of
+    /// 5 trials would show a green build for the one thing `--trials` exists to
+    /// catch.
+    #[test]
+    fn junit_reports_a_nondeterministic_test_as_a_failure() {
+        let xml = to_junit(&one_outcome("a::flaky", "src/a.rs", false, true, vec![2]));
+        assert!(xml.contains("failures=\"1\""), "{xml}");
+        assert!(xml.contains("<failure message="), "{xml}");
+        assert!(xml.contains("nondeterministic"), "{xml}");
+        assert!(
+            xml.contains("trial(s) 3"),
+            "the divergent trial is named: {xml}"
+        );
+    }
+
+    #[test]
+    fn tap_announces_its_version_and_plan_before_the_first_test() {
+        let tap = to_tap(&one_outcome("a::ok", "src/a.rs", true, false, Vec::new()));
+        let lines: Vec<&str> = tap.lines().collect();
+        assert_eq!(lines[0], "TAP version 13");
+        assert_eq!(lines[1], "1..1");
+        assert_eq!(lines[2], "ok 1 - a::ok");
+    }
+
+    #[test]
+    fn tap_marks_a_failing_test_not_ok_with_a_diagnostic() {
+        let tap = to_tap(&one_outcome("a::bad", "src/b.rs", false, false, Vec::new()));
+        assert!(tap.contains("not ok 1 - a::bad"), "{tap}");
+        assert!(tap.contains("  file: src/b.rs"), "{tap}");
+        assert!(tap.contains("  message: 2 of 3 trials passed"), "{tap}");
+    }
+
+    /// TAP is line-oriented: a name containing a newline would produce a second
+    /// line a harness reads as its own directive.
+    #[test]
+    fn tap_collapses_a_newline_in_a_test_name() {
+        let tap = to_tap(&one_outcome("a\nb", "src/a.rs", true, false, Vec::new()));
+        assert!(tap.contains("ok 1 - a b"), "{tap:?}");
+        assert_eq!(
+            tap.lines().count(),
+            3,
+            "one plan line plus one test line: {tap:?}"
+        );
+    }
+
+    #[test]
+    fn failure_message_names_the_divergent_trials() {
+        let outcome = &one_outcome("a", "src/a.rs", false, true, vec![1, 3]).outcomes[0];
+        let msg = failure_message(outcome);
+        assert!(msg.contains("trial(s) 2, 4"), "{msg}");
+        let plain = &one_outcome("a", "src/a.rs", false, false, Vec::new()).outcomes[0];
+        assert_eq!(failure_message(plain), "2 of 3 trials passed");
     }
 }

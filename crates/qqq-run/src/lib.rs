@@ -115,8 +115,8 @@ pub use scaffold::{
     WrittenFile,
 };
 pub use test_runner::{
-    by_file, discover, execute as run_tests, filter_tests, tests_dir, DiscoveredTest,
-    OutcomeReport, TestOptions, TestOutcome, TestOutput,
+    by_file, discover, execute as run_tests, filter_tests, tests_dir, to_junit, to_tap,
+    DiscoveredTest, OutcomeReport, TestFormat, TestOptions, TestOutcome, TestOutput,
 };
 pub use update::{
     apply, authority_unknown_for_moved, cannot_update, contradictory_request, decide, diff,

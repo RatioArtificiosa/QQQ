@@ -1834,17 +1834,42 @@ fn dispatch_test(
         }
     };
 
-    report_with_verdict(out, name, &result, |r| {
-        // A determinism failure counts as a failure for the exit code. A test
-        // that passed 4 of 5 trials is not a passing test, and exiting `0`
-        // would let CI accept it — which is the one outcome `--trials` exists
-        // to prevent.
+    // A determinism failure counts as a failure for the exit code. A test
+    // that passed 4 of 5 trials is not a passing test, and exiting `0`
+    // would let CI accept it — which is the one outcome `--trials` exists
+    // to prevent.
+    //
+    // Bound once and used by BOTH paths below, because the envelope and a foreign report must not
+    // disagree about whether the run passed: a reporter showing green beside a non-zero exit is
+    // the disagreement that makes a CI job untrustworthy.
+    let verdict = |r: &qqq_run::TestOutput| {
         if r.failed + r.nondeterministic > 0 {
             exit::FAILURE
         } else {
             exit::OK
         }
-    })
+    };
+
+    // `TEST-003`. A foreign report format is a document for **another tool**, so it is written
+    // raw rather than through the envelope — a CI reporter handed JUnit XML inside QQQ's JSON
+    // envelope would parse neither. The precedent is `qqqai mcp`, whose output is the protocol
+    // and which ignores the formatter for the same reason.
+    if opts.format.is_foreign() {
+        let document = match opts.format {
+            qqq_run::TestFormat::Junit => qqq_run::to_junit(&result),
+            qqq_run::TestFormat::Tap => qqq_run::to_tap(&result),
+            // `is_foreign` is exactly these two, so this arm is unreachable. It exists rather
+            // than a wildcard so that adding a format is a compile error here instead of a
+            // silently empty document — an empty report parses as "no tests", which reads as a
+            // pass.
+            qqq_run::TestFormat::Human | qqq_run::TestFormat::Json => String::new(),
+        };
+        print!("{document}");
+        let _ = std::io::stdout().flush();
+        return ExitCode::from(verdict(&result));
+    }
+
+    report_with_verdict(out, name, &result, verdict)
 }
 
 /// Decode `qqqai test`'s flags.
@@ -1868,6 +1893,14 @@ fn test_options(
     let mut opts = qqq_run::TestOptions {
         dry_run: flags.dry_run(),
         json: flags.format() != Format::Human,
+        // `--json` is the envelope, and it is also the envelope *report* format. Keeping the two
+        // in step here means `--json` alone still does exactly what it did before `--format`
+        // existed, which is the compatibility the flag is allowed to assume.
+        format: if flags.format() == Format::Human {
+            qqq_run::TestFormat::Human
+        } else {
+            qqq_run::TestFormat::Json
+        },
         ..Default::default()
     };
     let mut i = 0;
@@ -1881,7 +1914,20 @@ fn test_options(
             }
             "--fail-fast" => opts.fail_fast = true,
             "--dry-run" => opts.dry_run = true,
-            "--json" => opts.json = true,
+            "--json" => {
+                opts.json = true;
+                opts.format = qqq_run::TestFormat::Json;
+            }
+            // `TEST-003`. A foreign format is a document for another tool, so an unknown value is
+            // a USAGE error rather than a silent fallback to human text: a CI job collecting no
+            // artifact must not look like a job that succeeded.
+            "--format" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.format = qqq_run::TestFormat::parse(v)
+                    .ok_or_else(|| bad_value(a, v, "one of human, json, junit, tap"))?;
+                opts.json = opts.format == qqq_run::TestFormat::Json;
+                i += 1;
+            }
             "--trials" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
                 opts.trials = Some(
@@ -1897,8 +1943,8 @@ fn test_options(
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
-                    "`test` accepts --filter, --fail-fast, --trials, --dry-run \
-                     and --manifest",
+                    "`test` accepts --filter, --fail-fast, --trials, --format, \
+                     --dry-run and --manifest",
                 ));
             }
             // A bare argument is treated as a filter, which is what every other

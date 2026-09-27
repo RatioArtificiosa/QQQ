@@ -28086,4 +28086,80 @@ tool whose subject is the gate itself.
 
 ---
 
+## §O-366 — A report format is not an envelope, and the format decides what "flaky" means
+
+**Found:** Phase 3 of the build goal, taking `TEST-003` (*"Implement JUnit, TAP and JSON output"*).
+**Anchors:** `crates/qqq-run/src/test.rs`, `crates/qqq-run/src/main.rs`,
+`crates/qqq-run/src/output.rs`, `.scratch/inject_t3.py`.
+
+### The obvious move was wrong, and the reason is the one this file keeps recording
+
+`output.rs` already had a `Format` enum — `Human`, `Json`, `JsonLines` — and every command reads it.
+So "add JUnit and TAP" looks like two more variants. It is not: `Format` is the **envelope's** format,
+and an envelope is a QQQ-specific wrapper carrying `producer`, `version`, `schema_version`,
+`command`, `ok` and `exit_code`. JUnit XML and TAP are documents consumed by **other tools** — a CI
+reporter, a TAP harness — and neither can read an envelope wrapped around the document it expects.
+
+Two more variants on `Format` would have offered **every command** two formats that none of them can
+produce, which is the shape this file records repeatedly: *a flag that parses and does nothing*. The
+test report therefore has its own format, and the two foreign ones are written **raw**. The
+precedent was already in the tree: `qqqai mcp` ignores the output formatter because *its output is
+the protocol*.
+
+### A `replace` chain has an ordering bug; a single pass cannot
+
+The first way to write XML escaping is a chain:
+
+    s.replace('<', "&lt;").replace('>', "&gt;").replace('&', "&amp;")
+
+Escaping `<` **introduces** an `&`, and the later `&`-replacement then escapes that one too, so
+`a<b` renders as `a&amp;lt;b` — which is well-formed XML for the wrong string. The bug is invisible
+on any input containing one special character, which is every input a test would naturally use.
+
+`xml_escape` is a single `match` over `char`s, so there is nothing to order. The injection that
+proves the test is live **is** the chain, and it fails the named assertion
+(`junit_does_not_double_escape_an_ampersand`) and nothing else.
+
+    AN ESCAPE THAT PRODUCES THE CHARACTER IT ESCAPES IS ONLY CORRECT IF THE ORDER IS, AND AN ORDER
+    IS A THING A LATER EDIT CAN CHANGE.
+
+### JUnit and TAP have no word for "flaky", so the format decides the mapping — and it must agree with the exit code
+
+`--trials N` exists because a test that passes 4 of 5 trials is **not** a passing test, and the
+command already exits non-zero for it (`failed + nondeterministic > 0`). Neither JUnit nor TAP has a
+`flaky` concept, so a renderer must choose: report such a test `ok`, or report it as a failure.
+
+Reporting `ok` would put a **green build in front of the one thing `--trials` exists to catch** —
+the defect the exit code already refuses to commit. Both renderers therefore map it to a failure,
+and both name the divergent trials in the message so nothing the format cannot carry is dropped.
+
+The exit code itself is computed by **one** closure shared by the envelope path and the foreign
+paths, because a reporter showing green beside a non-zero exit is the disagreement that makes a CI
+job untrustworthy.
+
+### A typo must not be a silent fallback
+
+`--format juint` is a **usage error**. A fallback to human text would let a CI job collect no
+artifact and report success — the same failure mode as the flaky mapping, one level up: an
+instrument that produces nothing that looks like something.
+
+### Measured
+
+Lib unit suite **505 -> 517 passed / 0 failed** (12 new tests) · `cargo fmt --all -- --check` 0 ·
+`cargo clippy -p qqq-run --all-targets --all-features -- -D warnings` 0 · injection A
+(`xml_escape` -> the `replace` chain) and injection B (`tap_single_line` -> identity) **both
+compiled** and **both failed their named assertion**, then passed again after restore
+(`VERIFIED RESTORED`). Two exit-101s that were assertions and not syntax errors, checked rather
+than assumed (`§O-280`).
+
+### What this does NOT do
+
+`TEST-016`, the conformance-suite **execution** runner, is still unbuilt, and `TEST-010` remains
+`[~]` for exactly that reason: `conformance/suite.json` defines obligations and `check_conformance.py`
+verifies that each obligation's checker runs in both gates, but **no case is executed against a
+built guest**. A matrix of obligations is not a result, and this change does not make it one — it
+makes a run *reportable*, which the execution half will need and did not have.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

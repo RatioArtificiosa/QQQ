@@ -45,7 +45,24 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
+
+# `write_text_lf` is this repository's single definition of "write a tracked text file without
+# letting the platform translate its newlines", and `check_xrefs.py` is where it lives.
+#
+# # Why this import was missing, and what it cost
+#
+# Measured before the fix: `python tools/check_tombstones.py --update` died with
+# `NameError: name 'write_text_lf' is not defined` at `save_baseline`. The call had been
+# written and the helper was never imported.
+#
+# **The self-test could not see it**, and that is the part worth recording: all seven of its
+# cases exercised `check()` -- the *read* path -- and not one exercised the writer. A second
+# entry point with no test is an entry point with no evidence (`§O-356`). The case added
+# below is the fix for that, not just for the `NameError`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
 
 
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
@@ -61,6 +78,19 @@ for _stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
 BASELINE = ROOT / ".anchor-baseline.txt"
+
+# Written **only** when the baseline does not exist yet. Once it does, its own comment block is
+# preserved verbatim by `save_baseline` -- see the note there for why that is not mere tidiness.
+DEFAULT_HEADER = (
+    "# Known Proposal anchors (`DOC-010`).\n"
+    "#\n"
+    "# Every anchor that has ever existed in QQQ-Proposal-V1.md. The list only GROWS:\n"
+    "# an anchor that disappears without a tombstone fails `tools/check_tombstones.py`,\n"
+    "# because deleting one turns every inbound citation into a dead link in a\n"
+    "# different file from the one that caused it.\n"
+    "#\n"
+    "# Regenerate with: python tools/check_tombstones.py --update\n"
+)
 
 # `## §6.4 Capability Engine` or `## §6.4 Capability Engine (retired — see §6.5)`.
 HEADING = re.compile(r"^(#{1,4})\s+(§[0-9A-Z][0-9A-Za-z.]*)\s+(.+?)\s*$", re.MULTILINE)
@@ -130,29 +160,49 @@ def parse_headings(text: str) -> list[dict[str, str]]:
     return out
 
 
-def load_baseline() -> set[str]:
-    if not BASELINE.exists():
+def load_baseline(path: Path = BASELINE) -> set[str]:
+    if not path.exists():
         return set()
     return {
         line.strip()
-        for line in BASELINE.read_text(encoding="utf-8").splitlines()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     }
 
 
-def save_baseline(anchors: set[str]) -> None:
-    header = (
-        "# Known Proposal anchors (`DOC-010`).\n"
-        "#\n"
-        "# Every anchor that has ever existed in QQQ-Proposal-V1.md. The list only GROWS:\n"
-        "# an anchor that disappears without a tombstone fails `tools/check_tombstones.py`,\n"
-        "# because deleting one turns every inbound citation into a dead link in a\n"
-        "# different file from the one that caused it.\n"
-        "#\n"
-        "# Regenerate with: python tools/check_tombstones.py --update\n"
-    )
+def save_baseline(anchors: set[str], path: Path = BASELINE) -> None:
+    """Write the anchor set, preserving whatever a human wrote in the comment block.
+
+    # Why the comments are preserved rather than rewritten
+
+    Measured, before this was fixed: `--update` wrote a hard-coded header, and running it
+    **deleted the `# HISTORY:` paragraph** from `.anchor-baseline.txt` — hand-written
+    provenance recording an earlier defect and its repair. A regeneration command that
+    destroys what a human wrote into the file is worse than no command at all: the loss is
+    silent, and the file's own header is what tells people to run it.
+
+    The division of ownership is the fix. The tool owns the **anchor list**; the file owns
+    its **comments**. A file that does not exist yet gets `DEFAULT_HEADER`.
+
+    This also makes `--update` a **fixpoint** — byte-identical on a healthy tree — which is
+    the property a regeneration command has to have to be safe to run.
+    """
+    existing = ""
+    if path.exists():
+        keep: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("#") or not line.strip():
+                keep.append(line)
+            else:
+                break
+        existing = "\n".join(keep)
+
+    header = existing if existing.strip() else DEFAULT_HEADER
     body = "\n".join(sorted(anchors))
-    write_text_lf(BASELINE,f"{header}\n{body}\n", encoding="utf-8")
+    # `path` is a parameter rather than the module constant so the self-test can point this at a
+    # temporary file. Writing the real baseline from a self-test would make running the self-test
+    # a mutation of a tracked file -- and `.anchor-baseline.txt` is tracked.
+    write_text_lf(path, f"{header}\n{body}\n", encoding="utf-8")
 
 
 def check() -> list[str]:
@@ -334,6 +384,64 @@ def self_test() -> int:
         "is derived by both",
     )
 
+    # --- the WRITER, which had no case until `--update` was measured broken ------
+    #
+    # `--update` is the only path that ever produces the baseline, and until this case existed
+    # nothing in this file executed `save_baseline`. It carried an undefined name and revealed
+    # it only when a human ran the flag (`§O-356`).
+    #
+    # Three assertions, each of which was a measured failure:
+    #   1. the round trip -- a writer that mangles the header it must later skip;
+    #   2. the bytes -- `Path.write_text` translates `\n` to CRLF on Windows, which
+    #      `.gitattributes` pins `eol=lf` against and which `git status` cannot see;
+    #   3. the comments -- `--update` deleted the file's hand-written `# HISTORY:` block,
+    #      because the header was hard-coded in this file rather than owned by the file.
+    with tempfile.TemporaryDirectory() as _td:
+        _target = Path(_td) / ".anchor-baseline.txt"
+        _anchors = {"zz-last-anchor", "aa-first-anchor"}
+        try:
+            save_baseline(_anchors, _target)
+            _raw = _target.read_bytes()
+        except Exception as exc:  # the point is to name the failure, not to classify it
+            ok, detail = False, f"save_baseline raised {type(exc).__name__}: {exc}"
+        else:
+            _round_trip = load_baseline(_target)
+            if _round_trip != _anchors:
+                ok, detail = False, f"the round trip gave {sorted(_round_trip)}"
+            elif b"\r\n" in _raw:
+                ok, detail = False, "the writer translated newlines to CRLF"
+            else:
+                ok, detail = True, ""
+        print(f"  {'OK  ' if ok else 'DEAD'}  the baseline writer round-trips and writes LF")
+        if not ok:
+            failures += 1
+            print(f"        {detail}")
+
+        # (3) A file that already carries human commentary must keep it. The marker is
+        # deliberately not a substring of `DEFAULT_HEADER`, so a writer that falls back to the
+        # default header cannot pass by coincidence.
+        _marker = "# HISTORY: a human wrote this and it must survive regeneration"
+        try:
+            write_text_lf(_target, f"{_marker}\n\nzz-last-anchor\n", encoding="utf-8")
+            save_baseline(_anchors | {"mm-middle-anchor"}, _target)
+            _after = _target.read_bytes()
+            _reloaded = load_baseline(_target)
+        except Exception as exc:
+            ok, detail = False, f"preserving comments raised {type(exc).__name__}: {exc}"
+        else:
+            if _marker.encode("utf-8") not in _after:
+                ok, detail = False, "the writer dropped the file's own comment block"
+            elif _reloaded != _anchors | {"mm-middle-anchor"}:
+                ok, detail = False, f"the anchors came back as {sorted(_reloaded)}"
+            elif _marker.encode("utf-8") in DEFAULT_HEADER.encode("utf-8"):
+                ok, detail = False, "the marker is in DEFAULT_HEADER, so this case is vacuous"
+            else:
+                ok, detail = True, ""
+        print(f"  {'OK  ' if ok else 'DEAD'}  the writer preserves a comment block it did not write")
+        if not ok:
+            failures += 1
+            print(f"        {detail}")
+
     # The real corpus must currently hold.
     problems = check()
     ok = not problems
@@ -343,7 +451,7 @@ def self_test() -> int:
         for p in problems[:3]:
             print(f"        {p}")
 
-    total = 7
+    total = 9
     print("")
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")

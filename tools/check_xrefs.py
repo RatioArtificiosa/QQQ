@@ -455,6 +455,51 @@ def main() -> int:
 
 
     # ----------------------------------------------------------------------
+    # 14. Every observation id has exactly ONE definitional heading.
+    #
+    # [13] requires that a cited id **exists**. That is a substring test over the whole
+    # document, so a heading written twice satisfies it twice -- and `§O-354` did exactly
+    # that: two headings 1,267 lines apart, the later one being the newest entry of its
+    # round, appended with an id that already existed (`§O-358`).
+    #
+    # **Existence is not uniqueness.** An id is an address, and an address that resolves to
+    # two entries is not an address.
+    #
+    # # Why the pattern captures the letter suffix
+    #
+    # The register uses one: `§O-218` and `§O-218f` both exist, 138 lines apart, and a
+    # `\d+`-only pattern reads the second as `218` and reports a duplicate that is not
+    # there. That false positive was measured; the suffix group is what removes it.
+    #
+    # # Why only a heading, and only at the start of one
+    #
+    # A definition here is a heading; a citation is not. Citations appear mid-sentence, in
+    # tables, and in prose. Anchoring on `^#+\s+§?O-` and requiring the id to be the first
+    # thing after the hashes separates the two without guessing, and it covers both forms
+    # the register uses -- the sigil form (`## §O-354 — ...`) and the bare form
+    # (`### O-181: ...`).
+    # ----------------------------------------------------------------------
+    heading_ids: dict[str, list[int]] = {}
+    for lineno, line in enumerate(observations.splitlines(), start=1):
+        m = re.match(r"#+\s+§?O-(\d+[a-z]?)\b", line)
+        if m:
+            heading_ids.setdefault(m.group(1), []).append(lineno)
+
+    # Anti-vacuity first: an empty map would make the loop below pass while measuring
+    # nothing, which is the failure mode this whole check exists to end.
+    if not heading_ids:
+        errors.append(
+            "[14] no observation headings were found, so the uniqueness check is vacuous"
+        )
+    for oid, linenos in sorted(heading_ids.items()):
+        if len(linenos) > 1:
+            errors.append(
+                f"[14] §O-{oid} is defined by {len(linenos)} headings "
+                f"(lines {', '.join(str(n) for n in linenos)}); an id must be unique"
+            )
+
+
+    # ----------------------------------------------------------------------
     # 10b. Every decision must be cited from the Proposal.
     #
     # The reverse of [10], and the check that was missing. Six of the nine
@@ -736,10 +781,28 @@ def _checklist(*, citation: str = "\u2192 \u00a76.4 Capability engine",
 def _observations(*, skeleton: list[str] | None = None,
                   corrections: str = "### \u00a7C-001 Corrected a thing",
                   decisions: str = "### \u00a7D-001 Narrowing only",
-                  stubs: str = "") -> str:
+                  stubs: str = "",
+                  observation_headings: str = "## \u00a7O-001 A synthetic observation") -> str:
+    """A minimal Observations document.
+
+    # Why it carries an observation HEADING by default
+
+    Check [14] asserts that every observation id is defined by exactly one heading, and its
+    first clause is anti-vacuity: a document with no such heading would satisfy the
+    uniqueness loop while measuring nothing, and that is reported as a failure.
+
+    The fixture had none, so the clause fired on the **pristine baseline** the first time
+    [14] was run against it -- the self-test said `the baseline is broken, so every case
+    below is meaningless`, which is exactly what it should say. Adding the heading is the
+    fix, and the lesson is the one this repository keeps relearning: a check's own premise
+    is part of the check, and a fixture that cannot exhibit the property under test makes
+    every case built on it meaningless (`\u00a7O-358`).
+    """
     return "\n".join(skeleton if skeleton is not None else _SKELETON) + f"""
 
 ## 3. OBSERVATIONS
+
+{observation_headings}
 
 {corrections}
 
@@ -1032,6 +1095,33 @@ def self_test() -> int:
         _write_corpus(d, proposal=_proposal(), checklist=_checklist(),
                       observations=_observations(skeleton=swapped))
         case("[12] Observations headings are out of order", d, "12")
+
+        # --- [14] one observation id, two definitional headings ---
+        #
+        # The defect `§O-358` records: the register held two `## §O-354`s, 1,267 lines apart,
+        # the later one the newest entry of its round. Check [13] could not see it -- it asks
+        # whether a cited id *exists*, which a duplicate satisfies twice.
+        #
+        # The second heading is written by repeating the default one, so the fixture cannot
+        # drift out of step with the check the way an anchor on a *specific* observation
+        # would (`self_test_xrefs.py`'s check [4] case went stale twice that way).
+        d = base / "r14"
+        _write_corpus(d, proposal=_proposal(), checklist=_checklist(),
+                      observations=_observations(
+                          observation_headings=(
+                              "## \u00a7O-001 A synthetic observation\n\n"
+                              "## \u00a7O-001 The same id, defined again")))
+        case("[14] an observation id defined by two headings", d, "14")
+
+        # --- [14] the anti-vacuity clause itself ---
+        #
+        # A fixture with no observation heading at all must be reported, not passed. Without
+        # this case the clause could be deleted and every other [14] case would still pass --
+        # which is the shape of guard that reports a clean corpus because it read nothing.
+        d = base / "r14v"
+        _write_corpus(d, proposal=_proposal(), checklist=_checklist(),
+                      observations=_observations(observation_headings="# nothing here"))
+        case("[14] no observation headings is vacuous, not clean", d, "14")
 
         # --- the progress line counts every marker the legend defines ---------
         #

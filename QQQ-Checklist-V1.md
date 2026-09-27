@@ -4020,7 +4020,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 **Rust (Tier A)**
 
-- [ ] **LANG-001** Rust toolchain integration: `wasm32-wasip2` build path, verified end to end.
+- [x] **LANG-001** Rust toolchain integration: `wasm32-wasip2` build path, verified end to end.
+  → Done: `qqqai build` drives `cargo build --target wasm32-wasip2` over `examples/orders-api` and emits `target/qqq/orders-api.component.wasm`. `crates/qqq-run/tests/lang001_rust_guest.rs` asserts the artifact's eight-byte preamble is `0d 00 01 00`, the component-model encoding, and not `01 00 00 00`, a core module — the two share the `\0asm` magic, so asserting `\0asm` alone would pass on exactly the failure this item exists to catch. The `rust` CI job runs it on all three platforms via `--ignored`.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-002** Rust bindings generated from `wit/` via `wit-bindgen`.
   → §6.10 Language toolchains — one per target language

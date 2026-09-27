@@ -39,6 +39,15 @@ ROOT = Path(__file__).resolve().parent.parent
 CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
 PROPOSAL = ROOT / "QQQ-Proposal-V1.md"
 
+# This script rewrites two TRACKED files, so it must not let the platform translate their
+# newlines. `Path.write_text` defaults to `newline=None`, which turns every `\n` into
+# `os.linesep` -- `\r\n` on Windows -- and `.gitattributes` pins all three canonical documents
+# to `eol=lf`. The result is a working tree that `git status` reports as modified, that
+# `git diff` reports with an empty diff, and that `tools/normalize_eol.py` describes as untidy.
+# `write_text_lf` is this repository's single definition of the correct write (`§O-356`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
+
 RE_ITEM_DEF = re.compile(r"^\s*-\s*\[[ x~!-]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*")
 RE_TOKEN_ID = re.compile(r"`([A-Z]{2,5}-\d{3})`")
 RE_RANGE = re.compile(r"`([A-Z]{2,5})-(\d{3})`\s*…\s*`([A-Z]{2,5})-(\d{3})`")
@@ -104,7 +113,7 @@ def fix_citations() -> int:
             continue
         out.append(line)
         i += 1
-    CHECKLIST.write_text("\n".join(out) + "\n", encoding="utf-8")
+    write_text_lf(CHECKLIST, "\n".join(out) + "\n", encoding="utf-8")
     return changed
 
 
@@ -141,7 +150,7 @@ def fix_ranges() -> int:
         return m.group(0)
 
     text = RE_RANGE.sub(repl, text)
-    PROPOSAL.write_text(text, encoding="utf-8")
+    write_text_lf(PROPOSAL, text, encoding="utf-8")
     return changes
 
 
@@ -176,7 +185,7 @@ def fix_single_ids() -> int:
                 out.append(newline)
                 continue
         out.append(line)
-    PROPOSAL.write_text("\n".join(out) + "\n", encoding="utf-8")
+    write_text_lf(PROPOSAL, "\n".join(out) + "\n", encoding="utf-8")
     return changes
 
 

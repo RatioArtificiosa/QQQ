@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **163** |
+| `.rs` files scanned under `crates/` | **164** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -29,7 +29,7 @@ fails when this table disagrees with a live scan, and CI runs it. It was added b
 file count here said **85** while the tree held 139: true when written, never tied to the
 tree afterwards, and wrong in the direction that understates the sample.
 
-It has since caught the same drift three times, and every time it was a red CI run waiting for a
+It has since caught the same drift four times, and every time it was a red CI run waiting for a
 push, which is the mechanism doing its job. The first was **141 → 142**, when
 `qqq-host/src/guest_output.rs` landed. The second was **142 → 143**, from
 `crates/qqq-serve/tests/accept_bound.rs`, which arrived with the per-tenant connection
@@ -37,6 +37,11 @@ ceiling. The third is **143 → 146**, from three files in one session:
 `crates/qqq-pkg/src/signature.rs`, `crates/qqq-run/src/verify.rs`, and
 `crates/qqq-run/src/style.rs`. The fourth is **146 → 147**, from
 `crates/qqq-run/tests/worker_pool.rs`.
+
+The most recent is **163 → 164**, from `crates/qqq-run/tests/lang001_rust_guest.rs`. It was caught
+by the **local** full gate **before** the commit rather than by CI after it, and that is the one
+difference worth recording: the four above were found by CI because the whole gate had not been run
+locally, and this one was found because it was.
 
 **Four drifts in one working period, and every one was caught by CI rather than locally.** That
 is the mechanism working, and it is also a fact worth stating plainly: this number changes

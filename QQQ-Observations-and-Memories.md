@@ -27048,7 +27048,7 @@ found the second defect**.
 
 ---
 
-## §O-354 — HEAD was RED on clippy, and a clean tree is not a green tree
+## §O-356 — HEAD was RED on clippy, and a clean tree is not a green tree
 
 **Found:** re-running a check whose result a disconnection had lost. **Anchors:**
 `crates/qqq-run/src/mcp.rs`.
@@ -27093,6 +27093,328 @@ answered"* — and **the arm it was attached to *was* that silence, one round la
 ### Measured
 
 workspace **2714 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121).
+
+---
+
+## §O-357 — Three tools that rewrite the corpus let the platform translate its newlines, and the fourth had never been run
+
+**Found:** about to run `tools/mark_complete.py` to tick `LANG-001`, and reading its write before
+trusting it. **Anchors:** `tools/mark_complete.py`, `tools/fix_corpus.py`, `tools/fix_corpus2.py`,
+`tools/check_tombstones.py`, `tools/check_xrefs.py`, `.gitattributes`.
+
+### The class, measured rather than reasoned about
+
+`Path.write_text` passes `newline=None` to `open`, which translates every `\n` to `os.linesep` —
+`\r\n` on Windows. Measured on this platform:
+
+```text
+p.write_text("x\ny\n", encoding="utf-8")                 -> b'x\r\ny\r\n'
+p.write_text("x\ny\n", encoding="utf-8", newline="")     -> b'x\ny\n'
+os.linesep = '\r\n'
+```
+
+**Why the damage is invisible.** `.gitattributes` pins the canonical documents to `text eol=lf`, so
+Git normalizes on checkin: the index holds LF, the working tree holds CRLF, `git status` says
+modified, `git diff` shows **nothing**, and `tools/normalize_eol.py --check` **prints** the drift and
+**exits 0** — deliberately, because a working-tree difference is untidy rather than broken. Every
+one of those decisions is defensible on its own. Together they make a corrupted checkout that
+reports as clean.
+
+### The fix already existed, in one file, unpropagated
+
+`tools/check_xrefs.py` has had `write_text_lf` since `§O-273`, with a docstring that names the exact
+trap, and **seven checkers already import it**. Three tools that rewrite **tracked** corpus files did
+not:
+
+| file | sites | subject |
+|---|---|---|
+| `tools/fix_corpus.py` | 3 | `QQQ-Checklist-V1.md`, `QQQ-Proposal-V1.md` |
+| `tools/fix_corpus2.py` | 3 | `QQQ-Checklist-V1.md` |
+| `tools/mark_complete.py` | 1 | `QQQ-Checklist-V1.md` |
+
+All seven now call `write_text_lf`. **The guard was only as wide as its import list** — the rule was
+written down, implemented once, and never propagated to the tools that needed it most.
+
+### And the fourth tool had a `write_text_lf` call with no import
+
+`tools/check_tombstones.py` called `write_text_lf` in `save_baseline` and **never imported it**.
+Measured, before the fix:
+
+```text
+File "tools/check_tombstones.py", line 155, in save_baseline
+    write_text_lf(BASELINE,f"{header}\n{body}\n", encoding="utf-8")
+    ^^^^^^^^^^^^^
+NameError: name 'write_text_lf' is not defined
+```
+
+**Nothing had ever run it.** All **seven** self-test cases exercised `check()` — the *read* path —
+and not one exercised the writer. `--update` is the only path that produces `.anchor-baseline.txt`,
+and it had never been executed by anything except a human who never ran it.
+
+> **A second entry point with no test is an entry point with no evidence.**
+
+### And once it ran, `--update` deleted the file's own history
+
+With the import fixed, `--update` ran — and rewrote `.anchor-baseline.txt` to **different bytes** at
+an unchanged anchor count (`93 -> 93`). The diff was not the anchors:
+
+```text
+-# HISTORY: rebuilt once. The first version was written by a derivation that dropped
+-# the section number -- `capability-engine` where the anchor is
+-# `64-capability-engine` -- and because this file is append-only by design, `--update`
+-# could not remove those entries: it unions. ...
+```
+
+**`--update` destroyed the record of an earlier defect and its repair** — and the file's own header
+is what tells a reader to run `--update`. The header was a hard-coded string in the script, so the
+tool owned prose it did not write.
+
+The fix is a division of ownership: **the tool owns the anchor list, the file owns its comments.**
+`save_baseline` now preserves the existing comment block verbatim and falls back to `DEFAULT_HEADER`
+only when the file does not exist yet. Measured after the fix: `--update` is a **fixpoint** —
+`sha256` unchanged, `79d0b662…` before and after, and `git status` shows no modification.
+
+### And the ticker was not idempotent either
+
+`tools/mark_complete.py` guards its `COMPLETE` branch with the `- [ ] ` prefix, so a ticked item
+cannot be re-ticked. The `PARTIAL` branch has no such guard, and a partial item **stays** `- [ ] ` —
+so it matched on every run. Measured on a copy of the checklist:
+
+```text
+- [ ] **FND-008** Configure branch protection on `main`: ...
++  → Partial: branch protection is a repository setting, not a file; ...
+   → Partial: branch protection is a repository setting, not a file; ...
+```
+
+Two duplicated annotations (`FND-008`, `LIC-002`), and `ticked 1, annotated 2` where the answer is
+`ticked 1, annotated 0`. The run now reports `already present`, and **three consecutive runs produce
+byte-identical output** (`sha256 2a4d9570…` three times).
+
+> **A maintenance tool that cannot be run twice is a tool that corrupts the file it owns — and the
+> second run is the normal case, not the exotic one.**
+
+### And the writer got a case of its own
+
+`check_tombstones.py --self-test` went from **7 to 9** cases: the baseline writer round-trips and
+writes LF, and the writer preserves a comment block it did not write. Both were **fault-injected**:
+
+```text
+INJECT A (drop the `write_text_lf` import)
+  -> the baseline writer round-trips and writes LF: FAILED
+     save_baseline raised NameError: name 'write_text_lf' is not defined
+INJECT B (hard-code the header again)
+  -> the writer preserves a comment block it did not write: FAILED
+     the writer dropped the file's own comment block
+RESTORED, file touched, CLEAN -> 9/9 cases, every rule live
+```
+
+Injection A is the original defect restored verbatim, so the case that catches it is the case that
+catches a regression to the bug that started this.
+
+### Measured
+
+`--update` `sha256` **unchanged** (fixpoint) · `mark_complete` **3 runs, one hash** · `CRLF=0,
+bare-LF=5319` in the rewritten checklist · self-test **7 → 9** cases · **2** injections, both
+detected, both restored, file touched · **7** sites moved to `write_text_lf` across **3** tools ·
+`CHECKLIST COUNTS OK — 32 area(s), 587 item(s)`.
+
+### What is deliberately NOT fixed
+
+`check_xrefs.py`'s `_write_corpus` still writes its synthetic corpus with bare `write_text`. That is
+a **temp sandbox**, not a tracked file, and the checker reads those fixtures back through
+`splitlines()`, which handles either ending. Changing it would be acting on a theory rather than a
+measurement.
+
+---
+
+## §O-358 — The register held two `§O-354`s: an id is only an address if it is unique
+
+**Found:** locating the append point for a new observation, and counting the ids to pick the next
+free one. **Anchors:** `QQQ-Observations-and-Memories.md`, `tools/check_xrefs.py`.
+
+### The measurement
+
+```text
+headings matching `^#+\s+§O-(\d+[a-z]?)\b` : 520
+distinct ids                               : 519
+duplicates                                 : {354: 2}
+```
+
+Two headings, 1,267 lines apart:
+
+```text
+26784:  ## §O-354 — The conformance suite found a checker nobody had watched fail
+27051:  ## §O-354 — HEAD was RED on clippy, and a clean tree is not a green tree
+```
+
+The duplicate is the **newest** entry: the previous round appended an observation numbered `§O-354`
+while `§O-355` already existed. `§O-354` therefore names two different things, and every citation of
+it is ambiguous.
+
+### The guard could not see it, and says so in its own comment
+
+`check_xrefs.py` check **[13]** requires that every id cited from the corpus **exists**:
+
+```python
+if ("§" + cid) not in observations:
+    errors.append(f"[13] §{cid} is cited by {where} but is not defined in Observations")
+```
+
+That is a substring test on the whole document. A duplicated heading satisfies it **twice**.
+
+> **Existence is not uniqueness. A guard that asks "is it defined?" cannot see "defined twice".**
+
+And this is the guard that exists *because* of exactly this kind of failure: `§O-266` records
+`§O-249` being cited by eleven files while the entry had never been written. The rule was widened
+from "the Proposal cites an undefined decision" to "every family, every citing document" — and
+still stopped one question short.
+
+### The fix is a renumber, and the direction is not a choice
+
+Every existing citation of `§O-354` means the **conformance** entry — five sites:
+`docker/entrypoint.sh` (*"this checker had no demonstrated failure mode in either gate"*),
+three in `QQQ-Checklist-V1.md` (`conformance/suite.json` ownership, the `--self-test`, the
+`qqq-abi` structural assertion), and `tools/check_wit.py` (*"named as a conformance obligation by
+`conformance/suite.json`"*). So the mis-numbered entry is the clippy one, and it becomes `§O-356`.
+**No citation changes meaning**, which is what makes this a repair rather than a rename.
+
+### And the guard now asks the other question
+
+`check_xrefs.py` gains check **[14]**: every observation id must be defined by exactly **one**
+heading. It is a heading match — `^#+\s+§?O-(\d+[a-z]?)\b` — so it covers both forms the register
+uses, the sigil form `## §O-354 — …` and the bare form `### O-181: …`, and it cannot be satisfied
+by a citation, because a citation is never the first thing after the hashes.
+
+Measured against the real register: **539** definitional headings, **539** distinct, **0**
+duplicates.
+
+Its first clause is anti-vacuity, and **that clause immediately failed on the self-test's own
+fixture**: the synthetic Observations document contained no `§O-` heading at all, so
+`check_xrefs.py --self-test` reported
+
+```text
+DEAD  pristine synthetic corpus passes
+      the baseline is broken, so every case below is meaningless
+      | FAIL  [14] no observation headings were found, so the uniqueness check is vacuous
+```
+
+**A fixture that cannot exhibit the property under test makes every case built on it meaningless** —
+so the fixture now carries one observation heading, and a second case asserts that a document with
+none is reported rather than passed.
+
+### Both halves were injected, and each killed exactly one case
+
+```text
+INJECT dup      (disable the duplicate report)
+  DEAD  [14] an observation id defined by two headings
+  OK    [14] no observation headings is vacuous, not clean
+INJECT vacuity  (disable the anti-vacuity clause)
+  OK    [14] an observation id defined by two headings
+  DEAD  [14] no observation headings is vacuous, not clean
+RESTORED byte_identical=True  ->  19/19 cases
+```
+
+**Two injections, two directions, and neither case passes for the other's reason.** The self-test
+went from **17 to 19** cases. And the check was separately injected against the **real** corpus by
+renaming a heading's id to one that already existed:
+
+```text
+FAIL  [14] §O-359 is defined by 2 headings (lines 27099, 27297); an id must be unique
+```
+
+restored byte-identical (`c23890db…`).
+
+### And `§O-218` is NOT a duplicate — a naive pattern says it is
+
+`§O-218` and **`§O-218f`** both exist, 138 lines apart. The register uses a **letter suffix** for a
+follow-up, and a `\d+`-only pattern reads `§O-218f` as `218`. That is a false positive produced by
+the *measuring tool*, not by the corpus — the `§O-282` shape, one level up.
+
+**The uniqueness rule must therefore capture the suffix**: `§O-(\d+[a-z]?)`.
+
+### Measured
+
+**520** sigil headings, **519** distinct, **1** duplicate · **5** external citations, all meaning the
+conformance entry, none changed · `§O-218` / `§O-218f` verified **not** a duplicate · check **[14]**
+added, **539** headings / **539** distinct / **0** duplicates on the real register · self-test
+**17 → 19** cases · **2** fixture injections plus **1** real-corpus injection, all detected, all
+restored byte-identical · next free id **`§O-357`** before this round's entries, **`§O-359`** after
+them.
+
+---
+
+## §O-359 — `LANG-001`: `\0asm` is not the assertion, the layer field is
+
+**Found:** building the first `LANG` item, which the goal holds back until the conformance suite
+exists. **Anchors:** `crates/qqq-run/tests/lang001_rust_guest.rs`,
+`crates/qqq-run/src/build.rs`, `.github/workflows/ci.yml`.
+
+### The item, and the trap inside it
+
+`LANG-001` — *"Rust toolchain integration: `wasm32-wasip2` build path, verified end to end."*
+
+A **core module** and a **component** begin with the same four bytes, `\0asm`. They are
+distinguished by the **layer** field that follows:
+
+| artifact | first eight bytes |
+|---|---|
+| core module | `00 61 73 6d 01 00 00 00` |
+| component (component-model encoding) | `00 61 73 6d 0d 00 01 00` |
+
+**So a test asserting `\0asm` passes on exactly the failure this item exists to catch** — a crate
+that has not opted into the component model builds fine, produces a valid module, and is not a
+component. The assertion is the whole eight-byte preamble.
+
+### What was measured
+
+```text
+$ qqqai build            (in examples/orders-api)
+orders-api: target/qqq/orders-api.component.wasm (167382 bytes) for wasm32-wasip2
+EXIT=0
+```
+
+**Fault-injected** by setting the expected preamble to the core-module bytes:
+
+```text
+the artifact must be a COMPONENT, not a core module: [00, 61, 73, 6d, 0d, 00, 01, 00]
+```
+
+which fails **and** proves the real artifact is a component — the injection measured something.
+
+### Why it drives `qqqai build` and not `cargo build`
+
+Because a plan is an **intention**. `build::plan_pure` is already tested for the arguments it
+produces; what was never tested is that the toolchain turns those arguments into a component. The
+test runs the product's own command over the repository's own guest.
+
+### Why it runs in `rust` and not `reference-app`
+
+The obvious home is `reference-app`, which builds the guest and inspects it with `wasm-tools` — and
+it is the wrong one. Its cargo cache is keyed `workspaces: "examples/orders-api -> target"`, which
+**replaces** the default, so the host workspace — `wasmtime` included — would rebuild from cold on
+every run. The `rust` job has already built `CARGO_BIN_EXE_qqqai` in the step above at the same
+profile and feature set. The cost is one guest build per platform instead of one whole workspace.
+
+### Why all three platforms
+
+`DIST-020` asks whether Windows is first-class or best-effort, and the platform-dependent part of
+this path is the toolchain probe and the artifact-path computation behind `qqqai build`. Running it
+on Linux alone would answer that question with silence. The step carries `timeout-minutes: 10` from
+`§O-355`'s rule: a hang must fail a **named step**, not the job.
+
+### And only Rust
+
+The other four languages stay open behind `TEST-010`, the cross-language conformance suite. Five
+toolchains built against an unbuilt suite produce five unverifiable claims, and that is the whole
+reason `LANG` was held back. `LANG-001` becoming reachable is the conformance suite's first payoff,
+not a change of plan.
+
+### Measured
+
+`qqqai build` **EXIT=0**, artifact **167382 bytes**, target `wasm32-wasip2` · preamble
+`0d 00 01 00`, **asserted** and **injected** · test **1 passed** with `--ignored` · `LANG-001`
+ticked in `QQQ-Checklist-V1.md` with the ticker's `→ Done:` line · CI step added to the `rust` job
+with `timeout-minutes: 10` · **CI jobs 10, steps 161, 0 steps with neither `run` nor `uses`**.
 
 ---
 

@@ -6,7 +6,18 @@ Every edit is justified by evidence gathered from the source tree, not from
 memory. Items that are partially done are annotated rather than checked.
 """
 
+import sys
 from pathlib import Path
+
+# `CHECKLIST` is a TRACKED file pinned to `eol=lf` by `.gitattributes`, and `Path.write_text`
+# defaults to `newline=None`, which turns every `\n` into `os.linesep` -- `\r\n` on Windows.
+# Measured on this platform: `p.write_text("x\ny\n")` writes `b'x\r\ny\r\n'`, while
+# `newline=""` writes `b'x\ny\n'`. The result is a file `git status` reports as modified, that
+# `git diff` reports with an empty diff, and that `tools/normalize_eol.py` describes as untidy --
+# and this tool's whole job is to rewrite that file. `write_text_lf` is the repository's single
+# definition of the correct write (`§O-356`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
 
 CHECKLIST = Path("QQQ-Checklist-V1.md")
 
@@ -86,6 +97,14 @@ COMPLETE = {
     "GOV-002": "`CONTRIBUTING.md` — setup, workflow, standards and the DCO.",
     "GOV-003": "`CODE_OF_CONDUCT.md`, which CONTRIBUTING.md already linked to before it existed.",
     "GOV-006": "`SECURITY.md` — acknowledgement, assessment and patch targets by severity.",
+
+    # -- LANG: the Rust toolchain, and the gate in front of the other four ---------
+    #
+    # Only Rust. The other four languages stay open behind `TEST-010`, the cross-language
+    # conformance suite, because five toolchains built against an unbuilt suite produce five
+    # unverifiable claims. That is the whole point of the ordering, so it is stated here
+    # rather than left to be inferred from four absences.
+    "LANG-001": "`qqqai build` drives `cargo build --target wasm32-wasip2` over `examples/orders-api` and emits `target/qqq/orders-api.component.wasm`. `crates/qqq-run/tests/lang001_rust_guest.rs` asserts the artifact's eight-byte preamble is `0d 00 01 00`, the component-model encoding, and not `01 00 00 00`, a core module — the two share the `\\0asm` magic, so asserting `\\0asm` alone would pass on exactly the failure this item exists to catch. The `rust` CI job runs it on all three platforms via `--ignored`.",
 }
 
 # Items that are genuinely partial: annotate, never tick.
@@ -110,8 +129,19 @@ def main() -> int:
     out: list[str] = []
     ticked = 0
     annotated = 0
+    already = 0
 
-    for line in lines:
+    # # Why this iterates with an index rather than over the lines
+    #
+    # The `PARTIAL` branch needs to look at the line **after** the item, and the defect it
+    # guards against was measured: a second run of this tool appended the annotation again, so
+    # `FND-008` and `LIC-002` each ended up with two identical `→ Partial:` lines. A tool whose
+    # re-run corrupts the file it owns is a tool that cannot be run twice, which is exactly
+    # when it gets run (`§O-356`).
+    #
+    # The `COMPLETE` branch never needed the guard: a ticked item reads `- [x] ` and so cannot
+    # match the `- [ ] ` prefix above, which makes it idempotent by construction.
+    for index, line in enumerate(lines):
         matched = None
         for item_id in list(COMPLETE) + list(PARTIAL):
             if line.startswith("- [ ] ") and f"**{item_id}**" in line:
@@ -124,13 +154,18 @@ def main() -> int:
             ticked += 1
         elif matched and matched in PARTIAL:
             out.append(line)
-            out.append(f"  → Partial: {PARTIAL[matched]}")
-            annotated += 1
+            annotation = f"  → Partial: {PARTIAL[matched]}"
+            present = index + 1 < len(lines) and lines[index + 1].strip() == annotation.strip()
+            if present:
+                already += 1
+            else:
+                out.append(annotation)
+                annotated += 1
         else:
             out.append(line)
 
-    CHECKLIST.write_text("\n".join(out), encoding="utf-8")
-    print(f"ticked {ticked}, annotated {annotated}")
+    write_text_lf(CHECKLIST, "\n".join(out), encoding="utf-8")
+    print(f"ticked {ticked}, annotated {annotated}, already present {already}")
     return 0
 
 

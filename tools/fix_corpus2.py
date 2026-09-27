@@ -15,10 +15,19 @@ Idempotent.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
+
+# This script rewrites a TRACKED file, so it must not let the platform translate its newlines.
+# `Path.write_text` defaults to `newline=None`, which turns every `\n` into `os.linesep` --
+# `\r\n` on Windows -- and `.gitattributes` pins the canonical documents to `eol=lf`. The result
+# is a file `git status` reports as modified with an empty `git diff`, which is the state
+# `tools/normalize_eol.py` exists to describe (`§O-356`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf  # noqa: E402
 
 RE_ITEM_DEF = re.compile(r"^\s*-\s*\[[ x~!-]\]\s*\*\*([A-Z]{2,5}-\d{3})\*\*")
 
@@ -33,7 +42,7 @@ def strip_stale_appendix_citations() -> int:
             removed += 1
             continue
         out.append(line)
-    CHECKLIST.write_text("\n".join(out) + "\n", encoding="utf-8")
+    write_text_lf(CHECKLIST, "\n".join(out) + "\n", encoding="utf-8")
     return removed
 
 
@@ -79,7 +88,7 @@ def add_coverage_items() -> int:
         text = text.replace(anchor_agent, anchor_agent + new_agent, 1)
         added += 1
 
-    CHECKLIST.write_text(text, encoding="utf-8")
+    write_text_lf(CHECKLIST, text, encoding="utf-8")
     return added
 
 
@@ -94,7 +103,7 @@ def recount_totals() -> None:
         f"| **Total** | | **{total}** |",
         text,
     )
-    CHECKLIST.write_text(text, encoding="utf-8")
+    write_text_lf(CHECKLIST, text, encoding="utf-8")
     print(f"total checklist items: {total}")
 
 

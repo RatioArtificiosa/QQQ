@@ -888,6 +888,40 @@ jobs:
         timeout-minutes: 30
         run: cargo test --workspace --all-features --verbose
 
+      # `LANG-001` -- "`wasm32-wasip2` build path, **verified end to end**".
+      #
+      # # Why it is a separate step rather than part of the step above
+      #
+      # Because it **compiles a guest**. That needs the `wasm32-wasip2` target installed and
+      # takes seconds, so the test carries `#[ignore]` and this step is how the gate asks for
+      # it. The alternative -- letting it run in the default set -- would make every
+      # developer's `cargo test` depend on an installed target, and a test that cannot run
+      # everywhere must *say so* rather than fail everywhere.
+      #
+      # # What it proves that no other step does
+      #
+      # The `reference-app` job builds the guest with `cargo build` directly and inspects the
+      # artifact with `wasm-tools`. This drives the **product's own command** (`qqqai build`)
+      # and asserts the artifact's **eight-byte preamble** is the component-model encoding,
+      # `0d 00 01 00`, rather than a core module's `01 00 00 00`.
+      #
+      # That distinction is the whole point: **a core module carries the same `\0asm` magic
+      # as a component**, so a test asserting `\0asm` passes on exactly the failure
+      # `LANG-001` exists to catch.
+      #
+      # # Why all three platforms, at a cost of one guest build each
+      #
+      # `DIST-020` asks whether Windows is first-class or best-effort, and the
+      # platform-dependent part of this path is the toolchain probe and the artifact-path
+      # computation behind `qqqai build`. Running this on Linux alone would answer that
+      # question with silence. The incremental compile cost is near zero: the step above has
+      # already built these test targets in the same profile and feature set.
+      - name: the wasm32-wasip2 build path produces a component (LANG-001)
+        # Bounded, from the rule that cost a 360-minute run once: a hang must fail a named
+        # step rather than the whole job (`§O-355`).
+        timeout-minutes: 10
+        run: cargo test -p qqq-run --all-features --test lang001_rust_guest -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a

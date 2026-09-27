@@ -27048,4 +27048,52 @@ found the second defect**.
 
 ---
 
+## §O-354 — HEAD was RED on clippy, and a clean tree is not a green tree
+
+**Found:** re-running a check whose result a disconnection had lost. **Anchors:**
+`crates/qqq-run/src/mcp.rs`.
+
+### What the re-run found
+
+HEAD `537d6bd` **did not pass clippy**:
+
+```
+error: these match arms have identical bodies
+ --> crates/qqq-run/src/mcp.rs:195:9
+error: could not compile `qqq-run` (lib) due to 1 previous error
+```
+
+**`git status` was clean and HEAD looked settled** — *while the tree did not compile under the lint gate.*
+
+> **A clean tree is not a green tree.**
+
+### And the cause was an edit of mine from the previous round
+
+Removing `qqq_run`'s `request` field — because **nothing forwarded one, so it was a promise the tool does
+not keep** — made its schema **identical** to the arm `qqq_test | qqq_bench` already had. **Two arms, one
+body.**
+
+### And the lint was right, which is why the fix is a merge rather than an allowance
+
+> **An arm that exists only to repeat its neighbour is a place for the two to drift apart later.**
+
+**And they had already drifted once, in the other direction**: `qqq_run` carried a `request` the other two
+did not, and nothing forwarded it.
+
+**The fix**: seven tools, one schema, one arm. Four read the manifest; three shell out; they all take a
+`path` and nothing else. **`dry_run` stays on `qqq_build` alone, because `build` alone mutates.**
+
+### And the comment that argued for keeping them separate went with the arm
+
+It said three identical bodies would be *"the `clippy::match_same_arms` lint silenced rather than
+answered"* — and **the arm it was attached to *was* that silence, one round later.**
+
+> **A comment arguing for a separation is not the separation.**
+
+### Measured
+
+workspace **2714 passed, 0 failed** · fmt 0 · clippy 0 · `API EXAMPLES OK` (2121).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

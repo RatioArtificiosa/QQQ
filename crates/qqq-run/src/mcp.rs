@@ -166,15 +166,25 @@ fn describe(name: &str) -> &'static str {
 /// The JSON Schema for a tool's arguments.
 fn arguments_for(name: &str) -> Value {
     match name {
-        "qqq_manifest_get" | "qqq_manifest_validate" | "qqq_caps_list" | "qqq_inspect" => {
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The project directory. Defaults to the working directory." }
-                },
-                "additionalProperties": false
-            })
-        }
+        // **Seven tools, one schema, one arm.** Four read the manifest; three shell out to a command.
+        // They all take a `path` and nothing else -- `qqq_run` lost its `request` because nothing
+        // forwards one, and `dry_run` belongs to `qqq_build` alone because `build` alone mutates.
+        //
+        // **`clippy::match_same_arms` found this, and it was right**: an arm that exists only to repeat
+        // its neighbour is a place for the two to drift apart later.
+        "qqq_manifest_get"
+        | "qqq_manifest_validate"
+        | "qqq_caps_list"
+        | "qqq_inspect"
+        | "qqq_run"
+        | "qqq_test"
+        | "qqq_bench" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The project directory. Defaults to the working directory." }
+            },
+            "additionalProperties": false
+        }),
         "qqq_caps_explain" => json!({
             "type": "object",
             "properties": {
@@ -221,16 +231,6 @@ fn arguments_for(name: &str) -> Value {
         //   reaches the command -- a `request` field would be the same defect `§O-344` found in
         //   `dry_run`, found the same way.
         //
-        // **They are one arm because they are one schema.** Three identical bodies would be the
-        // `clippy::match_same_arms` lint *silenced* rather than answered -- and the lint is right: an
-        // arm that exists only to repeat its neighbour is a place for the two to drift apart later.
-        "qqq_run" | "qqq_test" | "qqq_bench" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "The project directory. Defaults to the working directory." }
-            },
-            "additionalProperties": false
-        }),
         "qqq_audit" => json!({
             "type": "object",
             "properties": {

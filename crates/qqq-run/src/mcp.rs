@@ -310,6 +310,7 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
         "qqq_errors_lookup" => Ok(errors_lookup(&arguments)),
         "qqq_schema" => Ok(schema_lookup(&arguments)),
         "qqq_caps_list" => Ok(caps_list()),
+        "qqq_caps_explain" => Ok(caps_explain(&arguments)),
         "qqq_manifest_get" => Ok(manifest(&arguments, false)),
         "qqq_manifest_validate" => Ok(manifest(&arguments, true)),
         other => Ok(unimplemented(other)),
@@ -401,6 +402,51 @@ fn caps_list() -> Value {
     ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
 }
 
+/// `qqq_caps_explain` -- what one capability grants, and what it does not.
+///
+/// # The suggestion is the point
+///
+/// A capability name is a **closed vocabulary** (`fs.read`, `http.client`, ...), and a model that guesses
+/// wrong should be told **which name it probably meant** rather than that its guess was wrong. That is
+/// what `Capability::suggest` is for, and **a tool that answered only *"no such capability"* would make a
+/// model try again with another guess** -- which is the loop this tool exists to break.
+///
+/// # `is_covert_channel` is reported rather than hidden
+///
+/// Because it is a **security property of the capability itself**: a capability that can carry data
+/// without an obvious channel is one a reviewer needs to see named. A tool that omitted it would be
+/// explaining the convenience and not the risk.
+fn caps_explain(arguments: &Value) -> Value {
+    let Some(name) = arguments.get("capability").and_then(Value::as_str) else {
+        return failed(&json!({
+            "capability": Value::Null,
+            "error": { "code": "QQQ-1001", "message": "`qqq_caps_explain` needs a `capability` name" },
+        }));
+    };
+
+    if let Some(c) = qqq_cap::capability::Capability::from_name(name) {
+        return ok(&json!({
+            "capability": c.name(),
+            "namespace": c.namespace(),
+            "kind": c.kind().as_str(),
+            "covert_channel": c.is_covert_channel(),
+        }));
+    }
+
+    // The nearest name, if there is one. **A structured suggestion is worth more than a structured
+    // refusal**, because it ends the guessing rather than reporting it.
+    let suggestion =
+        qqq_cap::capability::Capability::suggest(name).map(qqq_cap::capability::Capability::name);
+    failed(&json!({
+        "capability": name,
+        "suggestion": suggestion,
+        "error": {
+            "code": "QQQ-1002",
+            "message": format!("`{name}` is not a capability this runtime defines"),
+        },
+    }))
+}
+
 /// `qqq_manifest_get` and `qqq_manifest_validate` -- the first tools that touch the FILESYSTEM.
 ///
 /// # Why these two are one function with a flag
@@ -428,20 +474,29 @@ fn manifest(arguments: &Value, validate_only: bool) -> Value {
             // client asking for content needs to know WHICH file answered.
             "validated": validate_only,
         })),
-        Err(e) => {
-            let structured = json!({
-                "found": false,
-                "path": path.display().to_string(),
-                "valid": false,
-                "error": { "code": e.id(), "message": e.to_string() },
-            });
-            json!({
-                "content": [ { "type": "text", "text": structured.to_string() } ],
-                "structuredContent": structured,
-                "isError": true
-            })
-        }
+        Err(e) => failed(&json!({
+            "found": false,
+            "path": path.display().to_string(),
+            "valid": false,
+            "error": { "code": e.id(), "message": e.to_string() },
+        })),
     }
+}
+
+/// Wrap a structured value as a FAILED tool result.
+///
+/// # Why `isError` and not a protocol error
+///
+/// Because the call was well formed: the client asked a valid question and the answer is *"no"*. A JSON-RPC
+/// error would tell it the REQUEST was wrong, which is a different thing and would make a client retry a
+/// request it should not change. **`AGENT-019` puts the failure in the result, and this is the one place
+/// that decides how.**
+fn failed(structured: &Value) -> Value {
+    json!({
+        "content": [ { "type": "text", "text": structured.to_string() } ],
+        "structuredContent": structured,
+        "isError": true
+    })
 }
 
 /// Wrap a structured value as a successful tool result.

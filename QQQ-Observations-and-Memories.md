@@ -26290,4 +26290,63 @@ turned **a silent no-op into a visible failure**.
 
 ---
 
+## §O-347 — Six tools, and the refusal *suggests*
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### Six tools work
+
+`qqq_errors_lookup`, `qqq_schema`, `qqq_caps_list`, **`qqq_caps_explain`**, `qqq_manifest_get`,
+`qqq_manifest_validate`.
+
+### The suggestion is the point
+
+A capability name is **a closed vocabulary**, and a model that guesses wrong should be told **which name it
+probably meant** rather than that its guess was wrong:
+
+```
+fs.read  -> {"capability":"fs.read","covert_channel":false,"kind":"resource","namespace":"fs"}
+fs.raed  -> {"capability":"fs.raed","error":{"code":"QQQ-1002",…},"suggestion":"…"}
+```
+
+> **A tool that answered only *"no such capability"* would make the model guess again** — **which is the
+> loop this tool exists to break.**
+
+**`Capability::suggest` already existed for it**; the tool is what makes it **reachable by the client that
+needs it**.
+
+### Two different failures, two different codes
+
+`QQQ-1001` for a **missing argument**, `QQQ-1002` for an **unknown name**.
+
+> **A missing argument and an unknown name are different failures**, and collapsing them would tell a
+> client to change its *request* when it should change its *vocabulary*.
+
+### And `is_covert_channel` is reported rather than hidden
+
+Because it is **a security property of the capability itself** — so a tool that omitted it would be
+**explaining the convenience and not the risk**.
+
+### One place decides how a failure is shaped
+
+`failed()` is now the single wrapper, and `manifest` uses it too — **so the two failing tools agree by
+construction** rather than by two copies of the same four lines.
+
+**`AGENT-019` puts the failure *in the result*, and this is the one place that decides how**: `isError:
+true` rather than a JSON-RPC error, **because the call was well formed** — a protocol error would tell the
+client its *request* was wrong, **a different thing, and one that would make it retry a request it should
+not change.**
+
+### The injection
+
+Replacing the suggestion with `None`: `caps_explain_explains_and_suggests` **FAILED** with *"and a
+SUGGESTION — the tool must end the guessing, not report it"*.
+
+### Measured
+
+**15 MCP tests in 0.14 s** · six tools wired.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

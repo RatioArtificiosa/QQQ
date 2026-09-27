@@ -482,6 +482,66 @@ fn the_manifest_tools_answer_structured_content_and_a_structured_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **`qqq_caps_explain` explains a capability, and SUGGESTS the one a typo meant.**
+///
+/// # Why the suggestion is the assertion that matters
+///
+/// A capability name is a **closed vocabulary**, and a model that guesses wrong should be told **which
+/// name it probably meant** rather than that its guess was wrong. **A tool that answered only *"no such
+/// capability"* would make the model guess again** -- which is the loop this tool exists to break.
+///
+/// And `is_covert_channel` is reported rather than hidden: it is a **security property of the capability
+/// itself**, so a tool that omitted it would be explaining the convenience and not the risk.
+#[test]
+fn caps_explain_explains_and_suggests() {
+    let replies = run_mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_caps_explain","arguments":{"capability":"fs.read"}}}"#,
+        // A transposition -- the commonest typo, and the one a suggestion is worth most for.
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"qqq_caps_explain","arguments":{"capability":"fs.raed"}}}"#,
+        // And no argument at all.
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qqq_caps_explain","arguments":{}}}"#,
+    ]);
+    assert_eq!(replies.len(), 3, "{replies:?}");
+
+    // A real capability: explained, not refused.
+    let good = parse(&replies[0]);
+    assert_eq!(good["result"]["isError"], false, "{good}");
+    let content = &good["result"]["structuredContent"];
+    assert_eq!(content["capability"], "fs.read", "{good}");
+    assert_eq!(content["namespace"], "fs", "{good}");
+    assert!(
+        content["kind"].is_string(),
+        "the kind is part of the explanation: {good}"
+    );
+    assert!(
+        content["covert_channel"].is_boolean(),
+        "and so is whether the capability can carry data without an obvious channel -- a tool that \
+         omitted it would explain the convenience and not the risk: {good}"
+    );
+
+    // A typo: refused WITH A SUGGESTION.
+    let typo = parse(&replies[1]);
+    assert_eq!(typo["result"]["isError"], true, "{typo}");
+    assert_eq!(
+        typo["result"]["structuredContent"]["error"]["code"], "QQQ-1002",
+        "the refusal carries a code: {typo}"
+    );
+    assert!(
+        typo["result"]["structuredContent"]["suggestion"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "and a SUGGESTION -- the tool must end the guessing, not report it: {typo}"
+    );
+
+    // No argument: a different code, because it is a different failure.
+    let missing = parse(&replies[2]);
+    assert_eq!(missing["result"]["isError"], true, "{missing}");
+    assert_eq!(
+        missing["result"]["structuredContent"]["error"]["code"], "QQQ-1001",
+        "a missing argument and an unknown name are DIFFERENT failures and get different codes: {missing}"
+    );
+}
+
 /// **Every mutating tool takes `dry_run` and says so -- `AGENT-020`, over all twelve.**
 ///
 /// # The partition is DERIVED, and that is the point

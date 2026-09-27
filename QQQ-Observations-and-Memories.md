@@ -27863,4 +27863,113 @@ char-literal case was found.
 
 ---
 
+## §O-364 — The scaffold's `include_str!` broke the production image, and the COPY list went stale for the third time
+
+**Found:** CI run `36326245198`, job `Production image (SEC-029)`, red on HEAD `bd053e0` — the
+**only** red job of the twelve in that run. **Anchors:** `crates/qqq-run/src/new.rs`,
+`docker/Dockerfile.prod`, `crates/qqq-run/tests/lang003_template.rs`, `rust-toolchain.toml`.
+
+### What happened
+
+`LANG-003` made the scaffold embed the repository's toolchain pin:
+
+```rust
+const RUST_TOOLCHAIN_TOML: &str = include_str!("../../../rust-toolchain.toml");
+```
+
+`include_str!` is the **strongest possible tie** between two files — the bytes are the bytes, and no
+test can disagree. It is also a **compile-time dependency on a file**, and the production image's
+`COPY` list is an allowlist:
+
+```dockerfile
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY wit/ wit/
+```
+
+`rust-toolchain.toml` is not on it. The image died at the last build step:
+
+```text
+#18 7.217 error: couldn't read `crates/qqq-run/src/../../../rust-toolchain.toml`:
+            No such file or directory (os error 2)
+#18 8.188 error: could not compile `qqq-run` (lib) due to 1 previous error
+```
+
+`cargo fmt`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, the workspace
+test suite and the whole Python gate were **green locally**, because on this machine the file exists.
+The green was measured in the wrong build context — the same shape as `§O-121` and `§O-360`, and the
+same one the goal's own tooling note warns about: *reproduce the exact command, **in the environment
+CI runs it in***.
+
+### This is the third time in that file's short life
+
+`Dockerfile.prod` says so itself, in the comment written when `wit/` had to be added for exactly this
+reason:
+
+> `qqq-abi` embeds the WIT definitions with `include_str!("../../../wit/*.wit")`, so they are a
+> **compile-time input** even though they live outside `crates/`. … thirteen errors, each naming a
+> different file, which reads like a broken WIT setup rather than a missing COPY.
+
+and, further down, about the crate stub list:
+
+> an allowlist of files that must exist is a list that goes stale silently, and this is the second
+> time in this file's short life that enumerating was the mistake.
+
+**The third time.** The `wit/` comment is the same class one instance earlier, and it was closed by
+adding one line to the `COPY` list rather than by making the class impossible.
+
+### Why adding the file is not the one-line fix it looks like
+
+Because of the order of two lines already in that file:
+
+```dockerfile
+FROM rust:1.97-slim-bookworm AS build
+RUN rustup target add x86_64-unknown-linux-musl     # installed for 1.97
+```
+
+A `rust-toolchain.toml` naming **1.98** arriving later would make `rustup` select a different
+toolchain than the one the musl target was installed for — the target installed for one toolchain and
+the build running on another.
+
+### The fix
+
+The scaffold writes its own `rust-toolchain.toml`, and `SCAFFOLD_TOOLCHAIN_CHANNEL` carries the pin.
+`the_scaffold_pins_the_repositorys_toolchain` parses the channel out of **both** the repository's file
+and `new.rs` — reading the constant rather than restating it — holds them equal, and asserts the
+template **interpolates** the constant:
+
+```rust
+assert!(source.contains(r#"channel    = "{SCAFFOLD_TOOLCHAIN_CHANNEL}""#));
+```
+
+That last assertion is what makes the tie structural. A literal `channel = "1.98"` written into the
+template beside the constant would agree on the day it was written and drift the first time the
+constant moved — the shape `§O-361` and `§O-363` both record.
+
+The generated file is deliberately **not** the repository's verbatim. The repository's is 37 lines of
+argument about this repository's history — `§O-121`, the MSRV, why clippy gains lints — and a
+generated project has no use for it. What it needs is the pin, the two components and the guest
+target, and those are what it gets.
+
+> **A compile-time dependency on a file is a dependency on every build context that file has to
+> appear in.** `include_str!` looks like it removes a copy; it adds a context requirement, and the
+> context that breaks is the one nothing local reproduces.
+
+### And the checklist claim went stale in the same commit
+
+The `LANG-003` `→ Done:` line said the scaffold writes `rust-toolchain.toml` — *"the repository's own
+pin"*. After this fix that sentence is **false**. It was corrected rather than left to be read against
+the code, because a claim with no resolver is a claim nobody owns (`§O-277`).
+
+### Measured
+
+`Production image (SEC-029)` **the only red job** of **12** in run `36326245198` · the error at
+**7.2 s** into the final build layer, which is why it read as a broken WIT setup rather than a
+missing file · `rust-toolchain.toml` **absent** from the `COPY` allowlist (`Cargo.toml`,
+`Cargo.lock`, `crates/`, `wit/`) · fmt **0** · clippy **0** · `lang003_template` **2 passed** and
+**1 passed** with `--ignored` · **15** `include_str!` sites in `crates/qqq-abi/src/wit.rs` and **1**
+in `new.rs` are the only ones that escape `crates/` into a copied directory.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

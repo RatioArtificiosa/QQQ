@@ -525,8 +525,56 @@ const GITIGNORE: &str = "/target\n";
 /// while every guard in the repository stayed green.
 const APP_WORLD: &str = include_str!("../../../wit/app/app.wit");
 
-/// The repository's own toolchain pin, embedded for the same reason as the world.
-const RUST_TOOLCHAIN_TOML: &str = include_str!("../../../rust-toolchain.toml");
+/// The toolchain channel a scaffolded project pins.
+///
+/// # Why this is a constant rather than `include_str!` of the repository's own file
+///
+/// It **was** `include_str!("../../../rust-toolchain.toml")`, and that broke the production image.
+/// `docker/Dockerfile.prod` copies `Cargo.toml`, `Cargo.lock`, `crates/` and `wit/` — an allowlist —
+/// and `rust-toolchain.toml` is not on it, so `cargo build` inside the image died with:
+///
+/// ```text
+/// error: couldn't read `crates/qqq-run/src/../../../rust-toolchain.toml`: No such file or
+/// directory (os error 2)
+///   --> crates/qqq-run/src/new.rs:529:35
+/// ```
+///
+/// Adding it to that `COPY` list is **not** a one-line fix, and the reason is worth writing down:
+/// the image's `rustup target add x86_64-unknown-linux-musl` runs *before* any copy, so a toolchain
+/// file arriving later would leave the target installed for one toolchain and the build running on
+/// another. The image is deliberately built from `rust:1.97-slim-bookworm`.
+///
+/// So the values live here, and `the_scaffold_pins_the_repositorys_toolchain` holds them equal to
+/// the repository's file. That is the same shape as `WIT_BINDGEN_REQUIREMENT`: one fact, two
+/// places, and a test between them — which is weaker than `include_str!` and stronger than a
+/// comment saying the two agree.
+const SCAFFOLD_TOOLCHAIN_CHANNEL: &str = "1.98";
+
+/// The `rust-toolchain.toml` a scaffolded project gets.
+///
+/// # Why it is not the repository's file verbatim
+///
+/// Because the repository's file is mostly the *rationale* for the pin — `§O-121`, the MSRV, why
+/// clippy gains lints — and a generated project has no use for an argument about this repository's
+/// history. What it needs is the pin and the two component sets, which is what this writes.
+fn scaffold_toolchain() -> String {
+    format!(
+        r#"# The toolchain this project builds and lints with.
+#
+# Pinning it here makes `stable` a value rather than a variable: `rustup` fetches exactly this
+# version for anyone who runs `cargo` in the project, so a lint that exists on one toolchain and
+# not another cannot pass locally and fail in CI.
+#
+# `Cargo.toml`'s `rust-version` is a *different* promise — the oldest toolchain that can build the
+# project, for users. This is the one contributors and CI agree on.
+[toolchain]
+channel    = "{SCAFFOLD_TOOLCHAIN_CHANNEL}"
+components = ["rustfmt", "clippy"]
+targets    = ["wasm32-wasip2"]
+profile    = "minimal"
+"#
+    )
+}
 
 /// The `wit-bindgen` requirement a scaffolded Rust project is given.
 ///
@@ -540,26 +588,6 @@ const RUST_TOOLCHAIN_TOML: &str = include_str!("../../../rust-toolchain.toml");
 /// `the_scaffold_pins_the_same_wit_bindgen_as_the_reference_app` asserts this constant equals the
 /// reference application's requirement, so the two cannot disagree without a red build.
 const WIT_BINDGEN_REQUIREMENT: &str = "0.62";
-
-/// The channel a scaffolded project pins, parsed out of the embedded `rust-toolchain.toml`.
-///
-/// # Why it is parsed rather than written a second time
-///
-/// Because the scaffolded project's CI has to name a toolchain, and naming one by hand is a second
-/// copy of a pin. `§O-121` is what a moving toolchain costs: a lint that existed on one version and
-/// not another, a commit that was clean for three local verification passes, and a red CI run.
-fn toolchain_channel() -> &'static str {
-    const KEY: &str = "channel = \"";
-    let start = RUST_TOOLCHAIN_TOML
-        .find(KEY)
-        .expect("the embedded rust-toolchain.toml declares a channel")
-        + KEY.len();
-    let rest = &RUST_TOOLCHAIN_TOML[start..];
-    let end = rest.find('"').expect("the channel is quoted");
-    let channel = &rest[..end];
-    assert!(!channel.is_empty(), "the channel cannot be empty");
-    channel
-}
 
 /// The CI workflow a scaffolded Rust project gets.
 ///
@@ -599,7 +627,7 @@ jobs:
       # as well would be a second copy of a pin (`§O-121`).
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "{channel}"
+          toolchain: "{SCAFFOLD_TOOLCHAIN_CHANNEL}"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -615,9 +643,7 @@ jobs:
 
       - name: build for wasm32-wasip2
         run: cargo build --release --target wasm32-wasip2
-"#,
-        binary = binary,
-        channel = toolchain_channel(),
+"#
     )
 }
 
@@ -759,10 +785,7 @@ fn rust_sources(opts: &NewOptions, crate_name: &str) -> Vec<(String, String)> {
         ("Cargo.toml".to_owned(), cargo_manifest(opts, crate_name)),
         (format!("src/{crate_name}.rs"), rust_lib(opts)),
         ("tests/smoke.rs".to_owned(), SMOKE_TEST.to_owned()),
-        (
-            "rust-toolchain.toml".to_owned(),
-            RUST_TOOLCHAIN_TOML.to_owned(),
-        ),
+        ("rust-toolchain.toml".to_owned(), scaffold_toolchain()),
         (".github/workflows/ci.yml".to_owned(), scaffold_ci()),
     ];
 

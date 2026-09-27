@@ -178,6 +178,80 @@ fn assert_the_application_files_are_written(project: &Path, root: &Path) {
     );
 }
 
+/// The scaffold cannot hold a second opinion about the repository's toolchain either.
+///
+/// # Why this replaced `include_str!`, and what it cost
+///
+/// `new.rs` embedded the repository's `rust-toolchain.toml` with `include_str!`, which is the
+/// strongest possible tie — and it **broke the production image**:
+///
+/// ```text
+/// error: couldn't read `crates/qqq-run/src/../../../rust-toolchain.toml`: No such file or
+/// directory (os error 2)
+/// ```
+///
+/// `docker/Dockerfile.prod` copies `Cargo.toml`, `Cargo.lock`, `crates/` and `wit/` — an allowlist —
+/// and the toolchain file is not on it. Adding it is not a one-line fix: the image's `rustup target
+/// add` runs **before** any copy, so a toolchain file arriving later would leave the target
+/// installed for one toolchain and the build running on another.
+///
+/// So the scaffold writes its own file, and this test holds the values equal. That is a **weaker**
+/// tie than `include_str!` and a **stronger** one than a comment saying they agree — and the lesson
+/// is the one `§O-360` recorded: a compile-time dependency on a file is a dependency on every build
+/// context that file has to appear in.
+#[test]
+fn the_scaffold_pins_the_repositorys_toolchain() {
+    let root = repo_root();
+    let repository = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("the repository's `rust-toolchain.toml` must be readable");
+
+    // The channel, as the repository declares it.
+    let needle = "channel = \"";
+    let start = repository
+        .find(needle)
+        .expect("the repository's toolchain file must declare a channel")
+        + needle.len();
+    let rest = &repository[start..];
+    let end = rest.find('"').expect("the channel is quoted");
+    let repository_channel = &rest[..end];
+
+    // And as the scaffold declares it, read out of `new.rs` rather than assumed.
+    let source = fs::read_to_string(
+        root.join("crates")
+            .join("qqq-run")
+            .join("src")
+            .join("new.rs"),
+    )
+    .expect("`new.rs` must be readable");
+    let needle = "const SCAFFOLD_TOOLCHAIN_CHANNEL: &str = \"";
+    let start = source
+        .find(needle)
+        .expect("`new.rs` must declare the scaffold's toolchain channel")
+        + needle.len();
+    let rest = &source[start..];
+    let end = rest.find('"').expect("the channel is quoted");
+    let scaffold_channel = &rest[..end];
+
+    assert_eq!(
+        scaffold_channel, repository_channel,
+        "the scaffold pins `{scaffold_channel}` and the repository pins `{repository_channel}`"
+    );
+
+    // And the generated file must INTERPOLATE that constant rather than repeat the value.
+    //
+    // # Why this assertion is about a string and not about behaviour
+    //
+    // Because the failure it prevents is a literal `channel = "1.98"` written into the template
+    // alongside the constant. The two would agree on the day they were written and drift the first
+    // time the constant moved — which is the shape `§O-361` and `§O-363` both record. Asserting the
+    // **placeholder** is what makes the tie structural rather than coincidental.
+    assert!(
+        source.contains(r#"channel    = "{SCAFFOLD_TOOLCHAIN_CHANNEL}""#),
+        "the generated toolchain file must interpolate `SCAFFOLD_TOOLCHAIN_CHANNEL` rather than \
+         repeat its value"
+    );
+}
+
 /// **The Rust template scaffolds a servable QQQ application that passes its own CI — `LANG-003`.**
 #[test]
 #[ignore = "compiles a guest; runs in the rust CI job on all three platforms"]

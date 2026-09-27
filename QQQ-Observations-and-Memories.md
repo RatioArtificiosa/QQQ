@@ -26701,4 +26701,84 @@ the `§O-350` claim **retracted in place**.
 
 ---
 
+## §O-353 — `metrics_endpoint` failed on a commit that changes no Rust, and the retry could not fire
+
+**Found:** reading CI on `b4ea6d4`. **Anchors:** `crates/qqq-run/tests/metrics_endpoint.rs`,
+`crates/qqq-run/tests/common/mod.rs`.
+
+### The measurement that says it is not a regression
+
+| commit | what it changes | `Rust (windows-latest)` |
+|---|---|---|
+| `1db22b2` | `mcp.rs`, `main.rs`, `mcp_stdio.rs` — **all the Rust** | **success** |
+| `b4ea6d4` | `llms.txt`, `tools/corpus_at_rest.json` — **no Rust at all** | **failure** |
+
+**The commit with the Rust passed and the commit without it failed**, in a test file neither touches.
+That is a flake, and the direction of the evidence is what settles it.
+
+### What failed
+
+```
+test nothing_is_exposed_without_the_flag ... FAILED   (metrics_endpoint.rs:88)
+test the_endpoint_serves_the_exposition ... FAILED    (metrics_endpoint.rs:47)
+test result: FAILED. 2 passed; 2 failed ... finished in 30.05s
+```
+
+Both assertions are about **the shape of the response** — `starts_with("HTTP/1.1 200")` and
+`contains("404")`. The 30 s is `attempt_once`'s own 10 s connect deadline, three times over.
+
+### Why the retry could not fire — and this is the defect
+
+`serve_and_request` retries on **`!served.text.is_empty()`** (`common/mod.rs:118`). But `attempt_once`
+**appends the child's stdout and stderr to the response** before returning it (`:210`–`:211`):
+
+```rust
+response.push_str(&String::from_utf8_lossy(&out.stdout));
+response.push_str(&String::from_utf8_lossy(&out.stderr));
+Served { text: response }
+```
+
+**So a read that produced nothing still returns a NON-EMPTY text** — the child's own output, including its
+`listening on 127.0.0.1:56542` line. The observed failure carries exactly that, and no status line.
+
+**The retry is keyed on a condition its own failure mode cannot satisfy.** `text.is_empty()` is not
+reachable for a child that started and logged, which is every child that lost the race after binding.
+
+### And the predicates that would have caught it already exist — the wrapper uses neither
+
+`common/mod.rs` defines **two**:
+
+- `lost_the_port_race(text)` — `text.is_empty() || text.contains("QQQ-6002")` (`:141`)
+- `answered(text)` — `text.contains("HTTP/1.1 ")` (`:160`)
+
+**Neither is used at `:118`.** The helper that needs them most calls `is_empty()` directly.
+
+### Why this was NOT hot-fixed
+
+Because the file's own doc records that the obvious fix has already been tried and broke things:
+
+> *"a retry keyed on a missing HTTP response cannot serve the files that observe the server's **log**
+> rather than its response … the second (`!answered`) **broke three files** that never see a status line."*
+
+and because `§O-326` records the same shape one level up: *"the flake that four rounds of fixes chased was
+not a test — it was **the pattern**, present six times."* **Changing the predicate for `serve_and_request`
+means verifying all six consumers**, and doing that at the end of a long session is how a fix becomes the
+next four rounds. It is recorded with the diagnosis and the fix direction instead of guessed at.
+
+### The fix direction, stated so the next round can act
+
+`serve_and_request` is the **response-observing** helper — `Served` is documented as *"the HTTP response,
+then the server's own output"* (`:101`). So its retry should fire when **the text carries no status line**,
+which is exactly `!answered(&text)`. The **log-observing** helpers keep `lost_the_port_race`. **The two
+predicates are already written and already distinguished by their docs; the work is routing each helper to
+the right one and proving all six files still pass.**
+
+### Measured
+
+**2** tests failed · **30.05 s** (3 × the 10 s connect deadline) · the failing commit changes **no Rust** ·
+the passing commit changes **all of it** · the retry predicate `is_empty()` **unreachable in the failure
+mode** · `lost_the_port_race` and `answered` **both unused at the retry site**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -26349,4 +26349,61 @@ SUGGESTION — the tool must end the guessing, not report it"*.
 
 ---
 
+## §O-348 — Seven tools, and the recording half is reachable by a client
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### Seven tools work
+
+`qqq_errors_lookup`, `qqq_schema`, `qqq_caps_list`, `qqq_caps_explain`, `qqq_manifest_get`,
+`qqq_manifest_validate`, **`qqq_audit`**.
+
+### And this is the one the checklist has been waiting for
+
+`ARCH-011` says of step 15:
+
+> *"step 13 meters and step 15 records, and **the recording half does not run**."*
+
+**`AuditReport::to_sarif` has existed since `OBS-003` was written, and its only callers were the CLI and
+its own tests** — **the same shape this repository keeps finding**. This tool is **the recording half,
+reachable by a client**, and `OBS-003`'s SARIF export with it.
+
+### The SARIF is returned as a document, not a string
+
+`to_sarif` produces a string; the tool **re-parses** it so the field is an object, because `AGENT-019` says
+structured content and **a client that has to parse a JSON string out of a JSON field is a client doing the
+server's work**. If the re-parse ever fails the string is returned under `sarif_text` **rather than
+dropped** — a silent `null` would be worse than the string.
+
+### And `fail_on` is parsed, not defaulted
+
+`Severity::parse` refuses a typo, and **its own doc says why**:
+
+> *"a `--fail-on` that silently accepted a typo would be a CI gate that never fires, **which is worse than
+> no gate because it is believed to be one**."*
+
+**A tool that defaulted would reintroduce exactly that** — and a client asking for `warning` and getting
+`note` would never know. **The refusal names the three accepted values** rather than saying `invalid`:
+
+```
+fail_on:"zzz" -> {"error":{"code":"QQQ-1003","message":"`zzz` is not a severity; use `note`, `warning` or `error`"}}
+```
+
+### A threshold the audit does not meet makes the *call* a failure
+
+`isError: true` rather than a JSON-RPC error, **because the request was well formed and the answer is "yes,
+this fails"**. A protocol error would tell the client its *request* was wrong — **a different thing**.
+
+### The injection
+
+Making a typo default to `Severity::Note`: `audit_runs_returns_sarif_and_refuses_a_typo` **FAILED** with
+*"the refusal carries a code"*.
+
+### Measured
+
+**16 MCP tests in 0.15 s** · seven tools wired.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

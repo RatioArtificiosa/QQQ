@@ -313,6 +313,7 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
         "qqq_caps_explain" => Ok(caps_explain(&arguments)),
         "qqq_manifest_get" => Ok(manifest(&arguments, false)),
         "qqq_manifest_validate" => Ok(manifest(&arguments, true)),
+        "qqq_audit" => Ok(audit(&arguments)),
         other => Ok(unimplemented(other)),
     }
 }
@@ -400,6 +401,93 @@ fn caps_list() -> Value {
         .map(|n| json!({ "namespace": n.as_str() }))
         .collect();
     ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
+}
+
+/// `qqq_audit` -- the capability audit, and the SARIF export `OBS-003` asks for.
+///
+/// # Why this tool is the one the checklist has been waiting for
+///
+/// `ARCH-011` says of step 15: *"step 13 meters and step 15 records, and the recording half does not
+/// run."* **This is the recording half, reachable by a client.** `AuditReport::to_sarif` has existed
+/// since `OBS-003` was written and **its only callers were the CLI and its own tests** -- the same shape
+/// this repository keeps finding.
+///
+/// # `fail_on` is parsed, not defaulted
+///
+/// Because `Severity::parse` **refuses a typo rather than picking a default**, and its own doc says why:
+/// *"a `--fail-on` that silently accepted a typo would be a CI gate that never fires, which is worse than
+/// no gate because it is believed to be one."* **A tool that defaulted would reintroduce exactly that.**
+///
+/// # The SARIF is returned as a PARSED document, not a string
+///
+/// Because `AGENT-019` says structured content, and **a client that has to parse a JSON string out of a
+/// JSON field is a client doing the server's work.** The document is re-parsed here so the field is an
+/// object; if that ever fails, the string is returned under `sarif_text` rather than dropped.
+fn audit(arguments: &Value) -> Value {
+    let dir = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
+    let path = std::path::Path::new(dir).join("qqq.toml");
+
+    let loaded = match crate::manifest_loader::LoadedManifest::load(&path) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            return failed(&json!({
+                "found": false,
+                "path": path.display().to_string(),
+                "error": { "code": e.id(), "message": e.to_string() },
+            }))
+        }
+    };
+
+    let report = crate::audit::audit(&loaded, None);
+    let findings: Vec<Value> = report
+        .findings
+        .iter()
+        .map(|f| {
+            json!({
+                "rule": f.rule,
+                "severity": f.severity.as_str(),
+                "message": f.message,
+                "remediation": f.remediation,
+            })
+        })
+        .collect();
+
+    // `fail_on` decides whether the CALL is a failure -- the audit itself always answers.
+    let threshold = match arguments.get("fail_on").and_then(Value::as_str) {
+        Some(text) => match crate::audit::Severity::parse(text) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                return failed(&json!({
+                    "project": report.project,
+                    "error": { "code": "QQQ-1003", "message": e },
+                }))
+            }
+        },
+        None => None,
+    };
+
+    let worst = report.worst().map(crate::audit::Severity::as_str);
+    let fails = threshold.is_some_and(|t| report.fails_at(t));
+    let sarif_text = report.to_sarif();
+    let sarif = serde_json::from_str::<Value>(&sarif_text).unwrap_or(Value::Null);
+
+    let structured = json!({
+        "project": report.project,
+        "count": findings.len(),
+        "worst": worst,
+        "findings": findings,
+        "fail_on": threshold.map(crate::audit::Severity::as_str),
+        "fails_at_threshold": fails,
+        "sarif": sarif,
+        "sarif_text": if sarif.is_null() { json!(sarif_text) } else { Value::Null },
+    });
+
+    // A threshold the audit does not meet makes the CALL a failure -- `isError` rather than a JSON-RPC
+    // error, because the request was well formed and the ANSWER is "yes, this fails".
+    if fails {
+        return failed(&structured);
+    }
+    ok(&structured)
 }
 
 /// `qqq_caps_explain` -- what one capability grants, and what it does not.

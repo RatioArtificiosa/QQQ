@@ -542,6 +542,74 @@ fn caps_explain_explains_and_suggests() {
     );
 }
 
+/// **`qqq_audit` runs the audit, returns SARIF as a DOCUMENT, and refuses a typo in `fail_on`.**
+///
+/// # Why the SARIF is asserted to be an OBJECT
+///
+/// Because `AGENT-019` says structured content, and **a client that has to parse a JSON string out of a
+/// JSON field is a client doing the server's work.** `to_sarif` produces a string; the tool re-parses it
+/// so the field is a document.
+///
+/// # Why the typo is the assertion that matters most
+///
+/// `Severity::parse` refuses a typo **rather than defaulting**, and its own doc says why: *"a `--fail-on`
+/// that silently accepted a typo would be a CI gate that never fires, which is worse than no gate because
+/// it is believed to be one."* **A tool that defaulted would reintroduce exactly that** -- and a client
+/// asking for `"warning"` and getting `"note"` would never know.
+#[test]
+fn audit_runs_returns_sarif_and_refuses_a_typo() {
+    let dir = std::env::temp_dir().join(format!("qqq-mcp-audit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp project");
+    std::fs::write(
+        dir.join("qqq.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write");
+    let good = dir.display().to_string().replace('\\', "/");
+
+    let audit_request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"qqq_audit","arguments":{{"path":"{good}"}}}}}}"#
+    );
+    let typo_request = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"qqq_audit","arguments":{{"path":"{good}","fail_on":"zzz"}}}}}}"#
+    );
+    let replies = run_mcp(&[&audit_request, &typo_request]);
+    assert_eq!(replies.len(), 2, "{replies:?}");
+
+    let report = parse(&replies[0]);
+    let content = &report["result"]["structuredContent"];
+    assert!(
+        content["count"].as_u64().is_some_and(|c| c > 0),
+        "a bare manifest has at least one finding, so the audit RAN rather than returning empty: {report}"
+    );
+    assert!(
+        content["findings"][0]["rule"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("qqq/")),
+        "every finding names its rule: {report}"
+    );
+    assert!(
+        content["sarif"].is_object(),
+        "the SARIF must be a DOCUMENT, not a string inside a JSON field -- a client should not have to \
+         do the server's parsing: {report}"
+    );
+
+    // A typo is REFUSED, not defaulted.
+    let typo = parse(&replies[1]);
+    assert_eq!(typo["result"]["isError"], true, "{typo}");
+    assert_eq!(
+        typo["result"]["structuredContent"]["error"]["code"], "QQQ-1003",
+        "the refusal carries a code: {typo}"
+    );
+    assert!(
+        typo["result"]["structuredContent"]["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("note") && m.contains("warning") && m.contains("error")),
+        "and it NAMES the three accepted values rather than saying `invalid`: {typo}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Every mutating tool takes `dry_run` and says so -- `AGENT-020`, over all twelve.**
 ///
 /// # The partition is DERIVED, and that is the point

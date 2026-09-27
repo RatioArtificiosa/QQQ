@@ -314,6 +314,7 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
         "qqq_manifest_get" => Ok(manifest(&arguments, false)),
         "qqq_manifest_validate" => Ok(manifest(&arguments, true)),
         "qqq_audit" => Ok(audit(&arguments)),
+        "qqq_inspect" => Ok(inspect(&arguments)),
         other => Ok(unimplemented(other)),
     }
 }
@@ -401,6 +402,60 @@ fn caps_list() -> Value {
         .map(|n| json!({ "namespace": n.as_str() }))
         .collect();
     ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
+}
+
+/// `qqq_inspect` -- what a project is allowed to do, **and what it is not**.
+///
+/// # The second half is the point
+///
+/// `qqq_inspect`'s own description says *"Report what a project is allowed to do, **and what it is
+/// not**"*. A tool that reported only the declared capabilities would be **a list of what the manifest
+/// mentions**, which is a weaker claim than the one QQQ makes: **a capability that is absent is not
+/// denied at request time, it is not there to be denied** -- *"absent, not denied"* is the model, and a
+/// report that omits the absences **hides the property that makes the model worth having**.
+///
+/// # Why the absences are derived from `Namespace::all()` and not from a hand-written list
+///
+/// Because a hand-written list of *"the capabilities that exist"* is **a second answer to a question the
+/// runtime already answers** -- the lesson `§O-344` cost a round to learn. `Namespace::all()` is the
+/// runtime's own answer, so a namespace added tomorrow appears as absent until a manifest declares it.
+fn inspect(arguments: &Value) -> Value {
+    let dir = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
+    let path = std::path::Path::new(dir).join("qqq.toml");
+
+    let loaded = match crate::manifest_loader::LoadedManifest::load(&path) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            return failed(&json!({
+                "found": false,
+                "path": path.display().to_string(),
+                "error": { "code": e.id(), "message": e.to_string() },
+            }))
+        }
+    };
+
+    // The manifest's capability sections, as the manifest itself spells them.
+    let declared = serde_json::to_value(&loaded.manifest.capabilities).unwrap_or(Value::Null);
+    let declared_names: Vec<String> = declared
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // **The absences, from the RUNTIME's list rather than from a hand-written one.**
+    let absent: Vec<Value> = qqq_cap::capability::Namespace::all()
+        .into_iter()
+        .filter(|n| !declared_names.iter().any(|d| d == n.as_str()))
+        .map(|n| json!({ "namespace": n.as_str() }))
+        .collect();
+
+    ok(&json!({
+        "project": loaded.name(),
+        "path": loaded.path.display().to_string(),
+        "declared": declared,
+        "declared_namespaces": declared_names,
+        "absent_namespaces": absent,
+        "absent_count": absent.len(),
+    }))
 }
 
 /// `qqq_audit` -- the capability audit, and the SARIF export `OBS-003` asks for.

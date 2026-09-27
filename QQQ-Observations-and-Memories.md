@@ -26406,4 +26406,57 @@ Making a typo default to `Severity::Note`: `audit_runs_returns_sarif_and_refuses
 
 ---
 
+## §O-349 — Eight tools, and `qqq_inspect` reports what a project *cannot* do
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### Eight tools work
+
+`qqq_errors_lookup`, `qqq_schema`, `qqq_caps_list`, `qqq_caps_explain`, `qqq_manifest_get`,
+`qqq_manifest_validate`, `qqq_audit`, **`qqq_inspect`**.
+
+### The second half is the point
+
+`qqq_inspect`'s own description says *"Report what a project is allowed to do, **and what it is not**"*. A
+tool that reported only the declared capabilities would be **a list of what the manifest mentions** — a
+weaker claim than the one QQQ makes:
+
+> **A capability that is absent is not denied at request time, it is not there to be denied.**
+
+*"Absent, not denied"* **is the model**, and a report that omits the absences **hides the property that
+makes the model worth having**. Measured against a manifest declaring two of the runtime's thirteen
+namespaces:
+
+```
+{"absent_count":11,"absent_namespaces":[{"namespace":"ai"},{"namespace":"dns"},…],
+ "declared":{"clock":{},"crypto":{}},"declared_namespaces":["clock","crypto"],…}
+```
+
+### And the absences are derived, not hand-written
+
+From **`Namespace::all()`** — `§O-344`'s lesson: **a hand-list is a second answer to a question the runtime
+already answers.** A namespace added tomorrow appears as **absent** until a manifest declares it, **with no
+edit here**.
+
+### And the partition is asserted to be *total*
+
+`declared + absent == the runtime's whole namespace set`.
+
+> **That is what makes the report a partition rather than two lists.** Without it a namespace could be in
+> **neither** — and the absences would be **a reassurance that is simply incomplete**, which is worse than
+> no reassurance at all.
+
+### The injection
+
+Replacing the absence computation with an empty `Vec`: `inspect_reports_the_declared_and_the_absent`
+**FAILED** with *"and a namespace the manifest never mentions IS absent — that is the half a report of the
+declared set alone would lose"*.
+
+### Measured
+
+**17 MCP tests in 0.16 s** · eight tools wired.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

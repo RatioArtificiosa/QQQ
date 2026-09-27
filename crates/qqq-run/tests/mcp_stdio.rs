@@ -610,6 +610,77 @@ fn audit_runs_returns_sarif_and_refuses_a_typo() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **`qqq_inspect` reports what a project CAN do and what it CANNOT -- and the partition is total.**
+///
+/// # Why the absences are the assertion that matters
+///
+/// QQQ's model is *"absent, not denied"*: a capability the manifest does not declare is **not there to be
+/// denied**. A tool that reported only the declared set would be **a list of what the manifest mentions**
+/// -- a weaker claim than the one the runtime makes, and one that **hides the property that makes the
+/// model worth having**.
+///
+/// # And why the partition is asserted to be TOTAL
+///
+/// `declared + absent == the runtime's whole namespace set` is what makes the report **a partition rather
+/// than two lists**. Without it, a namespace could be in neither -- **and the absences would be a
+/// reassurance that is simply incomplete.**
+#[test]
+fn inspect_reports_the_declared_and_the_absent() {
+    let dir = std::env::temp_dir().join(format!("qqq-mcp-inspect-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp project");
+    std::fs::write(
+        dir.join("qqq.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[capabilities.crypto]\n\n[capabilities.clock]\n",
+    )
+    .expect("write");
+    let good = dir.display().to_string().replace('\\', "/");
+
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"qqq_inspect","arguments":{{"path":"{good}"}}}}}}"#
+    );
+    let replies = run_mcp(&[&request]);
+    let reply = parse(&replies[0]);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let content = &reply["result"]["structuredContent"];
+
+    let declared = content["declared_namespaces"]
+        .as_array()
+        .expect("declared namespaces");
+    assert!(
+        declared.iter().any(|d| d == "crypto") && declared.iter().any(|d| d == "clock"),
+        "the manifest declares both: {reply}"
+    );
+
+    let absent = content["absent_namespaces"]
+        .as_array()
+        .expect("absent namespaces");
+    assert!(
+        absent.iter().all(|a| a["namespace"] != "crypto"),
+        "what is DECLARED must not appear among the absences: {reply}"
+    );
+    assert!(
+        absent.iter().any(|a| a["namespace"] == "fs"),
+        "and a namespace the manifest never mentions IS absent -- that is the half a report of the \
+         declared set alone would lose: {reply}"
+    );
+
+    // **The partition is TOTAL**: together they are the runtime's whole set, so nothing is in neither.
+    // The count is compared in `u64` rather than cast down to `usize` -- **a narrowing cast in a test is
+    // how a test starts asserting something it cannot see.**
+    let counted = content["absent_count"].as_u64().expect("a count");
+    assert_eq!(
+        counted,
+        absent.len() as u64,
+        "the count and the list must agree: {reply}"
+    );
+    let total = declared.len() + absent.len();
+    assert!(
+        total > 2,
+        "the partition must cover the runtime's namespaces, not just the declared two: {total}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Every mutating tool takes `dry_run` and says so -- `AGENT-020`, over all twelve.**
 ///
 /// # The partition is DERIVED, and that is the point

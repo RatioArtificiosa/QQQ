@@ -26464,11 +26464,19 @@ declared set alone would lose"*.
 **Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
 `crates/qqq-run/tests/mcp_stdio.rs`.
 
-### `AGENT-006`–`AGENT-017` are covered
+### `AGENT-006`–`AGENT-017` — **RETRACTED: this heading was false. See `§O-352`.**
 
 Eight tools were wired in rounds 39–44; the last four — **`qqq_build`, `qqq_run`, `qqq_test`, `qqq_bench`**
 — shell out, and with them the match's `other => Ok(unimplemented(other))` arm **cannot be reached by any
 name in `mcp_tool_names()`**.
+
+**That sentence is about `mcp_tool_names()` and it is true. The heading above it was about the checklist
+and it was FALSE.** `AGENT-006`, `AGENT-013`, `AGENT-015`, `AGENT-016` and `AGENT-017` name **seven tools
+that `mcp_tool_names()` does not contain** — `qqq_new`, `qqq_dev_status`, `qqq_logs`, `qqq_metrics`,
+`qqq_trace`, `qqq_doctor`, `qqq_migrate_plan`.
+
+***"Every published tool has a handler"* and *"the tools the checklist asks for exist"* are two
+questions. I answered the first and claimed the second.** `§O-352` is the measurement.
 
 ### Why a subprocess, and not an in-process call
 
@@ -26628,6 +26636,68 @@ security model and a machine out of process handles.
 
 **505 lib tests** · **17 MCP stdio** · **7 MCP HTTP** · **5 doctests in 2.57 s** · `FMT_EXIT=0` · the
 `current_exe()` guess **absent from the code**.
+
+---
+
+## §O-352 — The published tool list and the checklist ask for **different tools**
+
+**Found:** Phase 2, while checking which `AGENT` items could be ticked. **Anchors:**
+`crates/qqq-run/src/output.rs` (`mcp_tool_names()`), `QQQ-Checklist-V1.md` §7.
+
+### Why this was measured instead of asserted
+
+`§O-350` claimed *"`AGENT-006`–`AGENT-017` are covered"* because all twelve published tools have handlers.
+**Those are two different questions**, and the second one had never been asked. So both sides were read
+**from source** — the published list from the single place it lives, the checklist names from the items
+themselves (`.scratch/mcp_tool_divergence.py`, re-runnable).
+
+### Measured
+
+```
+published  : 12 tools
+checklist  : 14 distinct tool names across 12 AGENT items
+
+BOTH           (7): qqq_audit, qqq_build, qqq_caps_explain, qqq_inspect, qqq_run, qqq_schema, qqq_test
+CHECKLIST-ONLY (7): qqq_dev_status, qqq_doctor, qqq_logs, qqq_metrics, qqq_migrate_plan, qqq_new, qqq_trace
+PUBLISHED-ONLY (5): qqq_bench, qqq_caps_list, qqq_errors_lookup, qqq_manifest_get, qqq_manifest_validate
+```
+
+**The two documents disagree in both directions, and neither disagreement was recorded anywhere.**
+
+### What this means per item
+
+| item | tool | verdict |
+|---|---|---|
+| `AGENT-006` | `qqq_new` | **not done** — not in the published contract |
+| `AGENT-007` | `qqq_build` | done |
+| `AGENT-008` | `qqq_run` | **partial** — the tool exists, but its schema is `path` alone: **the *explicit capabilities* the item asks for are not exposed**, even though the `run` *command* has `--cap` |
+| `AGENT-009`–`AGENT-012`, `AGENT-014` | `qqq_test`, `qqq_inspect`, `qqq_audit`, `qqq_caps_explain`, `qqq_schema` | done |
+| `AGENT-013` | `qqq_dev_status` | **not done** |
+| `AGENT-015` | `qqq_logs`, `qqq_metrics`, `qqq_trace` | **not done** — three tools, none published |
+| `AGENT-016` | `qqq_doctor` | **not done** |
+| `AGENT-017` | `qqq_migrate_plan` | **not done** (shared with `MIG-013`) |
+
+**So six of the twelve are done, one is partial, and five are not done** — against a heading in `§O-350`
+that said all twelve were.
+
+### And five published tools have no item at all
+
+`qqq_manifest_get`, `qqq_manifest_validate`, `qqq_caps_list`, `qqq_bench` and `qqq_errors_lookup` are
+**published to every MCP client and tracked by no checklist item**. That is the reverse gap, and it is the
+more comfortable one to have — but it means *"the checklist covers the agent face"* is also false.
+
+### The lesson
+
+**A contract and a plan are two documents, and nobody was comparing them.** `mcp_tool_names()` is what a
+client is offered; the checklist is what the project promised itself. **A tool that exists in one and not
+the other is a gap in whichever direction you are reading**, and the direction I was reading was the
+flattering one. `§O-277`'s rule — *a number that cannot be compared is a number with no owner* — applies to
+**sets**, not only to counts.
+
+### Measured
+
+**12** published · **14** asked for · **7** in both · **7** asked-for-but-absent · **5** published-untracked ·
+the `§O-350` claim **retracted in place**.
 
 ---
 

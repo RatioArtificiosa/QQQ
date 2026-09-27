@@ -4211,44 +4211,99 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §8.3 The machine contract layer
 - [ ] **AGENT-003** Implement the CI drift check that fails when schema output diverges from the implementation.
   → §8.3 The machine contract layer
-- [ ] **AGENT-004** Implement `qqqai mcp` as a stdio MCP server.
+- [x] **AGENT-004** Implement `qqqai mcp` as a stdio MCP server.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-005** Implement `qqqai mcp` as an HTTP MCP server.
+  → Done: `crates/qqq-run/src/mcp.rs::serve_stdio` — newline-delimited JSON-RPC 2.0 carrying
+    `initialize`, `tools/list`, `tools/call`, `ping`, and notifications. **17 tests** in
+    `crates/qqq-run/tests/mcp_stdio.rs` drive it **over the real pipe** rather than calling the dispatch
+    function, because the framing is half of what the item asks for.
+- [x] **AGENT-005** Implement `qqqai mcp` as an HTTP MCP server.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → Done: `mcp.rs::serve_http` + `handle_http` — Streamable HTTP, one POST per message,
+    `Connection: close`, `202` for a notification. **7 tests** in `crates/qqq-run/tests/mcp_http.rs`
+    over a real socket. **The server announces the port it bound**, so no test picks a port and releases
+    it — `§O-313`'s race, removed rather than narrowed.
 - [ ] **AGENT-006** Implement `qqq_new` tool with dry-run.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-007** Implement `qqq_build` tool returning structured diagnostics.
+  → **Open, and `§O-352` is how it is known to be open**: `qqq_new` is **not** in
+    `output::mcp_tool_names()`, so no client is offered it.
+- [x] **AGENT-007** Implement `qqq_build` tool returning structured diagnostics.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-008** Implement `qqq_run` tool with explicit capabilities.
+  → Done: `mcp.rs::run_command` runs the `build` command as a subprocess and returns its `--json`
+    envelope as `structuredContent`, with **the exit code as the verdict**. **The program to run is a
+    GRANT, not a guess** (`§O-351`) — an ungranted server refuses with `QQQ-7001`.
+- [~] **AGENT-008** Implement `qqq_run` tool with explicit capabilities.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-009** Implement `qqq_test` tool returning structured results.
+  → **Partial, and the gap is specific.** The tool exists (`run_command`) and refuses a `dry_run` it
+    cannot honour, but its schema is **`path` alone**: **the *explicit capabilities* this item asks for
+    are not exposed**, although the `run` *command* has `--cap` (`crates/qqq-run/src/run.rs`). Nothing
+    forwards a capability list, so a schema offering one would be a promise the tool does not keep
+    (`§O-344`).
+- [x] **AGENT-009** Implement `qqq_test` tool returning structured results.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-010** Implement `qqq_inspect` tool returning a static capability report.
+  → Done: `run_command` over the `test` command; the CLI's own `--json` envelope is the structured
+    result, and the command's exit code is the tool's verdict.
+- [x] **AGENT-010** Implement `qqq_inspect` tool returning a static capability report.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-011** Implement `qqq_audit` tool returning SARIF.
+  → Done: `mcp.rs::inspect` — the declared grants **and what the project cannot do**, which is the half
+    a report that lists only grants leaves out.
+- [x] **AGENT-011** Implement `qqq_audit` tool returning SARIF.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-012** Implement `qqq_caps_explain` tool.
+  → Done: `mcp.rs::audit` returns `report.to_sarif()` **re-parsed into a JSON object** under `sarif`, so
+    a client does not have to parse a JSON string out of a JSON field. `fail_on` decides `isError`, and
+    a typo is **refused rather than defaulted**. Test:
+    `audit_runs_returns_sarif_and_refuses_a_typo`.
+- [x] **AGENT-012** Implement `qqq_caps_explain` tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → Done: `mcp.rs::caps_explain` — and it **suggests** the name the caller probably meant, because a
+    capability name is a closed vocabulary and *"no such capability"* alone makes a model guess again.
 - [ ] **AGENT-013** Implement `qqq_dev_status` tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-014** Implement `qqq_schema` tool.
+  → **Open — `qqq_dev_status` is not in `mcp_tool_names()`** (`§O-352`).
+- [x] **AGENT-014** Implement `qqq_schema` tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → Done: `mcp.rs::schema_lookup` over `output::command_schemas()`, carrying `mutating` and
+    `supports_dry_run` — `AGENT-020`'s contract **at the command level** — and a test compares the two
+    surfaces rather than trusting them to agree.
 - [ ] **AGENT-015** Implement `qqq_logs`, `qqq_metrics` and `qqq_trace` tools.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → **Open — all three are absent from `mcp_tool_names()`** (`§O-352`).
 - [ ] **AGENT-016** Implement `qqq_doctor` tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → **Open — `qqq_doctor` is not in `mcp_tool_names()`** (`§O-352`).
 - [ ] **AGENT-017** Implement `qqq_migrate_plan` tool (read-only analysis).
   → §8.2 `qqqai mcp` — the Model Context Protocol server
+  → **Open — `qqq_migrate_plan` is not in `mcp_tool_names()`.** Shared with `MIG-013`, open for the
+    same reason (`§O-352`).
 - [ ] **AGENT-018** Write MCP tool descriptions for models, then review them with a human.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-019** Ensure every tool returns structured content, never prose-only.
+  → **Half done, half EXTERNAL.** The descriptions are written (`mcp.rs::describe`, one sentence per
+    tool, with a test requiring every published name to have one). **The human review is a pending
+    external step and an agent cannot close it** — recorded rather than ticked.
+- [x] **AGENT-019** Ensure every tool returns structured content, never prose-only.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-020** Ensure every mutating tool supports `dry_run` and says so in its description.
+  → Done: every tool returns `content` **and** `structuredContent`, and a failure sets `isError` rather
+    than becoming a protocol error. Enforced over **all twelve** by
+    `every_tool_returns_structured_content` and `no_tool_answers_unimplemented` in
+    `crates/qqq-run/tests/mcp_stdio.rs` — **a thirteenth tool added without a handler fails there, and
+    no reviewer has to notice it**.
+- [x] **AGENT-020** Ensure every mutating tool supports `dry_run` and says so in its description.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **AGENT-021** Implement the error-code class table and publish it.
+  → Done: enforced by `every_mutating_tool_takes_dry_run_and_says_so` **and**
+    `the_tool_dry_run_contract_agrees_with_the_command_schemas`, which holds each tool's declared
+    `supports_dry_run` to `output::command_schemas()` — **two surfaces that answer one question, held to
+    each other**.
+- [x] **AGENT-021** Implement the error-code class table and publish it.
   → §8.3 The machine contract layer
-- [ ] **AGENT-022** Implement the docs URL pattern for every error code.
+  → Done: `docs/ERRORS.md` §"How to read a code" publishes the range→area table for all **8** classes
+    (`1000`–`1999` through `8000`–`8999`), **generated** from the `ErrorCode` enum so it cannot omit a
+    code the runtime can emit. `tools/check_error_catalogue.py` reports **43** codes, each with a cause
+    and a remediation.
+- [x] **AGENT-022** Implement the docs URL pattern for every error code.
   → §8.3 The machine contract layer
+  → Done: `mcp.rs::errors_lookup` emits `docs: https://qqq.codes/errors/{id}` for **every** code in
+    `ErrorCode::all()` — the pattern is derived from the enum rather than listed, so a new code carries
+    it automatically.
 - [ ] **AGENT-023** Build the agent benchmark suite and track success rate.
   → §2.1 NN-1 — AI Agents Are First-Class Users
 - [ ] **AGENT-024** Publish the agent cookbook: a minimal reproducer for every error code.

@@ -160,25 +160,71 @@ fn a_working_tool_returns_structured_content() {
         .is_some_and(|d| d.starts_with("https://qqq.codes/errors/")));
 }
 
-/// **A tool that cannot run says so *structurally* — `AGENT-019`.**
+/// **NO TOOL ANSWERS `unimplemented` -- `AGENT-006` to `AGENT-017`, over all twelve.**
 ///
-/// A client must branch on a boolean, not on the wording of a sentence.
+/// # Why this replaces a test that asserted the opposite
+///
+/// The previous test asserted that `qqq_build` reports `implemented: false`. **That was true when it was
+/// written and it is false now**, which is the good kind of stale test -- but it means the property needs
+/// restating rather than deleting.
+///
+/// # The property, and why it is the one that covers the items
+///
+/// `AGENT-006`-`AGENT-017` ask for *"the tools themselves, each a thin, honest wrapper over a command"*.
+/// The strongest statement of that is **not** twelve separate assertions -- it is **one**: *no tool in the
+/// published list answers `unimplemented`.* **A thirteenth tool added without a handler would fail here**,
+/// and no reviewer has to notice it.
+///
+/// A path that does not exist is passed so the filesystem-backed tools take their **failure** path: that
+/// is still a handler, and `isError: true` with a code is the honest answer rather than a missing one.
 #[test]
-fn an_unrunnable_tool_reports_is_error() {
-    let replies = run_mcp(&[
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"qqq_build","arguments":{}}}"#,
-    ]);
-    let reply = parse(&replies[0]);
-    assert_eq!(
-        reply["result"]["isError"], true,
-        "an unrunnable tool sets the flag: {reply}"
-    );
-    assert_eq!(reply["result"]["structuredContent"]["implemented"], false);
-    assert_eq!(reply["result"]["structuredContent"]["tool"], "qqq_build");
-    assert!(
-        reply.get("error").is_none(),
-        "and it is a RESULT rather than a protocol error -- the call was well formed: {reply}"
-    );
+fn no_tool_answers_unimplemented() {
+    let names = [
+        "qqq_manifest_get",
+        "qqq_manifest_validate",
+        "qqq_caps_explain",
+        "qqq_caps_list",
+        "qqq_build",
+        "qqq_run",
+        "qqq_test",
+        "qqq_audit",
+        "qqq_inspect",
+        "qqq_bench",
+        "qqq_schema",
+        "qqq_errors_lookup",
+    ];
+    let requests: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{n}","arguments":{{"path":"C:/qqq-does-not-exist"}}}}}}"#,
+                i + 1
+            )
+        })
+        .collect();
+    let refs: Vec<&str> = requests.iter().map(String::as_str).collect();
+    let replies = run_mcp(&refs);
+    assert_eq!(replies.len(), 12, "one reply per tool: {replies:?}");
+
+    for (i, name) in names.iter().enumerate() {
+        let reply = parse(&replies[i]);
+        let result = &reply["result"];
+        assert!(
+            result.get("error").is_none(),
+            "`{name}` must answer as a RESULT: {reply}"
+        );
+        assert_eq!(
+            result["structuredContent"]["implemented"],
+            serde_json::Value::Null,
+            "`{name}` must NOT answer `unimplemented` -- every tool in the published list has a \
+             handler, and a tool added without one fails HERE rather than in a client: {reply}"
+        );
+        assert!(
+            result["structuredContent"].is_object(),
+            "and it must still be structured: {reply}"
+        );
+    }
 }
 
 /// **A name that is not a tool is refused, and the refusal names it.**

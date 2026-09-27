@@ -22,27 +22,43 @@
 //! |---|---|
 //! | `initialize` | implemented |
 //! | `tools/list` | implemented — all **12** tools, from the same list the CLI publishes |
-//! | `tools/call` | implemented for the tools whose backing exists in-process |
+//! | `tools/call` | implemented for **all twelve**: eight in-process, four by re-entering the CLI |
 //!
 //! **`tools/call` answers structurally for a tool it cannot run** — an `isError` result naming the
 //! tool, not prose and not a panic. `AGENT-019` is the item that makes this a requirement: *"every tool
 //! returns structured content, never prose-only"*, and a client that has to parse a sentence to learn
 //! that a tool is missing is a client that will get it wrong.
 //!
+//! # Re-entering the CLI is a GRANT, not a guess
+//!
+//! Four tools (`qqq_build`, `qqq_run`, `qqq_test`, `qqq_bench`) run a QQQ command as a subprocess. The
+//! path they run is **passed in by the caller** — `main` passes its own, because it is the one place
+//! that knows this process is the CLI. A server constructed with `None` **refuses**, and the refusal is
+//! structural.
+//!
+//! That is not decoration. The first version of this module called `std::env::current_exe()` instead,
+//! and under `cargo test --doc` `current_exe()` is **rustdoc's doctest harness** — a program that
+//! re-runs the same doctest, which re-enters again. **One `cargo test --doc` spawned 2,528 processes
+//! and did not stop** (`§O-351`). A capability-secure runtime that guesses at the program it re-enters
+//! is not capability-secure, and the fix is to be *told*.
+//!
 //! # Example
 //!
 //! ```
 //! use qqq_run::mcp::serve_stdio;
 //!
-//! // One JSON object per line in, one per line out -- and a tool the server cannot run says so
-//! // STRUCTURALLY, so a client branches on a boolean rather than on a sentence.
+//! // One JSON object per line in, one per line out. **No CLI is granted here**, and that is the case
+//! // worth showing: a tool that would shell out must refuse rather than guess at a program to
+//! // re-enter -- `§O-351`.
 //! let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\
 //!              \"params\":{\"name\":\"qqq_build\",\"arguments\":{}}}\n";
 //! let mut out = Vec::new();
-//! serve_stdio(input.as_bytes(), &mut out).expect("the transport is infallible here");
+//! serve_stdio(input.as_bytes(), &mut out, None).expect("the transport is infallible here");
 //!
 //! let reply = String::from_utf8(out).expect("utf8");
+//! // A refusal, not prose and not a panic: a client branches on a boolean.
 //! assert!(reply.contains("\"isError\":true"), "{reply}");
+//! assert!(reply.contains("not granted"), "{reply}");
 //! ```
 //!
 //! # Why an unknown method is `-32601` and not a custom code
@@ -51,6 +67,7 @@
 //! QQQ-specific code for *"no such method"* would be a second spelling of a standard answer.
 
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -192,22 +209,25 @@ fn arguments_for(name: &str) -> Value {
             },
             "additionalProperties": false
         }),
-        "qqq_test" | "qqq_bench" => json!({
+        // **`run`, `test` and `bench` share ONE schema -- `path` alone -- and the reasons are one per
+        // tool, all the same shape:**
+        //
+        // - `test` and `bench` **do not mutate**, so `CommandName::supports_dry_run()` is false for
+        //   them;
+        // - `run` declares `supports_dry_run: false` in `output::command_schemas()` even though it
+        //   executes a guest -- so a tool offering one would be **a promise the command does not
+        //   keep**, which a cross-surface test compares;
+        // - and `run_command` forwards `path` and `dry_run` and **nothing else**, so no request line
+        //   reaches the command -- a `request` field would be the same defect `§O-344` found in
+        //   `dry_run`, found the same way.
+        //
+        // **They are one arm because they are one schema.** Three identical bodies would be the
+        // `clippy::match_same_arms` lint *silenced* rather than answered -- and the lint is right: an
+        // arm that exists only to repeat its neighbour is a place for the two to drift apart later.
+        "qqq_run" | "qqq_test" | "qqq_bench" => json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "The project directory. Defaults to the working directory." }
-            },
-            "additionalProperties": false
-        }),
-        // **No `dry_run` here, and the absence is deliberate.** `output::command_schemas()` declares
-        // `supports_dry_run: false` for the `run` command, so a tool offering one would be
-        // **a promise the command does not keep** -- and a cross-surface test compares the two, which
-        // is how this was found.
-        "qqq_run" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "request": { "type": "string", "description": "The request line, such as `GET /orders`." }
             },
             "additionalProperties": false
         }),
@@ -229,8 +249,14 @@ fn arguments_for(name: &str) -> Value {
 ///
 /// Because a JSON-RPC **notification** (no `id`) is answered with **nothing at all** — not with a
 /// `null` id, which a client would read as a reply to a request it never made.
+///
+/// # Why the CLI path is threaded through here
+///
+/// Because the four tools that shell out must run **a program the caller named**, and this is the layer
+/// that reaches them. A parameter that only `run_command` saw would have to be fetched from somewhere
+/// ambient, and ambient is what `§O-351` cost 2,528 processes to disprove.
 #[must_use]
-fn answer(message: &Value) -> Option<Value> {
+fn answer(message: &Value, cli: Option<&Path>) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str);
 
@@ -241,7 +267,7 @@ fn answer(message: &Value) -> Option<Value> {
     let result = match method {
         "initialize" => Ok(initialize()),
         "tools/list" => Ok(json!({ "tools": tools().iter().map(tool_json).collect::<Vec<_>>() })),
-        "tools/call" => call(message.get("params")),
+        "tools/call" => call(message.get("params"), cli),
         "notifications/initialized" => {
             // A notification by definition, and the protocol says it needs no reply.
             return None;
@@ -289,7 +315,7 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
 /// MCP returns a `content` array of typed blocks, and an `isError` flag. **A tool that cannot run here
 /// sets `isError` and still returns content** — so a client branches on a boolean rather than on the
 /// wording of a message. `AGENT-019`: *"every tool returns structured content, never prose-only."*
-fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
+fn call(params: Option<&Value>, cli: Option<&Path>) -> Result<Value, (i64, String)> {
     let params = params.ok_or((code::INVALID_PARAMS, "`tools/call` needs params".to_owned()))?;
     let name = params.get("name").and_then(Value::as_str).ok_or((
         code::INVALID_PARAMS,
@@ -315,6 +341,13 @@ fn call(params: Option<&Value>) -> Result<Value, (i64, String)> {
         "qqq_manifest_validate" => Ok(manifest(&arguments, true)),
         "qqq_audit" => Ok(audit(&arguments)),
         "qqq_inspect" => Ok(inspect(&arguments)),
+        // **The four that SHELL OUT.** Each is a thin wrapper over the command of the same name, run as a
+        // subprocess of the CLI path the caller GRANTED -- which for `qqqai mcp` is `qqqai` itself.
+        "qqq_build" | "qqq_run" | "qqq_test" | "qqq_bench" => Ok(run_command(
+            name.trim_start_matches("qqq_"),
+            &arguments,
+            cli,
+        )),
         other => Ok(unimplemented(other)),
     }
 }
@@ -402,6 +435,105 @@ fn caps_list() -> Value {
         .map(|n| json!({ "namespace": n.as_str() }))
         .collect();
     ok(&json!({ "count": namespaces.len(), "namespaces": namespaces }))
+}
+
+/// Run a QQQ command as a subprocess and return what it said -- `AGENT-006`-`AGENT-017`.
+///
+/// # Why a SUBPROCESS and not an in-process call
+///
+/// Because the command's dispatchers live in the **binary**, and this module is in the **library**.
+/// More importantly, **a command writes to stdout, and on the stdio transport stdout IS THE PROTOCOL** --
+/// an in-process call would print a human summary into the middle of a JSON-RPC stream and corrupt it.
+/// A subprocess gives the command its own stdout, which this reads.
+///
+/// # The exit code IS the tool's verdict
+///
+/// A non-zero exit sets **`isError: true`** and puts the code in the structured content. **The command
+/// already decided whether it succeeded**, and a wrapper that second-guessed it would be a second answer
+/// to a question the command answers -- `§O-344`'s lesson.
+///
+/// # `--json` is always passed
+///
+/// Because the CLI has a machine-readable mode and **a wrapper that parsed the human rendering would be
+/// parsing a presentation**. When the output is not JSON -- a command that has no envelope yet -- the raw
+/// text is returned under `text` rather than dropped.
+///
+/// # Why `cli` is a PARAMETER and `current_exe()` is not used -- `§O-351`
+///
+/// **Because `current_exe()` is the wrong question.** It answers *"what program is running"*, and this
+/// needs *"what program may I re-enter"* -- two questions that coincide only when the process is the CLI.
+/// Under `cargo test --doc` they diverge violently: `current_exe()` is rustdoc's doctest harness, which
+/// **re-runs the same doctest**, which shells out again. Measured: **one `cargo test --doc` reached
+/// 2,528 live `rust_out.exe` processes and was still climbing when it was killed.**
+///
+/// So the ability to re-enter is **granted by the caller or absent**, and absent means refuse. `None` is
+/// the honest state for a doctest, a unit test, and any embedder linking this library -- and all three
+/// now get a structured refusal instead of a fork bomb.
+fn run_command(command: &str, arguments: &Value, cli: Option<&Path>) -> Value {
+    let Some(exe) = cli else {
+        // **Refused, and refused as a RESULT** rather than a protocol error: the call was well formed
+        // and the answer is "this server may not". The same shape every other failure uses.
+        return failed(&json!({
+            "command": command,
+            "error": {
+                "code": "QQQ-7001",
+                "message": "this server was not granted a CLI to re-enter, so it will not run a command \
+                            as a subprocess",
+                "remediation": "start the server with `qqqai mcp`, which grants its own path",
+            },
+        }));
+    };
+
+    let mut args: Vec<String> = vec![command.to_owned()];
+
+    if let Some(dir) = arguments.get("path").and_then(Value::as_str) {
+        args.push("--manifest".to_owned());
+        args.push(
+            std::path::Path::new(dir)
+                .join("qqq.toml")
+                .display()
+                .to_string(),
+        );
+    }
+    // `--dry-run` only when asked, and **only for the commands that declare it** -- the tool's own
+    // description is held to the command's `supports_dry_run` by a test, so passing it unconditionally
+    // would make that test's guarantee false at the point of use.
+    let dry_run = arguments
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if dry_run {
+        args.push("--dry-run".to_owned());
+    }
+    args.push("--json".to_owned());
+
+    match std::process::Command::new(exe).args(&args).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            // **The exit code, not the text, decides.** A command that printed a summary and exited
+            // non-zero failed, whatever the summary said.
+            let code = out.status.code().unwrap_or(-1);
+            let parsed = serde_json::from_str::<Value>(stdout.trim()).ok();
+            let structured = json!({
+                "command": command,
+                "args": args,
+                "exit_code": code,
+                "dry_run": dry_run,
+                "output": parsed.clone().unwrap_or(Value::Null),
+                "text": if parsed.is_some() { Value::Null } else { json!(stdout) },
+            });
+            if code == 0 {
+                ok(&structured)
+            } else {
+                failed(&structured)
+            }
+        }
+        Err(e) => failed(&json!({
+            "command": command,
+            "args": args,
+            "error": { "code": "QQQ-7001", "message": format!("cannot run this binary: {e}") },
+        })),
+    }
 }
 
 /// `qqq_inspect` -- what a project is allowed to do, **and what it is not**.
@@ -686,7 +818,7 @@ fn unimplemented(name: &str) -> Value {
 ///
 /// let input = "not json\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\"}\n";
 /// let mut out = Vec::new();
-/// serve_stdio(input.as_bytes(), &mut out).expect("the transport is infallible here");
+/// serve_stdio(input.as_bytes(), &mut out, None).expect("the transport is infallible here");
 ///
 /// let lines: Vec<&str> = std::str::from_utf8(&out).expect("utf8").lines().collect();
 /// assert_eq!(lines.len(), 2, "a bad line is answered AND the next request is served");
@@ -698,14 +830,23 @@ fn unimplemented(name: &str) -> Value {
 ///
 /// Because the transport is **newline-delimited** and a client may send one request and wait. A reader
 /// that waited for more input would deadlock against a client that is waiting for a reply.
-pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Result<()> {
+///
+/// # Why `cli` is a parameter
+///
+/// Because the four tools that shell out must run **a program the caller named**. `None` means this
+/// server was not granted one, and those four tools refuse — see `run_command` and `§O-351`.
+pub fn serve_stdio<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    cli: Option<&Path>,
+) -> std::io::Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => answer(&message),
+            Ok(message) => answer(&message, cli),
             Err(e) => Some(error(
                 &Value::Null,
                 code::PARSE,
@@ -763,7 +904,7 @@ pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Re
 ///     .port();
 ///
 /// std::thread::spawn(move || {
-///     let _ = serve_http(&format!("127.0.0.1:{port}"));
+///     let _ = serve_http(&format!("127.0.0.1:{port}"), None);
 /// });
 ///
 /// // **Wait by connecting, not by sleeping** -- a sleep is a guess, and this is ready when it answers.
@@ -786,7 +927,11 @@ pub fn serve_stdio<R: BufRead, W: Write>(input: R, mut output: W) -> std::io::Re
 /// assert!(out.starts_with("HTTP/1.1 200"), "{out}");
 /// assert!(out.contains("qqqai"), "and it is this server: {out}");
 /// ```
-pub fn serve_http(addr: &str) -> std::io::Result<()> {
+/// # Why `cli` is a parameter here too
+///
+/// Because the two transports serve the **same** protocol, and a tool that shells out must behave
+/// identically on both — the same reason `answer` is shared rather than written twice. See `§O-351`.
+pub fn serve_http(addr: &str, cli: Option<&Path>) -> std::io::Result<()> {
     let listener = std::net::TcpListener::bind(addr)?;
     // **ANNOUNCE THE BOUND ADDRESS.** `127.0.0.1:0` asks the OS for any free port, and a caller has no
     // other way to learn which one it got -- **a test that picks a port by binding and releasing it has
@@ -797,13 +942,13 @@ pub fn serve_http(addr: &str) -> std::io::Result<()> {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         // A connection that fails mid-exchange is one bad client, not a dead server.
-        let _ = handle_http(&mut stream);
+        let _ = handle_http(&mut stream, cli);
     }
     Ok(())
 }
 
 /// One HTTP exchange.
-fn handle_http(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+fn handle_http(stream: &mut std::net::TcpStream, cli: Option<&Path>) -> std::io::Result<()> {
     use std::io::{BufRead as _, BufReader, Read as _};
 
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -855,7 +1000,7 @@ fn handle_http(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
     let body = String::from_utf8_lossy(&body);
 
     let reply = match serde_json::from_str::<Value>(&body) {
-        Ok(message) => answer(&message),
+        Ok(message) => answer(&message, cli),
         Err(e) => Some(error(
             &Value::Null,
             code::PARSE,
@@ -890,4 +1035,130 @@ fn write_http(
     );
     stream.write_all(response.as_bytes())?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One `tools/call` as a client would frame it.
+    fn call_tool(name: &str) -> Value {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": {} }
+        });
+        answer(&message, None).expect("a request is answered")
+    }
+
+    /// **A server that was not granted a CLI REFUSES, and refuses structurally — `§O-351`.**
+    ///
+    /// # What this test is for
+    ///
+    /// The four tools that shell out take the program to run as a **parameter**. This is the assertion
+    /// that the parameter is *required*: with `None` there is no fallback, and the absence is reported
+    /// as a result a client can branch on rather than as a fork bomb.
+    ///
+    /// # Why it lives here and not in `tests/mcp_stdio.rs`
+    ///
+    /// Because the integration test drives the **real binary**, which *is* the CLI and therefore always
+    /// grants its own path — the ungranted state is unreachable from there. It is reachable here, and it
+    /// is the state a doctest, a unit test and a library embedder are all in.
+    ///
+    /// # The fault injection, and why it is this one
+    ///
+    /// Swapping `failed` for `ok` in `run_command`'s guard fails this test on `isError` — safe, and it
+    /// proves the assertion is live. **The unsafe injection is the historical one**: removing the guard
+    /// and falling back to `current_exe()` is exactly what produced `§O-351`'s 2,528 processes, so it is
+    /// recorded as a measurement rather than re-run.
+    #[test]
+    fn a_server_without_a_granted_cli_refuses_to_shell_out() {
+        let reply = call_tool("qqq_build");
+
+        assert_eq!(reply["id"], 1);
+        assert!(
+            reply.get("error").is_none(),
+            "a well-formed call is a RESULT, not a protocol error: {reply}"
+        );
+        let result = &reply["result"];
+        assert_eq!(
+            result["isError"], true,
+            "the refusal sets the flag a client branches on: {reply}"
+        );
+        assert_eq!(
+            result["structuredContent"]["command"], "build",
+            "the field names the CLI COMMAND that would have run, not the tool that asked for it -- \
+             which is what the success path reports too, so a client parses one shape: {reply}"
+        );
+        assert_eq!(result["structuredContent"]["error"]["code"], "QQQ-7001");
+        assert!(
+            result["structuredContent"]["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("not granted")),
+            "and it says WHY, because a refusal a client cannot act on is a dead end: {reply}"
+        );
+    }
+
+    /// **The refusal reports NO ARGUMENTS and NO EXIT CODE.**
+    ///
+    /// # Why this is the assertion that would have caught `§O-351`
+    ///
+    /// Because those two fields exist only if a program ran. An implementation that refused *after*
+    /// deciding what to run — or one that ran something and then reported a failure — would populate
+    /// them, and **the shape of the structured content is the only evidence a client has** about whether
+    /// the host executed anything.
+    #[test]
+    fn a_refusal_does_not_claim_anything_ran() {
+        let reply = call_tool("qqq_build");
+        let structured = &reply["result"]["structuredContent"];
+        assert!(
+            structured.get("args").is_none(),
+            "nothing was run, so there are no arguments to report: {reply}"
+        );
+        assert!(
+            structured.get("exit_code").is_none(),
+            "nothing was run, so there is no exit code: {reply}"
+        );
+    }
+
+    /// **All four shelling tools refuse, not just the one the test above names.**
+    ///
+    /// Because the guard lives in `run_command`, which all four share — and a test that named one of
+    /// them would pass while the other three took a different path.
+    #[test]
+    fn every_shelling_tool_refuses_without_a_grant() {
+        for name in ["qqq_build", "qqq_run", "qqq_test", "qqq_bench"] {
+            let reply = call_tool(name);
+            assert_eq!(
+                reply["result"]["isError"], true,
+                "`{name}` must refuse rather than guess: {reply}"
+            );
+            assert_eq!(
+                reply["result"]["structuredContent"]["command"],
+                name.trim_start_matches("qqq_"),
+                "and it names the command it would have run: {reply}"
+            );
+        }
+    }
+
+    /// **The guard does not reach the tools that need no subprocess.**
+    ///
+    /// Because `None` means *"you may not shell out"*, not *"you may not answer"*. A guard that disabled
+    /// the in-process tools would be a guard that broke the server in order to protect it — `§O-282`'s
+    /// shape, in the other direction.
+    #[test]
+    fn an_ungranted_server_still_answers_the_in_process_tools() {
+        let reply = call_tool("qqq_caps_list");
+        assert_eq!(
+            reply["result"]["isError"], false,
+            "the in-process tools are unaffected: {reply}"
+        );
+        assert!(
+            reply["result"]["structuredContent"]["count"]
+                .as_u64()
+                .is_some_and(|c| c > 0),
+            "and they still carry their answer: {reply}"
+        );
+    }
 }

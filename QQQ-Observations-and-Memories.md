@@ -26459,4 +26459,176 @@ declared set alone would lose"*.
 
 ---
 
+## §O-350 — All twelve tools wired: the `unimplemented` path is now unreachable
+
+**Found:** Phase 2, building. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/tests/mcp_stdio.rs`.
+
+### `AGENT-006`–`AGENT-017` are covered
+
+Eight tools were wired in rounds 39–44; the last four — **`qqq_build`, `qqq_run`, `qqq_test`, `qqq_bench`**
+— shell out, and with them the match's `other => Ok(unimplemented(other))` arm **cannot be reached by any
+name in `mcp_tool_names()`**.
+
+### Why a subprocess, and not an in-process call
+
+- the command's dispatchers live in the **binary** and this module is in the **library**; and
+- **more importantly, a command writes to stdout, and on the stdio transport stdout *is* the protocol.**
+  An in-process call would print a human summary **into the middle of a JSON-RPC stream and corrupt it.**
+  A subprocess gives the command its own stdout, which this reads.
+
+### The exit code *is* the tool's verdict
+
+A non-zero exit sets **`isError: true`** and puts the code in the structured content. **The command already
+decided whether it succeeded**, and a wrapper that second-guessed it would be **a second answer to a
+question the command answers** — `§O-344`'s lesson, in a new place.
+
+### `--json` is always passed
+
+Because the CLI has a machine-readable mode and **a wrapper that parsed the human rendering would be parsing
+a presentation**. When a command has no envelope yet the raw text goes to `text` **rather than being
+dropped**. Measured:
+
+```
+qqq_build --dry_run:true -> args ["build","--manifest",…,"--dry-run","--json"], exit_code 2
+qqq_test                 -> args ["test","--manifest",…,"--json"], exit_code 2
+```
+
+### And `qqq_run` lost its `request` field
+
+**Nothing forwards a request line** — `run_command` forwards `path` and `dry_run` and nothing else — so the
+schema was **a promise the tool does not keep**, **which is the same defect `§O-344` found in `dry_run`,
+found the same way: by asking what the tool actually does.**
+
+### And a stale test was *replaced* rather than deleted
+
+`an_unrunnable_tool_reports_is_error` asserted that `qqq_build` reports `implemented: false`. **That was
+true when it was written and is false now** — *the good kind of stale test* — so the property is restated
+as **one assertion over all twelve**:
+
+> **no tool in the published list answers `unimplemented`.**
+
+**A thirteenth tool added without a handler fails here, and no reviewer has to notice it.**
+
+### The injection fired four tests
+
+Removing `qqq_schema`'s arm so it falls through: `no_tool_answers_unimplemented`,
+`three_tools_are_wired_and_structured`, `every_mutating_tool_takes_dry_run_and_says_so` and
+`the_tool_dry_run_contract_agrees_with_the_command_schemas` **all FAILED**. **The cross-surface guard fires
+from four directions at once**, which is what a guard built on a derived fact should do.
+
+### Measured
+
+**17 MCP tests in 0.24 s** · **all twelve tools wired** · the `unimplemented` path unreachable.
+
+---
+
+## §O-351 — The doctest forked: `current_exe()` answers *"what is running"*, not *"what may I re-enter"*
+
+**Found:** Phase 2, verifying the last four MCP tools. **Anchors:** `crates/qqq-run/src/mcp.rs`,
+`crates/qqq-run/src/main.rs`, `crates/qqq-run/tests/mcp_stdio.rs`.
+
+### How it was found: the interruption *was* the evidence
+
+The round-45 verification log (`p45_verify.out`) ends mid-doctest, on
+`test crates\qqq-run\src\mcp.rs - mcp (line 34) has been running for over 60 seconds`. **That line was not
+a truncation — it was a live fork bomb**, and the power cut landed while it was running. Re-running
+`cargo test -p qqq-run --doc` after the restart reproduced it:
+
+```
+rust_out BEFORE: 2528          <- live processes at the FIRST measurement
+sweep 1 : 563                  <- 563 more spawned AFTER the root was killed
+sweep 2 : zero
+```
+
+**2,528 live `rust_out.exe`, and still climbing.** `rust_out.exe` is **rustdoc's doctest binary name**.
+
+### The mechanism
+
+The four new MCP tools that shell out ran `std::env::current_exe()`. **Under `cargo test --doc` that is
+`rust_out.exe`** — the doctest harness itself, which **re-runs the same doctest**, which shells out again.
+The doctest called `qqq_build`; `qqq_build` spawned the doctest; the doctest called `qqq_build`.
+
+### Why it had not reached CI
+
+**The shell-out was uncommitted.** At `HEAD` `qqq_build` fell through to `unimplemented`, so the doctest's
+`isError: true` assertion held and nothing spawned. **The fork bomb existed only in the working tree** —
+which is why the round that introduced it is the round that had to catch it.
+
+### The fix: re-entering the CLI is a GRANT
+
+`serve_stdio`, `serve_http`, `handle_http`, `answer`, `call` and `run_command` now take
+`cli: Option<&Path>`, and `main` passes **its own path**, because it is the one place that knows this
+process is the CLI. `None` means *"you may not shell out"*, and those four tools **refuse structurally**:
+
+```json
+{"command":"build","error":{"code":"QQQ-7001",
+ "message":"this server was not granted a CLI to re-enter, so it will not run a command as a subprocess"}}
+```
+
+**There is no `current_exe()` left in the code path** — measured: **6** occurrences in `mcp.rs` and
+**all six are documentation**, against exactly one `Command::new(exe)` whose `exe` is the granted
+parameter. A failed `current_exe()` in `main` yields `None`, so the capability's failure mode is
+**closed, not open**.
+
+### Measured, before and after
+
+| | before | after (two runs) |
+|---|---|---|
+| `cargo test -p qqq-run --doc` | **> 60 s, climbing, killed** | **5 passed in 2.57 s and 3.10 s**, `DOC_EXIT=0` |
+| peak live `rust_out.exe` | **2,528, climbing** | **0 and 1** (`fired=False`, `leftover=0`) |
+
+The doctest was run **under a watchdog** (`.scratch/watchdog_doc.ps1`), because *a fix for a fork bomb that
+is tested without one is the next incident*. The watchdog kills the tree above 40 live processes and
+reports the peak it saw.
+
+**And the watchdog was itself checked for whether it measured anything** — `§O-280`'s rule, applied to an
+instrument rather than to an injection. The second run saw **peak 1**, so it *does* observe `rust_out.exe`
+when one exists; **a watchdog that always reported zero would have proved nothing.** The comparison is
+`1` against `2,528`, not `0` against `2,528`.
+
+### The injection
+
+Two properties injected at once, because **different tests guard them** and one injection would prove only
+one is live: `failed` → `ok` (the refusal stops setting `isError`) and `"exit_code": 0` added (the refusal
+starts claiming something ran).
+
+```
+INJECTED  orig_sha=064c8ac1bdc84ede
+test result: FAILED. 1 passed; 3 failed
+RESTORED  sha=064c8ac1bdc84ede byte_identical=True
+test result: ok. 4 passed; 0 failed
+```
+
+**Three of the four failed, and the fourth is the point**:
+`an_ungranted_server_still_answers_the_in_process_tools` passed *under injection*, because it asserts the
+guard is **narrow** — `None` means *"you may not shell out"*, not *"you may not answer"* (`§O-282`'s shape,
+in the other direction).
+
+### And the doctest's premise was stale, for the same reason as `§O-350`'s test
+
+`mcp (line 34)` asserted `isError: true` **because `qqq_build` was unimplemented**. Wiring the tool made
+that false. **The example now shows the GRANT instead** — a server constructed with `None` refusing — which
+is both true and the more useful thing to document.
+
+### And the new tests found a mis-specification in their own author
+
+They asserted `structuredContent.command == "qqq_build"`; it is **`"build"`** — the CLI *command* that
+would have run, which is what the success path reports too, so a client parses one shape. **Two tests
+failed on the first run for that reason, and the implementation was right and the test was wrong.**
+`§O-344`'s lesson, pointed at a test.
+
+### The lesson
+
+**A capability-secure runtime that guesses at the program it re-enters is not capability-secure.** The
+grant is one parameter and the refusal is four lines, and they are the difference between a documented
+security model and a machine out of process handles.
+
+### Measured
+
+**505 lib tests** · **17 MCP stdio** · **7 MCP HTTP** · **5 doctests in 2.57 s** · `FMT_EXIT=0` · the
+`current_exe()` guess **absent from the code**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

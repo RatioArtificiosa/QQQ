@@ -702,6 +702,18 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
 /// Because the two transports serve **the same protocol**. A client picks one by how it connects, not by
 /// which program it runs, and a second command name would be a second spelling of one server.
 fn dispatch_mcp(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
+    // **THE GRANT.** The four MCP tools that shell out run a QQQ command as a subprocess, and they must
+    // run **a program the caller named** rather than one they guessed at. This is the one place in the
+    // process that KNOWS it is the CLI, so this is the one place that can grant it.
+    //
+    // `mcp.rs` used to call `std::env::current_exe()` instead. Under `cargo test --doc` that is
+    // **rustdoc's doctest harness**, which re-runs the same doctest, which shells out again -- one
+    // `cargo test --doc` reached **2,528 live processes** before it was killed (`§O-351`).
+    //
+    // A failed `current_exe()` yields `None`, and the four tools then **refuse** rather than fall back:
+    // the failure mode of this capability is closed, not open.
+    let self_exe = std::env::current_exe().ok();
+
     // `--http <addr>` selects the HTTP transport -- `AGENT-005`. **The flag rather than a subcommand**,
     // because the two transports serve the SAME protocol and a client picks one by how it connects,
     // not by which program it runs.
@@ -717,7 +729,7 @@ fn dispatch_mcp(name: CommandName, args: &[String], out: &mut Output<std::io::St
         };
         // **Binding is where a bad address is caught**, so the failure is reported before the loop
         // rather than as a silent server that never answers.
-        return match qqq_run::mcp::serve_http(addr) {
+        return match qqq_run::mcp::serve_http(addr, self_exe.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 let err = qqq_core::Error::new(
@@ -733,7 +745,7 @@ fn dispatch_mcp(name: CommandName, args: &[String], out: &mut Output<std::io::St
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    match qqq_run::mcp::serve_stdio(stdin.lock(), stdout.lock()) {
+    match qqq_run::mcp::serve_stdio(stdin.lock(), stdout.lock(), self_exe.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let err = qqq_core::Error::new(

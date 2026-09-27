@@ -1036,6 +1036,21 @@ jobs:
       - name: prove the error-standard check fires
         run: python tools/check_error_standard.py --self-test
 
+      # `CON-001`/`CON-016`. `schema/*.schema.json` is generated from the Rust types and
+      # drift-checked, which proves the document matches the *generator* -- and says nothing about
+      # whether the generator read the source. It did not, three times, in one struct:
+      # `dev_dependencies` for `dev-dependencies`, `generated_by` for `generated-by`, and
+      # `lockfile_hash` for `lockfile-hash` -- one of them also listed as REQUIRED, so the
+      # published schema rejected a manifest the parser accepts. Every one passed `--check`,
+      # because `--check` compares the schema against the generator's own misreading.
+      #
+      # It sits here for the same reason DX-004 does: its self-test injects into the source and
+      # then rebuilds the binary, and the checker job has no Rust.
+      - name: the published schemas agree with the Rust source (CON-001)
+        run: python tools/check_schema_conformance.py
+      - name: prove the schema-conformance rules are live
+        run: python tools/check_schema_conformance.py --self-test
+
       # `DX-015`. §12.3 commits to *"every public API has a compiling example"* at 100%, and
       # the measured state was **2116 public declarations and 3 doctests running**. A check
       # demanding 2113 new examples in one commit would be red forever and ignored, so this
@@ -1090,6 +1105,31 @@ jobs:
         run: python tools/check_doc_claims.py
       - name: prove the doc-claim scanner and resolvers are live
         run: python tools/check_doc_claims.py --self-test
+
+      # `§O-364`. `include_str!` is a **compile-time dependency on a file**, and the production
+      # image copies an allowlist. The scaffold embedded `rust-toolchain.toml`, the file was not on
+      # that list, and `Production image (SEC-029)` was the only red job of the twelve in run
+      # `36326245198` -- while fmt, clippy, the workspace suite and this whole gate were green
+      # locally, because on the developer's machine the file exists. This makes the class
+      # impossible rather than closing it with one more `COPY` line, which is how the `wit/`
+      # instance and the crate-stub list were each closed before it.
+      - name: every include_str! resolves inside the production image's COPY set
+        run: python tools/check_include_str.py
+      - name: prove the include_str! check fires
+        run: python tools/check_include_str.py --self-test
+
+      # `§O-268`. A `subprocess` call that decodes with the *locale's* encoding: on a default
+      # Windows console that is cp1252, so a child emitting UTF-8 kills subprocess's reader thread,
+      # `stdout` comes back **empty**, and the caller reads "no output" as a real result. It
+      # produced a false hand-off failure from the one tool whose job is to say whether a hand-off
+      # is safe -- and it passes in CI, which runs on a UTF-8 locale, so nothing here saw it.
+      #
+      # `§O-292` recorded this checker as *"registered in both gates"*. It was registered in
+      # **neither**; `check_gate_parity.py`'s rule 5 is what now refuses to allow that.
+      - name: no subprocess call decodes with the locale's encoding
+        run: python tools/check_subprocess_encoding.py
+      - name: prove the encoding scanner and its exemptions are live
+        run: python tools/check_subprocess_encoding.py --self-test
 
       # §12.3's DX-commitments table is titled "measurable, in CI", and its row
       # is `qqqai --help` for any command <= 40 lines. The unit test asserts it,

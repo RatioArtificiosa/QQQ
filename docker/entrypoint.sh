@@ -1015,6 +1015,40 @@ cmd_checks() {
     python3 tools/check_corpus_repair.py
     python3 tools/check_corpus_repair.py --self-test
 
+    # `§O-364`: `include_str!` is a **compile-time dependency on a file**, and the production image
+    # copies an allowlist. The scaffold embedded `rust-toolchain.toml`, the file was not on that
+    # list, and `Production image (SEC-029)` was the only red job of the twelve in run
+    # `36326245198` -- while fmt, clippy, the workspace suite and this whole gate were green
+    # locally, because on the developer's machine the file exists. This checker is what makes the
+    # class impossible instead of closing it with one more `COPY` line, which is how the first two
+    # instances in that file were closed.
+    python3 tools/check_include_str.py
+    python3 tools/check_include_str.py --self-test
+
+    # `§O-268`: a `subprocess` call that decodes with the *locale's* encoding. It was fixed as 42
+    # call sites and the scanner lived in `.scratch/`, which is gitignored, so nothing enforced it.
+    # `§O-292` recorded that this checker was *"registered in both gates"*. It was registered in
+    # **neither** -- which is the claim `check_gate_parity.py`'s rule 5 now refuses to allow.
+    python3 tools/check_subprocess_encoding.py
+    python3 tools/check_subprocess_encoding.py --self-test
+
+    # `CON-001`/`CON-016`: the published schema against the Rust source's `#[serde(rename = ...)]`
+    # and its optionality markers. Drift-checking proves the document matches the *generator*; it
+    # says nothing about whether the generator read the source correctly, and it did not, three
+    # times, in one struct -- every one of which passed `--check`.
+    #
+    # The runtime probe inside it is skipped with a notice when no binary has been built here, so
+    # this runs unconditionally and reports what it could not measure rather than passing silently.
+    python3 tools/check_schema_conformance.py
+    python3 tools/check_schema_conformance.py --self-test
+
+    # `§O-286`: these two ran in CI's line-ending step and **not here**, so the bridge verified
+    # neither. Both are pure Python, both were run against this image to prove it, and neither
+    # touches a tracked file -- `check_handoff.py --self-test` drives pure functions precisely so
+    # that it does not dirty the tree it exists to certify.
+    python3 tools/check_handoff.py --self-test
+    python3 tools/check_xrefs.py --self-test
+
     # # Why the line-ending guard runs LAST, and why the scratch copy is deliberate
     #
     # Ten of the steps above inject a defect into a *generated* tracked document and
@@ -1065,6 +1099,16 @@ cmd_checks() {
 # rather than accumulated. A divergence nobody decided is how a second gate quietly becomes a
 # weaker gate.
 #
+# **Two more were added on 2026-09-27, and they were not new divergences — they were ones this
+# file's own parity checker could not see.** Its `ci.yml` pattern required `run:` and the command
+# on ONE line, so every command inside a `run: |` block was invisible: it read **97** of that
+# file's **116** command lines. `tools/check_corpus_at_rest.py` and
+# `tools/self_test_xrefs.py --prove-isolation` had diverged for as long as they have existed and
+# were reported as nothing. The pattern is anchored on the command now, and the checker also
+# fails when a `tools/check_*.py` is invoked in NEITHER gate — which is how
+# `check_schema_conformance.py`, `check_subprocess_encoding.py` and `check_include_str.py` were
+# found running nowhere at all.
+#
 #   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
 #                                          of a working tree that is usually dirty
 #   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
@@ -1079,6 +1123,14 @@ cmd_checks() {
 #                                          against itself. A VACUOUS COMPARISON CERTIFIES
 #                                          NOTHING, which is the rule three other checkers in
 #                                          this repository already apply.
+#   tools/check_corpus_at_rest.py          verifies the documents' bytes against the COMMITTED
+#                                          digest file, so it needs a clean tree — the same
+#                                          reason `audit_requirements.py` is on this list
+#   tools/self_test_xrefs.py --prove-isolation  leaves a mutation UN-RESTORED, because that is
+#                                          how it proves a leftover is detectable. Against a bind
+#                                          mount of a working tree the leftover IS the defect, so
+#                                          the demonstration and the thing it demonstrates cannot
+#                                          share a directory.
 #
 # `tools/check_wit.py` used to be on this list — the image had no `wasm-tools`, so WIT *parsing*
 # was unverified on Linux while three Python WIT checkers passed. The toolchain is now installed in
@@ -1096,7 +1148,7 @@ cmd_checks() {
 # beyond it *and* when an entry on it stops diverging — a stale exemption is a defect in its own
 # right, and a list that only grows is a list that stops meaning anything (`§O-291`).
 #
-# If this list and `ci.yml` disagree beyond these thirteen, that is the defect — not the
+# If this list and `ci.yml` disagree beyond these fifteen, that is the defect — not the
 # divergence itself. A parity checker would be the durable form; it needs this list as data,
 # which is why the list is here rather than in a comment somewhere else.
 

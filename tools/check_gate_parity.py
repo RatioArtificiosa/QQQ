@@ -34,6 +34,26 @@ keeps recording — and the two would drift. **The declaration is the data.**
      `check_checklist_counts.py` validating the declaration against the document rather than only
      the arithmetic. A list that only grows is a list that stops meaning anything.
   4. Vacuity fails: if either gate yields no invocations, the comparison proved nothing.
+  5. **Every `tools/check_*.py` is invoked in at least one gate.**
+
+# Why rule 5 exists, and why rules 1-4 could not find this
+
+Rules 1-4 compare the two gates **to each other**. A checker in *neither* gate is invisible to
+every one of them: there is no divergence to detect, because both gates agree -- on running
+nothing. Measured when this rule was added, **two** checkers were in that state:
+
+| Checker | What it enforces | State |
+|---|---|---|
+| `tools/check_schema_conformance.py` | the published schema against the Rust source's `#[serde(rename)]` and optionality markers (`CON-001`, `CON-016`) | in neither gate |
+| `tools/check_subprocess_encoding.py` | no `subprocess` call decodes with the locale's encoding (`§O-268`) | in neither gate |
+
+Both passed when run by hand. `§O-292` claimed the second was *"registered in both gates"*, which
+is the failure this rule exists to make impossible: **a claim about a gate is worth exactly as much
+as the gate's ability to contradict it.**
+
+    A GUARD IS ONLY AS WIDE AS ITS FILE LIST AND ONLY AS NARROW AS ITS PATTERN.
+
+This file was narrow in both directions at once, which is the shape `§O-282` records.
 
 # Why the "declared" match is a prefix
 
@@ -72,8 +92,29 @@ ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 # script. Both are normalised to `tools/foo.py --bar` with runs of whitespace collapsed, because
 # the two files spell the interpreter differently (`python` vs `python3`) and that difference is
 # not what this check is about.
-CI_INVOCATION = re.compile(r"run:\s*python3?\s+(tools/[\w./-]+[^\n]*)")
-BRIDGE_INVOCATION = re.compile(r"^\s*python3?\s+(tools/[\w./-]+[^\n]*)", re.MULTILINE)
+#
+# # Why the CI pattern is not `run:\s*python`
+#
+# It was, and it could not see a `run: |` block -- the command is on the NEXT line, indented, with
+# no `run:` in front of it. Measured: `ci.yml` carries **116** command lines and this pattern saw
+# **97**. The three it missed were `tools/check_handoff.py --self-test`,
+# `tools/check_corpus_at_rest.py` and `tools/self_test_xrefs.py --prove-isolation`, and the first
+# two of those are real ci-only divergences that this checker therefore never reported. **A guard
+# is only as narrow as its pattern, and this one was narrower than the file it reads** (`§O-282`).
+#
+# So the pattern is anchored on the COMMAND, not on the YAML key: optional `run:`, optional
+# indentation, then `python`. A comment (`# python tools/x.py`) and a step name
+# (`- name: … (tools/check_gate_parity.py)`) still do not match, because neither reaches `python`
+# at the start of a line.
+CI_INVOCATION = re.compile(r"^\s*(?:run:\s*)?python3?\s+(tools/[\w./-]+[^\n]*)", re.MULTILINE)
+
+# The bridge's shell script spells the interpreter `python3` and carries no `run:` key at all, so
+# the optional `run:` group above simply never matches there and **one pattern serves both
+# sources**. It is *derived* rather than re-typed deliberately: two identical literals named
+# differently invite the next reader to edit one and not the other, and a guard whose two halves
+# silently disagree is the exact failure `§O-365` records. A name that must not be assumed to
+# differ should not be spelled twice.
+BRIDGE_INVOCATION = CI_INVOCATION
 
 # A declared entry: an indented comment naming a tool — **possibly with arguments**, because
 # `tools/check_sbom.py sbom` and `tools/check_sbom.py --self-test` are different commands and the
@@ -108,6 +149,15 @@ def invocations(text: str, pattern: re.Pattern[str]) -> list[str]:
         for m in pattern.finditer(text)
     }
     return sorted(out)
+
+
+def checkers() -> list[str]:
+    """Every `tools/check_*.py` the tree ships, by file name.
+
+    This is the third input, and the one rules 1-4 never had: the two gates compared **to each
+    other** cannot notice a checker that neither of them runs.
+    """
+    return sorted(p.name for p in (ROOT / "tools").glob("check_*.py"))
 
 
 def declaration() -> tuple[list[tuple[str, int | None]], list[tuple[str, int | None]]]:
@@ -156,11 +206,15 @@ def check(
     bridge: list[str],
     ci_only: list[tuple[str, int | None]],
     bridge_only: list[tuple[str, int | None]],
+    scripts: list[str] | tuple[str, ...] = (),
 ) -> list[str]:
     """The decision procedure, as a pure function, so `--self-test` can drive it.
 
     `ci_only` declares commands CI runs and the bridge does not; `bridge_only` declares the
     reverse. The direction is checked, not just the membership.
+
+    `scripts` is every `tools/check_*.py` in the tree. It defaults to empty so the cases that are
+    about the two-gate comparison can be written without naming a tree.
     """
     problems: list[str] = []
 
@@ -222,6 +276,18 @@ def check(
                     f"count is what catches a glob that silently stopped covering something"
                 )
 
+    # Rule 5: a checker that no gate runs certifies nothing. Rules 1-4 compare the gates to each
+    # other and are blind to this **by construction** -- two gates that both run nothing agree
+    # perfectly, so there is no divergence for them to report.
+    invoked = {i.split(" ")[0] for i in [*ci, *bridge]}
+    for name in scripts:
+        if f"tools/{name}" not in invoked:
+            problems.append(
+                f"`tools/{name}` is invoked in NEITHER gate. A checker no gate runs is a checker "
+                f"that certifies nothing, and rules 1-4 cannot see it because they compare the two "
+                f"gates to each other. Add it to `ci.yml` and `docker/entrypoint.sh`"
+            )
+
     return problems
 
 
@@ -232,13 +298,15 @@ def collect():
         invocations(ENTRYPOINT.read_text(encoding="utf-8", errors="replace"), BRIDGE_INVOCATION),
         ci_only,
         bridge_only,
+        checkers(),
     )
 
 
 def validate(verbose: bool) -> int:
-    ci, bridge, ci_only, bridge_only = collect()
+    ci, bridge, ci_only, bridge_only, scripts = collect()
     print(f"ci.yml invocations        : {len(ci)}")
     print(f"bridge invocations        : {len(bridge)}")
+    print(f"check_*.py in tools/      : {len(scripts)}")
     print(f"declared ci-only          : {len(ci_only)}")
     for token, count in ci_only:
         print(f"  declared  {token}{f' ({count} cmds)' if count else ''}")
@@ -246,7 +314,7 @@ def validate(verbose: bool) -> int:
     for token, count in bridge_only:
         print(f"  declared  {token}{f' ({count} cmds)' if count else ''}")
 
-    problems = check(ci, bridge, ci_only, bridge_only)
+    problems = check(ci, bridge, ci_only, bridge_only, scripts)
     print("")
     if problems:
         print(f"GATE PARITY FAILED -- {len(problems)} problem(s):")
@@ -267,15 +335,25 @@ def self_test() -> int:
         ci_only,
         bridge_only,
         expect: str | None,
+        scripts: list[str] | None = None,
     ) -> None:
         nonlocal failures
-        problems = check(ci, bridge, ci_only, bridge_only)
+        problems = check(ci, bridge, ci_only, bridge_only, scripts or [])
         ok = (not problems) if expect is None else any(expect in p for p in problems)
         print(f"  {'OK  ' if ok else 'DEAD'}  {name}")
         if not ok:
             failures += 1
             for p in problems[:2]:
                 print(f"        got: {p}")
+
+    def simple(name: str, ok: bool, detail: str = "") -> None:
+        """A case that is not about `check()` -- the pattern itself, for instance."""
+        nonlocal failures
+        print(f"  {'OK  ' if ok else 'DEAD'}  {name}")
+        if not ok:
+            failures += 1
+            if detail:
+                print(f"        {detail}")
 
     A, B = "tools/a.py", "tools/b.py"
     AB = "tools/a.py --self-test"
@@ -319,17 +397,76 @@ def self_test() -> int:
     )
     case("an empty gate fails rather than passing", [], [A], [], [], "vacuity")
 
+    # The pattern itself. A `run: |` block puts the command on the NEXT line, indented, with no
+    # `run:` in front of it -- which is what the first version could not read, and it saw 97 of
+    # ci.yml's 116 command lines because of it. A comment and a step name must still not count.
+    workflow = (
+        "      - name: a step (tools/check_named.py)\n"
+        "        run: python tools/check_inline.py\n"
+        "      - name: a block\n"
+        "        run: |\n"
+        "          python tools/check_block.py --self-test\n"
+        "          # python tools/check_commented.py\n"
+    )
+    seen = invocations(workflow, CI_INVOCATION)
+    simple(
+        "the pattern sees a `run: |` block, and not a comment or a step name",
+        seen == ["tools/check_block.py --self-test", "tools/check_inline.py"],
+        f"got {seen}",
+    )
+
+    # Rule 5: the tree is a third input, and rules 1-4 cannot see an orphan by construction.
+    case(
+        "a checker in NEITHER gate is caught",
+        [A, B],
+        [A, B],
+        [],
+        [],
+        "NEITHER gate",
+        scripts=["a.py", "orphan.py"],
+    )
+    case(
+        "a checker in both gates satisfies the tree rule",
+        [A, B],
+        [A, B],
+        [],
+        [],
+        None,
+        scripts=["a.py", "b.py"],
+    )
+    case(
+        "a checker declared ci-only still satisfies the tree rule",
+        [A, B],
+        [B],
+        [(A, None)],
+        [],
+        None,
+        scripts=["a.py"],
+    )
+    case(
+        "an orphan cannot be excused by declaring it",
+        [A],
+        [A],
+        [(B, None)],
+        [],
+        "NEITHER gate",
+        scripts=["b.py"],
+    )
+
     # The real repository must currently agree.
-    ci, bridge, ci_only, bridge_only = collect()
-    real = check(ci, bridge, ci_only, bridge_only)
+    ci, bridge, ci_only, bridge_only, scripts = collect()
+    real = check(ci, bridge, ci_only, bridge_only, scripts)
     ok = not real
-    print(f"  {'OK  ' if ok else 'DEAD'}  the real gates agree ({len(ci)} vs {len(bridge)} invocations)")
+    print(
+        f"  {'OK  ' if ok else 'DEAD'}  the real gates agree "
+        f"({len(ci)} vs {len(bridge)} invocations, {len(scripts)} checker(s))"
+    )
     if not ok:
         failures += 1
         for p in real[:3]:
             print(f"        {p}")
 
-    total = 12
+    total = 17
     print("")
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")

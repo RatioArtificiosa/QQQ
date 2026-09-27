@@ -22980,6 +22980,16 @@ both of those were decided before the edit, not after the failure.
 
 `§O-291` records 0.1 and the parity checker's own three defects. This entry records 0.2 and 0.3.
 
+> **Correction, `§O-365`.** The 0.3 row's *"registered in both gates"* was **false**.
+> `tools/check_subprocess_encoding.py` was invoked in **neither** gate — from the day it was
+> written until `§O-365` added it. The checker ran clean every time it was invoked by hand, and
+> **nothing invoked it**, so the class it exists to prevent was unguarded for the whole period in
+> which this entry claimed otherwise.
+>
+> **A claim about a gate is worth exactly as much as the gate's ability to contradict it.** The
+> parity checker could not contradict this one: it compared the two gates *to each other*, and two
+> gates that both run nothing agree perfectly. That blind spot is `§O-365`'s subject.
+
 ### 0.2 — and the declaration had to be *removed*, not kept
 
 The image had no `wasm-tools`, so `check_wit.py` failed loudly in the bridge and its absence was
@@ -27969,6 +27979,110 @@ missing file · `rust-toolchain.toml` **absent** from the `COPY` allowlist (`Car
 `Cargo.lock`, `crates/`, `wit/`) · fmt **0** · clippy **0** · `lang003_template` **2 passed** and
 **1 passed** with `--ignored` · **15** `include_str!` sites in `crates/qqq-abi/src/wit.rs` and **1**
 in `new.rs` are the only ones that escape `crates/` into a copied directory.
+
+## §O-365 — The parity guard was too narrow in both directions at once, and two checkers ran in no gate at all
+
+**Found:** Phase 0 of the build goal, re-deriving Gate 0's claims against the tree rather than
+against the entry that recorded them. **Anchors:** `tools/check_gate_parity.py`,
+`docker/entrypoint.sh`, `.github/workflows/ci.yml`, `tools/check_schema_conformance.py`,
+`tools/check_subprocess_encoding.py`, `tools/check_include_str.py`,
+`.scratch/run_ci_checkers.py`.
+
+### What `§O-292` said, and what the tree said
+
+`§O-292` closed Gate 0 with a table, and its 0.3 row claimed the locale-encoding checker was
+*"registered in both gates"*. Measured, it was invoked in **neither**:
+
+| Checker | `ci.yml` | `entrypoint.sh` |
+|---|---|---|
+| `tools/check_schema_conformance.py` | no | no |
+| `tools/check_subprocess_encoding.py` | no | no |
+
+Both passed when run by hand. `check_subprocess_encoding.py` reported **0** sites across **73**
+tools — correct, and enforced by nothing.
+
+### The guard could not contradict the claim, and the reason is structural
+
+`check_gate_parity.py` compared the two gates **to each other**. A checker in neither gate produces
+**no divergence**: both gates agree, perfectly, on running nothing. Rules 1-4 were blind to it by
+construction — not by a bug in their implementation.
+
+    A GUARD IS ONLY AS WIDE AS ITS FILE LIST AND ONLY AS NARROW AS ITS PATTERN.
+
+This file was narrow in both directions at once, which is the shape `§O-282` records.
+
+**Too narrow a pattern.** `CI_INVOCATION` was `run:\s*python3?\s+(tools/…)`, which requires the YAML
+key and the command on the **same line**. Measured: `ci.yml` carries **116** command lines and the
+pattern saw **97**. Every command inside a `run: |` block was invisible, and three of them were real
+ci-only divergences the checker therefore never reported:
+
+    tools/check_corpus_at_rest.py
+    tools/check_handoff.py --self-test
+    tools/self_test_xrefs.py --prove-isolation
+
+**Too narrow a file list.** There was no third input. Nothing asked whether a `tools/check_*.py`
+appears in a gate *at all*.
+
+### A third face: the same narrow pattern, in the instrument that produces local greens
+
+`.scratch/run_ci_checkers.py` carries the same `run:\s*python` regex, and its docstring says it
+exists to *"reproduce the EXACT command CI runs"*. It was reproducing **97 of 116** — so the local
+gate behind every green this repository has recorded was running three fewer commands than the gate
+it claims to predict. Fixed in the same edit, because an instrument that under-measures produces a
+green that means less than it says.
+
+### What was built
+
+1. **The pattern is anchored on the command**, not on the YAML key:
+   `^\s*(?:run:\s*)?python3?\s+(tools/…)`. A `run: |` block matches; a YAML comment
+   (`# python tools/x.py`) and a step name (`- name: … (tools/check_gate_parity.py)`) still do not,
+   because neither reaches `python` at the start of a line.
+2. **Rule 5: every `tools/check_*.py` is invoked in at least one gate.** A checker no gate runs
+   certifies nothing.
+3. **The orphans are wired.** `check_schema_conformance.py` (`CON-001`/`CON-016`) and
+   `check_subprocess_encoding.py` (`§O-268`) went into **both** gates. The first sits in the `rust`
+   job rather than the checker job for the same reason `DX-004` does: its self-test injects into the
+   source and then runs `cargo build`, and the checker job has no Rust.
+4. **Two more checkers were promoted out of `.scratch/`** — `tools/check_include_str.py`, which is
+   `§O-364`'s durable half, and is what makes that class impossible rather than closing it with one
+   more `COPY` line. It carries 13 self-test cases, including a **continuation-aware** `COPY` parser
+   (the image's last `COPY` spans two lines, and a line-based parser never saw its source).
+5. **Two divergences were declared** rather than wired, each with its reason in the data block:
+   `check_corpus_at_rest.py` (needs a clean tree) and `self_test_xrefs.py --prove-isolation`
+   (deliberately leaves a mutation un-restored, so it cannot share a directory with the tree it
+   demonstrates against).
+6. **Two were wired that CI ran and the bridge did not** — `check_handoff.py --self-test` and
+   `check_xrefs.py --self-test`. Both are pure Python, both were run against the image before being
+   added, and neither touches a tracked file.
+
+### The `--self-test` grew the case that would have caught the original defect
+
+`self_test()` had **12** cases, all of them about `check()`. **The pattern itself was never
+tested** — which is why it could be wrong for as long as it was. Case 12 now drives `invocations()`
+against a synthetic workflow holding an inline `run:`, a `run: |` block, a comment and a step name:
+
+    seen == ["tools/check_block.py --self-test", "tools/check_inline.py"]
+
+The previous version of this checker **fails that case**. Four more cover rule 5, including
+**"an orphan cannot be excused by declaring it"** — which is the distinction between *not run in
+this gate* and *not run anywhere*, and is the one a declaration mechanism would otherwise blur.
+
+### Measured
+
+`check_*.py` in `tools/`: **46** · invoked in both gates: **41** before, **44** after · invoked in
+**no** gate: **2** before, **0** after · declared ci-only: **5** before, **7** after · `ci.yml`
+command lines the parity checker sees: **97 of 116** before, **107** after · parity `--self-test`
+**17/17** · `GATE PARITY OK` · `yamlcheck`: **10** jobs, **170** steps, **0** with neither `run` nor
+`uses`, **108** checker steps.
+
+### What is NOT fixed, and is recorded rather than hidden
+
+`tools/check_handoff.py`'s **real** half is invoked in no gate — only its `--self-test` is, in CI's
+line-ending step. That is **structural, not an oversight**: the tool verifies *"the tree is clean,
+HEAD equals `origin/main`, CI is green"*, and a gate running **inside** CI cannot ask whether CI is
+green. It is a local pre-push ritual, and `--no-ci` exists for the offline half. Rule 5 accepts it
+because its `--self-test` does run in a gate; a rule demanding the *real* half would flag the one
+tool whose subject is the gate itself.
 
 ---
 

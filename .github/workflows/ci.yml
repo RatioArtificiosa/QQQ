@@ -916,6 +916,32 @@ jobs:
       # computation behind `qqqai build`. Running this on Linux alone would answer that
       # question with silence. The incremental compile cost is near zero: the step above has
       # already built these test targets in the same profile and feature set.
+      # # `qqqai build` HAS A PREREQUISITE, AND THIS JOB DID NOT HAVE IT
+      #
+      # The first version of the step below **failed on ubuntu and macos**, and the reason is
+      # the most useful thing this item produced:
+      #
+      #     error[QQQ-1003]: missing a tool required for a `rust` build
+      #       caused by: missing:
+      #       wasm-tools (validates that the output is a component, not a core module
+      #                   -- install with `cargo install wasm-tools`)
+      #
+      # `qqqai build` **requires `wasm-tools`** -- `crates/qqq-run/src/build.rs` declares it as a
+      # `ToolRequirement` for a rust build, because the build *validates that its own output is a
+      # component rather than a core module*. The product reports that correctly, with a
+      # remediation line; the job simply never installed the tool. `wit` and `reference-app`
+      # install it, and `rust` did not.
+      #
+      # **The local run was green because this machine has `wasm-tools` 1.259.0.** A green that
+      # depends on what happens to be installed is not a green (`§O-355`), and the rule it breaks
+      # is `§O-121`'s: reproduce the exact command, **in the environment CI runs it in**. The
+      # prerequisite was declared in the product and invisible in the job.
+      #
+      # The same action `wit` and `reference-app` use, rather than `cargo install`: it is pinned,
+      # cached, and it FAILS when the tool cannot be obtained -- a `|| true` here would turn the
+      # step into the vacuity this repository records more often than any other.
+      - uses: taiki-e/install-action@wasm-tools
+
       - name: the wasm32-wasip2 build path produces a component (LANG-001)
         # Bounded, from the rule that cost a 360-minute run once: a hang must fail a named
         # step rather than the whole job (`§O-355`).

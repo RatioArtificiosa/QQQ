@@ -49,6 +49,22 @@ const CORE_MODULE_PREAMBLE: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00,
 /// everywhere — and the `rust` CI job runs it, on all three platforms. **`--ignored` is how the gate
 /// asks for it**, and a skip that is *named* is a skip a reader can find.
 ///
+/// # What `qqqai build` needs installed, and why that made CI red
+///
+/// **`wasm-tools`.** `build.rs` declares it as a `ToolRequirement` for a rust build, because the build
+/// *validates that its own output is a component rather than a core module* — which is the same claim
+/// this test makes, one layer down.
+///
+/// The first version of the CI step that runs this failed on **ubuntu and macos** with
+/// `error[QQQ-1003]: missing a tool required for a rust build`, naming `wasm-tools`. The product
+/// reported it correctly and with a remediation line; the job simply never installed the tool.
+/// `wit` and `reference-app` install it, and `rust` did not.
+///
+/// **And it passed locally, because this machine happens to have `wasm-tools` 1.259.0.** A green that
+/// depends on what is already installed is not a green — the rule is to reproduce the exact command
+/// *in the environment CI runs it in*. If you run this test by hand and it fails on `QQQ-1003`, the
+/// message is the answer, not the build path.
+///
 /// # Why `rust` and not `reference-app`
 ///
 /// The `reference-app` job is where the *guest* is built and inspected, and it is the obvious home for

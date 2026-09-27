@@ -27418,4 +27418,85 @@ with `timeout-minutes: 10` · **CI jobs 10, steps 161, 0 steps with neither `run
 
 ---
 
+## §O-360 — `qqqai build` needs `wasm-tools`, and the local green could not see it
+
+**Found:** the first CI run of `LANG-001`'s new step, red on **ubuntu and macos**. **Anchors:**
+`crates/qqq-run/src/build.rs`, `.github/workflows/ci.yml`,
+`crates/qqq-run/tests/lang001_rust_guest.rs`.
+
+### The failure, verbatim
+
+```text
+thread 'the_wasm32_wasip2_build_path_produces_a_component' panicked at
+  crates/qqq-run/tests/lang001_rust_guest.rs:83:5:
+the build must succeed.
+stdout: error[QQQ-1003]: missing a tool required for a `rust` build
+  caused by: missing:
+  wasm-tools (validates that the output is a component, not a core module
+              -- install with `cargo install wasm-tools`)
+
+  → cargo install wasm-tools
+```
+
+**`qqqai build` requires `wasm-tools`.** `crates/qqq-run/src/build.rs` declares it as a
+`ToolRequirement` for a rust build, and the `why` string is the reason:
+
+```rust
+ToolRequirement {
+    program: "wasm-tools",
+    version_args: &["--version"],
+    install: "cargo install wasm-tools",
+    why: "validates that the output is a component, not a core module",
+}
+```
+
+So the build **validates its own output is a component** — the same claim `LANG-001`'s test makes,
+one layer down. The product is right, the error names the tool, and the remediation line is exact.
+
+### And the local run was green
+
+**`wasm-tools 1.259.0` is installed on this machine**, so the step passed locally on Windows and
+failed on both CI platforms that do not install it. `wit` and `reference-app` install `wasm-tools`
+via `taiki-e/install-action`; the `rust` job — where the new step went — did not.
+
+> **A green that depends on what happens to be installed is not a green.**
+
+That is `§O-121`'s rule, and it is the second time in this goal that it has cost a red push: the
+first was a `clippy` lint that existed only on the pinned toolchain. The rule is *reproduce the
+exact command, **in the environment CI runs it in*** — and the environment includes the tools that
+happen to be on `PATH`.
+
+### The prerequisite was DECLARED, and the job could not read the declaration
+
+This is the part worth keeping. The requirement is not folklore: it is a struct field in the
+product, with a version probe, an install command and a reason. **A declared requirement is only
+useful if the environment that runs the command reads it**, and a GitHub job is not a reader — it
+is a `PATH`. The declaration answered "what does this need?" precisely, and the job still failed,
+because nothing bridged the two.
+
+### And the failure was fast, which is the design working
+
+The step failed in **0.02 s**, before any `cargo` invocation: the probe short-circuits the build
+rather than letting it run and produce a module that is not a component. A prerequisite check that
+fails before the work is the cheapest possible version of this error.
+
+### The fix
+
+`- uses: taiki-e/install-action@wasm-tools` in the `rust` job, immediately before the step — the
+same pinned, cached action `wit` and `reference-app` use, chosen over `cargo install` because it
+**fails** when the tool cannot be obtained. A `|| true` there would have converted the step into
+the vacuity this repository records more often than any other. The prerequisite is also written
+into the test's own doc comment, so the next person who runs it by hand and sees `QQQ-1003` reads
+the answer instead of debugging the build path.
+
+### Measured
+
+**2 of 3** platforms red (`Rust (ubuntu-latest)`, `Rust (macos-latest)`) · failure at **0.02 s**,
+before any build · `wasm-tools 1.259.0` present locally, absent in the `rust` job · `ci.yml`
+**10 jobs, 162 steps, 0 steps with neither `run` nor `uses`** · the same run was green for
+`Line endings`, `MSRV`, `Cross-reference integrity`, `WIT interface validation`, `Supply chain`,
+`Reference application`, `Production image` and `Fuzz targets compile`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

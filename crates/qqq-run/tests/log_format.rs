@@ -68,25 +68,38 @@ fn serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
     // the child's bind the number is unowned. That is `§O-326`'s measured cause, and this file's
     // helper had no retry while a sibling's did. **Six copies of one racy helper was the object all
     // along**, and the fix belongs in each of them until they share one.
+    // **And the retry is keyed on whether the attempt REACHED the server, not only on whether it
+    // read nothing** (`§O-355`). A lost race leaves a child that started, logged `listening on ...`,
+    // and then never accepted anything -- so its output is **non-empty and names no error**, and
+    // `lost_the_port_race` cannot see it. Measured on ubuntu: the sibling `redact_wiring` test spent
+    // exactly `READ_DEADLINE` and then failed an assertion instead of retrying, because the text was
+    // the only signal it had.
+    let mut last = String::new();
     for attempt in 1..=common::ATTEMPTS {
-        let out = attempt_serve_once(sandbox, extra);
-        if !common::lost_the_port_race(&out) {
+        let (out, reached) = attempt_serve_once(sandbox, extra);
+        if !common::should_retry(reached, &out) {
             return out;
         }
         eprintln!(
-            "attempt {attempt} of {} read nothing; retrying on a fresh port",
+            "attempt {attempt} of {} did not reach the server, or read nothing; retrying on a fresh \
+             port",
             common::ATTEMPTS
         );
+        last = out;
     }
     panic!(
-        "all {} attempts read nothing. This is the port-allocation race this helper retries around, \
-         not an assertion failure -- the server answered no bytes, so there is nothing to assert \
-         about.",
+        "all {} attempts did not reach the server or read nothing. This is the port-allocation race \
+         this helper retries around, not an assertion failure -- the server answered no bytes, so \
+         there is nothing to assert about. Last output: {last}",
         common::ATTEMPTS
     );
 }
 
-fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
+/// One attempt: spawn, connect, request, reap.
+///
+/// Returns the combined output **and whether the attempt reached the server** — connected, and the
+/// child then exited on its own. That flag is the retry's real signal (`§O-355`).
+fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> (String, bool) {
     let config = sandbox.write("qqq.toml", MANIFEST);
     let port = free_port();
     let child: Child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
@@ -105,9 +118,11 @@ fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
         .spawn()
         .expect("spawn qqqai serve");
 
+    let mut connected = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+            connected = true;
             let _ = s.write_all(b"GET /orders HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
             let mut buf = String::new();
             let _ = s.read_to_string(&mut buf);
@@ -120,12 +135,21 @@ fn attempt_serve_once(sandbox: &Sandbox, extra: &[&str]) -> String {
     // above can time out without one, which is exactly the port race `free_port()` documents. A bare
     // `wait_with_output()` blocks forever when that happens, and on CI that is a job that runs until
     // GitHub's 360-minute default rather than a failing test (`§O-355`).
-    let out = common::reap_bounded(child);
-    format!(
+    //
+    // **And killed at once when nothing connected.** Waiting `READ_DEADLINE` to learn what
+    // `connected` already says would spend 30 seconds per lost race, which is 30 seconds of the
+    // retry's budget spent on a question that has been answered.
+    let (out, killed) = if connected {
+        common::reap_within(child, common::READ_DEADLINE)
+    } else {
+        common::reap_within(child, Duration::ZERO)
+    };
+    let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    )
+    );
+    (text, connected && !killed)
 }
 
 /// **With stdout piped — not a terminal — the served log line is JSON — `OBS-007`.**

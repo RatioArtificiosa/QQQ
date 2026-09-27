@@ -26991,6 +26991,47 @@ caused it**. Updated to 163.
 
 **A number with a resolver is a number that tells you when it is stale** (`§O-277`). This one did.
 
+### And bounding the wait made a SECOND latent defect visible, on ubuntu, in CI
+
+The first push of the fix (`aeb8a00`) came back **red on `Rust (ubuntu-latest)`** — not hung, **failed**:
+`redact_wiring::the_served_log_line_redacts_a_declared_secret`, after exactly **30.02 s**, which is
+`READ_DEADLINE` to the hundredth of a second.
+
+That is the port race **being lost on ubuntu** — the very thing that used to hang — now bounded, and
+therefore now *reported*. And the retry did not fire, because both retry loops were keyed on
+`lost_the_port_race(&text)`, which sees only **two** of the three ways an attempt fails:
+
+| how the attempt failed | `lost_the_port_race` sees it? |
+|---|---|
+| nothing read at all | **yes** — `text.is_empty()` |
+| the child reported `QQQ-6002` (bind failure) | **yes** — `text.contains("QQQ-6002")` |
+| **the child started, logged `listening on ...`, and never accepted anything** | **NO** — the text is non-empty and names no error |
+
+**The third case is what a lost race actually leaves behind**, and it was invisible for exactly as long
+as the wait after it never returned. So the retry was already broken; it had simply never been given the
+chance to be wrong. **One bounded wait turned a hang into a visible failure and exposed a second bug
+behind it.**
+
+The fix: the attempt helper now returns **whether it reached the server**, and the predicate is one
+function in one place — `common::should_retry(reached, text) = !reached || lost_the_port_race(text)`.
+It was two conditions at two call sites; it is now one, and it is tested.
+
+**And the child is killed at once when nothing connected.** Waiting `READ_DEADLINE` to learn what
+`connected` already says would spend 30 seconds per lost race — 30 seconds of the retry budget spent on
+a question that has already been answered.
+
+```
+clean run, sha=166db67675d95089
+  INJECT A (stop setting the kill flag)   -> a_child_that_never_exits_is_killed_and_the_reap_returns FAILED
+  INJECT B (always report killed)         -> a_child_that_exits_on_its_own_is_not_killed FAILED
+  INJECT C (`should_retry` blind to `reached`) -> the_retry_predicate_sees_an_attempt_that_never_reached_the_server FAILED
+  RESTORED byte_identical=True   CLEAN -> 3 passed
+```
+
+**Three injections, three directions, every one detected** — and injection C is the §O-355 defect
+restored verbatim, so the test that catches it is the test that would catch a regression to the bug that
+started this.
+
 ### The lesson
 
 **A deadline on one half of an operation is not a deadline on the operation.** The connect loop was
@@ -26999,10 +27040,11 @@ unbounded half reachable was the bounded half giving up.
 
 ### Measured
 
-**~70 min** stuck → **5.2 min** on the next run · **0 → 11** `timeout-minutes` · **2** tests, **2**
-injections, **both** directions live, restore byte-identical (`94cfd017217824e1` on the final revision) ·
-`--all-features` locally **`TEST_EXIT=0`** · `reap_bounded` 2 passed · `log_format` 3 passed ·
-`redact_wiring` 4 passed · clippy clean on the pinned 1.98.1.
+**~70 min** stuck → **5.2 min** on the next run · **0 → 11** `timeout-minutes` · **3** tests, **3**
+injections, every direction live, restore byte-identical (`166db67675d95089`) · workspace
+`--all-features` **`TEST_EXIT=0`** · `reap_bounded` 3 passed · `log_format` 3 passed · `redact_wiring`
+4 passed · clippy clean on the pinned 1.98.1 · **and the fix's own first push was RED, which is what
+found the second defect**.
 
 ---
 

@@ -88,11 +88,14 @@ fn spawn(sandbox: &Sandbox, extra: &[&str]) -> (Child, u16) {
     (child, port)
 }
 
-/// Wait for the port to accept, then make one request and return the server's combined output.
-fn request_and_collect(child: Child, port: u16, path: &str) -> String {
+/// Wait for the port to accept, then make one request and return the server's combined output
+/// **and whether the attempt reached it**.
+fn request_and_collect(child: Child, port: u16, path: &str) -> (String, bool) {
+    let mut connected = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+            connected = true;
             let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
             let _ = s.write_all(req.as_bytes());
             let mut buf = String::new();
@@ -105,12 +108,20 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> String {
     // **Bounded, for the same reason as `log_format.rs`**: the child exits only after ACCEPTING a
     // connection, so a connect loop that timed out leaves it running forever and a bare
     // `wait_with_output()` never returns (`§O-355`).
-    let out = common::reap_bounded(child);
-    format!(
+    //
+    // **And killed at once when nothing connected** — waiting `READ_DEADLINE` to learn what
+    // `connected` already says would spend 30 seconds per lost race.
+    let (out, killed) = if connected {
+        common::reap_within(child, common::READ_DEADLINE)
+    } else {
+        common::reap_within(child, Duration::ZERO)
+    };
+    let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    )
+    );
+    (text, connected && !killed)
 }
 
 /// Spawn, request and collect, **retrying the pair on a fresh port when the server produced nothing**.
@@ -122,21 +133,29 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> String {
 /// `request_and_collect` are one attempt, and this is the retry around them — `§O-326`'s measured
 /// cause, and the four sibling files each gained the same guard.
 fn serve_and_collect(sandbox: &Sandbox, extra: &[&str], path: &str) -> String {
+    // **The retry is keyed on whether the attempt REACHED the server, not only on whether it read
+    // nothing** (`§O-355`). A lost race leaves a child that started, logged `listening on ...`, and
+    // then never accepted anything — so its output is **non-empty and names no error**, and
+    // `lost_the_port_race` cannot see it. Measured on ubuntu: this test spent exactly
+    // `READ_DEADLINE` and then failed an assertion instead of retrying.
+    let mut last = String::new();
     for attempt in 1..=common::ATTEMPTS {
         let (child, port) = spawn(sandbox, extra);
-        let out = request_and_collect(child, port, path);
-        if !common::lost_the_port_race(&out) {
+        let (out, reached) = request_and_collect(child, port, path);
+        if !common::should_retry(reached, &out) {
             return out;
         }
         eprintln!(
-            "attempt {attempt} of {} produced no output; retrying on a fresh port",
+            "attempt {attempt} of {} did not reach the server, or produced no output; retrying on a \
+             fresh port",
             common::ATTEMPTS
         );
+        last = out;
     }
     panic!(
-        "all {} attempts produced no output. This is the port-allocation race this helper retries \
-         around, not an assertion failure -- the server wrote nothing, so there is nothing to assert \
-         about.",
+        "all {} attempts did not reach the server or produced no output. This is the port-allocation \
+         race this helper retries around, not an assertion failure -- the server wrote nothing, so \
+         there is nothing to assert about. Last output: {last}",
         common::ATTEMPTS
     );
 }

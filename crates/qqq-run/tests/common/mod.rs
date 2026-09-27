@@ -150,6 +150,30 @@ pub fn lost_the_port_race(text: &str) -> bool {
     text.is_empty() || text.contains("QQQ-6002")
 }
 
+/// Whether an attempt should be **retried on a fresh port**.
+///
+/// # Why this is one function and not a condition at each call site
+///
+/// Because it was a condition at each call site, and **both were wrong the same way** (`§O-355`).
+/// Each retry loop tested only `lost_the_port_race(&text)`, which sees two things: an empty read, and
+/// the child's own `QQQ-6002` bind failure. It **cannot** see the third way an attempt fails — a child
+/// that started, logged `listening on ...`, and then never accepted anything — because that child's
+/// output is **non-empty and names no error**.
+///
+/// That case is reachable exactly when `free_port()`'s race is lost, and it was **invisible** for as
+/// long as the wait after it never returned: the job hung instead of the attempt being retried.
+/// Bounding the wait (`reap_within`) made it visible, and on ubuntu it made `redact_wiring` fail an
+/// assertion after exactly `READ_DEADLINE` instead of retrying.
+///
+/// # Why `reached` rather than a cleverer parse of the text
+///
+/// Because the caller **knows** whether it connected. Inferring it from the output would be a guess
+/// about a child's logging, and the signal is a fact at the call site and an inference here.
+#[must_use]
+pub fn should_retry(reached: bool, text: &str) -> bool {
+    !reached || lost_the_port_race(text)
+}
+
 /// Whether the server **answered at all** — an HTTP status line is present.
 ///
 /// # Why this and not `is_empty`
@@ -314,9 +338,4 @@ pub fn reap_within(mut child: Child, deadline: Duration) -> (std::process::Outpu
         }
     }
     (child.wait_with_output().expect("reap"), killed)
-}
-
-/// Reap with the module's standard deadline, discarding the kill flag.
-pub fn reap_bounded(child: Child) -> std::process::Output {
-    reap_within(child, READ_DEADLINE).0
 }

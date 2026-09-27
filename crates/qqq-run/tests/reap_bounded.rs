@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The bounded reap — `§O-355`'s fix, tested in both directions.
+//! The port-race retry — `§O-355`'s two halves, each tested in both directions.
+//!
+//! **One retry decision has two halves**: *how long to wait* (`reap_within`, which bounds a wait that
+//! used to be unbounded) and *whether to retry at all* (`should_retry`, which used to be blind to the
+//! failure it exists for). Both live here because **both were wrong**, and because fixing one without
+//! the other converts a hang into a red CI run rather than into a passing one — which is exactly what
+//! happened: the bound turned an ubuntu hang into a 30-second assertion failure, and the predicate is
+//! what makes it retry instead.
 //!
 //! # Why these tests assert a DECISION rather than a duration
 //!
@@ -23,7 +30,7 @@ mod common;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{free_port, reap_within, Sandbox, ATTEMPTS};
+use common::{free_port, lost_the_port_race, reap_within, should_retry, Sandbox, ATTEMPTS};
 
 /// A minimal manifest that `serve` accepts, so the child's only way out is a signal.
 const MANIFEST: &str = "[package]\nname = \"reap-probe\"\nversion = \"0.1.0\"\n\
@@ -136,5 +143,57 @@ fn a_child_that_exits_on_its_own_is_not_killed() {
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("qqqai"),
         "and its output survived the reap"
+    );
+}
+
+/// **The retry predicate sees the third way an attempt fails — `§O-355`.**
+///
+/// # The case that hung CI, stated as an assertion
+///
+/// A lost port race leaves a child that **started, logged `listening on ...`, and then never accepted
+/// anything**. Its output is therefore **non-empty and names no error**, so `lost_the_port_race`
+/// — which sees only an empty read or a `QQQ-6002` bind failure — returns **false** for it. The first
+/// two assertions below are that fact: the text alone cannot see this failure, and an attempt that
+/// never connected must still be retried.
+///
+/// # And the three cases the predicate already covered
+///
+/// Because a predicate that retried *everything* would also pass the case above, and would turn a
+/// genuinely broken server into four attempts and a confusing panic instead of one clear failure.
+#[test]
+fn the_retry_predicate_sees_an_attempt_that_never_reached_the_server() {
+    // The child's own startup line: what a lost race actually leaves behind.
+    let logged = "{\"level\":\"info\",\"msg\":\"listening on 127.0.0.1:56542\"}";
+
+    assert!(
+        !lost_the_port_race(logged),
+        "the text alone cannot see this failure -- that is the whole defect, so this assertion is \
+         what would break if `should_retry` were reduced to `lost_the_port_race` again"
+    );
+    assert!(
+        should_retry(false, logged),
+        "**an attempt that never connected must be retried**, whatever the child happened to log"
+    );
+
+    // The cases the old predicate did cover, still covered.
+    assert!(should_retry(false, ""), "nothing read at all");
+    assert!(
+        should_retry(true, "QQQ-6002 the address is already in use"),
+        "the child reported the bind failure"
+    );
+    assert!(
+        should_retry(true, ""),
+        "connected, but the server wrote nothing"
+    );
+
+    // And the case that must NOT retry: a served attempt is finished, log line and all.
+    assert!(
+        !should_retry(true, logged),
+        "a server that connected and exited on its own is a completed attempt, not a lost race -- \
+         retrying it would hide a real failure behind four attempts"
+    );
+    assert!(
+        !should_retry(true, "HTTP/1.1 200 OK\r\n\r\n{}"),
+        "and neither is a clean response"
     );
 }

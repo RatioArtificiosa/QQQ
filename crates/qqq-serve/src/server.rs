@@ -412,10 +412,19 @@ fn micros_since(start: std::time::Instant) -> u64 {
 /// id, which the host allocated, and there is no parameter here a guest could reach. A caller that
 /// decided for itself would be a second place the rule could be got wrong.
 ///
-/// # Why `failed` is the status and not anything the guest said
+/// # Why `failed` is a HOST fact, and why it used to be the guest's status
 ///
 /// Because a guest that could claim to have failed would be able to force recording, which is the
 /// same influence §10.4 forbids in the other direction.
+///
+/// **This said that while the call site passed `response.status >= 500`, and `response` is what the
+/// guest's handler returned.** `CodeRabbit` finding #23: the comment named the invariant and the code
+/// violated it, so on `dispatch_flat`'s path a guest could choose its own status and change whether
+/// the host **recorded the span**. That is `OBS-014` as a live defect.
+///
+/// `failed` is now `false` on that path, because **there is no host failure there**: an unroutable
+/// path is a 404 and a wrong method a 405 -- both produced by the host, neither a failure -- and a
+/// guest answering 500 has, from the host's point of view, answered normally.
 fn emit_span(
     ctx: &ConnectionContext<'_>,
     tenant: &str,
@@ -1857,13 +1866,21 @@ async fn serve_connection(
 
         let route_started = std::time::Instant::now();
         let response = dispatch_flat(table, dispatch, &head, path, &body);
+        // **`false`, because this path has no host failure to report** -- `CodeRabbit` finding #23.
+        //
+        // This used to be `response.status >= 500`, and `response` is the GUEST's answer: a guest that
+        // returned 500 could force its span to be recorded, which is the influence `emit_span`'s own
+        // doc comment says a guest must not have. The status is still recorded -- `emit_record` a few
+        // lines below reads it -- so nothing about observability is lost; what is lost is the guest's
+        // vote in a host sampling decision.
+        let host_failed = false;
         emit_span(
             ctx,
             &tenant,
             3,
             span_seq,
             u64::try_from(route_started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            response.status >= 500,
+            host_failed,
         );
 
         let response = apply_cors(response, &head, ctx.cors);

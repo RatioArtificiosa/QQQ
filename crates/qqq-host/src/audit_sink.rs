@@ -171,6 +171,14 @@ pub struct Loaded {
     /// file **did not shut down cleanly**, which is itself a fact an operator wants and which the
     /// records alone cannot state.
     pub dropped_partial_line: bool,
+    /// The byte offset just past the last **complete** line.
+    ///
+    /// What [`resume_or_start`] truncates to when it dropped a fragment. **Finding #24 of
+    /// `CodeRabbit`'s review**: the fragment was removed from the *stream* and left in the *file*, the
+    /// next `append` wrote onto it, and the resulting line was neither valid JSON nor last -- so the
+    /// loader refused it as corruption. A crash, a restart and one request produced an evidence file
+    /// that could never be read again.
+    pub complete_bytes: u64,
 }
 
 /// Read and verify an audit file.
@@ -181,6 +189,13 @@ pub struct Loaded {
 /// that is not a record, and [`SinkError::NotAStream`] when the records do not form one.
 ///
 /// A **missing** file is not an error: it is a first run, and the caller gets an empty set.
+/// The bytes a line occupies on disk, terminator included.
+///
+/// Zero for a line that failed to read, which the loop returns on before the value is used.
+fn line_bytes_of(line: &Result<String, std::io::Error>) -> u64 {
+    line.as_ref().map_or(0, |l| l.len() as u64 + 1)
+}
+
 pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -188,6 +203,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
             return Ok(Loaded {
                 records: Vec::new(),
                 dropped_partial_line: false,
+                complete_bytes: 0,
             })
         }
         Err(e) => {
@@ -200,7 +216,13 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
 
     let mut records = Vec::new();
     let mut dropped_partial_line = false;
+    // Tracked as the loop goes rather than derived afterwards, so the offset is exact.
+    let mut complete_bytes: u64 = 0;
+    let mut offset: u64 = 0;
     for (i, line) in BufReader::new(file).lines().enumerate() {
+        // **Advance FIRST.** At the bottom, the blank-line `continue` below would skip it and the
+        // truncation point would fall inside a record -- worse than not truncating at all.
+        offset += line_bytes_of(&line);
         let line = line.map_err(|e| SinkError::Io {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -209,7 +231,10 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
             continue;
         }
         match AuditRecord::from_json(&line) {
-            Ok(record) => records.push(record),
+            Ok(record) => {
+                records.push(record);
+                complete_bytes = offset;
+            }
             Err(reason) => {
                 // A truncated FINAL line is a crash, not corruption. It is dropped and reported;
                 // anything else is refused, because an append-only file cannot explain it.
@@ -246,6 +271,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
     Ok(Loaded {
         records,
         dropped_partial_line,
+        complete_bytes,
     })
 }
 
@@ -495,6 +521,28 @@ impl AuditFile {
 /// ```
 pub fn resume_or_start(path: &Path, capacity: usize) -> Result<(AuditStream, Loaded), SinkError> {
     let loaded = load(path)?;
+
+    // **A fragment is removed from the FILE, not only from the stream** -- finding #24. Resuming means
+    // *"continue the chain this file holds"*, and a file whose last line is half a record cannot be
+    // continued: `AuditFile` opens `append`, so the next record would be written onto the fragment, and
+    // the combined line would be neither valid JSON nor last -- which makes the loader refuse the whole
+    // file as corruption. **An append-only log that refuses to be re-read after a crash has failed at
+    // its one job.**
+    if loaded.dropped_partial_line {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| SinkError::Io {
+                path: path.to_path_buf(),
+                reason: format!("the half-written final record could not be removed: {e}"),
+            })?;
+        file.set_len(loaded.complete_bytes)
+            .map_err(|e| SinkError::Io {
+                path: path.to_path_buf(),
+                reason: format!("the half-written final record could not be removed: {e}"),
+            })?;
+    }
+
     let stream = AuditStream::resume(loaded.records.clone(), capacity)
         .map_err(|reason| SinkError::NotAStream { reason })?;
     Ok((stream, loaded))
@@ -636,6 +684,84 @@ mod tests {
     /// A process killed mid-write leaves a fragment. Repairing it would fabricate a record from
     /// bytes that were never a complete append, and refusing to start would make an unclean
     /// shutdown unrecoverable.
+    /// **A dropped fragment must not poison the next append** -- CodeRabbit finding #24.
+    ///
+    /// # Why the existing truncation test could not have caught it
+    ///
+    /// `a_truncated_final_line_is_dropped_and_reported` checks that the fragment is dropped from the
+    /// **stream**. It never appends afterwards, so it cannot see what the fragment does to the
+    /// **file**. The two are different claims, and only the second is about the file's future.
+    ///
+    /// # What the failure looked like
+    ///
+    /// The appended record landed on the fragment's line; the combined line was not valid JSON and was
+    /// no longer the last line, so the loader refused it as **corruption** rather than a crash. A
+    /// crash, a restart and one request produced an evidence file that could never be read again.
+    #[test]
+    fn a_dropped_fragment_does_not_poison_the_next_append() {
+        use std::io::Write as _;
+
+        let scratch = Scratch::new("drop-then-append");
+        let path = scratch.file();
+
+        // A first run writes one record to the FILE, then the process dies mid-record.
+        //
+        // The record goes through `AuditFile`, not only into the in-memory stream: the file must
+        // EXIST before the fragment can be appended to it, and a test that forgot that would fail on
+        // its first `open` rather than on the claim it is about. (It did, the first time.)
+        let (mut stream, _) = resume_or_start(&path, 1024).expect("first run");
+        append(&mut stream, Outcome::Granted);
+        {
+            let mut file = AuditFile::open(&path, 0).expect("open");
+            let record = stream.records().last().expect("a record").clone();
+            file.append(&record).expect("write the first record");
+        }
+        {
+            let mut raw = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("append raw");
+            raw.write_all(b"{\"sequence\":2,\"comp")
+                .expect("the crash fragment");
+            raw.flush().expect("flush");
+        }
+
+        // A restart drops the fragment, and says so.
+        let (mut stream, loaded) = resume_or_start(&path, 1024).expect("resume");
+        assert!(loaded.dropped_partial_line, "the fragment must be reported");
+        assert_eq!(
+            loaded.records.len(),
+            1,
+            "and only the complete record is read"
+        );
+
+        // The resume above is what removes the fragment. Then a record is appended -- onto a file that
+        // now ends at a line boundary.
+        // The chain CONTINUES -- a fresh record, not a copy of the last one. Copying it was the
+        // first version of this test, and the chain checker refused the file for it
+        // (`record 2 is missing ... carries sequence 1`). That refusal is the loader doing its
+        // job, and it is worth having written a test that met it.
+        append(&mut stream, Outcome::Denied);
+        let mut file = AuditFile::open(&path, loaded.records.len()).expect("open for append");
+        let record = stream.records().last().expect("a record").clone();
+        file.append(&record).expect("append");
+        drop(file);
+
+        // And the file must still be loadable. Before the fix it was not.
+        let (_again, loaded_again) = resume_or_start(&path, 1024)
+            .expect("a crash, a resume and an append must leave a file that can be read again");
+        assert_eq!(
+            loaded_again.records.len(),
+            2,
+            "the surviving record and the appended one"
+        );
+        assert!(
+            !loaded_again.dropped_partial_line,
+            "and the second load has nothing to drop"
+        );
+    }
+
     #[test]
     fn a_truncated_final_line_is_dropped_and_reported() {
         let scratch = Scratch::new("truncated");

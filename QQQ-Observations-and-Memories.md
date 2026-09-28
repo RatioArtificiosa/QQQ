@@ -29423,4 +29423,71 @@ files (one of them missed by the first pattern, because it passed `path` rather 
 
 ---
 
+## §O-382 — A fragment dropped from the stream stayed in the file, and made it unreadable forever
+
+**Found:** by CodeRabbit, as finding **#24** (`major`), and fixed this round. **Anchors:**
+`crates/qqq-host/src/audit_sink.rs`.
+
+### The defect
+
+`load` detected a half-written final line — a crash — and did this:
+
+```rust
+if is_last && !line.trim_end().ends_with('}') {
+    dropped_partial_line = true;
+    break;                       // dropped from the STREAM, left in the FILE
+}
+```
+
+`AuditFile` is opened **`append`**, so the next record was written **onto the fragment's line**:
+
+```text
+{"sequence":1,...}
+{"sequence":2,"comp{"sequence":3,...}     <- the fragment, then a record appended to it
+```
+
+The combined line is not valid JSON, and it is **no longer the last line** either — so the next `load`
+hit `SinkError::Malformed` and **refused the whole file**. **A crash, a restart and one request produced
+an evidence file that could never be read again**, which is the opposite of what an append-only log is
+for.
+
+### Why the existing test could not have caught it
+
+`a_truncated_final_line_is_dropped_and_reported` checks the fragment is dropped from the **stream**. It
+never appends afterwards, so it cannot see what the fragment does to the **file**. **The two are
+different claims, and only the second is about the file's future.**
+
+### Where the fix goes, and why that took a decision
+
+Three places could truncate. `load` would be a **read that writes**. `AuditFile::open` is impossible to
+forget but would need a third parameter at all ten call sites to carry a value only the loader
+measured. **`resume_or_start` is the right one**: resuming means *"continue the chain this file
+holds"*, and a file whose last line is half a record **cannot be continued**. Discarding the fragment is
+part of resuming, not a side effect of reading.
+
+So `Loaded` gained `complete_bytes` — the offset just past the last complete line — and
+`resume_or_start` truncates to it when it dropped something.
+
+### And the offset had a trap of its own
+
+The first version advanced it at the **bottom** of the loop body — where the **blank-line `continue`
+skips it**. The offset would have fallen behind the file and the truncation point would have landed
+**inside a record**, which is worse than not truncating at all. The advance moved to the top, and the
+accept records the offset *after* it.
+
+### Two wrong tests, and the second one taught something
+
+The first failed on its own `open`, because it appended the fragment to a file **no test had created**
+— `append(true)` without `create(true)`. The second failed on the loader's **chain check**:
+`record 2 is missing: the file's 1-th record carries sequence 1`, because it copied the stream's last
+record rather than continuing the chain. **That refusal is the loader doing exactly its job**, and it is
+worth having written a test that met it.
+
+### Measured
+
+**Verified both ways**: the test **passes** with the fix (`CLEAN_TEST=0`) and **fails without** it
+(`INJECTED_TEST=101`), restore **byte-identical** (`48f3123a…`), `cargo fmt --all -- --check` **0**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -446,6 +446,20 @@ MUTATIONS = [
 ]
 
 
+
+def _can_build() -> bool:
+    """Whether `cargo build` can succeed on this machine, asked once.
+
+    A toolchain that is absent and an anchor that moved are different facts about different owners:
+    the first is this machine's, the second is the tree's. Asking first separates them, so the
+    self-test can SKIP the former and still FAIL on the latter.
+    """
+    probe = subprocess.run(
+        ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
+        capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
+    return probe.returncode == 0
+
+
 def self_test() -> int:
     """Each mutation must produce a failure, on a temporary copy of the tree."""
     cases = 0
@@ -536,6 +550,13 @@ def self_test() -> int:
         profile = built.parent.name  # `debug` or `release`
         src = ROOT / "crates/qqq-run/src/output.rs"
         original_src = src.read_bytes()
+        # **Can this machine build at all?** Asked ONCE, before any injection writes source.
+        can_build = _can_build()
+        if not can_build:
+            print("  SKIP  the two cargo-dependent cases: this machine cannot `cargo build` "
+                  "(no `cl.exe`/`link.exe` on PATH, or a Linux tree whose `target/` is a named "
+                  "volume). Everything else in this self-test ran.", file=sys.stderr)
+
         text = original_src.decode("utf-8")
         needle = """        command: command.as_str(),
         ok: true,
@@ -557,9 +578,12 @@ def self_test() -> int:
                 rebuild = subprocess.run(
                     ["cargo", "build", "-q", "-p", "qqq-run", "--bin", "qqqai"],
                     capture_output=True, text=True, cwd=ROOT, encoding="utf-8", errors="replace")
-                if rebuild.returncode != 0:
+                if rebuild.returncode != 0 and not can_build:
+                    print("  SKIP  caught: a constant exit_code in the success envelope "
+                          "-- the injected build could not run here", file=sys.stderr)
+                elif rebuild.returncode != 0:
                     check("caught: a constant exit_code in the success envelope", False,
-                          "the injected build failed")
+                          "the injected build failed, and this machine CAN build")
                 else:
                     check(
                         "caught: a constant exit_code in the success envelope",
@@ -587,8 +611,9 @@ def self_test() -> int:
             )
             check(
                 "the binary was rebuilt from the restored source",
-                restore.returncode == 0,
-                f"`cargo build` exited {restore.returncode} after the restore",
+                restore.returncode == 0 or not can_build,
+                f"`cargo build` exited {restore.returncode} after the restore, and this machine "
+                "reported it CAN build",
             )
 
     # The tree is conformant again.

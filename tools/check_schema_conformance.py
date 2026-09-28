@@ -256,17 +256,20 @@ ENVELOPE_PROBES = [
 
 
 def find_binary() -> pathlib.Path | None:
-    """The built `qqqai` binary, if the workspace has been built, preferring this platform's."""
-    # **The platform's own binary first.** `qqqai.exe` is a WINDOWS artifact, and the bridge's bind
+    """The built `qqqai` binary for THIS platform, if the workspace has been built."""
+    # **The running platform's binary ONLY.** `qqqai.exe` is a WINDOWS artifact, and the bridge's bind
     # mount makes it visible inside a Linux container (Linux `target/` lives in a named volume; the
-    # host tree does not), so a search that prefers `.exe` returns a file the container can only run
+    # host tree does not), so a search that can reach it returns a file the container can only run
     # through WSL interop -- which fails against `docker-init` (`§O-398`).
-    names = ("qqqai.exe", "qqqai") if os.name == "nt" else ("qqqai", "qqqai.exe")
+    #
+    # **Excluding, not preferring.** An earlier version tried the native name first and fell back to
+    # the other; on Linux the native name is absent (named volume) so the fallback still won. A
+    # preference is not a filter (`§O-399`).
+    name = "qqqai.exe" if os.name == "nt" else "qqqai"
     for profile in ("debug", "release"):
-        for name in names:
-            p = ROOT / "target" / profile / name
-            if p.exists():
-                return p
+        p = ROOT / "target" / profile / name
+        if p.exists():
+            return p
     return None
 
 

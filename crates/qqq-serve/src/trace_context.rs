@@ -105,6 +105,15 @@ pub enum TraceContextError {
         /// Which field, by its W3C name.
         field: &'static str,
     },
+    /// A version W3C reserves as **invalid** rather than as a future version.
+    ///
+    /// Only `ff` qualifies today: *"If the version is `ff`, the traceparent is invalid."* It is not a
+    /// forward-compatibility case, and treating it as one means a receiver accepts a header the
+    /// specification tells it to reject.
+    InvalidVersion {
+        /// The version found.
+        got: String,
+    },
 }
 
 impl std::fmt::Display for TraceContextError {
@@ -122,6 +131,11 @@ impl std::fmt::Display for TraceContextError {
             Self::AllZero { field } => write!(
                 f,
                 "`{field}` is all zeros, which W3C defines as invalid rather than as an id"
+            ),
+            Self::InvalidVersion { got } => write!(
+                f,
+                "version `{got}` is reserved by W3C as invalid; a version above `{VERSION}` other \
+                 than `ff` is read forward-compatibly"
             ),
         }
     }
@@ -254,9 +268,18 @@ impl TraceContext {
     ///     TraceContext::parse("00-00000000000000000000000000000000-00f067aa0ba902b7-01").is_err(),
     ///     "an all-zero trace id is invalid rather than an id"
     /// );
-    /// // A higher version is READ, not refused: a receiver that rejected `ff` would break every
-    /// // future producer, and W3C says so explicitly.
-    /// assert!(TraceContext::parse("ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").is_ok());
+    /// // A higher version is READ forward-compatibly, including one with a field this build does
+    /// // not know. `01` is the example, **not** `ff`: W3C reserves `ff` as invalid, and a receiver
+    /// // that accepted it would be accepting a header the specification tells it to refuse.
+    /// assert!(TraceContext::parse("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").is_ok());
+    /// assert!(
+    ///     TraceContext::parse("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra").is_ok(),
+    ///     "a field the receiver does not know is ignored, not refused"
+    /// );
+    /// assert!(
+    ///     TraceContext::parse("ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").is_err(),
+    ///     "`ff` is reserved as invalid"
+    /// );
     /// ```
     pub fn parse(header: &str) -> Result<Self, TraceContextError> {
         let header = header.trim();
@@ -264,12 +287,33 @@ impl TraceContext {
             return Err(TraceContextError::Empty);
         }
         let parts: Vec<&str> = header.split('-').collect();
-        if parts.len() != FIELDS {
+        // **A short header is invalid for every version**, so this bound holds before the version is
+        // known. The exact count is checked below, because it depends on the version.
+        if parts.len() < FIELDS {
             return Err(TraceContextError::FieldCount { got: parts.len() });
         }
         let (version, trace, parent, flags) = (parts[0], parts[1], parts[2], parts[3]);
 
         check(version, 2, "version")?;
+
+        // **`ff` is refused, and it is not a forward-compatibility case.** W3C: *"If the version is
+        // `ff`, the traceparent is invalid."* The doctest below used to claim the opposite -- that a
+        // receiver rejecting `ff` would break every future producer -- and this code accepted it, so a
+        // header the specification says to reject was read as a valid trace. `§O-380` corrected the
+        // sentence; `CodeRabbit` finding #17 is the code catching up.
+        if version.eq_ignore_ascii_case("ff") {
+            return Err(TraceContextError::InvalidVersion {
+                got: version.to_owned(),
+            });
+        }
+
+        // **`00` defines the field list; `01`..`fe` do not.** For `00` an extra field is a violation
+        // of a format that says exactly what it contains. For a higher version W3C requires a receiver
+        // to parse the fields it knows and ignore the rest -- which is the entire reason the version
+        // byte exists, and refusing them made it decorative.
+        if version == VERSION && parts.len() != FIELDS {
+            return Err(TraceContextError::FieldCount { got: parts.len() });
+        }
         check(trace, TraceId::TRACE_LEN, "trace-id")?;
         check(parent, TraceId::SPAN_LEN, "parent-id")?;
         check(flags, 2, "trace-flags")?;
@@ -522,12 +566,65 @@ mod tests {
         ));
     }
 
-    /// **An unknown HIGHER version is accepted**, per W3C, by reading the fields this knows.
+    /// **A higher version is read forward-compatibly, and `ff` is not one.**
+    ///
+    /// # What this test used to assert, and why it was wrong
+    ///
+    /// It used `ff` as its example of *"an unknown HIGHER version"*, with a doc comment claiming W3C
+    /// said so. **W3C reserves `ff` as invalid** -- *"If the version is `ff`, the traceparent is
+    /// invalid"* -- and the versions that must be read are `01` through `fe`. The production doctest
+    /// asserted the same thing, so the parser accepted `ff` because **three artefacts agreed**, not
+    /// because anyone had measured the specification.
+    ///
+    /// # And the half that was missing entirely
+    ///
+    /// W3C requires a receiver to parse the fields it knows and **ignore the rest**, which is the whole
+    /// reason a version byte exists. This parser refused any field count but four, so a `01` header
+    /// with a trailing field -- the shape the rule is for -- was rejected as malformed. Version `00`
+    /// does define the field list, so for `00` the exact count still holds.
     #[test]
-    fn a_higher_version_is_accepted() {
-        let ctx = TraceContext::parse("ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+    fn a_higher_version_is_read_and_ff_is_refused() {
+        // A valid higher version, with only the fields this build knows.
+        let ctx = TraceContext::parse("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
             .expect("a higher version is read, not refused");
         assert_eq!(ctx.trace().as_str(), "4bf92f3577b34da6a3ce929d0e0e4736");
+
+        // **And one with a field this build does not know**, which is the case the version byte is
+        // reserved for. Before the fix this was `FieldCount { got: 5 }`.
+        let extended =
+            TraceContext::parse("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-future")
+                .expect("an unknown trailing field is ignored, not refused");
+        assert_eq!(
+            extended.trace().as_str(),
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "and the fields it knows are still read"
+        );
+        assert_eq!(
+            extended.parent().as_str(),
+            "00f067aa0ba902b7",
+            "both ids, not just the first"
+        );
+
+        // **`ff` is refused**, and it is not a higher version.
+        assert_eq!(
+            TraceContext::parse("ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            Err(TraceContextError::InvalidVersion {
+                got: "ff".to_owned()
+            })
+        );
+
+        // **`00` still says exactly what it contains.** An extra field is a violation of a format that
+        // defines its own field list, so the forward-compatibility rule does not apply to it.
+        assert_eq!(
+            TraceContext::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra"),
+            Err(TraceContextError::FieldCount { got: 5 })
+        );
+
+        // And a short header is refused whatever the version claims.
+        assert_eq!(
+            TraceContext::parse("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"),
+            Err(TraceContextError::FieldCount { got: 3 })
+        );
     }
 
     /// **What is parsed can be emitted**, so a downstream hop continues the trace.

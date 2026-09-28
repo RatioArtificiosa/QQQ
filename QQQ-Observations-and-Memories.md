@@ -29806,4 +29806,68 @@ dismissed with this measurement**.
 
 ---
 
+## §O-389 — Correcting a claim in one artefact is not correcting it, and a version byte nobody honours is decorative
+
+**Found:** by CodeRabbit, as finding **#17** (minor) — and it is the follow-through of `§O-380`.
+**Anchors:** `crates/qqq-serve/src/trace_context.rs`.
+
+### Three artefacts carried the same false premise, and one had already been corrected
+
+`TraceContext::parse` **accepted `ff`** as a forward-compatible version. The claim that it should was
+written in three places:
+
+* the production **doctest** — *"A higher version is READ, not refused: a receiver that rejected `ff`
+  would break every future producer, and W3C says so explicitly"*;
+* the **test** `a_higher_version_is_accepted`, whose doc said *"An unknown HIGHER version is accepted,
+  per W3C"* and whose fixture was `ff-…`;
+* and an **observation**, which `§O-380` corrected — *"W3C reserves `ff` as **invalid**; the
+  forward-compatible ones are `01`–`fe`"*.
+
+**`§O-380` fixed the observation and left the code and its test asserting the opposite**, so the parser
+accepted `ff` because **three artefacts agreed**, not because anyone had measured the specification.
+
+> **Correcting a claim in one artefact is not correcting it.** A wrong sentence in a doc comment is a
+> wrong sentence in the product; a test that enshrines it makes the agreement look like evidence. That
+> is `§O-385` — *a test can be a defect's alibi* — with the defect copied into every place a reader
+> would look to check it.
+
+### And the half that was never implemented at all
+
+W3C requires a receiver of version `01`–`fe` to parse the fields it knows and **ignore the rest** —
+which is the entire reason a version byte is reserved. `parse` refused **any** field count other than
+four:
+
+```rust
+if parts.len() != FIELDS { return Err(TraceContextError::FieldCount { got: parts.len() }); }
+```
+
+So a `01` header with a trailing field — the exact shape the rule exists for — was rejected as
+malformed. **A version byte whose promise is not honoured is decorative** (`§O-376`'s class, one
+protocol over).
+
+### Fixed, with the boundary W3C actually draws
+
+`ff` is **refused** (a new `InvalidVersion` variant). A header shorter than four fields is refused for
+every version. Version **`00` keeps the exact count**, because `00` defines its own field list. Versions
+`01`–`fe` are read with their extra fields ignored. The doctest and the test were rewritten to cover
+**both** halves, and the test now asserts that an unknown trailing field is ignored *and* that the
+fields it knows are still read.
+
+### Two measurements about measuring
+
+* **`INJECTED=0` was `findstr`'s exit code, not cargo's.** The refusal was piped into `findstr` for
+  readability, so `%ERRORLEVEL%` belonged to the pipe rather than the test run. **The evidence was the
+  `FAILED` line**, and a round that recorded only the code would have recorded the opposite of what
+  happened. `§O-284`'s family, one level up: a status read through a filter is the filter's status.
+* **`DOC=0`**: the corrected doctest is executed, so the sentence and the code are now checked against
+  each other rather than merely agreeing.
+
+### Measured
+
+`cargo test -p qqq-serve trace_context` **7 passed / 0 failed** · doctests **0** · injected (the `ff`
+refusal removed) the rewritten test **FAILED** with `assertion left == right failed` · restore
+**byte-identical** (`7899ca60…`) · `FMT=0`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

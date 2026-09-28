@@ -684,7 +684,7 @@ mod tests {
     /// A process killed mid-write leaves a fragment. Repairing it would fabricate a record from
     /// bytes that were never a complete append, and refusing to start would make an unclean
     /// shutdown unrecoverable.
-    /// **A dropped fragment must not poison the next append** -- CodeRabbit finding #24.
+    /// **A dropped fragment must not poison the next append** -- `CodeRabbit` finding #24.
     ///
     /// # Why the existing truncation test could not have caught it
     ///

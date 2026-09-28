@@ -80,7 +80,7 @@
 //!    points. This row read `Implemented` with an empty `gap` while the comment
 //!    above it recorded the deviation, which is the shape `§O-219` names: the step
 //!    looked finished because the thing that would notice was the thing describing
-//!    it. CodeRabbit raised it twice. It is `Partial` now, and the Status, the gap
+//!    it. `CodeRabbit` raised it twice. It is `Partial` now, and the Status, the gap
 //!    and this list agree (`§O-277`).
 //!
 //! # Instrumentation

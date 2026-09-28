@@ -608,8 +608,25 @@ def self_test() -> int:
             finally:
                 write_bytes(src, original_src)
                 # Touch, so the next build cannot reuse the injected artifact.
+                #
+                # **Best effort, and it must not be able to abort the run.** This runs inside a
+                # `finally:`, so an exception here replaces whatever the `try` was reporting -- and
+                # in the bridge `/workspace` is a bind mount of a **Windows** filesystem through
+                # Docker Desktop, where `utime` is not permitted:
+                #
+                #     PermissionError: [Errno 1] Operation not permitted
+                #
+                # Measured there, 2026-09-28. The touch is a cache hint for the NEXT cargo
+                # invocation, not a statement about this run, so failing to set an mtime cannot
+                # invalidate the result -- but raising from `finally` can hide it entirely, which is
+                # strictly worse than a stale artefact. `§O-280`'s rule stands on a host filesystem
+                # and is unavailable on this mount; the honest thing is to try it and say so.
                 stamp = time.time()
-                os.utime(src, (stamp, stamp))
+                try:
+                    os.utime(src, (stamp, stamp))
+                except OSError as exc:  # pragma: no cover - environment-dependent
+                    print(f"  note: could not touch {src.name} ({exc.strerror}); the restore build "
+                          f"below is what actually proves the file is back", file=sys.stderr)
                 # The restore build's status is checked, and it targets the same
                 # profile `find_binary` selected: a failed restore build would
                 # leave the injected artifact in place, and the test after this

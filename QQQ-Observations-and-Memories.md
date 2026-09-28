@@ -30261,7 +30261,60 @@ counters pass with this entry in place.
 
 ---
 
+## §O-396 — The goal's Phase 1 is complete, and the signal it still owes is a shape change, not a follow-up
+
+**Found:** by checking the remnants rather than assuming them. **Anchors:** the checklist's `OBS` area,
+`crates/qqq-serve/src/server.rs`'s `Handler`.
+
+### Phase 1 is done, and here is the evidence rather than the impression
+
+Every item the goal's Phase 1 names is `[x]`:
+
+```text
+4863:- [x] **OBS-002** Implement the append-only, hash-chained audit record.
+4877:- [x] **OBS-003** Implement SARIF export of the audit record.
+4890:- [x] **OBS-004** Implement the compliance-report export.
+4956:- [x] **OBS-008** Implement host-side redaction using manifest-declared secret names.
+5060:- [x] **OBS-014** Prove that a guest cannot influence sampling decisions.
+```
+
+**And the full gate for `e29db97` is green** — `FMT=0 CLIPPY=0 WS=0 LANG001/002/003=0 CONFEXEC=0
+LANG005=0 ORDERS_BUILD/TEST=0 API=0` (2108 of 2108), with `CHECKERS=1` naming **only** the expected
+`check_sbom sbom`.
+
+### The one thing Phase 1 still owes, and why it is not a small follow-up
+
+`§O-385` recorded that `--trace-keep-failures` is **inert on the flat dispatch path**, and named the
+honest end state: *"a HOST-side failure signal (a trap, a failed instantiation) wired to it."*
+
+Measured this round, that is **not** a wiring change:
+
+```rust
+pub type Handler = Arc<dyn Fn(&RequestHead, &RouteMatch) -> Response + Send + Sync>;
+```
+
+**A handler returns a `Response` and nothing else**, so there is nowhere for it to say *"the host failed,
+as opposed to the guest answering 5xx"* — which is precisely the distinction the signal needs, and
+precisely the one `§O-384` removed from the guest. `unbuilt` shows the trap: it is a **host** handler that
+answers **503**, and on the wire it is indistinguishable from a guest's 503.
+
+So the fix is a **shape change** — a `Handler` that returns its outcome alongside the response, or a side
+channel the caller owns — across **every** handler, not a parameter at one call site.
+
+**And `false` is the right value until then.** The flat path today cannot compute the signal, and passing
+a guest-derived status would restore exactly the influence `§O-384` removed. **An honest `false` beats a
+signal that is wrong**, and the test that proves the guest has no vote (`a_guest_cannot_force_trace_recording`)
+passes on `false` for the right reason.
+
+### Measured
+
+The five `[x]` lines above, read from the checklist · the full gate for `e29db97` green with the single
+expected failure · the `Handler` declaration quoted from the source.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

@@ -100,6 +100,11 @@ impl Template {
     /// because generating a grant the code has not yet been shown to need would
     /// violate DX-002. The template's comment names what would be needed, so
     /// the ladder is signposted without being pre-climbed.
+    ///
+    /// **`Http` is the exception, and it is the one that matters**: its handler answers inbound
+    /// requests, so the capability to receive one is **granted by the scaffold** rather than merely
+    /// suggested. Its [`Self::suggests`] value and its manifest both say `http.server`. A README that
+    /// told an HTTP user they had nothing was finding #7.
     #[must_use]
     pub const fn suggests(self) -> &'static str {
         match self {
@@ -228,7 +233,12 @@ pub struct NewOutput {
     pub template: String,
     /// The files written, in creation order.
     pub files: Vec<WrittenFile>,
-    /// Capabilities granted by the generated manifest — always 0.
+    /// Capabilities granted by the generated manifest.
+    ///
+    /// **Zero for every template except `http`**, which grants `http.server` -- its handler answers
+    /// inbound requests, so the capability to receive one is part of the scaffold rather than a ladder
+    /// rung left for the user. The other four are pure logic with no ABI export, so a grant would be a
+    /// capability nothing can exercise.
     pub capabilities_granted: usize,
     /// What the generated code would need, once it is real.
     pub would_need: String,
@@ -462,6 +472,23 @@ epoch_deadline_ms = 5000
 /// The generated `README.md`.
 #[must_use]
 pub fn readme_for(opts: &NewOptions) -> String {
+    // **The capability text is a function of the template**, because the manifest is. The HTTP
+    // scaffold grants `http.server`, and a README that told its user they had nothing was
+    // `CodeRabbit` finding #7: the code knew and the document did not.
+    let (caps_now, capabilities_prose) = if opts.template == Template::Http {
+        (
+            "currently: http.server",
+            "This project is scaffolded with **one** capability: `http.server`, so its handler can \
+             answer\ninbound requests. Everything else stays denied — it cannot read a file or open \
+             an outbound\nsocket until you say so in `qqq.toml`.",
+        )
+    } else {
+        (
+            "currently: nothing",
+            "This project starts with **zero** capabilities. It cannot read a file, open a\nsocket, \
+             or reach the network until you say so in `qqq.toml`.",
+        )
+    };
     let build_note = if opts.language.is_buildable() {
         String::new()
     } else {
@@ -483,13 +510,12 @@ Scaffolded by `{binary}` with the `{template}` template.
 ```bash
 {binary} build   # compile to a WebAssembly component
 {binary} run     # execute it under the capability sandbox
-{binary} caps    # show what it is allowed to do (currently: nothing)
+{binary} caps    # show what it is allowed to do ({caps_now})
 ```
 
 ## Capabilities
 
-This project starts with **zero** capabilities. It cannot read a file, open a
-socket, or reach the network until you say so in `qqq.toml`.
+{capabilities_prose}
 
 That is not a limitation to work around — it is the security model. When the
 code needs something, ask why it was denied:
@@ -504,6 +530,8 @@ The answer includes the exact `qqq.toml` stanza to paste.
         binary = qqq_core::BINARY_NAME,
         template = opts.template.as_str(),
         build_note = build_note,
+        caps_now = caps_now,
+        capabilities_prose = capabilities_prose,
     )
 }
 

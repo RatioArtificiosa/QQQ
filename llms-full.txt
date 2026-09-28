@@ -2173,9 +2173,9 @@ reproducing them**.
 | Kind | Count | Codes |
 |---|---|---|
 | `cli` | **5** | `1001`, `2001`, `2002`, `6004`, `7001` |
-| `test` | **10** | `1002`, `1003`, `3001`, `3002`, `3003`, `3006`, `3007`, `3008`, `6001`, `6002` |
-| `src` | **28** | `1004`, `1005`, `2004`, `2005`, `2007`, `3004`, `3005`, `4003`, `4004`, `5001`, `5002`, `5003`, `5004`, `5006`, `6003`, `6005`, `6006`, `6007` |
-| `unreachable` | **0** | `2003`, `2006`, `4001`, `4002`, `4005`, `5005`, `5007`, `7002`, `7003`, `7004` |
+| `test` | **10** | `3001`, `3002`, `3003`, `3004`, `3006`, `3007`, `3008`, `4003`, `6002`, `6003` |
+| `src` | **28** | `1002`, `1003`, `1004`, `1005`, `2003`, `2004`, `2005`, `2006`, `2007`, `3005`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `7002`, `7003`, `7004` |
+| `unreachable` | **0** | *(none)* |
 
 **Only 5 of 43 codes can be reproduced from the command line.** The other 38 need a Rust test, a
 running server, or a hostile guest — which is itself the most useful thing this page can tell an
@@ -2265,7 +2265,7 @@ Ten codes are reproduced by the permanent suite rather than by a command. The ch
 
 ### The `src`-only codes
 
-**Eighteen codes are raised by the code and reproduced by no test.** They are not unreachable — a
+**Twenty-eight codes are raised by the code and reproduced by no test.** They are not unreachable — a
 guest that trips them gets one — but nothing in the suite proves the path works, so a regression in
 any of them is invisible.
 

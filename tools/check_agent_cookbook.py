@@ -239,6 +239,35 @@ def run_cli_reproducers(binary: pathlib.Path, problems: list[str]) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def summary_row_problems(page: str) -> list[str]:
+    """Rows of the "Measured, by kind" table whose count and code list disagree.
+
+    # Why this predicate exists
+
+    The table said `src` had **28** codes and listed **18**, and said `unreachable` had **0** and
+    listed **10** -- the ten missing from `src`. **A count that its own list does not support is a
+    number with no owner**, and nothing compared the two, so the page disagreed with the checker and
+    with its own `unreachable` section for as long as it took a reader to count.
+
+    This is deliberately narrow: it checks the row against **itself**, which is the defect that was
+    there. Comparing the rows against the sections as well would be stronger, and is owed.
+    """
+    problems: list[str] = []
+    for line in page.split("\n"):
+        m = re.match(r"\| `(\w+)` \| \*\*(\d+)\*\* \| (.*?) \|\s*$", line)
+        if not m:
+            continue
+        kind, declared, codes = m.group(1), int(m.group(2)), m.group(3)
+        if kind not in KINDS:
+            problems.append(f"the summary table has a row for unknown kind `{kind}`")
+            continue
+        listed = re.findall(r"`(\d{4})`", codes)
+        if len(listed) != declared:
+            problems.append(
+                f"the summary table says `{kind}` has {declared} code(s) and lists {len(listed)}"
+            )
+    return problems
+
 def classify(
     declared: list[str],
     kinds: dict[str, str],
@@ -260,6 +289,9 @@ def classify(
     table to ask what the checker would say about a disagreement.
     """
     problems: list[str] = []
+    # The page's own summary table is checked against itself first: a row that claims a count
+    # its list does not contain is the defect that was here (`CodeRabbit` finding #21).
+    problems.extend(summary_row_problems(COOKBOOK.read_text(encoding="utf-8")))
     if cli_reproducers is None:
         cli_reproducers = CLI_REPRODUCERS
 
@@ -411,6 +443,25 @@ def self_test() -> int:
     disagreed = classify(d, k, t, s, cli_reproducers={})
     cases.append(("the `cli` set disagreeing with the table is reported",
                   bool(disagreed), disagreed[0] if disagreed else "NO PROBLEM RAISED"))
+
+    # --- the summary table's rows against themselves -----------------------------------------
+    #
+    # The defect `CodeRabbit` finding #21 repaired: the page said `src` had **28** codes and listed
+    # **18**, and said `unreachable` had **0** and listed **10**. This predicate takes the page text
+    # rather than the four collections above, so it cannot ride on `fires()`.
+    good_page = COOKBOOK.read_text(encoding="utf-8")
+    cases.append(
+        ("the summary table's rows are self-consistent", not summary_row_problems(good_page), "")
+    )
+    # Change the declared count and leave the list alone, which is the defect exactly.
+    broken_page = good_page.replace("| `src` | **28** |", "| `src` | **27** |", 1)
+    cases.append(
+        (
+            "a row claiming a count it does not list is reported",
+            bool(summary_row_problems(broken_page)),
+            (summary_row_problems(broken_page) or ["NO PROBLEM RAISED"])[0],
+        )
+    )
 
     failed = 0
     print("check_agent_cookbook self-test")

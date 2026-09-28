@@ -29936,4 +29936,78 @@ files this round that went through the `write` tool applied cleanly on the first
 
 ---
 
+## §O-391 — An injection that does not apply looks exactly like a test that catches nothing
+
+**Found:** while verifying the fix for `CodeRabbit` finding #18. **Anchors:**
+`.scratch/inject_cr18.py`, `crates/qqq-run/src/serve.rs`, `crates/qqq-run/tests/cli.rs`.
+
+### What happened, in order, because the order is the lesson
+
+1. The fix went in, and the test passed.
+2. The injection was run, and **the test passed again**. I read that as *"the test measures nothing"*
+   and **strengthened the assertion** on that basis.
+3. The strengthened test passed the injection **too**. So I stopped trusting the test and ran the
+   **binary** by hand — which printed **my** message, the one the fix writes.
+4. The injector's **stderr**, which I had been filtering out of the output I read, said:
+
+```text
+AssertionError: start anchor 0
+```
+
+**The injection had never applied.** Its anchor was `    if let Some(path) = &opts.audit_log {`, and
+that exact line appears **twice** in the file — once in the block I had just added to `prepare`, and
+once in `build_dispatch`, where it had always been. The injector's own `assert count == 1` **correctly
+refused to inject**, and I never saw it because I piped its output through a filter that kept only the
+test result.
+
+### The tell was there, and it was a number
+
+The build printed:
+
+```text
+Finished `dev` profile [optimized + debuginfo] target(s) in 0.54s
+```
+
+**Nothing was compiled.** Nine seconds is a rebuild; half a second is cargo saying the artifact is
+current.
+
+### What this costs if it is not caught
+
+**An injection whose application is not confirmed measures the un-injected build, and its result is
+indistinguishable from "the test does not catch the bug".** That is the most dangerous conclusion
+available in this repository — it is a **false negative about a guard**, and its remedy is to weaken or
+rewrite a test that was working, which is what I did for one round before the binary disagreed.
+
+> **An injector must assert its own application, and its assert must be read.** A filter that keeps only
+> the line you expect to see is a filter that can hide the line that says nothing happened.
+
+`§O-282` again, from a direction worth recording: *a guard is only as narrow as its pattern* — and **an
+injector is a guard**, so its anchor must be as unique as any other predicate's.
+
+### And the mtime rule earned its place a second time in one round
+
+After the real injection, the **clean** re-run failed — because restoring the file set its mtime
+**backwards** and cargo reused the injected artifact. Touching the file (`copy /b file +,, file`) forced
+the rebuild and the clean run passed. `FACT` already carries *"fault-inject every new test, then TOUCH
+THE FILE"*; this round it was the difference between a green test and a red one **with the fix in
+place**.
+
+### Two artefacts corrected rather than left standing
+
+* The assertion now names the **sentence the check writes** (`is not usable as an audit log`) instead of
+  `--audit-log`, which the flag's own **help text** satisfies. That is stricter and it is not the reason
+  I wrote it — the reason was wrong, and the change stands on its own merits.
+* **The comment recording the false conclusion was rewritten.** It had claimed the original assertion was
+  inert "Measured"; the measurement had been of an injection that never applied. **A false measurement
+  claim in the corpus is the class this whole goal exists to remove, and it does not become true because
+  the author was the one who introduced it.**
+
+### Measured, both ways, with a rebuild each time
+
+Clean `1 passed / 0 failed` · injected (`Compiling qqq-run`, 9.52 s) the binary prints
+`error[QQQ-2002]: this project declares no routes`, which contains no `--audit-log`, so the assertion
+fails · restored + **touched** `1 passed` · `FMT=0`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

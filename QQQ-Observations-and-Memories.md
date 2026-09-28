@@ -28820,4 +28820,79 @@ injector now does; the earlier one asserted the wrong thing and reported `CLEAN`
 
 ---
 
+## §O-374 — My own guard was too narrow, and it produced the false headline of `§O-373`
+
+**Found:** the round after shipping it. **Anchors:** `tools/check_agent_cookbook.py`,
+`docs/agent-cookbook.md`, `docs/errors.md`, `crates/qqq-core/src/error.rs`.
+
+### The defect
+
+`§O-373` reported that **ten of the 43 error codes are emitted by nothing**. That is **false**.
+
+The predicate searched the Rust tree for the code **string** — `QQQ-7004` — and the tree raises the
+code as an **enum variant**:
+
+```rust
+qqq_core::Error::new(qqq_core::ErrorCode::CliFlagUnknown, ...)   // the variant
+```
+
+The literal appears only in `docs/errors.md` and in a handful of places that happen to spell it out.
+**Every one of the ten is named in the tree, and every one of the 43 has a construction site.**
+
+### Two guards, the same defect, one round apart
+
+* `§O-282`: *a guard is only as wide as its file list and only as narrow as its pattern.*
+* `§O-361`: *a guard that uses a different parser than the consumer measures a different language.*
+
+This is both at once: the pattern was the **code** and the language was the **variant**. And it
+produced the one outcome the whole exercise exists to prevent — **a confident, measured-sounding,
+wrong headline**, written into an observation and into a commit message.
+
+### And the correction has a trap of its own
+
+Matching the variant **naively** is worse in the other direction: `crates/qqq-core/src/error.rs`
+**declares all 43 variants in one enum**, so a bare `\bVariantName\b` search matches **every code**
+and certifies nothing. The declaration is therefore **excluded** — `pub enum ErrorCode {` to its
+closing brace — and what remains is a real use.
+
+**A predicate that matches everything and a predicate that matches nothing both pass for a
+measurement.** The exclusion is asserted, not assumed, for that reason.
+
+### The corrected taxonomy
+
+| Kind | Before | After | Meaning |
+|---|---|---|---|
+| `cli` | 5 | **5** | a command reproduces it — unchanged, because it was measured by **running** things |
+| `test` | 10 | **10** | a test names it |
+| `src` | 18 | **28** | raised in the tree, **no test reproduces it** |
+| `unreachable` | 10 | **0** | — |
+
+**The `cli` count survived because it was verified by executing the reproducers, not by scanning.**
+That is the one predicate in the file that could not be wrong about what it measured, and it is the
+argument for having at least one check per claim that **runs** the thing.
+
+### What survives, and it is still the finding
+
+**38 of 43 codes cannot be reached from a shell, and 28 have no test reproducing them.** So a
+regression in any of those 28 is invisible — which is the claim `§O-373` was reaching for, stated at
+the size it actually is. The wrong headline **overstated** the problem by inventing ten unreachable
+codes; the real problem is 28 untested ones, and it is worse in the way that matters, because an
+untested code is one that can **stop working** rather than one that never worked.
+
+### The page carries the correction, not just the table
+
+The tables were re-derived from the checker's own classification, so the page cannot disagree with
+the guard. **The prose was corrected too** — a corrected table under a paragraph that still says
+*"ten codes are published and emitted by nothing"* would be the same defect one level up. And the
+empty `unreachable` table is **kept**, with a note, because a category that can only ever be
+populated by a mistake is worth having a name for.
+
+### Measured
+
+`unreachable` **10 → 0** · `src` **18 → 28** · `cli` **5, unchanged and re-verified by execution** ·
+construction sites outside the enum declaration: **43 of 43** · the declaration block excluded
+(**13,703** bytes of **37,466**) · checker and self-test pass, **5** reproducers executed.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -119,18 +119,59 @@ def cookbook_kinds() -> dict[str, str]:
     return found
 
 
+def catalogue_names() -> dict[str, str]:
+    """`code -> variant name`, from `docs/errors.md`. The tree raises the NAME, not the code."""
+    out: dict[str, str] = {}
+    for line in CATALOGUE.read_text(encoding="utf-8").split("\n"):
+        m = HEADING.match(line)
+        if not m:
+            continue
+        rest = line[m.end():]
+        n = re.search(r"`([A-Za-z][A-Za-z0-9]*)`", rest)
+        if n:
+            out.setdefault(m.group(1), n.group(1))
+    return out
+
+
+# The enum DECLARATION names every variant, so it cannot count as a use. Without this exclusion the
+# variant predicate would match all 43 codes and certify nothing -- the same defect in the other
+# direction, which is why the exclusion is asserted rather than assumed.
+DECLARATION = ROOT / "crates" / "qqq-core" / "src" / "error.rs"
+
+
+def _without_declaration(text: str) -> str:
+    start = text.find("pub enum ErrorCode {")
+    if start == -1:
+        return text
+    end = text.find("\n}", start)
+    if end == -1:
+        return text
+    return text[:start] + text[end:]
+
+
 def rust_tree() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
-    """`(in_tests, in_src)` — where each code is named under `crates/`."""
-    in_tests: dict[str, set[str]] = {}
-    in_src: dict[str, set[str]] = {}
+    """`(in_tests, in_src)` -- where each code's VARIANT is used under `crates/`.
+
+    Keyed by the **code**, resolved through the variant name, because that is how the tree writes it.
+    A site in the enum declaration does not count.
+    """
+    names = catalogue_names()
+    by_name: dict[str, set[str]] = {}
     for path in (ROOT / "crates").rglob("*.rs"):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
         rel = path.relative_to(ROOT).as_posix()
-        bucket = in_tests if "/tests/" in rel else in_src
-        for code in set(CODE.findall(text)):
+        body = _without_declaration(text) if path == DECLARATION else text
+        for name in set(re.findall(r"\b([A-Z][A-Za-z0-9]*)\b", body)):
+            by_name.setdefault(name, set()).add(rel)
+
+    in_tests: dict[str, set[str]] = {}
+    in_src: dict[str, set[str]] = {}
+    for code, name in names.items():
+        for rel in by_name.get(name, ()):
+            bucket = in_tests if "/tests/" in rel else in_src
             bucket.setdefault(code, set()).add(rel)
     return in_tests, in_src
 

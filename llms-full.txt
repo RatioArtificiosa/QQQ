@@ -2134,6 +2134,15 @@ remediation. Nothing validated that a code can be *produced*.** That is the gap 
 measuring it is how the page was written: every code below was classified by **running the CLI** or by
 **searching the tree**, not by reading the catalogue.
 
+**And the first version of that measurement was wrong, in a way worth recording.** It searched the
+tree for the code *string* — `QQQ-7004` — and the tree raises the code as an **enum variant**,
+`ErrorCode::CliFlagUnknown`. The literal appears only in the catalogue and in a handful of places that
+happen to spell it out, so **ten codes were reported as emitted by nothing when every one of them is
+named in the tree**. A guard is only as narrow as its pattern (`§O-282`), and a checker that reads a
+different language than the code writes measures something else (`§O-361`). The predicate now matches
+the **variant** and excludes the enum declaration — which names all 43, so including it would have
+matched everything and certified nothing. See `§O-374`.
+
 ```bash
 python tools/check_agent_cookbook.py             # re-derives every classification below
 python tools/check_agent_cookbook.py --self-test # proves the checker fires
@@ -2148,11 +2157,16 @@ python tools/check_agent_cookbook.py --self-test # proves the checker fires
 | **`cli`** | A command reproduces it | the checker **runs** the reproducer and asserts the code comes back |
 | **`test`** | A test reproduces it | the checker asserts the code is named in a file under `crates/*/tests/` |
 | **`src`** | The code is **raised** in `src`, and **no test reproduces it** | the checker asserts it is named in a non-test `.rs` file and in **no** test |
-| **`unreachable`** | **Nothing in the tree emits it.** The code is published and cannot happen | the checker asserts it is named **nowhere** in the Rust tree |
+| **`unreachable`** | Nothing in the tree names it at all | the checker asserts the **variant** is named nowhere outside the enum declaration |
 
 The last two are the reason this page exists. A cookbook with only the first two would have silently
 omitted **28 of the 43 codes**, and an agent that read `docs/errors.md` would have no way to tell which
 of the 43 it could ever see.
+
+**`unreachable` is now empty, and that is the honest result rather than a disappointment.** Every one
+of the 43 codes has a construction site. What the corrected measurement does say — and it is the claim
+that survives — is that **only five can be reached from a shell**, and that **28 have no test
+reproducing them**.
 
 #### Measured, by kind
 
@@ -2160,8 +2174,8 @@ of the 43 it could ever see.
 |---|---|---|
 | `cli` | **5** | `1001`, `2001`, `2002`, `6004`, `7001` |
 | `test` | **10** | `1002`, `1003`, `3001`, `3002`, `3003`, `3006`, `3007`, `3008`, `6001`, `6002` |
-| `src` | **18** | `1004`, `1005`, `2004`, `2005`, `2007`, `3004`, `3005`, `4003`, `4004`, `5001`, `5002`, `5003`, `5004`, `5006`, `6003`, `6005`, `6006`, `6007` |
-| `unreachable` | **10** | `2003`, `2006`, `4001`, `4002`, `4005`, `5005`, `5007`, `7002`, `7003`, `7004` |
+| `src` | **28** | `1004`, `1005`, `2004`, `2005`, `2007`, `3004`, `3005`, `4003`, `4004`, `5001`, `5002`, `5003`, `5004`, `5006`, `6003`, `6005`, `6006`, `6007` |
+| `unreachable` | **0** | `2003`, `2006`, `4001`, `4002`, `4005`, `5005`, `5007`, `7002`, `7003`, `7004` |
 
 **Only 5 of 43 codes can be reproduced from the command line.** The other 38 need a Rust test, a
 running server, or a hostile guest — which is itself the most useful thing this page can tell an
@@ -2236,16 +2250,16 @@ Ten codes are reproduced by the permanent suite rather than by a command. The ch
 
 | Code | Test file |
 |---|---|
-| `QQQ-1002` `InvalidComponentArtifact` | `crates/qqq-run/tests/mcp_stdio.rs` |
-| `QQQ-1003` `MissingTarget` | `crates/qqq-run/tests/lang001_rust_guest.rs`, `crates/qqq-run/tests/cli.rs` |
-| `QQQ-3001` `MemoryLimitExceeded` | `crates/qqq-host/tests/compatibility.rs` |
-| `QQQ-3002` `FuelExhausted` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/engine.rs` |
-| `QQQ-3003` `EpochDeadlineExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/engine.rs` |
-| `QQQ-3006` `GuestPanic` | `crates/qqq-host/tests/compatibility.rs` |
-| `QQQ-3007` `GuestOutOfBounds` | `crates/qqq-serve/tests/access.rs` |
-| `QQQ-3008` `SubrequestLimitExceeded` | `crates/qqq-host/tests/subrequest_limits.rs` |
-| `QQQ-6001` `InstancePoolExhausted` | `crates/qqq-run/tests/worker_pool.rs` |
-| `QQQ-6002` `ListenerBindFailed` | `crates/qqq-run/tests/reap_bounded.rs`, `crates/qqq-run/tests/common/mod.rs` |
+| `QQQ-3001` `MemoryLimitExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-3002` `FuelExhausted` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs`, `crates/qqq-host/tests/subrequest_limits.rs` |
+| `QQQ-3003` `EpochDeadlineExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-3004` `GuestTrap` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-3006` `GuestPanic` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-3007` `GuestOutOfBounds` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-3008` `SubrequestLimitExceeded` | `crates/qqq-host/tests/refusal_amplification.rs`, `crates/qqq-host/tests/subrequest_limits.rs` |
+| `QQQ-4003` `CapabilityDenied` | `crates/qqq-host/tests/hostile_guests.rs` |
+| `QQQ-6002` `ListenerBindFailed` | `crates/qqq-io/tests/listener.rs` |
+| `QQQ-6003` `ComponentLoadFailed` | `crates/qqq-host/tests/hostile_guests.rs` |
 
 ---
 
@@ -2257,24 +2271,34 @@ any of them is invisible.
 
 | Code | Name |
 |---|---|
+| `QQQ-1002` | `InvalidComponentArtifact` |
+| `QQQ-1003` | `MissingTarget` |
 | `QQQ-1004` | `WitInterfaceMismatch` |
 | `QQQ-1005` | `NonReproducibleBuild` |
+| `QQQ-2003` | `SecretUnresolvable` |
 | `QQQ-2004` | `CapabilityPathInvalid` |
 | `QQQ-2005` | `LimitOutOfRange` |
+| `QQQ-2006` | `RequiresFabric` |
 | `QQQ-2007` | `CapabilitySyntaxInvalid` |
-| `QQQ-3004` | `GuestTrap` |
 | `QQQ-3005` | `InvalidResourceHandle` |
-| `QQQ-4003` | `CapabilityDenied` |
+| `QQQ-4001` | `CapabilityOutOfScope` |
+| `QQQ-4002` | `CapabilityWideningRefused` |
 | `QQQ-4004` | `SecretUseFailed` |
+| `QQQ-4005` | `CapabilityQuotaExhausted` |
 | `QQQ-5001` | `RegistryUnreachable` |
 | `QQQ-5002` | `SignatureVerificationFailed` |
 | `QQQ-5003` | `LockfileOutOfDate` |
 | `QQQ-5004` | `VersionUnsatisfiable` |
+| `QQQ-5005` | `DependencyCapabilityEscalation` |
 | `QQQ-5006` | `StoreCorrupted` |
-| `QQQ-6003` | `ComponentLoadFailed` |
+| `QQQ-5007` | `DependencyNotFound` |
+| `QQQ-6001` | `InstancePoolExhausted` |
 | `QQQ-6005` | `HostResourceExhausted` |
 | `QQQ-6006` | `RequestBodyTooLarge` |
 | `QQQ-6007` | `HostPanicContained` |
+| `QQQ-7002` | `UnknownSchemaSurface` |
+| `QQQ-7003` | `ProtocolVersionUnsupported` |
+| `QQQ-7004` | `CliFlagUnknown` |
 
 **What to do instead.** Treat a `src`-only code as untested surface. The next test written in its area
 should reproduce it, and `tools/check_agent_cookbook.py` will move it from this table to the `test`
@@ -2282,23 +2306,15 @@ one the moment a test names it — the classification is re-derived, so the tabl
 
 ---
 
-### The `unreachable` codes
+### The `unreachable` codes — none
 
-**Ten codes are published and emitted by nothing.** They are named nowhere in the Rust tree, so no
-command, no test and no guest can produce them.
+**This table is empty, and it was not empty in the first version of this page.** Ten codes were
+listed here as *"published and emitted by nothing"*; all ten are named in the tree, and the
+paragraph above records why the measurement said otherwise. The row is kept, empty, because a
+category that can only ever be populated by a mistake is worth having a name for.
 
 | Code | Name | What it would take |
 |---|---|---|
-| `QQQ-2003` | `SecretUnresolvable` | `qqq:secrets` is declared and **not bound**; the manifest parses secret references but nothing resolves them at runtime |
-| `QQQ-2006` | `RequiresFabric` | the fabric tier does not exist |
-| `QQQ-4001` | `CapabilityOutOfScope` | an import reachable outside the grant set — which the design makes **impossible** (`absent, not denied`), so the code may be unneeded rather than unimplemented |
-| `QQQ-4002` | `CapabilityWideningRefused` | no widening path exists to refuse |
-| `QQQ-4005` | `CapabilityQuotaExhausted` | per-capability quotas are not accounted |
-| `QQQ-5005` | `DependencyCapabilityEscalation` | a dependency that grants more than its parent — no registry resolution to detect it |
-| `QQQ-5007` | `DependencyNotFound` | dependency resolution reports `QQQ-5001`/`QQQ-5003` instead |
-| `QQQ-7002` | `UnknownSchemaSurface` | `qqqai schema` has no surface parameter |
-| `QQQ-7003` | `ProtocolVersionUnsupported` | the MCP server negotiates but does not reject a version with this code |
-| `QQQ-7004` | `CliFlagUnknown` | **the CLI reports `QQQ-7001` instead** — see the `cli` section |
 
 **What to do instead.** Do not write a handler for a code in this table, and do not cite one in a bug
 report: nothing emits it. If a code here *should* be reachable, the work is to raise it at the right
@@ -2306,8 +2322,9 @@ place — and if it should not, the work is to remove it from the catalogue, whi
 
 **This is the finding the cookbook was written to produce.** The catalogue is complete by its own
 checker — *"43 code(s), every one with a cause and a remediation"* — and completeness of
-**documentation** is not completeness of **behaviour**. Ten published codes are documentation of
-errors that cannot occur.
+**documentation** is not completeness of **behaviour**. What survives the correction is the size of
+the gap that is real: **38 of 43 codes cannot be reached from a shell, and 28 have no test
+reproducing them**, so a regression in any of those is invisible.
 
 ---
 

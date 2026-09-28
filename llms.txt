@@ -24,7 +24,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [schema/qqq-toml.schema.json](schema/qqq-toml.schema.json) — JSON Schema for `qqq.toml`, generated from the Rust type that parses it. _(agent)_ (19 KB)
 - [schema/qqq-lock.schema.json](schema/qqq-lock.schema.json) — JSON Schema for `qqq.lock`, including the per-package `caps` record. _(agent)_ (7 KB)
 - [schema/cli-envelope.schema.json](schema/cli-envelope.schema.json) — JSON Schema for the `--json` envelope every command emits. _(agent)_ (3 KB)
-- [docs/agent-cookbook.md](docs/agent-cookbook.md) — Every QQQ error code with the reproducer that produces it, or the statement that nothing does. _(agent)_ (8 KB)
+- [docs/agent-cookbook.md](docs/agent-cookbook.md) — Every QQQ error code with the reproducer that produces it, or the statement that nothing does. _(agent)_ (9 KB)
 
 ## Using it
 

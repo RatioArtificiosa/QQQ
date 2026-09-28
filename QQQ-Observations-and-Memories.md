@@ -30081,5 +30081,44 @@ rather than as a measurement.
 
 ---
 
+## §O-393 — The checker that catches unrestored injections was reporting stale baselines as injections
+
+**Found:** by fixing what `§O-392` diagnosed. **Anchors:** `tools/check_fault_inject_restores.py`.
+
+### The fix
+
+`verify()` compared the tree against a `TEMP` snapshot and reported **every** difference as *"file(s) the
+gate changed and did not restore"*. But the snapshot is `TEMP` precisely so `git add` cannot take it —
+and **a gate stopped before its `--verify` leaves it there**, so the next run compares today's tree
+against an older baseline and blames every commit since.
+
+**`git status --porcelain` is empty exactly when the working tree matches HEAD.** So when the digests
+disagree and git says the tree is **clean**, nothing any checker did is on disk: the difference is
+between the **snapshot** and the **repository**. That verdict is `INCONCLUSIVE` — the word this checker
+already uses for *"no snapshot"*, and for the same reason: **a comparison against the wrong baseline
+certifies nothing.**
+
+### Three outcomes, all measured
+
+| tree | snapshot | verdict |
+|---|---|---|
+| clean | **fresh** | `GATE TREE AT REST -- 373 tracked file(s), none moved`, exit **0** |
+| clean | **stale** (one digest doctored) | `GATE TREE INCONCLUSIVE -- 1 file(s) differ from the snapshot, but git reports the tree CLEAN against HEAD`, exit **1**, naming the file and saying *"a snapshot that predates a commit reports that commit as an unrestored injection"* |
+| **dirty** (my own uncommitted fix) | fresh | the original `GATE TREE MODIFIED` path — the case the checker exists for |
+
+**And the middle row nearly fooled me twice.** My first attempt at the reproduction still printed
+`MODIFIED`, because the **fix I was testing was itself uncommitted** — so `git status` was not empty and
+the new branch correctly did not fire. **A reproduction run in a dirty tree cannot exercise a predicate
+whose whole job is to ask whether the tree is dirty.** The control had to be committed before the
+measurement meant anything, which is the same shape as `§O-391`: *the experiment was measuring the
+un-injected build.*
+
+### Measured
+
+`check_fault_inject_restores --self-test` **4/4** · the three rows above · `check_doc_claims` OK.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 

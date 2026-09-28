@@ -30119,6 +30119,83 @@ un-injected build.*
 
 ---
 
+## §O-394 — One idle client stalled the whole MCP HTTP transport, and a checker caught a defect in my fix
+
+**Found:** by CodeRabbit as finding **#8**, and then by `check_subprocess_encoding.py` in the same gate
+run. **Anchors:** `crates/qqq-run/src/mcp.rs`, `tools/check_fault_inject_restores.py`.
+
+### The defect
+
+```rust
+for stream in listener.incoming() {
+    let Ok(mut stream) = stream else { continue };
+    // A connection that fails mid-exchange is one bad client, not a dead server.
+    let _ = handle_http(&mut stream, cli);
+}
+```
+
+The loop is **sequential** and `handle_http` does **blocking reads**, and `TcpStream` defaults to **no
+timeout**. So the comment is right about a connection that *fails* and wrong about one that never
+*finishes*: a client that connects and sends nothing holds the loop and **every later client waits
+behind it**. A slowloris in a server whose whole job is to answer a tool call.
+
+**Measured against the built binary** — an idle client, then a real request:
+
+```text
+idle client connected and sent NOTHING
+second client answered in 28.0 s, 127 bytes
+HTTP/1.1 405 Method Not Allowed
+```
+
+**28.0 s is the proof**: the 30-second bound minus the two seconds the idle socket had already been
+held. Without it the second client would never have been answered at all.
+
+### The predicate and the path, tested separately on purpose
+
+Two lines inside a loop can only be tested by running a server for thirty seconds, so they became
+`bound(&stream)` — and `TcpStream` exposes what was set, so a test reads both timeouts back. **That test
+does not prove the loop calls `bound`**, and it cannot; the loop is the path, and the evidence for the
+path is the measurement above. `§O-376` is exactly this: *a test of the predicate is not a test of the
+path*, and **neither stands in for the other.**
+
+### And a checker caught a defect in my fix, in the same gate run
+
+The fix cross-checks `git status --porcelain` before reporting a difference as a modification
+(`§O-393`), and it decoded that subprocess with `text=True` and **no `encoding=`**:
+
+```text
+SUBPROCESS ENCODING FAILED -- 1 site(s) decode with the locale's encoding:
+  check_fault_inject_restores.py  (1 site(s)): lines [185]
+```
+
+On Windows the default is cp1252, a child emitting UTF-8 can kill `subprocess`'s reader thread, and
+`stdout` comes back **empty**. For `git status --porcelain` an empty result means *"the tree is clean"* —
+**which is the branch the fix acts on, so the defect would have made the new code fire always**,
+reporting `INCONCLUSIVE` even when an injection really was left applied.
+
+**The checker found it before the commit reached a verdict.** That is `§O-268`'s class: invisible on this
+machine, which is why the checker exists rather than a code review.
+
+### Two anchors failed before the third worked, and the reason generalises
+
+My first insertion anchored on `pub fn serve_http(…)` and landed **between** that function and its doc
+comment — because **a doc comment is part of the item it documents**, so the const inherited the doc and
+the function lost it. Clippy said so in two sentences (*"missing documentation for a function"* and
+*"docs for function returning `Result` missing `# Errors` section"*).
+
+> **An anchor on a function is not an anchor on the item.** When inserting beside a documented item, the
+> anchor has to be the item's **start**, doc comment included — or, as here, the pieces should be
+> assembled by name rather than located by adjacency.
+
+### Measured
+
+`cargo test -p qqq-run --lib timeout_tests` **1 passed** · `clippy -D warnings` clean · the 28.0 s
+measurement · `check_subprocess_encoding` OK and `--self-test` **10/10** ·
+`check_fault_inject_restores --self-test` **4/4**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 

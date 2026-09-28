@@ -30468,6 +30468,82 @@ command inside the container · `BRIDGE_EXIT=1` with exactly one `FAIL`, the sca
 
 ---
 
+## §O-399 — A preference is not a filter, and the round that added cross-references skipped the cross-reference checker
+
+**Found:** by CI failing, which is the point. **Anchors:** the four `find_binary` copies,
+`.github/workflows/ci.yml`, `C:\Users\Usuario\bridge.txt`.
+
+### The fix that was not one
+
+`§O-398` established that the bridge's one failure was a checker running the **Windows** `qqqai.exe`
+through the bind mount. The first repair **reordered** the names so the platform's own binary is tried
+first:
+
+```python
+names = ("qqqai.exe", "qqqai") if os.name == "nt" else ("qqqai", "qqqai.exe")
+```
+
+**Measured, by patching `os.name` to `posix` and calling the shipped function:**
+
+```text
+find_binary() as posix : E:\QQQ\target\debug\qqqai.exe
+=> on Linux it would find: the WINDOWS .exe (BAD)
+```
+
+The native name **missed** — in the container `target/` is a named volume and holds no `qqqai` — and the
+**fallback** found the other one anyway. **A preference is not a filter.** The corrected version names one
+binary and returns `None` otherwise, which reaches the checker's already-documented SKIPPED path:
+measured as `['None','None','None','None']` under `posix` and the four binaries under `nt`.
+
+> **The right outcome was already coded. Ordering never reached it; only exclusion did.**
+
+### And CI called the broken version green
+
+`9e35ecc` — the reordering, which cannot work on Linux — is **success** in CI. The defect needs the
+Windows artifact to be **visible to a Linux process**, which happens only through the bridge's bind
+mount. **A check that fails on one platform is only visible to the gate that runs there**, and for this
+one that gate is `docker/entrypoint.sh`, not `ci.yml`.
+
+### The one that cost the round
+
+CI failed for the corrected fix, and **not** for the binary logic:
+
+```text
+FAIL  [13] §O-399 is cited by tools/check_agent_bench.py, tools/check_agent_cookbook.py,
+            tools/check_schema_conformance.py, tools/run_conformance.py but is not defined
+```
+
+I had cited an observation I never wrote. And the command that says so —
+
+```yaml
+- name: Validate proposal <-> checklist graph
+  run: python tools/check_xrefs.py
+```
+
+— **is the same command available locally, registered in both gates.** Round 93 ran four checkers, named
+them in the journal as evidence, and did not run this one.
+
+> **The round that added cross-references skipped the cross-reference checker. Five ran; the sixth was
+> the one that mattered.**
+
+**A hand-picked subset is a hypothesis about which checks matter; the gate is the measurement.** The
+goal's own rule — *run the whole gate again after the last edit* — is what this cost.
+
+### Mechanically
+
+The eight occurrence of the string-literal class, and the **first inside a file the `write` tool
+created** — so *"write scripts with the write tool"* is not sufficient on its own. The cause is narrower
+than quoting: **a string literal that spans lines.** `py_compile` caught it before anything was
+committed, which turned a broken gate into a one-round delay.
+
+### Measured
+
+`find_binary` under `posix` → four `None`; under `nt` → four binaries · `9e35ecc` CI **success**,
+`f7db732` CI **failure** with the citation above · `check_gate_parity`'s self-test 17/17 · all four
+checkers green locally after the exclusion fix.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

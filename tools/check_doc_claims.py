@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import collections
 import re
 import subprocess
 import sys
@@ -236,6 +237,20 @@ def _host_bound_modules() -> int | None:
     return len(found) or None
 
 
+def _checklist() -> dict[str, int]:
+    """The ledger's counts, parsed from the document that owns them."""
+    text = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
+    c = collections.Counter(re.findall(r"^- \[(.)\] \*\*[A-Z]+-\d{3}\*\*", text, re.M))
+    return {"done": c["x"], "open": c[" "], "total": sum(c.values())}
+
+
+def _observation() -> dict[str, int]:
+    """The `\u00a7O` heading count and its highest id, from the register that owns them."""
+    text = (ROOT / "QQQ-Observations-and-Memories.md").read_text(encoding="utf-8")
+    ids = [int(n) for n in re.findall(r"^## \u00a7O-(\d+)", text, re.M)]
+    return {"headings": len(set(ids)), "highest": max(ids) if ids else 0}
+
+
 RESOLVERS = {
     "crate-files": lambda: len(list((ROOT / "crates").rglob("*.rs"))),
     "workspace-tests": _workspace_tests,
@@ -250,6 +265,15 @@ RESOLVERS = {
     "conformance-definition-cases": lambda: _suite_cases("definition"),
     "conformance-execution-cases": lambda: _suite_cases("execution"),
     # What the host binds, which is not what `wit/` declares -- see `_host_bound_modules`.
+    # The ledger's own arithmetic. `check_checklist_counts.py` validates the LIST; these let a
+    # document state the count without owning it (`§O-277`).
+    "checklist-done": lambda: _checklist()["done"],
+    "checklist-open": lambda: _checklist()["open"],
+    "checklist-total": lambda: _checklist()["total"],
+    # The decision record's size and its high-water mark.
+    "observation-headings": lambda: _observation()["headings"],
+    "observation-highest": lambda: _observation()["highest"],
+    "crate-directories": lambda: len([p for p in (ROOT / "crates").iterdir() if p.is_dir()]),
     "host-bound-modules": _host_bound_modules,
 }
 

@@ -187,6 +187,14 @@ def verify() -> int:
             cwd=ROOT,
             capture_output=True,
             text=True,
+            # **NOT decoration.** `text=True` alone decodes with the locale's default -- cp1252 on
+            # Windows -- and a child emitting UTF-8 can kill `subprocess`'s reader thread and return
+            # **empty `stdout`**. For `git status --porcelain` empty means *"the tree is clean"*, which
+            # is exactly the branch below, so omitting this would make the check fire **always** --
+            # reporting INCONCLUSIVE even when an injection really was left applied.
+            # `check_subprocess_encoding.py` caught this in the same gate run as the fix (`§O-268`).
+            encoding="utf-8",
+            errors="replace",
             check=False,
         ).stdout.strip()
         if not dirty:

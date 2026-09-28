@@ -191,9 +191,17 @@ def _suite_cases(kind: str | None = None) -> int | None:
     cases = doc.get("cases")
     if not isinstance(cases, list) or not cases:
         return None
+    # A case with NO `kind` is a **definition** case -- the six original cases predate the field, and
+    # `check_conformance.py` default the same way. Counting only the literal string made such a case
+    # vanish from the split while still being counted in the total, so the parts could sum to less
+    # than the whole. A finding from `§O-380`, and the totals are asserted against it below.
     if kind is None:
         return len(cases)
-    return sum(1 for c in cases if c.get("kind") == kind)
+    counted = [
+        c for c in cases
+        if (c.get("kind") or "definition") == kind
+    ]
+    return len(counted) or None
 
 
 def _host_bound_modules() -> int | None:

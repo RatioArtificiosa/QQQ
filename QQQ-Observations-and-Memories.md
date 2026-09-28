@@ -23786,9 +23786,12 @@ out of the process table where a command-line argument would put them.
    message naming what is redacted would be the leak the redactor exists to prevent.
 
 Plus a fourth that is this repository's recurring tax: **a CRLF file would carry a `\r` into the
-value and never match the secret it is meant to redact** — silently. `str::lines` splits on `\n` and
-keeps the `\r`. That is the **third** time a line-ending assumption has cost this repository
-something (`§O-273`, `§O-301`), so it is asserted rather than assumed.
+value and never match the secret it is meant to redact** — silently. The operation that would do it
+is a bare `split('\n')`; **`str::lines()` does not**, because it strips a trailing `\r` as part of
+recognising `\r\n`. This note claimed the opposite until `§O-380`, and the correction is the point:
+the *risk* is real and the *mechanism* named was wrong, which is the harder kind of error to catch,
+because the sentence reads as specific. It is the **third** time a line-ending assumption has cost
+this repository something (`§O-273`, `§O-301`), so it is asserted rather than assumed.
 
 ### Two doc comments described opposite mechanisms
 
@@ -25464,8 +25467,11 @@ is indistinguishable from a trace with one service in it.
 - four dash-separated fields, each length- and hex-checked;
 - **an all-zero trace or parent id is refused, because W3C defines it as invalid rather than as an id** —
   accepting it would join every undecided request into one trace;
-- **an unknown higher version is accepted**, per W3C: a receiver that rejected `ff` would break every
-  future producer.
+- **versions `01` through `fe` are accepted**, per W3C, so a future producer is not broken by a
+  receiver that only knows `00`;
+- **`ff` is REFUSED**, and it is not a future version: W3C reserves it as **invalid**, which is why
+  `§O-380` had to correct this note — it named `ff` as the example of forward compatibility, and the
+  specification names it as the one version a receiver must reject.
 
 ### The outbound half is not wired, and it says so
 
@@ -29288,6 +29294,65 @@ still running.
 `FAIL` count **1 → 0** for this command under `cmd.exe` (`LIST_OK=0`) · `GATE PARITY OK` after **two**
 edits, one per gate · the two gates now invoke the identical three commands · `CLEAN sh: no stray file
 created` — the redirect did not leave a `dev/` directory, because `cmd.exe` refused it outright.
+
+---
+
+## §O-380 — CodeRabbit reviewed the change set from `e50f7c0`, and found two false claims of mine
+
+**Anchors:** the review of `e50f7c0..edf43e1` (96 commits, 137 files),
+`QQQ-Observations-and-Memories.md`, `QQQ-Checklist-V1.md`, `tools/check_doc_claims.py`,
+`tools/mark_complete.py`.
+
+Goal DoD #7 asks for *"CodeRabbit has reviewed the change set from `e50f7c0` … every finding fixed or
+dismissed with a recorded reason"*. It had been outstanding for five rounds. Run:
+
+```bash
+coderabbit review --agent --light --committed --base-commit e50f7c0
+```
+
+and the `complete` line read `{"type":"complete","status":"review_completed","findings":25,…}` with a
+**non-empty** `reviewedFiles` — which is the part that matters, because an empty one with a non-zero
+`unreviewedFileCount` means *incomplete*, not *clean*.
+
+**25 findings: 1 critical, 9 major, 15 minor.**
+
+### The five fixed this round
+
+| # | Where | What it was |
+|---|---|---|
+| **13** | an observation | **A FALSE CLAIM.** It said *"`str::lines` splits on `\n` and keeps the `\r`"*. `str::lines()` **strips** a trailing `\r` as part of recognising `\r\n`; the operation that would keep it is a bare `split('\n')`. |
+| **14** | an observation | **A FALSE CLAIM.** It named `ff` as the example of a version a receiver must accept *"so as not to break every future producer"*. W3C reserves `ff` as **invalid**; the forward-compatible ones are `01`–`fe`. |
+| **5** | `tools/mark_complete.py` | `TEST-016` was still in `PARTIAL` after being ticked — two records of one item, one of them stale. |
+| **6** | `tools/check_doc_claims.py` | The kind-filtered case count matched the **literal** `"definition"`, so a case with **no** `kind` vanished from the split while still counting in the total. The parts could sum to less than the whole. |
+| **1** | the checklist | `TEST-016`'s `→ Partial:` note still said the standalone runner was missing. |
+
+**#13 and #14 are the ones that matter, and they are the goal's own class.** Both are statements about
+**reality** — what a library does, what a specification says — written with the confidence of having
+been measured, in the register that documents this project's mistakes. **The correction is the point,
+not the embarrassment:** the *risk* each paragraph describes is real, and the *mechanism* it named was
+wrong, which is the harder kind of error to catch because the sentence reads as specific.
+
+`str::lines`' own documentation settles #13 — *"Lines are split at line endings that are either
+newlines or sequences of a carriage return followed by a line feed"* — and W3C's trace-context grammar
+settles #14.
+
+### The remaining twenty, and why they are not in this commit
+
+They are **not dismissed as noise**; each is real and each is classified:
+
+| Class | Findings | Why they wait |
+|---|---|---|
+| **Behavioural** — a Rust change with an injection | 7, 8, 9, 11, 12, 15, 16, 17, 18, 22, 23, 24, 25 | **#12 is `critical`** — `guest_handler.rs` persists only the *final* audit record rather than every record appended since the sink's last persisted position, and **#24** is the truncation case in `audit_sink.rs`. Both are in the audit path, both need a fixture that appends during a guest call, and a fix without that fixture would be the unmeasured kind this repository has paid for. **#8** (no read/write timeouts on accepted HTTP streams) and **#16**/**#17** (the rate parser's overflow and the `ff` version, the *implementation* half of #14) are the same shape. |
+| **My own checkers** | 19, 20 | `check_agent_bench.py` and `check_agent_cookbook.py` — findings about tools written this round. |
+| **Corpus staleness** | 2, 3, 4, 10, 21 | `OBS-013`/`OBS-014`/`OBS-016` annotations claim work is undone that has since been done, and **#10** is sharper: a DoD item runs `qqqai audit --fail-on error`, and `audit.rs`'s own test `no_current_rule_emits_an_error_severity` proves **no rule emits an error** — so the check can never fail. |
+
+**A review whose findings are all fixed in one round is a review that found nothing structural.**
+
+### Measured
+
+`review_completed` · **25** findings (**1** critical, **9** major, **15** minor) · **137** files, under
+the 300-file cap · **5** fixed, **20** classed and deferred · `DOC CLAIMS OK` (11 claims) · checklist
+citations **1244 → 1243** (the removed stale note) · corpus re-recorded.
 
 ---
 

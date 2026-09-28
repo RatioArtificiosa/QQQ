@@ -29692,4 +29692,53 @@ comment that says why.
 
 ---
 
+## §O-387 — Two Definition-of-Done items asked for the exact threshold the corpus had already measured as vacuous
+
+**Found:** by CodeRabbit, as finding **#10** (minor). **Anchors:** `QQQ-Checklist-V1.md`'s `DOD-006`,
+`QQQ-Proposal-V1.md`'s Security list, `CLI-016`, `crates/qqq-run/src/audit.rs`.
+
+Both documents required:
+
+```text
+`qqqai audit --fail-on error` is clean on all first-party packages
+```
+
+`Severity` is `{ Note, Warning, Error }`, and `audit.rs` carries a test named
+**`no_current_rule_emits_an_error_severity`** whose doc comment says *"If a rule is added that emits
+`Error`, this test fails and says so."* So `--fail-on error` exits **`0` on any project**, and the item
+is satisfied by construction — its work is zero.
+
+### And the corpus had already written the principle, and the measurement, in the same file
+
+`CLI-016`'s own `→ Done:` line:
+
+> *`--fail-on warning` exits `1` (a warning-level finding exists) and `--fail-on error` exits `0` (none
+> does). That pair is the test — a threshold that always fired would pass a single check and is what the
+> flag exists to avoid.*
+
+**The measurement was four thousand lines above the item that contradicted it.** That is `§O-375` — *a
+rule that cannot fire is worse than no rule* — reaching the **definition of done** itself, which is the
+one place a project cannot afford it, because a DoD item is what "finished" is measured against.
+
+### Fixed, with the reason left where the next reader meets it
+
+`DOD-006` now asks for `--fail-on warning` — the strongest threshold any current rule can reach, and one
+that becomes **stricter** the moment a rule emits `Error` — with a `→` note recording the measurement,
+naming the test that proves it, and saying that `CLI-016` had already recorded it. The Proposal's
+Security item was changed to match and points at `DOD-006` for the reasoning.
+
+### And the goal brief was wrong about the value
+
+The brief calls this *"`DOD-006`'s `qqqai audit --fail-on high`"*. **The tree says `error`**, and
+`Severity::parse` accepts only `note`, `warning`, `warn` and `error` — so `high` would be a **usage
+error**, not merely unreachable. Rule 1 holds: *the brief is a hypothesis; the tree is the evidence.*
+
+### Measured
+
+`CHECKLIST COUNTS OK — 32 areas, 587 items` (the edit added no item) · `CHECKLIST CITATIONS OK — 1243 →
+**1245**` citations, all resolving · corpus re-recorded, `validation PASSED` · the only remaining
+`fail-on error` mentions are the two that **report** the measurement.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

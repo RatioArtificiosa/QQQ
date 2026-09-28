@@ -5127,8 +5127,17 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §16 — Definition of Done for V1
 - [ ] **DOD-005** Confirm the ≥200-case hostile-guest suite passes with zero host memory-safety incidents.
   → §16 — Definition of Done for V1
-- [ ] **DOD-006** Confirm `qqqai audit --fail-on error` is clean on all first-party packages.
+- [ ] **DOD-006** Confirm `qqqai audit --fail-on warning` is clean on all first-party packages.
   → §16 — Definition of Done for V1
+  → **Threshold corrected from `error` to `warning`.** `Severity` is `{ Note, Warning, Error }` and no
+    current rule emits `Error` -- `crates/qqq-run/src/audit.rs`'s `no_current_rule_emits_an_error_severity`
+    asserts exactly that, and says it will fail if a rule ever does. So `--fail-on error` exits `0` on
+    **any** project, and an item that cannot fail is not a gate.
+  → The measurement was already in this corpus: `CLI-016`'s own `→ Done:` line records that on the same
+    project `--fail-on warning` exits `1` and `--fail-on error` exits `0`, and calls that pair *"the
+    test"*. This item contradicted it.
+  → `warning` is the strongest threshold a current rule can reach, so the corrected item is reachable
+    today and becomes stricter the moment a rule emits `Error`.
 - [ ] **DOD-007** Publish the threat model including explicit non-goals.
   → §16 — Definition of Done for V1
 - [ ] **DOD-008** Verify every numeric target in the performance budget on reference hardware.

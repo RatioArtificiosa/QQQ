@@ -1,14 +1,14 @@
 {
   "QQQ-Checklist-V1.md": {
-    "bytes": 455756,
-    "sha256": "f26e2d1753706eefd60b1f5d0f68afa24c98ee180b709b2c432f43ffc465017f"
+    "bytes": 456555,
+    "sha256": "a7ee4dfec36188cf644fba5a7bc7873c811a7e29fced01a0352081c13b14d7b1"
   },
   "QQQ-Observations-and-Memories.md": {
-    "bytes": 1651708,
-    "sha256": "9ec0cae5307c1eb26b832318adebebd684cc238c61b7f9bc3d40baa6fea256cf"
+    "bytes": 1654234,
+    "sha256": "6da14363a938b94dbbc87a80a58738e1ce7eb45e307cd657ae9e4b2b3b7ec54e"
   },
   "QQQ-Proposal-V1.md": {
-    "bytes": 140841,
-    "sha256": "4b6a773566738e7ee9ea3148225070ee57d8f9396aacbe3db27f63171d963399"
+    "bytes": 141044,
+    "sha256": "c5782901aa620c4beffc998a4e996e7fac847c00c624184e23c5adb07fd6a7a1"
   }
 }

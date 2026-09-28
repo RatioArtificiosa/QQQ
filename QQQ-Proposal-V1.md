@@ -1857,7 +1857,9 @@ V1.0 ships only when **every** item below is true and verifiable by a third part
 **Security**
 - [ ] Two independent external audits complete; all critical and high findings fixed
 - [ ] The hostile-guest suite (≥200 cases) passes with zero host memory-safety incidents
-- [ ] `qqqai audit --fail-on error` is clean on all first-party packages
+- [ ] `qqqai audit --fail-on warning` is clean on all first-party packages (`warning`, not `error`: no
+  current rule emits `Error`, so an `error` threshold exits `0` on any project and the item could never
+  fail -- see `QQQ-Checklist-V1.md`'s `DOD-006` for the measurement)
 - [ ] Threat model published, including explicit non-goals
 
 **Performance**

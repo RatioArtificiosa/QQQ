@@ -3185,3 +3185,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 }
+
+#[cfg(test)]
+mod readme_capability_tests {
+    use super::*;
+
+    /// One option set per template, built from the default so a new field cannot silently break it.
+    fn for_template(template: Template) -> NewOptions {
+        NewOptions {
+            name: "app".to_owned(),
+            template,
+            ..Default::default()
+        }
+    }
+
+    /// **The README's capability text follows the template's grant** -- `CodeRabbit` finding #7.
+    ///
+    /// # The defect, and why the guard compares two things rather than reading one
+    ///
+    /// `new::run` grants a capability for exactly one template -- `http` -- and the summary line it
+    /// prints says so (*"1 capability granted"*). `readme_for` wrote, for **every** template, *"This
+    /// project starts with **zero** capabilities"* and *"currently: nothing"*. So one command printed
+    /// **both** claims, and a reader learned the truth of neither.
+    ///
+    /// A test that re-derived the grant would only restate the code. This one holds the README against
+    /// the grant **it is written for**, in both directions: the phrase the grant implies must be
+    /// present, and the phrase the other templates use must be absent.
+    #[test]
+    fn the_readme_capability_text_follows_the_template_grant() {
+        // (template, does it grant?, the phrase its README must carry)
+        let cases = [
+            (Template::Http, true, "currently: http.server"),
+            (Template::Worker, false, "currently: nothing"),
+            (Template::Cli, false, "currently: nothing"),
+            (Template::Lib, false, "currently: nothing"),
+            (Template::AiTool, false, "currently: nothing"),
+        ];
+
+        for (template, grants, phrase) in cases {
+            let readme = readme_for(&for_template(template));
+            assert!(
+                readme.contains(phrase),
+                "`{template:?}` grants={grants} and its README must say `{phrase}`:\n{readme}"
+            );
+
+            // And the OTHER claim must be absent, so a copy that says both cannot pass.
+            let wrong = if grants {
+                "zero** capabilities"
+            } else {
+                "currently: http.server"
+            };
+            assert!(
+                !readme.contains(wrong),
+                "`{template:?}` must not also claim `{wrong}`:\n{readme}"
+            );
+        }
+
+        // The HTTP README must name the capability the manifest actually grants, which is the
+        // cross-check that makes the rest more than string-matching.
+        let http = readme_for(&for_template(Template::Http));
+        assert!(
+            http.contains(Template::Http.suggests()),
+            "the README must name the capability the manifest grants ({}):\n{http}",
+            Template::Http.suggests()
+        );
+    }
+}

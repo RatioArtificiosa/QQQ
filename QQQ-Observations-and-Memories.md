@@ -30195,7 +30195,74 @@ measurement · `check_subprocess_encoding` OK and `--self-test` **10/10** ·
 
 ---
 
+## §O-395 — The review's register, closed out — and `§O-380`'s table is now the stale artefact
+
+**Found:** by working the list. **Anchor:** `§O-380`'s *"the remaining twenty, and why they are not in
+this commit"* table.
+
+`§O-380` recorded 25 findings, and its own table then listed twenty of them as **deferred**. Every one of
+those has since been worked, so **the table is now a document disagreeing with the code** — the class
+this goal exists to remove, in the entry that started it. This closes the register.
+
+### The dispositions, 25 of 25
+
+| # | Where | Disposition |
+|---|---|---|
+| 1–4 | checklist (`TEST-016`'s note, `OBS-002`/`013`/`014`/`016`) | **fixed** — `0b76b4d`, `2d36c3b` |
+| 5, 6 | `mark_complete.py`, `check_doc_claims.py` | **fixed** — `0b76b4d` |
+| 7 | `new.rs`'s `readme_for` | **fixed** — `c98d1ea`, guard `c4c68b9`, its own test corrected `6128603` |
+| 8 | `mcp.rs` — no timeouts on accepted streams | **fixed** — `b6ce5f4` |
+| 9 | `main.rs` — `--json` said to print prose | **DISMISSED, measured** — the claim is false; `qqqai audit --json` and `qqqai --json audit` emit the same envelope |
+| 10 | Proposal — `--fail-on error` | **fixed** — `877be66` |
+| 11 | `audit_sink.rs` — the dropped fragment | **fixed** — `a83ddd8` (the same finding as #24/#25) |
+| 12 | `guest_handler.rs` — only the last record persisted | **fixed** — `9473304` |
+| 13, 14 | observations — two false claims | **fixed** — `0b76b4d` |
+| 15 | `common/mod.rs` — retry on the port race | **fixed, and better than asked** — see below |
+| 16 | `span.rs` — the rate parser | **fixed** — `8bd1875` |
+| 17 | `trace_context.rs` — `ff` and forward compatibility | **fixed** — `aa06103` |
+| 18 | `serve.rs` — `--audit-log` unchecked with no artifact | **fixed** — `4aa6883` |
+| 19, 20 | the bench and cookbook self-tests | **fixed** — `f238fd2`, `93e38c7` |
+| 21 | `docs/agent-cookbook.md`'s summary table | **fixed** — `b722ec1` |
+| 22 | `test.rs` — `to_junit`/`to_tap` | **fixed** — `62b5afa` |
+| 23 | `server.rs` — the guest's status drove sampling | **fixed** — `ebc8c98` |
+| 24, 25 | the same `audit_sink`/`guest_handler` finding as #11 | **fixed** — `a83ddd8` |
+
+**24 fixed, 1 dismissed with its measurement.**
+
+### #15 is worth reading as the example, because it was already solved and not by the remedy asked for
+
+The finding wanted `serve_and_request` to *"use `answered` and reject output indicating
+`lost_the_port_race`"*. Both exist — and the file records that **the naive form was measured and
+rejected**:
+
+> *"Measured twice: the first condition (`!text.is_empty()`) was inert, the second (`!answered`) broke
+> three files that never see a status line."*
+
+What is there instead is **stronger**: `lost_the_port_race(text)` covers the two signals the output can
+carry, and the retry decision is `should_retry(reached, text)` — where `reached` is a **fact at the call
+site** rather than an inference from a child's logging. The doc says why, and `reap_bounded.rs` tests the
+combination specifically, including *"what would break if `should_retry` were reduced to
+`lost_the_port_race` again"*.
+
+> **A finding's remedy is a hypothesis like everything else.** Here the substance was already in the
+> tree, implemented with a better signal, and the finding's own suggestion had been tried and rejected
+> **with a measurement** — which is the outcome a review that is taken seriously produces.
+
+### And one lesson this table earns: a disposition table is a derived artefact too
+
+`§O-380`'s table was **true when written**. Nothing regenerated it, nothing checked it, and it silently
+became false as the work landed — **the same failure as the cookbook's summary table (#21) and the
+checklist's `DOD-006` (#10)**. A dated table with no re-derivation behind it is a claim with no owner.
+
+### Measured
+
+All 25 accounted for; `check_xrefs`, `check_doc_claims`, `check_corpus_at_rest` and the checklist
+counters pass with this entry in place.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

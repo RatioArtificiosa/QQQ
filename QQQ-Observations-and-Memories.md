@@ -29240,9 +29240,14 @@ A step I added read:
           python tools/run_conformance.py --list > /dev/null
 ```
 
-`ci.yml`'s shell **is bash**, so `> /dev/null` is correct there and **CI was green**. The local gate's
-CI mirror replays those same `run:` lines **under `cmd.exe`**, where `> /dev/null` is a redirection to a
-file called `\dev\null` — and the gate reported:
+`ci.yml`'s shell is **bash on Linux and macOS and PowerShell on Windows** — a detail this note got
+wrong in its first version, which said *"CI was green"*. Measured on the run for the commit that
+introduced it: **`Rust (windows-latest)` FAILED, at step 14, "the conformance suite runs as a tool, not
+only as a test (TEST-016)"** — the step this note is about — while ubuntu and macOS passed. So the
+bash-ism was red in **CI as well**, on one platform of three, and the local gate's CI mirror, which
+replays those same `run:` lines **under `cmd.exe`**, is the other place it broke.
+
+**Three shells evaluate one `run:` block, and the block is green in two of them.**
 
 ```text
 OK   python tools/run_conformance.py

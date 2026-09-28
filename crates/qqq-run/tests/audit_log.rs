@@ -68,7 +68,7 @@ fn write_record(path: &Path) {
         "handle_request",
         Outcome::Denied,
     );
-    let mut sink = AuditFile::open(path).expect("open");
+    let mut sink = AuditFile::open(path, 0).expect("open");
     for record in stream.records() {
         sink.append(record).expect("append");
     }

@@ -29356,4 +29356,71 @@ citations **1244 → 1243** (the removed stale note) · corpus re-recorded.
 
 ---
 
+## §O-381 — The audit file held the last record of the stream rather than the records of the call
+
+**Found:** by CodeRabbit, as **finding #12 — the only `critical`** — and fixed this round.
+**Anchors:** `crates/qqq-run/src/guest_handler.rs`, `crates/qqq-host/src/audit_sink.rs`.
+
+### The defect
+
+```rust
+if let Some(record) = stream.records().last() {   // the last record in the STREAM
+    file.append(record)
+}
+```
+
+That is the last record in the **stream**, not the records **this call appended**. Three lines above it
+the code's own comment says the write happens inside the block *"so the record written is the record
+appended"* — **and the code did not do that.** A guest call that appends more than one record — an
+`ambient::require` during the call is the case the review names — had every record but the last
+**silently dropped from the evidence file**, so the file disagreed with the stream it came from. That
+is the failure the comment exists to prevent.
+
+### Why every existing test missed it
+
+**Because they all append exactly one record per call, and with one record the two behaviours are
+indistinguishable.** A module with this much audit coverage had nothing to say about the case where
+they differ — and the review found it by reading, not by running.
+
+> **A test suite measures what its fixtures vary. This one never varied the count.**
+
+### The fix, and the shape of it
+
+`AuditFile` now carries **how many records it holds**, and `AuditFile::open` is **told** rather than
+counting, because it is opened for *append* and the loader has already parsed every line — one source
+of truth instead of two. `append` advances the count **only on a successful write**, so a failed write
+is retried rather than skipped. The handler then persists
+`records.iter().skip(file.records())` under the same lock that appends.
+
+**The lock is the point.** A position remembered in the handler would have to be read and advanced
+under the same lock to be correct, and it would still be a second counter that could drift from the
+file it describes. Reading the **file's** count under the lock makes interleaved requests safe by
+construction.
+
+### The injection reproduces it exactly
+
+Restoring the old behaviour — `skip(records.len().saturating_sub(1))` — makes the new test fail, and the
+failure message is the defect in one line:
+
+```text
+assertion `left == right` failed: the file must hold all three, not only the last:
+{"sequence":3,…}          <- ONE record, not three
+```
+
+Restore **byte-identical** (`430b1e2c…`), `cargo fmt --all -- --check` exits **0**.
+
+### And the review was worth running on a module with its own audit trail
+
+`§O-380` recorded that the twenty deferred findings were *classed, not dismissed*. This is the first of
+them turned into a fix, and it is the one the review ranked **highest** — in the path the goal's Phase 1
+is about, on a module whose own comments describe the invariant that the code violated.
+
+### Measured
+
+`AuditFile` gains a field and a `records()` accessor · `open` **10 call sites** updated across three
+files (one of them missed by the first pattern, because it passed `path` rather than `&path`) ·
+`Cargo check` **0** · the new test **1 passed**, and **1 failed** under injection · `FMT=0`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

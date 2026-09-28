@@ -416,22 +416,48 @@ impl GuestApp {
             if let (Some(file), qqq_host::Append::Recorded(_)) =
                 (self.audit_file.as_ref(), appended)
             {
-                let mut file = file
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(record) = stream.records().last() {
-                    // A failed persist is reported rather than swallowed. The alternative --
-                    // continuing to serve while the evidence file silently stops growing -- is
-                    // the "control that reports healthy while measuring nothing" this whole
-                    // module exists against.
-                    if let Err(e) = file.append(record) {
-                        eprintln!("error: the capability audit record could not be persisted: {e}");
-                    }
-                }
+                Self::persist_pending(file, stream.records());
             }
         }
 
         Ok(to_served(&outcome?))
+    }
+
+    /// Persist every record the file does not already hold -- **finding #12 of CodeRabbit's review**.
+    ///
+    /// # The defect this replaces, and why it was `critical`
+    ///
+    /// It appended `stream.records().last()`. That is the last record in the **stream**, not the records
+    /// **this call appended**. Three lines above the old code a comment says the write happens inside the
+    /// same block *"so the record written is the record appended"* -- and the code did not do that. A guest
+    /// call that appends more than one record (an `ambient::require` during the call is the case the
+    /// review names) had every record but the last **silently dropped from the evidence file**, so the
+    /// file disagreed with the stream it came from. That is the failure the comment exists to prevent, and
+    /// it is why the review is worth running even on a module with an audit trail of its own.
+    ///
+    /// # Why it takes a slice and skips by the file's own count
+    ///
+    /// Because two requests interleave, so the position must be read **under the lock that appends**, and
+    /// it must be the **file's** count rather than a second counter that could drift from the file it
+    /// describes. `file.records()` is that count, and `append` advances it only on a successful write, so
+    /// a failed write is retried rather than skipped.
+    ///
+    /// # Why a failed persist is reported rather than swallowed
+    ///
+    /// The alternative -- continuing to serve while the evidence file silently stops growing -- is the
+    /// "control that reports healthy while measuring nothing" this module exists against.
+    fn persist_pending(
+        file: &std::sync::Mutex<qqq_host::audit_sink::AuditFile>,
+        records: &[qqq_host::audit::AuditRecord],
+    ) {
+        let mut file = file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for record in records.iter().skip(file.records()) {
+            if let Err(e) = file.append(record) {
+                eprintln!("error: the capability audit record could not be persisted: {e}");
+            }
+        }
     }
 
     /// Create an instance for `request`, call the guest, and return its answer.
@@ -540,12 +566,13 @@ impl GuestApp {
             );
         }
 
-        let file = qqq_host::audit_sink::AuditFile::open(path).map_err(|e| {
-            Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
+        let file =
+            qqq_host::audit_sink::AuditFile::open(path, loaded.records.len()).map_err(|e| {
+                Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
                 "point `--audit-log` at a writable path, or remove the flag to keep the record in \
                  memory only",
             )
-        })?;
+            })?;
 
         self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
         self.audit_file = Some(std::sync::Mutex::new(file));
@@ -887,6 +914,81 @@ mod tests {
             "the replayed chain must verify: {replay:?}",
             replay = replay.verify_chain().err()
         );
+    }
+
+    /// **Every record the file lacks is persisted -- not only the last one.** CodeRabbit finding #12.
+    ///
+    /// # Why this test could not have passed before the fix, and why the defect survived
+    ///
+    /// The code appended `stream.records().last()`. With **one** record appended per call the two
+    /// behaviours are indistinguishable -- and every existing test appends one -- so a module with
+    /// this much audit coverage had nothing to say about it. **Three** records make them differ by
+    /// two, which is the whole test.
+    ///
+    /// The review called it `critical`, and the reason is in the code's own comment three lines above
+    /// where the bug was: the write happens inside the block *"so the record written is the record
+    /// appended"*. It was not. An evidence file that holds a subset of the stream it came from cannot
+    /// answer the only question it exists to answer.
+    #[test]
+    fn persist_pending_writes_every_record_the_file_lacks() {
+        let dir = std::env::temp_dir().join(format!("qqq-cr12-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+
+        let mut stream = qqq_host::audit::AuditStream::with_default_capacity();
+        let component = qqq_host::tenant::ComponentDigest::new("0011223344556677").expect("digest");
+        let grants = qqq_host::tenant::GrantDigest::new("aabbccdd").expect("digest");
+        for outcome in [
+            qqq_host::audit::Outcome::Granted,
+            qqq_host::audit::Outcome::Denied,
+            qqq_host::audit::Outcome::Granted,
+        ] {
+            let _ = stream.record(
+                None,
+                &component,
+                &grants,
+                qqq_cap::capability::Capability::HttpServer,
+                "handle_request",
+                outcome,
+            );
+        }
+        assert_eq!(
+            stream.records().len(),
+            3,
+            "three records, so the last is not the whole"
+        );
+
+        let file = qqq_host::audit_sink::AuditFile::open(&path, 0).expect("open");
+        let held = std::sync::Mutex::new(file);
+        GuestApp::persist_pending(&held, stream.records());
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            text.lines().count(),
+            3,
+            "the file must hold all three, not only the last: {text}"
+        );
+        assert_eq!(
+            held.lock().expect("lock").records(),
+            3,
+            "and the file must know how many it holds, or the next call re-appends them"
+        );
+
+        // A second call with nothing new writes nothing: the position is the FILE's count, read
+        // under the same lock that appends, so two interleaved requests cannot both think they are
+        // behind.
+        GuestApp::persist_pending(&held, stream.records());
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .lines()
+                .count(),
+            3,
+            "a call with nothing new must not duplicate what is already there"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The record is persisted, and a second process continues the chain — `OBS-002`.**

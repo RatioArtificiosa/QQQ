@@ -61,7 +61,7 @@
 //! let (mut first, _) = resume_or_start(&path, 1024).expect("fresh start");
 //! assert!(first.is_empty());
 //! let _ = first.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
-//! let mut file = AuditFile::open(&path).expect("open");
+//! let mut file = AuditFile::open(&path, 0).expect("open");
 //! file.append(&first.records()[0]).expect("append");
 //! drop(file);
 //!
@@ -268,7 +268,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
 /// std::fs::create_dir_all(&dir).expect("scratch");
 /// let path = dir.join("audit.jsonl");
 ///
-/// let mut file = AuditFile::open(&path).expect("open");
+/// let mut file = AuditFile::open(&path, 0).expect("open");
 /// file.append(&stream.records()[0]).expect("append");
 /// drop(file);
 ///
@@ -279,6 +279,15 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
 pub struct AuditFile {
     path: PathBuf,
     file: File,
+    /// How many records the file already holds.
+    ///
+    /// # Why the opener is TOLD this rather than counting it
+    ///
+    /// Because counting means reading the file, and this is opened for **append**. The loader has
+    /// already parsed every line, so it knows; asking it to say so is one source of truth instead of
+    /// two. It is what lets a caller append *"everything after what the file has"* without a second
+    /// counter that could drift from the file it describes.
+    records: usize,
 }
 
 impl AuditFile {
@@ -298,12 +307,15 @@ impl AuditFile {
     ///
     /// let dir = std::env::temp_dir().join(format!("qqq-open-doc-{}", std::process::id()));
     /// let path = dir.join("nested").join("audit.jsonl");
-    /// let file = AuditFile::open(&path).expect("the directory is created");
+    /// let file = AuditFile::open(&path, 0).expect("the directory is created");
     /// assert!(path.exists());
+    /// assert_eq!(file.records(), 0, "a fresh file holds nothing");
     /// drop(file);
     /// let _ = std::fs::remove_dir_all(&dir);
     /// ```
-    pub fn open(path: &Path) -> Result<Self, SinkError> {
+    ///
+    /// `already` is how many records the file holds, which the **loader** measured; see the field.
+    pub fn open(path: &Path, already: usize) -> Result<Self, SinkError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| SinkError::Io {
@@ -323,6 +335,7 @@ impl AuditFile {
         Ok(Self {
             path: path.to_path_buf(),
             file,
+            records: already,
         })
     }
 
@@ -361,7 +374,7 @@ impl AuditFile {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     ///
-    /// let mut file = AuditFile::open(&path).expect("open");
+    /// let mut file = AuditFile::open(&path, 0).expect("open");
     /// file.append(&stream.records()[0]).expect("append");
     /// drop(file);
     ///
@@ -376,7 +389,20 @@ impl AuditFile {
         self.file.flush().map_err(|e| SinkError::Io {
             path: self.path.clone(),
             reason: e.to_string(),
-        })
+        })?;
+        // Only a SUCCESSFUL write advances the count. A failed one leaves the position where it was,
+        // so the next attempt retries that record rather than skipping it -- an evidence file that
+        // silently skips a row is worse than one that stops.
+        self.records += 1;
+        Ok(())
+    }
+
+    /// How many records this file holds.
+    ///
+    /// A caller appends `records().iter().skip(file.records())` -- everything the file does not have.
+    #[must_use]
+    pub fn records(&self) -> usize {
+        self.records
     }
 
     /// The path this sink writes to.
@@ -424,7 +450,7 @@ impl AuditFile {
 /// let component = ComponentDigest::new("0011223344556677").expect("digest");
 /// let grants = GrantDigest::new("aabbccdd").expect("digest");
 /// let _ = first.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
-/// let mut file = AuditFile::open(&path).expect("open");
+/// let mut file = AuditFile::open(&path, 0).expect("open");
 /// file.append(&first.records()[0]).expect("append");
 /// drop(file);
 ///
@@ -500,7 +526,7 @@ mod tests {
         append(&mut stream, Outcome::Granted);
         append(&mut stream, Outcome::Denied);
 
-        let mut sink = AuditFile::open(&path).expect("open");
+        let mut sink = AuditFile::open(&path, 0).expect("open");
         for record in stream.records() {
             sink.append(record).expect("append");
         }
@@ -533,7 +559,7 @@ mod tests {
         append(&mut first, Outcome::Granted);
         let head_before = first.head().to_owned();
         {
-            let mut sink = AuditFile::open(&path).expect("open");
+            let mut sink = AuditFile::open(&path, 0).expect("open");
             for record in first.records() {
                 sink.append(record).expect("append");
             }
@@ -583,7 +609,7 @@ mod tests {
 
         let mut stream = AuditStream::with_default_capacity();
         append(&mut stream, Outcome::Granted);
-        let mut sink = AuditFile::open(&path).expect("open");
+        let mut sink = AuditFile::open(&path, 0).expect("open");
         sink.append(&stream.records()[0]).expect("append");
         drop(sink);
 
@@ -689,7 +715,7 @@ mod tests {
         let mut stream = AuditStream::with_default_capacity();
         append(&mut stream, Outcome::Granted);
         append(&mut stream, Outcome::Granted);
-        let mut sink = AuditFile::open(&path).expect("open");
+        let mut sink = AuditFile::open(&path, 0).expect("open");
         for record in stream.records() {
             sink.append(record).expect("append");
         }

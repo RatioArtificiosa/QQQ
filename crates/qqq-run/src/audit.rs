@@ -237,10 +237,14 @@ impl AuditReport {
 }
 
 /// Every rule the audit can emit, for the SARIF `rules` array and the docs.
-pub const RULES: [RuleInfo; 5] = [
+pub const RULES: [RuleInfo; 6] = [
     RuleInfo {
         id: "qqq/exposed-posture",
         summary: "The grant set can write or reach the network",
+    },
+    RuleInfo {
+        id: "qqq/unused-grant",
+        summary: "A capability is granted that the artifact does not import",
     },
     RuleInfo {
         id: "qqq/limits-at-default",
@@ -305,6 +309,7 @@ pub fn audit(loaded: &LoadedManifest, lock: Option<&qqq_pkg::lock::Lockfile>) ->
     findings.extend(limits_at_default(loaded));
     findings.extend(provenance(lock));
     findings.extend(supply_chain(lock));
+    findings.extend(unused_grants(loaded));
 
     // Severity descending, then by rule and message, so two runs of the same
     // project produce identical output -- which is what makes a SARIF baseline
@@ -320,6 +325,86 @@ pub fn audit(loaded: &LoadedManifest, lock: Option<&qqq_pkg::lock::Lockfile>) ->
         project: loaded.name().to_owned(),
         findings,
     }
+}
+
+/// The unused-grant question: does the manifest grant something the artifact cannot import?
+///
+/// # Why this is a warning and not an error
+///
+/// Because granting ahead of the code is **legitimate**. A general application may grant a capability
+/// whose code path is not written yet, and refusing to build for that would be wrong. What is not
+/// legitimate is a grant nothing can *ever* exercise -- an **inert grant** -- because the linker is
+/// built from the grant set alone: the model is *absent, not denied*, so a capability the guest
+/// cannot import is surface it should not hold.
+///
+/// The reference application takes the stronger position for itself (`LANG-005` asserts its grants
+/// and its imports are **equal in both directions**), and that is right for a reference application
+/// precisely because it is the file a reader is invited to copy. This rule states the weaker,
+/// general claim, which is the one that is true for every project.
+///
+/// # Why it needs the artifact, and what it does without one
+///
+/// The manifest says what is **granted**; only the artifact says what is **imported**. So this reads
+/// the staged artifact `build` writes -- `target/qqq/<name>.component.wasm` -- and reports **nothing**
+/// when it is absent, rather than guessing from the source. Guessing would be a second opinion about
+/// what the build produces, and this repository has already paid for that once: a checker that reads
+/// a different language than the code writes measures something else (`§O-361`, `§O-374`).
+///
+/// # Why the predicate is a separate function
+///
+/// Because it has to be **provable without a build**. This module already records the lesson -- *"a
+/// rule that cannot fire is worse than no rule, because it reads as coverage"* -- and the way to
+/// avoid repeating it is to make the predicate pure and test it directly.
+fn unused_grants(loaded: &LoadedManifest) -> Vec<Finding> {
+    let project_dir = loaded
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let artifact = project_dir
+        .join("target")
+        .join("qqq")
+        .join(format!("{}.component.wasm", loaded.name()));
+
+    let Ok(report) = crate::commands::inspect_artifact(&artifact) else {
+        return Vec::new();
+    };
+    let required: std::collections::BTreeSet<&str> =
+        report.required.iter().map(|c| c.name.as_str()).collect();
+
+    let resolution = qqq_cap::resolve::Resolution::from_manifest(&loaded.manifest);
+    unused_grants_from(&resolution.grants.capabilities(), &required)
+}
+
+/// The pure predicate: which grants the artifact does not import.
+///
+/// Split out so a test can call it with both sets in hand. [`unused_grants`] is the only caller that
+/// reads a file.
+fn unused_grants_from(
+    granted: &[qqq_cap::Capability],
+    required: &std::collections::BTreeSet<&str>,
+) -> Vec<Finding> {
+    let mut unused: Vec<&str> = granted
+        .iter()
+        .map(|c| c.name())
+        .filter(|name| !required.contains(name))
+        .collect();
+    unused.sort_unstable();
+    unused.dedup();
+
+    if unused.is_empty() {
+        return Vec::new();
+    }
+
+    vec![Finding::new(
+        "qqq/unused-grant",
+        Severity::Warning,
+        format!(
+            "{} capability(ies) are granted and never imported: {}",
+            unused.len(),
+            unused.join(", ")
+        ),
+        "remove them from `[capabilities]` in qqq.toml, or add the import that uses them; an inert grant is an over-grant, because the linker is built from the grant set alone",
+    )]
 }
 
 /// The exposure question: can this component write or reach the network?
@@ -741,6 +826,65 @@ mod tests {
                           epoch_deadline_ms = 2500\n";
 
     // -- Severity ---------------------------------------------------------
+
+    /// The pure predicate fires when a grant is not imported, and is silent when they agree.
+    ///
+    /// # Why this test is written against the predicate and not through `audit`
+    ///
+    /// Because `audit` needs a built artifact to have anything to compare, and a test that built one
+    /// would be testing `build` as much as this rule. The predicate is the rule; the wrapper is a
+    /// file lookup, and it has its own test below.
+    #[test]
+    fn an_inert_grant_is_reported_and_a_used_one_is_not() {
+        use qqq_cap::Capability;
+
+        let granted = [Capability::HttpServer, Capability::ClockWall];
+
+        // Neither is imported: both are inert, and both are named.
+        let none: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let fired = unused_grants_from(&granted, &none);
+        assert_eq!(fired.len(), 1, "one finding, naming both");
+        assert_eq!(fired[0].rule, "qqq/unused-grant");
+        assert!(
+            fired[0].message.contains("http.server"),
+            "{}",
+            fired[0].message
+        );
+        assert!(
+            fired[0].message.contains("clock.wall"),
+            "{}",
+            fired[0].message
+        );
+
+        // One of the two is imported: only the other is reported.
+        let one: std::collections::BTreeSet<&str> = ["http.server"].into_iter().collect();
+        let fired = unused_grants_from(&granted, &one);
+        assert_eq!(fired.len(), 1);
+        assert!(
+            !fired[0].message.contains("http.server"),
+            "{}",
+            fired[0].message
+        );
+        assert!(
+            fired[0].message.contains("clock.wall"),
+            "{}",
+            fired[0].message
+        );
+
+        // Both are imported: silent. This is the direction that makes the rule usable -- a rule that
+        // fired on a correct project would be turned off within a day.
+        let both: std::collections::BTreeSet<&str> =
+            ["http.server", "clock.wall"].into_iter().collect();
+        assert!(unused_grants_from(&granted, &both).is_empty());
+    }
+
+    /// With no built artifact the rule reports **nothing**, rather than guessing from the source.
+    #[test]
+    fn without_an_artifact_the_rule_is_silent() {
+        let loaded = loaded(MINIMAL);
+        // The test's working directory has no `target/qqq/`, so the wrapper returns early.
+        assert!(unused_grants(&loaded).is_empty());
+    }
 
     #[test]
     fn severities_order_from_note_to_error() {

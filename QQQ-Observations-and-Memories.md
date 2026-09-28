@@ -28895,4 +28895,67 @@ construction sites outside the enum declaration: **43 of 43** · the declaration
 
 ---
 
+## §O-375 — The audit module already knew a rule that cannot fire is worse than no rule, and this is that lesson applied
+
+**Found:** implementing `TEST-015`, the unused-capability detector. **Anchors:**
+`crates/qqq-run/src/audit.rs`, `docs/agent-cookbook.md`, `§O-368`, `§O-372`.
+
+### The rule, and the decision inside it
+
+`qqq/unused-grant` is the sixth audit rule: **a capability is granted that the artifact does not
+import**. It is a **warning, not an error**, and that is the interesting part.
+
+Granting ahead of the code is **legitimate** — a general application may grant a capability whose code
+path is not written yet, and refusing to build for that would be wrong. What is not legitimate is a
+grant nothing can **ever** exercise. The reference application takes the stronger position for itself
+(`LANG-005` asserts its grants and imports are **equal in both directions**), and that is right for
+the file a reader is invited to copy. **This rule states the weaker claim, which is the one that is
+true for every project** — and getting that boundary wrong in either direction would have made the
+rule either useless or unusable.
+
+### The module had already paid for this lesson
+
+`audit.rs` records it in its own words, about three rules that were removed:
+
+> *"**A rule that cannot fire is worse than no rule, because it reads as coverage** … a checker written
+> from a document describes what a reader imagines can go wrong; only running it against the real
+> types reveals what the system already prevents."*
+
+So this rule was built **with the lesson applied rather than rediscovered**:
+
+* **The predicate and the plumbing are separate functions.** `unused_grants_from(granted, required)`
+  is **pure**; `unused_grants(loaded)` reads the artifact and calls it. The pure half is provable
+  **without a build**, which is the only way to test a rule whose real input is a compiled component.
+* **The wrapper reports nothing without an artifact**, rather than guessing from the source. Guessing
+  would be a second opinion about what the build produces — `§O-361` and `§O-374` in one sentence.
+
+### Proved to fire three ways, because "it compiles" is not evidence
+
+| | Evidence |
+|---|---|
+| **Unit** | an inert grant is reported, a used one is not, and a correct project is **silent** — a rule that fired on correct code would be turned off within a day |
+| **Injected** | the filter made inert → the test **FAILS** with `assertion left == right failed: one finding, naming both`; restore **byte-identical**, verified against a hash recorded beforehand (`§O-373`) |
+| **End to end** | the rebuilt CLI on a scaffolded `http` project: **no** `qqq/unused-grant`; the same project plus `[capabilities.clock] wall = true`: `[warning] qqq/unused-grant  1 capability(ies) are granted and never imported: clock.wall` |
+
+**The third one is the one that matters**, and it needed a **control**. A rule proved only to fire is
+half-proved: the control is the same project with no inert grant, and it is silent. Without it, a rule
+that fired on everything would pass.
+
+### And the class it closes
+
+This is the third round in a row where the same shape appeared: `§O-368` found a manifest claiming
+three load-bearing grants where only one was imported; `§O-372` found nine capability packages
+declared and unbound; this turns the first into a **rule the product runs**, so the next project that
+grants an inert capability finds out from `qqqai audit` rather than from a reviewer.
+
+**A finding is worth more than a fix when the fix was for one instance of a class.**
+
+### Measured
+
+`RULES` **5 → 6** · audit lib tests **31 passed / 0 failed** · injection: **1 failed** as asserted,
+restore **byte-identical** (`4b8d5058…`) · end-to-end **control silent, case fires** · checklist
+citations **1219**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

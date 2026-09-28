@@ -928,6 +928,24 @@ pub fn serve_stdio<R: BufRead, W: Write>(
     Ok(())
 }
 
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// **Bound one accepted exchange**, so a client that never finishes cannot hold the loop.
+///
+/// # Why this is a function rather than two lines in the loop
+///
+/// Because two lines in a loop can only be tested by running a server for thirty seconds. `TcpStream`
+/// exposes what was set, so pulling them out makes the rule checkable directly -- and the loop still
+/// calls it, so the rule and the path cannot drift apart. **`§O-376`: a test of the predicate is not a
+/// test of the path**, which is why the measurement in `§O-394` is kept beside this.
+fn bound(stream: &std::net::TcpStream) {
+    // Without this a client that connects and sends nothing stalls every later client: the loop is
+    // sequential and the reads block. *"One bad client, not a dead server"* is true of a connection
+    // that FAILS and false of one that never FINISHES, which is what this makes true.
+    let _ = stream.set_read_timeout(Some(HTTP_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(HTTP_TIMEOUT));
+}
+
 /// The HTTP transport — `AGENT-005`.
 ///
 /// # The shape, and why it is this one
@@ -998,6 +1016,21 @@ pub fn serve_stdio<R: BufRead, W: Write>(
 ///
 /// Because the two transports serve the **same** protocol, and a tool that shells out must behave
 /// identically on both — the same reason `answer` is shared rather than written twice. See `§O-351`.
+/// How long one HTTP exchange may take before the transport gives up on it.
+///
+/// # Why a timeout is not optional here
+///
+/// The accept loop below is **sequential**, and `handle_http` blocks on `read_line`. `TcpStream`
+/// defaults to **no timeout**, so a client that connects and sends nothing holds the loop and every
+/// later client waits behind it -- the comment about *"one bad client, not a dead server"* is true of a
+/// connection that **fails** and false of one that never **finishes**.
+///
+/// # Why thirty seconds, and what it costs
+///
+/// A tool call may shell out to `qqqai`, so the write side has to tolerate a slow command; thirty
+/// seconds is comfortably longer than any first-party tool call measured here and short enough that a
+/// stuck client cannot pin the transport. **A tool that legitimately needs longer than this would be
+/// cut off**, which is the honest cost of the bound rather than a hidden one.
 pub fn serve_http(addr: &str, cli: Option<&Path>) -> std::io::Result<()> {
     let listener = std::net::TcpListener::bind(addr)?;
     // **ANNOUNCE THE BOUND ADDRESS.** `127.0.0.1:0` asks the OS for any free port, and a caller has no
@@ -1008,7 +1041,7 @@ pub fn serve_http(addr: &str, cli: Option<&Path>) -> std::io::Result<()> {
     }
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        // A connection that fails mid-exchange is one bad client, not a dead server.
+        bound(&stream);
         let _ = handle_http(&mut stream, cli);
     }
     Ok(())
@@ -1320,5 +1353,51 @@ mod tests {
                 .is_some_and(|c| c > 0),
             "and they still carry their answer: {reply}"
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    /// **An accepted stream carries both timeouts** -- `CodeRabbit` finding #8.
+    ///
+    /// # What this proves, and what it does not
+    ///
+    /// It proves `bound` sets both, by reading them back -- which is the whole reason the two lines
+    /// were pulled out of the loop. It does **not** prove the loop calls `bound`, and a test cannot:
+    /// that is the path, and the evidence for it is the measurement in `§O-394`, where an idle client
+    /// was dropped at the timeout and the next client was served in 28.0 s.
+    ///
+    /// **Neither stands in for the other** (`§O-376`).
+    #[test]
+    fn an_accepted_stream_is_bounded_in_both_directions() {
+        // A real socket, because the getters read what the socket actually holds.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        let client = std::net::TcpStream::connect(addr).expect("connect to our own listener");
+        let (server, _) = listener.accept().expect("accept our own connection");
+
+        // The default is the defect: unbounded.
+        assert_eq!(
+            server.read_timeout().expect("read_timeout is readable"),
+            None,
+            "a fresh `TcpStream` has no read timeout -- that is what finding #8 was"
+        );
+
+        bound(&server);
+
+        assert_eq!(
+            server.read_timeout().expect("read_timeout is readable"),
+            Some(HTTP_TIMEOUT),
+            "`bound` must set the read timeout"
+        );
+        assert_eq!(
+            server.write_timeout().expect("write_timeout is readable"),
+            Some(HTTP_TIMEOUT),
+            "`bound` must set the write timeout"
+        );
+
+        drop(client);
     }
 }

@@ -28738,4 +28738,86 @@ import) · probe **BUILD=0** · resolvers **11 → 12**, claims checked **9 → 
 
 ---
 
+## §O-373 — The catalogue certifies 43 error codes, and ten of them are emitted by nothing
+
+**Found:** writing the agent cookbook (`AGENT-024`), which asks for *"a minimal reproducer for every
+error code"*. **Anchors:** `docs/agent-cookbook.md`, `tools/check_agent_cookbook.py`,
+`tools/check_error_catalogue.py`, `docs/errors.md`.
+
+### The item cannot be satisfied the way it reads, and measuring that is the finding
+
+`check_error_catalogue.py` reports:
+
+```text
+ERROR CATALOGUE OK -- 43 code(s), every one with a cause and a remediation
+```
+
+**That is completeness of DOCUMENTATION, not of BEHAVIOUR.** Nothing checked that a code can be
+**produced**. Measuring it — by running the CLI against twenty malformed inputs and by searching the
+tree — gives four kinds:
+
+| Kind | Count | Predicate |
+|---|---|---|
+| `cli` | **5** | a command reproduces it |
+| `test` | **10** | a test names it |
+| `src` | **18** | raised in `src`, **no test reproduces it** |
+| `unreachable` | **10** | named **nowhere** in the Rust tree |
+
+**An agent debugging from a shell will see at most five of the forty-three codes it can read about.**
+
+### The ten that cannot happen
+
+`QQQ-2003`, `QQQ-2006`, `QQQ-4001`, `QQQ-4002`, `QQQ-4005`, `QQQ-5005`, `QQQ-5007`, `QQQ-7002`,
+`QQQ-7003`, `QQQ-7004` — **published in the catalogue and named nowhere in the tree.** No command, no
+test and no guest can produce them.
+
+`QQQ-4001` (`CapabilityOutOfScope`) is the interesting one: it may be **unneeded rather than
+unimplemented**, because the design makes an out-of-scope reach impossible by construction — *absent,
+not denied*. **A code that documents an impossible state is not a gap to fill; it is a line to
+delete**, and the catalogue is generated, so deleting it is cheap.
+
+### Two codes are emitted for the wrong class
+
+```text
+$ qqqai build --nonsense-flag   ->  QQQ-7001  McpArgumentInvalid
+$ qqqai migrate                 ->  QQQ-6004  InternalInvariantViolated
+```
+
+`QQQ-7004` (`CliFlagUnknown`) is the code that **should** fire for a CLI typo, and it fires for
+nothing. `QQQ-6004` tells a reader the host found a broken invariant, when what happened is that a
+command is not implemented. **Both send a reader to the wrong page of the catalogue** — which is the
+one thing an error code exists to prevent.
+
+### The guard, and the two things it does that the repository had not done
+
+* **A negative predicate.** `unreachable` is verified by asserting the code is named **nowhere**. Every
+  other check in this repository asserts a presence; this one asserts an **absence**, and an absence
+  is the only thing that keeps *"nothing emits this"* from rotting into a comfortable lie.
+* **A claim verified by running it.** The five `cli` reproducers are **executed** and must print their
+  code. The checker owns the executable table, the page owns the readable one, and it asserts the two
+  sets are **equal**, so neither can drift.
+
+All three predicates were fault-injected — moving an `unreachable` code into the `test` table, calling
+a reachable code unreachable, and pointing a `cli` reproducer at a command that emits nothing — and
+each fails with **exactly one** problem.
+
+### And an injector that could not restore, which is worse than no injector
+
+The first injection run left the page **spliced**: the restore's marker was a **prefix** of a table
+row, so it inserted a row in the middle of another one instead of restoring it. Then a second attempt
+threw **before** undoing anything, leaving three injections applied. Both were repaired and verified
+against hashes recorded beforehand, and the final state is **byte-identical** to the clean one.
+
+**The lesson is not "be careful with text"** — it is that `verify-restored` must compare a **hash
+against a value recorded before the injection**, not merely assert that a marker is absent. The
+injector now does; the earlier one asserted the wrong thing and reported `CLEAN` on a spliced table.
+
+### Measured
+
+`cli` **5** · `test` **10** · `src` **18** · `unreachable` **10** · **= 43** · CLI probes **20** →
+**5** distinct codes · three predicates injected, each **1** problem · page and tool restore
+**byte-identical** (sha256) · checker registered in **both** gates, `GATE PARITY OK`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -1155,6 +1155,14 @@ jobs:
         run: python tools/check_doc_claims.py
       - name: prove the doc-claim scanner and resolvers are live
         run: python tools/check_doc_claims.py --self-test
+      # AGENT-024. The catalogue is checked for documentation completeness -- every code has a
+      # cause and a remediation. NOTHING checked that a code can be PRODUCED, and this is what
+      # found that ten of the 43 are emitted by nothing in the tree. The `cli` half runs the
+      # reproducers; the static half needs only the tree and always runs.
+      - name: every error code is classified, and the runnable ones are run (AGENT-024)
+        run: python tools/check_agent_cookbook.py
+      - name: prove the cookbook classifier and its negative predicate are live
+        run: python tools/check_agent_cookbook.py --self-test
 
       # `§O-364`. `include_str!` is a **compile-time dependency on a file**, and the production
       # image copies an allowlist. The scaffold embedded `rust-toolchain.toml`, the file was not on

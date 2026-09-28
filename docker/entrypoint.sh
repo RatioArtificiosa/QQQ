@@ -1007,6 +1007,11 @@ cmd_checks() {
     # always run.
     python3 tools/check_doc_claims.py
     python3 tools/check_doc_claims.py --self-test
+    # AGENT-024. The `cli` half needs a built qqqai, which this image does not have; the checker
+    # says SKIPPED and names the reason rather than passing quietly, and the static half -- the
+    # four classifications, including the negative one -- runs here in full.
+    python3 tools/check_agent_cookbook.py
+    python3 tools/check_agent_cookbook.py --self-test
 
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired

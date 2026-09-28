@@ -210,6 +210,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/agent-cookbook.md",
+        "Every QQQ error code with the reproducer that produces it, or the statement that "
+        "nothing does.",
+        "agent",
+        "contract",
+    ),
+    (
         "docs/recipes/rust.md",
         "Task-oriented Rust recipes for the capabilities the host actually binds, "
         "and the §11.3 recipes that cannot be written yet, with what to do instead.",

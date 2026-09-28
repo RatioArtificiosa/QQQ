@@ -187,10 +187,20 @@ def find_binary() -> pathlib.Path | None:
     # the other; on Linux the native name is absent (named volume) so the fallback still won. A
     # preference is not a filter (`§O-399`).
     name = "qqqai.exe" if os.name == "nt" else "qqqai"
-    for profile in ("debug", "release"):
-        p = ROOT / "target" / profile / name
-        if p.is_file():
-            return p
+    # **`CARGO_TARGET_DIR` is where cargo actually wrote it.** The bridge sets it to `/linux-target`,
+    # because Linux build output lives in a named volume rather than the bind-mounted tree
+    # (`docker/compose.yaml`). Searching only `ROOT / "target"` finds nothing there, and the schema
+    # self-test's runtime case -- which exists precisely so the comparison cannot be silently skipped --
+    # reported "no binary after `cargo build`" for that reason.
+    roots = []
+    if os.environ.get("CARGO_TARGET_DIR"):
+        roots.append(pathlib.Path(os.environ["CARGO_TARGET_DIR"]))
+    roots.append(ROOT / "target")
+    for root in roots:
+        for profile in ("debug", "release"):
+            p = root / profile / name
+            if p.is_file():
+                return p
     return None
 
 

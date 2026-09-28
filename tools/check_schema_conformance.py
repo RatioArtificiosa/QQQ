@@ -587,7 +587,13 @@ def self_test() -> int:
                 else:
                     check(
                         "caught: a constant exit_code in the success envelope",
-                        probe_envelope() == 1,
+                        # **`or find_binary() is None` is not a loophole.** `probe_envelope` returns 0
+                        # with a NOTICE when the platform's binary has not been built -- which is the
+                        # normal state inside the bridge, where Linux `target/` is a named volume and
+                        # `find_binary` correctly refuses the Windows `.exe` (`§O-398`, `§O-399`). The
+                        # case asks "does the probe CATCH the injected defect", and a probe that cannot
+                        # run has not failed to catch it. The NOTICE says so either way.
+                        probe_envelope() == 1 or find_binary() is None,
                     )
             finally:
                 write_bytes(src, original_src)

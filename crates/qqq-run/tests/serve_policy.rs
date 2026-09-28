@@ -108,53 +108,79 @@ impl Drop for Serving {
 /// `AddrInUse`, and the moment it stops holding it the bind succeeds. Nothing is accepted
 /// and nothing is counted.
 fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
-        .args([
-            "serve",
-            "--listen",
-            &format!("127.0.0.1:{port}"),
-            "--accept-limit",
-            &accepts.to_string(),
-        ])
-        .current_dir(&dir.path)
-        .env("HOME", &dir.path)
-        .env("USERPROFILE", &dir.path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("`qqqai serve` must be runnable for {tag}: {e}"));
+    // **A port race is retried, not waited out** -- `CodeRabbit` finding #15, and a CI failure.
+    //
+    // `try_wait` returning a status means the child **exited**. The port is then not ours and never
+    // will be, so the loop below could only spin to its deadline and report *"never bound"*. Measured
+    // on CI: `the_manifest_body_limit_is_enforced_on_a_real_request` failed after **30.06 s** -- the
+    // deadline, not the test -- on a test that has nothing to do with body limits.
+    //
+    // The comment further down already says the child exiting *"is the signal that the port is not
+    // ours"*. This acts on it.
+    const ATTEMPTS: usize = 5;
+    for attempt in 1..=ATTEMPTS {
+        let port = free_port();
+        let child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
+            .args([
+                "serve",
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+                "--accept-limit",
+                &accepts.to_string(),
+            ])
+            .current_dir(&dir.path)
+            .env("HOME", &dir.path)
+            .env("USERPROFILE", &dir.path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("`qqqai serve` must be runnable for {tag}: {e}"));
 
-    // The `Serving` is built *before* the probe, not returned from inside it, so that a
-    // panic on the failure path unwinds through its `Drop`. Built after the probe, that
-    // path dropped a bare `Child` -- and `Child`'s own `Drop` neither kills nor waits, so
-    // a server that never bound left a live process behind on a port the next test then
-    // failed to claim. The `Serving`'s `Drop` owns the child's whole lifetime, which is
-    // also why no `wait()` appears here for `clippy::zombie_processes` to find.
-    let mut serving = Serving { child, port };
+        // The `Serving` is built *before* the probe, not returned from inside it, so that a
+        // panic on the failure path unwinds through its `Drop`. Built after the probe, that
+        // path dropped a bare `Child` -- and `Child`'s own `Drop` neither kills nor waits, so
+        // a server that never bound left a live process behind on a port the next test then
+        // failed to claim. The `Serving`'s `Drop` owns the child's whole lifetime, which is
+        // also why no `wait()` appears here for `clippy::zombie_processes` to find.
+        let mut serving = Serving { child, port };
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        // # Why the child's liveness is checked, not only the port's
-        //
-        // `bind().is_err()` proves *some* process holds the port. It does not prove **ours**
-        // does, and `cargo test` runs test binaries concurrently - so another test's server
-        // holding this port satisfies the probe, this helper returns believing its own server is
-        // up, and the caller writes to a server whose lifecycle it does not own.
-        //
-        // Measured: `a_route_that_does_not_exist_is_a_404_and_not_a_403` panicked at its
-        // `write_all` on two CI platforms, in the same runs that introduced a second test binary
-        // spawning servers. The child exiting is the signal that the port is not ours, and
-        // `try_wait` reads it without consuming the child.
-        if let Ok(Some(_)) = serving.child.try_wait() {
-            continue; // still unwinding: the loop's deadline will report a real failure
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            // # Why the child's liveness is checked, not only the port's
+            //
+            // `bind().is_err()` proves *some* process holds the port. It does not prove **ours**
+            // does, and `cargo test` runs test binaries concurrently - so another test's server
+            // holding this port satisfies the probe, this helper returns believing its own server is
+            // up, and the caller writes to a server whose lifecycle it does not own.
+            //
+            // Measured: `a_route_that_does_not_exist_is_a_404_and_not_a_403` panicked at its
+            // `write_all` on two CI platforms, in the same runs that introduced a second test binary
+            // spawning servers. The child exiting is the signal that the port is not ours, and
+            // `try_wait` reads it without consuming the child.
+            //
+            // # And it is why this BREAKS rather than continues
+            //
+            // A `continue` here would spin to the deadline on a port that can never become ours. The
+            // attempt ends, `serving` drops -- and `Serving`'s `Drop` owns the child's whole lifetime,
+            // which is why the next attempt cannot inherit a stray process on the port it picks.
+            if let Ok(Some(_)) = serving.child.try_wait() {
+                break;
+            }
+            if TcpListener::bind(("127.0.0.1", port)).is_err() {
+                return serving;
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
-        if TcpListener::bind(("127.0.0.1", port)).is_err() {
-            return serving;
-        }
-        std::thread::sleep(Duration::from_millis(25));
+
+        // An `assert!` rather than `if attempt == ATTEMPTS { panic! }`, which `clippy` reads as
+        // `manual_assert` and which the lint gate treats as an error.
+        assert!(
+            attempt != ATTEMPTS,
+            "`qqqai serve` never bound a port for {tag} in {ATTEMPTS} attempt(s); each attempt lost \
+             its port to a race"
+        );
     }
-    panic!("`qqqai serve` never bound 127.0.0.1:{port} for {tag}");
+    unreachable!("the loop returns or panics on its final attempt")
 }
 
 /// Send one raw request and return the raw response.

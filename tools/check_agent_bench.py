@@ -188,13 +188,13 @@ def verify(spec: dict, binary: pathlib.Path, work: pathlib.Path) -> tuple[bool, 
         if build.returncode != 0:
             if msvc_missing(build.stderr):
                 raise EnvironmentCannotCompile("no MSVC environment")
-            return False, f"build failed: {diag(build.stderr)}"
+            return False, f"build failed: {diag(build.stdout + build.stderr)}"
         wasm = project / "target" / "qqq" / f"{spec['project']}.component.wasm"
         if not wasm.is_file():
             return False, f"no artifact at {wasm.relative_to(work)}"
         r = qqqai(binary, ["inspect", str(wasm), "--json"], project)
         if r.returncode != 0:
-            return False, f"inspect failed: {diag(r.stderr)}"
+            return False, f"inspect failed: {diag(r.stdout + r.stderr)}"
         doc = json.loads(r.stdout)
         got = sorted(c["name"] for c in doc.get("data", {}).get("required", []))
         want = sorted(spec["expected"])
@@ -211,10 +211,10 @@ def verify(spec: dict, binary: pathlib.Path, work: pathlib.Path) -> tuple[bool, 
         if build.returncode != 0:
             if msvc_missing(build.stderr):
                 raise EnvironmentCannotCompile("no MSVC environment")
-            return False, f"build failed: {diag(build.stderr)}"
+            return False, f"build failed: {diag(build.stdout + build.stderr)}"
         r = qqqai(binary, ["audit", "--json"], project)
         if r.returncode != 0:
-            return False, f"audit failed: {diag(r.stderr)}"
+            return False, f"audit failed: {diag(r.stdout + r.stderr)}"
         doc = json.loads(r.stdout)
         rules = [f.get("rule") for f in doc.get("data", {}).get("findings", [])]
         if spec["rule"] in rules:

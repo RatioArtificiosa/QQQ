@@ -239,14 +239,29 @@ def run_cli_reproducers(binary: pathlib.Path, problems: list[str]) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def check(*, run_cli: bool = True) -> int:
-    problems: list[str] = []
+def classify(
+    declared: list[str],
+    kinds: dict[str, str],
+    in_tests: dict[str, set[str]],
+    in_src: dict[str, set[str]],
+    cli_reproducers: dict[str, str] | None = None,
+) -> list[str]:
+    """Every static problem `declared`, `kinds` and the Rust tree imply.
 
-    declared = catalogue_codes()
-    kinds = cookbook_kinds()
-    if not declared:
-        print("FAIL -- docs/errors.md declares no codes; a scan of nothing certifies nothing")
-        return 1
+    # Why this is a function rather than the body of `check`
+
+    Because a predicate that is only reachable through `check` can only ever be tested against the
+    **real tree**, and the real tree is well-formed -- so `self_test` could assert that the data is
+    clean and never that the checker would say so about data that is not. **`§O-375`: a rule that
+    cannot fire is worse than no rule.** Taking the four inputs as **parameters** is what lets the
+    self-test hand in a mutated copy and require a problem back.
+
+    `cli_reproducers` defaults to this module's `CLI_REPRODUCERS`, and a caller may pass a different
+    table to ask what the checker would say about a disagreement.
+    """
+    problems: list[str] = []
+    if cli_reproducers is None:
+        cli_reproducers = CLI_REPRODUCERS
 
     # --- completeness, both directions -------------------------------------------------------
     missing = [c for c in declared if c not in kinds]
@@ -257,7 +272,6 @@ def check(*, run_cli: bool = True) -> int:
         problems.append(f"in the cookbook and not in the catalogue: {extra}")
 
     # --- the static predicates ---------------------------------------------------------------
-    in_tests, in_src = rust_tree()
     for code, kind in sorted(kinds.items()):
         if kind == "test" and not in_tests.get(code):
             problems.append(f"{code}: declared `test` and named in no file under crates/*/tests/")
@@ -277,7 +291,28 @@ def check(*, run_cli: bool = True) -> int:
                     f"e.g. {where[0]}"
                 )
 
-    # --- the executable predicate ------------------------------------------------------------
+    # --- the page and the checker cannot disagree about which codes are `cli` -----------------
+    cli_codes = sorted(c for c, k in kinds.items() if k == "cli")
+    if set(cli_codes) != set(cli_reproducers):
+        problems.append(
+            "the page's `cli` set and this checker's executable table differ: "
+            f"page={cli_codes} table={sorted(cli_reproducers)}"
+        )
+
+    return problems
+
+
+def check(*, run_cli: bool = True) -> int:
+    declared = catalogue_codes()
+    kinds = cookbook_kinds()
+    if not declared:
+        print("FAIL -- docs/errors.md declares no codes; a scan of nothing certifies nothing")
+        return 1
+
+    in_tests, in_src = rust_tree()
+    problems = classify(declared, kinds, in_tests, in_src)
+
+    # --- the executable predicate, which is the one part that needs a process -----------------
     ran = 0
     cli_codes = sorted(c for c, k in kinds.items() if k == "cli")
     if cli_codes:
@@ -287,13 +322,6 @@ def check(*, run_cli: bool = True) -> int:
                   "(cargo build -p qqq-run); the static half ran")
         else:
             ran = run_cli_reproducers(binary, problems)
-
-    # --- the page and the checker cannot disagree about which codes are `cli` -----------------
-    if set(cli_codes) != set(CLI_REPRODUCERS):
-        problems.append(
-            "the page's `cli` set and this checker's executable table differ: "
-            f"page={cli_codes} table={sorted(CLI_REPRODUCERS)}"
-        )
 
     counts = {k: sum(1 for v in kinds.values() if v == k) for k in KINDS}
     print(f"catalogue codes      : {len(declared)}")
@@ -312,33 +340,77 @@ def check(*, run_cli: bool = True) -> int:
 
 
 def self_test() -> int:
-    """Prove each predicate fires, by breaking it and watching the check report it."""
+    """Prove each predicate **fires**, by handing the classifier a mutated copy."""
     cases: list[tuple[str, bool, str]] = []
     declared = catalogue_codes()
     kinds = cookbook_kinds()
     in_tests, in_src = rust_tree()
 
+    def copies() -> tuple[list[str], dict[str, str], dict[str, set[str]], dict[str, set[str]]]:
+        # Fresh copies per case, so one mutation cannot leak into the next.
+        return (
+            list(declared),
+            dict(kinds),
+            {k: set(v) for k, v in in_tests.items()},
+            {k: set(v) for k, v in in_src.items()},
+        )
+
+    def fires(name: str, mutate) -> None:
+        """The real data is clean, the mutation is not, and the classifier says so."""
+        d, k, t, s = copies()
+        clean = classify(d, k, t, s)
+        cases.append((f"the real tree is clean ({name} control)", not clean, f"{clean[:1]}"))
+        d, k, t, s = copies()
+        mutate(d, k, t, s)
+        broken = classify(d, k, t, s)
+        cases.append((name, bool(broken), broken[0] if broken else "NO PROBLEM RAISED"))
+
     cases.append(("the catalogue is non-empty", len(declared) == 43, f"{len(declared)}"))
     cases.append(("every declared code is classified", all(c in kinds for c in declared), ""))
 
-    cli_codes = [c for c, k in kinds.items() if k == "cli"]
-    cases.append(("the `cli` set equals the executable table",
-                  set(cli_codes) == set(CLI_REPRODUCERS), f"{sorted(cli_codes)}"))
+    # --- each mutation must produce a problem, and the real tree must not ---------------------
 
-    # A `test`-classified code must be named in a test file -- the predicate the check uses.
-    any_test = next((c for c, k in kinds.items() if k == "test"), None)
-    cases.append(("a `test` code is named in a test file",
-                  bool(any_test) and bool(in_tests.get(any_test)), f"{any_test}"))
+    def an_untested_test_code(d, k, t, s) -> None:
+        code = next(c for c, kind in k.items() if kind == "test")
+        t.pop(code, None)
 
-    # The negative predicate: an `unreachable` code must be named nowhere.
-    unreachable = [c for c, k in kinds.items() if k == "unreachable"]
-    named = [c for c in unreachable if in_src.get(c) or in_tests.get(c)]
-    cases.append(("no `unreachable` code is named in the tree", not named, f"{named}"))
+    fires("a `test` code named in no test file is reported", an_untested_test_code)
 
-    # And the predicate must be able to FIRE: a code that IS named would fail it.
-    reachable = next(iter(in_src), None)
-    cases.append(("the negative predicate would reject a named code",
-                  bool(reachable) and bool(in_src.get(reachable)), f"{reachable}"))
+    def a_src_code_named_by_a_test(d, k, t, s) -> None:
+        code = next(c for c, kind in k.items() if kind == "src")
+        t.setdefault(code, set()).add("crates/qqq-run/tests/injected.rs")
+
+    fires("a `src` code named by a test is reported", a_src_code_named_by_a_test)
+
+    def a_missing_catalogue_code(d, k, t, s) -> None:
+        k.pop(next(c for c in d if c in k), None)
+
+    fires("a catalogue code absent from the cookbook is reported", a_missing_catalogue_code)
+
+    def a_code_not_in_the_catalogue(d, k, t, s) -> None:
+        k["QQQ-9999"] = "src"
+        s["QQQ-9999"] = {"crates/qqq-run/src/injected.rs"}
+
+    fires("a cookbook code absent from the catalogue is reported", a_code_not_in_the_catalogue)
+
+    def an_unreachable_code_that_is_named(d, k, t, s) -> None:
+        # **Synthesised, because the real taxonomy has ZERO `unreachable` codes** -- the first version
+        # of this case did `next(... for kind == "unreachable")` and raised `StopIteration`. That is
+        # itself the reason the case matters: the branch is unexercised by the tree, so only a
+        # constructed input can show it fires. The code is added to the catalogue AND the cookbook so
+        # the completeness predicates stay silent and the `unreachable` one is the problem reported.
+        code = "QQQ-9998"
+        d.append(code)
+        k[code] = "unreachable"
+        s.setdefault(code, set()).add("crates/qqq-run/src/injected.rs")
+
+    fires("an `unreachable` code named in the tree is reported", an_unreachable_code_that_is_named)
+
+    # The one case whose parameter is not the tree: a table that disagrees with the page.
+    d, k, t, s = copies()
+    disagreed = classify(d, k, t, s, cli_reproducers={})
+    cases.append(("the `cli` set disagreeing with the table is reported",
+                  bool(disagreed), disagreed[0] if disagreed else "NO PROBLEM RAISED"))
 
     failed = 0
     print("check_agent_cookbook self-test")
@@ -348,7 +420,7 @@ def self_test() -> int:
     if failed:
         print(f"\nSELF-TEST FAILED -- {failed} case(s) wrong")
         return 1
-    print("\nSELF-TEST PASSED -- every classification is re-derived and the negative one can fire")
+    print("\nSELF-TEST PASSED -- every predicate fires on a mutated copy, and is silent on the real one")
     return 0
 
 

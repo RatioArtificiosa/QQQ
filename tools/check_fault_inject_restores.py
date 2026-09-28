@@ -174,6 +174,34 @@ def verify() -> int:
     print(f"tracked files compared: {len(before)}")
     print("")
     if problems:
+        # **Is the tree actually modified, or is the SNAPSHOT stale?**
+        #
+        # The snapshot lives in `TEMP` so that `git add` cannot take it, and a gate stopped before its
+        # `--verify` leaves it there -- so the next run compares today's tree against an older baseline
+        # and blames every commit since. `git status --porcelain` is empty exactly when the working tree
+        # matches HEAD; if it is empty while the digests disagree, nothing a checker did is on disk, and
+        # the difference is between the SNAPSHOT and the REPOSITORY. Measured in `§O-392`: three files
+        # named, `git status` empty, and the tree at rest.
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if not dirty:
+            print(
+                f"GATE TREE INCONCLUSIVE -- {len(problems)} file(s) differ from the snapshot, but git "
+                "reports the tree CLEAN against HEAD"
+            )
+            for p_ in problems:
+                print(f"  ----  {p_}")
+            print("")
+            print("  A snapshot that predates a commit reports that commit as an unrestored injection.")
+            print("  `--snapshot` must run at the START of THIS gate; a gate stopped early leaves its")
+            print("  snapshot in TEMP, and the next `--verify` compares against the wrong baseline.")
+            return 1
+
         print(f"GATE TREE MODIFIED -- {len(problems)} file(s) the gate changed and did not restore:")
         for p_ in problems:
             print(f"  FAIL  {p_}")

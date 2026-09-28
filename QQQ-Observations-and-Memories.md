@@ -30544,6 +30544,26 @@ checkers green locally after the exclusion fix.
 
 ---
 
+## §O-400 — A checker whose report is broken cannot report, and the artifact it reports on can be stale at the same time
+
+Three defects were found in one chain, and each concealed the next.
+
+**1. The truncation.** `check_agent_bench.py` reported a failure as `{build.stderr.strip()[:120]}`. `[:120]` keeps the **head**, and a compiler puts the **diagnosis last**: cargo's first 120 characters are always `Updating crates.io index / Locking 33 packages / Compiling app v0.1.0`. So every task in the benchmark produced a **byte-identical** message, and the part that differed — the error — was the part that was dropped. **This is `§O-284`'s family — "a `-Last 1` hides a multi-line verdict" — inside a checker whose entire purpose is to report a verdict.** Fixed by keeping both ends with an explicit elision marker.
+
+**2. The stream.** With head and tail both shown, the message was still useless, because the bench read `build.stderr` — where cargo writes its progress **and its `Finished` line** — while `qqqai`'s own diagnosis is on **stdout**, where the envelope goes (`output.rs` prints the JSON envelope and the human rendering to stdout; stderr is reserved for cargo's inherited stream). So the report showed a **successful** compile and gave no reason for the failure. **Two independent defects in one message, each masking the other.**
+
+**3. The stale artifact.** Even with the message fixed, the measurement was still wrong: `/linux-target` is a **named Docker volume** that persists between runs, and the container's rustup had to **download components** on its first real build. The bridge's `cargo build -p qqq-run --bin qqqai` was a no-op or a partial one, and nothing said so. **Five rounds of `AGENT BENCH FAILED` were reading a binary built at `17:47 UTC` — before the commits under test existed.**
+
+**The general form.** A gate reports a *measurement of an artifact*. Two things can be wrong with that, and they are independent: the artifact can be **stale**, and the **instrument** can be broken. When both are wrong the report is confidently and specifically incorrect, and it stays that way until **both** are fixed — because fixing either alone still produces a failure, so the fix looks like it did not work. Here the fix **was** correct from `53176d6` onward; it took three more rounds, two further commits and a rebuilt container to be able to see that.
+
+**The second form, and it bit hardest.** `os.utime` sat inside a `finally:` in `check_schema_conformance.py`, where it restores a file and then touches its mtime so the next build cannot reuse the injected artifact. That rule is correct — it is `§O-280`'s, earned on a host filesystem. In the bridge, `/workspace` is a **bind mount of a Windows filesystem** through Docker Desktop, where `utime` raises `PermissionError: [Errno 1] Operation not permitted`. **Because the call was in a `finally:`, the exception replaced whatever the `try` was reporting and killed the process with a traceback** — literally the last line in the log. **A rule that is right on the host and fatal in the container.** A best-effort cache hint must never be able to abort the thing it optimises.
+
+**The third form, and it caught me.** In the round before, I wrote down: *"the four `SCHEMA CONFORMANCE FAILED -- N divergence(s)` lines are the SELF-TEST'S INJECTIONS, not failures."* In the next round I grepped `ENVELOPE PROBE FAILED -- 1 of 3` and called it a second real defect — and `ENVELOPE PROBE OK -- 3 command(s)` was printed **directly above it**. `probe_envelope` writes `OK` to stdout and `FAILED` to stderr, so a grep over a merged log presents the injection as the verdict. **Naming a trap is not the same as avoiding it.** When a self-test deliberately prints failure-shaped output, the only sound greps are for the **PASS** line or for the process's **exit status**.
+
+**And a fourth, found while writing this entry.** The draft of it was written to `.scratch/obs400_draft.md` and the bridge failed with `FAIL [13] §O-400 is cited by .scratch/obs400_draft.md but is not defined in Observations`. **`check_xrefs.py` reads the working tree, not the git index** — so a file that CI cannot see is a file the gate still checks. `§O-383` recorded the divergence in one direction; this is the same divergence in the other, and it means `.scratch/` is not a safe place to name a corpus identifier.
+
+**What the sequence cost, and what it bought.** Four commits — `5533089` (the truncation), `0273188` (the stream), `53176d6` (the product defect the fixed message revealed), `654bb38` (the `finally`). The middle one is the payoff: with a report that could show the tail **and** read the right stream, the bench immediately produced `error[QQQ-1001]: the build succeeded but no component was found in /tmp/…/app/target/wasm32-wasip2/release`, which named both the defect and the directory — `qqqai build` hard-coded `project/target` and ignored `CARGO_TARGET_DIR`. **A real product bug, reachable by any CI that sets a standard cargo variable, and invisible for as long as the report was broken.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -1110,6 +1110,43 @@ fn seconds_from_ms(ms: u128) -> f64 {
     ms as f64 / 1000.0
 }
 
+/// How one outcome is reported to a format that is not QQQ's own.
+///
+/// # Why this exists as one function
+///
+/// Because the count and the body of a foreign document must be **two readings of one decision**.
+/// `to_junit` used to compute `failed + nondeterministic` for its `failures` attribute and render
+/// `<failure>` from `!o.passed` -- so an outcome that was both failed and divergent was counted
+/// **twice**, and the document could claim more failures than it contained elements for. **A count
+/// that can disagree with the thing it counts is worse than no count**, because a harness trusts it.
+///
+/// # And why a dry run is `Skipped`, not `Failure`
+///
+/// `opts.dry_run` builds outcomes with `passed: false` and every counter at zero. Rendered by
+/// `!o.passed`, a dry run reported **every test as failing** while its own `failures` attribute said
+/// `0` -- the worst of both. A dry run ran nothing, so nothing failed, and `skipped` is the word the
+/// format has for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reported {
+    Ok,
+    Failure,
+    Skipped,
+}
+
+/// The one decision both foreign formats read.
+fn reported(output: &TestOutput, outcome: &OutcomeReport) -> Reported {
+    if output.dry_run {
+        return Reported::Skipped;
+    }
+    // A nondeterministic test is a `failure` in a format with no "flaky": reporting `ok` would show a
+    // green build for the one thing `--trials` exists to catch, which the exit code already refuses.
+    if !outcome.passed || outcome.nondeterministic {
+        Reported::Failure
+    } else {
+        Reported::Ok
+    }
+}
+
 /// Render the run as `JUnit` XML.
 ///
 /// # Why a nondeterministic test is a `failure` here
@@ -1155,7 +1192,18 @@ pub fn to_junit(output: &TestOutput) -> String {
     use std::fmt::Write as _;
 
     let total = output.ran;
-    let failures = output.failed + output.nondeterministic;
+    // **Counted from the same classifier the body uses.** The old `failed + nondeterministic`
+    // double-counted an outcome that was both, and could exceed the `<failure>` elements below.
+    let failures = output
+        .outcomes
+        .iter()
+        .filter(|o| reported(output, o) == Reported::Failure)
+        .count();
+    let skipped = output
+        .outcomes
+        .iter()
+        .filter(|o| reported(output, o) == Reported::Skipped)
+        .count();
     let seconds = seconds_from_ms(output.outcomes.iter().map(|o| o.duration_ms).sum());
     let project = xml_escape(&output.project);
 
@@ -1164,30 +1212,41 @@ pub fn to_junit(output: &TestOutput) -> String {
     let _ = writeln!(
         s,
         "<testsuites name=\"{project}\" tests=\"{total}\" failures=\"{failures}\" errors=\"0\" \
-         skipped=\"0\" time=\"{seconds:.3}\">"
+         skipped=\"{skipped}\" time=\"{seconds:.3}\">"
     );
     let _ = writeln!(
         s,
         "  <testsuite name=\"{project}\" tests=\"{total}\" failures=\"{failures}\" errors=\"0\" \
-         skipped=\"0\" time=\"{seconds:.3}\">"
+         skipped=\"{skipped}\" time=\"{seconds:.3}\">"
     );
     for o in &output.outcomes {
         let time = seconds_from_ms(o.duration_ms);
         let name = xml_escape(&o.name);
         let classname = xml_escape(&o.file);
-        if o.passed {
-            let _ = writeln!(
-                s,
-                "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\"/>"
-            );
-        } else {
-            let message = xml_escape(&failure_message(o));
-            let _ = writeln!(
-                s,
-                "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\">"
-            );
-            let _ = writeln!(s, "      <failure message=\"{message}\"/>");
-            let _ = writeln!(s, "    </testcase>");
+        match reported(output, o) {
+            Reported::Ok => {
+                let _ = writeln!(
+                    s,
+                    "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\"/>"
+                );
+            }
+            Reported::Skipped => {
+                let _ = writeln!(
+                    s,
+                    "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\">"
+                );
+                let _ = writeln!(s, "      <skipped/>");
+                let _ = writeln!(s, "    </testcase>");
+            }
+            Reported::Failure => {
+                let message = xml_escape(&failure_message(o));
+                let _ = writeln!(
+                    s,
+                    "    <testcase name=\"{name}\" classname=\"{classname}\" time=\"{time:.3}\">"
+                );
+                let _ = writeln!(s, "      <failure message=\"{message}\"/>");
+                let _ = writeln!(s, "    </testcase>");
+            }
         }
     }
     let _ = writeln!(s, "  </testsuite>");
@@ -1241,16 +1300,24 @@ pub fn to_tap(output: &TestOutput) -> String {
     for (i, o) in output.outcomes.iter().enumerate() {
         let n = i + 1;
         let name = tap_single_line(&o.name);
-        if o.passed {
-            let _ = writeln!(s, "ok {n} - {name}");
-        } else {
-            let file = tap_single_line(&o.file);
-            let message = tap_single_line(&failure_message(o));
-            let _ = writeln!(s, "not ok {n} - {name}");
-            let _ = writeln!(s, "  ---");
-            let _ = writeln!(s, "  file: {file}");
-            let _ = writeln!(s, "  message: {message}");
-            let _ = writeln!(s, "  ...");
+        match reported(output, o) {
+            Reported::Ok => {
+                let _ = writeln!(s, "ok {n} - {name}");
+            }
+            // TAP's directive, and the reason a dry run must not read `not ok`: a harness that reads
+            // `1..3` and three `not ok` lines reports three failures for a run that ran nothing.
+            Reported::Skipped => {
+                let _ = writeln!(s, "ok {n} - {name} # SKIP dry run");
+            }
+            Reported::Failure => {
+                let file = tap_single_line(&o.file);
+                let message = tap_single_line(&failure_message(o));
+                let _ = writeln!(s, "not ok {n} - {name}");
+                let _ = writeln!(s, "  ---");
+                let _ = writeln!(s, "  file: {file}");
+                let _ = writeln!(s, "  message: {message}");
+                let _ = writeln!(s, "  ...");
+            }
         }
     }
     s
@@ -2085,5 +2152,141 @@ benches::throughput: benchmark
         assert!(msg.contains("trial(s) 2, 4"), "{msg}");
         let plain = &one_outcome("a", "src/a.rs", false, false, Vec::new()).outcomes[0];
         assert_eq!(failure_message(plain), "2 of 3 trials passed");
+    }
+}
+
+#[cfg(test)]
+mod cr22_tests {
+    use super::*;
+
+    /// One outcome, with only the fields these tests care about varying.
+    fn outcome(name: &str, passed: bool, nondeterministic: bool) -> OutcomeReport {
+        OutcomeReport {
+            name: name.to_owned(),
+            file: "src/a.rs".to_owned(),
+            passed,
+            trials: if nondeterministic { 5 } else { 1 },
+            trials_passed: if nondeterministic {
+                4
+            } else {
+                u32::from(passed)
+            },
+            nondeterministic,
+            divergent_trials: if nondeterministic {
+                vec![3]
+            } else {
+                Vec::new()
+            },
+            duration_ms: 5,
+        }
+    }
+
+    /// A run of `outcomes`, with the counts derived rather than typed, so a test cannot assert a
+    /// count the outcomes do not support.
+    fn run(outcomes: Vec<OutcomeReport>, dry_run: bool) -> TestOutput {
+        // `usize`, because that is what `TestOutput` counts in. The first version cast to `u32` and
+        // the compiler said so four times -- derived, not typed, is the reason it is `count()` at all.
+        let passed = outcomes.iter().filter(|o| o.passed).count();
+        let failed = outcomes.iter().filter(|o| !o.passed).count();
+        let nondeterministic = outcomes.iter().filter(|o| o.nondeterministic).count();
+        TestOutput {
+            project: "app".to_owned(),
+            discovered: outcomes.len(),
+            ran: outcomes.len(),
+            passed,
+            failed,
+            nondeterministic,
+            trials: 1,
+            dry_run,
+            outcomes,
+        }
+    }
+
+    fn attr(doc: &str, key: &str) -> u32 {
+        let needle = format!("{key}=\"");
+        let start = doc.find(&needle).expect("the attribute is present") + needle.len();
+        let rest = &doc[start..];
+        let end = rest.find('"').expect("the attribute is closed");
+        rest[..end].parse().expect("the attribute is a number")
+    }
+
+    /// **A dry run skips every test, in both foreign formats.**
+    ///
+    /// # What it used to do
+    ///
+    /// `opts.dry_run` builds outcomes with `passed: false` and every counter at zero, and both formats
+    /// rendered from `!o.passed` -- so a dry run wrote a `<failure>` for **every** testcase and
+    /// `not ok` for every test, while its own `failures` attribute said `0`. A harness reading it saw
+    /// a run where everything failed. **A dry run runs nothing, so nothing failed.**
+    #[test]
+    fn a_dry_run_is_skipped_and_not_a_failure() {
+        let output = run(
+            vec![
+                outcome("a::one", false, false),
+                outcome("a::two", false, false),
+            ],
+            true,
+        );
+
+        let xml = to_junit(&output);
+        assert_eq!(
+            attr(&xml, "failures"),
+            0,
+            "nothing ran, so nothing failed: {xml}"
+        );
+        assert_eq!(attr(&xml, "skipped"), 2, "{xml}");
+        assert!(
+            !xml.contains("<failure"),
+            "a dry run must not write a failure element: {xml}"
+        );
+        assert_eq!(xml.matches("<skipped/>").count(), 2, "{xml}");
+
+        let tap = to_tap(&output);
+        assert!(
+            !tap.contains("not ok"),
+            "a dry run must not report `not ok`: {tap}"
+        );
+        assert_eq!(tap.matches("# SKIP").count(), 2, "{tap}");
+    }
+
+    /// **A nondeterministic outcome is a failure EXACTLY ONCE.**
+    ///
+    /// # The double count
+    ///
+    /// `to_junit` computed `failures = failed + nondeterministic`. An outcome that is **both** failed
+    /// and divergent is in each set, so it was counted twice -- and `failures` could exceed the number
+    /// of `<failure>` elements in the same document. **A count that can disagree with the thing it
+    /// counts is worse than no count**, because a harness trusts it.
+    #[test]
+    fn a_nondeterministic_outcome_is_counted_once() {
+        let output = run(
+            vec![
+                outcome("a::flaky", true, true), // passed some trials, diverged: a failure
+                outcome("a::bad", false, false), // failed outright: a failure
+                outcome("a::ok", true, false),   // fine
+            ],
+            false,
+        );
+
+        let xml = to_junit(&output);
+        assert_eq!(
+            attr(&xml, "failures"),
+            2,
+            "the flaky test and the failing one, each once: {xml}"
+        );
+        assert_eq!(
+            xml.matches("<failure").count(),
+            2,
+            "and the count must equal the elements: {xml}"
+        );
+        assert_eq!(attr(&xml, "skipped"), 0, "{xml}");
+
+        let tap = to_tap(&output);
+        assert_eq!(
+            tap.matches("not ok").count(),
+            2,
+            "TAP agrees with JUnit: {tap}"
+        );
+        assert_eq!(tap.matches("\nok ").count(), 1, "{tap}");
     }
 }

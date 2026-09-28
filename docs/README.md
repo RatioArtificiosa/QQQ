@@ -112,6 +112,7 @@ asking rather than assuming.
 | [`contributing/anchors.md`](contributing/anchors.md) | Anchor derivation and stability rules (`DOC-008`) |
 | [`contributing/claims-policy.md`](contributing/claims-policy.md) | How to write claims that can be verified (`DOC-014`) |
 | [`languages/rust.md`](languages/rust.md) | The Rust toolchain's state, **including its limitations** — measured rather than recalled (`LANG-008`) |
+| [`recipes/rust.md`](recipes/rust.md) | Task-oriented Rust recipes for the capabilities the host **binds**, and the `§11.3` recipes that cannot be written yet (`LANG-006`) |
 | [`reconciliation.md`](reconciliation.md) | Every correction to the source corpus, kept in sync with Appendix A |
 | [`threat-model.md`](threat-model.md) | Assets, adversaries, the code defending each, and residual risk (`SEC-001`) |
 | [`out-of-scope.md`](out-of-scope.md) | What QQQ does not defend against, and what to do instead (`SEC-030`) |

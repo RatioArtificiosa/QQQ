@@ -210,6 +210,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/recipes/rust.md",
+        "Task-oriented Rust recipes for the capabilities the host actually binds, "
+        "and the §11.3 recipes that cannot be written yet, with what to do instead.",
+        "both",
+        "use",
+    ),
+    (
         "docs/contributing/claims-policy.md",
         "How a factual claim must be verified before it enters a document.",
         "human",

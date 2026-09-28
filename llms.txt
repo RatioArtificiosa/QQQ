@@ -32,6 +32,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/threat-model.md](docs/threat-model.md) — The adversaries QQQ defends against, and what it explicitly does not. (11 KB)
 - [docs/out-of-scope.md](docs/out-of-scope.md) — What is deliberately not defended, so absences are decisions rather than oversights. (7 KB)
 - [docs/languages/rust.md](docs/languages/rust.md) — The Rust toolchain's state, and its limitations — each measured rather than recalled. Read this before believing a Rust build is servable. (8 KB)
+- [docs/recipes/rust.md](docs/recipes/rust.md) — Task-oriented Rust recipes for the capabilities the host actually binds, and the §11.3 recipes that cannot be written yet, with what to do instead. (8 KB)
 - [docs/contributing/claims-policy.md](docs/contributing/claims-policy.md) — How a factual claim must be verified before it enters a document. _(human)_ (7 KB)
 - [docs/contributing/anchors.md](docs/contributing/anchors.md) — The anchor convention, and why a retired section is tombstoned rather than deleted. _(human)_ (6 KB)
 

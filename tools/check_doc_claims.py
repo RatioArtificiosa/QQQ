@@ -196,6 +196,38 @@ def _suite_cases(kind: str | None = None) -> int | None:
     return sum(1 for c in cases if c.get("kind") == kind)
 
 
+def _host_bound_modules() -> int | None:
+    """How many capability modules `qqq-host`'s linker actually registers.
+
+    # What this counts, precisely, and what it does not
+
+    It counts the **distinct `host_*.rs` modules named in a `register(&mut linker` call inside
+    `crates/qqq-host/src/linker.rs`**. That is the list a guest's import can be satisfied from, and it
+    is the fact a recipe page depends on: a recipe for a capability the host does not bind is a recipe
+    that fails at instantiation.
+
+    # Why a resolver and not a number in a document
+
+    Because the gap between **declared** and **bound** is the thing a reader gets wrong. `wit/` declares
+    fifteen packages; the host binds three of them. A page that said "QQQ has `qqq:sql`" without saying
+    it is unbound would send a reader to write a Postgres recipe that cannot instantiate -- which is
+    exactly what `§11.3`'s recipes row does, and exactly what `§O-372` records.
+
+    # The limitation, stated rather than hidden
+
+    This is a **textual** count over one file, so it can only under-report: a module registered by a
+    shape the pattern does not match would be missed, and the count would come out low. It cannot
+    over-report, which is the direction that matters -- a number that is too high would claim
+    capability the host does not have.
+    """
+    linker = ROOT / "crates" / "qqq-host" / "src" / "linker.rs"
+    if not linker.is_file():
+        return None
+    text = linker.read_text(encoding="utf-8")
+    found = set(re.findall(r"host_([a-z0-9_]+)::register\(", text))
+    return len(found) or None
+
+
 RESOLVERS = {
     "crate-files": lambda: len(list((ROOT / "crates").rglob("*.rs"))),
     "workspace-tests": _workspace_tests,
@@ -209,6 +241,8 @@ RESOLVERS = {
     "conformance-cases": lambda: _suite_cases(),
     "conformance-definition-cases": lambda: _suite_cases("definition"),
     "conformance-execution-cases": lambda: _suite_cases("execution"),
+    # What the host binds, which is not what `wit/` declares -- see `_host_bound_modules`.
+    "host-bound-modules": _host_bound_modules,
 }
 
 

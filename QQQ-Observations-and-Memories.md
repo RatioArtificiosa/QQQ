@@ -28652,4 +28652,90 @@ table that records nothing, and it would satisfy a guard that only checked membe
 
 ---
 
+## §O-372 — Three of the four recipes `§11.3` names are recipes for capabilities the host does not bind
+
+**Found:** writing the Rust recipes, and checking which capabilities a guest can actually import
+before writing a line of them. **Anchors:** `docs/recipes/rust.md`, `crates/qqq-host/src/linker.rs`,
+`crates/qqq-abi/src/registry.rs`, `wit/qqq-http.wit`, `wit/qqq-sql.wit`.
+
+### What `§11.3` promises
+
+> | Recipes | Task-oriented: *"connect to Postgres"*, *"rate limit"*, *"stream a large file"*, *"run
+> untrusted code"* |
+
+**Three of those four cannot be written today.** Measured:
+
+```bash
+rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
+#   host_wasi::register      <- the baseline, not a QQQ capability
+#   host_clock::register
+#   host_crypto::register
+#   host_http::register
+```
+
+**Four modules: the WASI baseline plus three capability modules**, against **15** packages declared
+in `wit/`. So:
+
+| `§11.3`'s recipe | Why it cannot be written |
+|---|---|
+| connect to Postgres | `qqq:sql` is **declared and not bound**; there is no `host_sql` module, so a guest importing it fails at **instantiation** |
+| rate limit | there is **no request rate limiter** in `qqq-serve`; `[limits]` bounds cost per request, and `admission.rs` refuses degenerate limits at load time |
+| stream a large file | **not expressible**: `wit/qqq-http.wit` declares only `http` and `incoming-handler`, and `handle` returns a single `body: list<u8>` |
+| run untrusted code | **this one works** — it is what the runtime is for |
+
+**And `qqq:secrets` is worse than unbound: it is a module nobody registers.** `host_secrets.rs` exists,
+compiles, and is re-exported from `qqq-host`'s `lib.rs` — and **`build_linker` never calls it**. A
+reader who found the file would reasonably conclude the capability works.
+
+> **The gap between DECLARED and BOUND is invisible from the WIT tree, and it is the gap that decides
+> whether a recipe runs.**
+
+That is why the recipe page carries a resolver for it — `host-bound-modules`, **4**, read textually
+from `linker.rs` with its limitation stated (it can under-report, and cannot over-report, which is the
+direction that matters).
+
+### The caveat that would have cost a reader an afternoon
+
+**Importing `monotonic-clock` also imports `wall-clock`.** `generate_all` binds every interface in the
+package, so the artifact requires both:
+
+```text
+$ qqqai inspect target/qqq/probe-clock.component.wasm
+  clock.monotonic      from qqq:clock/monotonic-clock@1.0.0
+  clock.wall           from qqq:clock/wall-clock@1.0.0
+```
+
+**So a monotonic-clock guest must also grant `wall`** — and `wall` is the clock a deterministic
+workload must not have, which the reference application turns off for exactly that reason. The
+convenience macro silently widens the grant set, and nothing in the guest's own source says so.
+
+### And the code in the recipes was compiled, not read
+
+Every generated Rust path in the page — `qqq::clock::monotonic_clock::now()`,
+`qqq::crypto::hashing::digest(..., Algorithm::Sha256, ...)` — was **measured by building a probe that
+calls it** (`BUILD=0`), not derived from the kebab-to-snake convention. `§O-153` records the same
+lesson from the other direction: the generated layout is *"discoverable with `cargo check` and a
+one-line type alias per candidate"*, and guessing at it is not worth the cycles.
+
+### What the page does with the absences
+
+Each is an **Absent** claim in `docs/contributing/claims-policy.md`'s sense — *"what to do instead"* —
+rather than an omission. A reader who looks for "connect to Postgres" finds out **why** there is
+nothing to find, and what to do meanwhile (bound the cost per request with `[limits]`; put a rate
+limiter in front of the server; bound the body size and refuse anything larger).
+
+**A documentation surface that names a task is a promise.** `§11.3`'s recipes row is a table of four
+promises, three of which have no implementation behind them — the same shape as `§O-369`'s four SLOs
+that were "measured in CI" and were not.
+
+### Measured
+
+`§11.3`'s four recipes → **one written, three Absent with a remedy** · linker registers **4** modules
+(**3** capability + WASI) against **15** declared packages · `qqq:secrets` **declared, module present,
+never registered** · `monotonic-clock` drags in `wall-clock` (**2** required capabilities from one
+import) · probe **BUILD=0** · resolvers **11 → 12**, claims checked **9 → 11** · `llms-full.txt`
+**117 KB → 126 KB**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

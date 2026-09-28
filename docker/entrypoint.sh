@@ -1012,6 +1012,10 @@ cmd_checks() {
     # four classifications, including the negative one -- runs here in full.
     python3 tools/check_agent_cookbook.py
     python3 tools/check_agent_cookbook.py --self-test
+    # AGENT-023. The dynamic half shells out to `qqqai build`, which compiles; a container with
+    # no toolchain reports SKIPPED and names the reason, and the static half always runs.
+    python3 tools/check_agent_bench.py
+    python3 tools/check_agent_bench.py --self-test
 
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired

@@ -1163,6 +1163,14 @@ jobs:
         run: python tools/check_agent_cookbook.py
       - name: prove the cookbook classifier and its negative predicate are live
         run: python tools/check_agent_cookbook.py --self-test
+      # AGENT-023. §2.1's measurement: a cold-start agent must produce a working QQQ service.
+      # The task set is checked in BOTH directions -- each task's verifier must FAIL on its
+      # starting point and PASS on its reference solution -- so a task that cannot tell solved
+      # from unsolved is reported as a defect in the TASK rather than as somebody's score.
+      - name: the agent benchmark's task set is solvable and falsifiable (AGENT-023)
+        run: python tools/check_agent_bench.py
+      - name: prove the benchmark's task set and the two Proposal thresholds are live
+        run: python tools/check_agent_bench.py --self-test
 
       # `§O-364`. `include_str!` is a **compile-time dependency on a file**, and the production
       # image copies an allowlist. The scaffold embedded `rust-toolchain.toml`, the file was not on

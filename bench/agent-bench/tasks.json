@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "_comment": [
+    "The reference task set for the agent-only benchmark -- Proposal §2.1, NN-1.",
+    "",
+    "§2.1 states the measurement verbatim: \"a cold-start coding agent, given only the repository and",
+    "a task, must produce a working QQQ service without human intervention. Target: >=90% success on",
+    "the reference task set. Tracked in bench/agent-bench.\" And `R-13` fires when the rate drops",
+    "below 70%.",
+    "",
+    "Each task carries a STARTING POINT and a REFERENCE SOLUTION, and the runner asserts BOTH",
+    "directions: the verifier must FAIL on the starting point (or the task is already solved and",
+    "measures nothing) and PASS on the reference solution (or the task is unsolvable and measures a",
+    "broken verifier). That is what makes the set falsifiable without an agent in the loop -- and it",
+    "is also how the set is tested, because a task that fails either direction is a defect in the",
+    "task rather than a score."
+  ],
+  "target": {
+    "successRate": 0.90,
+    "escalationThreshold": 0.70,
+    "_why": "§2.1's target, and R-13's trigger. Both are the Proposal's numbers, not this file's."
+  },
+  "tasks": [
+    {
+      "id": "serve-http",
+      "statement": "Create a Rust project named `app` that serves HTTP requests.",
+      "start": { "verb": "empty" },
+      "reference": {
+        "verb": "new",
+        "args": ["app", "--language", "rust", "--template", "http"]
+      },
+      "verify": { "verb": "inspect-requires", "project": "app", "expected": ["http.server"] }
+    },
+    {
+      "id": "declare-nothing-you-do-not-use",
+      "statement": "A Rust project named `app` grants the wall clock but never reads it. Remove the capability it does not use, without breaking the build.",
+      "start": {
+        "verb": "new",
+        "args": ["app", "--language", "rust", "--template", "http"],
+        "then": { "verb": "append-manifest", "project": "app", "text": "\n[capabilities.clock]\nwall = true\n" }
+      },
+      "reference": {
+        "verb": "new",
+        "args": ["app", "--language", "rust", "--template", "http"]
+      },
+      "verify": { "verb": "audit-lacks-rule", "project": "app", "rule": "qqq/unused-grant" }
+    },
+    {
+      "id": "no-capabilities-at-all",
+      "statement": "A Rust project named `app` grants `http.server`. Produce a build of it that requires no capabilities at all.",
+      "start": {
+        "verb": "new",
+        "args": ["app", "--language", "rust", "--template", "http"]
+      },
+      "reference": {
+        "verb": "new",
+        "args": ["app", "--language", "rust", "--template", "lib"]
+      },
+      "verify": { "verb": "inspect-requires", "project": "app", "expected": [] }
+    }
+  ]
+}

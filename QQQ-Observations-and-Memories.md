@@ -29053,4 +29053,91 @@ view of `AGENT-004`/`AGENT-005`.
 
 ---
 
+## §O-377 — A benchmark that cannot tell a bad task from a bad agent reports its own bugs as your score
+
+**Found:** building `AGENT-023`, Proposal §2.1's agent-only benchmark. **Anchors:**
+`bench/agent-bench/tasks.json`, `tools/check_agent_bench.py`, `QQQ-Proposal-V1.md` §2.1 and `R-13`.
+
+### The property, and why it is not "run an agent"
+
+`§2.1` states the measurement verbatim — *"a cold-start coding agent, given only the repository and a
+task, must produce a working QQQ service without human intervention. **Target: ≥90% success** on the
+reference task set. Tracked in `bench/agent-bench`"* — and `R-13` fires below **70%**.
+
+An agent cannot be run inside a gate, so the set is made **falsifiable without one**. Every task
+carries a **starting point** and a **reference solution**, and the runner asserts **both directions**:
+
+* the verifier must **FAIL on the starting point** — or the task is already solved and measures nothing;
+* the verifier must **PASS on the reference** — or the task is unsolvable and the verifier is what is
+  broken.
+
+> **A benchmark that cannot tell a bad task from a bad agent reports its own bugs as somebody else's
+> failure.**
+
+### It earned its place on the first run
+
+The assertion caught **two defective tasks** immediately:
+
+1. `declare-nothing-you-do-not-use` **passed on its own starting point** — because its verifier asked
+   `qqqai audit` about `qqq/unused-grant`, which needs a **built artifact**, and the verifier never
+   built one. The task was a no-op, and nothing about it looked wrong.
+2. `serve-http`'s reference **failed** — for a reason that was **not the task's fault**.
+
+The second one is the more interesting failure, because the honest response to it is **not** to fix the
+task.
+
+### A failure that is not a task's failure must not be reported as one
+
+The reference build failed with:
+
+```text
+note: please ensure that Visual Studio 2017 or later … were installed with the Visual C++ option
+```
+
+On Windows, `cargo` needs the MSVC environment for any crate with a build script, and this shell has
+none. **Reporting that as a failed task would be a false defect** — the benchmark would claim its own
+reference solution does not work when the truth is that nothing here can compile.
+
+It is now a **declared skip** with a named reason, like the missing-binary case. And the **verdict says
+what it measured**: with the dynamic half skipped, the tool prints *"AGENT BENCH OK (static only) — the
+BOTH-DIRECTIONS property was NOT checked here"*. **The first version of that message claimed the
+property anyway**, in a tool whose entire purpose is to detect exactly that kind of confidence.
+
+### An injector whose marker is not unique cannot restore — again
+
+The injection changed one task's `expected` to what its **starting point** satisfies. It fired, and
+named **both** failures. Then `restore` refused:
+
+```text
+AssertionError: expected 1 injection, found 2
+```
+
+**The marker appeared twice** — task 1 legitimately expects `["http.server"]` too. The refusal was
+correct; guessing would have repaired the wrong line. The anchor now carries the two lines above it
+(task 3's reference scaffolds `--template lib`), which makes it unique by construction.
+
+And a second, sharper lesson: **the self-restoring job restored nothing the first time**, because the
+run was longer than my polling window and the harness killed the process tree — the restore line never
+executed. **A "self-restoring" job is only self-restoring if it is not killed.** The reliable pattern
+is short polls, and a `verify-restored` afterwards that does not trust the job's own report.
+
+### And two existing guards caught my registration mistakes
+
+* `check_gate_parity` failed with *"`tools/check_agent_bench.py` is invoked in NEITHER gate"* — rule 5
+  of `§O-365`, the rule added because rules 1–4 compared the gates to **each other** and a checker in
+  neither was invisible.
+* `check_doc_claims` failed with *"`tools-python` says 74, the tree has 75"* — adding one `tools/*.py`
+  drifts the handbook, and the claim had an owner, so it was caught rather than shipped.
+
+**Both fired on the first attempt at registration.** That is what a guard is for.
+
+### Measured
+
+**3** tasks × **both** directions = **6 of 6** verifications as asserted · reference success rate
+**100%** vs `§2.1`'s **90%** target, `R-13`'s **70%** threshold both **read from the Proposal's prose**
+· injection: **2 named failures**, restore **byte-identical** (`8400cfc7…`) · `ci.yml` **175 → 177**
+steps, `GATE PARITY OK` · `tools/*.py` **74 → 75**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

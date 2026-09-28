@@ -400,6 +400,40 @@ impl AuditFile {
     /// How many records this file holds.
     ///
     /// A caller appends `records().iter().skip(file.records())` -- everything the file does not have.
+    ///
+    /// # Example
+    ///
+    /// The count is what makes that skip correct, and it advances only on a write that succeeded:
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::audit_sink::AuditFile;
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use qqq_cap::capability::Capability;
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-records-doc-{}", std::process::id()));
+    /// let path = dir.join("audit.jsonl");
+    /// let mut file = AuditFile::open(&path, 0).expect("open");
+    /// assert_eq!(file.records(), 0);
+    ///
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::HttpServer, "f", Outcome::Granted);
+    ///
+    /// for record in stream.records().iter().skip(file.records()) {
+    ///     file.append(record).expect("append");
+    /// }
+    /// assert_eq!(file.records(), 1, "one write, one record");
+    ///
+    /// // And a second pass appends nothing, because the count is the file's own.
+    /// for record in stream.records().iter().skip(file.records()) {
+    ///     file.append(record).expect("append");
+    /// }
+    /// assert_eq!(file.records(), 1);
+    /// drop(file);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     #[must_use]
     pub fn records(&self) -> usize {
         self.records

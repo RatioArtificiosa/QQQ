@@ -423,7 +423,7 @@ impl GuestApp {
         Ok(to_served(&outcome?))
     }
 
-    /// Persist every record the file does not already hold -- **finding #12 of CodeRabbit's review**.
+    /// Persist every record the file does not already hold -- **finding #12 of `CodeRabbit`'s review**.
     ///
     /// # The defect this replaces, and why it was `critical`
     ///
@@ -916,7 +916,7 @@ mod tests {
         );
     }
 
-    /// **Every record the file lacks is persisted -- not only the last one.** CodeRabbit finding #12.
+    /// **Every record the file lacks is persisted -- not only the last one.** `CodeRabbit` finding #12.
     ///
     /// # Why this test could not have passed before the fix, and why the defect survived
     ///

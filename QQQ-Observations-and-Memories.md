@@ -30010,4 +30010,76 @@ fails · restored + **touched** `1 passed` · `FMT=0`.
 
 ---
 
+## §O-392 — A killed gate leaves its snapshot behind, and the next one blames your commits
+
+**Found:** by running the full gate for `2d36c3b` and getting three Python-half failures that each pass
+when run by hand. **Anchors:** `tools/check_fault_inject_restores.py`, `.scratch/clean_gate.cmd`,
+`§O-386`.
+
+### What the gate said, and what the tree said
+
+```text
+FAIL python tools/check_fault_inject_restores.py --verify
+FAIL python tools/check_agent_cookbook.py
+FAIL python tools/check_agent_bench.py
+FAIL python tools/check_sbom.py sbom          <- the expected CI-only one
+```
+
+and the first of those named its evidence:
+
+```text
+GATE TREE MODIFIED -- 3 file(s) the gate changed and did not restore:
+  FAIL  QQQ-Checklist-V1.md was MODIFIED and not restored
+  FAIL  tools/check_agent_cookbook.py was MODIFIED and not restored
+  FAIL  tools/corpus_at_rest.json was MODIFIED and not restored
+```
+
+**`git status` was empty.** The tree was clean, and every one of those three files is something **I had
+edited and committed** in the two rounds before — the checklist and the corpus record in round 74,
+`check_agent_cookbook.py` in round 73.
+
+### Why, and the one line that settles it
+
+`check_fault_inject_restores.py` keeps its baseline **in `TEMP`**
+(`qqq-gate-tree-snapshot.json`), deliberately: *"a snapshot written beside the tree is a file `git add`
+could take"*. `--snapshot` records the tree **before** the checkers, `--verify` compares **after**.
+
+**A gate I killed mid-run never reached its `--verify`, so its snapshot stayed on disk.** The next
+`--verify` compares today's tree against **that** older one — and every commit since is reported as an
+injection that was not restored.
+
+Measured with a fresh snapshot, running exactly the checkers the gate flagged:
+
+```text
+GATE SNAPSHOT TAKEN -- 373 tracked file(s)
+AGENT COOKBOOK OK -- 43 code(s) classified, 5 reproducer(s) executed
+AGENT BENCH OK  (static only)
+GATE TREE AT REST -- 373 tracked file(s), none moved
+```
+
+**`VERIFY_EXIT=0`.** The checker is correct; the leftover snapshot was the problem.
+
+### The rule, and it is `§O-386`'s, one artefact over
+
+> **Killing a gate leaves state behind, and the next run inherits it.** `§O-386` recorded that for
+> `qqqai` processes holding the binary; this is the same rule for a file in `TEMP`. **`--snapshot` must
+> run at the start of every gate, and a gate that is stopped early must be assumed to have left one.**
+
+### The other two failures were transient, and that is worth saying plainly
+
+`check_agent_cookbook.py` and `check_agent_bench.py` both **pass when re-run**, including the cookbook's
+`cli` half (`5 reproducer(s) executed`, which is the half the earlier `--no-run` had skipped). The gate's
+Python half ran while the tree was being committed to underneath it. **A gate is only a verdict about
+the tree it read**, and this one read a tree in motion.
+
+### And one thing this round did NOT establish
+
+The three files named are the ones that changed in rounds 73–74, which is consistent with the stale
+snapshot but does not prove the ordering. **What is proved is that a fresh snapshot is clean and the
+tree is clean**; the mechanism above is the explanation that fits, and it is recorded as an explanation
+rather than as a measurement.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+

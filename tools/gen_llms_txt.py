@@ -15,9 +15,9 @@ the design:
 * `llms.txt` is an **index**. A model that has never seen QQQ reads this first and
   learns what exists, what order to read it in, and — critically — **what each
   file is for**. It is small enough to fit in any context window.
-* `llms-full.txt` is a **corpus**. It is every document concatenated with its
-  provenance, for when the whole thing fits and a model should reason over all of
-  it at once.
+* `llms-full.txt` is a **corpus**. It is the index's documents concatenated with their provenance —
+  **minus a declared set**, each entry of which carries its reason in `CORPUS_EXCLUDED` — for when
+  the useful part fits and a model should reason over all of it at once.
 
 # Why a generator rather than two hand-written files
 
@@ -203,6 +203,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/languages/rust.md",
+        "The Rust toolchain's state, and its limitations — each measured rather "
+        "than recalled. Read this before believing a Rust build is servable.",
+        "both",
+        "use",
+    ),
+    (
         "docs/contributing/claims-policy.md",
         "How a factual claim must be verified before it enters a document.",
         "human",
@@ -311,27 +318,62 @@ AUDIENCE_HEADINGS = [
     ("machinery", "The machinery behind the documents"),
 ]
 
-# Documents included whole in `llms-full.txt`, in order.
+# The documents `llms-full.txt` deliberately omits, **with a reason each**.
 #
-# # Why this is a subset and not everything
+# # The rule, in one sentence
 #
-# Because `llms-full.txt` is for *context loading*, and the two largest documents
-# are the two least useful to load whole: the Proposal is ~130 KB and the
-# Observations ~90 KB. Including them would consume a context window before the
-# reader reaches the part they need. They are in the index with their size stated,
-# so a consumer can fetch them deliberately.
-FULL_INCLUDES = [
-    "README.md",
-    "PRINCIPLES.md",
-    "docs/glossary.md",
-    "docs/threat-model.md",
-    "docs/out-of-scope.md",
-    "docs/errors.md",
-    "docs/wit-reference.md",
-    "docs/verified-facts.md",
-    "docs/reconciliation.md",
-    "SECURITY.md",
-]
+# The corpus carries the documents a model needs in order to **reason about QQQ**, so it omits three
+# kinds of file: **navigation** (the directory indexes, which describe a tree the corpus does not
+# have), **machine contracts** (the JSON Schemas and the advisory register, which are fetched by path
+# and are useless as prose), and **repository and operational facts** (the contributor rules, the
+# verification environment, the unsafe audit, the stability promise and the Wasmtime runbooks, which
+# are about *this repository* rather than about QQQ) -- plus the three root documents, which are large
+# enough to consume a context window before a reader reaches anything else.
+#
+# # Why this is a TABLE and not a second hand-written list
+#
+# Because it **was** a second hand-written list, and it had drifted. Measured: **20 of the 30** curated
+# documents were absent from the corpus while this file's own docstring and the **rendered** artifact
+# both said that only **two** were excluded (`§O-371`). A generated artifact that a model loads as its
+# context told the model it was complete, and the reader had no way to check it against the tree.
+#
+# The stale numbers are worth recording too, because they are how the drift stayed invisible: the old
+# comment said the Proposal is "~130 KB" (it is **140,841** bytes) and the Observations "~90 KB" (it is
+# **1,591,630** -- wrong by a factor of seventeen).
+#
+# Every omission now cites the rule above, `--self-test` asserts that every curated document is either
+# in the corpus or named here **with a reason**, and `FULL_INCLUDES` is derived rather than typed.
+CORPUS_EXCLUDED: dict[str, str] = {
+    # The three root documents: size.
+    "QQQ-Proposal-V1.md": "the specification, 140,841 bytes: fetch it by path when it is what you need",
+    "QQQ-Checklist-V1.md": "status rather than reference, 445,705 bytes, and it changes every round",
+    "QQQ-Observations-and-Memories.md": "history, 1,591,630 bytes: fetch it by path",
+    # Navigation.
+    "docs/README.md": "navigation for this repository's documentation tree",
+    "docs/adr/README.md": "navigation for the decision records",
+    "docs/advisories/README.md": "navigation for the advisory register",
+    # Machine contracts, fetched by path.
+    "schema/qqq-toml.schema.json": "a machine contract, fetched by path",
+    "schema/qqq-lock.schema.json": "a machine contract, fetched by path",
+    "schema/cli-envelope.schema.json": "a machine contract, fetched by path",
+    "docs/advisories/INDEX.md": "the advisory register itself, fetched by path",
+    # Repository and operational facts.
+    "docs/contributing/anchors.md": "a contributor rule, not a fact about QQQ",
+    "docs/contributing/claims-policy.md": "a contributor rule, not a fact about QQQ",
+    "docs/wit-style-guide.md": "a contributor rule, not a fact about QQQ",
+    "docs/development-bridge.md": "this repository's verification environment",
+    "docs/unsafe-audit.md": "a result about this repository's own source",
+    "docs/stability.md": "a change-promise table, fetched by path",
+    "docs/wasmtime-advisory-process.md": "an operational commitment, fetched by path",
+    "docs/wasmtime-upgrade-runbook.md": "an operational runbook, fetched by path",
+}
+
+# **Derived**, in the index's order. A document is in the corpus unless the table above names it.
+#
+# `docs/abi-cost-measured.md` and `docs/languages/rust.md` are therefore **in** the corpus, which the
+# old hand-written list had left out: both are reference material a model needs to reason about QQQ,
+# which is exactly what the rule admits.
+FULL_INCLUDES = [path for path, *_ in CURATED if path not in CORPUS_EXCLUDED]
 
 # Files that are documents but must NOT appear in the index.
 #
@@ -649,17 +691,13 @@ def render_full() -> str:
     out.append("# QQQ — full documentation")
     out.append("")
     out.append(
-        "Every document below is included **whole**, preceded by its path in the "
-        "repository so a statement here can be traced to its source. Generated by "
-        "`tools/gen_llms_txt.py`; do not edit by hand."
-    )
-    out.append("")
-    out.append(
-        "The two largest documents — `QQQ-Proposal-V1.md` (the specification) and "
-        "`QQQ-Observations-and-Memories.md` (decisions and mistakes) — are "
-        "**deliberately excluded** because loading them would consume a context "
-        "window before reaching anything else. Fetch them by path when they are "
-        "what you need."
+        f"{len(FULL_INCLUDES)} of the {len(CURATED)} indexed documents are included **whole**, "
+        "each preceded by its path in the repository so a statement here can be traced to its "
+        f"source. The other {len(CORPUS_EXCLUDED)} are **declared omissions**, each carrying its "
+        "reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and "
+        "facts about this repository rather than about QQQ, plus the three root documents, which are "
+        "large enough to consume a context window before a reader reaches anything else. Fetch any "
+        "of them by path."
     )
     out.append("")
     out.append("---")
@@ -883,6 +921,46 @@ def self_test() -> int:
             "every docs/*.md is indexed or excluded",
             not unindexed,
             f"these are neither: {unindexed}",
+        )
+
+        # --- the CORPUS, which had no guard at all until it drifted --------
+        #
+        # # Why this case exists, and what it would have caught
+        #
+        # The case above checks the **index**. Nothing checked the **corpus**, and it had drifted:
+        # measured, 20 of the 30 curated documents were absent from `llms-full.txt` while both this
+        # file's docstring and the rendered artifact said only two were excluded (`§O-371`). The
+        # guard was exactly as wide as its subject -- the index -- and the artifact a model loads as
+        # its context was the thing nobody was checking.
+        #
+        # The rule is now stated, so it can be checked: every curated document is either in the
+        # corpus or named in `CORPUS_EXCLUDED` **with a non-empty reason**.
+        absent = [
+            p
+            for p, _, _, _ in CURATED
+            if p not in FULL_INCLUDES and not CORPUS_EXCLUDED.get(p, "").strip()
+        ]
+        expect(
+            "every curated document is in the corpus or excluded WITH A REASON",
+            not absent,
+            f"these are neither, or carry an empty reason: {absent}",
+        )
+
+        # And the table cannot name something the index does not have, or the two would be free to
+        # disagree about what exists.
+        stray = [p for p in CORPUS_EXCLUDED if p not in indexed]
+        expect(
+            "every declared omission is a curated document",
+            not stray,
+            f"named but not indexed: {stray}",
+        )
+
+        # Anti-vacuity: a derived list that came out empty would satisfy the first check above while
+        # certifying nothing.
+        expect(
+            "the corpus is a non-empty subset of the index",
+            0 < len(FULL_INCLUDES) < len(CURATED),
+            f"corpus {len(FULL_INCLUDES)} of {len(CURATED)}",
         )
 
         def tracked_paths(paths: list[str]) -> str:

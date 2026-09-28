@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -163,6 +164,38 @@ def _workspace_tests() -> int | None:
 # number written in three places" defect `§O-244` exists to prevent -- duplicating the
 # *derivation* is worse than duplicating the number, because the two can disagree while
 # both look authoritative (`§O-277`).
+def _suite_cases(kind: str | None = None) -> int | None:
+    """How many cases `conformance/suite.json` declares, optionally filtered by `kind`.
+
+    # Why the suite gets resolvers rather than numbers in a document
+
+    Because the split is the part a reader is most likely to over-read. `TEST-010` builds the
+    suite, and the honest thing about it is that its **execution** half is thin: most cases are
+    *definitions* enforced by a checker that runs in both gates, and only a few run a guest. A page
+    that said "the suite has <!-- total -->8<!-- / --> cases" without the split would be true and
+    misleading, which is what `docs/contributing/claims-policy.md` calls a wish wearing a
+    measurement's clothes.
+
+    So there are three names, one fact each, and a document that makes a claim names which it means.
+    `conformance/suite.json` is the single source; nothing is counted here that the suite does not
+    declare, and an unreadable or empty suite returns `None` so a claim on it **fails** rather than
+    silently passing.
+    """
+    suite = ROOT / "conformance" / "suite.json"
+    if not suite.is_file():
+        return None
+    try:
+        doc = json.loads(suite.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    cases = doc.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return None
+    if kind is None:
+        return len(cases)
+    return sum(1 for c in cases if c.get("kind") == kind)
+
+
 RESOLVERS = {
     "crate-files": lambda: len(list((ROOT / "crates").rglob("*.rs"))),
     "workspace-tests": _workspace_tests,
@@ -172,6 +205,10 @@ RESOLVERS = {
     "wit-interfaces": lambda: wit_totals()["interfaces"],
     "wit-functions": lambda: wit_totals()["functions"],
     "wit-types": lambda: wit_totals()["types"],
+    # The conformance suite, split by what a case *does* -- see `_suite_cases`.
+    "conformance-cases": lambda: _suite_cases(),
+    "conformance-definition-cases": lambda: _suite_cases("definition"),
+    "conformance-execution-cases": lambda: _suite_cases("execution"),
 }
 
 

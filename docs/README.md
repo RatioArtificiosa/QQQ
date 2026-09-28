@@ -111,6 +111,7 @@ asking rather than assuming.
 | [`glossary.md`](glossary.md) | **Generated** from the Proposal's §0.6 table by `tools/gen_glossary.py`. Do not edit; edit the Proposal. |
 | [`contributing/anchors.md`](contributing/anchors.md) | Anchor derivation and stability rules (`DOC-008`) |
 | [`contributing/claims-policy.md`](contributing/claims-policy.md) | How to write claims that can be verified (`DOC-014`) |
+| [`languages/rust.md`](languages/rust.md) | The Rust toolchain's state, **including its limitations** — measured rather than recalled (`LANG-008`) |
 | [`reconciliation.md`](reconciliation.md) | Every correction to the source corpus, kept in sync with Appendix A |
 | [`threat-model.md`](threat-model.md) | Assets, adversaries, the code defending each, and residual risk (`SEC-001`) |
 | [`out-of-scope.md`](out-of-scope.md) | What QQQ does not defend against, and what to do instead (`SEC-030`) |

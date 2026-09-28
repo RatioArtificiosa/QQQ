@@ -28433,4 +28433,223 @@ build time **25.34 s > 20 s** · **3** failure branches injected, each exits **1
 
 ---
 
+## §O-370 — `LANG-008` said "there are few limitations", and four of five templates build and cannot run
+
+**Found:** writing the Rust language guide, and measuring each limitation rather than recalling it.
+**Anchors:** `docs/languages/rust.md`, `docs/contributing/claims-policy.md`, `crates/qqq-run/src/new.rs`,
+`tools/check_doc_claims.py`.
+
+### The item's own parenthetical is a claim
+
+`LANG-008` reads:
+
+> *"Rust language-guide page published with honest limitations **(there are few)**."*
+
+**The parenthetical is false.** The guide carries **seven** limitations, every one measured rather
+than recalled — and the reason it survived is the subject of this observation: it is written *in the
+checklist item*, which no checker scans, rather than in a document whose claims are resolved.
+
+> **An item's own aside is a claim, and it needs the same measurement as any other.** The corpus
+> already knows this about numbers (`§O-277`); this is the same rule applied to a phrase.
+
+### The worst of the seven, and it is the one this register has already recorded once
+
+`§O-362` fixed the `http` template: it built to `world root { }` and could not be served. **The other
+four templates still do.** Measured:
+
+```text
+$ qqqai new p-worker --language rust --template worker
+$ cd p-worker && qqqai build
+p-worker: target/qqq/p-worker.component.wasm (287061 bytes) for wasm32-wasip2    # exit 0
+
+$ wasm-tools component wit target/qqq/p-worker.component.wasm
+package root:component;
+world root {
+}
+```
+
+**The build succeeds and the application cannot run**, because only `http` is given a `wit/` tree and
+a `wit-bindgen` dependency. `qqq-host::invoke` resolves the export by name, finds nothing, and
+`qqqai serve` has no function to call — while `qqqai build` prints a byte count and `qqqai inspect`
+prints a posture word. Both commands say yes.
+
+That is `§O-362`'s exact shape, one template over, and the fix in that round was scoped to the
+template the item was about. **A fix scoped to one instance of a class leaves the rest of the class
+in place**, which is the same lesson as `§O-282` (a guard only as wide as its file list) applied to a
+*repair*.
+
+### And the six that were not previously recorded
+
+| # | Limitation | How it was measured |
+|---|---|---|
+| 1 | `wit-bindgen 0.44` cannot bind the canonical `wit/` at all | `invalid character in identifier '2'` on `aes-256-gcm` (`§O-361`) |
+| 2 | Every template except `http` exports nothing | the `world root { }` above |
+| 3 | `wit/` is a `wasm-tools` layout, not a `wit-bindgen` one | a guest must vendor what it binds |
+| 4 | A `wit/` edit does not re-run the macro | `Finished … in 0.13s` after an edit (`§O-361`) |
+| 5 | The build-time budget is not met | 25.34 s against ≤ 20 s (`LANG-007`) |
+| 6 | The conformance suite's execution half is thin | definitions outnumber executions three to one |
+| 7 | `docs.qqq.codes` does not exist | no generator, no workflow, no `DIST-*` item |
+
+**Six of the seven were found in the last four rounds of this goal**, which is worth stating plainly:
+they were not obscure. They were simply not written down where a reader would look, and an item that
+says "there are few" is a reason not to look.
+
+### The guide is guarded, and the guard is the one that already exists
+
+`tools/check_doc_claims.py` scans `("*.md", "docs/**/*.md", "crates/*/*.md")`, so a new page under
+`docs/` is **scanned automatically** — no registration, no new checker. The guide adds **3** claims
+behind **3** new resolvers (`conformance-cases`, `conformance-definition-cases`,
+`conformance-execution-cases`), all read from `conformance/suite.json`:
+
+```text
+conformance-cases                = 8
+conformance-definition-cases     = 6
+conformance-execution-cases      = 2
+```
+
+and the checker went from **6** checked claims to **9**, with `--self-test` still passing. The split
+exists because the total alone is true and misleading: a page that said "the suite has 8 cases"
+without saying that two of them run would be a wish wearing a measurement's clothes, which is the
+phrase `docs/contributing/claims-policy.md` uses for exactly this.
+
+### What "published" is held to mean, and why that is stated rather than assumed
+
+The item says **published**, and `§11.3` names `docs.qqq.codes` as the human documentation surface.
+**It does not exist.** So the Done line says which sense is being claimed — the page is part of the
+repository's checked documentation surface (indexed in `docs/README.md`, claim-scanned, generated
+into `llms.txt`) — and that `§11.3`'s `docs.qqq.codes` is a **separate artifact row**, not this
+item's subject. A live URL is not claimed.
+
+**And nothing owns building it.** `DIST-001`…`DIST-020` cover installers, registries, images,
+signing, notarisation and reproducibility; **not one of them is the documentation site**, though
+`§11.3` lists it first in its table. That is a checklist gap, recorded here rather than filled by
+inventing an item.
+
+### Measured
+
+`LANG-008` ticked with **7** limitations, each measured · the item's *"there are few"* **falsified** ·
+`--template worker` builds **exit 0** to `world root { }` · resolvers **8 → 11**, claims checked
+**6 → 9**, `--self-test` passing · `docs/` **24 → 25** tracked pages · `check_checklist_counts` and
+`check_checklist_citations` (**1207**) both pass.
+
+---
+
+## §O-371 — `llms-full.txt` told a model it was complete, and a third of it was missing
+
+**Found:** adding the Rust guide to the agent corpus. **Anchors:** `tools/gen_llms_txt.py`,
+`llms.txt`, `llms-full.txt`, `docs/contributing/claims-policy.md`.
+
+### The measurement
+
+`llms-full.txt` opens by telling its reader what it is:
+
+> *"Every document below is included **whole** … The two largest documents — `QQQ-Proposal-V1.md`
+> (the specification) and `QQQ-Observations-and-Memories.md` (decisions and mistakes) — are
+> **deliberately excluded**."*
+
+and the generator's docstring agreed: *"`llms-full.txt` is a **corpus**. It is **every document**
+concatenated with its provenance."*
+
+**Both were false.** Measured:
+
+```text
+CURATED      : 30      # the index, llms.txt
+FULL_INCLUDES: 10      # the corpus, llms-full.txt
+
+in CURATED but NOT in FULL_INCLUDES: 20
+in FULL_INCLUDES but NOT in CURATED:  0
+```
+
+**Twenty of thirty documents were absent, and the artifact said two.**
+
+### It was not a size rule either
+
+The obvious defence — "the corpus excludes what is too large to load" — is measurably not what it was
+doing:
+
+```text
+largest INCLUDED : 17,711 bytes   docs/wit-reference.md
+smallest EXCLUDED:  2,029 bytes   docs/advisories/INDEX.md
+```
+
+`docs/languages/rust.md` (8,506) sat between an excluded document at 8,684 and an included one at
+8,776. **No threshold separates the two sets**, so `FULL_INCLUDES` was a hand-typed second list with
+no stated rule.
+
+### And the comment beside it was stale by a factor of seventeen
+
+```text
+the Proposal is ~130 KB      ->  140,841 bytes    (close)
+the Observations ~90 KB      ->  1,591,630 bytes (wrong by 17x)
+```
+
+The corpus excludes the Observations for context-window reasons, so the number that *justified the
+exclusion* was the one nobody had re-measured. This is `§O-277` again — a number with no resolver
+drifts — and it drifted in the direction that keeps the decision looking sound.
+
+### The guard was exactly as wide as its subject
+
+`gen_llms_txt.py --self-test` contained this case, and it passed throughout:
+
+```text
+OK    every docs/*.md is indexed or excluded
+```
+
+**That checks the INDEX.** Nothing checked the corpus, so the two lists were free to disagree, and the
+one nobody was watching is the one that ships. This is `§O-282`'s shape — a guard only as wide as its
+file list — with the file list replaced by *one of two curated tables*.
+
+> **Two hand-maintained lists of the same thing will disagree, and the one with the guard is the one
+> that stays right.**
+
+### The worst possible place for a false claim
+
+The claim was not in a design document a human reads and can argue with. It was in a **generated
+artifact that a model loads as its context**, and the reader of that artifact — a model answering a
+question about QQQ — **cannot check it against the tree**. It was told the corpus was complete, so it
+had no reason to go looking for the twenty documents that were not there.
+
+`§11.3` lists the agent corpus as a product surface. A corpus that overstates its own completeness is
+worse than a smaller one that states it exactly, because the failure is invisible from the position
+the reader occupies.
+
+### The fix: one rule, one table, one derivation
+
+* **`CORPUS_EXCLUDED`** is a table of every deliberate omission **with a reason each**, and the reason
+  cites one stated rule: the corpus carries what a model needs to *reason about QQQ*, so it omits
+  **navigation**, **machine contracts** (fetched by path), and **facts about this repository rather
+  than about QQQ**, plus the three root documents for size.
+* **`FULL_INCLUDES` is derived** — `[path for path, *_ in CURATED if path not in CORPUS_EXCLUDED]` —
+  so a document added to the index is in the corpus unless someone deliberately says otherwise.
+* **The rendered text is computed**, so the numbers it states cannot drift: it now says
+  `12 of the 30` and `the other 18`, from `len()` of the two structures.
+* **Three self-test cases** close the guard: every curated document is in the corpus **or** named in
+  the table **with a non-empty reason**; every declared omission is a curated document; and the corpus
+  is a non-empty proper subset of the index.
+
+The rule also **admits two documents the hand list had dropped** — `docs/abi-cost-measured.md` and
+`docs/languages/rust.md`, both reference material a model needs — so the corpus went from **89 KB to
+117 KB**. That is the fix changing the artifact, which is what a fix is for.
+
+### Both directions injected
+
+```text
+INJECT A (drop one document from the derived corpus without declaring it)
+  -> FAIL  every curated document is in the corpus or excluded WITH A REASON
+INJECT B (a declared omission with an EMPTY reason)
+  -> FAIL  every curated document is in the corpus or excluded WITH A REASON
+RESTORED byte_identical=True  ->  SELF-TEST PASSED
+```
+
+**B is the half that is easy to forget**: a table with a `reason` column whose entries are empty is a
+table that records nothing, and it would satisfy a guard that only checked membership.
+
+### Measured
+
+`CURATED` **30** · corpus **10 → 12** · omitted **20 → 18**, each with a reason · `llms-full.txt`
+**89 KB → 117 KB** · stale sizes corrected (**140,841** and **1,591,630** bytes, the latter wrong by
+**17×**) · self-test cases **+3**, both injections detected, restore byte-identical.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

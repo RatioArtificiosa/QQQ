@@ -5040,7 +5040,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
     check that does not run for the inputs that take the early path.*
   → `§O-309` and `§O-310` record both attempts, including that **twice in two rounds a failing
     assertion was mine rather than the code's** — found by printing the bytes and believing them.
-  → **Half done, and it stays open rather than claiming otherwise.** The **renderer** is built:
+  → **The renderer, which is the half that was built first and is unchanged by the endpoint:**
     `HttpMetrics::render_prometheus()` reads the registry through its own accessors, so every
     number comes from the same source the recording path writes to, and the label values are the
     bounded enums' own `as_str` — **the exposition inherits §10.2's cardinality discipline rather
@@ -5054,18 +5054,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → **The bound is asserted at the output, not just the registry**: the tenant walk goes **by
     index**, so *“at most `MAX_TENANTS + 2` series”* is true of the exposition, and a flood of client
     addresses produces **one** series labelled `other`.
-  → **What is NOT done: there is no endpoint.** A renderer is not a scrape endpoint, and shipping
-    one alone would be the **eighth** instance of *“written, tested, never called”* — the pattern
-    this goal keeps finding. The remainder is a design decision, not plumbing: **where the path
-    lives** (on the app port it can shadow an app route and exposes tenant names and traffic to
-    anyone who can reach the app; a separate admin port is conventional and larger), **opt-in or
-    always on** (`--audit-log` and `--redact-from` are both opt-ins), and **what a collision does**
-    (a silent shadow hides either an app route or the metrics, so a start-up refusal).
   → `§O-308` records the design and the remainder. **A renderer with no caller is a known state;
     a renderer with no caller and a tick is a claim.**
   → §10.2 Metrics that ship by default
 - [x] **OBS-014** Prove that a guest cannot influence sampling decisions.
-  → **Done, with one half of its fault injection still owed.** A guest cannot influence sampling,
+  → **The injection that was owed is done.** `the_tail_option_keeps_every_failure` was inverted
+    into `a_guest_cannot_force_trace_recording` and injected: with the guest's status removed from
+    the decision the test fails with `assertion left == right failed`, so the behavioural half is
+    proved rather than asserted. Recorded in `§O-385`, and it is finding #23's fix that made it
+    possible -- the test had been enshrining the defect the injection now catches.
+  → **Done, and its behavioural injection is no longer owed.** A guest cannot influence sampling,
     proved **two ways** because §10.4's *“never guest-controlled”* is a negative and no runtime test
     can prove a negative about a capability.
   → **Behavioural**: a well-formed W3C `traceparent` claiming `sampled=1` — the flag a conventional
@@ -5078,15 +5076,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
     `span.rs` and left **dormant**: *“`span.rs` names `traceparent` in code”* fired while **both
     behavioural tests passed**. A dormant vulnerability is invisible to a runtime test by
     construction, and it is exactly what a half-finished change leaves behind.
-  → **What is NOT claimed**: the behavioural pair was **not** shown to fail under the injection. The
-    patch fought its own anchors three times and the round ran out of budget, so the `→ Done:` claim
-    rests on the structural check. **A claim about a negative needs its own injection.**
   → The Observations document records both kinds of evidence and the gap.
-  → **Blocked by `OBS-011`, and the block is worth stating because the item reads as buildable.**
-    “Prove that a guest cannot influence sampling decisions” is a property **of a mechanism**, and
-    there is no sampling mechanism to have the property. Measured: `grep -i sampl` across
-    `crates/*/src/*.rs` returns only `qqq-bench`'s load-generator `Sample` — an unrelated type —
-    and `OBS-011` (*“Implement host-controlled sampling with a tail-sampling option”*) is open.
   → **You cannot prove a property of something that does not exist**, and a test written against a
     stub would assert that a stub is a stub. So this row stays open **behind `OBS-011`**, the same
     way `LANG-004`/`LANG-012`/`LANG-020` stay open behind `TEST-010` — and for the same reason: the
@@ -5101,10 +5091,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → **Done — this is the compliance report.** §10.1 calls *“prove what this code did”* QQQ's
     fourth signal and says no other runtime answers it structurally. `to_compliance_report` is that
     answer: per-record evidence with the chain head, so a reader can recompute rather than trust.
-  → **What it still does not answer, named rather than implied**: the capability column is a
-    **stated placeholder** (`FsRead`), because the served seam sees one guest call and not the host
-    calls inside it. The per-capability rows are `OBS-001`, which needs the `ambient::require` seam.
-    A report that aggregated by capability today would be aggregating a constant.
+  → **What the report answers, and what it still does not, named rather than implied**: the
+    capability column records the **served** capability, which is `Capability::HttpServer` -- measured
+    in the record the served path writes (`"capability":"http.server"`), not a placeholder. What is
+    still owed is the **per-capability row**: the served seam sees one guest call and not the host
+    calls inside it, so an aggregation by capability today would be aggregating a constant. That is
+    `OBS-001`, and it needs the `ambient::require` seam.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OBS-017** Decide whether to contribute capability-audit semantic conventions to OpenTelemetry (open question `OQ-010`).
   → §10.4 Distributed tracing

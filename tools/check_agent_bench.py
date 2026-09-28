@@ -74,6 +74,23 @@ START_VERBS = {"empty", "new"}
 VERIFY_VERBS = {"inspect-requires", "audit-lacks-rule"}
 
 
+def diag(text: str, head: int = 200, tail: int = 600) -> str:
+    """A command failure's message, keeping BOTH ends.
+
+    `text.strip()[:120]` keeps the head, and a compiler puts the DIAGNOSIS LAST: cargo prints
+    `Updating crates.io index / Locking … / Compiling …` and then the error. Reporting only the head
+    meant three unrelated tasks produced byte-identical messages and the real cause never appeared.
+
+    Collapsed to one line first, because a benchmark summary that wraps is a benchmark summary nobody
+    reads.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= head + tail:
+        return flat
+    elided = len(flat) - head - tail
+    return f"{flat[:head]} … [{elided} chars elided] … {flat[-tail:]}"
+
+
 def load() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
@@ -171,13 +188,13 @@ def verify(spec: dict, binary: pathlib.Path, work: pathlib.Path) -> tuple[bool, 
         if build.returncode != 0:
             if msvc_missing(build.stderr):
                 raise EnvironmentCannotCompile("no MSVC environment")
-            return False, f"build failed: {build.stderr.strip()[:120]}"
+            return False, f"build failed: {diag(build.stderr)}"
         wasm = project / "target" / "qqq" / f"{spec['project']}.component.wasm"
         if not wasm.is_file():
             return False, f"no artifact at {wasm.relative_to(work)}"
         r = qqqai(binary, ["inspect", str(wasm), "--json"], project)
         if r.returncode != 0:
-            return False, f"inspect failed: {r.stderr.strip()[:120]}"
+            return False, f"inspect failed: {diag(r.stderr)}"
         doc = json.loads(r.stdout)
         got = sorted(c["name"] for c in doc.get("data", {}).get("required", []))
         want = sorted(spec["expected"])
@@ -194,10 +211,10 @@ def verify(spec: dict, binary: pathlib.Path, work: pathlib.Path) -> tuple[bool, 
         if build.returncode != 0:
             if msvc_missing(build.stderr):
                 raise EnvironmentCannotCompile("no MSVC environment")
-            return False, f"build failed: {build.stderr.strip()[:120]}"
+            return False, f"build failed: {diag(build.stderr)}"
         r = qqqai(binary, ["audit", "--json"], project)
         if r.returncode != 0:
-            return False, f"audit failed: {r.stderr.strip()[:120]}"
+            return False, f"audit failed: {diag(r.stderr)}"
         doc = json.loads(r.stdout)
         rules = [f.get("rule") for f in doc.get("data", {}).get("findings", [])]
         if spec["rule"] in rules:

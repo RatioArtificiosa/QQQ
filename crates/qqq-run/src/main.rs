@@ -935,6 +935,30 @@ fn dispatch_audit(
                     return ExitCode::from(exit::USAGE);
                 }
             }
+        } else if a.starts_with("--") && a != "--manifest" {
+            // **An unknown flag is refused rather than dropped.** There was no arm here, so
+            // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
+            // to a question they did not ask, with nothing to say the option had been discarded. Of
+            // the three things a command can do with a flag it does not implement -- honour it, refuse
+            // it, ignore it -- **only ignoring it lies**, and `dispatch_audit_log` already refuses.
+            //
+            // `--manifest` is excluded because `flag_value` reads it from this same argv below. Flag
+            // VALUES cannot start with `--`, so this predicate cannot catch one.
+            //
+            // `--json`, `--jsonl` and `-q` never reach here: they are **global** flags, parsed before
+            // dispatch and accepted in either position. A first version of this arm special-cased
+            // `--json` as a usage error, which would have broken
+            // `audit_json_is_parseable_and_only_the_envelope` -- a green test. Measured, then reverted.
+            let err = qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("`{a}` is not a flag `qqqai audit` understands"),
+            )
+            .with_remediation(
+                "`qqqai audit [--sarif] [--fail-on note|warning|error] [--manifest <path>]`; \
+                 `--json` and `--jsonl` are global, so they go before the command or after it",
+            );
+            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         }
         i += 1;
     }

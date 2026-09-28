@@ -2196,6 +2196,49 @@ fn audit_json_is_parseable_and_only_the_envelope() {
     );
 }
 
+/// **An unknown flag is refused, not dropped.** `CodeRabbit` finding #9, corrected.
+///
+/// # Why this is the test the finding should have asked for
+///
+/// The finding said `qqqai audit --json` prints prose. It does not -- `--json` is global and works in
+/// either position, which `audit_json_is_parseable_and_only_the_envelope` above already asserts. What
+/// was true is that **any** flag `qqqai audit` does not implement was silently skipped: `--bogus`
+/// printed the human report and exited `0`. A caller who asked for something got an answer to
+/// something else, with no error, which is the one outcome worse than a refusal.
+///
+/// `dispatch_audit_log` already refuses unknown flags, so this is also `qqqai audit` agreeing with its
+/// own sibling.
+#[test]
+fn audit_refuses_an_unknown_flag() {
+    let s = Sandbox::new("audit-unknown-flag");
+    s.write("qqq.toml", AUDITING);
+
+    let run = s.run(&["audit", "--bogus"]);
+    // `assert_failed` rather than a hand-rolled `code != 0`: the harness already has it, and a test
+    // that re-implements its own helper is a test that can drift from it.
+    run.assert_failed();
+    let all = run.all();
+    assert!(
+        all.contains("--bogus"),
+        "the message must name the flag it refused, on whichever stream it went to:\n{all}"
+    );
+    assert!(
+        !run.stdout.contains("worst severity:") && !run.stdout.contains("exposed-posture"),
+        "and no report may be rendered for a run that was refused:\n{}",
+        run.stdout
+    );
+
+    // The control: the flags it DOES implement still work, and `--json` among them even though it is
+    // global -- the assertion the first version of this fix would have broken.
+    s.run(&["audit", "--sarif"]).assert_ok();
+    s.run(&["audit", "--json"]).assert_ok();
+    // `--fail-on warning` **exits 1**, and that is the control working rather than failing: the
+    // fixture has a warning-level finding, which is exactly the measurement `CLI-016`'s `-> Done:`
+    // line records. The first version of this test asserted `assert_ok()` here and was wrong about
+    // the product -- the threshold is supposed to fire on a project that reaches it.
+    s.run(&["audit", "--fail-on", "warning"]).assert_failed();
+}
+
 /// A threshold must gate **every** output mode.
 ///
 /// `meets_threshold` was computed inside the non-SARIF branch, so

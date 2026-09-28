@@ -29741,4 +29741,69 @@ error**, not merely unreachable. Rule 1 holds: *the brief is a hypothesis; the t
 
 ---
 
+## §O-388 — A review is a hypothesis too, and the existing test is what caught me
+
+**Found:** by writing CodeRabbit finding **#9**'s fix, then measuring before committing it.
+**Anchors:** `crates/qqq-run/src/main.rs`, `crates/qqq-run/tests/cli.rs`.
+
+### The finding, and the measurement that refutes it
+
+Finding #9 said `qqqai audit --json` outputs the compliance report as **plain prose**. Measured against
+the built binary:
+
+```text
+qqqai audit --json   -> {"producer":"qqqai",…,"command":"audit","ok":true,…}   one line, exit 0
+qqqai --json audit   -> the SAME bytes                                          one line, exit 0
+```
+
+`--json` is a **global** flag, and `main.rs`'s parser accepts it **in either position** — it has had a
+test for `["doctor", "--json"]` since long before this review. `cli.rs`'s
+**`audit_json_is_parseable_and_only_the_envelope`** drives `["audit", "--json"]` and asserts a single
+envelope line. **The behaviour the finding asks for was already implemented and already tested.**
+
+### And I nearly shipped a regression
+
+The first version of the fix made `--json` a **usage error** on `qqqai audit`. It compiled. It would
+have turned a green test red — and it was reverted before it was committed, because I read the
+**existing test** before trusting the review.
+
+> **A review is a hypothesis too.** `§O-380` recorded the review as worth running; this is the other
+> half: a finding carries the reviewer's model of the code, and that model can be wrong in the same way
+> the brief's can. **The evidence is the tree, and the existing tests are part of it** — a finding that
+> contradicts a green test is a finding to measure before obeying.
+
+### The defect that IS there, one step over
+
+```text
+qqqai audit --bogus  -> the human report, exit 0
+```
+
+`dispatch_audit`'s flag loop had arms for `--sarif`, `--fail-on` and `--fail-on=` and **no `else`**, so
+**any** flag it does not implement was silently skipped. Of the three things a command can do with an
+option it does not implement — honour it, refuse it, ignore it — **only ignoring it lies**: the caller
+gets an answer to a question they did not ask, with nothing to say their option was discarded. And
+**`dispatch_audit_log` already refuses** unknown flags, so `qqqai audit` contradicted its own sibling.
+
+**Fixed**: an unknown flag is refused with `exit::USAGE`, naming itself and the flags the command does
+take, and saying `--json` and `--jsonl` are global. `--manifest` is excluded because `flag_value` reads
+it from the same argv; flag **values** cannot start with `--`, so the predicate cannot catch one.
+
+### Two of my own test expectations were wrong, and both were about the product
+
+* The **control** asserted `--fail-on warning` exits `0`. It exits **`1`** — the fixture has a
+  warning-level finding, which is exactly what `CLI-016`'s `→ Done:` line records. **The threshold is
+  supposed to fire on a project that reaches it**, and a control that expected otherwise was asserting
+  the opposite of the feature.
+* The harness already had `assert_failed()` and `all()`; my first version hand-rolled `code != 0`. A
+  test that re-implements its own helper is a test that drifts from it.
+
+### Measured
+
+`cargo test -p qqq-run --test cli audit` **6 passed / 0 failed** · injected (the arm made unreachable)
+**101**, with `audit_refuses_an_unknown_flag` reporting *"expected failure, got exit 0"* — the pre-fix
+behaviour exactly · restore **byte-identical** (`215d6462…`) · `FMT=0` · DoD #7 now **13 fixed, 1
+dismissed with this measurement**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

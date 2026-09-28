@@ -315,14 +315,36 @@ fn a_quarter_rate_produces_both_outcomes() {
     );
 }
 
-/// **The tail option keeps a trace the head dropped — §10.4's *"tail sampling option"*.**
+/// **A guest cannot force recording -- `OBS-014`, and `CodeRabbit` finding #23.**
 ///
-/// With `--trace-keep-failures` and a project whose every response is 503, a `0.25` rate keeps
-/// **everything**, because every request is a failure the option exists to keep. That is the
-/// behaviour, stated: the option is an **exception to the rate**, which is why it is a flag of its
-/// own and not bundled into `--trace-sample`.
+/// With `--trace-keep-failures` and a project whose every response is 503, a `0.25` rate must still
+/// be a `0.25` rate: the guest does not get a vote in a host sampling decision.
+///
+/// # This test used to assert the opposite, and its own comment said why
+///
+/// It asserted that all 24 traces are kept, on the reasoning recorded as `§O-317`:
+///
+/// > *with the tail option on for every policy, and a failure read from `status >= 500`, a project
+/// > answering 503 to everything sampled 24 of 24 -- the rate was not the rate.*
+///
+/// **`§O-317` found the right symptom and drew the wrong conclusion.** The symptom was that a
+/// guest's status could defeat the rate; the remedy made the defeat CONSISTENT instead of removing
+/// it. But `emit_span`'s own comment in `qqq-serve` requires the opposite:
+///
+/// > *a guest that could claim to have failed would be able to force recording, which is the same
+/// > influence §10.4 forbids in the other direction.*
+///
+/// So this file held the invariant, a test that violated it, and a note explaining why. A guest that
+/// answers 500 decided whether the host recorded a trace.
+///
+/// # What this does NOT prove, and it is owed
+///
+/// With `failed` a host fact, the flat dispatch path has NO failure to report, so
+/// `--trace-keep-failures` has nothing to keep there -- **the option is inert on that path.** The
+/// honest end state is a HOST-side failure signal (a trap, a failed instantiation) wired to it, and
+/// until that exists this test proves the guest has no vote, not that the option works.
 #[test]
-fn the_tail_option_keeps_every_failure() {
+fn a_guest_cannot_force_trace_recording() {
     let sandbox = Sandbox::new("tail");
     let out = serve(
         &sandbox,
@@ -333,9 +355,14 @@ fn the_tail_option_keeps_every_failure() {
     // `span step=` would assert three times the requests and fail for a correct server. `ROUTE MATCH`
     // is emitted exactly once per request that reaches dispatch.
     let sampled = out.matches("name=ROUTE MATCH").count();
-    assert_eq!(
-        sampled, 24,
-        "with the tail option on and every response a 503, every trace is a failure it keeps: \
-         {sampled} spans for 24 requests"
+    assert!(
+        sampled < 24,
+        "a guest answering 503 must NOT force every trace to be recorded: {sampled} spans for 24 \
+         requests at a 0.25 rate -- the guest has a vote in a host sampling decision"
+    );
+    assert!(
+        sampled > 0,
+        "and the rate must still sample something, or this would pass on a server that never \
+         records: {sampled} spans"
     );
 }

@@ -496,6 +496,35 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         }
     }
 
+    // **A bad `--audit-log` is refused before serving, not at the first request.**
+    //
+    // `attach_audit_file` runs from `build_dispatch`, which returns early when the project has no built
+    // artifact -- so a bare manifest, or one whose component failed to build, never reached it and the
+    // flag was effectively unchecked. That is the same shape as the metrics-path check above, whose
+    // comment records this exact failure and this exact remedy; `CodeRabbit` finding #18 is the second
+    // instance of it, found by reading the first one's comment.
+    //
+    // The load here is a **read** (and, since `§O-382`, the removal of a half-written final record), so
+    // it is idempotent with the attach that `build_dispatch` performs when there IS an artifact: this
+    // either proves the file usable or refuses the run, and attaches nothing either way.
+    if let Some(path) = &opts.audit_log {
+        qqq_host::audit_sink::resume_or_start(
+            std::path::Path::new(path),
+            qqq_host::audit::DEFAULT_CAPACITY,
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::InternalInvariantViolated,
+                format!("`--audit-log {path}` is not usable as an audit log: {e}"),
+            )
+            .with_context("manifest", loaded.path.display().to_string())
+            .with_remediation(
+                "point `--audit-log` at a writable path, or remove the flag to keep the record in \
+                 memory only; a file that exists must hold records whose hash chain verifies",
+            )
+        })?;
+    }
+
     if server.routes.is_empty() {
         return Err(Error::new(
             ErrorCode::ManifestSchemaViolation,

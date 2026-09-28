@@ -2196,6 +2196,77 @@ fn audit_json_is_parseable_and_only_the_envelope() {
     );
 }
 
+/// **A bad `--audit-log` is refused before serving, even when nothing was built.**
+/// `CodeRabbit` finding #18.
+///
+/// # Why the manifest has no routes
+///
+/// So the run terminates and this test can assert on it. `prepare` refuses a route-less manifest, and
+/// the audit check sits **before** that refusal, so the message is the audit one. **Asserting the exit
+/// code alone would pass either way** -- both paths fail -- so the assertion is on the sentence.
+///
+/// # What was wrong
+///
+/// `attach_audit_file` runs from `build_dispatch`, which returns early when the project has no built
+/// artifact, so a bare manifest with `--audit-log /nope` **started serving** and said nothing. `prepare`
+/// already carries the comment that records this exact failure for `--metrics-path`; this was the
+/// second instance of it, in the same function.
+#[test]
+fn a_broken_audit_log_is_refused_before_serving() {
+    let s = Sandbox::new("audit-log-refused");
+    // No routes: `prepare` refuses this, and the audit check runs first.
+    s.write("qqq.toml", "[package]\nname = \"a\"\nversion = \"1.0.0\"\n");
+    // **A line that ends with `}` but is not a record.** The fixture matters: a line that does NOT
+    // end with `}` is treated as a half-written final record from a crash and DROPPED (`§O-382`), so
+    // the loader accepts the file and this test would pass for the wrong reason -- measured, that is
+    // what the first version did, and the routes refusal printed instead. Only a line that looks
+    // finished and is not is refused as corruption.
+    s.write("audit.jsonl", "{\"nope\":1}\n");
+
+    let run = s.run(&["serve", "--audit-log", "audit.jsonl"]);
+    run.assert_failed();
+    let all = run.all();
+    // **The sentence the check writes, and nothing else does.** `contains("--audit-log")` -- the
+    // first version -- is satisfied by the flag's own help and remediation text, so it would pass on
+    // a run in which the check never executed. It happens that it would ALSO have failed here, and
+    // that is worth recording as a correction: the first draft of this comment claimed the original
+    // assertion was inert, on the strength of an injection that had in fact **never applied** -- the
+    // injector's anchor appeared twice in the file, its `assert count == 1` refused, and its stderr
+    // was filtered out of the output I read. Naming the sentence removes the question.
+    assert!(
+        all.contains("is not usable as an audit log"),
+        "the refusal must be the audit one, not merely a failure:\n{all}"
+    );
+    assert!(
+        all.contains("audit.jsonl"),
+        "and the path it could not use:\n{all}"
+    );
+
+    // The control: the SAME manifest without the flag fails for a DIFFERENT reason -- the missing
+    // routes -- so the assertion above is about the audit check and not about route-less manifests.
+    let control = s.run(&["serve"]);
+    control.assert_failed();
+    assert!(
+        !control.all().contains("is not usable as an audit log"),
+        "without the flag the audit check has nothing to say, so the sentence must be absent -- this \
+         is the assertion that makes the one above mean something:\n{}",
+        control.all()
+    );
+
+    // A path whose parent does not exist is NOT an error: `AuditFile::open` creates the directory, so
+    // that the flag can be pointed at a log path before anything has been written. Asserted rather
+    // than assumed, because the opposite would be a reasonable design and this records which one it
+    // is. (A third assertion here claimed the nested path was refused; it was not, and it passed
+    // vacuously -- removed rather than left asserting nothing.)
+    let nested = s.run(&["serve", "--audit-log", "nested/nowhere/audit.jsonl"]);
+    nested.assert_failed();
+    assert!(
+        !nested.all().contains("--audit-log"),
+        "a creatable path is not an audit-log failure:\n{}",
+        nested.all()
+    );
+}
+
 /// **An unknown flag is refused, not dropped.** `CodeRabbit` finding #9, corrected.
 ///
 /// # Why this is the test the finding should have asked for

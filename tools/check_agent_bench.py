@@ -41,6 +41,7 @@ no binary it prints `SKIPPED` and names the reason rather than passing quietly.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import pathlib
 import re
@@ -190,9 +191,19 @@ def verify(spec: dict, binary: pathlib.Path, work: pathlib.Path) -> tuple[bool, 
 # --------------------------------------------------------------------------------------------
 # The two halves
 # --------------------------------------------------------------------------------------------
-def static_checks() -> tuple[list[str], dict]:
+def static_checks(
+    doc: dict, want_target: str | None, want_escal: str | None
+) -> tuple[list[str], dict]:
+    """Every static problem `doc` implies, given §2.1's target and R-13's escalation threshold.
+
+    # Why the document and the two numbers are PARAMETERS
+
+    Because a predicate reachable only through `load()` can only ever be tested against the
+    checked-in file, and that file is well-formed -- so a self-test could assert the data is clean and
+    never that the checker would say otherwise. **`§O-375`: a rule that cannot fire is worse than no
+    rule.** Passing them in is what lets the self-test hand over a mutated copy.
+    """
     problems: list[str] = []
-    doc = load()
     tasks = doc.get("tasks", [])
     if not tasks:
         problems.append("the task set is empty; a benchmark of nothing scores nothing")
@@ -220,7 +231,6 @@ def static_checks() -> tuple[list[str], dict]:
             problems.append(f"`{tid}`'s reference solution IS its starting point; the task is a no-op")
 
     target = doc.get("target", {})
-    want_target, want_escal = proposal_numbers()
     got_target = target.get("successRate")
     got_escal = target.get("escalationThreshold")
     if want_target is None:
@@ -278,7 +288,8 @@ def dynamic_checks(binary: pathlib.Path, doc: dict) -> tuple[list[str], float | 
 
 
 def run(*, dynamic: bool = True) -> int:
-    problems, doc = static_checks()
+    doc = load()
+    problems, doc = static_checks(doc, *proposal_numbers())
     tasks = doc.get("tasks", [])
     print(f"agent benchmark: {len(tasks)} task(s) in {FIXTURE.relative_to(ROOT)}")
 
@@ -325,29 +336,60 @@ def run(*, dynamic: bool = True) -> int:
 
 
 def self_test() -> int:
-    """Prove each static predicate fires, by breaking it and watching it report."""
+    """Prove each static predicate **fires**, by handing `static_checks` a mutated document."""
     cases: list[tuple[str, bool, str]] = []
     doc = load()
-    tasks = doc.get("tasks", [])
-    cases.append(("the task set is non-empty", bool(tasks), f"{len(tasks)}"))
-
-    # A task whose reference IS its starting point proves nothing, so the rule must be live on the
-    # real set -- and the rule itself must be able to fire.
-    noop = tasks[0]["start"] == tasks[0].get("reference")
-    cases.append(("the real set has no no-op task", not noop, ""))
-    cases.append(("the no-op rule would fire on a task that had one",
-                  dict(tasks[0], reference=dict(tasks[0]["start"]))["start"]
-                  == dict(tasks[0], reference=dict(tasks[0]["start"]))["reference"], ""))
-
     want_target, want_escal = proposal_numbers()
+    tasks = doc.get("tasks", [])
+
+    cases.append(("the task set is non-empty", bool(tasks), f"{len(tasks)}"))
     cases.append(("§2.1 states the target", want_target is not None, f"{want_target}%"))
     cases.append(("R-13 states the escalation threshold", want_escal is not None, f"{want_escal}%"))
-    cases.append(("the fixture's target equals the Proposal's",
-                  doc["target"]["successRate"] == int(want_target) / 100 if want_target else False, ""))
 
-    # The rule must be able to FIRE: a mismatched target is a mismatch.
-    cases.append(("a mismatched target would be reported",
-                  doc["target"]["successRate"] != 0.5, ""))
+    def fires(name: str, mutate, numbers=None) -> None:
+        """The real fixture is clean, the mutation is not, and `static_checks` says so."""
+        if numbers is None:
+            numbers = (want_target, want_escal)
+        clean, _ = static_checks(copy.deepcopy(doc), *numbers)
+        cases.append((f"the real fixture is clean ({name} control)", not clean, f"{clean[:1]}"))
+        broken = copy.deepcopy(doc)
+        mutate(broken)
+        problems, _ = static_checks(broken, *numbers)
+        cases.append((name, bool(problems), problems[0] if problems else "NO PROBLEM RAISED"))
+
+    def a_duplicate_id(d: dict) -> None:
+        # `tasks` is non-empty on the real fixture, which the case above asserts -- so an index here
+        # cannot be the empty-set failure the next case exists for.
+        d["tasks"].append(dict(d["tasks"][0]))
+
+    fires("a duplicate task id is reported", a_duplicate_id)
+
+    def an_unknown_start_verb(d: dict) -> None:
+        d["tasks"][0] = dict(d["tasks"][0], start=dict(d["tasks"][0]["start"], verb="frobnicate"))
+
+    fires("an unknown start verb is reported", an_unknown_start_verb)
+
+    def a_no_op_task(d: dict) -> None:
+        d["tasks"][0] = dict(d["tasks"][0], reference=dict(d["tasks"][0]["start"]))
+
+    fires("a task whose reference IS its start is reported", a_no_op_task)
+
+    def a_mismatched_target(d: dict) -> None:
+        d["target"] = dict(d["target"], successRate=0.5)
+
+    fires("a target that disagrees with §2.1 is reported", a_mismatched_target)
+
+    def an_escalation_that_cannot_fire(d: dict) -> None:
+        d["target"] = dict(d["target"], escalationThreshold=1.0)
+
+    fires("an escalation threshold at or above the target is reported", an_escalation_that_cannot_fire)
+
+    # **An empty task set is a failure, and it must not be an IndexError.** The old self-test indexed
+    # `tasks[0]` before checking anything, so this input crashed the self-test instead of reporting.
+    empty = dict(copy.deepcopy(doc), tasks=[])
+    empty_problems, _ = static_checks(empty, want_target, want_escal)
+    cases.append(("an empty task set is a reported failure, not a crash",
+                  bool(empty_problems), empty_problems[0] if empty_problems else "NO PROBLEM RAISED"))
 
     failed = 0
     print("check_agent_bench self-test")
@@ -357,7 +399,7 @@ def self_test() -> int:
     if failed:
         print(f"\nSELF-TEST FAILED -- {failed} case(s) wrong")
         return 1
-    print("\nSELF-TEST PASSED -- the task set, the two Proposal numbers and the no-op rule are live")
+    print("\nSELF-TEST PASSED -- every predicate fires on a mutated document, and is silent on the real one")
     return 0
 
 

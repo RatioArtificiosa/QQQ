@@ -30387,7 +30387,89 @@ time (the previous run was ~46) · `BRIDGE_EXIT=1` · **no** `ENVELOPE PROBE FAI
 
 ---
 
+## §O-398 — The bridge's one failure is a checker running the WINDOWS binary through a bind mount
+
+**Found:** by measuring `§O-397`'s hypothesis and finding it wrong, twice, before finding the right one.
+**Anchors:** `tools/check_agent_cookbook.py`, `crates/qqq-run/src/new.rs:1344`, `docker/compose.yaml`.
+
+### What I assumed, and the source refuted
+
+`§O-397`'s next step said the scaffold *"runs `git init`, and Docker Desktop's `git` can be a Windows
+binary on `/mnt/c`"*. Reading `new.rs`:
+
+```rust
+/// Run `git init` in a new project.
+///
+/// Best-effort and silent on failure: a machine without git is a perfectly good
+/// machine to write software on, and `qqqai new` succeeding without version
+/// control is better than failing because of it. The boolean in the output
+/// tells the truth about what happened.
+fn init_git(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())      // <- silenced
+        .status()
+        .is_ok_and(|s| s.success())
+}
+```
+
+**It cannot produce that stderr** — the stream is `Stdio::null()` — and it runs at line 1305, **after**
+the files are written, so `qqq.toml` would exist. The checker's failure was *"could not scaffold a
+project"* because **`qqq.toml` was missing**, which `init_git` cannot cause.
+
+### And the container's git is not Windows either
+
+```text
+/usr/bin/git
+git version 2.39.5
+```
+
+**Wrong a second time.** `git` inside the image is the Linux one.
+
+### The actual chain, measured
+
+Running the scaffold's own command inside the container:
+
+```text
+ls: cannot access 'target/debug/qqqai': No such file or directory
+sh: 1: target/debug/qqqai: not found
+```
+
+**The container has no Linux `qqqai` at that path** — `compose.yaml` keeps Linux `target/` in a **named
+volume** (`/linux-target`) precisely so build output never crosses. But `/workspace` **is** a bind mount
+of the host tree, so:
+
+> **`target/debug/qqqai.exe` — a WINDOWS binary — is visible inside the container through the bind
+> mount.** A checker that resolves its binary by looking in the working tree finds **that one**, and
+> running a Windows `.exe` inside the container goes through **WSL interop**, which fails with
+> `UtilGetPpid: Failed to parse: /proc/1/stat` against `docker-init`.
+
+`check_agent_cookbook.py:193` runs `[str(binary), "new", "p", …]` and `find_binary()` chose the Windows
+artifact.
+
+### Why this is worth more than the fix
+
+**Both of my first two explanations were plausible and both were wrong**, and each was refuted by
+reading the source rather than by reasoning about it — `Stdio::null()` for the first, `git --version`
+inside the image for the second. **The volume topology that makes the bridge safe is exactly what makes
+a working-directory search unsafe**: rule 2 of `compose.yaml` keeps build output from crossing, and rule
+1's bind mount then shows the *other* platform's artifact to a checker that never asks which one it
+needs.
+
+**The fix is a question the helpers have to answer**: a binary resolved from the working tree must be
+**the running platform's**, or the check must **prove it runs** before using it. That is a change in
+`find_binary()`, which several checkers share, and it is **not** made here.
+
+### Measured
+
+`init_git`'s `Stdio::null()` and its line number read from the source · `git 2.39.5` and `/usr/bin/git`
+inside `qqq-dev-linux:1.97` · the missing Linux binary and the "not found" from the scaffold's own
+command inside the container · `BRIDGE_EXIT=1` with exactly one `FAIL`, the scaffold line.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

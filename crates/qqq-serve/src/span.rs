@@ -106,6 +106,12 @@ pub(crate) enum Policy {
     },
 }
 
+/// The most fractional digits a rate can carry and still be represented exactly in `u32` tenths.
+///
+/// `10^9` is the largest power of ten that fits a `u32` (4,294,967,295); `10^10` does not. Naming it
+/// once is what lets the refusal say **which** limit was exceeded rather than silently rescaling.
+const FRACTION_DIGITS: usize = 9;
+
 impl Policy {
     /// Parse a policy from its CLI spelling.
     ///
@@ -126,7 +132,23 @@ impl Policy {
             // float would make the bucket comparison inexact at the boundary, and a sampling rate
             // that is off by one bucket is a rate nobody can reason about.
             Some((whole, frac)) if !frac.is_empty() => {
-                let scale = 10u32.pow(u32::try_from(frac.len()).unwrap_or(9));
+                // **A fraction this cannot represent is REFUSED, not rescaled.** The old code was
+                // `10u32.pow(u32::try_from(frac.len()).unwrap_or(9))`, so a tenth digit was silently
+                // dropped and `0.0000000005` was read as `5/10^9` -- ten times the rate the operator
+                // wrote, with no error. A wrong rate that looks configured is exactly what the integer
+                // arithmetic below exists to prevent, so the value is refused while it can still be
+                // named as the problem.
+                if frac.len() > FRACTION_DIGITS {
+                    return Err(format!(
+                        "`{s}` has {} fractional digits; at most {FRACTION_DIGITS} can be \
+                         represented exactly, so this rate would be read as a different one",
+                        frac.len()
+                    ));
+                }
+                let scale = 10u32.pow(
+                    u32::try_from(frac.len())
+                        .expect("the check above bounds the length by FRACTION_DIGITS"),
+                );
                 let whole: u32 = whole.parse().map_err(|_| format!("`{s}` is not a rate"))?;
                 let frac: u32 = frac.parse().map_err(|_| format!("`{s}` is not a rate"))?;
                 (whole.saturating_mul(scale).saturating_add(frac), scale)
@@ -146,7 +168,15 @@ impl Policy {
         if num == 0 {
             return Ok(Self::AlwaysOff);
         }
-        if num >= den {
+        // **`1` means everything; anything above it is refused.** The old `num >= den` turned
+        // `--trace-sample 2`, a typo for `0.2`, into "record every request" -- a command that could not
+        // honour what it was asked and said nothing. `1.0` still reduces to `AlwaysOn`, because it IS 1.
+        if num > den {
+            return Err(format!(
+                "`{s}` is above 1, which is not a sampling rate; `1` and `on` both record everything"
+            ));
+        }
+        if num == den {
             return Ok(Self::AlwaysOn);
         }
         // **Reduced to lowest terms**, because `0.25` (25/100) and `0.250` (250/1000) are the same
@@ -371,5 +401,67 @@ impl Span {
             self.micros
         );
         out
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::Sampler;
+
+    /// **A rate this cannot represent is refused, not silently rescaled** -- `CodeRabbit` finding #16.
+    ///
+    /// `0.0000000005` has ten fractional digits. The old code computed `scale = 10^9` because ten did
+    /// not fit its `unwrap_or(9)`, and then parsed `0000000005` as `5`, so the rate became `5/10^9` --
+    /// **ten times** what was written, with no error and no way to notice. A wrong rate that looks
+    /// configured is the failure the integer arithmetic exists to prevent.
+    #[test]
+    fn a_fraction_too_long_to_represent_is_refused() {
+        let err = Sampler::from_rate("0.0000000005", false).expect_err("ten digits is too many");
+        assert!(err.contains("fractional digits"), "{err}");
+        assert!(err.contains("10"), "and it names how many it got: {err}");
+
+        // Nine is the boundary and must still work: `10^9` fits a `u32`.
+        assert!(
+            Sampler::from_rate("0.000000001", false).is_ok(),
+            "nine fractional digits is representable"
+        );
+    }
+
+    /// **A rate above 1 is refused; `1` itself is not.** `CodeRabbit` finding #16, second half.
+    ///
+    /// The old `num >= den` made `--trace-sample 2` -- a typo for `0.2` -- record **every** request.
+    #[test]
+    fn a_rate_above_one_is_refused_and_one_itself_is_not() {
+        // Each of these is representable, so the ONLY reason to refuse them is the bound. (A first
+        // version of this list included `1.0000000001`, which has ten fractional digits and is refused
+        // by the length check first, with a different message -- also correct, and not this case.)
+        for above in ["2", "1.5", "10", "1.9"] {
+            let err = Sampler::from_rate(above, false)
+                .expect_err(&format!("`{above}` is above 1 and must be refused"));
+            assert!(err.contains("above 1"), "{above}: {err}");
+        }
+
+        // And the length check refuses ten fractional digits whatever their value, so a rate that is
+        // BOTH too long and above one is refused by length -- still refused, by the first rule that
+        // can name the problem it found.
+        let both = Sampler::from_rate("1.0000000001", false).expect_err("ten digits is too many");
+        assert!(both.contains("fractional digits"), "{both}");
+
+        // And exactly 1 is everything, however it is written.
+        assert!(Sampler::from_rate("1", false).is_ok(), "`1` is a rate");
+        assert!(Sampler::from_rate("1.0", false).is_ok(), "and so is `1.0`");
+        assert!(Sampler::from_rate("on", false).is_ok(), "and so is `on`");
+
+        // The floor still works, and zero is still `off` rather than an error.
+        assert!(Sampler::from_rate("0", false).is_ok());
+        assert!(Sampler::from_rate("0.0", false).is_ok());
+        assert!(Sampler::from_rate("off", false).is_ok());
+    }
+
+    /// The typo test the `from_rate` doctest already asserts, kept here so the boundary lives with it.
+    #[test]
+    fn a_typo_is_still_refused() {
+        let err = Sampler::from_rate("0.5x", false).expect_err("a typo is refused");
+        assert!(err.contains("is not a rate"), "{err}");
     }
 }

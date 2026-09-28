@@ -29870,4 +29870,70 @@ refusal removed) the rewritten test **FAILED** with `assertion left == right fai
 
 ---
 
+## §O-390 — Two rates were silently misread rather than refused, and one character was the whole bug
+
+**Found:** by CodeRabbit, as finding **#16** (minor). **Anchors:** `crates/qqq-serve/src/span.rs`.
+
+Neither defect crashed. Both **answered a different question than the one asked**, which is the failure
+mode the surrounding comment says the integer arithmetic exists to prevent.
+
+### One: a tenth fractional digit was dropped, and the rate was then wrong by ten
+
+```rust
+let scale = 10u32.pow(u32::try_from(frac.len()).unwrap_or(9));
+```
+
+`unwrap_or(9)` made a **ten**-digit fraction scale as if it had nine, and the leading zeros parse away:
+
+```text
+--trace-sample 0.0000000005      the operator wrote 5e-10
+    scale = 10^9                 because 10 did not fit the expression
+    frac  = 5
+    -> 5 / 10^9 = 5e-9           TEN TIMES the rate that was written
+```
+
+**No error, no warning, and a rate nobody can reason about** — from a flag whose whole job is to be
+reasoned about.
+
+### Two: a rate above 1 recorded everything, and `>=` was the entire bug
+
+```rust
+if num >= den { return Ok(Self::AlwaysOn); }
+```
+
+So `--trace-sample 2` — a typo for `0.2` — sampled **every request**. `1` means everything and is the
+only value at or above the denominator that does; anything larger is a request the command cannot
+honour, and it answered a different one. `1.0` still reduces to `AlwaysOn`, because **it is 1**.
+
+### Fixed
+
+A fraction longer than **nine** digits is **refused**, naming how many it got and that at most nine can
+be represented exactly. `num > den` is a usage error; `num == den` stays `AlwaysOn`. `FRACTION_DIGITS`
+is a named constant so the refusal says **which** limit was exceeded rather than rescaling quietly.
+
+### And my own test got the interaction wrong
+
+Its first version asserted that `1.0000000001` produces the "above 1" message. It has **ten** fractional
+digits, so the **length** check fires first — with a different, equally correct message. The list now
+holds only representable values, and a separate assertion records that a value which is **both** too
+long and above one is refused by length, because that is the first rule that can name what it found.
+
+> **When two rules can fire on one input, the test must say which one it is about** — otherwise it
+> asserts whichever the implementation happens to check first.
+
+### Measured
+
+`cargo test -p qqq-serve rate_tests` **3 passed / 0 failed** · `--doc span` **3 passed** · the
+integration suite that drives the flag, `cargo test -p qqq-run --test spans`, **7 passed / 0 failed** —
+so the boundary change breaks nothing above it · injected (the `num > den` refusal made unreachable) the
+rate test **FAILED** · restore **byte-identical** (`51b6b7fa…`) · `FMT=0`.
+
+### The shell cost this round, recorded because it is the third time
+
+A patch script generated through a PowerShell here-string came out with an **unterminated Python string
+literal**. `FACT` already says *"write scripts with the `write` tool, never through the shell"*; the two
+files this round that went through the `write` tool applied cleanly on the first try.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

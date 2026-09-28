@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -57,11 +58,16 @@ def load() -> dict:
 
 
 def find_binary() -> pathlib.Path | None:
-    for rel in ("target/debug/qqqai.exe", "target/debug/qqqai",
-                "target/release/qqqai.exe", "target/release/qqqai"):
-        p = ROOT / rel
-        if p.is_file():
-            return p
+    # **The platform's own binary first.** `qqqai.exe` is a WINDOWS artifact, and the bridge's bind
+    # mount makes it visible inside a Linux container (Linux `target/` lives in a named volume; the
+    # host tree does not), so a search that prefers `.exe` returns a file the container can only run
+    # through WSL interop -- which fails against `docker-init` (`§O-398`).
+    names = ("qqqai.exe", "qqqai") if os.name == "nt" else ("qqqai", "qqqai.exe")
+    for profile in ("debug", "release"):
+        for name in names:
+            p = ROOT / "target" / profile / name
+            if p.is_file():
+                return p
     return None
 
 

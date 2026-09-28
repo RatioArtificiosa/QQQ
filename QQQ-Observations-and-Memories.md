@@ -29490,4 +29490,79 @@ worth having written a test that met it.
 
 ---
 
+## §O-383 — 30.06 seconds is the deadline, not the test — and a deferred finding is a deferred failure
+
+**Found:** after the full gate finally passed, by reading the CI job log. **Anchors:**
+`crates/qqq-run/tests/serve_policy.rs`, `.github/workflows/ci.yml`, `§O-282`.
+
+### The gate passed, and CI was still red
+
+The first full gate since `9473304` came back green with one expected failure:
+
+```text
+FMT=0  CLIPPY=0  WS=0  LANG001/002/003=0  CONFEXEC=0  LANG005=0
+ORDERS_BUILD=0  ORDERS_TEST=0  API EXAMPLES OK -- 2108 of 2108
+CHECKERS=1 -> FAIL python tools/check_sbom.py sbom        (the expected CI-only one)
+```
+
+CI, on the same commit, failed `Rust (ubuntu-latest)` at **step 8, `test`** — while macOS passed.
+
+> **The gate and CI do not run the same things, and `check_gate_parity` compares the gates to each
+> other, not to the platform CI runs on.** A green gate is not a green build; it is a green gate.
+
+That is the second round in a row where this held — `§O-379` was a `bash`-ism the gate's `cmd.exe`
+mirror caught and CI's Ubuntu job did not, and this is its mirror image.
+
+### The measurement that names the defect
+
+```text
+---- the_manifest_body_limit_is_enforced_on_a_real_request stdout ----
+panicked at crates/qqq-run/tests/serve_policy.rs:157:5:
+`qqqai serve` never bound 127.0.0.1:36743 for body-limit
+test result: FAILED. 10 passed; 1 failed; ... finished in 30.06s
+```
+
+**Thirty point oh six seconds is the deadline, not the test.** A test that fails at *exactly* its
+timeout is not reporting a slow test — it is reporting **the timeout**, and the message beside it
+(`never bound`) is what the deadline says, not what went wrong.
+
+The code:
+
+```rust
+if let Ok(Some(_)) = serving.child.try_wait() {
+    continue;                 // no sleep, and the port can never become ours
+}
+```
+
+The child **exited** — a port race with a sibling test binary — so the port would never become ours,
+and `continue` spun to the deadline. **The comment three lines above the bug already said it**: *"the
+child exiting is the signal that the port is not ours"*. The code did not act on it.
+
+### And CodeRabbit had already named it
+
+This is finding **#15** of the review in `§O-380`, filed under *"classed, not dismissed"* and deferred:
+
+> *"Update `serve_and_request` to determine success from the HTTP response rather than non-empty
+> captured output: use `answered` and reject output indicating `lost_the_port_race` before returning
+> `served`, so failed attempts retry on a fresh port."*
+
+**A deferred finding is a deferred failure, and it will fail at the least convenient moment** — here,
+on a commit whose subject was a *lint sweep*, in a test about *body limits*, on one platform of three.
+
+### The fix
+
+The spawn-and-probe is wrapped in a **five-attempt loop over fresh ports**, and the child exiting now
+`break`s out of the probe so `Serving`'s `Drop` owns the child's lifetime — which is what stops the
+next attempt from inheriting a stray process on the port it picks. `assert!` rather than
+`if attempt == ATTEMPTS { panic! }`, which `clippy` reads as `manual_assert` and the lint gate treats
+as an error.
+
+### Measured
+
+`cargo test -p qqq-run --test serve_policy` **11 passed / 0 failed in 0.31 s** — where the failing run
+took **30.06 s** · `clippy -D warnings` **0** · `cargo fmt --all` applied · DoD #7 now **8 of 25**
+findings fixed (#15, #24, #12, #13, #14, #5, #6, #1).
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

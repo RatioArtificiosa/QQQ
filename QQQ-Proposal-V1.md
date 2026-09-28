@@ -672,14 +672,41 @@ scoop install qqqai         # Windows
 winget install QQQ.QQQ      # Windows
 ```
 
-**Size and startup targets** (these are SLOs, measured in CI on every commit, not aspirations):
+**Size and startup targets.** SLOs — and the state of each is stated rather than implied:
 
-| Metric | Target | Rationale |
-|---|---|---|
-| Download size (per platform, compressed) | ≤ 25 MB | Comparable to Bun; small enough for CI images |
-| `qqqai --version` wall time | ≤ 15 ms | Cold process start with no project |
-| `qqqai run` cold start (cached) | ≤ 40 ms | From process exec to listener accepting |
-| Installed footprint (binary only) | ≤ 60 MB on disk | Fits in any container layer |
+| Metric | Target | Measured | Where it is measured |
+|---|---|---|---|
+| Download size (per platform, compressed) | ≤ 25 MB | **6.1 MiB** | the `production-image` job, every commit |
+| Installed footprint (binary only) | ≤ 60 MB on disk | **19.3 MiB** | the `production-image` job, every commit |
+| `qqqai --version` wall time | ≤ 15 ms | **7.75 ms** p50 | native, 20 runs — see below |
+| `qqqai run` cold start (cached) | ≤ 40 ms | **not measured** | — |
+
+The first two are **gates**. The `production-image` job extracts the shipped binary from the built
+image and fails when either budget is exceeded. It is measured there because that job builds exactly
+what a user installs, so the binary is already present and the measurement costs no extra build —
+and because the runtime stage is **distroless**, so the bytes come out with `docker create` +
+`docker cp` rather than with a tool inside the image.
+
+The other two are **timings**, and the honest state differs for each:
+
+* **`qqqai --version`** is measured **natively**: 20 runs, min 6.68 ms, **p50 7.75 ms**, max
+  12.72 ms, against the ≤ 15 ms budget. It is deliberately **not** gated, and the reason is worth
+  recording: the same command measured through `docker run` reads **599.8 ms p50**, which is the
+  container runtime's startup rather than the binary's. A wall-clock number taken on a shared runner
+  through a container is not a gate, and a step that measured the wrong thing would be worse than no
+  step (`§O-353`).
+* **`qqqai run` cold start** is **not measured anywhere**. The row above is what a reader should
+  expect to find and does not.
+
+This paragraph previously said these were *"measured in CI on every commit, not aspirations"* about
+all four, and that was false for all four until `LANG-007`. It is the shape `§O-277` names: a claim
+with no resolver drifts, and it drifts in the direction that looks tidy.
+
+**Build time** is budgeted separately in §9.2 (`qqqai build`, 10k LOC Rust, ≤ 20 s) and is
+**measured and not met**: a cold release build of the reference application takes **25.34 s**. The
+reference application is 2,513 lines rather than 10,000, so it is four times smaller than the
+subject the budget names and still 27% over the limit. The full measurement, including what the
+number does and does not cover, is recorded against `PERF-013` and `LANG-007`.
 
 → **Checklist:** `DIST-001` … `DIST-012`
 

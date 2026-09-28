@@ -28339,4 +28339,98 @@ four implementations are `LANG-013`/`LANG-021`/`LANG-029`/`LANG-037`, behind `TE
 
 ---
 
+## §O-369 — `§5.1` said four SLOs were measured in CI, and none of them was
+
+**Found:** measuring `LANG-007` rather than ticking it. **Anchors:** `QQQ-Proposal-V1.md` §5.1,
+`.github/workflows/ci.yml` (the `production-image` job), `QQQ-Checklist-V1.md` (`PERF-013`),
+`docker/Dockerfile.prod`.
+
+### The claim
+
+`§5.1` declares four install-time SLOs and introduces them with:
+
+> *"these are SLOs, **measured in CI on every commit**, not aspirations"*
+
+**Nothing measured any of them.** There is no size step in `ci.yml`, no budget checker under
+`tools/`, and no `PERF-*` item that names them. The sentence was an aspiration wearing the word
+"measured", which is the direction `§O-277` names: a claim with no resolver drifts, and it drifts
+toward whatever looks tidy.
+
+### What the numbers actually are
+
+Measured from the **shipped** artifact — the cached production image, extracting the binary with
+`docker create` + `docker cp`:
+
+| Metric | Target | Measured | Met |
+|---|---|---|---|
+| Installed footprint (binary only) | ≤ 60 MB | **20,201,728 B — 19.3 MiB** | **yes** |
+| Download size (compressed) | ≤ 25 MB | **6,420,492 B — 6.1 MiB** (gzip -9) | **yes** |
+| `qqqai --version` wall time | ≤ 15 ms | **7.75 ms p50** (min 6.68, max 12.72) | **yes** |
+| `qqqai run` cold start (cached) | ≤ 40 ms | **not measured anywhere** | — |
+
+and, from `§9.2`, the budget `LANG-007` is jointly about:
+
+| Metric | Target | Measured | Met |
+|---|---|---|---|
+| `qqqai build`, 10k LOC Rust | ≤ 20 s | **25.34 s** (cold, reference app, 2,513 LOC) | **no** |
+
+### And the instrument matters more than the number
+
+The same command, measured two ways:
+
+```text
+$ qqqai --version           (native, 20 runs)   ->  p50   7.75 ms
+$ docker run --rm --entrypoint /usr/local/bin/qqqai qqqai-prod:test --version
+                                                ->  p50 599.8 ms
+```
+
+**77× apart, and the second is not the binary.** It is the container runtime's own startup, paid
+before `main` runs. Measuring the right thing in the wrong place does not produce a noisy number; it
+produces a number about something else, and a gate built on it would be a gate on docker's
+scheduling.
+
+So `--version` is **reported and not gated**, and the reason is written into `§5.1` rather than left
+in a commit message. The two **size** budgets are gated, because they are deterministic and because
+the job that builds what a user installs is where they belong.
+
+### The two gates, and why the binary is extracted rather than run
+
+The runtime stage is **distroless** — no `stat`, no `du`, no shell — so the bytes come out with
+`docker create` + `docker cp`, which needs nothing inside the image. That is the same property the
+job already asserts above it.
+
+All three branches were exercised before the step was trusted, because a budget check that cannot
+fail is not a check:
+
+```text
+A. the real binary                      -> exit 0
+B. footprint budget tightened to 1 MB   -> exit 1, "installed footprint is over the §5.1 budget"
+C. download budget tightened to 1 MB    -> exit 1, "download size is over the §5.1 budget"
+D. a zero-byte binary                   -> exit 1, "the binary could not be extracted"
+```
+
+**D is the anti-vacuity case**, and it is the one that matters: a zero-byte binary satisfies both
+`≤` comparisons, so without `test -s` and the numeric `case` guards the step would pass on an
+extraction that produced nothing.
+
+The docker plumbing was verified separately against the real cached image, because WSL's `bash` on
+this machine can reach `gzip`/`wc`/`tr` but **not** the Docker daemon — so the shell logic was
+exercised on a file and the plumbing on the image, and neither half was assumed from the other.
+
+### `LANG-007` is `[~]`, not `[x]`
+
+The item is *"Rust build-time **and** binary-size budget met"*. That is a conjunction and one
+conjunct is false, so the honest state is an annotation rather than a tick — and the annotation
+carries both numbers, so a reader can check it. **Ticking it would have been the exact move the
+`§O-258` precedent forbids**: a budget that hides a shortfall is worse than one that shows it.
+
+### Measured
+
+`§5.1` **4 SLOs → 2 gated, 1 reported, 1 stated as unmeasured** · footprint **19.3 MiB ≤ 60 MB** ·
+download **6.1 MiB ≤ 25 MB** · `--version` **7.75 ms ≤ 15 ms** native, **599.8 ms** through docker ·
+build time **25.34 s > 20 s** · **3** failure branches injected, each exits **1** · `ci.yml`
+**10 jobs, 173 steps, 0 steps with neither `run` nor `uses`**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

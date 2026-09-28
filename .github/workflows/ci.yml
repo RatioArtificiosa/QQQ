@@ -1778,6 +1778,66 @@ jobs:
           fi
           echo "OK: the CLI runs under every hardening flag"
 
+      # `LANG-007` / `§5.1`. The Proposal's install section declares four SLOs and says they are
+      # *"measured in CI on every commit, not aspirations"* -- and **nothing measured any of them**.
+      # This job is the right home for the two that are about size: it builds exactly what a user
+      # installs, so the shipped binary is already here and the measurement costs no extra build.
+      #
+      # # Why the binary is extracted rather than measured through `docker run`
+      #
+      # Because the runtime stage is **distroless** -- there is no `stat`, no `du` and no shell to
+      # run them with. `docker create` + `docker cp` gets the bytes out without needing anything
+      # inside the image, which is the same property the job asserts above.
+      #
+      # # Why only two of the four SLOs are here
+      #
+      # The other two are **timings**, and this is the wrong instrument for them: measured through
+      # `docker run`, `qqqai --version` reads **599.8 ms p50**, which is docker's own container
+      # startup and not the binary's. Measured natively it is **7.75 ms p50** against a ≤ 15 ms
+      # budget. A wall-clock number taken on a shared runner through a container runtime is not a
+      # gate, so the honest thing is to record it where it was measured correctly and to say so in
+      # `§5.1` rather than to add a step that measures the wrong thing (`§O-353`).
+      - name: Assert the shipped binary meets the §5.1 size budgets (LANG-007)
+        run: |
+          set -eu
+
+          # The two budgets, as `§5.1` states them. Written as bytes so the comparison is exact.
+          FOOTPRINT_BUDGET=$((60 * 1000 * 1000))
+          DOWNLOAD_BUDGET=$((25 * 1000 * 1000))
+
+          # The binary, out of the image, without running anything inside it.
+          CID="$(docker create qqqai:ci)"
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          docker cp "$CID:/usr/local/bin/qqqai" /tmp/qqqai-shipped
+          test -s /tmp/qqqai-shipped || { echo "::error::the binary could not be extracted"; exit 1; }
+
+          FOOTPRINT="$(wc -c < /tmp/qqqai-shipped | tr -d ' ')"
+          DOWNLOAD="$(gzip -9 -c /tmp/qqqai-shipped | wc -c | tr -d ' ')"
+
+          echo "installed footprint (binary only) : $FOOTPRINT bytes   budget <= $FOOTPRINT_BUDGET"
+          echo "download size (gzip -9)           : $DOWNLOAD bytes   budget <= $DOWNLOAD_BUDGET"
+
+          # Anti-vacuity first: a zero-byte binary would satisfy both comparisons below, and the
+          # `test -s` above is the only thing that would have caught it.
+          case "$FOOTPRINT" in
+            ''|*[!0-9]*) echo "::error::the footprint is not a number: '$FOOTPRINT'"; exit 1 ;;
+          esac
+          case "$DOWNLOAD" in
+            ''|*[!0-9]*) echo "::error::the download size is not a number: '$DOWNLOAD'"; exit 1 ;;
+          esac
+
+          status=0
+          if [ "$FOOTPRINT" -gt "$FOOTPRINT_BUDGET" ]; then
+            echo "::error::installed footprint is over the §5.1 budget"
+            status=1
+          fi
+          if [ "$DOWNLOAD" -gt "$DOWNLOAD_BUDGET" ]; then
+            echo "::error::download size is over the §5.1 budget"
+            status=1
+          fi
+          [ "$status" -eq 0 ] || exit 1
+          echo "OK: the shipped binary is inside both §5.1 size budgets"
+
   # ---------------------------------------------------------------------------
   # Fuzzing targets: they must still COMPILE.
   #

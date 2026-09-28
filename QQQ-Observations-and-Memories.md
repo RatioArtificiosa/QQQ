@@ -29635,4 +29635,61 @@ old test** · `clippy -p qqq-run --all-targets --all-features -- -D warnings` **
 
 ---
 
+## §O-386 — One live `qqqai` fails every Rust step in the gate, and the failure looks like a test failure
+
+**Found:** by running the full gate twice, once with a leftover process alive and once with it cleared.
+**Anchors:** `.scratch/full_gate.cmd`, `.scratch/clean_gate.cmd`, `target/debug/qqqai.exe`.
+
+### The measurement
+
+The first run reported:
+
+```text
+FMT=0   CLIPPY=0
+WS=101  LANG001=101  LANG002=101  LANG003=101  CONFEXEC=101  LANG005=101
+ORDERS_BUILD=0  ORDERS_TEST=0   API=0
+```
+
+**Every Rust step failed and the lint and format steps passed** — and the log's actual error was:
+
+```text
+error: failed to remove file `E:\QQQ\target\debug\qqqai.exe`
+  Access is denied. (os error 5)
+```
+
+That is a **build** failing to replace the binary, not an assertion. One process holding `qqqai.exe`
+makes cargo unable to relink it, so **every** step that needs the binary fails — including
+`cargo test --workspace`, whose integration tests spawn it.
+
+### Where the holder comes from
+
+`Get-Process | Where-Object { $_.Path -like 'E:\QQQ\target\*' }` found a live `qqqai` (pid 1424) — a
+**test server left behind by a previous gate run**. Its three rules are the bridge's, one level down:
+
+> **Do not kill the gate mid-run.** A killed gate does not take its spawned servers with it, and those
+> servers hold the binary. **The next gate then fails to build anything and reports it as eleven test
+> failures.**
+
+The second run, with the strays force-killed first, was **green**: `FMT=0 CLIPPY=0 WS=0 LANG001=0
+LANG002=0 LANG003=0 CONFEXEC=0 LANG005=0 ORDERS_BUILD=0 ORDERS_TEST=0 API=0` and the single expected
+`FAIL python tools/check_sbom.py sbom`. **The same commit, the same tree, the two runs differing only
+in whether a leftover process was alive.**
+
+### And the fix is one line, before the gate rather than after the failure
+
+`taskkill /F /IM qqqai.exe` at the top of the runner. `.scratch/clean_gate.cmd` now does that, under a
+comment that says why.
+
+### Two smaller things the same round measured
+
+* **`Stop-Process -Force` worked while `Get-Process` still reported the process.** A count read
+  immediately after a kill can be **stale**, and a reader who trusted it would have concluded the kill
+  had failed — the file was already free. **Check the resource, not the registry of who might hold it.**
+* **A `cmd.exe` redirect buffers, so a gate that has finished can look like a gate that is stuck.** The
+  log sat at 210,820 bytes across three reads while `CHECKERS=1` and `==== DONE ====` were already in
+  it. **`Select-String` on a buffered log is not a liveness check**; read the tail, and check the
+  process, before concluding anything is hung.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

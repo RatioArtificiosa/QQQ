@@ -2297,8 +2297,17 @@ mod tests {
         }
     }
 
-    /// The README must state the zero-capability fact. It is the first thing a
-    /// user reads, and the security model is the thing they most need to know.
+    /// The README must state the capability fact **for its template**. It is the
+    /// first thing a user reads, and the security model is what they most need to know.
+    ///
+    /// # This test used to DEMAND the defect, which is why the defect survived
+    ///
+    /// It asserted `readme.contains("zero")` for **every** template, `http` included -- and `http`'s
+    /// manifest grants `http.server`, so its README said one thing while the summary line printed by
+    /// the same command said another. **Anyone who corrected the README would have been blocked by
+    /// this test**, which is why the lie reached every HTTP scaffold: `CodeRabbit` finding #7, and
+    /// `§O-385` (*a test can be a defect's alibi*) with the guard demanding the wrong answer rather
+    /// than merely failing to notice it.
     #[test]
     fn every_readme_explains_the_capability_model() {
         for t in Template::ALL {
@@ -2308,9 +2317,15 @@ mod tests {
                 ..Default::default()
             };
             let readme = readme_for(&o);
+            // The claim the template's grant implies, not one claim for all of them.
+            let expected = if t == Template::Http {
+                "currently: http.server"
+            } else {
+                "zero"
+            };
             assert!(
-                readme.contains("zero"),
-                "the {} readme must say zero",
+                readme.contains(expected),
+                "the {} readme must say `{expected}`",
                 t.as_str()
             );
             assert!(

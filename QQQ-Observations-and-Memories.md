@@ -28958,4 +28958,99 @@ citations **1219**.
 
 ---
 
+## §O-376 — Every MCP tool published `additionalProperties: false`, and nothing enforced it
+
+**Found:** verifying the goal's Gate 2 as an **independent client**. **Anchors:**
+`crates/qqq-run/src/mcp.rs`, `crates/qqq-run/tests/mcp_stdio.rs`, `crates/qqq-run/src/main.rs`
+(`reject_unknown_flags`).
+
+### The measurement
+
+Driving `qqqai mcp` over a pipe, from a directory containing a `qqq.toml`:
+
+```text
+client -> {"name":"qqq_manifest_get","arguments":{"manifest":"does-not-exist.toml"}}
+server <- isError: false, {"found": true, "name": "p", "path": ".\\qqq.toml", "valid": true}
+```
+
+`qqq_manifest_get` publishes **one** argument — `path` — and declares
+`"additionalProperties": false`. The client sent `manifest`. The server **ignored it**, used the
+default, found the working directory's manifest, and answered **successfully**.
+
+**A successful reply to a question the client never asked.** And silent: the first time I tried it, the
+working directory had no manifest, so the reply was an honest `isError: true` about a missing file —
+which read as *"the argument was understood and the file is missing"*, not *"the argument was
+ignored"*.
+
+### The CLI already knew this, in writing
+
+`reject_unknown_flags`'s own doc comment, in the CLI, about its own flags:
+
+> *"Silently ignoring an argument is worse than refusing it — the user believes the option took
+> effect, and the **absence** of its effect is then a mystery rather than an error."*
+
+The CLI refuses an unknown flag for its **human** callers and ignored an unknown argument for its
+**machine** callers. **The rule was written down in the same repository, one module over, and the MCP
+server had the opposite behaviour** — which is what makes it a defect rather than a design choice.
+
+### The fix, and why it is checked against the schema
+
+`reject_unknown_arguments(name, arguments)` runs before dispatch and refuses a key the tool does not
+publish, with `-32602` naming both the wrong argument and the accepted ones. It is checked against the
+schema **`tools/list` already hands the model**, so there is no second list of accepted arguments to
+drift — which is how a published surface ends up with nothing behind part of it (`§O-372`).
+
+### And my own probe was the first thing it corrected
+
+The Gate 2 probe had **guessed** the argument names — `code` for `qqq_errors_lookup`, `manifest` for
+`qqq_manifest_get` — and both were wrong. It got away with it under the old behaviour, and the moment
+the server started refusing, the probe failed with:
+
+```text
+`qqq_errors_lookup` does not take `code`; it accepts class
+`qqq_manifest_get` does not take `manifest`; it accepts path
+```
+
+**The probe now derives its arguments from each tool's `inputSchema`.** A probe that guesses at a
+published contract is a probe that tests its own guesses.
+
+### The injection found a hole in my own tests, which is the part worth keeping
+
+Removing the one-line call left the whole suite **green** — `6 passed; 0 failed`. The unit test calls
+`reject_unknown_arguments` **directly**, so it proved the **predicate** and said nothing about the
+**wiring**; and every protocol test in `mcp_stdio.rs` sent no arguments at all. **The call site had no
+coverage.** A protocol-level test was added, and the injection then fired:
+
+```text
+an_unpublished_argument_is_refused_over_the_protocol ... FAILED
+test result: FAILED. 17 passed; 1 failed
+```
+
+> **A test of the predicate is not a test of the path.** An injection that leaves the suite green is
+> not a failed injection; it is a measurement of where the test was looking.
+
+### And an existing test was exercising the defect
+
+`no_tool_answers_unimplemented` called **all twelve** tools with `{"path": "C:/qqq-does-not-exist"}`.
+Only some publish `path`; the rest had it silently ignored. The test's subject is *"every published
+tool has a handler"*, so it now sends no arguments — and its comment records why the argument went
+away. **A test that passes because a defect absorbs it is a test that will fail the day the defect is
+fixed**, which is exactly what happened, in the right direction.
+
+### Gate 2, as an independent client
+
+`initialize` answers a `protocolVersion` and `serverInfo.name = qqqai`; `tools/list` returns all
+**12** with an `inputSchema` each; and `qqq_errors_lookup` / `qqq_manifest_get` / `qqq_schema` each
+answer with `structuredContent` and `isError: false`, **arguments derived from their own schemas**.
+That is the goal's Phase 2 gate, read from the run rather than asserted.
+
+### Measured
+
+`additionalProperties: false` published by **12 of 12** tools and enforced by **0** before this round ·
+injection: **0 failed → 1 failed** once the wiring had a test · restore **byte-identical**
+(`ad95608a…`) · `mcp_stdio` **17 → 18** tests · lib `mcp` **6 passed** · `CLI-022` ticked as the CLI's
+view of `AGENT-004`/`AGENT-005`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

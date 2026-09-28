@@ -193,12 +193,18 @@ fn no_tool_answers_unimplemented() {
         "qqq_schema",
         "qqq_errors_lookup",
     ];
+    // # Why these carry NO arguments
+    //
+    // They used to send `{"path": "C:/qqq-does-not-exist"}` to all twelve. Only some tools publish
+    // `path`, and the others had it **silently ignored** -- which is the defect the server's schema
+    // enforcement removed. This test's subject is *"every published tool has a handler"*, so it sends
+    // no arguments and lets each tool take its own defaults.
     let requests: Vec<String> = names
         .iter()
         .enumerate()
         .map(|(i, n)| {
             format!(
-                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{n}","arguments":{{"path":"C:/qqq-does-not-exist"}}}}}}"#,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{n}"}}}}"#,
                 i + 1
             )
         })
@@ -225,6 +231,52 @@ fn no_tool_answers_unimplemented() {
             "and it must still be structured: {reply}"
         );
     }
+}
+
+/// **An argument a tool does not publish is REFUSED, over the protocol.**
+///
+/// # Why this test exists, and what it caught
+///
+/// Because the unit test for `reject_unknown_arguments` calls the function **directly**, so deleting
+/// the call site in `dispatch` left it green. Measured by injection: the check removed, the whole
+/// suite still reported `6 passed; 0 failed` -- the predicate was tested and **the wiring was not**.
+///
+/// This one speaks the protocol, so the only way for it to pass is for `call()` to actually invoke
+/// the check. Every other test in this file sends no arguments, which is why none of them noticed.
+///
+/// # And why the schema makes this a defect rather than a preference
+///
+/// Because every tool publishes `"additionalProperties": false`. Before the check existed, a client
+/// that misspelled `path` as `manifest` got `isError: false` and an answer built from the **working
+/// directory** -- a successful reply to a question it never asked. Silent, and wrong.
+#[test]
+fn an_unpublished_argument_is_refused_over_the_protocol() {
+    let replies = run_mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_manifest_get","arguments":{"manifest":"nope"}}}"#,
+    ]);
+    assert_eq!(replies.len(), 1, "one request, one reply: {replies:?}");
+    let reply = parse(&replies[0]);
+
+    let error = &reply["error"];
+    assert!(
+        !error.is_null(),
+        "an unpublished argument must be an ERROR, not a result that ignores it: {reply}"
+    );
+    assert_eq!(error["code"], -32602, "JSON-RPC invalid params: {reply}");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("manifest"),
+        "the refusal must name the argument that was wrong: {message}"
+    );
+    assert!(
+        message.contains("path"),
+        "and it must name what the tool DOES take: {message}"
+    );
+    // The other half: the request must not have produced a result at all.
+    assert!(
+        reply["result"].is_null(),
+        "a refused call must carry no result: {reply}"
+    );
 }
 
 /// **A name that is not a tool is refused, and the refusal names it.**

@@ -315,6 +315,70 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
 /// MCP returns a `content` array of typed blocks, and an `isError` flag. **A tool that cannot run here
 /// sets `isError` and still returns content** — so a client branches on a boolean rather than on the
 /// wording of a message. `AGENT-019`: *"every tool returns structured content, never prose-only."*
+/// Refuse an argument the tool does not publish.
+///
+/// # The defect this closes, measured
+///
+/// Every tool publishes `"additionalProperties": false`, and **nothing enforced it**. Measured, with
+/// the working directory containing a manifest:
+///
+/// ```text
+/// client -> {"name":"qqq_manifest_get","arguments":{"manifest":"does-not-exist.toml"}}
+/// server <- isError: false, {"found": true, "path": ".\\qqq.toml"}
+/// ```
+///
+/// `manifest` is not a published argument of `qqq_manifest_get` -- it takes `path` -- so the call
+/// **succeeded against a directory the client never named** and answered a question it never asked.
+/// It is the failure the CLI already names for its own flags, in `reject_unknown_flags`:
+///
+/// > *"Silently ignoring an argument is worse than refusing it -- the user believes the option took
+/// > effect, and the absence of its effect is then a mystery rather than an error."*
+///
+/// # Why it is checked against the schema rather than a per-tool list
+///
+/// Because the schema is already here and is already what `tools/list` hands the model. A second list
+/// of accepted arguments would be a second answer to the same question, and the two would drift --
+/// which is how a published surface ends up with nothing behind part of it.
+fn reject_unknown_arguments(name: &str, arguments: &Value) -> Result<(), (i64, String)> {
+    let schema = arguments_for(name);
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(given) = arguments.as_object() else {
+        return Err((
+            code::INVALID_PARAMS,
+            format!("`{name}` takes an object of arguments"),
+        ));
+    };
+
+    let unknown: Vec<&str> = given
+        .keys()
+        .filter(|k| !properties.contains_key(k.as_str()))
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+
+    let mut accepted: Vec<&str> = properties.keys().map(String::as_str).collect();
+    accepted.sort_unstable();
+    let accepted = if accepted.is_empty() {
+        "no arguments".to_owned()
+    } else {
+        accepted.join(", ")
+    };
+    let named = unknown
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err((
+        code::INVALID_PARAMS,
+        format!("`{name}` does not take {named}; it accepts {accepted}"),
+    ))
+}
+
 fn call(params: Option<&Value>, cli: Option<&Path>) -> Result<Value, (i64, String)> {
     let params = params.ok_or((code::INVALID_PARAMS, "`tools/call` needs params".to_owned()))?;
     let name = params.get("name").and_then(Value::as_str).ok_or((
@@ -331,6 +395,9 @@ fn call(params: Option<&Value>, cli: Option<&Path>) -> Result<Value, (i64, Strin
             format!("`{name}` is not one of this server's tools"),
         ));
     }
+
+    // The schema is a contract, not documentation. See `reject_unknown_arguments`.
+    reject_unknown_arguments(name, &arguments)?;
 
     match name {
         "qqq_errors_lookup" => Ok(errors_lookup(&arguments)),
@@ -1035,6 +1102,99 @@ fn write_http(
     );
     stream.write_all(response.as_bytes())?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    /// **Every tool refuses an argument it does not publish.**
+    ///
+    /// # Why it iterates rather than naming one tool
+    ///
+    /// Because the defect was that the schema was **decorative**, and it was decorative for **all
+    /// twelve** tools. A test that checked one would have caught the same defect twelve times more
+    /// slowly, and would have left the other eleven free to regress the moment someone added a tool
+    /// and forgot.
+    ///
+    /// # Why the key is one no tool could plausibly publish
+    ///
+    /// So the test cannot pass by accident on a future tool that happens to accept the name used here.
+    /// A test whose fixture could become valid is a test with an expiry date.
+    #[test]
+    fn every_tool_refuses_an_argument_it_does_not_publish() {
+        let bogus = "__not_a_published_argument__";
+        let all = tools();
+        assert_eq!(all.len(), 12, "the published surface is twelve tools");
+
+        for tool in &all {
+            let arguments = json!({ bogus: "x" });
+            let refused = reject_unknown_arguments(tool.name, &arguments);
+            assert!(
+                refused.is_err(),
+                "`{}` accepted an unpublished argument: {:?}",
+                tool.name,
+                tool.input
+            );
+            let (_, message) = refused.unwrap_err();
+            assert!(
+                message.contains(bogus),
+                "the refusal must name what was wrong: {message}"
+            );
+        }
+    }
+
+    /// And it stays out of the way of a call that conforms.
+    ///
+    /// The half that makes the rule usable: a check that refused correct calls would be removed.
+    #[test]
+    fn a_published_argument_is_accepted() {
+        // Every tool accepts an empty object: `additionalProperties: false` constrains what may be
+        // PRESENT, and a tool whose arguments are all optional is correctly callable with none.
+        for tool in tools() {
+            assert!(
+                reject_unknown_arguments(tool.name, &json!({})).is_ok(),
+                "`{}` refused an empty argument object: {:?}",
+                tool.name,
+                tool.input
+            );
+        }
+
+        // And each tool accepts the arguments it DOES publish -- taken from its own schema rather
+        // than named here, so this cannot be wrong about which arguments a tool takes.
+        //
+        // # Why not "a tool that publishes none"
+        //
+        // Because there is no such tool, measured: all twelve publish at least one argument. An
+        // assertion built on that assumption panicked on `expect`, which is how this test learned the
+        // property it should have been checking.
+        let mut checked = 0;
+        for tool in tools() {
+            let properties = tool
+                .input
+                .get("properties")
+                .and_then(Value::as_object)
+                .expect("every tool publishes a properties object");
+            assert!(
+                !properties.is_empty(),
+                "`{}` publishes no arguments; the loop below assumes at least one",
+                tool.name
+            );
+            for key in properties.keys() {
+                let arguments = json!({ key.clone(): "x" });
+                assert!(
+                    reject_unknown_arguments(tool.name, &arguments).is_ok(),
+                    "`{}` refused its own published argument `{key}`",
+                    tool.name
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 12,
+            "twelve tools, at least one argument each: {checked}"
+        );
+    }
 }
 
 #[cfg(test)]

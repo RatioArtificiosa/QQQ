@@ -3913,7 +3913,8 @@ Items are grouped below by **phase**, because dependency order matters more than
     deliverable in two areas of the checklist, and the evidence is recorded once
     rather than restated in a second place that would drift. Same pattern as
     `CON-004` pointing at `CON-016`.
-- [ ] **CLI-022** Implement `qqqai mcp`.
+- [x] **CLI-022** Implement `qqqai mcp`.
+  → Done: `qqqai mcp` -- the stdio and HTTP MCP server, **verified as an independent client**. The command dispatches (`CommandName::Mcp => dispatch_mcp`) and publishes **12** tools, which the probe reads from `tools/list` rather than from a list in the probe. Driven over stdin/stdout as an agent would: `initialize` answers a `protocolVersion` and `serverInfo.name = qqqai`; `tools/list` returns all twelve with an `inputSchema` each; and three `tools/call`s -- `qqq_errors_lookup`, `qqq_manifest_get`, `qqq_schema` -- each answer with `structuredContent` and `isError: false`, the **arguments derived from each tool's own published schema** rather than guessed. This is the same work `AGENT-004` (stdio) and `AGENT-005` (HTTP) record; this item is the CLI's own view of it, and it was open while both of those were ticked. **What the round found while verifying it is not in any item, and is fixed**: every tool published `"additionalProperties": false` and **nothing enforced it**, so a client that misspelled `path` as `manifest` got `isError: false` and an answer built from the working directory -- a successful reply to a question it never asked. `reject_unknown_arguments` in `crates/qqq-run/src/mcp.rs` now checks every key against the schema `tools/list` already hands the model, and refuses with `-32602` naming both the wrong argument and the accepted ones. See `§O-376`.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
 - [x] **CLI-023** Implement `qqqai schema --all` and the per-command schema output.
   → §8.3 The machine contract layer

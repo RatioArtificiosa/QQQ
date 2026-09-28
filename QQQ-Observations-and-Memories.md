@@ -29565,4 +29565,74 @@ findings fixed (#15, #24, #12, #13, #14, #5, #6, #1).
 
 ---
 
+## §O-384 — A guest's status code drove the host's sampling decision, and the comment said it must not
+
+**Found:** by CodeRabbit, as **finding #23** (`major`), and fixed this round. **Anchors:**
+`crates/qqq-serve/src/server.rs`, `crates/qqq-run/tests/spans.rs`, `OBS-014`.
+
+`emit_span`'s call site passed `response.status >= 500` as the span's `failed` flag, and `emit_span`'s
+**own doc comment**, four hundred lines above it, said:
+
+> *# Why `failed` is the status and not anything the guest said*
+> *Because a guest that could claim to have failed would be able to force recording, which is the same
+> influence §10.4 forbids in the other direction.*
+
+**`response` is what the guest's handler returned.** `dispatch_flat` calls `handler(head, body)` and
+`(dispatch.flat)(head, &matched)`, so `response.status` is **exactly** "anything the guest said". The
+comment named the invariant and the code violated it.
+
+This is **`OBS-014`** — *"prove a guest cannot influence sampling decisions"* — as a **live defect**
+rather than an open item, and it is `§O-381`'s shape: a comment that says what the code is supposed to
+do, beside code that does something else, in a module whose audit trail is the reason the comment
+exists.
+
+**The fix**: `failed` is a host fact. On the flat path there is no host failure — an unroutable path is
+a 404 and a wrong method a 405, both host-produced and neither a *failure* — so the flag is `false`.
+The status is still recorded by `emit_record` a few lines below, so **no observability is lost**; what
+is lost is the guest's vote in a host sampling decision.
+
+---
+
+## §O-385 — A test can be a defect's alibi
+
+**Found:** when the gate came back `WS=101` on the fix for `§O-384`. **Anchors:**
+`crates/qqq-run/tests/spans.rs`, `§O-317`.
+
+The failing test was `the_tail_option_keeps_every_failure`, and its own doc comment explained where it
+came from:
+
+> *`§O-317`: with the tail option on for every policy, and a failure read from `status >= 500`, a
+> project answering 503 to everything sampled **24 of 24** — the rate was not the rate. The assertion
+> below is what said so.*
+
+**`§O-317` found the right symptom and drew the wrong conclusion.** The symptom was real: a guest's
+status could defeat the sampling rate. The remedy made the defeat **consistent** instead of **removing**
+it — and `emit_span`'s own comment required the opposite. So the file held **the invariant, a test that
+violated it, and a note explaining why**, and the note made the test look authoritative.
+
+> **A test can be a defect's alibi.** When a fix breaks a test, read the test's own justification before
+> concluding the fix is wrong — and when the justification is a recorded observation, read *that*
+> observation's reasoning, because a recorded decision is not a correct one.
+
+The test is now `a_guest_cannot_force_trace_recording`, and its assertion is **both** bounds
+(`sampled < 24` **and** `sampled > 0`) so it cannot pass on a server that never records at all. **That
+is `OBS-014`'s behavioural test, created by inverting the test that enshrined the bug.**
+
+### And what the inversion exposes, stated rather than left to be discovered
+
+With `failed` a host fact, the flat dispatch path has **no** failure to report, so
+`--trace-keep-failures` is **inert there**. The honest end state is a **host-side** failure signal — a
+trap, an instantiation that failed — wired to it. Until that exists, the test proves **the guest has no
+vote**, not that the option works. That is written into the test's own doc comment.
+
+### Measured
+
+`cargo test -p qqq-run --test spans` **7 passed / 0 failed**, where the failing run read
+*"6 spans for 24 requests"* against the old assertion's `24` — **the rate applying is what broke the
+old test** · `clippy -p qqq-run --all-targets --all-features -- -D warnings` **0** · the full gate for
+`7b2afa7` **green** with the single expected `check_sbom` failure · CI for `06de95f` **SUCCESS** (the
+`§O-383` flake fix) · DoD #7 now **9 of 25**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

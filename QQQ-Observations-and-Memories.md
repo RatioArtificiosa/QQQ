@@ -29140,4 +29140,86 @@ steps, `GATE PARITY OK` · `tools/*.py` **74 → 75**.
 
 ---
 
+## §O-378 — An assertion that lives inside a test cannot be reused by a tool
+
+**Found:** making the conformance runner *"an independently usable tool"* (`TEST-016`). **Anchors:**
+`conformance/suite.json`, `crates/qqq-run/tests/conformance_exec.rs`, `tools/run_conformance.py`.
+
+### The shape of the problem
+
+The fixture **named** an execution case and pointed at a *runner*; the runner said what the case
+**meant**:
+
+```rust
+match id {
+    "component-layer" => /* data.kind == "component" */,
+    "qqq-imports-all-mapped" => /* no qqq: entry in unmapped_interfaces */,
+    other => Err(...),
+}
+```
+
+So `DOD-001`'s requirement — five toolchains passing **the identical conformance suite** — had no
+route: you cannot point a `cargo test` at somebody else's guest, and a second consumer would have had
+to **re-derive** both assertions in its own language. **Two derivations of one fact can disagree while
+both look authoritative** (`§O-277`), and this repository has paid for that repeatedly.
+
+> **An assertion that lives inside a test is not a contract. It is one test's private knowledge.**
+
+### The fix, and the injection that proves it
+
+The assertion moved into `conformance/suite.json` as `assert: { kind, value }` — a vocabulary **two
+words wide** — and **both** consumers read it: the Rust test that runs in the `rust` CI job, and
+`tools/run_conformance.py`, which takes `--guest <wasm>` and can be pointed at an artifact **nobody in
+this repository built**.
+
+The injection is what makes that a measurement rather than a claim. Changing `component-layer`'s
+declared value from `component` to `module` made:
+
+```text
+the TOOL:       FAIL  component-layer   classified `component`, not `module`      -> exit 1
+the RUST test:  panicked at conformance_exec.rs:217                               -> exit 101
+```
+
+**Both failed.** A `match id` arm could only ever have broken **one** of them, so both failing is the
+evidence that the declaration is shared. Restore byte-identical (`ae3b7922…`).
+
+### And `check_gate_parity` caught me adding a divergence instead of a check
+
+The first registration ran the tool with an explicit `--guest` in `ci.yml` and without it in the
+bridge. The guard refused:
+
+> *"…runs in ci.yml and not in docker/entrypoint.sh, and is not declared under '# # What this bridge
+> does NOT run'. Add it to the bridge, or declare it there with a reason"*
+
+The honest fix was **not** to declare the divergence but to **remove** it: the reference guest path
+became the tool's **default**, so both gates run one identical command. An **explicitly named** guest
+that is missing is still a failure; the **default** being missing is a declared skip, because the
+bridge has no build output and saying so is the accurate report. **A divergence you can delete is
+better than one you can justify.**
+
+### A guard that matched the wrong thing — `§O-374`'s shape, a third time
+
+My ticker guard read:
+
+```python
+if '"TEST-016"' in mc:          # the WHOLE file
+```
+
+`TEST-016` was already in the **PARTIAL** map, so the guard concluded the COMPLETE entry existed, the
+script printed *"already present"*, and the item **stayed open while everything reported success**. It
+now tests the slice before `PARTIAL = {`. **A guard that matches the wrong map reports the wrong
+thing**, and this is the same failure as a predicate that matched a code string instead of a variant
+(`§O-374`) and a marker that was a prefix of a row (`§O-373`).
+
+### Measured
+
+Vocabulary **2** assertions · `--self-test` **7 of 7**, including both directions of both assertions
+and the unknown-assertion case · the reference guest: **2 of 2 PASS** · a declared gap language
+(`--language ts`) exits **non-zero** naming owner and target, because reporting success for a language
+with no toolchain hides exactly what the parity matrix exists to show · injection **both consumers
+failed**, restore **byte-identical** · `ci.yml` **177 → 178** steps, `GATE PARITY OK` · `tools/*.py`
+**75 → 76**.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

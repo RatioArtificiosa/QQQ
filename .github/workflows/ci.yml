@@ -1038,6 +1038,15 @@ jobs:
       - name: every conformance execution case passes against the Rust guest (TEST-016)
         timeout-minutes: 20
         run: cargo test -p qqq-run --all-features --test conformance_exec -- --ignored
+      # TEST-016, the other half: the suite as an INDEPENDENTLY USABLE TOOL. The test above runs
+      # it from inside the crate that owns the fixture; this runs it against a guest path the
+      # caller names, which is what DOD-001 needs for the other four languages. Both read the
+      # assertion from `conformance/suite.json`, so they cannot drift.
+      - name: the conformance suite runs as a tool, not only as a test (TEST-016)
+        run: |
+          python tools/run_conformance.py
+          python tools/run_conformance.py --self-test
+          python tools/run_conformance.py --list > /dev/null
 
       # `LANG-005` -- the Rust reference application, and the one claim in it that was false.
       #

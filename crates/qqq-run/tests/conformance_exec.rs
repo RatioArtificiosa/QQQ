@@ -58,6 +58,12 @@ struct Case {
     id: String,
     kind: String,
     summary: String,
+    /// **The assertion, read from the fixture rather than hard-coded here.** An execution case used
+    /// to mean whatever a `match id` in this file said it meant, so every other consumer of the
+    /// suite would have had to re-derive it -- and two derivations of one fact can disagree while
+    /// both look authoritative. `TEST-016` asks for the runner to be *"an independently usable
+    /// tool"*, and a tool cannot reuse an assertion that lives inside a test.
+    assertion: serde_json::Value,
 }
 
 /// Every case in the fixture, in document order.
@@ -97,6 +103,7 @@ fn cases() -> Vec<Case> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            assertion: c.get("assert").cloned().unwrap_or(serde_json::Value::Null),
         })
         .collect()
 }
@@ -202,7 +209,7 @@ fn every_execution_case_passes_against_the_rust_guest() {
     );
 
     for case in &execution {
-        if let Err(why) = run_case(&case.id, &report) {
+        if let Err(why) = run_case(case, &report) {
             failures.push(format!("  {} ({}) -- {why}", case.id, case.summary));
         }
     }
@@ -217,27 +224,50 @@ fn every_execution_case_passes_against_the_rust_guest() {
 
 /// Run one case against the runtime's own reading of the artifact.
 ///
-/// An unknown id is an **error**, not a pass: this is the function that would otherwise turn the
-/// drift guard into a formality.
-fn run_case(id: &str, report: &serde_json::Value) -> Result<(), String> {
+/// # Why this dispatches on the FIXTURE rather than on the case's id
+///
+/// Because `TEST-016` wants the runner to be *"an independently usable tool"*, and a tool cannot
+/// reuse an assertion that is a `match id` arm inside a test file. The vocabulary is three words
+/// wide and is declared in `conformance/suite.json`; every consumer reads the same statement, so
+/// they cannot drift.
+///
+/// An unknown assertion is an **error**, not a pass: this is the function that would otherwise turn
+/// the drift guard into a formality.
+fn run_case(case: &Case, report: &serde_json::Value) -> Result<(), String> {
     let data = report
         .get("data")
         .ok_or_else(|| "the report carries no `data`".to_owned())?;
+
+    let assertion = &case.assertion;
+    let id = assertion
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "case `{}` declares no `assert.kind`, so this runner would have to guess what it \
+                 means -- which is the defect the declarative form removes",
+                case.id
+            )
+        })?;
 
     match id {
         // The eight-byte preamble says component rather than core module. `LANG-001` asserts this
         // on the bytes; the case asserts it through the runtime's own classification, so the
         // *fixture* carries the obligation rather than one test's private knowledge.
-        "component-layer" => {
+        "runtime-classification-is" => {
+            let want = assertion
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "`runtime-classification-is` needs a `value`".to_owned())?;
             let kind = data
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if kind == "component" {
+            if kind == want {
                 Ok(())
             } else {
                 Err(format!(
-                    "the runtime classified the artifact as `{kind}`, not `component`"
+                    "the runtime classified the artifact as `{kind}`, not `{want}`"
                 ))
             }
         }
@@ -245,7 +275,7 @@ fn run_case(id: &str, report: &serde_json::Value) -> Result<(), String> {
         // Every `qqq:` interface a guest imports must map to a capability. An unmapped one is a
         // guest reaching for something the capability model does not name — which is a hole in the
         // model, not a property of the guest, and exactly what this suite exists to make visible.
-        "qqq-imports-all-mapped" => {
+        "no-unmapped-qqq-interfaces" => {
             let unmapped = data
                 .get("unmapped_interfaces")
                 .and_then(serde_json::Value::as_array)
@@ -268,6 +298,8 @@ fn run_case(id: &str, report: &serde_json::Value) -> Result<(), String> {
             }
         }
 
-        other => Err(format!("no check is implemented for case `{other}`")),
+        other => Err(format!(
+            "no check is implemented for the assertion `{other}`; the vocabulary is declared in `conformance/suite.json`"
+        )),
     }
 }

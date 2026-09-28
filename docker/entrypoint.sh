@@ -1016,6 +1016,14 @@ cmd_checks() {
     # no toolchain reports SKIPPED and names the reason, and the static half always runs.
     python3 tools/check_agent_bench.py
     python3 tools/check_agent_bench.py --self-test
+    # TEST-016. The execution half needs an artifact; the container has none, so the run prints
+    # a named failure rather than a pass, and the vocabulary's self-test always runs.
+    # TEST-016. The reference guest is absent here, so the run reports a NAMED SKIP rather than a
+    # failure or a pass -- and the command is identical to the one in `ci.yml`, which is what keeps
+    # the two gates comparable.
+    python3 tools/run_conformance.py
+    python3 tools/run_conformance.py --self-test
+    python3 tools/run_conformance.py --list > /dev/null
 
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired

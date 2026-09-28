@@ -126,14 +126,23 @@
       "kind": "execution",
       "capability": "core",
       "summary": "the artifact is a component rather than a core module, so the runtime can instantiate what the toolchain produced",
-      "runner": "crates/qqq-run/tests/conformance_exec.rs"
+      "runner": "crates/qqq-run/tests/conformance_exec.rs",
+      "assert": {
+        "kind": "runtime-classification-is",
+        "value": "component"
+      },
+      "assert_comment": "The assertion is declared HERE rather than in the runner, so the fixture is the contract and every consumer -- the Rust test that runs in the rust CI job and `tools/run_conformance.py`, which runs against any guest -- reads one statement of it. Two derivations of one fact can disagree while both look authoritative."
     },
     {
       "id": "qqq-imports-all-mapped",
       "kind": "execution",
       "capability": "core",
       "summary": "every qqq: interface the guest imports maps to a capability, so no import reaches past the capability model",
-      "runner": "crates/qqq-run/tests/conformance_exec.rs"
+      "runner": "crates/qqq-run/tests/conformance_exec.rs",
+      "assert": {
+        "kind": "no-unmapped-qqq-interfaces"
+      },
+      "assert_comment": "The assertion is declared HERE rather than in the runner, so the fixture is the contract and every consumer -- the Rust test that runs in the rust CI job and `tools/run_conformance.py`, which runs against any guest -- reads one statement of it. Two derivations of one fact can disagree while both look authoritative."
     }
   ],
   "exceptions": []

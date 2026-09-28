@@ -490,17 +490,52 @@ fn rust_args(profile: &str, target: &str) -> Vec<String> {
 /// Where a Rust build puts the `.wasm` it produced.
 #[must_use]
 pub fn rust_artifact_path(project_dir: &Path, profile: &str, target: &str, name: &str) -> PathBuf {
-    project_dir
-        .join("target")
+    target_root(project_dir)
         .join(target)
         .join(profile)
         .join(format!("{name}.wasm"))
 }
 
+/// Where cargo actually writes build output, honouring `CARGO_TARGET_DIR`.
+///
+/// # Why this is not simply `project_dir/target`
+///
+/// Because that is only cargo's default. `CARGO_TARGET_DIR` overrides it, cargo says so in its own
+/// documentation, and `qqqai build` **shells out to cargo** -- so a tool that invents its own answer
+/// looks in a directory cargo never wrote. Measured before this existed, with the variable set:
+///
+/// ```text
+///     Finished `release` profile ... in 2.03s
+/// error[QQQ-1001]: the build succeeded but no component was found in
+///                  `/tmp/probeapp/target/wasm32-wasip2/release`
+/// ```
+///
+/// The build succeeded and the error said it had not. **A relative value is relative to the working
+/// directory the child cargo inherited**, which for `qqqai build` is the project directory.
+fn target_root(project_dir: &Path) -> PathBuf {
+    target_root_for(project_dir, std::env::var_os("CARGO_TARGET_DIR").as_deref())
+}
+
+/// The rule above, with the environment **passed in** so it can be tested.
+///
+/// # Why the split exists
+///
+/// `std::env::set_var` is `unsafe` in edition 2024 and this crate is `#![forbid(unsafe_code)]`, so a
+/// test cannot set the variable for itself. **A rule that cannot be tested is a rule that will be
+/// broken by the next edit** -- and this one was broken for as long as the function existed. Passing
+/// the value in makes the rule testable without touching the process environment. `§O-376`: the
+/// predicate and the path are tested separately, and here they can be.
+fn target_root_for(project_dir: &Path, override_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    match override_dir {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => project_dir.join("target"),
+    }
+}
+
 /// The directory Cargo writes a build's output into.
 #[must_use]
 pub fn artifact_dir(project_dir: &Path, profile: &str, target: &str) -> PathBuf {
-    project_dir.join("target").join(target).join(profile)
+    target_root(project_dir).join(target).join(profile)
 }
 
 /// Find the component a successful build produced.
@@ -1682,5 +1717,62 @@ mod tests {
         assert_eq!(json["aot_requested"], true);
         assert_eq!(json["aot_performed"], false);
         assert_ne!(json["aot_requested"], json["aot_performed"]);
+    }
+}
+
+#[cfg(test)]
+mod target_root_tests {
+    use super::*;
+
+    /// **`CARGO_TARGET_DIR` overrides cargo's default.**
+    ///
+    /// # Why this test exists, and what it would have caught
+    ///
+    /// `qqqai build` shells out to cargo, so it must resolve whatever cargo resolved. Measured inside
+    /// the bridge, which sets the variable to `/linux-target`:
+    ///
+    /// ```text
+    ///     Finished `release` profile ... in 2.03s
+    /// error[QQQ-1001]: the build succeeded but no component was found in
+    ///                  `/tmp/probeapp/target/wasm32-wasip2/release`
+    /// ```
+    ///
+    /// **The build succeeded and the tool said it had not**, naming a directory cargo never wrote and
+    /// a remediation that was true in general and false here.
+    ///
+    /// # Why it tests the `_for` form
+    ///
+    /// Because `std::env::set_var` is `unsafe` in edition 2024 and this crate is `#![forbid(unsafe_code)]`.
+    /// A test could not set the variable; so the rule takes it as an argument, and **the pure half is
+    /// the half that gets tested**.
+    #[test]
+    fn cargo_target_dir_overrides_the_default() {
+        let project = Path::new("/proj");
+
+        assert_eq!(
+            target_root_for(project, Some(std::ffi::OsStr::new("/elsewhere"))),
+            PathBuf::from("/elsewhere"),
+            "an override must win outright"
+        );
+        assert_eq!(
+            target_root_for(project, None),
+            PathBuf::from("/proj/target"),
+            "with no override, cargo's default is the project's `target/`"
+        );
+        assert_eq!(
+            target_root_for(project, Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("/proj/target"),
+            "an EMPTY value is not an override -- cargo treats it as unset, so this must too"
+        );
+    }
+
+    /// **The artifact path and the directory agree**, because a build that reports one and writes the
+    /// other is the defect this pair exists to prevent.
+    #[test]
+    fn the_artifact_path_lives_under_the_directory() {
+        let project = Path::new("/proj");
+        let dir = artifact_dir(project, "release", "wasm32-wasip2");
+        let file = rust_artifact_path(project, "release", "wasm32-wasip2", "app");
+        assert_eq!(file.parent(), Some(dir.as_path()));
     }
 }

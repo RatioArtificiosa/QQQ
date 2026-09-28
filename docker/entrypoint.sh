@@ -1023,7 +1023,7 @@ cmd_checks() {
     # the two gates comparable.
     python3 tools/run_conformance.py
     python3 tools/run_conformance.py --self-test
-    python3 tools/run_conformance.py --list > /dev/null
+    python3 tools/run_conformance.py --list
 
     # The corpus guard's **repair** path -- what runs after a killed harness leaves an
     # injection behind. It had a `NameError` in its verification loop, so it repaired

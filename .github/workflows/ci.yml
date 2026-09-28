@@ -1044,9 +1044,12 @@ jobs:
       # assertion from `conformance/suite.json`, so they cannot drift.
       - name: the conformance suite runs as a tool, not only as a test (TEST-016)
         run: |
+          # No shell redirect: `--list` prints two lines, and `> /dev/null` is a POSIX-ism
+          # that the local gate's ci.yml mirror -- which replays these commands under cmd.exe --
+          # cannot honour. A command that is green in CI and red locally is a divergence.
           python tools/run_conformance.py
           python tools/run_conformance.py --self-test
-          python tools/run_conformance.py --list > /dev/null
+          python tools/run_conformance.py --list
 
       # `LANG-005` -- the Rust reference application, and the one claim in it that was false.
       #

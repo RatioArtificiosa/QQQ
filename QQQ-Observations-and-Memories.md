@@ -29222,4 +29222,68 @@ failed**, restore **byte-identical** · `ci.yml` **177 → 178** steps, `GATE PA
 
 ---
 
+## §O-379 — A bash-ism in a `ci.yml` `run:` block is green in CI and red locally
+
+**Found:** by the gate, on a commit that had already been pushed. **Anchors:**
+`.github/workflows/ci.yml`, `docker/entrypoint.sh`, `tools/check_gate_parity.py`,
+`.scratch/run_ci_checkers.py`.
+
+### The measurement
+
+A step I added read:
+
+```yaml
+      - name: the conformance suite runs as a tool, not only as a test (TEST-016)
+        run: |
+          python tools/run_conformance.py
+          python tools/run_conformance.py --self-test
+          python tools/run_conformance.py --list > /dev/null
+```
+
+`ci.yml`'s shell **is bash**, so `> /dev/null` is correct there and **CI was green**. The local gate's
+CI mirror replays those same `run:` lines **under `cmd.exe`**, where `> /dev/null` is a redirection to a
+file called `\dev\null` — and the gate reported:
+
+```text
+OK   python tools/run_conformance.py
+OK   python tools/run_conformance.py --self-test
+FAIL python tools/run_conformance.py --list > /dev/null
+```
+
+**The same command, green in one gate and red in the other, because the two gates have different
+shells.** That is the shape `check_gate_parity` exists to catch — two gates that disagree — except this
+one is not a *list* divergence but a **shell-semantics** divergence, which no list can express.
+
+### The fix bought nothing and cost a red gate
+
+`--list` prints two lines. The redirect was decoration. Removing it makes both gates run an identical
+command and is the whole fix — **and the same reasoning as `§O-378`'s divergence: one you can delete is
+better than one you can justify.**
+
+### And the parity checker caught the repair's other direction
+
+The first patch fixed `ci.yml` and reported success — and `check_gate_parity` immediately failed the
+**other way**:
+
+> *"`tools/run_conformance.py --list > /dev/null` runs in docker/entrypoint.sh and not in ci.yml"*
+
+The bridge's line uses **`python3`**, so the patch's `python …` anchor had missed it. **A fix applied to
+one gate is half a fix**, and the guard said so in the direction I was not looking.
+
+### And it was found late, which is the part worth keeping
+
+The commit was **already pushed** when the gate reported red. The reason is recorded with it: the
+previous round's gate was **killed by my own polling** — twice — so the commit went out on the strength
+of the checkers I had run by hand, and this is precisely the failure mode that leaves. **A gate that is
+not run is not a gate**, and a gate that is run but killed reads in the log exactly like a gate that is
+still running.
+
+### Measured
+
+`FAIL` count **1 → 0** for this command under `cmd.exe` (`LIST_OK=0`) · `GATE PARITY OK` after **two**
+edits, one per gate · the two gates now invoke the identical three commands · `CLEAN sh: no stray file
+created` — the redirect did not leave a `dev/` directory, because `cmd.exe` refused it outright.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

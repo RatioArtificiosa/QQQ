@@ -30313,7 +30313,82 @@ expected failure · the `Handler` declaration quoted from the source.
 
 ---
 
+## §O-397 — The bridge ran to completion: the probe I diagnosed is green, and a checker shells out into WSL
+
+**Found:** by reading the bridge's finished log. **Anchors:** `tools/check_agent_cookbook.py`,
+`docker/entrypoint.sh`, `C:\Users\Usuario\bridge.txt`.
+
+After five rounds of polling — during which the log sat **buffered** at exactly 36,081 bytes while the
+container's `Up` climbed past the previous run's length — the bridge returned:
+
+```text
+BRIDGE_EXIT=1
+```
+
+### First: the failure `§O-392`'s round diagnosed is GONE
+
+The previous run failed on **`ENVELOPE PROBE FAILED -- 3 of 3`** — `schema`, `why` and `doctor` emitting
+no JSON on stdout — and I measured it **passing locally**, concluding the problem was the container's
+build. **It is fixed**: the finished log contains no `ENVELOPE PROBE FAILED` at all, only
+`OK schema/cli-envelope.schema.json`. Whatever changed between those runs, that check now passes inside
+Linux.
+
+### Second: the one failure left is a checker that shells out, and the shell is WSL
+
+```text
+catalogue codes      : 43
+  cli                  : 5
+  test                 : 10
+  src                  : 28
+  unreachable          : 0
+cli reproducers run  : 0
+
+  FAIL  could not scaffold a project: <3>WSL (544 - ) ERROR: UtilGetPpid:1330: Failed to parse:
+        /proc/1/stat, content: 1 (docker-init) S 0 1 1 0 -1 4194560 1095 0 3 0 5 5 0 0 20 0 1 0 36440
+```
+
+`check_agent_cookbook.py:193` runs:
+
+```python
+scaffold = subprocess.run(
+    [str(binary), "new", "p", "--language", "rust", "--template", "http"],
+```
+
+and **inside the container that invocation reaches `wsl.exe`**. So the `cli` half executed **zero**
+reproducers and the checker reported it as a **FAIL**.
+
+### What that says about the checker, and it is the useful part
+
+**Two honest readings, and the code already chose one of them elsewhere:**
+
+* `check_agent_cookbook.py` **already knows** how to report an unavailable half as **SKIPPED** rather
+  than failed — it does exactly that when no `qqqai` binary is found (*"the `cli` half needs a built
+  qqqai … the static half ran"*). A half that **cannot run in this environment** is the same situation
+  as a half whose binary is missing, and it is being reported as a defect in the project.
+* But the **reason it cannot run here is a Windows/Docker interaction** — a Linux container reaching
+  `wsl.exe` — and **a check that shells out is only as portable as what it shells out to**. That is a
+  property of the *check*, and the bridge is entitled to say so.
+
+**The honest next step** is to find *which* of `qqqai new`'s steps reaches WSL — the scaffold runs
+`git init`, and Docker Desktop's `git` can be a Windows binary on `/mnt/c` — and then either the
+checker reports the half as SKIPPED with a reason, or the container stops seeing a Windows `git`.
+
+### DoD #5 is NOT met, and the reason is recorded rather than rounded
+
+`BRIDGE_EXIT=1`. This is **not** a product defect, and it is **not** dismissed either: it is a checker
+that cannot complete its `cli` half inside the bridge, and the failure is **diagnosed** above with the
+line of the check that produced it.
+
+### Measured
+
+The bridge's full log: **39,805 bytes**, finishing at `08:04:46` local after **~56 minutes** of container
+time (the previous run was ~46) · `BRIDGE_EXIT=1` · **no** `ENVELOPE PROBE FAILED` · exactly one
+`FAIL` line, the scaffold one above · the tree clean throughout, so the source guard never fired.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*
+
 
 
 

@@ -1039,6 +1039,40 @@ jobs:
         timeout-minutes: 20
         run: cargo test -p qqq-run --all-features --test conformance_exec -- --ignored
 
+      # `LANG-005` -- the Rust reference application, and the one claim in it that was false.
+      #
+      # # What was measured
+      #
+      # `examples/orders-api/qqq.toml` said *"every stanza below is load-bearing, and a reader can
+      # check that claim by deleting one and watching a route fail."* It was false for two of the
+      # three capability stanzas:
+      #
+      #     $ qqqai caps --manifest examples/orders-api/qqq.toml --json
+      #     data.grants = ["clock.monotonic", "http.server", "crypto.hash"]     3 GRANTED
+      #
+      #     $ qqqai inspect examples/orders-api/target/qqq/orders-api.component.wasm
+      #     required capabilities: http.server                                  1 IMPORTED
+      #
+      # `crypto.hash` was declared for a SHA-256 the app implements in-tree, and `clock.monotonic`
+      # for a clock no workload reads.
+      #
+      # # Why that matters more here than anywhere else
+      #
+      # **An inert grant is an over-grant.** The linker is built from the grant set alone -- the
+      # model is *absent, not denied* -- so a capability the guest cannot exercise is one it should
+      # not hold. And `examples/orders-api` is the file a reader is invited to copy, so it is the
+      # worst place to teach "grant a few extra, they are harmless".
+      #
+      # This step asserts the two sets are **EQUAL in both directions**: an import with no grant is
+      # a guest reaching past the model, and a grant with no import is a capability granted for
+      # nothing. Both are read through the product's own surfaces, so the assertion is about what
+      # QQQ resolves rather than about what the TOML appears to say.
+      #
+      # The `wasm-tools` install above is its prerequisite: `qqqai build` needs it.
+      - name: the reference application grants exactly what it imports (LANG-005)
+        timeout-minutes: 15
+        run: cargo test -p qqq-run --all-features --test lang005_reference_app -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a

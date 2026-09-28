@@ -28247,4 +28247,96 @@ suite weak, and those are different claims.**
 
 ---
 
+## §O-368 — The reference application granted three capabilities and imported one
+
+**Found:** measuring `LANG-005` rather than ticking it, by reading the app's own manifest against its
+own artifact. **Anchors:** `examples/orders-api/qqq.toml`,
+`crates/qqq-run/tests/lang005_reference_app.rs`, `crates/qqq-run/src/output.rs`.
+
+### The measurement
+
+`examples/orders-api/qqq.toml` said:
+
+> *"every stanza below is load-bearing, and a reader can check that claim by deleting one and
+> watching a route fail."*
+
+Two commands, both already implemented:
+
+```text
+$ qqqai caps --manifest examples/orders-api/qqq.toml --json
+data.grants = ["clock.monotonic", "http.server", "crypto.hash"]     3 GRANTED
+
+$ qqqai inspect examples/orders-api/target/qqq/orders-api.component.wasm
+required capabilities
+  http.server          from qqq:http/http@1.0.0                     1 IMPORTED
+```
+
+**The claim was false for two of the three capability stanzas.** Deleting `[capabilities.crypto]` or
+`[capabilities.clock]` would have broken nothing, because the guest never imported either.
+
+### Why they were there, and why that is not a reason to keep them
+
+* `hash = ["sha256"]` was declared for a SHA-256 the app implements **in-tree** — `src/hash.rs`,
+  held to the FIPS 180-4 vectors, and the manifest's own comment argued for that: *"a reference app
+  that depends on the ecosystem is measuring the ecosystem."* The host never served a byte of it.
+* `monotonic = true` was declared for a clock **no workload reads**. The comment beside it said so —
+  *"A wall clock is not needed by any of the ten"* — and granted one anyway.
+
+> **An inert grant is an over-grant.**
+
+This runtime's model is *absent, not denied*: the linker is built from the grant set alone, so a
+capability the guest cannot exercise is a capability it should not hold. A grant that nothing
+exercises is not neutral — it is a wider surface than the application needs, declared by the one
+file a reader is invited to copy.
+
+**And a reference application is the worst place for it.** `examples/orders-api` is what `§5.3`'s
+annotated example points at and what `LANG-003`'s scaffold is measured against; a reader who learns
+"grant a few extra, they are harmless" from it has learned the opposite of the model.
+
+### The fix, and the guard that makes the claim structural
+
+Both stanzas are gone, and the comment now records the measurement and the reason. The claim in that
+file is no longer prose: `crates/qqq-run/tests/lang005_reference_app.rs` asserts the two sets are
+**equal in both directions**, read through the product's own surfaces — `qqqai caps --json` for what
+is granted, `qqqai inspect --json` for what is imported.
+
+* an import with no grant is a guest reaching past the capability model, and
+* a grant with no import is a capability granted for nothing.
+
+**Equality is the right assertion *here* and not in general.** A general application may legitimately
+grant a capability whose code path is not yet written; the *reference* application may not, because
+its manifest makes exactly the stronger claim and because it is the thing people copy. The test's
+doc comment says so, so the strictness is a decision rather than an accident.
+
+### The injection is the defect restored verbatim
+
+```text
+INJECT (put `[capabilities.crypto]` and `[capabilities.clock]` back)
+  -> the manifest grants ["clock.monotonic", "crypto.hash"], which the artifact does not import.
+     **An inert grant is an over-grant** ...
+     granted:  {"clock.monotonic", "crypto.hash", "http.server"}
+     imported: {"http.server"}
+RESTORED byte_identical=True  ->  1 passed
+```
+
+The failure message names the two capabilities, so a reader learns which stanza is inert rather than
+only that one is.
+
+### And the class, stated generally
+
+**A claim in a manifest is a claim like any other, and the only thing that can hold it is a
+measurement.** The comment was not wrong when it was written — it was wrong when `src/hash.rs`
+landed and the app stopped needing the host for hashing, and nothing measured the difference. This
+is `§O-277`'s shape one level down: a number (or a claim) with no resolver drifts, and it drifts
+silently in the direction that looks tidy.
+
+### Measured
+
+**3 granted → 1** · **2** inert stanzas removed · the artifact's `required` is `{http.server}`, the
+manifest's `grants` is `{http.server}`, **equal** · test **1 passed**, fault-injected and observed to
+fail naming both, restore **byte-identical** · `LANG-005` ticked with the boundary stated: the other
+four implementations are `LANG-013`/`LANG-021`/`LANG-029`/`LANG-037`, behind `TEST-010`.
+
+---
+
 *End of `QQQ-Observations-and-Memories.md`.*

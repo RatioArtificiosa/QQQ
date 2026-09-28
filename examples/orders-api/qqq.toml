@@ -43,6 +43,25 @@ profile      = "release"
 reproducible = true
 
 [capabilities]
+# # Why this is ONE capability and not three
+#
+# The comment here used to say *"every stanza below is load-bearing, and a reader can check that
+# claim by deleting one and watching a route fail."* **It was false for two of the three.** Measured
+# before the fix:
+#
+#     $ qqqai caps --manifest examples/orders-api/qqq.toml --json
+#     data.grants = ["clock.monotonic", "http.server", "crypto.hash"]     3 GRANTED
+#
+#     $ qqqai inspect examples/orders-api/target/qqq/orders-api.component.wasm
+#     required capabilities: http.server                                  1 IMPORTED
+#
+# **An inert grant is an over-grant.** This runtime's model is *absent, not denied* — a capability a
+# guest cannot exercise is a capability it should not hold — and the reference application cannot be
+# the one place that grants more than it uses.
+#
+# `crates/qqq-run/tests/lang005_reference_app.rs` asserts the two sets are **equal**, so the claim
+# above is now checked rather than asserted.
+#
 # HTTP as a server, and only as a server. `client` is absent, which means the guest
 # cannot make outbound requests — so the `db` workload's stateful read-modify-write
 # cannot be outsourced to a real database through the guest's own HTTP client. That
@@ -50,19 +69,18 @@ reproducible = true
 [capabilities.http]
 server = true
 
-# The `json`, `crypto` and `tailp99` workloads hash caller-supplied bytes, so the app
-# needs SHA-256 and nothing else. `random` is off: a benchmark that used a random
-# source would produce a different trace every run, and §10.5 requires identical
-# output for identical input.
-[capabilities.crypto]
-hash = ["sha256"]
-
-# The `cold` workload is defined by instantiation cost. A wall clock is not needed by
-# any of the ten, and granting one would let a workload read time and become
-# non-deterministic.
-[capabilities.clock]
-monotonic = true
-wall      = false
+# # Why there is no `[capabilities.crypto]`
+#
+# The `json`, `crypto` and `tailp99` workloads do hash caller-supplied bytes — and this app's
+# SHA-256 is **in-tree** (`src/hash.rs`, held to the FIPS 180-4 vectors). `hash = ["sha256"]` was
+# declared and never imported, so the host never served a byte of it. A grant for an in-guest
+# implementation is an over-grant with no behaviour behind it.
+#
+# # And why there is no `[capabilities.clock]`
+#
+# The `cold` workload is defined by instantiation cost, and a wall clock is not needed by any of the
+# ten. `monotonic = true` was granted anyway and never imported — the same over-grant in a different
+# namespace.
 
 [limits]
 memory            = "128MiB"

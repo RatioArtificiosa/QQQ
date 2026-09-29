@@ -31859,6 +31859,140 @@ value)`, with `recorded`/`dropped` counters and a closed function set.** Every o
 properties is already implemented, tested and documented one module away -- which makes this the cheapest
 buildable item in Phase 1 and the one whose design carries the least risk.
 
+## §O-420 — Four times in this codebase, "the thing failed" and "the instrument could not measure" are different findings
+
+Reading `wit/qqq-test.wit` for Phase 2's `TEST-007`/`TEST-008` turned up a principle rather than a
+specification. **The same distinction appears in four independent places**, each written by a different
+part of the work, and each stating the same reason.
+
+**1 — `qqq:test`'s `assertion-error`:**
+
+```wit
+/// **Distinct from a failed assertion.** A failure is a *result* — the test ran and the
+/// condition was false, which is the framework working. This error means the assertion
+/// could not be checked, which is a defect in the test or in the host.
+///
+/// Collapsing the two would make a broken test look like a failing one, and the
+/// diagnosis differs entirely: one means "fix the code", the other means "fix the test".
+variant assertion-error { no-fuel-baseline, unknown-capability(string), not-assertable(string) }
+```
+
+**2 — `qqq:test`'s `outcome`:**
+
+```wit
+/// # Why the outcome is reported rather than inferred from the exit
+///
+/// A guest that traps and a guest that reports a failure both stop. Inferring "failure"
+/// from "did not return normally" would mean an out-of-fuel termination and a genuine
+/// assertion failure produce the same report, and **the first is an infrastructure
+/// problem rather than a test result**.
+variant outcome { passed, failed(string), errored(string) }
+```
+
+with `errored` carrying its own note: *"Deliberately not a failure: a suite that cannot start is a
+different problem from one whose assertions fail, and **conflating them makes a broken environment look
+like a broken build.**"*
+
+**3 — `--trials`' two counters.** `TestOutput` splits `failed` from `nondeterministic`, and
+`is_nondeterministic()`'s doc gives the reason:
+
+> Distinct from failure: **a flaky test and a broken test are different findings, and conflating them
+> sends the reader to the wrong place.** A flaky test is a determinism bug in the *code under test*; a
+> broken test is a bug in the code.
+
+**4 — `audit.rs`'s `AppendCounters`.** `recorded` and `refused` are split rather than summed, because
+*"a gap is **visible as a value**, never silent."*
+
+**And the principle is the same one this goal's own rules state from the other side.** `§O-375` — *a rule
+that cannot fire is worse than no rule* — is the same claim about a check that reports nothing;
+`§O-280` — *confirm the premises, not the exit code* — is the same claim about a measurement that did not
+measure. **Both say: a signal that cannot distinguish "no" from "no data" is not a signal.**
+
+**And `qqq:test` states the cost of collapsing them in the form a user meets it:**
+
+> **"fix the code"** versus **"fix the test"**
+
+**A runner that reported one number would send half its readers to the wrong file.** That is not a
+stylistic preference; it is the difference between a report that routes work and one that creates it.
+
+**What this means for `TEST-007` and `TEST-008`, which are the items that need the host.** The interface
+is **complete** — six functions, two error variants, an outcome type, and a rationale for each decision —
+and `qqq-abi/src/wit.rs:105` already registers it as `qqq:test@1.0.0` (`ABI-011`). **So the work is a host
+implementation behind an existing WIT package, plus the macros that call it**, and the interface already
+tells the implementer which distinctions must survive: `assertion-error` is not a failure, `errored` is
+not `failed`, and `no-fuel-baseline` exists because `assert-fuel-below` without a `mark-fuel` is a test
+bug rather than a cost overrun.
+
+**One detail worth keeping, because it is a security decision in a test helper.** `report`'s `location`
+parameter is caller-supplied:
+
+> `location` is a caller-supplied string and is **not trusted**: it appears in the report verbatim, so a
+> test that lies about where it failed makes a **confusing report rather than a false one.** It cannot
+> affect whether the test passed.
+
+**A test helper is still an attack surface**, and the interface says which field is decorative before
+anyone implements it.
+
+## §O-421 — Three items share one prerequisite, and it is not any of the three
+
+`TEST-013` (*"benchmark-as-test: fail a build when a performance budget regresses"*) is `[ ]` with no
+annotation. **Measured, its mechanism is built and the thing that would run it is not.**
+
+**What exists:**
+
+```rust
+// crates/qqq-run/src/bench.rs
+pub fail_on_miss: bool,                                              // :72
+"--fail-on-miss" => { opts.fail_on_miss = true; }                    // :180
+pub fn should_fail(output: &BenchOutput, fail_on_miss: bool) -> bool // :532
+fn a_met_budget_succeeds_even_with_fail_on_miss()                    // :1160
+```
+
+**and `Budget::ALL` carries the ten rows with their direction and target**, which
+`tools/check_bench_contract.py` validates in **both** gates.
+
+**What does not exist: an invocation of `qqqai bench` in either gate.** `check_bench_contract.py` checks
+the *table*; nothing runs a measurement. **So `--fail-on-miss` is a mechanism with no caller, which is
+`§O-375`'s shape exactly — a rule that cannot fire.**
+
+**And the reason is structural rather than an oversight.** `BenchOptions` says so in its first field:
+
+```rust
+/// Where the server is listening. **Required** — see the module docs.
+pub target: Option<SocketAddr>,
+```
+
+**`qqqai bench` is a load generator.** It does not instantiate anything; it drives HTTP at a `qqqai serve`
+that is already running. **So a gate that ran it would have to start a server first, and no gate does.**
+
+**Which makes one prerequisite serve three items:**
+
+| item | what it needs | why it needs it |
+|---|---|---|
+| **`TEST-013`** | a gate that starts a server and benches it | *"fail a build when a performance budget regresses"* — the build has to run the benchmark |
+| **`PERF-020`** | the same, on a schedule with history | *"continuous performance regression detection in CI"* |
+| **`DET-016`** | the same, twice, in two modes | *"report what determinism costs"* — two servers measured by one client |
+
+**`TEST-013` and `PERF-020` are the same gap at two cadences**, and `DET-016` is a third caller of the
+same job. **Building it once serves all three**, and building any one of them alone would produce a
+second harness for the same measurement.
+
+**And there is a fourth thing the job must carry, which is not about performance.** Seven of `Budget::ALL`'s
+ten rows have `method: "NOT_IMPLEMENTED::…"`. **A gate that ran the three implemented benchmarks and
+reported green would be reporting that the *build* is fine — and a reader would take it as "the budgets
+pass".** The job's output has to name the seven, or it is `§O-258`'s failure in a CI job rather than in a
+table.
+
+**What this changes about the checklist's reading.** `TEST-013` looks like an item about a flag, and the
+flag exists with tests. **The item is about a CI job that starts a server** — which is why it is `[ ]`,
+and why `PERF-020` is `[ ]` beside it. **Neither is blocked on `qqq-bench`; both are blocked on something
+that runs a server in CI**, and that something is currently unnamed in any item.
+
+**Which is worth saying plainly: the missing thing is a *job*, not a *feature*.** Three items describe
+three uses of it and none of them owns it. **An item that owns the job — start a server, wait for
+readiness, bench it, report per-budget with the unmeasured rows named — would make all three closable**,
+and would make `DET-016` a second invocation rather than a second mechanism.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -231,6 +231,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/determinism.md",
+        "What determinism controls, what it costs, and where it stops: the nine sources of "
+        "nondeterminism with the tree's state beside each, the honest limits, and the non-use cases.",
+        "both",
+        "use",
+    ),
+    (
         "docs/contributing/claims-policy.md",
         "How a factual claim must be verified before it enters a document.",
         "human",

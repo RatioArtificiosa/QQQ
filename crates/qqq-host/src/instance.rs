@@ -396,6 +396,18 @@ impl InstanceOptions {
     /// inside the store, which lives inside the `Instance`. Passing what it wants to read back is
     /// the only shape in which that is possible -- [`crate::audit::AuditHandle`] is the precedent.
     #[must_use]
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::host_test::TestState;
+    /// use qqq_host::instance::InstanceOptions;
+    ///
+    /// let state = TestState::default();
+    /// let opts = InstanceOptions::default().with_test(state.clone());
+    ///
+    /// assert!(opts.test.is_some(), "the handle is attached");
+    /// // A clone is a second way in, not a copy: what the store records, the caller reads.
+    /// ```
     pub fn with_test(mut self, state: crate::host_test::TestState) -> Self {
         self.test = Some(state);
         self

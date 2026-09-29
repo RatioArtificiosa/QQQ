@@ -98,6 +98,14 @@ pub mod host_clock;
 pub mod host_crypto;
 mod host_http;
 pub mod host_secrets;
+/// The `qqq:test/assertions` host — Checklist `TEST-007`, `TEST-008`.
+///
+/// # Example
+///
+/// ```
+/// // The interface name a guest's `wit` import resolves against, and the one the linker registers.
+/// assert_eq!(qqq_host::host_test::INTERFACE, "qqq:test/assertions@1.0.0");
+/// ```
 pub mod host_test;
 mod host_wasi;
 pub mod instance;

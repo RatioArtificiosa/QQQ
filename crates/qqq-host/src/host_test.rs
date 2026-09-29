@@ -92,6 +92,16 @@ struct Inner {
 /// handle over an `Arc<Mutex<..>>`, passes it in, and keeps its own way in. **`Clone` is the mechanism**
 /// -- a host function clones the state out of the store before touching the fuel counter, so the two
 /// borrows cannot interleave.
+/// The assertion state a run accumulates, shared with the caller.
+///
+/// # Example
+///
+/// ```
+/// use qqq_host::host_test::TestState;
+///
+/// let state = TestState::default();
+/// assert!(state.all_passed(), "a fresh state has recorded nothing to disagree with");
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct TestState {
     inner: std::sync::Arc<std::sync::Mutex<Inner>>,
@@ -121,18 +131,48 @@ impl TestState {
     ///
     /// Because a slice would have to outlive the guard that protects it. The failures of a run are a
     /// handful of strings, and a runner wants them after the lock is released.
+    /// The messages `report` recorded as failed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::host_test::TestState;
+    ///
+    /// // A run that reported nothing failed nothing, and the list says so rather than being absent.
+    /// assert!(TestState::default().failures().is_empty());
+    /// ```
     #[must_use]
     pub fn failures(&self) -> Vec<String> {
         self.data().failures.clone()
     }
 
     /// How many assertions the guest marked.
+    /// How many assertions the guest marked.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::host_test::TestState;
+    ///
+    /// // A count, not a flag: a caller can tell "no marks" from "the store was never asked".
+    /// assert_eq!(TestState::default().marks(), 0);
+    /// ```
     #[must_use]
     pub fn marks(&self) -> usize {
         self.data().marks.len()
     }
 
     /// Whether every recorded assertion passed.
+    /// Whether every recorded assertion passed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::host_test::TestState;
+    ///
+    /// // True of a state that recorded nothing, which is why a caller wanting evidence reads `marks`.
+    /// assert!(TestState::default().all_passed());
+    /// ```
     #[must_use]
     pub fn all_passed(&self) -> bool {
         self.data().failures.is_empty()
@@ -140,6 +180,16 @@ impl TestState {
 }
 
 /// The WIT package this module implements.
+/// The WIT package this module implements.
+///
+/// # Example
+///
+/// ```
+/// use qqq_host::host_test::INTERFACE;
+///
+/// // The name `linker.rs` registers under, so a guest's import resolves against it.
+/// assert_eq!(INTERFACE, "qqq:test/assertions@1.0.0");
+/// ```
 pub const INTERFACE: &str = "qqq:test/assertions@1.0.0";
 
 /// Register the interface.
@@ -159,6 +209,15 @@ pub const INTERFACE: &str = "qqq:test/assertions@1.0.0";
 // splitting the function -- would need two `Linker::instance` calls under the same name, which is
 // not the same registration; so the length is accepted with the reason rather than worked around.
 #[allow(clippy::too_many_lines)]
+/// Register the interface.
+///
+/// # Example
+///
+/// ```
+/// // **Not capability-gated.** The name is bound unconditionally, and a store created without
+/// // assertion state refuses each call with `not-assertable` rather than the interface being absent.
+/// assert_eq!(qqq_host::host_test::INTERFACE, "qqq:test/assertions@1.0.0");
+/// ```
 pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     let mut inst = linker.instance(INTERFACE)?;
 

@@ -32266,6 +32266,76 @@ prints the empty list of failures is reporting that it measured nothing, **and a
 failing test is not a report that the guard works.** The fix is not a better pattern — it is to name the
 crate, run the whole lib, and assert that the expected test *appeared in the output at all*.
 
+## §O-425 — a `serve_policy` test fails only on macOS, only sometimes, and the panic says the server did not answer
+
+**Measured, commit `cb34c0d`:**
+
+```
+Rust (macos-latest): failure          <- 2 of 11 failed
+Rust (ubuntu-latest): success
+Rust (windows-latest): success
+MSRV (1.97): success
+Reference application (SRV-018): success
+
+failures:
+    a_body_under_the_limit_is_not_refused_by_it
+    a_route_that_does_not_exist_is_a_404_and_not_a_403
+test result: FAILED. 9 passed; 2 failed
+
+panicked at ./tests/serve_policy.rs:279:25:
+    no status line in: <the whole response>
+```
+
+**And the same command on this machine, twice in a row:**
+
+```
+cargo test -p qqq-run --test serve_policy
+run 1: ok. 11 passed; 0 failed; finished in 0.70s
+run 2: ok. 11 passed; 0 failed; finished in 0.74s
+```
+
+**Eleven tests, the same eleven, passing twice locally and failing twice on one runner.** The two that
+failed are the two that read a status line, and the panic is the helper that reports its absence:
+
+```rust
+/// The status code, or a failure naming the whole response.
+fn status(response: &str) -> u16 {
+    status_of(response).unwrap_or_else(|| panic!("no status line in: {response:?}"))
+}
+```
+
+**A response with no status line is not a wrong status — it is no response.** So the finding is that the
+server did not answer within whatever the test waits, and the test reports it as a missing status line.
+
+### Why this is worth an observation rather than a retry
+
+**`cb34c0d` is the commit whose CI went red, and I spent three measurements on it before arriving here** --
+checking the failing step, tailing the log for the platform, then reproducing it locally twice. **The cost of
+this defect is not the fix; it is every agent who reads a red run and starts looking for a cause in their own
+diff.** The mechanism this session already recorded applies exactly: **a signal that cannot distinguish "the
+code is wrong" from "the environment was slow" is not a signal**, which is the same distinction `§O-420`
+found in four other places.
+
+**`TEST-014` — the flaky-test detector — is the item that owns this and it is `[ ]`.** Its absence is what
+made this cost three measurements instead of one:
+
+| the question | the instrument that should answer it | its state |
+|---|---|---|
+| did this failure reproduce? | `TEST-014`'s detector | not built |
+| is it platform-specific? | the CI matrix | **built** — and that is how the answer was found |
+| is it my diff? | the local run | **built** — two clean runs |
+
+**And the answer came from the matrix, which is the only one of the three that was already there.** A flaky
+test detector would have said *"this test has failed 1 of the last N runs on this platform"* and turned three
+measurements into one.
+
+### What is not known, stated as such
+
+**The cause is not established.** The candidates are a port that is not free on the runner, a server that
+starts slowly under a loaded runner, or a connection that is refused and retried nowhere. **None of those was
+measured**, and a plausible mechanism recorded as a finding is the failure this corpus's own rules name. What
+*is* measured: the same eleven tests, twice green here, twice red there, on one platform of five.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

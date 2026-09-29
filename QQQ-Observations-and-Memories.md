@@ -33133,7 +33133,7 @@ cheap to make because the limit and the capability sit in the same sentence — 
 guest* — and the correction is worth recording because **the next reader of `§O-424` will reach the same
 dead end**, and this session's agent reached it while holding that observation in context.
 
-## §O-436 — Five instances of one shape: a pattern wider than the thing it describes
+## §O-436 — Six instances of one shape: a pattern wider than the thing it describes
 
 Each was found by a measurement disagreeing with an expectation, and each is the same mistake.
 

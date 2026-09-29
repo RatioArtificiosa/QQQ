@@ -912,9 +912,22 @@ impl fmt::Debug for BuiltLinker<'_> {
 ///
 /// # The security property
 ///
-/// The returned linker provides an interface if and only if at least one
-/// capability mapping to it is granted. There is no code path that adds an
-/// interface the grant set does not justify.
+/// The returned linker provides a **capability-backed** interface if and only if
+/// at least one capability mapping to it is granted. There is no code path that adds
+/// a capability-backed interface the grant set does not justify.
+///
+/// # The one interface this does not describe, and why it is not an exception
+///
+/// `qqq:test/assertions` is registered **unconditionally**, with no capability behind it, because it has
+/// none to have: an assertion interface is not an authority a guest is granted or denied, and what decides
+/// whether a guest gets it is whether a *runner* built the store. **The authority is withheld by the
+/// store's state rather than by the registration** — the same instrument `host_wasi` uses, where the
+/// context carries the deny and the registration does not.
+///
+/// **A store created without `InstanceOptions::test` has no assertion state, and every function in the
+/// interface then refuses with `not-assertable`** rather than passing. So the presence of the interface is
+/// not the authority; the function is. The alternative would be worse than untidy: an absent interface
+/// gives the guest `unknown import`, which names the wrong problem.
 ///
 /// # Errors
 ///

@@ -862,7 +862,8 @@ mod tests {
         let pairs: BTreeSet<(&str, &str)> = AUDITED.iter().map(|a| (a.file, a.function)).collect();
         assert!(
             pairs.len() < AUDITED.len(),
-            "this test exists because the two-part key collides; if it no longer              does, the reasoning in `audit` should be revisited"
+            "this test exists because the two-part key collides; if it no longer \
+             does, the reasoning in `audit` needs revisiting"
         );
     }
 

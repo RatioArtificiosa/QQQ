@@ -560,7 +560,8 @@ fn stream_of(
 ) -> Result<&crate::audit::AuditHandle, AssertionError> {
     handle.ok_or_else(|| {
         AssertionError::NotAssertable(
-            "no audit stream is attached, so `assert-caps-only` cannot tell an attempt that was not              recorded from one that did not happen"
+            "no audit stream is attached, so `assert-caps-only` cannot tell an attempt that was not \
+             recorded from one that did not happen"
                 .to_owned(),
         )
     })

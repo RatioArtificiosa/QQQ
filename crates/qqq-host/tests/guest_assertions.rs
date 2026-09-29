@@ -84,7 +84,28 @@ fn ordinary_limits() -> LimitSet {
     }
 }
 
-/// Build the tracked guest crate for `wasm32-wasip2`, or `None` when the target is not installed.
+/// Build the tracked guest crate for `wasm32-wasip2`, or `None` when the toolchain cannot build it.
+///
+/// # Why the target root comes from the environment
+///
+/// **`CARGO_TARGET_DIR` is `/linux-target` in the bridge image** (`docker/Dockerfile:310`), and
+/// `Command::new("cargo")` inherits it — so the artifact lands under that root, not under the crate. An
+/// earlier version read `crate_dir/target` unconditionally, which meant **the read always failed in the
+/// bridge, `None` was returned, and the test reported a missing toolchain for a build that had
+/// succeeded.** It would skip in the bridge and run in CI, and **no gate-parity check can see the
+/// difference** — which is the shape `§O-400` records for an artifact that is stale while the instrument
+/// that would notice is broken at the same time.
+///
+/// # Why a spawn failure panics and only three signatures skip
+///
+/// A skip is a claim that the test did not run *for a stated reason*. An earlier version ended with
+/// `.ok()?`, so **every** spawn failure became that claim, and "cargo is not on PATH" became
+/// indistinguishable from "the fork failed". `"no such file"` was worse: it matches any missing file at
+/// all — a wrong `--target`, a deleted source, a bad path.
+///
+/// **So the three signatures below are the toolchain's, and nothing else is treated as one.** After a
+/// build *succeeds*, an unreadable artifact is a panic with its path, because that is a defect in this
+/// test rather than a missing toolchain.
 fn build_the_guest() -> Option<Vec<u8>> {
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -96,20 +117,35 @@ fn build_the_guest() -> Option<Vec<u8>> {
         .args(["build", "--target", "wasm32-wasip2"])
         .current_dir(&crate_dir)
         .output()
-        .ok()?;
+        .unwrap_or_else(|e| {
+            panic!("`cargo` could not be run, so this test cannot report a result: {e}")
+        });
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains("can't find crate for `std`")
             || stderr.contains("target may not be installed")
-            || stderr.contains("no such file")
+            || stderr.contains("is not installed for the toolchain")
         {
             return None;
         }
         panic!("`examples/qqq-test` failed to build, which is a defect in the example:\n{stderr}");
     }
 
-    std::fs::read(crate_dir.join("target/wasm32-wasip2/debug/qqq_test.wasm")).ok()
+    // **The root Cargo actually wrote to.** `CARGO_TARGET_DIR` wins when it is set, which is every run
+    // inside the bridge.
+    let root = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| crate_dir.join("target"), std::path::PathBuf::from);
+    let artifact = root
+        .join("wasm32-wasip2")
+        .join("debug")
+        .join("qqq_test.wasm");
+    Some(std::fs::read(&artifact).unwrap_or_else(|e| {
+        panic!(
+            "the guest built, so the toolchain is present, but {} could not be read: {e}",
+            artifact.display()
+        )
+    }))
 }
 
 /// Run one export with a **fresh** assertion state, and hand back both the outcome and the state.

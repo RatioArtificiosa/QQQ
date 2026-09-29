@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# A guest-side crate, and therefore **not** a workspace member.
+#
+# # Why it is not in `crates/`
+#
+# Because it cannot build for the host. `wit_bindgen::generate!` emits `extern` imports for
+# `qqq:test/assertions`, and those only exist inside a component -- so a `cargo clippy --workspace`
+# would fail on a crate that is correct for its one target. `examples/orders-api` sits here for the same
+# reason and carries its own `Cargo.lock`, which is how a reader can tell.
+#
+# # Why the proof of this crate is a build rather than a test
+#
+# The macros expand to calls on the generated bindings. **A host-target test could never call them**, so
+# it would assert nothing but its own compilation -- and `§O-424` records that a `std` guest cannot be
+# run by `qqqai run` at all. A successful `wasm32-wasip2` build *is* the type-check, and it is the only
+# honest one available here.
+
+# The empty table terminates Cargo's upward search for a workspace root.
+#
+# # Why this crate is not a member, said from this side
+#
+# `crates/` holds the runtime and every member there builds for the host. **This one cannot**: the
+# bindings `wit_bindgen::generate!` emits are component imports, so a host-target build fails on code that
+# is correct for its one target, and `cargo clippy --workspace` would be red for the wrong reason. Cargo
+# says so in its own words when the table is missing -- *"current package believes it's in a workspace
+# when it's not"* -- and names this remedy among its three.
+#
+# `examples/orders-api` carries the same table for the same reason, and it is the documented recipe.
+[workspace]
+
+[package]
+name = "qqq-test"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Guest-side assertion macros for QQQ components - assert_caps! and assert_fuel_below!"
+repository = "https://github.com/qqq-codes/qqq"
+publish = false
+
+[lib]
+# A component. The world it declares has imports and no exports, which is what a library of assertions
+# is: it is not an application, and `export!` is what an application needs.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The same version `examples/orders-api` uses, so a guest that depends on both resolves one copy.
+wit-bindgen = { version = "0.62", features = ["macros"] }
+
+[package.metadata.docs.rs]
+# Not buildable for any host target, so docs.rs would fail on it. Recorded rather than left to be
+# discovered by a red docs job.
+no-default-target = true

@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// The world this crate declares itself against.
+//
+// # Why it exports a function
+//
+// **Because an import nobody calls does not survive the linker.** The first version of this world had the
+// import and no export, and the built component came out as
+//
+//     package root:component;
+//     world root {
+//     }
+//
+// — **empty.** The `extern` block `wit_bindgen::generate!` emits is dead code until something references
+// it, so the artifact said nothing about whether the import exists. **A build that cannot show the
+// import is a build that cannot be told apart from one where the binding was never generated**, which is
+// the shape of every instrument defect this project has recorded.
+//
+// So `run-assertions` exists to *use* the macros. It is not an API anyone should call in anger; it is
+// the reference that keeps the import alive, and `wasm-tools component wit` on the artifact is what
+// proves the macros expanded into calls on `qqq:test/assertions` rather than into nothing.
+//
+// # Why it imports and does not export `qqq:test/assertions`
+//
+// Because the host implements it. A guest that asserted against its own implementation would be checking
+// itself, and the whole point of the audit stream being the host's is that the guest cannot see what it
+// was given — only, through this interface, what it did.
+//
+// # Why this file declares its own package
+//
+// Because a world file is not exempt from the rule that every WIT file names a package. Without this
+// line `wit_bindgen::generate!` fails with *"no `package` header was found in any WIT file for this
+// package"*, and the failure it produces next — `cannot find module or crate qqq` — is a cascade from
+// the macro not expanding at all, which is worth knowing so the second error is not mistaken for the
+// first.
+//
+// **And the name must differ from the package it imports.** `qqq:test@1.0.0` is the interface below; a
+// world that took that name would be a second declaration of it. `examples/orders-api` does the same:
+// `package qqq:app@1.0.0` imports `qqq:http@1.0.0`.
+//
+// # Why the interface is vendored at `deps/qqq-test/qqq-test.wit`
+//
+// WIT reads a **directory** of `.wit` files as one package, so a guest's own world and the packages it
+// imports cannot share a directory — the same rule `host_http.rs` records from the host side, where
+// pointing `bindgen!` at `wit/` fails with *"package identifier `qqq:ai@1.0.0` does not match previous
+// package name of `qqq:agent@1.0.0`"*. The host reads the file from `wit/qqq-test.wit`; a guest gets a
+// copy under `deps/`, which is what `examples/orders-api/wit/deps/qqq-http/` does for `qqq:http`.
+//
+// **A copy is a second answer to "what is `qqq:test`", and the two can drift.** That risk is not
+// hypothetical, and `tools/check_wit_vendoring.py` exists because it happened: `wit/qqq-http.wit` was
+// corrected to admit that `send` has no transport, and the vendored copies were left asserting the
+// retracted guarantee — *"a false security property, in the file a guest author's toolchain actually
+// consumes."* The checker enforces byte-equality between every `deps/` copy and `wit/`, and it reads
+// this file: with it in place this copy is *"correct exactly once"* rather than silently stale.
+package qqq:test-guest@1.0.0;
+
+world qqq-test {
+  /// The assertions a component under test makes about itself — `TEST-007`, `TEST-008`.
+  import qqq:test/assertions@1.0.0;
+
+  /// Exercise both macros, so the import above is referenced and survives into the component.
+  ///
+  /// # Why this is an export rather than a `#[cfg(test)]` function
+  ///
+  /// Because a test function is not reachable from a WIT world, and **only something the world can reach
+  /// keeps the import in the artifact.** The same reason `examples/orders-api` exports its handler: a
+  /// component's contract is what a host can call.
+  export run-assertions: func();
+}

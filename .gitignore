@@ -103,6 +103,16 @@ fuzz/target/
 # reference app should pin, while `target/` is the output of applying it.
 examples/orders-api/target/
 
+# `examples/qqq-test` is a guest crate for the same reason, so it needs its own line for the same
+# reason. **One entry per guest is the rule, not an oversight**: `/target/` is anchored at the root and
+# deliberately does not reach a crate that is not a workspace member — `fuzz/target/` above is the third
+# instance of the same pattern. A guest that is added without this line stages its build output on the
+# first `git add -A`, which is the failure the entries exist to prevent.
+#
+# Its `Cargo.lock` is committed deliberately, as `orders-api`'s is: the lockfile is what a reader should
+# pin, and `target/` is the output of applying it.
+examples/qqq-test/target/
+
 # The mutating corpus harness's exclusive lock (`tools/self_test_xrefs.py`).
 #
 # Ignored because it is a **transient claim on a running process**, not project

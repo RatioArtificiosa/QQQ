@@ -133,6 +133,36 @@ def slugify(text: str) -> str:
     return slug.strip("-")
 
 
+def outside_fences(text: str) -> str:
+    """The text with every fenced code block replaced by blank lines.
+
+    # Why a quotation is not a definition
+
+    The register is a markdown document that **describes itself**, so an observation about the register
+    legitimately quotes a heading:
+
+        ## §O-218   — `why` exited zero on a denial, ...
+
+    Rule [14] anchors on `^#+\\s+§?O-` and cannot tell that line from a real definition, so an
+    observation that quotes two headings appears to define `§O-218` twice. Measured: writing `§O-403`
+    produced two `FAIL [14]` lines for headings it was only *describing*.
+
+    # Why blank rather than delete
+
+    Rule [14]'s error names the line numbers it found, so the numbering has to survive. Replacing each
+    fenced line with `""` keeps `enumerate(..., start=1)` aligned with the file on disk.
+    """
+    out: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+            out.append("")
+            continue
+        out.append("" if fenced else line)
+    return "\n".join(out)
+
+
 def parse_headings(text: str):
     """Return (anchors, ordered_section_titles).
 
@@ -480,7 +510,8 @@ def main() -> int:
     # (`### O-181: ...`).
     # ----------------------------------------------------------------------
     heading_ids: dict[str, list[int]] = {}
-    for lineno, line in enumerate(observations.splitlines(), start=1):
+    # `outside_fences`: a heading reproduced inside a code block is a QUOTATION, not a definition.
+    for lineno, line in enumerate(outside_fences(observations).splitlines(), start=1):
         m = re.match(r"#+\s+§?O-(\d+[a-z]?)\b", line)
         if m:
             heading_ids.setdefault(m.group(1), []).append(lineno)
@@ -1122,6 +1153,28 @@ def self_test() -> int:
         _write_corpus(d, proposal=_proposal(), checklist=_checklist(),
                       observations=_observations(observation_headings="# nothing here"))
         case("[14] no observation headings is vacuous, not clean", d, "14")
+
+        # --- [14] a heading QUOTED inside a code fence is not a definition ---
+        #
+        # `§O-403` quotes two real headings as examples, inside a fence, and rule [14] reported both as
+        # second definitions. The rule is right about what it sees; what is wrong is that a quotation
+        # is not a definition, and an observation that *describes* the register must be able to quote
+        # it. `outside_fences()` is the fix, and this case is what keeps it.
+        #
+        # The fixture is CLEAN once the fence is respected, so it asserts `expect_fail=False`. Revert
+        # the fix and the same fixture reports `§O-001` twice -- measured, and that is why this case is
+        # a regression test rather than a restatement of the code.
+        d = base / "r14f"
+        _write_corpus(d, proposal=_proposal(), checklist=_checklist(),
+                      observations=_observations(
+                          observation_headings=(
+                              "## \u00a7O-001 A synthetic observation\n\n"
+                              "An entry that quotes a heading, as \u00a7O-403 does:\n\n"
+                              "```\n"
+                              "## \u00a7O-001 the same id, quoted rather than defined\n"
+                              "```\n")))
+        case("[14] a heading quoted inside a code fence is not a definition", d, "14",
+             expect_fail=False)
 
         # --- the progress line counts every marker the legend defines ---------
         #

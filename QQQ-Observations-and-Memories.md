@@ -30722,6 +30722,75 @@ A single measurement would have been accepted. The same shape caught `§O-400`, 
 failure -- one of them an artefact -- were what made the truth visible.
 
 
+## §O-404 — A fix that narrows a check and a fix that disables one pass the same test, so a fix needs the injection too
+
+`§O-403` recorded that `check_xrefs.py` rule `[14]` -- *every observation id has exactly ONE definitional
+heading* -- read a fenced code block as content. Writing `§O-403` quoted two real headings as examples,
+and the rule reported both as second definitions:
+
+```
+FAIL  [14] §O-218 is defined by 2 headings (lines 17791, 30677); an id must be unique
+FAIL  [14] §O-218f is defined by 2 headings (lines 17929, 30678); an id must be unique
+```
+
+**The rule was right about what it saw.** What was wrong is that a *quotation of a heading* is not a
+definition, and an observation that **describes the register** must be able to quote it.
+
+**The fix is `outside_fences()`** -- fenced lines are replaced by blank lines before rule `[14]` scans.
+Blank rather than deleted, because the rule's error message reports **line numbers** and they must keep
+pointing at the real file.
+
+**Why the fix needed its own injection, which is the point of this entry.** A fix that *narrows* a check
+and a fix that *silently disables* one produce the **same result on the failing input**: both turn
+`validation FAILED` into `validation PASSED`. So passing was not evidence that rule `[14]` still worked.
+Two measurements were needed, in opposite directions:
+
+| input | expected | measured |
+|---|---|---|
+| a heading quoted **inside a fence** | no failure (the fix) | `exit=0`, `validation PASSED` |
+| a second **real** heading | failure (the rule) | `exit=1`, `FAIL [14] §O-218 is defined by 2 headings (lines 17791, 30726)` |
+
+**And then the regression test needed its own injection.** A hermetic case was added to
+`check_xrefs.py --self-test` -- a synthetic corpus whose register quotes a heading inside a fence, asserted
+with `expect_fail=False`. A case like that passes whether or not the fix exists if the assertion is
+wrong, so the fix was **withdrawn** and the case was required to go red:
+
+```
+baseline : exit=0  OK    [14] a heading quoted inside a code fence is not a definition | 20/20
+withdrawn: exit=1  DEAD  [14] a heading quoted inside a code fence is not a definition | 1/20 case(s) bad
+restored : exit=0  OK    [14] a heading quoted inside a code fence is not a definition | 20/20
+```
+
+**A regression test that passes with and without the fix is decoration.** `§O-280` says an injection is a
+measurement and must be checked for whether it measured anything; this is the same rule applied to a
+**fix** rather than to a test.
+
+**The census, so the remaining readers are a measurement rather than a worry.** Two other readers scan
+line-by-line for structure and do not respect fences: `check_xrefs.py`'s `parse_headings` and anchor loop
+over the Proposal, and `check_verified_facts.py`'s `line.startswith("## ") and "re-verify" in line` over
+the register. Measured across all three normative documents:
+
+| document | fenced lines | markdown headings inside | checklist items inside |
+|---|---|---|---|
+| `QQQ-Proposal-V1.md` | 315 | **0** | 0 |
+| `QQQ-Checklist-V1.md` | 0 | **0** | 0 |
+| `QQQ-Observations-and-Memories.md` | 1476 | **0** | **1** |
+
+So both heading readers are **latent, not live** -- no document contains a `##`-or-deeper line inside a
+fence. The single checklist-shaped line is in the register at line 27200, an observation quoting an
+`FND-008` item. Three tools contain both a register reference and an item pattern, and **all three apply
+the pattern to the Checklist rather than the register** (`check_xrefs.py:242` scans `checklist`,
+`mark_complete.py:22` sets `CHECKLIST = Path("QQQ-Checklist-V1.md")`, and `self_test_xrefs.py` fabricates
+items in fixtures by design). **Nothing counts that line; it stays.**
+
+**And the first version of that census was wrong in the same way it was warning about.** It matched
+`#+\\s` and reported **31** "heading-shaped" lines inside fences -- every one of them a single-hash
+**shell** comment or a Prometheus `# HELP` / `# TYPE` line. Splitting by depth gave the true answer: **0**
+markdown headings. Then the follow-up scan reported three tools "at risk" because they *contained* a
+register reference and an item pattern -- a **file-level** property standing in for a **data-flow** one,
+which is `§O-282` again: *a guard is only as narrow as its pattern*. Both errors were caught by asking
+what the pattern was applied **to**, not whether it existed.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

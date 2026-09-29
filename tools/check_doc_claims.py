@@ -258,19 +258,24 @@ def _observation() -> dict[str, int]:
     # **And the register uses a THIRD form, which this resolver could not see.** `\u00a7O-253` through
     # `\u00a7O-266` -- fourteen observations, all inside `\u00a7O-252`'s section -- are written as bold
     # paragraphs opening `**\u00a7O-NNN — claim.**`, because they came out of one working session and were
-    # grouped deliberately. Measured: `^##\s*\u00a7O-258` -> 0, `^###` -> 0, `^#+` -> 0, `**\u00a7O-258` -> 1.
-    # So this figure under-reported by fourteen while `check_doc_claims.py` passed, because a document is
-    # compared to its resolver and not to the tree.
+    # grouped deliberately.
     #
-    # This is the `\u00a7D-` lesson from a third direction: there the headings were `###` and a `^##`
-    # pattern found zero; here they are bold and a `^#+` pattern finds zero. **A count of zero from a
-    # pattern that cannot match is not evidence of absence**, and the register is now known to use three
-    # forms -- so this counts all three and a fourth would need a fourth clause, which is why the
-    # `--self-test` below asserts each form separately.
+    # **And a FOURTH: the bare form, `### O-NNN: claim`, with no sigil.** Sixteen of those. The fix for
+    # the bold form taught this resolver two of the register's forms and left it reporting 266 against a
+    # register that defines 282 -- so the figure was wrong by sixteen *after* being corrected, which is
+    # the same defect one level up. `check_xrefs.py`'s rule `[14]` had the right pattern all along
+    # (`(?:#+|\*\*)\s*\u00a7?O-`, with the sigil optional); this resolver's had the sigil required.
+    #
+    # This is the `\u00a7D-` lesson from a fourth direction. There the headings were `###` and a `^##`
+    # pattern found zero; here they are bare `###` and a `^## \u00a7` pattern finds zero. **A count of zero
+    # from a pattern that cannot match is not evidence of absence** -- and the register is now known to use
+    # four forms, so this counts all four and a fifth would need a fifth clause. That is why the
+    # `--self-test` below asserts a case per form.
     body = re.sub(r"(?ms)^```.*?^```", "", text)
-    heading = r"(?m)^## \u00a7O-(\d+[a-z]*)"
+    sigil_heading = r"(?m)^## \u00a7O-(\d+[a-z]*)"
     bold = r"(?m)^\*\*\u00a7O-(\d+[a-z]*)"
-    full = re.findall(heading, body) + re.findall(bold, body)
+    bare = r"(?m)^### O-(\d+[a-z]*)"
+    full = re.findall(sigil_heading, body) + re.findall(bold, body) + re.findall(bare, body)
     nums = [int(re.match(r"\d+", n).group(0)) for n in full]
     return {"headings": len(full), "highest": max(nums) if nums else 0}
 

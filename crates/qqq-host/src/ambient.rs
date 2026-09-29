@@ -189,7 +189,7 @@ impl AmbientState {
     /// Because recording while replaying would append the replayed values to the log being read,
     /// which grows it as it is consumed and makes `is_exhausted` depend on how far the reader got.
     /// **The two directions are mutually exclusive by construction rather than by convention.**
-    #[must_use]
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -207,6 +207,7 @@ impl AmbientState {
     /// let state = AmbientState::new(true).with_replay_source(Arc::clone(&log));
     /// assert_eq!(state.read_wall_nanos().expect("recorded"), 42);
     /// ```
+    #[must_use]
     pub fn with_replay_source(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
         if self.deterministic && self.replay.is_none() {
             self.replay_source = Some(log);
@@ -215,7 +216,7 @@ impl AmbientState {
     }
 
     /// Whether this state is replaying a recorded run.
-    #[must_use]
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -231,6 +232,7 @@ impl AmbientState {
     /// )));
     /// assert!(!AmbientState::new(true).has_replay_source());
     /// ```
+    #[must_use]
     pub fn has_replay_source(&self) -> bool {
         self.replay_source.is_some()
     }
@@ -264,6 +266,7 @@ impl AmbientState {
     /// [`crate::replay::ReplayError`] when replaying and the log is exhausted, or when its next record
     /// is for a different function. **Both are errors rather than fallbacks**, so a replayed run that
     /// diverged from its recording stops instead of continuing against a real clock.
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -304,6 +307,7 @@ impl AmbientState {
     /// # Errors
     ///
     /// As [`Self::read_wall_nanos`].
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -342,6 +346,7 @@ impl AmbientState {
     ///
     /// [`RandomFailure::Replay`] when replaying and the log cannot supply the bytes, and the live
     /// failures otherwise.
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -404,7 +409,7 @@ impl AmbientState {
     /// `ReplayHeader` carries `deterministic` for exactly this reason, and
     /// attaching one here would produce a file whose header and whose contents
     /// disagree. The caller gets `None` back and can see it.
-    #[must_use]
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -421,6 +426,7 @@ impl AmbientState {
     /// let state = AmbientState::new(true).with_replay(Arc::clone(&log));
     /// assert!(state.has_replay());
     /// ```
+    #[must_use]
     pub fn with_replay(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
         if self.deterministic {
             self.replay = Some(log);
@@ -429,7 +435,7 @@ impl AmbientState {
     }
 
     /// Whether a replay log is attached.
-    #[must_use]
+    /// ```
     /// use qqq_host::ambient::AmbientState;
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     /// use std::sync::{Arc, Mutex};
@@ -445,6 +451,7 @@ impl AmbientState {
     /// )));
     /// assert!(!AmbientState::new(true).has_replay(), "a sink is opt-in");
     /// ```
+    #[must_use]
     pub fn has_replay(&self) -> bool {
         self.replay.is_some()
     }

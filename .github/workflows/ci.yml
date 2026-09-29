@@ -464,10 +464,10 @@ jobs:
         # that repeats a substantial line, or a tick with no evidence, passed every gate. Both are
         # mechanical, and the second is a ratchet: the 53 items ticked before the convention existed are
         # listed by name, and a new one fails.
-      - name: Verify every -> Done: block is free of repeated lines and every tick carries evidence
+      - name: Verify no Done block repeats a line and every tick carries evidence
         run: python tools/check_done_lines.py
       - name: Prove the evidence check catches a duplicate line and a newly unevidenced tick
-          run: python tools/check_done_lines.py --self-test
+        run: python tools/check_done_lines.py --self-test
 
       # `PLAN-001`: the checklist as machine-readable data. The tracked `tools/backlog.json` is what a
       # consumer reads instead of re-parsing markdown, and this fails when it has drifted from the

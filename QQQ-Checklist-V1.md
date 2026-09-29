@@ -4344,10 +4344,36 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.7 `qqqai test` — test runner
 - [ ] **TEST-004** Implement coverage via Wasm instrumentation plus DWARF source mapping.
   → §6.7 `qqqai test` — test runner
-- [ ] **TEST-005** Implement `--trials N` determinism checking.
+- [x] **TEST-005** Implement `--trials N` determinism checking.
   → §6.7 `qqqai test` — test runner
-- [ ] **TEST-006** Implement deterministic replay logs and `--replay`.
+  → Done: `--trials N` in `crates/qqq-run/src/test.rs` (`TestOptions::trials`, `Trials::trials_passed`,
+    `is_nondeterministic()`, `divergent_trials`), with the captured output **normalised** before
+    comparison and every trial run under `--test-threads 1` so the measurement does not depend on the
+    machine. Tests: `crates/qqq-run/tests/cli.rs` — `test --trials 3` asserts "3 trials each", and a
+    non-numeric value is a `QQQ-7001` usage error naming `--trials`.
+    **And the limit belongs in this line rather than in a caveat elsewhere: the subject is a NATIVE test
+    binary.** `test.rs:353` shells out to `cargo test --no-run --message-format json` and `:488` runs each
+    reported executable directly, and the module's own doc says so -- *"a test binary's `#[cfg(test)]`
+    modules share process state"*. **The QQQ runtime is not in the path**, so no virtual clock, seeded
+    generator or fuel is involved (`§O-427`). **This is a determinism check of a project's tests, which is
+    what §6.7's runner is for -- and it is not the engine's 10,000-trial verification**, which is
+    `DET-009`'s `tools/det009_trials.py`.
+- [x] **TEST-006** Implement deterministic replay logs and `--replay`.
   → §10.5 Determinism — the feature nobody else has
+  → Done: the format and its reader in `crates/qqq-host/src/replay.rs` -- `ReplayLog::to_text` /
+    `from_text` with the hash chain **re-derived on load**, so an edit, a deletion and a rewritten linkage
+    are three separate refusals (`ReplayError::{Tampered, Discontinuous, OutOfOrder}`) -- and `--replay` /
+    `--replay-log` on `qqqai run` (`crates/qqq-run/src/run.rs::replay_endpoints`), both **refused without
+    `--deterministic`** with `QQQ-7001`.
+    Test: `crates/qqq-run/tests/cli.rs::replay_reproduces_a_recorded_run_and_refuses_an_exhausted_log` --
+    three assertions, of which the load-bearing one is that a **zero-record** log must FAIL at the read
+    rather than fall back to the real clock. **Fault-injected against the branch in `read_wall_nanos` that
+    consults the log, and detected** -- removing it makes the zero-record case succeed, because a replayed
+    run that falls back to the clock also succeeds.
+    Measured: a one-record log replays and the guest runs (exit 0); a zero-record log traps at `m!init`
+    with *"the replay log ended before the execution did"* and exits 1. **The subject is a pinned 281-byte
+    WAT component** that reads the clock once at instantiation, so the execution half is verified over a
+    minimal guest rather than the reference application, which `qqqai run` cannot instantiate (`§O-424`).
 - [ ] **TEST-007** Implement capability assertions (`assert_caps!`).
   → §6.7 `qqqai test` — test runner
 - [ ] **TEST-008** Implement fuel assertions (`assert_fuel_below!`).

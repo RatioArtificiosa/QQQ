@@ -30,7 +30,7 @@
 //! spurious re-check denies it — and that asymmetry justifies the cost.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use qqq_cap::capability::Capability;
@@ -39,6 +39,7 @@ use sha2::{Digest, Sha256, Sha512};
 
 use crate::audit::Outcome;
 use crate::linker::StoreData;
+use crate::replay::{ReplayLog, ReplayValue};
 
 /// The largest single `random.get` request the host will serve, in bytes.
 ///
@@ -98,6 +99,30 @@ pub struct AmbientState {
     /// different origins. Lazy initialisation also keeps `new` cheap on the
     /// instantiation hot path, which is measured in hundreds of nanoseconds.
     origin: OnceLock<Instant>,
+    /// The replay log, when one is attached — `DET-007`.
+    ///
+    /// # Why the sink is here and not in the caller
+    ///
+    /// Because the reads that must be recorded are this struct's own methods —
+    /// [`Self::now_nanos`], [`Self::elapsed_nanos`] and [`Self::random_bytes`] —
+    /// and all three take `&self`. A sink the caller held could not be reached
+    /// from them without threading a parameter through every host function,
+    /// which is the arrangement that makes a recording site easy to forget.
+    ///
+    /// # Why `Arc<Mutex<..>>` rather than a field
+    ///
+    /// The same reason [`crate::audit::AuditHandle`] uses it: `record` needs
+    /// `&mut`, the readers have `&self`, and the state is shared across the
+    /// instance's host calls. `Arc` because the log outlives the state so a
+    /// caller can read what was recorded.
+    ///
+    /// # Why `None` is the default
+    ///
+    /// Because `Instance::create` is used by `qqqai run`, by tests and by
+    /// `qqq-debug`, and **none of those should silently start writing a replay
+    /// file.** [`Self::with_replay`] is the opt-in, mirroring
+    /// `Instance::create_with_audit`.
+    replay: Option<Arc<Mutex<ReplayLog>>>,
 }
 
 /// The floor the host reports as its real-time clock resolution.
@@ -131,6 +156,61 @@ impl AmbientState {
             // host's memory, and a bound is cheaper than an investigation.
             max_random_bytes: DEFAULT_MAX_RANDOM_BYTES,
             origin: OnceLock::new(),
+            replay: None,
+        }
+    }
+
+    /// Attach a replay log, so every nondeterministic read is recorded — `DET-007`.
+    ///
+    /// # Why this is a builder rather than a `new` parameter
+    ///
+    /// Because a fourth positional argument to `new` would have to be passed at
+    /// every call site, and the call sites that do not want a log are the
+    /// majority — `qqqai run`, tests, `qqq-debug`. A builder keeps the default
+    /// honest and makes the opt-in greppable, which is the same shape
+    /// `Instance::create_with_audit` uses for the audit stream.
+    ///
+    /// # Why it refuses to attach outside deterministic mode
+    ///
+    /// Because a log recorded with a real clock records nothing reproducible.
+    /// `ReplayHeader` carries `deterministic` for exactly this reason, and
+    /// attaching one here would produce a file whose header and whose contents
+    /// disagree. The caller gets `None` back and can see it.
+    #[must_use]
+    pub fn with_replay(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
+        if self.deterministic {
+            self.replay = Some(log);
+        }
+        self
+    }
+
+    /// Whether a replay log is attached.
+    #[must_use]
+    pub fn has_replay(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Record one nondeterministic read, if a log is attached.
+    ///
+    /// # Why this is one function and not three copies
+    ///
+    /// Because the three recording sites differ only in the function name and
+    /// the value, and a copy per site is three places a future change can miss.
+    /// It is also where the `deterministic` guard lives, so a site cannot record
+    /// without it — which is the property `ReplayHeader::deterministic` depends
+    /// on.
+    ///
+    /// A poisoned lock is ignored rather than propagated: this is a recording
+    /// side-channel, and **failing a guest's clock read because a log writer
+    /// panicked would turn a diagnostic into an outage.**
+    fn note(&self, function: &'static str, value: ReplayValue) {
+        if !self.deterministic {
+            return;
+        }
+        if let Some(log) = &self.replay {
+            if let Ok(mut log) = log.lock() {
+                let _ = log.record(function, value);
+            }
         }
     }
 
@@ -155,9 +235,12 @@ impl AmbientState {
     ///
     /// In deterministic mode: the fixed instant plus `ticks` advances.
     /// Otherwise: the real system clock.
+    ///
+    /// **The value is recorded before it is returned**, so a replay reproduces
+    /// what the guest saw rather than recomputing it — `DET-007`.
     #[must_use]
     pub fn now_nanos(&self) -> u64 {
-        if self.deterministic {
+        let value = if self.deterministic {
             let ticks = self.ticks.load(Ordering::Relaxed);
             self.fixed_nanos
                 .saturating_add(self.tick_nanos.saturating_mul(ticks))
@@ -169,10 +252,17 @@ impl AmbientState {
                 // might store.
                 Err(_) => 0,
             }
-        }
+        };
+        self.note("clock.wall", ReplayValue::Clock(value));
+        value
     }
 
     /// Advance the virtual clock by one tick. No effect in real-time mode.
+    ///
+    /// **Not a recording site.** A tick produces no value a guest can observe —
+    /// the next [`Self::now_nanos`] records the advanced reading. What has to be
+    /// deterministic is *when* the host ticks, and in deterministic mode that is
+    /// a property of the caller rather than of this method.
     pub fn tick(&self) {
         if self.deterministic {
             self.ticks.fetch_add(1, Ordering::Relaxed);
@@ -197,7 +287,7 @@ impl AmbientState {
     /// guest measuring a latency must never see a negative elapsed time.
     #[must_use]
     pub fn elapsed_nanos(&self) -> u64 {
-        if self.deterministic {
+        let value = if self.deterministic {
             let ticks = self.ticks.load(Ordering::Relaxed);
             self.tick_nanos.saturating_mul(ticks)
         } else {
@@ -208,7 +298,12 @@ impl AmbientState {
             // within one instance — exactly what the WIT promises.
             let origin = self.origin.get_or_init(Instant::now);
             u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
-        }
+        };
+        // A separate function name from `clock.wall`, because the two answer
+        // different questions and a replay reader comparing them would otherwise
+        // see one series where the guest saw two.
+        self.note("clock.monotonic", ReplayValue::Clock(value));
+        value
     }
 
     /// The smallest interval this clock can meaningfully report, in nanoseconds.
@@ -259,6 +354,12 @@ impl AmbientState {
                 chunk[..n].copy_from_slice(&bytes[..n]);
             }
             self.rng_state.store(state, Ordering::Relaxed);
+            // Recorded here rather than at the single `Ok(out)` below, because
+            // the real-time path's bytes are not reproducible and must not be
+            // logged: a `Random` record from a real run would replay a value the
+            // generator never produced. `note` guards on `deterministic` too, so
+            // this is the second of two checks rather than the only one.
+            self.note("crypto.random", ReplayValue::Random(out.clone()));
             Ok(out)
         } else {
             getrandom::fill(&mut out).map_err(|_| RandomFailure::SourceFailed)?;
@@ -863,6 +964,121 @@ mod tests {
             assert!(err.remediation.is_some(), "{e:?} must carry a remediation");
             assert!(err.render().contains("QQQ-"));
         }
+    }
+
+    /// **The injection this step exists for.** A sink wired to the wrong read, or
+    /// wired but never called, passes a *presence* check and fails this one.
+    ///
+    /// Two `now_nanos()` calls in deterministic mode must produce two records
+    /// whose `Clock` values are **equal** — the virtual clock does not advance
+    /// unasked — and a third after a `tick()` must be **larger**. Reading the log
+    /// back rather than asserting the field is what makes the test a measurement:
+    /// `has_replay()` would be true for a sink that records nothing.
+    #[test]
+    fn two_deterministic_reads_are_recorded_and_equal() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            crate::replay::ReplayHeader {
+                artifact_digest: "sha256:test".to_owned(),
+                engine_version: "48.0.2".to_owned(),
+                target_triple: "test".to_owned(),
+                deterministic: true,
+            },
+            8,
+        )));
+        let s = AmbientState::new(true).with_replay(std::sync::Arc::clone(&log));
+        assert!(s.has_replay());
+
+        let first = s.now_nanos();
+        let second = s.now_nanos();
+        assert_eq!(first, second, "a virtual clock must not advance unasked");
+
+        let guard = log.lock().expect("log");
+        assert_eq!(guard.records().len(), 2, "both reads must be recorded");
+        match (&guard.records()[0].value, &guard.records()[1].value) {
+            (crate::replay::ReplayValue::Clock(a), crate::replay::ReplayValue::Clock(b)) => {
+                assert_eq!(a, b, "the two recorded readings must agree");
+                assert_eq!(*a, first, "and must be the value the caller got");
+            }
+            other => panic!("expected two Clock records, got {other:?}"),
+        }
+        assert_eq!(guard.records()[0].function, "clock.wall");
+        drop(guard);
+
+        s.tick();
+        let third = s.now_nanos();
+        assert!(third > first, "a tick must advance the clock");
+        let guard = log.lock().expect("log");
+        assert_eq!(guard.records().len(), 3);
+        match &guard.records()[2].value {
+            crate::replay::ReplayValue::Clock(c) => assert_eq!(*c, third),
+            other => panic!("expected a Clock record, got {other:?}"),
+        }
+        assert!(
+            guard.verify().is_ok(),
+            "the chain must verify after three appends"
+        );
+    }
+
+    /// **The negative half, and it is the one that matters for safety.** A state
+    /// in real-time mode must record **nothing**, because the bytes and instants
+    /// it reads are not reproducible and a log of them would replay values the
+    /// generator never produced.
+    ///
+    /// `with_replay` refuses to attach outside deterministic mode, and `note`
+    /// guards again — so this asserts the second check independently of the
+    /// first, which is why it constructs the state and then tries to attach.
+    #[test]
+    fn a_real_time_state_records_nothing() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            crate::replay::ReplayHeader {
+                artifact_digest: "sha256:test".to_owned(),
+                engine_version: "48.0.2".to_owned(),
+                target_triple: "test".to_owned(),
+                deterministic: false,
+            },
+            8,
+        )));
+        let s = AmbientState::new(false).with_replay(std::sync::Arc::clone(&log));
+        assert!(!s.has_replay(), "a real-time state must refuse a log");
+        let _ = s.now_nanos();
+        let _ = s.elapsed_nanos();
+        let _ = s.random_bytes(8).expect("the OS source");
+        assert!(
+            log.lock().expect("log").records().is_empty(),
+            "nothing may be recorded outside deterministic mode"
+        );
+    }
+
+    /// The two clock reads are recorded under **different function names**, so a
+    /// replay reader does not see one series where the guest saw two.
+    #[test]
+    fn the_wall_and_monotonic_reads_are_named_apart() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            crate::replay::ReplayHeader {
+                artifact_digest: "sha256:test".to_owned(),
+                engine_version: "48.0.2".to_owned(),
+                target_triple: "test".to_owned(),
+                deterministic: true,
+            },
+            8,
+        )));
+        let s = AmbientState::new(true).with_replay(std::sync::Arc::clone(&log));
+        let _ = s.now_nanos();
+        let _ = s.elapsed_nanos();
+        let _ = s.random_bytes(4).expect("the generator");
+        let guard = log.lock().expect("log");
+        let names: Vec<&str> = guard.records().iter().map(|r| r.function).collect();
+        assert_eq!(
+            names,
+            vec!["clock.wall", "clock.monotonic", "crypto.random"]
+        );
+        assert!(
+            matches!(
+                guard.records()[2].value,
+                crate::replay::ReplayValue::Random(_)
+            ),
+            "the random read must carry bytes, not an instant"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {

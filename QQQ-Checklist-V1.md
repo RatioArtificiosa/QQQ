@@ -4374,10 +4374,40 @@ Each language has eight required items. The parity matrix makes any gap visible.
     with *"the replay log ended before the execution did"* and exits 1. **The subject is a pinned 281-byte
     WAT component** that reads the clock once at instantiation, so the execution half is verified over a
     minimal guest rather than the reference application, which `qqqai run` cannot instantiate (`§O-424`).
-- [ ] **TEST-007** Implement capability assertions (`assert_caps!`).
+- [x] **TEST-007** Implement capability assertions (`assert_caps!`).
   → §6.7 `qqqai test` — test runner
-- [ ] **TEST-008** Implement fuel assertions (`assert_fuel_below!`).
+  → Done: the guest-side `assert_caps!` in `examples/qqq-test`, over `qqq:test/assertions`, whose host half
+    is `crates/qqq-host/src/host_test.rs` — six functions, six refusal guards, five fault-injected tests.
+    Measured at `005fe20`: the crate builds for `wasm32-wasip2` with **0 warnings**, and
+    `wasm-tools component wit` on the artefact shows `import qqq:test/assertions@1.0.0` **beside
+    `export run-assertions: func()`** — so the macro expands into a real call rather than into nothing.
+    That distinction cost a round to find: with the import declared and nothing referencing it, the
+    component came out an **empty world**, and **a build cannot tell a generated binding from one that was
+    never generated.**
+    **The assertion reads the audit stream, so it discloses nothing about the grant set.** It is about what
+    the code *attempted* — what the WIT says, and what §2.5's "absent, not denied" requires. A denied
+    attempt is still an attempt, which is why every recorded row counts rather than only the granted ones.
+    **And the limit belongs in this line: no test drives a guest through the macro into the host.** The host
+    half is covered by `host_test.rs`'s own tests and the macro half by the artefact; **the seam between
+    them is witnessed by neither**, because a `std` guest cannot be instantiated (`§O-424`) and a
+    hand-written WAT against a lowered `result<_, variant>` is the trap `host_crypto.rs` records four
+    attempts into — *"each attempt failed to instantiate whether or not the capability was granted, making
+    the ungranted case pass for the wrong reason."*
+- [x] **TEST-008** Implement fuel assertions (`assert_fuel_below!`).
   → §6.7 `qqqai test` — test runner
+  → Done: `assert_fuel_below!` in `examples/qqq-test`, over the host's `assert-fuel-below`
+    (`crates/qqq-host/src/host_test.rs`). **It has two forms and the arity is arithmetic rather than
+    taste:** the proposal writes `assert_fuel_below!(n)`, and a mark made immediately before the assertion
+    has **zero consumption behind it** — so a one-argument form that marked for itself would be below every
+    limit and **pass forever, which is worse than failing.** The short form therefore measures from a mark
+    named `block` that the test places, and `assert_fuel_below!("mark", n)` names it.
+    **A missing mark is `no-fuel-baseline`, not a pass**, and the macro's panic says so; the host returns
+    it as a WIT error rather than a trap, because a trap would end the instance and hide every later
+    assertion.
+    **The limit is `TEST-007`'s**, stated the same way: the expansion is proven by the artefact and the
+    comparison by unit tests, and no guest has been driven through it. **And the item requires deterministic
+    metering** — the proposal's own footnote on this row — which is `DET-002`'s virtual clock and
+    `DET-009`'s 10,000-trial result. **The comparison is exact only because the counter is.**
 - [ ] **TEST-009** Implement property tests with shrinking and replayable failures.
   → §6.7 `qqqai test` — test runner
 - [~] **TEST-010** Implement the cross-language conformance suite and wire it into CI.

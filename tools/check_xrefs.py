@@ -511,8 +511,22 @@ def main() -> int:
     # ----------------------------------------------------------------------
     heading_ids: dict[str, list[int]] = {}
     # `outside_fences`: a heading reproduced inside a code block is a QUOTATION, not a definition.
+    #
+    # **And the register uses a THIRD form, which this pattern could not see.** The comment above says
+    # `^#+\s+§?O-` "covers both forms the register uses" -- the sigil form and the bare form. Measured,
+    # there are three: `§O-253` through `§O-266`, fourteen observations, are written as bold paragraphs
+    # opening `**§O-NNN — claim.**`, all inside `§O-252`'s section.
+    #
+    # Two things hid it, and they hid it in opposite directions. `[13]` is a substring test over the
+    # whole document, so a bold id that is *cited* reads as *defined* and no error is raised; and this
+    # pattern requires `#+`, so the id never entered the uniqueness map. **Each rule assumed the other
+    # was watching.** That is `§O-282` applied to a pair of checks rather than to one.
+    #
+    # The bold form is deliberate: those fourteen came out of one working session and were grouped under
+    # `§O-252` rather than given fourteen top-level sections. So the pattern accepts them, and the
+    # anti-vacuity clause below still holds because it counts whatever the pattern finds.
     for lineno, line in enumerate(outside_fences(observations).splitlines(), start=1):
-        m = re.match(r"#+\s+§?O-(\d+[a-z]?)\b", line)
+        m = re.match(r"(?:#+|\*\*)\s*§?O-(\d+[a-z]?)\b", line)
         if m:
             heading_ids.setdefault(m.group(1), []).append(lineno)
 

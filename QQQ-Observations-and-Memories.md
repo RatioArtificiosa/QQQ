@@ -31706,6 +31706,159 @@ impossible.**
 been deleted. That needs the checklist to name the file, and it does not. **Reporting it as covered would
 be `§O-375` -- a rule that cannot fire.**
 
+## §O-418 — The Proposal's §10.5 table is Phase 1's plan, and two of its nine rows do not match the tree
+
+Phase 1 has been planned from the checklist. **The Proposal states the same work as a nine-row table**, and
+reading it against the tree gives the phase a precise shape — including two rows where the specification
+and the implementation disagree.
+
+**`QQQ-Proposal-V1.md:1541`, `## §10.5 Determinism — the feature nobody else has`**, whose claim is:
+
+> With `[determinism] enabled = true`, executing the same component with the same inputs produces a
+> bit-identical result, and the execution is recorded in a replay log sufficient to reproduce it exactly —
+> including any failure.
+
+**and whose mechanism is a table.** Measured 2026-09-28 at `2b30549`:
+
+| # | source of nondeterminism | control, per §10.5 | state |
+|---|---|---|---|
+| 1 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks | **partial** — `ambient.rs` freezes it; `tick()` is called from tests only |
+| 2 | Monotonic clock | virtualized; advances deterministically with fuel or explicit ticks | **partial** — same mechanism |
+| 3 | Randomness | **a seeded CSPRNG (ChaCha20 with `determinism.seed`)** | ⚠️ **built, with `splitmix64`** — see below |
+| 4 | Async scheduling | a deterministic scheduler: same poll order, same interleavings, single-threaded executor | ❌ **absent** — `DET-004` |
+| 5 | Float behaviour | `cranelift_nan_canonicalization` on; relaxed-SIMD fusion disabled | ✅ `config.rs:116,119` |
+| 6 | HashMap iteration order | banned in host interfaces; ordered maps only | ✅ **zero `HashMap` in `qqq-host/src`**; the two mentions explain its absence |
+| 7 | **Network timing** | **recorded and replayed from the replay log (`--replay`)** | ❌ **absent** — `DET-011`, and no `ReplayLog` exists |
+| 8 | Compilation | AOT artifact pinned by digest; same compiler version required | ✅ `config.rs:371` `aot_cache_key` over four inputs |
+| 9 | Threads | deterministic mode is single-threaded; shared memory is forbidden | ❌ **absent** — `DET-012`, itself behind `ARCH-014` |
+
+**So four rows are done, two are partial, and three are absent — and row 7 says the replay log records
+network timing, which means `DET-007`, `DET-008` and `DET-011` are one unit rather than three.** That is
+the phase's real scope, stated by the Proposal rather than inferred from the checklist.
+
+**Row 3 is the discrepancy.** §10.5 says *"a seeded CSPRNG (ChaCha20 with `determinism.seed`)"*. The
+implementation says:
+
+```rust
+if self.deterministic {
+    // splitmix64: deterministic, architecture-independent, and good
+    // enough for test reproducibility (it is explicitly NOT a CSPRNG,
+    // and is never used outside deterministic mode).
+} else {
+    getrandom::fill(&mut out).map_err(|_| RandomFailure::SourceFailed)?;
+}
+```
+
+**`splitmix64` is not a CSPRNG and the comment says so.** The guest-facing path is
+`host_crypto.rs:174` `qqq:crypto@1.0.0/random.get` -> `random_bytes`, so **in normal mode the guest gets
+the OS source** and the weak generator is reachable only when determinism is on and the seed is public.
+
+**And the surrounding doc is careful in the way that matters:**
+
+> In non-deterministic mode the OS source is read; a failure there is surfaced by the caller rather than
+> substituted, **because falling back to a weaker source would be worse than failing.**
+
+**So the implementation is the more honest of the two documents.** The Proposal names a cipher and a
+category the code does not claim; the code names its algorithm, states that it is not a CSPRNG, and
+confines it to the mode where reproducibility is the point and secrecy is not. **Either §10.5 should say
+`splitmix64` and stop calling it a CSPRNG, or the implementation should change — and the checklist's
+`DET-003` is `[ ]`, so neither has been decided.**
+
+**Two more rows the Proposal states and nothing reads.** The `[determinism]` block itself:
+
+```toml
+[determinism]
+enabled     = false               # true for tests and replay
+seed        = 0x51515151
+fixed_clock = "2026-01-01T00:00:00Z"
+fp_strict    = true               # forbids relaxed-SIMD fusion differences
+```
+
+**`fp_strict` and `fixed_clock` appear nowhere in `crates/`** — the manifest declares them and no parser
+reads them. **And `fixed_clock`'s value is not decoration:** `2026-01-01T00:00:00Z` in nanoseconds is
+`1_767_225_600_000_000_000`, which is **exactly** `ambient.rs:126`'s constant and `instance.rs:1189`'s.
+**The document and the code agree on the value and disagree on who owns it** — which is `§O-409`'s
+duplication, seen from the specification side.
+
+**And §10.5's honest limits are already written**, which is `DET-010`'s deliverable:
+
+> determinism holds for a given (artifact digest, engine version, target triple, config). It does not
+> survive a Wasmtime upgrade that changes codegen in an observable way, and it cannot serialize true
+> external I/O without recording it.
+
+**Four of the four things `DET-010` asks for are in that one sentence.** The item is not unwritten; it is
+un**landed** — the text exists in the Proposal and the checklist does not point at it.
+
+## §O-419 — The replay log's design is already written, in the module next to it
+
+Phase 1's first buildable item is `DET-007` (the replay log format) with `DET-008` (`--replay`), and
+`DET-011` (network-timing recording) is the same unit -- §10.5 says the replay log is what records network
+timing. **The design question is where it hooks and what it stores, and both are answered by a module that
+already exists and does the adjacent job.**
+
+**`crates/qqq-host/src/audit.rs`** is `CAP-015` and Proposal §10.1's fourth signal, and its header states
+its own contract as a table of properties a *log* does not have:
+
+| Property | What a log does instead | What this module does |
+|---|---|---|
+| **Append-only** | Rotates, truncates, drops under pressure | **a record can be added and never removed; there is no `clear`, no `truncate`, and a full ring *refuses* rather than overwrites** |
+| **Hash-chained** | Each line is independent | **every record carries the digest of its predecessor, so removing or editing any record changes every later digest** |
+| **Evidence** | Best-effort, sampled, lossy | **counters are split `recorded` / `dropped` so a gap is *visible as a value*, never silent** |
+
+**and its record is:**
+
+```rust
+pub struct AuditRecord {
+    sequence: u64,            // 1-based: "a missing record is visible as a gap rather than an off-by-one"
+    tenant: Option<TenantId>,
+    component: ComponentDigest,
+    grants: GrantDigest,      // §10.1's "manifest revision"
+    capability: Capability,
+    function: &'static str,   // "bounded by the interface's own WIT"
+    outcome: Outcome,
+    previous: String,         // the digest of the preceding record
+    chain: String,            // SHA-256 over every field above, in order
+}
+```
+
+**And the decisive measurement: it carries no values.** The record says *that* `random.get` was called and
+what happened; it does not say **what the bytes were**. **A replay log needs exactly the other half** --
+the clock reading, the random bytes, the network timing -- **and needs them from the same point in the
+call.**
+
+**So the two are two sinks of one event, not two mechanisms.** `ambient.rs` is where the values are
+produced: `now_nanos()` reads the virtual clock, `random_bytes()` fills from `splitmix64` or the OS,
+`tick()` advances the virtual clock. `ambient.rs:490-499` already wires `AuditHandle` into that path, so the
+seam exists and the replay sink attaches beside it.
+
+**And the properties to mirror are the five the audit stream already had to get right**, each of which is
+a way a replay log fails silently:
+
+1. **Append-only** -- a replay that overwrites cannot reproduce a failure, because the failure's record is
+   the one most likely to be dropped.
+2. **Hash-chained** -- a replayed log is evidence, and evidence that can be edited is not.
+3. **`recorded` / `dropped` counters** -- a replay with a gap must *say so*, or `--replay` reproduces a
+   different execution and reports success.
+4. **A closed function set** -- `RECORDED_FUNCTIONS` is bounded by the interfaces' own WIT and a test
+   (`every_recorded_function_round_trips`) fails until a new function is added. **A replay log needs the
+   same, or it records nothing for a function someone added later.**
+5. **Refuse an unknown name rather than intern it.** `audit.rs:524-532` rejects a parsed function name
+   that is not in the set, with the reason stated: *"refusing rather than leaking a string whose length
+   the file controls."* **The replay log reads a file, so it is under the same rule** -- and a replay file
+   is attacker-supplied by construction, which makes the rule stronger there than here.
+
+**And one property the audit stream does not need and the replay log does.** The audit stream is
+append-only *within a run*. A replay log is written by one run and read by another, so it needs a
+**header** naming what it is a replay *of* -- and §10.5's honest limits give the four fields: *"determinism
+holds for a given (artifact digest, engine version, target triple, config)."* **A replay log whose header
+omits any of the four cannot tell a reader whether the replay is valid**, which is the same failure as a
+budget with no owner.
+
+**So `DET-007`'s format is: a header of four fields, then hash-chained records of `(sequence, function,
+value)`, with `recorded`/`dropped` counters and a closed function set.** Every one of those five
+properties is already implemented, tested and documented one module away -- which makes this the cheapest
+buildable item in Phase 1 and the one whose design carries the least risk.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

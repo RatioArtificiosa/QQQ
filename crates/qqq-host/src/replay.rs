@@ -107,7 +107,6 @@ impl ReplayHeader {
     /// say. A replay refused with "the header does not match" sends a reader to four fields; the
     /// mismatch list sends them to one. The same reasoning `audit.rs` gives for travelling as a struct
     /// rather than positionally.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::ReplayHeader;
     ///
@@ -121,6 +120,7 @@ impl ReplayHeader {
     /// b.engine_version = "49.0.0".to_owned();
     /// assert_eq!(a.mismatches(&b), vec!["engine_version"]);
     /// ```
+    #[must_use]
     pub fn mismatches(&self, other: &Self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if self.artifact_digest != other.artifact_digest {
@@ -166,12 +166,12 @@ pub enum ReplayValue {
 
 impl ReplayValue {
     /// The variant's name, for a report and for the JSON encoding.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::ReplayValue;
     ///
     /// assert_eq!(ReplayValue::Clock(0).kind(), "clock");
     /// ```
+    #[must_use]
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Clock(_) => "clock",
@@ -343,7 +343,6 @@ pub struct ReplayFields<'a> {
 
 impl ReplayRecord {
     /// This record's own fields, for re-hashing during verification.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -359,6 +358,7 @@ impl ReplayRecord {
     /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
     /// assert_eq!(log.records()[0].fields().sequence, 1);
     /// ```
+    #[must_use]
     pub fn fields(&self) -> ReplayFields<'_> {
         ReplayFields {
             sequence: self.sequence,
@@ -378,7 +378,6 @@ impl ReplayRecord {
     /// one of the fields is a byte string the *guest* chose the length of: without a prefix, a guest
     /// that can ask for `random.get(n)` can construct two different records with one digest, and a
     /// chain that can be made to collide is a chain that cannot detect an edit.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayFields, ReplayRecord};
     ///
@@ -398,6 +397,7 @@ impl ReplayRecord {
     /// });
     /// assert_ne!(a, b, "the encoding must be injective");
     /// ```
+    #[must_use]
     pub fn compute_chain(fields: &ReplayFields<'_>) -> String {
         let mut h = Sha256::new();
         field(&mut h, &fields.sequence.to_string());
@@ -415,12 +415,12 @@ impl ReplayRecord {
     /// Because the empty string is a value a record's `previous` could legitimately hold if a writer
     /// produced one by mistake, and then the mistake is indistinguishable from a valid genesis. A
     /// named constant makes "this is the first record" a value no other field can take.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::ReplayRecord;
     ///
     /// assert_eq!(ReplayRecord::genesis_digest().len(), 64, "a SHA-256 in hex");
     /// ```
+    #[must_use]
     pub fn genesis_digest() -> String {
         let mut h = Sha256::new();
         field(&mut h, "qqq-replay-log-genesis-v1");
@@ -449,12 +449,12 @@ pub struct AppendCounters {
 
 impl AppendCounters {
     /// Whether any record was refused.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::AppendCounters;
     ///
     /// assert!(AppendCounters { recorded: 1, refused: 1 }.has_gaps());
     /// ```
+    #[must_use]
     pub const fn has_gaps(self) -> bool {
         self.refused > 0
     }
@@ -717,7 +717,10 @@ fn parse_records(all: &[&str], body_start: usize) -> Result<Vec<ReplayRecord>, R
         }
         let f: Vec<&str> = line.split(' ').collect();
         if f.len() != 6 {
-            return Err(malformed(lineno, "a record needs six space-separated fields"));
+            return Err(malformed(
+                lineno,
+                "a record needs six space-separated fields",
+            ));
         }
         let sequence: u64 = f[0]
             .parse()
@@ -800,7 +803,6 @@ impl ReplayLog {
     /// A capacity of zero is a log that refuses everything, which is a legitimate configuration for a
     /// caller that wants the chain and the counters without retaining values — and it is *not* treated
     /// as "unbounded", which is the reading that turns a bound into a memory leak.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog};
     ///
@@ -815,6 +817,7 @@ impl ReplayLog {
     /// );
     /// assert!(log.records().is_empty(), "a zero-capacity log refuses everything");
     /// ```
+    #[must_use]
     pub fn new(header: ReplayHeader, capacity: usize) -> Self {
         Self {
             header,
@@ -873,7 +876,6 @@ impl ReplayLog {
     }
 
     /// Whether a reader has consumed every record.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -888,12 +890,12 @@ impl ReplayLog {
     /// );
     /// assert!(log.is_exhausted(), "nothing recorded, nothing left to read");
     /// ```
+    #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.cursor >= self.records.len()
     }
 
     /// How many records a reader has consumed.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -908,6 +910,7 @@ impl ReplayLog {
     /// );
     /// assert_eq!(log.cursor(), 0);
     /// ```
+    #[must_use]
     pub const fn cursor(&self) -> usize {
         self.cursor
     }
@@ -941,7 +944,6 @@ impl ReplayLog {
     }
 
     /// The header this log was opened with.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -956,12 +958,12 @@ impl ReplayLog {
     /// );
     /// assert_eq!(log.header().engine_version, "48.0.3");
     /// ```
+    #[must_use]
     pub const fn header(&self) -> &ReplayHeader {
         &self.header
     }
 
     /// The records, in order.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -976,12 +978,12 @@ impl ReplayLog {
     /// );
     /// assert!(log.records().is_empty());
     /// ```
+    #[must_use]
     pub fn records(&self) -> &[ReplayRecord] {
         &self.records
     }
 
     /// How many were accepted and how many refused.
-    #[must_use]
     /// ```
     /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
     ///
@@ -996,6 +998,7 @@ impl ReplayLog {
     /// );
     /// assert_eq!(log.counters().recorded, 0);
     /// ```
+    #[must_use]
     pub const fn counters(&self) -> AppendCounters {
         self.counters
     }
@@ -1124,27 +1127,27 @@ impl ReplayLog {
     /// **`refused` is written because a truncated log that does not say so is indistinguishable from a
     /// complete one** -- and the replay of a truncated log fails with [`ReplayError::Exhausted`] at a
     /// line the reader cannot see coming.
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// let text = log.to_text();
+    /// // Seven lines: the magic, five header keys, and one record. A count rather than a
+    /// // substring, because the record line is `1 clock.wall clock 7 <prev> <chain>` and an
+    /// // assertion on `"clock.wall 7"` fails on a file that is correct.
+    /// assert_eq!(text.lines().count(), 7);
+    /// assert!(text.starts_with("qqq-replay 1"));
+    /// ```
     #[must_use]
-/// ```
-/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
-///
-/// let mut log = ReplayLog::new(
-///     ReplayHeader {
-///         artifact_digest: "sha256:9f2c".to_owned(),
-///         engine_version: "48.0.3".to_owned(),
-///         target_triple: "test".to_owned(),
-///         deterministic: true,
-///     },
-///     8,
-/// );
-/// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
-/// let text = log.to_text();
-/// // Seven lines: the magic, five header keys, and one record. A count rather than a
-/// // substring, because the record line is `1 clock.wall clock 7 <prev> <chain>` and an
-/// // assertion on `"clock.wall 7"` fails on a file that is correct.
-/// assert_eq!(text.lines().count(), 7);
-/// assert!(text.starts_with("qqq-replay 1"));
-/// ```
     pub fn to_text(&self) -> String {
         let mut out = String::with_capacity(128 + self.records.len() * 96);
         out.push_str(REPLAY_FILE_MAGIC);
@@ -1189,64 +1192,63 @@ impl ReplayLog {
         out
     }
 
-/// Read a log back, **verifying its chain against its own contents** — `DET-008`.
-///
-/// # Errors
-///
-/// [`ReplayError::Malformed`] for a line that cannot be parsed, [`ReplayError::Tampered`] for a record
-/// whose stored chain does not match a re-derived one, and [`ReplayError::Discontinuous`] for a
-/// `previous` that does not point at the record before it.
-///
-/// # Why the three are separate
-///
-/// Because they send a reader to different places. `Malformed` means the file is not this format;
-/// `Tampered` means it is, and its contents were changed after it was written; `Discontinuous` means a
-/// record was **removed** -- which is the edit a per-record chain check cannot see, because every
-/// remaining record still hashes to itself. **A deletion is the one edit that only the linkage
-/// catches.**
-///
-/// # Why the work is in three functions
-///
-/// Because this one was 124 lines and `clippy::too_many_lines` is a warning this workspace denies. The
-/// split is by *what is being parsed* rather than by line count: the magic, the header, and the records
-/// each refuse for their own reasons and each names its own line number. **A single function that did
-/// all three would still have had to report which of the three failed**, so the boundary was already
-/// there.
-///
-/// ```
-/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
-///
-/// let mut log = ReplayLog::new(
-///     ReplayHeader {
-///         artifact_digest: "sha256:9f2c".to_owned(),
-///         engine_version: "48.0.3".to_owned(),
-///         target_triple: "test".to_owned(),
-///         deterministic: true,
-///     },
-///     8,
-/// );
-/// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
-/// let text = log.to_text();
-/// let back = ReplayLog::from_text(&text).expect("a log it wrote");
-/// assert_eq!(back.records().len(), 1);
-/// assert_eq!(back.header().engine_version, "48.0.3");
-/// ```
-pub fn from_text(text: &str) -> Result<Self, ReplayError> {
-    let all: Vec<&str> = text.lines().collect();
-    parse_magic(&all)?;
-    let (header, refused, body_start) = parse_header(&all)?;
-    let records = parse_records(&all, body_start)?;
-    let recorded = records.len() as u64;
-    let capacity = records.len();
-    Ok(Self {
-        header,
-        records,
-        capacity,
-        counters: AppendCounters { recorded, refused },
-        cursor: 0,
-    })
-}
-
+    /// Read a log back, **verifying its chain against its own contents** — `DET-008`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Malformed`] for a line that cannot be parsed, [`ReplayError::Tampered`] for a record
+    /// whose stored chain does not match a re-derived one, and [`ReplayError::Discontinuous`] for a
+    /// `previous` that does not point at the record before it.
+    ///
+    /// # Why the three are separate
+    ///
+    /// Because they send a reader to different places. `Malformed` means the file is not this format;
+    /// `Tampered` means it is, and its contents were changed after it was written; `Discontinuous` means a
+    /// record was **removed** -- which is the edit a per-record chain check cannot see, because every
+    /// remaining record still hashes to itself. **A deletion is the one edit that only the linkage
+    /// catches.**
+    ///
+    /// # Why the work is in three functions
+    ///
+    /// Because this one was 124 lines and `clippy::too_many_lines` is a warning this workspace denies. The
+    /// split is by *what is being parsed* rather than by line count: the magic, the header, and the records
+    /// each refuse for their own reasons and each names its own line number. **A single function that did
+    /// all three would still have had to report which of the three failed**, so the boundary was already
+    /// there.
+    ///
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// let text = log.to_text();
+    /// let back = ReplayLog::from_text(&text).expect("a log it wrote");
+    /// assert_eq!(back.records().len(), 1);
+    /// assert_eq!(back.header().engine_version, "48.0.3");
+    /// ```
+    pub fn from_text(text: &str) -> Result<Self, ReplayError> {
+        let all: Vec<&str> = text.lines().collect();
+        parse_magic(&all)?;
+        let (header, refused, body_start) = parse_header(&all)?;
+        let records = parse_records(&all, body_start)?;
+        let recorded = records.len() as u64;
+        let capacity = records.len();
+        Ok(Self {
+            header,
+            records,
+            capacity,
+            counters: AppendCounters { recorded, refused },
+            cursor: 0,
+        })
+    }
 }
 
 /// Hash one field with a length prefix, so the encoding is injective.

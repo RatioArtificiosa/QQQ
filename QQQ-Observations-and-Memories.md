@@ -31015,6 +31015,336 @@ note test its own enumeration. **The remedy is the same one: measure the set, no
 had missed. The note had been sitting in the checklist asserting a platform had no profiler, and the
 command that falsifies it takes under a second.
 
+## §O-409 — The deterministic clock exists twice, with two owners for each of its two constants, in a file that states the opposite intent
+
+Phase 1 (`DET`) was briefed as unbuilt: *"nothing in this project is reproducible yet."* Measured on
+2026-09-28, **that is wrong in the direction that makes the work smaller, not larger.**
+
+**`DET-001`, `DET-002` and `DET-003` are implemented AND wired.** `crates/qqq-host/src/ambient.rs`
+carries the deterministic state:
+
+```
+ambient.rs:20   //! In deterministic mode the wall clock returns a **fixed** instant and the
+ambient.rs:21   //! random source is **seeded**. A guest cannot observe nondeterminism the host
+ambient.rs:22   //! did not grant it, which is what makes bit-identical replay (Proposal §10.5)
+ambient.rs:247  // splitmix64: deterministic, architecture-independent, and good
+```
+
+`crates/qqq-host/src/config.rs:43` already has `pub deterministic: bool`, and the state is **reached from
+the guest-facing interfaces** rather than sitting unused:
+
+```
+host_clock.rs:5   //! Wires the WIT package in `wit/qqq-clock.wit` to the [`AmbientState`] already
+host_crypto.rs:5  //! Wires `wit/qqq-crypto.wit` to the [`AmbientState`] already in the store.
+host_clock.rs:28  //! Every read goes through [`AmbientState`], which is deterministic when the...
+```
+
+and the guarantee has a test that measures it:
+
+```rust
+/// **The determinism guarantee.** Two independent states in deterministic
+/// mode must produce identical sequences — that is what makes bit-identical
+/// replay possible.
+#[test]
+fn deterministic_mode_is_reproducible_across_instances() {
+    let a = AmbientState::new(true);
+    let b = AmbientState::new(true);
+    assert_eq!(a.now_nanos(), b.now_nanos(), "the fixed clock must agree");
+    for _ in 0..8 {
+        assert_eq!(a.random_bytes(32).unwrap(), b.random_bytes(32).unwrap(), ...);
+    }
+}
+```
+
+**So the phase's remaining work is the replay log, NaN canonicalization, ordered maps and the 10,000-trial
+verification — not the clock and the RNG.** `§O-375`'s rule runs the other way here too: *do not build
+what is already built.*
+
+**And then the defect, which is in the part that IS built.** There are **two** deterministic clocks:
+
+| | |
+|---|---|
+| `ambient.rs:67-224` | `AmbientState` — `deterministic: bool`, `tick_nanos`, `now_nanos()`, `tick()` |
+| `instance.rs:1174-1219` | `DeterministicClock` — `fixed_unix_nanos`, `tick_nanos`, `now_after(ticks)` |
+
+and **each of the two constants is defined twice**:
+
+```
+fixed instant  1_767_225_600_000_000_000:   ambient.rs:126   instance.rs:1189
+tick_nanos     1_000_000:                   ambient.rs:127   instance.rs:1190, 1201
+```
+
+`instance.rs` pins its copy with a test (`assert_eq!(c.fixed_unix_nanos, 1_767_225_600_000_000_000)`);
+`ambient.rs`'s copy has no such assertion in what was measured. **So the two can drift, and only one
+side would notice** — which is `§O-277` applied to a constant: a number with two owners has an owner who
+can be wrong without anyone being told.
+
+**And `instance.rs` states the intent it violates**, four lines below the duplicate:
+
+```rust
+/// A named predicate rather than an inline `if cfg.deterministic`, so the
+/// question "does this configuration change observable behaviour?" has one
+/// answer in one place.
+pub const fn uses_virtual_clock(cfg: &EngineConfig) -> bool { cfg.deterministic }
+```
+
+**"One answer in one place" is exactly what the two clocks are not.** The predicate was lifted out of an
+inline `if` for that reason; the constants beside it were left duplicated.
+
+**A second measurement, and it is about behaviour rather than structure.** `tick()` is called from
+**tests only**:
+
+```
+ambient.rs:777, 785      host_clock.rs:529, 566
+```
+
+So in a real execution the deterministic clock **never advances** — it is *frozen* at the fixed instant,
+not *virtualised*. `DET-002` asks for *"virtualized wall and monotonic clocks"*, and a clock that only
+moves when a test moves it is a degenerate virtualization: a guest measuring elapsed time always reads
+zero. That may be the intended first step, but it is not what the item's wording claims, and **nothing
+in the tree calls `tick()` from production**.
+
+---
+
+## The complete Phase 1 table, measured 2026-09-28
+
+Read from the source, not from the checklist's status column. `DET` is **16 items**; five are built, two
+are partial, four are genuinely unbuilt, and the rest need a targeted check.
+
+| item | state | evidence |
+|---|---|---|
+| `DET-001` | ✅ **built** | `config.rs:43` `pub deterministic: bool`; `instance.rs:1227` `uses_virtual_clock(cfg)` |
+| `DET-002` | ⚠️ **partial** | `ambient.rs` virtualizes both clocks — **but `tick()` is called from tests only** |
+| `DET-003` | ✅ **built** | `ambient.rs:247` `splitmix64`, *"deterministic, architecture-independent"*, with a measuring test |
+| `DET-004` | ❌ **unset** | no `wasm_threads(false)` anywhere in `qqq-host` |
+| `DET-005` | ✅ **built** | `config.rs:116,119` — `cranelift_nan_canonicalization(true)`, `wasm_relaxed_simd(false)` |
+| `DET-006` | ✅ **built** | **no `HashMap` in `qqq-host/src` at all** — the two mentions are doc comments explaining its absence (`admission.rs:161` *"Ordered rather than a `HashMap` because §10.3 requires structured output"*), and `BTreeMap`/`BTreeSet` appear in 11 files |
+| `DET-007`/`DET-008` | ❌ **unbuilt** | no `ReplayLog`, `replay_log` or `struct Replay` in any `.rs` |
+| `DET-009` | ❌ | needs the replay log to verify anything |
+| `DET-010` | ❓ | documentation |
+| `DET-011` | ❌ | needs the replay log |
+| `DET-012` | ❌ **unset, and blocked** | no shared-memory rejection, **and `ARCH-014` is open** |
+| `DET-013` | ✅ **built** | `config.rs:371` `aot_cache_key` over digest + engine version + target triple + config |
+| `DET-014`/`DET-016` | ❓ | documentation and a cost report |
+
+**The dependency the brief did not note.** `DET-012` is *"Implement deterministic-mode rejection of shared
+memory"* and `ARCH-014` is *"Implement the manifest opt-in for shared memory, off by default"* — **and
+`ARCH-014` is open.** You cannot reject a feature that is not yet wired, so `DET-012` is **behind**
+`ARCH-014` rather than beside it. Any ordering that puts `DET-012` in Phase 1 without `ARCH-014` will
+either stall or produce a rejection clause with nothing to reject.
+
+**And the consequence for the phase's gate.** `DET-009` is the 10,000-trial bit-identical verification and
+it is the item the phase exists for — but it needs `DET-007`'s replay log, which is genuinely unbuilt.
+**So the phase's real path is: the replay log → the trials → the cost report.** The engine-configuration
+items the brief lists first are already there.
+
+**Which is the rule this repository keeps having to relearn, from the other side.** `§O-375` says *a rule
+that cannot fire is worse than no rule*; its dual is *do not build what is already built.* The brief said
+*"nothing in this project is reproducible yet"* and five of the sixteen items say otherwise — with tests.
+**The brief is a hypothesis; the tree is the evidence.**
+
+## §O-410 — The ordering argument is inverted: the conformance suite is waiting on the languages, not the languages on the suite
+
+The brief's central argument is a sequence, and it states the reason explicitly:
+
+> ⛔ **LANG — 40, the largest block — Unbuildable now.** `DOD-001` requires *"all five languages pass
+> the identical conformance suite"*, and `TEST-010` — that suite — is open. Five toolchains built
+> against an unbuilt suite produce **five unverifiable claims.**
+>
+> **Do not start LANG-009–040 before Phase 3 lands. That is the whole point of the ordering.**
+
+**Measured on 2026-09-28, the suite is not unbuilt.** `TEST-010`'s own annotation says so, and it is
+accurate:
+
+    - [~] **TEST-010** Implement the cross-language conformance suite and wire it into CI.
+      → **Partial, and the gap is specific.** `conformance/suite.json` is the checked-in fixture and
+        `tools/check_conformance.py` is its runner: it prints the language × capability parity matrix
+        (`--matrix`), **fails on a gap with no owner or date** (Proposal §6.10), derives each
+        language's status from `build::toolchain_for`'s own guard so the fixture cannot drift from the
+        code, and requires every obligation's checker to be invoked in **both** gates. Wired into
+        `ci.yml` and `docker/entrypoint.sh`, with **9 fault injections**, every one detected.
+
+and the registration is real, in both gates:
+
+    docker/entrypoint.sh:901-903   check_conformance.py / --matrix / --self-test
+    .github/workflows/ci.yml:710-714  check_conformance.py / --matrix / --self-test
+
+**And the fixture is not a placeholder.** `conformance/suite.json` holds **5 languages**, **15
+capabilities**, **8 cases** (`definition` 6, `execution` 2) and **0 exceptions**, and `--matrix` prints
+the grid with every gap owned:
+
+```
+PARITY MATRIX -- language x capability x supported
+
+  capability         rust          ts          go      python         cpp
+  -----------------------------------------------------------------------
+  qqq:agent           yes         GAP         GAP         GAP         GAP
+  ...  (15 capabilities, the same shape)
+
+  GAP  ts       owner='Language toolchains -- AssemblyScript' target='M5 (Language #2 and #3)'
+  GAP  go       owner='Language toolchains -- TinyGo' target='M5 (Language #2 and #3)'
+```
+
+**So `LANG-039` (the parity matrix generated from CI) and `LANG-040` (the job that fails when it gains
+an unexplained gap) are substantially built as well**, and the toolchain guard the fixture derives from
+is `build::toolchain_for`'s own `if language != "rust" { return None; }`.
+
+**Which inverts the dependency.** `TEST-010` is `[~]` **because the four languages have no execution
+half** — not the other way round. The gate the brief describes as standing in front of `LANG-009`–`040`
+is the fixture, the runner, the parity matrix and the gap-ownership rule, and **all four exist and are
+enforced in both gates.** What is missing is the languages.
+
+**The practical consequence is that a language can start now**, and the work is additive rather than
+blocked: a new toolchain adds its driver, its bindings, its template, its reference app — and its
+**execution half**, which is the one thing the fixture is waiting for. **`TEST-010` closes as the
+languages land; it does not have to close first.**
+
+**Why the brief read it the other way.** The checklist's `[~]` is a single character, and the brief
+took it as *unbuilt* rather than *partially built with a named gap*. The annotation beneath it says
+exactly what is missing and the brief did not quote it. **That is `§O-408`'s shape one level up: a
+conclusion drawn from the status column rather than from the thing the status describes.**
+
+**This is the third time in this goal that a briefed "unbuildable" or "unbuilt" dissolved under
+measurement** — `DET` was six-of-sixteen built, `PERF-024`'s note named three absent tools and missed
+two present ones, and now the suite that gates forty items is a runner with nine fault injections and
+a generated matrix. **The brief is a hypothesis; the tree is the evidence.**
+
+## §O-411 — A comment is a claim about code, not the code; and `TEST-005` is finished while its checkbox is not
+
+`TEST-005` (*"Implement `--trials N` determinism checking"*) and `TEST-014` (*"Implement the flaky-test
+detector"*) are **both unticked and both substantially built**, and finding that cost two wrong
+inferences of mine in the same round. The second correction is the one worth keeping.
+
+**The machinery, measured.** `crates/qqq-run/src/test.rs`:
+
+```rust
+/// Whether the trials disagreed with each other.
+///
+/// Distinct from failure: a flaky test and a broken test are different
+/// findings, and conflating them sends the reader to the wrong place. A
+/// flaky test is a determinism bug in the *code under test*; a broken test
+/// is a bug in the code.
+pub fn is_nondeterministic(&self) -> bool {
+    if self.trial_outputs.len() < 2 { return false; }
+    let first = &self.trial_outputs[0];
+    self.trial_outputs.iter().any(|o| o != first)
+}
+```
+
+**It compares outputs**, and `TestOutput` carries `passed` / `failed` / `nondeterministic` / `trials`,
+with `main.rs` failing the exit code on `failed + nondeterministic > 0`.
+
+**And the doc beside it is a measured account of getting the comparison right**, which is the part a
+reader should not skip:
+
+    The captured output is **normalised** before it is returned, because the raw stream contains lines
+    that differ between two identical runs:
+        test result: ok. 1 passed; 0 failed; ... finished in 0.01s   <-- differs each run
+    Comparing raw output therefore reports **every** test as nondeterministic. Measured on a real
+    project: `--trials 3` against a perfectly deterministic suite produced
+    `NONDETERMINISTIC: 1 of 2 test(s) produced different output across 3 trials`.
+    **A determinism check that fires on a stable suite is worse than no check, because it teaches the
+    reader to ignore the one signal it exists to give.**
+
+and one more, which is the same rule applied to the environment:
+
+    Because libtest's default is *as many threads as the machine has cores*, and a default that depends
+    on the machine makes the measurement depend on the machine. ... A suite that is deterministic under
+    one core and not under sixteen is not deterministic.
+
+**So `TEST-005` is finished**: the flag, the normalised output comparison, `--test-threads 1`, the
+failing exit code, and the flaky-versus-broken distinction. **And `TEST-014`'s detector is the same
+machinery naming the differing trials** (`test.rs:135`, *"the indices of trials whose output differs
+from the first"*).
+
+**Which leaves the correction, and it is mine.** I read
+
+    // A determinism failure counts as a failure for the exit code. A test
+    // that passed 4 of 5 trials is not a passing test ...
+
+and concluded the flag was **flakiness only**, not determinism. Then I read
+
+    /// How many passed some trials and failed others.
+    pub nondeterministic: usize,
+
+and concluded it was **pass/fail only**, not output comparison. **Both were inferences from prose, and
+the code contradicted both** — `is_nondeterministic()` compares `trial_outputs`, and the doc that
+explains *why the comparison is normalised* sits 300 lines away from the comment I read first.
+
+**`§O-219` already names this** — *"the step looked finished because the thing that would notice was the
+thing describing it"* — and `§O-408` named it from the other side last round: a justification can be
+right about every item it names and wrong about its conclusion. **This is the same defect pointed at the
+reader: a comment is a claim about code, and a claim is not the code.** Twice in one round, from the
+same file, the inference was narrower than the implementation.
+
+**The general form, and it is `§O-277` applied to reading.** A number with no owner is a number nobody
+compares; **a comment with no `grep` is a description nobody checks.** The remedy is the one this
+repository applies everywhere else: **run the thing.** Here, `is_nondeterministic()` is four lines and
+would have settled it in one read — after the second wrong inference, that is what settled it.
+
+**And the corpus-level finding stands on its own.** `TEST-005` and `TEST-014` join `TEST-010` in the set
+of items whose **status lags the tree** — three in one phase, all with substantial implementations, all
+unticked. **The checklist's status column is a claim like any other**, and the brief read it as evidence
+rather than as a claim to be measured. That is now the fourth briefed "unbuilt" this goal has dissolved.
+
+## §O-412 — The highest-value unbuilt items in Phase 2 are fully specified, so the work is implementation rather than design
+
+Four rounds of reconnaissance have found briefed "unbuilt" items dissolving under measurement — `DET` was
+six-of-sixteen built, `TEST-010` was a runner with nine fault injections, `TEST-005` and `TEST-014` were
+finished with measured design notes. **`TEST-007` and `TEST-008` are the exception, and they are
+genuinely unbuilt.** The measurement matters as much as the ones that dissolved.
+
+**What exists is the specification, and it is good.** `wit/qqq-test.wit` declares six functions:
+
+```
+interface assertions {
+  mark-fuel:          func(name: string) -> result<_, assertion-error>;
+  assert-fuel-below:  func(mark: string, limit: u64) -> result<_, assertion-error>;
+  assert-caps-only:   func(allowed: list<string>) -> result<_, assertion-error>;
+  assert-no-capability: func(capability: string) -> result<_, assertion-error>;
+  report:             func(passed: bool, message: string, location: option<string>) -> result<_, assertion-error>;
+  fuel-since:         func(mark: string) -> result<u64, assertion-error>;
+}
+```
+
+and `crates/qqq-abi/src/wit.rs:105` registers it as `qqq:test@1.0.0` (`ABI-011`). **What does not exist
+is a host implementation** — no `host_test.rs`, no `assert_caps!`, no `assert_fuel_below!` anywhere in
+the tree — and `TEST-007`/`TEST-008` are `[ ]`, which is **correct**.
+
+**The interface's header states why it is an interface rather than a library**, and the argument is the
+one the items depend on:
+
+    Every testing framework has assertions, and they all live in the *language's* library. That is fine
+    until the assertion needs to know something the language cannot see: whether the code under test
+    asked for a capability the test declared it should not need, or how much fuel it consumed. Those
+    questions are answered by the host, because the host is what enforces capabilities and meters
+    execution. So the assertions that exploit QQQ's architecture -- the ones §6.7 calls "the
+    differentiators" -- are host calls, and this is their interface.
+
+and the property it buys, which is the sentence to keep:
+
+    A test that exercises a pure function should not need `http.client`. Today that is a convention:
+    the code happens not to call anything. With `assert-no-capability`, it is a property -- if someone
+    later adds an HTTP call to a function the test says is pure, the test fails, and it fails at the
+    point where the request is *attempted* rather than somewhere downstream where the effect is visible.
+
+**And the fuel pair is the right shape.** `mark-fuel` and `fuel-since` are a mark-and-measure pair rather
+than an absolute reading, which is what makes *"how much did this operation cost"* expressible — the same
+reason `PERF-025` needed a metered denominator rather than a total.
+
+**The consequence for the plan.** The brief called these *"the highest-value items in this phase"* and
+that judgement holds: they are the ergonomic surface of a capability-secure runtime, and they are what
+makes the security model usable by people who did not design it. **And unlike the rest of Phase 2, the
+design work is already done** — the interface, its rationale and its error type exist, so the task is a
+host implementation behind an existing WIT package, the macros that call it, and the fault injection
+each assertion needs.
+
+**The honest summary of this goal's reconnaissance, then, is not "everything is built".** It is: **the
+brief's *status* readings were unreliable in both directions.** Four items it called unbuilt are
+substantially built; **two it called high-value-and-pending are exactly that.** The remedy is the same
+in every case and it is the repository's own rule — **measure the thing, not the column that describes
+it.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

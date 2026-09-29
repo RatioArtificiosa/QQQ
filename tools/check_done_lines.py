@@ -204,7 +204,7 @@ def self_test() -> int:
     """Fabricate each defect and require detection, then require a clean corpus to pass.
 
     The fabricated id is `ZZ-001`, which is not a checklist item and cannot collide with one -- the same
-    escape `check_checklist_citations.py` needed for `DX-029`.
+    escape `check_checklist_citations.py` carries -- **it must describe the class it forbids without being an instance of it**, and so must this self-test.
     """
     long = "y" * 50
     cases: list[tuple[str, bool]] = []

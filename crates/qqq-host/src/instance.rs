@@ -385,8 +385,9 @@ impl<'a> Instance<'a> {
     ///
     /// # Errors
     ///
-    /// * `QQQ-6003` — the component imports something the linker does not
-    ///   provide. The message names the missing import.
+    /// * `QQQ-6003` — the component could not be instantiated. **Two failures reach it and the
+    ///   remediation distinguishes them**: an import the linker does not provide, and a component
+    ///   that linked and then trapped while running its own start function.
     /// * `QQQ-3001`, `QQQ-3002` — the limits could not be applied.
     ///
     /// # Examples
@@ -622,8 +623,9 @@ impl<'a> Instance<'a> {
     ///
     /// # Errors
     ///
-    /// * `QQQ-6003` — the component imports something the linker does not
-    ///   provide. The message names the missing import.
+    /// * `QQQ-6003` — the component could not be instantiated. **Two failures reach it and the
+    ///   remediation distinguishes them**: an import the linker does not provide, and a component
+    ///   that linked and then trapped while running its own start function.
     /// * `QQQ-3001`, `QQQ-3002` — the limits could not be applied.
     pub fn create_for(
         mode: ExecutionMode,
@@ -1296,17 +1298,44 @@ fn instantiation_error(
     prepared: &PreparedComponent,
     grants: &GrantSet,
 ) -> Error {
+    // **Two failures reach here, and they need different advice.**
+    //
+    // `QQQ-6003` is "the component could not be instantiated", which happens when an import is not
+    // provided **and** when the component links and then traps while running its own start function.
+    // The remediation used to be written only for the first, so a trapped guest was told to grant a
+    // capability it already had -- and the reader would go to `qqq.toml` for a defect in the component.
+    // Measured, replaying an exhausted log:
+    //
+    //     error[QQQ-6003]: the component could not be instantiated
+    //       caused by: error while executing at wasm backtrace:
+    //         0:     0xa4 - m!init: the replay log ended before the execution did
+    //       → the error above names the missing import; grant it in qqq.toml or correct the
+    //         component's imports
+    //
+    // The cause is precise and the advice above it sent the reader to the wrong file.
+    //
+    // # Why the pattern is a positive signal
+    //
+    // A backtrace appears **only** when the component was executing, which means it linked and its
+    // imports were satisfied. Matching for its absence instead would mean any wording change in a
+    // linker error silently reclassified every linking failure as a trap -- `§O-282`'s class, where a
+    // guard is only as narrow as its pattern and a negative pattern is the widest one there is.
+    let cause = format!("{e:#}");
+    let remediation = if cause.contains("wasm backtrace") {
+        "the component linked and then trapped while instantiating, so its imports were provided \
+         and this is not a grant to add; the cause above names the function and the reason"
+    } else {
+        "the error above names the missing import; grant it in qqq.toml or correct the component's \
+         imports"
+    };
     Error::new(
         ErrorCode::ComponentLoadFailed,
         "the component could not be instantiated",
     )
     .with_context("component", prepared.digest().to_owned())
     .with_context("granted", grants.to_string())
-    .with_cause(format!("{e:#}"))
-    .with_remediation(
-        "the error above names the missing import; grant it in qqq.toml \
-         or correct the component's imports",
-    )
+    .with_cause(cause)
+    .with_remediation(remediation)
 }
 
 /// Content digest of an artifact, for cache keying and deduplication.

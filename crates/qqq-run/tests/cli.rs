@@ -1976,6 +1976,16 @@ fn replay_reproduces_a_recorded_run_and_refuses_an_exhausted_log() {
     s.run(&["run", &wasm, "--deterministic", "--replay", "empty.replay"])
         .assert_failed()
         .assert_contains("the replay log ended before the execution did");
+
+    // **And the advice must not send the reader to the manifest.**
+    //
+    // `QQQ-6003` covers two failures -- an import the linker does not provide, and a component that
+    // linked and then trapped -- and the remediation was written only for the first, so a trapped guest
+    // was told to grant a capability it already had. The assertion is on the advice rather than on the
+    // cause, because the cause was always right and only the advice misdirected.
+    s.run(&["run", &wasm, "--deterministic", "--replay", "empty.replay"])
+        .assert_failed()
+        .assert_contains("linked and then trapped");
 }
 
 /// An ungranted import is **refused**, and the error names the right capability.

@@ -36,6 +36,7 @@ pub mod build;
 pub mod commands;
 pub mod deps;
 pub mod dev;
+pub mod flaky;
 /// The bridge from a served request to a guest call: `qqq-serve` + `qqq-abi` +
 /// `qqq-host`, joined.
 ///

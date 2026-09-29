@@ -456,6 +456,84 @@ impl StoreData {
         self
     }
 
+    /// Attach a replay log, so every nondeterministic read is recorded -- `DET-007`.
+    ///
+    /// # Why this is a builder on the store rather than a parameter to `create`
+    ///
+    /// Because the sink belongs to the **instance**, and the store is what an instance owns. A
+    /// parameter threaded through every constructor would have to be passed by callers that do not
+    /// want one, and the default has to be "no log" -- `Instance::create` is used by `qqqai run`, by
+    /// tests and by `qqq-debug`, and none of those should silently start writing an evidence file.
+    ///
+    /// It refuses outside deterministic mode, and [`crate::ambient::AmbientState::set_replay`] is
+    /// where that decision lives.
+    /// ```
+    /// use qqq_host::linker::StoreData;
+    /// use qqq_cap::resolve::GrantSet;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let store = StoreData::new(GrantSet::empty())
+    ///     .with_deterministic_ambient(true)
+    ///     .with_replay_sink(Arc::clone(&log));
+    /// assert!(store.ambient.has_replay());
+    /// ```
+    #[must_use]
+    pub fn with_replay_sink(
+        mut self,
+        log: std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>,
+    ) -> Self {
+        self.ambient.set_replay(log);
+        self
+    }
+
+    /// Attach a log to **replay from** -- `DET-008`.
+    ///
+    /// # Why a store cannot do both
+    ///
+    /// Because recording while replaying would append the replayed values to the log being read,
+    /// which grows it as it is consumed. [`crate::ambient::AmbientState::set_replay_source`] refuses
+    /// the pair, so the two builders are mutually exclusive by construction rather than by
+    /// convention -- and a caller that attaches both gets a store that records, not one that
+    /// half-does each.
+    /// ```
+    /// use qqq_host::linker::StoreData;
+    /// use qqq_cap::resolve::GrantSet;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let store = StoreData::new(GrantSet::empty())
+    ///     .with_deterministic_ambient(true)
+    ///     .with_replay_source(Arc::clone(&log));
+    /// assert!(store.ambient.has_replay_source());
+    /// ```
+    #[must_use]
+    pub fn with_replay_source(
+        mut self,
+        log: std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>,
+    ) -> Self {
+        self.ambient.set_replay_source(log);
+        self
+    }
+
     /// Mutable access to the resource limiter, for `Store::limiter`.
     #[must_use]
     pub fn limiter_mut(&mut self) -> &mut TrappingLimiter {
@@ -1561,6 +1639,77 @@ mod tests {
     /// Two stores, two tenants, one shared component digest. Neither store's
     /// scope accepts the other's identity, and their pool keys differ. This is
     /// §7.1's "no cross-tenant handles" exercised through the real types rather
+    /// A `ReplayLog` for the builder tests.
+    fn replay_log() -> std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>> {
+        std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            crate::replay::ReplayHeader {
+                artifact_digest: "sha256:test".to_owned(),
+                engine_version: "48.0.3".to_owned(),
+                target_triple: "test".to_owned(),
+                deterministic: true,
+            },
+            8,
+        )))
+    }
+
+    /// **A deterministic store records through the builder** — `DET-007` from the store's side.
+    #[test]
+    fn a_deterministic_store_records_through_the_replay_sink() {
+        let manifest = Manifest::parse(MINIMAL_MANIFEST).expect("test manifest");
+        let log = replay_log();
+        let store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_deterministic_ambient(true)
+            .with_replay_sink(std::sync::Arc::clone(&log));
+        assert!(store.ambient.has_replay());
+        let _ = store.ambient.now_nanos();
+        assert_eq!(log.lock().expect("log").records().len(), 1);
+    }
+
+    /// **A real-time store refuses the sink**, so a log cannot be written for a run whose values are
+    /// not reproducible.
+    #[test]
+    fn a_real_time_store_refuses_the_replay_sink() {
+        let manifest = Manifest::parse(MINIMAL_MANIFEST).expect("test manifest");
+        let log = replay_log();
+        let store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_deterministic_ambient(false)
+            .with_replay_sink(std::sync::Arc::clone(&log));
+        assert!(!store.ambient.has_replay());
+    }
+
+    /// **A store replays through the source builder**, and the recorded value wins over the clock.
+    #[test]
+    fn a_store_replays_through_the_source_builder() {
+        let manifest = Manifest::parse(MINIMAL_MANIFEST).expect("test manifest");
+        let log = replay_log();
+        log.lock()
+            .expect("log")
+            .record("clock.wall", crate::replay::ReplayValue::Clock(4242))
+            .expect("room");
+        let store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_deterministic_ambient(true)
+            .with_replay_source(std::sync::Arc::clone(&log));
+        assert!(store.ambient.has_replay_source());
+        assert_eq!(store.ambient.read_wall_nanos().expect("recorded"), 4242);
+    }
+
+    /// **The two builders are mutually exclusive.** Recording while replaying would append the
+    /// replayed values to the log being read, which grows it as it is consumed — so a caller that
+    /// attaches both gets a store that records, not one that half-does each.
+    #[test]
+    fn a_store_cannot_record_and_replay_at_once() {
+        let manifest = Manifest::parse(MINIMAL_MANIFEST).expect("test manifest");
+        let store = StoreData::new(GrantSet::from_manifest(&manifest))
+            .with_deterministic_ambient(true)
+            .with_replay_sink(replay_log())
+            .with_replay_source(replay_log());
+        assert!(store.ambient.has_replay());
+        assert!(
+            !store.ambient.has_replay_source(),
+            "the source must be refused when a sink is attached"
+        );
+    }
+
     /// than through the ledger alone.
     #[test]
     fn two_tenants_over_one_artifact_cannot_adopt_each_others_scope() {

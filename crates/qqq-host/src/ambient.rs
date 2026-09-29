@@ -209,10 +209,33 @@ impl AmbientState {
     /// ```
     #[must_use]
     pub fn with_replay_source(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
+        self.set_replay_source(log);
+        self
+    }
+
+    /// Attach a replay source in place. See [`Self::set_replay`] for why this exists.
+    /// ```
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let mut state = AmbientState::new(true);
+    /// state.set_replay_source(Arc::clone(&log));
+    /// assert!(state.has_replay_source());
+    /// ```
+    pub fn set_replay_source(&mut self, log: Arc<Mutex<ReplayLog>>) {
         if self.deterministic && self.replay.is_none() {
             self.replay_source = Some(log);
         }
-        self
     }
 
     /// Whether this state is replaying a recorded run.
@@ -428,10 +451,40 @@ impl AmbientState {
     /// ```
     #[must_use]
     pub fn with_replay(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
+        self.set_replay(log);
+        self
+    }
+
+    /// Attach a replay log in place, for a caller that already owns the state.
+    ///
+    /// # Why this exists beside [`Self::with_replay`]
+    ///
+    /// Because [`crate::linker::StoreData`]'s builders take `self` by value and its `ambient` is a
+    /// field, so a builder cannot move the state out to call a by-value constructor. **The guard
+    /// lives here and `with_replay` calls it**, rather than being written twice -- two copies of a
+    /// `deterministic` check is two places a future change can miss one.
+    /// ```
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let mut state = AmbientState::new(true);
+    /// state.set_replay(Arc::clone(&log));
+    /// assert!(state.has_replay());
+    /// ```
+    pub fn set_replay(&mut self, log: Arc<Mutex<ReplayLog>>) {
         if self.deterministic {
             self.replay = Some(log);
         }
-        self
     }
 
     /// Whether a replay log is attached.
@@ -1538,6 +1591,59 @@ mod tests {
             !s.has_replay_source(),
             "attaching a source beside a sink must be refused"
         );
+    }
+
+    /// **The in-place setters carry the same guard as the by-value builders.**
+    ///
+    /// This is the test that would catch the two entry points drifting: if `set_replay` had its own
+    /// copy of the `deterministic` check and someone relaxed one, a real-time state built through a
+    /// [`crate::linker::StoreData`] builder would start writing a log of unreproducible values while
+    /// the by-value form still refused.
+    #[test]
+    fn the_in_place_setters_carry_the_builders_guard() {
+        let via_builder = AmbientState::new(true).with_replay(std::sync::Arc::new(
+            std::sync::Mutex::new(crate::replay::ReplayLog::new(replay_header(), 8)),
+        ));
+        let mut in_place = AmbientState::new(true);
+        in_place.set_replay(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::replay::ReplayLog::new(replay_header(), 8),
+        )));
+        assert_eq!(
+            via_builder.has_replay(),
+            in_place.has_replay(),
+            "the two entry points must agree"
+        );
+        assert!(in_place.has_replay());
+
+        // The guard itself: a real-time state refuses a sink either way.
+        let mut real_time = AmbientState::new(false);
+        real_time.set_replay(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::replay::ReplayLog::new(replay_header(), 8),
+        )));
+        assert!(
+            !real_time.has_replay(),
+            "the guard must live in the setter, not only in the builder"
+        );
+    }
+
+    /// **`set_replay_source` replays**, so a `StoreData` builder can attach one to a state it owns.
+    #[test]
+    fn the_in_place_source_setter_replays() {
+        let mut written = crate::replay::ReplayLog::new(replay_header(), 8);
+        written
+            .record("clock.wall", crate::replay::ReplayValue::Clock(99))
+            .unwrap();
+        let mut s = AmbientState::new(true);
+        s.set_replay_source(std::sync::Arc::new(std::sync::Mutex::new(written)));
+        assert!(s.has_replay_source());
+        assert_eq!(s.read_wall_nanos().expect("recorded"), 99);
+
+        // And a real-time state refuses it, for the same reason it refuses a sink.
+        let mut real_time = AmbientState::new(false);
+        real_time.set_replay_source(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::replay::ReplayLog::new(replay_header(), 8),
+        )));
+        assert!(!real_time.has_replay_source());
     }
 
     fn replay_header() -> crate::replay::ReplayHeader {

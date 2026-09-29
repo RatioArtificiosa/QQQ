@@ -242,6 +242,138 @@ impl std::fmt::Debug for Instance<'_> {
     }
 }
 
+/// What an instance is created with, beyond its component and grants — `DET-001`.
+///
+/// # Why this exists rather than more constructor parameters
+///
+/// The constructors were `create`, `create_with_audit`, `create_async` and `create_for`, and the next two
+/// would have been `create_with_replay` and `create_with_audit_and_replay`. **That is a combinatorial
+/// surface, and it had already produced a real defect**: `create` builds the store through
+/// `ReadyStore::prepare`, which set `data.audit` and never `data.ambient` — **so `qqqai run
+/// --deterministic` set the engine's configuration and left the guest's clock reading `SystemTime::now()`
+/// and its RNG calling `getrandom::fill`.** Every existing caller passed `None` for the one optional thing
+/// a constructor could carry, so nothing was ever in a position to notice.
+///
+/// **`DET-001`'s own text is the argument**: *"deterministic mode as an engine configuration profile, not
+/// a scattering of if statements — one place decides; everything else reads it."* There was one place that
+/// decided for the engine and no place at all for the ambient state. This is that place.
+///
+/// # Why the defaults are "real time, no record"
+///
+/// Because that must be what every existing caller means. `Instance::create` is used by `qqqai run`, by
+/// tests and by `qqq-debug`; **none of those should silently start writing an evidence file, and none
+/// should silently get a virtual clock they did not ask for.**
+#[derive(Clone, Debug, Default)]
+/// ```
+/// use qqq_host::instance::InstanceOptions;
+///
+/// let opts = InstanceOptions::default();
+/// assert!(!opts.deterministic, "real time unless asked");
+/// assert!(opts.audit.is_none() && opts.replay_sink.is_none() && opts.replay_source.is_none());
+/// ```
+pub struct InstanceOptions {
+    /// Virtualize the guest's clock and randomness — Proposal §10.5.
+    ///
+    /// # What this does and does not make reproducible
+    ///
+    /// It virtualizes the **reads**: the wall clock, the monotonic clock and `crypto.random.get` all come
+    /// from the store's ambient state instead of the system. **It says nothing about scheduling** —
+    /// `DET-004`'s deterministic single-threaded scheduler is not built — so a guest whose output depends
+    /// on the order two tasks interleave is not made reproducible by this flag. **A guest whose output
+    /// depends only on what it reads is the case this covers, and it is the case `--deterministic`
+    /// advertises.** `ReadyStore::prepare` carries a `debug_assert` refusing the combination, and this note
+    /// is what a release build relies on.
+    pub deterministic: bool,
+    /// Record capability uses — `OBS-001`.
+    pub audit: Option<crate::audit::AuditHandle>,
+    /// Record every nondeterministic read — `DET-007`.
+    pub replay_sink: Option<std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>>,
+    /// Replay every nondeterministic read from a recorded log — `DET-008`.
+    pub replay_source: Option<std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>>,
+}
+
+impl InstanceOptions {
+    /// Options that virtualize the clock and randomness, and nothing else.
+    #[must_use]
+    /// ```
+    /// use qqq_host::instance::InstanceOptions;
+    ///
+    /// let opts = InstanceOptions::deterministic();
+    /// assert!(opts.deterministic);
+    /// assert!(!opts.replays());
+    /// ```
+    pub fn deterministic() -> Self {
+        Self {
+            deterministic: true,
+            ..Self::default()
+        }
+    }
+
+    /// Attach a recording sink — `DET-007`.
+    ///
+    /// Takes `&mut self` rather than consuming, so a caller can build the options in whichever order reads
+    /// best. **A by-value combinator per field is the shape that produced four constructors**, and a
+    /// mutable builder on a struct with four public fields is not carrying its weight.
+    /// ```
+    /// use qqq_host::instance::InstanceOptions;
+    ///
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let mut opts = InstanceOptions::deterministic();
+    /// opts.record_to(log);
+    /// assert!(opts.replay_sink.is_some());
+    /// assert!(!opts.replays(), "a sink is not a replay");
+    /// ```
+    pub fn record_to(&mut self, log: std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>) {
+        self.replay_sink = Some(log);
+    }
+
+    /// Attach a log to replay from — `DET-008`.
+    /// ```
+    /// use qqq_host::instance::InstanceOptions;
+    ///
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.3".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let mut opts = InstanceOptions::deterministic();
+    /// opts.replay_from(log);
+    /// assert!(opts.replays());
+    /// ```
+    pub fn replay_from(&mut self, log: std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>) {
+        self.replay_source = Some(log);
+    }
+
+    /// Whether these options ask for a replay, which needs deterministic mode to be meaningful.
+    #[must_use]
+    /// ```
+    /// use qqq_host::instance::InstanceOptions;
+    ///
+    /// assert!(!InstanceOptions::default().replays());
+    /// ```
+    pub fn replays(&self) -> bool {
+        self.replay_source.is_some()
+    }
+}
+
 impl<'a> Instance<'a> {
     /// Create an instance with exactly the granted capabilities.
     ///
@@ -329,7 +461,38 @@ impl<'a> Instance<'a> {
         grants: &GrantSet,
         limits: StoreLimits,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, None)?;
+        Self::create_with(
+            engine,
+            prepared,
+            grants,
+            limits,
+            &InstanceOptions::default(),
+        )
+    }
+
+    /// Create an instance from explicit options — the one place the store is assembled.
+    ///
+    /// # Why this is the assembly step and the others are not
+    ///
+    /// Because every constructor that sets something on the store must set *everything* it needs, and
+    /// the failure this function exists to end was a constructor that set one field and forgot another.
+    /// `create`, `create_with_audit` and `create_async` all funnel through here, so **a field added to
+    /// [`InstanceOptions`] cannot be wired into one path and missed in another** — which is exactly how
+    /// `audit` came to be set while `deterministic` was not.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::create`]. The options add no failure mode: a replay source or sink the ambient
+    /// state refuses is refused there, and the instance is still created — see
+    /// [`crate::linker::StoreData::with_replay_source`] for why that refusal is silent rather than fatal.
+    pub fn create_with(
+        engine: &'a wasmtime::Engine,
+        prepared: &PreparedComponent,
+        grants: &GrantSet,
+        limits: StoreLimits,
+        opts: &InstanceOptions,
+    ) -> Result<Self> {
+        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, opts)?;
         let instance = instantiator(&ready.linker, &mut ready.store, prepared)
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
         Ok(Self::finish(
@@ -412,17 +575,16 @@ impl<'a> Instance<'a> {
         limits: StoreLimits,
         audit: crate::audit::AuditHandle,
     ) -> Result<Self> {
-        let mut ready =
-            ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, Some(audit))?;
-        let instance = instantiator(&ready.linker, &mut ready.store, prepared)
-            .map_err(|e| instantiation_error(&e, prepared, grants))?;
-        Ok(Self::finish(
-            ready,
-            instance,
-            limits,
+        Self::create_with(
             engine,
-            ExecutionMode::Sync,
-        ))
+            prepared,
+            grants,
+            limits,
+            &InstanceOptions {
+                audit: Some(audit),
+                ..InstanceOptions::default()
+            },
+        )
     }
 
     /// Create an instance for the **async** entry points.
@@ -441,8 +603,9 @@ impl<'a> Instance<'a> {
         prepared: &PreparedComponent,
         grants: &GrantSet,
         limits: StoreLimits,
+        opts: &InstanceOptions,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits, None)?;
+        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits, opts)?;
         let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
             .await
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
@@ -955,13 +1118,34 @@ impl ReadyStore {
         engine: &wasmtime::Engine,
         grants: &GrantSet,
         limits: StoreLimits,
-        audit: Option<crate::audit::AuditHandle>,
+        opts: &InstanceOptions,
     ) -> Result<Self> {
+        // **A deterministic store in an async context is refused in a debug build and accepted in a
+        // release one**, because refusing it for real needs an error code this crate does not have and
+        // `docs/ERRORS.md` is hand-maintained with a count. `DET-004` -- the deterministic
+        // single-threaded scheduler -- is unbuilt, so the combination is not made reproducible by the
+        // flag; `InstanceOptions::deterministic` carries the limitation where a reader will see it.
+        debug_assert!(
+            !(opts.deterministic && matches!(context, ExecutionContext::Async)),
+            "deterministic mode has no scheduler for an async store: DET-004 is unbuilt"
+        );
+
         // -- Store state: grants, limits, and the limiter ----------------
         let mut data = StoreData::new(grants.clone());
         // Attached here rather than in every host function: the seam that records is
         // `ambient::require`, which reads the store, so the store is where the handle has to be.
-        data.audit = audit;
+        opts.audit.clone_into(&mut data.audit);
+        // **The ambient mode travels with the store, and this line is the fix.** `StoreData::new`
+        // defaults to real time, so leaving `ambient` unset is what made `--deterministic` virtualize
+        // the compiler and not the clock -- and every checker in this repository asks about text, so
+        // nothing saw it. See the field's own doc for what this does and does not guarantee.
+        data.ambient = crate::ambient::AmbientState::new(opts.deterministic);
+        if let Some(log) = &opts.replay_sink {
+            data.ambient.set_replay(std::sync::Arc::clone(log));
+        }
+        if let Some(log) = &opts.replay_source {
+            data.ambient.set_replay_source(std::sync::Arc::clone(log));
+        }
         let mut store = Store::new(engine, data);
 
         // StoreLimits is what enforces the memory ceiling *at runtime*, as
@@ -1777,6 +1961,54 @@ mod tests {
         assert_eq!(c.now_after(u64::MAX), u64::MAX, "must saturate, not wrap");
     }
 
+    // -- The ambient mode reaches the store (DET-001, DET-002) --------------
+
+    /// **`InstanceOptions::deterministic()` must reach the store's ambient state, and this is the test
+    /// whose absence was the defect.**
+    ///
+    /// `--deterministic` set `EngineConfig::deterministic()` and nothing else, so every assertion about
+    /// the *engine* passed while the guest's clock read `SystemTime::now()` and its RNG called
+    /// `getrandom::fill`. **A test that checked the engine's configuration would have agreed with the
+    /// flag and with the bug**, which is why this one reads the store instead: two reads of a virtual
+    /// clock are equal, and two reads of a real one are not.
+    ///
+    /// The control matters as much as the assertion. `Instance::create` — what `qqqai run` calls when the
+    /// flag is *absent* — must still give a real clock, or the fix would have made every run virtual.
+    #[test]
+    fn a_deterministic_instance_has_a_virtual_clock() {
+        let engine = engine();
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+
+        let virtual_ = Instance::create_with(
+            &engine,
+            &prepared,
+            &none(),
+            limits(),
+            &InstanceOptions::deterministic(),
+        )
+        .expect("a deterministic instance");
+        assert!(
+            virtual_.store.data().ambient.is_deterministic(),
+            "the option must reach the store, not only the engine"
+        );
+        let a = virtual_.store.data().ambient.now_nanos();
+        let b = virtual_.store.data().ambient.now_nanos();
+        assert_eq!(a, b, "a virtual clock must not advance unasked");
+
+        let real =
+            Instance::create(&engine, &prepared, &none(), limits()).expect("a default instance");
+        assert!(
+            !real.store.data().ambient.is_deterministic(),
+            "the default must stay real time, or every existing caller changed behaviour"
+        );
+        let c = real.store.data().ambient.now_nanos();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(
+            real.store.data().ambient.now_nanos() > c,
+            "a real clock must move, or the control is measuring nothing"
+        );
+    }
+
     // -- The async execution path (HOST-015, HOST-016) ---------------------
 
     /// The async path runs a real guest to completion and returns its value.
@@ -1788,9 +2020,15 @@ mod tests {
     async fn the_async_path_runs_a_component_and_returns_its_value() {
         let engine = engine();
         let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
-        let instance = Instance::create_async(&engine, &prepared, &none(), limits())
-            .await
-            .expect("create");
+        let instance = Instance::create_async(
+            &engine,
+            &prepared,
+            &none(),
+            limits(),
+            &InstanceOptions::default(),
+        )
+        .await
+        .expect("create");
 
         // The typed-func lookup happens *inside* the closure, which is the
         // pattern the synchronous tests use and the only one that satisfies the
@@ -1852,9 +2090,15 @@ mod tests {
         let engine = engine();
         let prepared = PreparedComponent::compile(&engine, SPIN_WAT.as_bytes()).expect("compiles");
 
-        let mut instance = Instance::create_async(&engine, &prepared, &none(), limits())
-            .await
-            .expect("create");
+        let mut instance = Instance::create_async(
+            &engine,
+            &prepared,
+            &none(),
+            limits(),
+            &InstanceOptions::default(),
+        )
+        .await
+        .expect("create");
         assert_eq!(
             instance.mode(),
             ExecutionMode::Async,
@@ -2036,9 +2280,15 @@ mod tests {
     async fn a_poisoned_instance_refuses_to_run_async() {
         let engine = engine();
         let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
-        let mut instance = Instance::create_async(&engine, &prepared, &none(), limits())
-            .await
-            .expect("create");
+        let mut instance = Instance::create_async(
+            &engine,
+            &prepared,
+            &none(),
+            limits(),
+            &InstanceOptions::default(),
+        )
+        .await
+        .expect("create");
         instance.poison();
 
         let result = instance

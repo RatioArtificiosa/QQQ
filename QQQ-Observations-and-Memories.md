@@ -32190,6 +32190,82 @@ is the symptom — `create`, `create_with_audit`, `create_async`, `create_for` �
 would be `create_with_replay` and `create_with_audit_and_replay`, **which is a combinatorial surface rather
 than a decision point.**
 
+## §O-424 — `qqqai run` cannot run the project's own reference application, and the reason is a WASI grant nothing supplies
+
+**The measurement, from the built binary:**
+
+```
+$ qqqai run --manifest examples\orders-api\qqq.toml --deterministic --replay-log one.replay
+error[QQQ-6003]: the component imports 14 interfaces that no grant provides
+
+  missing: wasi:cli/environment@0.2.9, wasi:cli/exit@0.2.9, wasi:cli/stderr@0.2.9,
+           wasi:cli/stdin@0.2.9, wasi:cli/stdout@0.2.9, wasi:cli/t… (14 total)
+  granted: qqq:http/http@1.0.0
+  project: orders-api
+```
+
+**And the same command against the session's own guest probe:**
+
+```
+$ qqqai run --manifest .scratch\guest_probe\probe-app\qqq.toml --deterministic …
+error[QQQ-6003]: the component imports 14 interfaces that no grant provides
+  granted:                                        <- empty
+```
+
+**Two components, two manifests, the same fourteen interfaces.** So `--replay-log` could not be verified
+end to end against either, and **the obstacle is the finding.**
+
+### The mechanism, and why it is unconditional
+
+A guest built for `wasm32-wasip2` with `std` **imports the WASI CLI interfaces whether or not its own source
+mentions them** — `crates/qqq-host/Cargo.toml` states it for the host side:
+
+> *"A guest built by `cargo build --target wasm32-wasip2` imports fifteen WASI interfaces even when its own
+> source never calls one, because `std` for that target is implemented over them."*
+
+**So every Rust guest that uses `std` needs fourteen or fifteen grants before it can instantiate, and no
+manifest in this repository supplies them.** `examples/orders-api/qqq.toml` grants `qqq:http/http`, which is
+what the application *does*, and nothing for the language runtime it is written in.
+
+**And the CLI tests do not catch it, because they never use such a guest.** `crates/qqq-run/tests/cli.rs`
+writes a manifest from `const MINIMAL: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"` — **no
+grants at all** — and its run test passes the capability explicitly:
+
+```rust
+s.run(&["run", &wasm, "--cap", "clock.wall"])
+```
+
+**A guest that imports only `clock.wall` needs only `clock.wall`. That is the case the tests cover, and it
+is the case a developer writing a first guest is not in** — the moment they use `std`, the reference app's
+own shape, `run` refuses with a capability error that names fourteen interfaces they did not ask for.
+
+### What this costs, stated plainly
+
+**It is not that a grant is missing from a file.** It is that **`--cap` cannot widen** — `RunOptions::caps`
+is documented as *"a **developer overlay**, which may only narrow the manifest's grants"* — **so a user
+cannot supply the fourteen at the command line either.** The refusal is correct, the capability model is
+working, and the reference application is unrunnable by the command named for running things.
+
+**`qqqai serve` is presumably fine, which is why this has gone unnoticed**: the reference app is an HTTP
+service and `serve` builds its own store along a path that grants WASI. **`run` and `serve` disagree about
+what a guest is owed, and only `run` is silent about it** — it reports fourteen missing interfaces rather
+than saying that a `std` guest needs a WASI grant the manifest does not express.
+
+### And the measurement lesson that arose while establishing this
+
+**A test command has three filters — the crate, the target, and the name pattern — and all three are a
+guard's width.** This cost two round-trips in one session:
+
+| round | the filter I got wrong | what it reported |
+|---|---|---|
+| 62 | the **name pattern**: `cargo test --lib replay::`, so `instance::` never ran | `NOT DETECTED` for a test that would have fired |
+| 64 | the **crate**: `cargo test -p qqq-host --lib`, so a test in `qqq-run` never ran | `NOT DETECTED`, twice, for code that was fine |
+
+**Both times the tell was the same and I had to learn it twice: `the run failed: []`.** An injector that
+prints the empty list of failures is reporting that it measured nothing, **and a report that names no
+failing test is not a report that the guard works.** The fix is not a better pattern — it is to name the
+crate, run the whole lib, and assert that the expected test *appeared in the output at all*.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

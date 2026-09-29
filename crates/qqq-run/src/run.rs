@@ -54,6 +54,16 @@ use crate::output::{CommandName, CommandOutput};
 pub struct RunOptions {
     /// An explicit artifact to run, overriding the staged path.
     pub artifact: Option<PathBuf>,
+    /// Write a replay file for this run — `DET-007`.
+    ///
+    /// Requires [`Self::deterministic`]. A log recorded with a real clock records nothing
+    /// reproducible, so the pair is checked at parse time rather than left to a runtime refusal the
+    /// user would never see.
+    pub replay_log: Option<PathBuf>,
+    /// Replay a recorded run instead of reading the clock and the RNG — `DET-008`.
+    ///
+    /// Requires [`Self::deterministic`], for the same reason and by the same check.
+    pub replay: Option<PathBuf>,
     /// Run deterministically: fixed clock, seeded RNG (Proposal §10.5).
     pub deterministic: bool,
     /// Additional capabilities granted on the command line.
@@ -594,6 +604,24 @@ impl std::fmt::Debug for Prepared {
     }
 }
 
+/// How many nondeterministic reads a `qqqai run` replay log will hold — `DET-007`.
+///
+/// # Why a bound rather than a growing file
+///
+/// Because the log is written from the store's own reads, and the store belongs to a guest. **An
+/// unbounded log is a guest-controlled allocation**, which is the thing `REPLAY_LOG_CAPACITY`'s
+/// counterpart in `crate::audit` exists to prevent for the audit stream. 4096 is generous for a
+/// one-shot `run` -- which instantiates and drops -- and small enough that a hostile guest gains
+/// nothing by reading in a loop. A log that fills **refuses rather than overwrites**, so the first
+/// records -- the ones a reader needs to reproduce the start -- survive, and
+/// [`qqq_host::replay::AppendCounters::has_gaps`] says so in the file.
+/// ```
+/// use qqq_run::run::REPLAY_LOG_CAPACITY;
+///
+/// assert!(REPLAY_LOG_CAPACITY > 0, "a zero-capacity log records nothing");
+/// ```
+pub const REPLAY_LOG_CAPACITY: usize = 4096;
+
 /// Build the engine for a run.
 ///
 /// # Errors
@@ -684,6 +712,91 @@ pub fn resolve_grants(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Reso
     Ok(resolution)
 }
 
+/// A replay log shared between the store that writes it and the runner that saves it.
+///
+/// # Why an alias and not the type spelled out
+///
+/// Because it appears four times in this file's signatures, and **`clippy::type_complexity` is
+/// right for a reason a reader feels before a linter states it**: the alias is the thing that says
+/// this is *one log seen from two places*, and the stacked generics say only that it is an `Arc` of a
+/// `Mutex` of a `ReplayLog`. The name carries the intent the type does not.
+type SharedLog = std::sync::Arc<std::sync::Mutex<qqq_host::replay::ReplayLog>>;
+
+/// The replay sink and source a run needs, from its options — `DET-007` and `DET-008`.
+///
+/// # Why this is a separate function
+///
+/// Because it is the one part of a run that is about *evidence* rather than execution, and
+/// `execute` crossed `clippy`'s line budget when it was inlined. The split is by subject: this
+/// builds two optional endpoints and refuses a file it cannot trust, and none of that needs the
+/// engine, the grants or the limits.
+///
+/// # Why the header names the artifact and the engine
+///
+/// `DET-010` names four inputs that decide whether two recorded runs are comparable: the artifact
+/// digest, the engine version, the target triple and the configuration. Three of them are read from
+/// the component and the build rather than from the user, because **a header a user could fill in
+/// is a header a user could fill in wrongly**, and its whole purpose is to be believed.
+///
+/// # Errors
+///
+/// `QQQ-1002` when the replay file cannot be read or does not verify.
+fn replay_endpoints(
+    opts: &RunOptions,
+    digest: &str,
+) -> Result<(Option<SharedLog>, Option<SharedLog>)> {
+    //
+    // **The log is built here because the header has to name the artifact and the engine**, and this
+    // is the last point at which both are in hand. `DET-010` names the four inputs that decide whether
+    // two runs are comparable, and three of them -- digest, engine version, target triple -- are read
+    // from the component and the build rather than from the user.
+    let replay_sink = opts.replay_log.as_ref().map(|_| {
+        std::sync::Arc::new(std::sync::Mutex::new(qqq_host::replay::ReplayLog::new(
+            qqq_host::replay::ReplayHeader {
+                artifact_digest: digest.to_owned(),
+                engine_version: qqq_host::config::ENGINE_VERSION.to_owned(),
+                target_triple: qqq_host::config::TARGET_TRIPLE.to_owned(),
+                deterministic: opts.deterministic,
+            },
+            REPLAY_LOG_CAPACITY,
+        )))
+        // A log of a non-deterministic run is not a contradiction to refuse silently: the parser
+        // already refused the combination, so reaching here with one is a bug in this function
+        // rather than a user error. `AmbientState` refuses the sink in that case, and the file would
+        // be an empty header -- which is why the check below is a hard one.
+    });
+    let replay_source = match &opts.replay {
+        None => None,
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                qqq_core::Error::new(
+                    qqq_core::ErrorCode::InvalidComponentArtifact,
+                    format!("the replay file `{}` could not be read: {e}", path.display()),
+                )
+                .with_remediation(
+                    "`--replay` takes the path `--replay-log` wrote; check it exists and is readable",
+                )
+            })?;
+            // **A file that does not verify is refused rather than partly used.** The chain is
+            // re-derived on load, so an edit, a deletion or a rewritten link is a failure here and
+            // not a run that silently reproduces something else.
+            let log = qqq_host::replay::ReplayLog::from_text(&text).map_err(|e| {
+                qqq_core::Error::new(
+                    qqq_core::ErrorCode::InvalidComponentArtifact,
+                    format!("the replay file `{}` is not usable: {e}", path.display()),
+                )
+                .with_remediation(
+                    "a replay file this build did not write, or one edited since, is refused; \
+                     re-record it with `--replay-log`",
+                )
+            })?;
+            Some(std::sync::Arc::new(std::sync::Mutex::new(log)))
+        }
+    };
+
+    Ok((replay_sink, replay_source))
+}
+
 /// Run the component and report the outcome.
 ///
 /// # Errors
@@ -728,7 +841,30 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     };
 
     let limits = LimitSet::from_manifest(&loaded.manifest.limits)?;
-    let instance = Instance::create(&p.engine, &p.component, &p.resolution.grants, limits)?;
+
+    // -- The ambient mode, and the replay log that carries it (DET-007, DET-008) ---
+    let (replay_sink, replay_source) = replay_endpoints(opts, p.component.digest())?;
+
+    // A literal rather than a `Default` plus an assignment, so the one field that is not optional
+    // is set where a reader sees it beside the others.
+    let mut inst_opts = qqq_host::InstanceOptions {
+        deterministic: opts.deterministic,
+        ..qqq_host::InstanceOptions::default()
+    };
+    if let Some(log) = &replay_sink {
+        inst_opts.record_to(std::sync::Arc::clone(log));
+    }
+    if let Some(log) = &replay_source {
+        inst_opts.replay_from(std::sync::Arc::clone(log));
+    }
+
+    let instance = Instance::create_with(
+        &p.engine,
+        &p.component,
+        &p.resolution.grants,
+        limits,
+        &inst_opts,
+    )?;
 
     let started = Instant::now();
     let outcome = instance.run_measured(|_store, _instance| {
@@ -741,6 +877,30 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
         Ok(RunOutcome::Instantiated)
     });
     let elapsed = started.elapsed();
+
+    // -- Write the log, if one was asked for (DET-007) ------------------
+    //
+    // Written after the run rather than streamed, because a replay file is only useful if it is
+    // complete: a partial file would describe an execution that did not happen, and `from_text`
+    // would refuse it at replay time with `Exhausted` -- a failure a reader cannot see coming.
+    if let (Some(path), Some(log)) = (&opts.replay_log, &replay_sink) {
+        let text = log.lock().map(|l| l.to_text()).map_err(|_| {
+            qqq_core::Error::new(
+                qqq_core::ErrorCode::InternalInvariantViolated,
+                "the replay log's lock was poisoned by a panic elsewhere",
+            )
+        })?;
+        std::fs::write(path, text.as_bytes()).map_err(|e| {
+            qqq_core::Error::new(
+                qqq_core::ErrorCode::InvalidComponentArtifact,
+                format!(
+                    "the replay file `{}` could not be written: {e}",
+                    path.display()
+                ),
+            )
+            .with_remediation("--replay-log takes a path this process can write")
+        })?;
+    }
 
     match outcome {
         Ok(o) => Ok(RunOutput {

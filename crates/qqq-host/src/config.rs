@@ -349,6 +349,28 @@ pub const ENGINE_VERSION: &str = "48.0.3";
 /// [`ENGINE_VERSION`]; see `engine_version_matches_the_pinned_dependency`.
 pub const ENGINE_REQUIREMENT: &str = "48";
 
+/// The target triple this artifact was built for — `DET-010`.
+///
+/// # Why this is a build script's output and not a `cfg`
+///
+/// See `crates/qqq-host/build.rs`: `cfg!(target_arch)` and `cfg!(target_os)` combine into
+/// `x86_64-windows`, and **a `.cwasm` is native code whose validity depends on the vendor and the ABI
+/// too.** The real triple is `x86_64-pc-windows-msvc`.
+///
+/// # Why it is `env!` and not a defaulted `option_env!`
+///
+/// Because a defaulted value would be silently wrong, and this constant is written into
+/// [`crate::replay::ReplayHeader`] — a header whose whole purpose is telling a reader whether two
+/// recorded runs are comparable. **A field that is wrong in the direction of agreeing with a
+/// different platform is worse than a field that is absent.**
+/// ```
+/// use qqq_host::config::TARGET_TRIPLE;
+///
+/// assert!(TARGET_TRIPLE.contains("-"), "a triple has at least one dash");
+/// assert!(!TARGET_TRIPLE.contains(' '), "and no spaces");
+/// ```
+pub const TARGET_TRIPLE: &str = env!("QQQ_TARGET_TRIPLE");
+
 /// The AOT cache key for a compiled artifact.
 ///
 /// # Why the key includes so much

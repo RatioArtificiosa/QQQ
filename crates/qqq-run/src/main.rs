@@ -3065,6 +3065,18 @@ fn run_options(
             // bitfield: `run` has only one switch, and a bitfield for one flag
             // would be ceremony.
             "--deterministic" => opts.deterministic = true,
+            "--replay-log" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| missing_value("--replay-log"))?;
+                opts.replay_log = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            "--replay" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value("--replay"))?;
+                opts.replay = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
             "--artifact" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value("--artifact"))?;
                 opts.artifact = Some(std::path::PathBuf::from(v));
@@ -3090,8 +3102,9 @@ fn run_options(
                         format!("unknown flag `{other}` for `run`"),
                     )
                     .with_remediation(
-                        "`run` accepts --cap, --artifact, --deterministic and -- <args>; \
-                         use `--` before arguments meant for the component",
+                        "`run` accepts --cap, --artifact, --deterministic, --replay, \
+                         --replay-log and -- <args>; use `--` before arguments meant for the \
+                         component",
                     ));
                 }
                 // A bare positional names the artifact, when no `--artifact`
@@ -3118,7 +3131,57 @@ fn run_options(
         }
         i += 1;
     }
+    validate_replay_flags(&opts)?;
+
     Ok(opts)
+}
+
+/// Refuse a replay flag that cannot mean anything without deterministic mode.
+///
+/// # Why this is a function and not a block in `run_options`
+///
+/// Because `run_options` is a parser and this is a rule. **The parser crossed `clippy`'s line budget
+/// when the rule was added**, and the split that satisfies the lint is also the one that puts the
+/// rule where a reader looking for rules will find it.
+///
+/// # Why the refusal is here rather than at the store
+///
+/// `AmbientState::set_replay` and `set_replay_source` refuse a sink or source outside deterministic
+/// mode *silently*, and that silence is deliberate: a diagnostic must never fail a guest's clock
+/// read. At the CLI it is the wrong behaviour -- a user would watch a flag do nothing and conclude
+/// the log was empty. **The same rule, enforced where each enforcement is useful.**
+///
+/// # Errors
+///
+/// `QQQ-7001` when either flag is given without `--deterministic`.
+fn validate_replay_flags(opts: &qqq_run::RunOptions) -> Result<(), qqq_core::Error> {
+    //
+    // `AmbientState::set_replay` and `set_replay_source` refuse a sink or source outside deterministic
+    // mode *silently*, and that silence is deliberate: a diagnostic must never fail a guest's clock
+    // read. At the CLI it is the wrong behaviour -- a user would watch a flag do nothing and conclude
+    // the log was empty. The two are the same rule enforced where each one is useful.
+    if opts.replay.is_some() && !opts.deterministic {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--replay` needs `--deterministic`".to_owned(),
+        )
+        .with_remediation(
+            "a recording of a non-deterministic run describes an execution that never happened \
+             twice; add `--deterministic`, or drop `--replay`",
+        ));
+    }
+    if opts.replay_log.is_some() && !opts.deterministic {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--replay-log` needs `--deterministic`".to_owned(),
+        )
+        .with_remediation(
+            "a log recorded with a real clock records nothing reproducible, so replaying it \
+             would reproduce nothing; add `--deterministic`",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Emit a successful result and convert it into an exit code.

@@ -150,7 +150,7 @@ pub use host_wasi::{
 };
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
-    ExecutionOutcome, Instance, PreparedComponent,
+    ExecutionOutcome, Instance, InstanceOptions, PreparedComponent,
 };
 pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,

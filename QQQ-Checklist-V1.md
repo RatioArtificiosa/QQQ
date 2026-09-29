@@ -4765,6 +4765,18 @@ Each language has eight required items. The parity matrix makes any gap visible.
     run would be the "documentation describes something that does not exist" failure
     `DOC-018` exists to catch, so the item stays open rather than being ticked with a
     procedure nobody executed.
+  → **Still open after a document was written, and the reason is now measured rather
+    than assumed.** `docs/profiling.md` exists: it carries the tool matrix (measured
+    with `Get-Command`), the `criterion` rejection and its reason, a real `--version`
+    startup table over 30 runs, and the unfed-metric finding. What it does **not**
+    have is an executed capture. The Windows half of the matrix is `wpr` + `xperf`,
+    both installed here — the earlier note did not mention them, so it had never
+    asked whether a Windows workflow was runnable — and `wpr -start CPU -filemode`
+    **fails with `Failed to enable the policy to profile system performance`**. It
+    needs elevation, and `wpr -stop` confirms nothing was left running. So the
+    procedure is written and attempted, not executed, and the item stays open until
+    an elevated shell or a Linux machine runs it. **A document that describes a
+    procedure nobody ran is what this note exists to prevent.**
 - [ ] **PERF-025** Implement the CPU-cost-per-request metric derived from fuel.
   → §10.2 Metrics that ship by default
   → **Measured and not met — and the gap is specific rather than total.** Fuel *is*

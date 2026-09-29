@@ -224,6 +224,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/profiling.md",
+        "Where the time goes: which profilers exist on which platform, the measured `--version` "
+        "startup table, and why `criterion` was rejected twice.",
+        "both",
+        "use",
+    ),
+    (
         "docs/contributing/claims-policy.md",
         "How a factual claim must be verified before it enters a document.",
         "human",

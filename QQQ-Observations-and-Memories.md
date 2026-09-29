@@ -30960,6 +30960,61 @@ adding an eighth counter made the compiler report a **type error** rather than a
 is a second copy of a fact the array already carries -- a hand-maintained count of the kind `§O-277` is
 about -- so it is inferred now and a new counter is one edit.
 
+## §O-408 — A justification can be right about every item it names and wrong about its conclusion, because the enumeration is the unchecked part
+
+`PERF-024` (*"Establish the profiling workflow (perf, samply, VTune) and document it"*) carried a note
+that refused to tick it, and the refusal was correct:
+
+    **The reason is capability, not decision:** `perf` and `VTune` are Linux and Intel-profiler
+    tooling -- this machine reports `windows x86_64` -- and `samply` is not installed. Naming a
+    workflow the project cannot run would be the "documentation describes something that does not
+    exist" failure `DOC-018` exists to catch, so the item stays open rather than being ticked with a
+    procedure nobody executed.
+
+**Every clause of that is true, and the note is incomplete in the way that matters: it never mentions
+`wpr` or `xperf`.** Measured on 2026-09-28 with `Get-Command`:
+
+| tool | here | where it works |
+|---|---|---|
+| `perf` | absent | Linux |
+| `samply` | absent | Linux, macOS |
+| VTune | absent | all three, and heaviest to install |
+| **`wpr`** | **`C:\Windows\system32\wpr.exe`** | **Windows** |
+| **`xperf`** | **Windows Performance Toolkit** | **Windows** |
+
+**So the note reasoned from the tools it knew were missing and concluded that the platform had no
+profiler.** Windows does -- two of them -- and the conclusion was drawn without asking.
+
+**And then the measurement that settles it.** `wpr -start CPU -filemode` fails here:
+
+```
+Failed to enable the policy to profile system performance.
+Profile Id: CPU.Verbose.File
+```
+
+with `wpr -stop` confirming *"There are no trace profiles running"* and **no `.etl` written**. It needs
+elevation. So the item still stays open -- **but now for a measured reason rather than an assumed one**,
+and the reason is a *different* one: the tooling is **present and cannot be started**, which is not the
+same as absent.
+
+`docs/profiling.md` is written and carries the tool matrix, the `criterion` rejection and its reason
+(*"rejected twice ... because §9.1 requires the concurrency level be disclosed per result, which is a
+concept Criterion does not have"*), a real `--version` table over 30 runs, and the unfed-metric finding.
+**What it does not carry is an executed capture**, so `PERF-024` is not ticked. The item's own standard --
+*"rather than being ticked with a procedure nobody executed"* -- is the right one, and it applies to a
+page as much as to a sentence.
+
+**The general form, and it is `§O-401`'s.** That entry recorded a **declared reason** whose justification
+had become false while the divergence it excused remained. This is the same defect one step earlier: **a
+justification is a claim, and the unchecked part of a claim is the part that enumerates.** A note that
+lists the tools it knows are absent can be right about each and wrong about the whole, because nothing
+compares the list against what exists. `check_gate_parity.py` cannot test a reason; neither could this
+note test its own enumeration. **The remedy is the same one: measure the set, not the members.**
+
+**And the measurement itself was cheap.** One `Get-Command` loop over five names found the two the note
+had missed. The note had been sitting in the checklist asserting a platform had no profiler, and the
+command that falsifies it takes under a second.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

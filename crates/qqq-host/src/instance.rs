@@ -294,13 +294,13 @@ pub struct InstanceOptions {
     /// whether a **runner** created its instance, not what a manifest declares -- so expressing it as
     /// a grant would mean a test guest must be granted the right to assert.
     ///
-    /// # Why `false` is safe rather than merely quiet
+    /// # Why `None` is safe rather than merely quiet
     ///
     /// The interface is linked unconditionally, and every function in it refuses with
     /// `not-assertable` when no state is attached. **So a store that did not opt in cannot pass an
     /// assertion it never evaluated** -- which is the failure mode a flag that merely skipped the work
     /// would produce.
-    pub test: bool,
+    pub test: Option<crate::host_test::TestState>,
     /// Record every nondeterministic read — `DET-007`.
     pub replay_sink: Option<std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>>,
     /// Replay every nondeterministic read from a recorded log — `DET-008`.
@@ -389,9 +389,15 @@ impl InstanceOptions {
     }
 
     /// Attach the assertion state `qqq:test/assertions` records into.
+    ///
+    /// # Why the caller passes the state rather than a flag
+    ///
+    /// Because a runner has to read the marks and failures *after* the run, and the state lives
+    /// inside the store, which lives inside the `Instance`. Passing what it wants to read back is
+    /// the only shape in which that is possible -- [`crate::audit::AuditHandle`] is the precedent.
     #[must_use]
-    pub const fn with_test(mut self) -> Self {
-        self.test = true;
+    pub fn with_test(mut self, state: crate::host_test::TestState) -> Self {
+        self.test = Some(state);
         self
     }
 }
@@ -1159,7 +1165,7 @@ impl ReadyStore {
         // Attached here rather than in every host function: the seam that records is
         // `ambient::require`, which reads the store, so the store is where the handle has to be.
         opts.audit.clone_into(&mut data.audit);
-        data.test = opts.test.then(crate::host_test::TestState::default);
+        opts.test.clone_into(&mut data.test);
         // **The ambient mode travels with the store, and this line is the fix.** `StoreData::new`
         // defaults to real time, so leaving `ambient` unset is what made `--deterministic` virtualize
         // the compiler and not the clock -- and every checker in this repository asks about text, so

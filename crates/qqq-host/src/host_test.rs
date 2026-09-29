@@ -654,4 +654,59 @@ mod tests {
             "an empty allowed set permits nothing"
         );
     }
+
+    /// **A clone is a second way in, not a copy.** The whole handle design rests on this.
+    ///
+    /// `TestState` is handed to `InstanceOptions::with_test`, cloned into `StoreData`, and cloned again by
+    /// every guard. **If cloning copied the state, the caller would hold an empty one and every assertion
+    /// would record into a value nobody reads** — and the caller would see zero failures whether the guest
+    /// passed or failed, which is the vacuous pass this interface exists to prevent, moved into the
+    /// plumbing meant to prevent it.
+    ///
+    /// A unit test cannot reach a `func_wrap` closure, but it can reach this — and this is where the design
+    /// would break: not in the host functions and not in the caller, but in the `Arc` between them.
+    #[test]
+    fn a_cloned_handle_sees_what_its_sibling_recorded() {
+        let caller = TestState::default();
+        let inside_the_store = caller.clone();
+        inside_the_store
+            .data()
+            .failures
+            .push("the guest reported a failure".to_owned());
+        inside_the_store
+            .data()
+            .marks
+            .insert("before".to_owned(), 1234);
+        assert_eq!(
+            caller.failures(),
+            vec!["the guest reported a failure".to_owned()],
+            "the caller's handle must see what the store's handle recorded"
+        );
+        assert_eq!(caller.marks(), 1, "the marks are shared too");
+        assert!(
+            !caller.all_passed(),
+            "one recorded failure means the run did not pass"
+        );
+    }
+
+    /// And the options hold the caller's handle, not a copy of its value.
+    ///
+    /// The first test never goes through `InstanceOptions`, so it passes even if `with_test` stored a
+    /// fresh state. **This one records *before* the options exist**, which only reaches them if they hold
+    /// the handle.
+    #[test]
+    fn with_test_attaches_the_callers_handle() {
+        let state = TestState::default();
+        let opts = crate::instance::InstanceOptions::default().with_test(state.clone());
+        assert!(opts.test.is_some(), "the handle must be attached");
+        state
+            .data()
+            .failures
+            .push("recorded before the instance existed".to_owned());
+        assert_eq!(
+            opts.test.expect("attached").failures(),
+            vec!["recorded before the instance existed".to_owned()],
+            "the options must share the caller's state"
+        );
+    }
 }

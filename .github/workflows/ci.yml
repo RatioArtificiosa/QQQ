@@ -454,6 +454,14 @@ jobs:
       - name: Prove the count check catches a wrong total
         run: python tools/check_checklist_counts.py --self-test
 
+      # `PLAN-001`: the checklist as machine-readable data. The tracked `tools/backlog.json` is what a
+      # consumer reads instead of re-parsing markdown, and this fails when it has drifted from the
+      # document -- the same shape as `corpus_at_rest.json` and `gen_llms_txt.py --check`.
+      - name: Verify the tracked backlog matches the checklist
+        run: python tools/gen_backlog.py --check
+      - name: Prove the backlog check catches drift and vacuity
+        run: python tools/gen_backlog.py --self-test
+
       # §9.2 is a contract with twelve stated budgets. `Budget::ALL` in
       # `crates/qqq-bench/src/budget.rs` is its machine-readable copy, and this
       # compares the Proposal, that table and the checklist against each other.

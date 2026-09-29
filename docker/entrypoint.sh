@@ -932,6 +932,9 @@ cmd_checks() {
     # the divergence had accumulated without anyone deciding it.
     python3 tools/check_checklist_counts.py
     python3 tools/check_checklist_counts.py --self-test
+    # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
+    python3 tools/gen_backlog.py --check
+    python3 tools/gen_backlog.py --self-test
     python3 tools/check_lifecycle_counts.py
     python3 tools/check_lifecycle_counts.py --self-test
     python3 tools/check_error_catalogue.py

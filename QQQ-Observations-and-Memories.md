@@ -30791,6 +30791,53 @@ register reference and an item pattern -- a **file-level** property standing in 
 which is `§O-282` again: *a guard is only as narrow as its pattern*. Both errors were caught by asking
 what the pattern was applied **to**, not whether it existed.
 
+## §O-405 — A test for an input that cannot occur is not a test, and three times in this session the defect was in the test rather than the code
+
+`PLAN-001` is built: `tools/gen_backlog.py` derives `tools/backlog.json` from the checklist, and both
+gates run `--check` and `--self-test`. The document's shape was measured before anything was written --
+**587 items, 32 areas, 11 phases, no item line outside the strict form**, status characters in use
+`' '` 342, `'x'` 241, `'~'` 2, `'!'` 2 -- and the derived data agrees with the document's own declared
+tables on every axis: total **587** against a declared **587**, **no** area disagreeing, **no** phase
+disagreeing, **0** items in no phase.
+
+**The generator imports its patterns from `check_checklist_counts.py` rather than copying them.** That
+file already owns "what an item looks like", and a second copy is a second place for the definition to
+drift -- which is the `§O-282` lesson applied to a *definition* rather than to a guard.
+
+**And a self-test case came up DEAD, which is the entry.** The generator carries four anti-vacuity
+clauses: a missing `**Total: N items.**` line, a missing phase-table `**Total**` row, an area belonging
+to no phase, and an item whose status character the vocabulary does not define. Each was fault-injected.
+Three fired. The fourth reported:
+
+```
+DEAD  a status character outside the vocabulary is reported
+```
+
+**The clause cannot be reached from the document, and the test assumed it could.** The mutation was
+`- [ ] **LANG-007**` to `- [-] **LANG-007**`, and `-` is **defined** as `withdrawn`. The item pattern
+accepts `[ x~!-]` and the vocabulary defines all five characters, so no document edit can produce an
+undefined status. **The clause guards a future edit that widens one without the other** -- a real hazard,
+and not one a document mutation can exercise. It is now tested by calling the pure `problems()` with a
+fabricated backlog, which is what a unit test of a pure function is for.
+
+**A rule that cannot fire is worse than no rule (`§O-375`)**, and the way this one disguised itself is
+worth naming: it was **green as code and dead as a test**. The clause was correct; the case that claimed
+to cover it proved nothing, and it read as coverage in the self-test output until the mutation was
+actually run.
+
+**Three times in this session the defect was in the test, not the thing under test:**
+
+| the test | what was wrong with it |
+|---|---|
+| the `CARGO_TARGET_DIR` edit script's anchors | copied from a script that solved a *related* problem; the indentation was wrong twice, and the asserts fired before any write |
+| `ENVELOPE PROBE FAILED -- 1 of 3` | read as a real failure when it was a **self-test injection**, with `ENVELOPE PROBE OK` printed directly above it |
+| this case | asserted a mutation that the vocabulary makes impossible |
+
+**The common shape: a test is a claim about what is possible, and an unchecked claim about possibility is
+the same defect as an unchecked claim about a number** (`§O-277`). The remedy is the one this repository
+keeps arriving at -- **measure the input before asserting on it** -- and the cheapest form of that here is
+to let the mutation run and read whether the clause actually fired, rather than reasoning that it would.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

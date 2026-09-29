@@ -195,6 +195,76 @@ impl ReplayValue {
             Self::Random(bytes) => hex(bytes),
         }
     }
+
+    /// Rebuild a value from its [`Self::canonical`] form and its kind — `DET-008`.
+    ///
+    /// # Why the kind is a separate argument and not inferred
+    ///
+    /// Because [`Self::canonical`] is **not injective across variants**: `Clock(7)` and `Network(7)`
+    /// both encode as `"7"`. The kind is what distinguishes them, which is why the file format carries
+    /// it as its own column and why a loader that guessed from the shape would silently turn a network
+    /// timing into a wall-clock reading.
+    ///
+    /// # Why this returns `Option` rather than an error
+    ///
+    /// Because "this string is not a canonical value of this kind" is a *parse* failure, and the caller
+    /// that knows which line it was on is the one that can say so. `ReplayLog::from_text` does exactly
+    /// that, and reports [`ReplayError::Malformed`] with the line number.
+    ///
+    /// ```
+    /// use qqq_host::replay::ReplayValue;
+    ///
+    /// assert_eq!(
+    ///     ReplayValue::from_canonical("clock", "7"),
+    ///     Some(ReplayValue::Clock(7))
+    /// );
+    /// assert_eq!(
+    ///     ReplayValue::from_canonical("network", "7"),
+    ///     Some(ReplayValue::Network(7)),
+    ///     "the same canonical string is a different value under a different kind"
+    /// );
+    /// assert_eq!(
+    ///     ReplayValue::from_canonical("random", "5a5b"),
+    ///     Some(ReplayValue::Random(vec![0x5a, 0x5b]))
+    /// );
+    /// assert_eq!(ReplayValue::from_canonical("random", "5a5"), None, "odd hex");
+    /// assert_eq!(ReplayValue::from_canonical("random", "zz"), None, "not hex");
+    /// assert_eq!(ReplayValue::from_canonical("clock", "-1"), None, "unsigned");
+    /// assert_eq!(ReplayValue::from_canonical("temperature", "7"), None, "unknown kind");
+    /// ```
+    #[must_use]
+    pub fn from_canonical(kind: &str, canonical: &str) -> Option<Self> {
+        match kind {
+            "clock" => canonical.parse::<u64>().ok().map(Self::Clock),
+            "network" => canonical.parse::<u64>().ok().map(Self::Network),
+            "random" => {
+                // An odd-length or non-hex string is refused rather than truncated: a shortened
+                // `random` value would replay a byte string the generator never produced.
+                if !canonical.len().is_multiple_of(2) {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(canonical.len() / 2);
+                let bytes = canonical.as_bytes();
+                for pair in bytes.chunks(2) {
+                    let hi = hex_nibble(pair[0])?;
+                    let lo = hex_nibble(pair[1])?;
+                    out.push((hi << 4) | lo);
+                }
+                Some(Self::Random(out))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One hexadecimal digit's value, or `None`.
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// One recorded read.
@@ -428,6 +498,46 @@ pub enum ReplayError {
         /// What the log holds next.
         found: &'static str,
     },
+    /// A line of a replay file could not be understood.
+    /// ```
+    /// use qqq_host::replay::ReplayError;
+    ///
+    /// let e = ReplayError::Malformed { line: 7, reason: "not a replay file" };
+    /// assert!(e.to_string().contains("line 7"));
+    /// ```
+    Malformed {
+        /// The 1-based line number, so a reader can look at it.
+        line: usize,
+        /// What was wrong, in a phrase.
+        reason: &'static str,
+    },
+    /// A replay file parsed, but a record's chain does not match its own fields.
+    ///
+    /// **This is the variant that makes a replay file evidence rather than input.** A loader that
+    /// recomputed the chain from whatever it read would accept an edited value and produce a new,
+    /// internally consistent log -- so the file would say whatever its editor wanted. Comparing the
+    /// stored chain against a re-derived one is what turns an edit into a refusal.
+    /// ```
+    /// use qqq_host::replay::ReplayError;
+    ///
+    /// let e = ReplayError::Tampered { line: 3 };
+    /// assert!(e.to_string().contains("edited"));
+    /// ```
+    Tampered {
+        /// The 1-based line number of the first record that did not match.
+        line: usize,
+    },
+    /// A replay file's `previous` pointer does not lead to the record before it.
+    /// ```
+    /// use qqq_host::replay::ReplayError;
+    ///
+    /// let e = ReplayError::Discontinuous { line: 4 };
+    /// assert!(e.to_string().contains("previous"));
+    /// ```
+    Discontinuous {
+        /// The 1-based line number of the record whose link is broken.
+        line: usize,
+    },
 }
 
 impl std::fmt::Display for ReplayError {
@@ -443,6 +553,19 @@ impl std::fmt::Display for ReplayError {
                 f,
                 "the execution asked to replay `{expected}` but the log's next record is `{found}`"
             ),
+            Self::Malformed { line, reason } => {
+                write!(f, "replay file line {line}: {reason}")
+            }
+            Self::Tampered { line } => write!(
+                f,
+                "replay file line {line}: the record's chain does not match its own fields, so the \
+                 file has been edited since it was written"
+            ),
+            Self::Discontinuous { line } => write!(
+                f,
+                "replay file line {line}: the record's `previous` does not point at the record \
+                 before it"
+            ),
         }
     }
 }
@@ -457,6 +580,180 @@ impl std::fmt::Display for ReplayError {
 /// for is `map_err(|_| ...)`, and that discards the cause — the failure mode `§O-280` names, where a
 /// report cannot say what happened.
 impl std::error::Error for ReplayError {}
+
+/// The first token of a replay file, so a file that is not one is refused by name.
+/// ```
+/// use qqq_host::replay::REPLAY_FILE_MAGIC;
+///
+/// assert!(REPLAY_FILE_MAGIC.starts_with("qqq"));
+/// ```
+pub const REPLAY_FILE_MAGIC: &str = "qqq-replay";
+
+/// The format version. A file naming a different one is refused rather than guessed at.
+/// ```
+/// use qqq_host::replay::REPLAY_FILE_VERSION;
+///
+/// assert_eq!(REPLAY_FILE_VERSION, 1);
+/// ```
+pub const REPLAY_FILE_VERSION: u32 = 1;
+
+/// The functions a replay file may name.
+///
+/// # Why an allowlist rather than accepting any string
+///
+/// `ReplayRecord::function` is `&'static str`, because the names are bounded by the interfaces'
+/// own WIT -- the same reason `crate::audit`'s `RECORDED_FUNCTIONS` exists. A loader that accepted
+/// an arbitrary string would have to leak it to satisfy the lifetime, so a file could grow the
+/// process's memory by being long. **A file naming a function this runtime does not have is
+/// refused**, which is also the honest answer: it was not written by this runtime.
+/// ```
+/// use qqq_host::replay::REPLAY_FUNCTIONS;
+///
+/// assert!(REPLAY_FUNCTIONS.contains(&"clock.wall"));
+/// assert!(REPLAY_FUNCTIONS.contains(&"crypto.random"));
+/// ```
+pub const REPLAY_FUNCTIONS: [&str; 3] = ["clock.wall", "clock.monotonic", "crypto.random"];
+
+/// Resolve a name from a file to the `&'static str` the record type requires.
+fn static_function(name: &str) -> Option<&'static str> {
+    REPLAY_FUNCTIONS.iter().copied().find(|f| *f == name)
+}
+
+/// A malformed-line error, named once so every parser reports the same shape.
+fn malformed(line: usize, reason: &'static str) -> ReplayError {
+    ReplayError::Malformed { line, reason }
+}
+
+/// Refuse a file that is not a replay log, **by name** — the magic and the version.
+fn parse_magic(all: &[&str]) -> Result<(), ReplayError> {
+    let Some(first) = all.first() else {
+        return Err(malformed(1, "the file is empty"));
+    };
+    let mut magic = first.split(' ');
+    if magic.next() != Some(REPLAY_FILE_MAGIC) {
+        return Err(malformed(1, "not a replay file"));
+    }
+    match magic.next().and_then(|v| v.parse::<u32>().ok()) {
+        Some(v) if v == REPLAY_FILE_VERSION => Ok(()),
+        Some(_) => Err(malformed(1, "unsupported replay file version")),
+        None => Err(malformed(1, "the version is not a number")),
+    }
+}
+
+/// Parse the header, returning it with the refusal count and the index of the first record.
+///
+/// # Why the body's start is returned rather than searched for again
+///
+/// Because the header's keys and the records' first field are both "a token followed by more tokens",
+/// and the only thing that separates them is that a record's first token is a number. **Finding that
+/// boundary once and passing it on means the two parsers cannot disagree about where the header ended.**
+fn parse_header(all: &[&str]) -> Result<(ReplayHeader, u64, usize), ReplayError> {
+    let mut header = ReplayHeader {
+        artifact_digest: String::new(),
+        engine_version: String::new(),
+        target_triple: String::new(),
+        deterministic: false,
+    };
+    let mut refused = 0u64;
+    let mut seen = 0u8;
+    let mut body_start = all.len();
+    for (idx, line) in all.iter().enumerate().skip(1) {
+        let lineno = idx + 1;
+        let Some((key, value)) = line.split_once(' ') else {
+            return Err(malformed(lineno, "expected a header key and a value"));
+        };
+        // The first line whose key parses as a number is the first record.
+        if key.parse::<u64>().is_ok() {
+            body_start = idx;
+            break;
+        }
+        match key {
+            "artifact_digest" => {
+                value.clone_into(&mut header.artifact_digest);
+                seen |= 1;
+            }
+            "engine_version" => {
+                value.clone_into(&mut header.engine_version);
+                seen |= 2;
+            }
+            "target_triple" => {
+                value.clone_into(&mut header.target_triple);
+                seen |= 4;
+            }
+            "deterministic" => {
+                header.deterministic = match value {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(malformed(lineno, "`deterministic` must be true or false")),
+                };
+                seen |= 8;
+            }
+            "refused" => {
+                refused = value
+                    .parse()
+                    .map_err(|_| malformed(lineno, "`refused` is not a number"))?;
+                seen |= 16;
+            }
+            _ => return Err(malformed(lineno, "unknown header key")),
+        }
+    }
+    // All five, or the file is not one this format writes. A missing `deterministic` in particular
+    // would default to `false` and silently refuse a replay that should have been accepted.
+    if seen != 0b1_1111 {
+        return Err(malformed(1, "a required header key is missing"));
+    }
+    Ok((header, refused, body_start))
+}
+
+/// Parse the records, **re-deriving each chain rather than trusting the one written**.
+fn parse_records(all: &[&str], body_start: usize) -> Result<Vec<ReplayRecord>, ReplayError> {
+    let mut records: Vec<ReplayRecord> = Vec::new();
+    let mut previous = ReplayRecord::genesis_digest();
+    let mut seq_expected = 1u64;
+    for (idx, line) in all.iter().enumerate().skip(body_start) {
+        let lineno = idx + 1;
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(' ').collect();
+        if f.len() != 6 {
+            return Err(malformed(lineno, "a record needs six space-separated fields"));
+        }
+        let sequence: u64 = f[0]
+            .parse()
+            .map_err(|_| malformed(lineno, "the sequence is not a number"))?;
+        if sequence != seq_expected {
+            return Err(ReplayError::OutOfOrder);
+        }
+        let function = static_function(f[1])
+            .ok_or_else(|| malformed(lineno, "the function is not one this log may record"))?;
+        let value = ReplayValue::from_canonical(f[2], f[3])
+            .ok_or_else(|| malformed(lineno, "the value is not canonical for its kind"))?;
+        if f[4] != previous {
+            return Err(ReplayError::Discontinuous { line: lineno });
+        }
+        let rederived = ReplayRecord::compute_chain(&ReplayFields {
+            sequence,
+            function,
+            kind: value.kind(),
+            canonical: Cow::Owned(value.canonical()),
+            previous: &previous,
+        });
+        if rederived != f[5] {
+            return Err(ReplayError::Tampered { line: lineno });
+        }
+        records.push(ReplayRecord {
+            sequence,
+            function,
+            value,
+            previous: previous.clone(),
+            chain: rederived.clone(),
+        });
+        previous = rederived;
+        seq_expected += 1;
+    }
+    Ok(records)
+}
 
 /// A bounded, append-only, hash-chained log of the values an execution read.
 #[derive(Debug, Clone)]
@@ -799,6 +1096,157 @@ impl ReplayLog {
     pub(crate) fn records_mut_for_test(&mut self) -> &mut Vec<ReplayRecord> {
         &mut self.records
     }
+    /// The log as a text file — `DET-008`.
+    ///
+    /// # Why text and not a serialized struct
+    ///
+    /// Because this file is **evidence**, and evidence a reader cannot read is evidence a reader has to
+    /// take on trust. A JSON array of records would carry the same bytes and be diffable only by tooling;
+    /// a line per record is diffable by eye, which is what makes `--replay` reviewable in a pull request.
+    ///
+    /// # The format
+    ///
+    /// ```text
+    /// qqq-replay 1
+    /// artifact_digest sha256:9f2c...
+    /// engine_version 48.0.3
+    /// target_triple x86_64-pc-windows-msvc
+    /// deterministic true
+    /// refused 0
+    /// 1 clock.wall clock 7 <genesis> <chain>
+    /// 2 crypto.random random 5a5b <previous> <chain>
+    /// ```
+    ///
+    /// **The chain is written, not omitted.** A loader could re-derive it, and then an edited value
+    /// would produce a new internally consistent log -- so the file would say whatever its editor
+    /// wanted. [`Self::from_text`] compares the stored chain against a re-derived one instead.
+    ///
+    /// **`refused` is written because a truncated log that does not say so is indistinguishable from a
+    /// complete one** -- and the replay of a truncated log fails with [`ReplayError::Exhausted`] at a
+    /// line the reader cannot see coming.
+    #[must_use]
+/// ```
+/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+///
+/// let mut log = ReplayLog::new(
+///     ReplayHeader {
+///         artifact_digest: "sha256:9f2c".to_owned(),
+///         engine_version: "48.0.3".to_owned(),
+///         target_triple: "test".to_owned(),
+///         deterministic: true,
+///     },
+///     8,
+/// );
+/// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+/// let text = log.to_text();
+/// // Seven lines: the magic, five header keys, and one record. A count rather than a
+/// // substring, because the record line is `1 clock.wall clock 7 <prev> <chain>` and an
+/// // assertion on `"clock.wall 7"` fails on a file that is correct.
+/// assert_eq!(text.lines().count(), 7);
+/// assert!(text.starts_with("qqq-replay 1"));
+/// ```
+    pub fn to_text(&self) -> String {
+        let mut out = String::with_capacity(128 + self.records.len() * 96);
+        out.push_str(REPLAY_FILE_MAGIC);
+        out.push(' ');
+        out.push_str(&REPLAY_FILE_VERSION.to_string());
+        out.push('\n');
+        for (key, value) in [
+            ("artifact_digest", self.header.artifact_digest.as_str()),
+            ("engine_version", self.header.engine_version.as_str()),
+            ("target_triple", self.header.target_triple.as_str()),
+        ] {
+            out.push_str(key);
+            out.push(' ');
+            out.push_str(value);
+            out.push('\n');
+        }
+        out.push_str("deterministic ");
+        out.push_str(if self.header.deterministic {
+            "true"
+        } else {
+            "false"
+        });
+        out.push('\n');
+        out.push_str("refused ");
+        out.push_str(&self.counters.refused.to_string());
+        out.push('\n');
+        for r in &self.records {
+            let f = r.fields();
+            out.push_str(&f.sequence.to_string());
+            out.push(' ');
+            out.push_str(f.function);
+            out.push(' ');
+            out.push_str(f.kind);
+            out.push(' ');
+            out.push_str(&f.canonical);
+            out.push(' ');
+            out.push_str(&r.previous);
+            out.push(' ');
+            out.push_str(&r.chain);
+            out.push('\n');
+        }
+        out
+    }
+
+/// Read a log back, **verifying its chain against its own contents** — `DET-008`.
+///
+/// # Errors
+///
+/// [`ReplayError::Malformed`] for a line that cannot be parsed, [`ReplayError::Tampered`] for a record
+/// whose stored chain does not match a re-derived one, and [`ReplayError::Discontinuous`] for a
+/// `previous` that does not point at the record before it.
+///
+/// # Why the three are separate
+///
+/// Because they send a reader to different places. `Malformed` means the file is not this format;
+/// `Tampered` means it is, and its contents were changed after it was written; `Discontinuous` means a
+/// record was **removed** -- which is the edit a per-record chain check cannot see, because every
+/// remaining record still hashes to itself. **A deletion is the one edit that only the linkage
+/// catches.**
+///
+/// # Why the work is in three functions
+///
+/// Because this one was 124 lines and `clippy::too_many_lines` is a warning this workspace denies. The
+/// split is by *what is being parsed* rather than by line count: the magic, the header, and the records
+/// each refuse for their own reasons and each names its own line number. **A single function that did
+/// all three would still have had to report which of the three failed**, so the boundary was already
+/// there.
+///
+/// ```
+/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+///
+/// let mut log = ReplayLog::new(
+///     ReplayHeader {
+///         artifact_digest: "sha256:9f2c".to_owned(),
+///         engine_version: "48.0.3".to_owned(),
+///         target_triple: "test".to_owned(),
+///         deterministic: true,
+///     },
+///     8,
+/// );
+/// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+/// let text = log.to_text();
+/// let back = ReplayLog::from_text(&text).expect("a log it wrote");
+/// assert_eq!(back.records().len(), 1);
+/// assert_eq!(back.header().engine_version, "48.0.3");
+/// ```
+pub fn from_text(text: &str) -> Result<Self, ReplayError> {
+    let all: Vec<&str> = text.lines().collect();
+    parse_magic(&all)?;
+    let (header, refused, body_start) = parse_header(&all)?;
+    let records = parse_records(&all, body_start)?;
+    let recorded = records.len() as u64;
+    let capacity = records.len();
+    Ok(Self {
+        header,
+        records,
+        capacity,
+        counters: AppendCounters { recorded, refused },
+        cursor: 0,
+    })
+}
+
 }
 
 /// Hash one field with a length prefix, so the encoding is injective.
@@ -903,6 +1351,154 @@ mod tests {
         r.rewind();
         assert!(!r.is_exhausted());
         assert_eq!(r.next_record("clock.wall").unwrap(), first);
+    }
+
+    /// A two-record log, for the file-format tests.
+    fn two_record_log() -> ReplayLog {
+        let mut log = log(8);
+        log.record("clock.wall", ReplayValue::Clock(7))
+            .expect("room");
+        log.record("crypto.random", ReplayValue::Random(vec![0x5a, 0x5b]))
+            .expect("room");
+        log
+    }
+
+    /// **The round trip, and the reason the file exists at all.** A log written and read back must
+    /// carry the same header, the same values and the same refusals.
+    #[test]
+    fn a_log_round_trips_through_its_text_form() {
+        let written = two_record_log();
+        let text = written.to_text();
+        assert!(text.starts_with(REPLAY_FILE_MAGIC), "the magic leads");
+
+        let back = ReplayLog::from_text(&text).expect("a log this crate wrote");
+        assert_eq!(back.records().len(), 2);
+        assert_eq!(
+            back.header().engine_version,
+            written.header().engine_version
+        );
+        assert_eq!(back.header().deterministic, written.header().deterministic);
+        assert_eq!(back.records()[0].value, ReplayValue::Clock(7));
+        assert_eq!(
+            back.records()[1].value,
+            ReplayValue::Random(vec![0x5a, 0x5b])
+        );
+        assert_eq!(back.records()[0].chain, written.records()[0].chain);
+        assert_eq!(back.counters().recorded, 2);
+        assert!(back.verify().is_ok(), "the rebuilt log verifies");
+        // And it replays, which is what the file is for.
+        let mut r = back;
+        assert_eq!(
+            r.next_record("clock.wall").expect("recorded"),
+            ReplayValue::Clock(7)
+        );
+    }
+
+    /// **An edited value is refused.** This is the property that makes the file evidence: a loader
+    /// that re-derived the chain from whatever it read would accept this and produce a new, internally
+    /// consistent log.
+    #[test]
+    fn an_edited_value_is_refused_as_tampered() {
+        let text = two_record_log().to_text();
+        // Change the recorded instant from 7 to 8, leaving the chain as written.
+        let edited = text.replacen(" 7 ", " 8 ", 1);
+        assert_ne!(edited, text, "the edit must have landed");
+        assert!(
+            matches!(
+                ReplayLog::from_text(&edited),
+                Err(ReplayError::Tampered { .. })
+            ),
+            "an edited value must be refused, not silently re-chained"
+        );
+    }
+
+    /// **An edited linkage is refused.** A record whose `previous` was rewritten no longer points at
+    /// the record before it, and the per-record chain check cannot see this -- only the linkage can.
+    #[test]
+    fn an_edited_previous_pointer_is_refused() {
+        let text = two_record_log().to_text();
+        let lines: Vec<&str> = text.lines().collect();
+        let last = lines[lines.len() - 1];
+        let mut f: Vec<&str> = last.split(' ').collect();
+        assert_eq!(f.len(), 6, "six fields");
+        f[4] = "0000000000000000000000000000000000000000000000000000000000000000";
+        let edited = format!("{}\n{}\n", lines[..lines.len() - 1].join("\n"), f.join(" "));
+        assert!(
+            matches!(
+                ReplayLog::from_text(&edited),
+                Err(ReplayError::Discontinuous { .. })
+            ),
+            "a rewritten `previous` must be refused"
+        );
+    }
+
+    /// **A removed record is refused.** Every remaining record still hashes to itself, so the chain
+    /// check cannot see a deletion -- the sequence is what catches it.
+    #[test]
+    fn a_removed_record_is_refused() {
+        let text = two_record_log().to_text();
+        let lines: Vec<&str> = text.lines().collect();
+        // Drop the first record's line (index 6, after the magic and five header keys).
+        let mut kept: Vec<&str> = lines[..6].to_vec();
+        kept.extend_from_slice(&lines[7..]);
+        let edited = format!("{}\n", kept.join("\n"));
+        assert!(
+            matches!(ReplayLog::from_text(&edited), Err(ReplayError::OutOfOrder)),
+            "a deleted record must be refused"
+        );
+    }
+
+    /// **A file this crate did not write is refused by name**, rather than partially accepted.
+    #[test]
+    fn a_foreign_file_is_refused() {
+        assert!(matches!(
+            ReplayLog::from_text(""),
+            Err(ReplayError::Malformed { line: 1, .. })
+        ));
+        assert!(matches!(
+            ReplayLog::from_text("{\"records\": []}\n"),
+            Err(ReplayError::Malformed { line: 1, .. })
+        ));
+        assert!(matches!(
+            ReplayLog::from_text("qqq-replay 99\n"),
+            Err(ReplayError::Malformed { line: 1, .. })
+        ));
+    }
+
+    /// **A function this runtime does not have is refused.** Accepting an arbitrary name would have to
+    /// leak it to satisfy `&'static str`, so a long file could grow the process's memory.
+    #[test]
+    fn an_unknown_function_is_refused() {
+        let text = two_record_log()
+            .to_text()
+            .replace("clock.wall", "clock.fictional");
+        assert!(matches!(
+            ReplayLog::from_text(&text),
+            Err(ReplayError::Malformed { .. })
+        ));
+    }
+
+    /// **A truncated log says so in its own file.** A log that refused records is a partial recording,
+    /// and a reader who cannot see that would read `Exhausted` as a bug in the replay.
+    #[test]
+    fn a_truncated_log_records_its_refusals() {
+        let mut log = ReplayLog::new(header(), 1);
+        log.record("clock.wall", ReplayValue::Clock(1))
+            .expect("room");
+        assert!(log.record("clock.wall", ReplayValue::Clock(2)).is_err());
+        assert!(log.counters().has_gaps());
+
+        let text = log.to_text();
+        assert!(
+            text.contains("refused 1"),
+            "the file must say it is partial"
+        );
+        let back = ReplayLog::from_text(&text).expect("a log this crate wrote");
+        assert_eq!(back.counters().refused, 1);
+        assert!(
+            back.counters().has_gaps(),
+            "and a reader must be able to see it without parsing prose"
+        );
     }
 
     fn header() -> ReplayHeader {

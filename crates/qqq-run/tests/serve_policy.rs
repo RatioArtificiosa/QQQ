@@ -33,10 +33,11 @@
 //! have been accepted, which lets each test end by itself instead of by timeout — and a
 //! test that ends by timing out cannot tell "finished" from "stuck".
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// A scratch directory that is removed on drop.
@@ -144,6 +145,21 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
         // also why no `wait()` appears here for `clippy::zombie_processes` to find.
         let mut serving = Serving { child, port };
 
+        // **The announcement is the proof, so take the stdout before probing anything.**
+        //
+        // The reader runs on its own thread because `read_line` on a pipe has no timeout, and the
+        // deadline below is the only thing bounding this loop. The thread ends when the child's stdout
+        // closes, which `Serving`'s `Drop` causes by killing the child.
+        let stdout = serving
+            .child
+            .stdout
+            .take()
+            .unwrap_or_else(|| panic!("`qqqai serve` must have a piped stdout for {tag}"));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(announced_addr(stdout));
+        });
+
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             // # Why the child's liveness is checked, not only the port's
@@ -166,8 +182,22 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
             if let Ok(Some(_)) = serving.child.try_wait() {
                 break;
             }
-            if TcpListener::bind(("127.0.0.1", port)).is_err() {
-                return serving;
+            // **Both halves, and the second is the new one.** `try_wait()` above answers *"has our child
+            // exited"*; this answers *"has our child bound"*. Before this, a port held by a sibling
+            // test's server satisfied the check below while our own child was still starting, and the
+            // caller then spoke to a server it did not own.
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(addr)) => {
+                    // **The port the server reported, not the one we asked for.** They agree in the
+                    // ordinary case, and recording the reported one means a disagreement is data rather
+                    // than an assumption.
+                    serving.port = addr.port();
+                    return serving;
+                }
+                // The child's stdout closed without announcing, so it cannot ever announce.
+                Ok(None) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -181,6 +211,49 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
         );
     }
     unreachable!("the loop returns or panics on its final attempt")
+}
+
+/// The address the server announced on its stdout, or `None` if the child ended first.
+///
+/// # Why this exists rather than a `bind()` probe
+///
+/// **`bind().is_err()` proves *some* process holds the port, not that ours does**, and `cargo test` runs
+/// test binaries concurrently. Neither does `try_wait()`: it proves the child has not *exited*, which a
+/// child that is still starting also satisfies. The probe therefore needs a fact only **our** server can
+/// supply, and the server already emits one --
+///
+/// > *"A caller that guesses a port races with every other process on the machine; a caller that reads
+/// > this line does not."* (`crates/qqq-serve/src/server.rs`, `announce_bound`)
+///
+/// **Measured by running the binary rather than by reading it:** the line is JSON on **stdout**, its
+/// `msg` is `listening on 127.0.0.1:<port>`, and `--accept-limit 1` does not affect it. That last point is
+/// load-bearing: the earlier design note is right that a readiness *connect* consumes the accept budget,
+/// and reading a pipe consumes nothing.
+///
+/// # Why the address is taken as a character run and not a JSON field
+///
+/// Because the log format is configurable. A parser keyed on `"msg":"` would stop matching the day the
+/// format changed, and it would stop **silently** -- `§O-282`'s shape, a pattern that describes one
+/// rendering of a thing rather than the thing. `listening on ` is emitted for every format.
+fn announced_addr(stdout: ChildStdout) -> Option<std::net::SocketAddr> {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None; // the child's stdout closed, so it will never announce
+        }
+        let Some(rest) = line.split_once("listening on ").map(|(_, r)| r) else {
+            continue;
+        };
+        let addr: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | ':' | '[' | ']'))
+            .collect();
+        if let Ok(parsed) = addr.parse() {
+            return Some(parsed);
+        }
+    }
 }
 
 /// Send one raw request and return the raw response.

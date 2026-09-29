@@ -33011,6 +33011,156 @@ its inputs (`checklist-done`, `checklist-open`) already exist, and the two missi
 over them. **Until then this observation is the guard**, which is the weaker form this corpus keeps
 naming.
 
+## §O-433 — A fabricated identifier list, inside the checker written to prevent fabricated identifiers
+
+**`tools/check_done_lines.py`'s first version held a list of fifty-three checklist ids, and eight of them
+were measured.** The other forty-five were invented to fill the count: `SEC-007`, `SEC-014`, `SEC-022`,
+`SEC-024`, `SEC-030`, then `DET-001`, `DET-002`, `DET-007`, `TEST-001` through `TEST-018`, and a whole
+`LANG-` tail. The measured set shares **only its first eight ids** with the fabricated one.
+
+**This is `§O-126` again**, and the reproduction is the point. That observation's own words:
+
+> *"a docstring in `tools/` cited a Checklist item that does not exist … the identifier was invented, a
+> quotation was wrapped around it to look like a citation, and the same claim was repeated in a commit
+> message. Nothing caught it; it surfaced by luck when the item was being ticked and `grep` found
+> nothing."*
+
+**`tools/check_checklist_citations.py` exists because of it**, with an escape marker so the checker can
+describe the class it forbids without being an instance of it. **And this session's agent read that file,
+quoted its docstring in a report, and then fabricated forty-five ids in the same round.**
+
+### And the direction of the failure is the reason it matters
+
+**A list that is too large fails loudly.** A list that is wrong in *membership* is silent: an
+evidence-less item outside it is simply never reported, and the checker keeps printing `DONE LINES OK`.
+**The fabrication would have made the ratchet permanently too loose**, which is the quiet direction — the
+same asymmetry `§O-373` records for a zero and `§O-282` for a pattern.
+
+### What was built in response, rather than a correction
+
+Check [3] of the checker now refuses a list that disagrees with the corpus **in either direction**: an
+item in the list that has gained a `→ Done:` line is a failure, so the set ratchets downward and cannot be
+refreshed to the same size while changing membership. **The fabrication is what made the two-way check
+necessary** — one direction was enough for an honest list and not for a plausible one.
+
+**And the measured list is what replaced it**, obtained by the command in the checker's own header rather
+than by hand:
+
+```
+python -X utf8 -c "…"      # print every `[x]` item whose block has no `-> Done:` line
+53 ids: FND-010 DOC-018 ARCH-010 HOST-009 HOST-020 CON-006 CON-011 SEC-003 SEC-009 … OQ-007
+```
+
+## §O-434 — Nothing read a sentence: a duplicated clause passed every gate, and 53 ticks carry no evidence
+
+**`check_checklist_counts` counts items. `check_doc_claims` resolves numerals. Neither reads prose.**
+
+Measured, at `6abb862`: `TEST-008`'s `→ Done:` block held the **same seventy-nine-character sentence
+twice**, because an edit's anchor ended mid-sentence and its replacement reproduced past the end.
+
+```
+4424| **And the item requires deterministic metering** — the proposal's own footnote on this row —
+4425| which is `DET-002`'s virtual clock and `DET-009`'s 10,000-trial result.
+4426| metering** — the proposal's own footnote on this row — which is `DET-002`'s virtual clock and
+4427| `DET-009`'s 10,000-trial result. **The comparison is exact only because the counter is.**
+```
+
+**It rendered as a repeated clause and passed every gate**, because no gate reads a sentence. **That is the
+prose form of the defect this corpus names for figures** — *a number that cannot be compared is a number
+with no owner* — and the figure version has fourteen resolvers while the prose version had none.
+
+### And the second measurement, which is larger
+
+**53 of 248 ticked items (21%) have no `→ Done:` line at all.** They are not wrong: each was ticked before
+`→ Done:` became the convention, and each was ticked at a commit that carries its own evidence. **What was
+wrong is that the count only ever went one way and nothing reported it.**
+
+### What `tools/check_done_lines.py` asserts
+
+| check | why it cannot cry wolf |
+|---|---|
+| no `→ Done:` block repeats a line of ≥40 characters | **prose that says the same thing twice says it once too many.** Forty is chosen so a shared short fragment — an em-dash clause, a citation, a backticked identifier — is not flagged |
+| a ticked item with no evidence line fails | **ratcheted by an explicit list**, because a count says *how many* and a list says *which* |
+| the list must agree both ways | **or it can be refreshed to the same size while changing membership** |
+
+**And it found a real defect on its first run**: `DOC-015`'s block held a stray second copy of its own
+reference line, `→ §3.4 Positioning statement and the language we use`, once at the item's head and again
+at the block's end. Removed.
+
+**Exit: 0 ok, 1 a defect, 2 unreadable, 5 self-test failed. Eight self-test cases, all passing.**
+
+## §O-435 — "Cannot be run by the tool" is not "cannot be run": the `§O-424` conflation in a tick line
+
+**`§O-424` records that `qqqai run` cannot instantiate a `std` guest for `wasm32-wasip2`**, because no
+manifest in this repository grants the fourteen WASI interfaces its `std` imports, and `--cap` may only
+narrow.
+
+**`TEST-007`'s `→ Done:` line then used that to explain why a seam was unwitnessed** — *"a `std` guest
+cannot be instantiated (`§O-424`)"* — and the explanation was wrong in a way that cost a round.
+
+**`build_linker` registers `host_wasi` unconditionally**, and its own comment gives the reason: *"the
+authority that matters is withheld by the context … So this is not a hole in deny-by-default; it is where
+the deny is enforced."* **The context is the preopen set, not the registration.** So a `std` guest
+instantiates wherever a caller builds its own linker — which a test does — and the CLI is the only place it
+does not.
+
+### Measured
+
+`crates/qqq-host/tests/guest_assertions.rs` builds `examples/qqq-test`, instantiates it through
+`Instance::create_with` with the caller's own `TestState` attached, and calls its exported
+`run-assertions`. **Three cases pass in 0.32 s**, and the guest's `mark_fuel("block")` reaches the handle
+the test holds.
+
+**And the fourteen are confirmed from the guest side**, which is an independent count of the number
+`§O-424` gives:
+
+```
+$ wasm-tools component wit target/wasm32-wasip2/debug/qqq_test.wasm
+world root {
+  import qqq:test/assertions@1.0.0;
+  import wasi:io/poll@0.2.9;  import wasi:clocks/monotonic-clock@0.2.9;
+  import wasi:io/error@0.2.9; import wasi:io/streams@0.2.9;
+  import wasi:cli/stdout@0.2.9; … stderr, stdin, environment, exit,
+  import wasi:cli/terminal-input@0.2.9; … -output, -stdin, -stdout, -stderr
+  export run-assertions: func();
+}
+```
+
+### The general form
+
+**An observation that names a tool's limit is not an observation about the engine's.** The conflation is
+cheap to make because the limit and the capability sit in the same sentence — *the CLI refuses this
+guest* — and the correction is worth recording because **the next reader of `§O-424` will reach the same
+dead end**, and this session's agent reached it while holding that observation in context.
+
+## §O-436 — Five instances of one shape: a pattern wider than the thing it describes
+
+Each was found by a measurement disagreeing with an expectation, and each is the same mistake.
+
+| the pattern | the thing it described | the measurement |
+|---|---|---|
+| an anchor on `pub const fn with_test(…)` | that `fn` **and its doc comment**, which the anchor did not include | the inserted doc landed *between* the original doc and its `#[must_use]`, leaving the attribute on a comment — `unused attribute`. **The same shape cost `grants` its documentation in `linker.rs` and `replays` its doc in the same file** |
+| a source test counting `if store.data().test.is_none() {` | the guards, **and the test's own search string** | **7 guards for 6 registrations** — *a guard that matches its own explanation is a guard whose pattern describes the reader, not the code* |
+| a call-site test asserting `body.contains("stream_of(")` | the **call**, where the property is the **propagation** | an injection keeping the call and discarding its answer **was not detected** |
+| `stale = KNOWN_WITHOUT_DONE - evidenceless` | the **list**, where the rule is about the **file** | a fixture holding one id reported all fifty-three as stale, in four self-test cases |
+| a guard pattern written `letSomestate=…` | the code's `letSome(state)=…` | **0 guards against 6 registrations** — and a pattern that cannot match is indistinguishable from a file with no guards |
+| a file-wide search for a reference line | the **item's block**, where five items share that line | `expected 2, found 5` — and a deletion scoped to the file would have removed another item's reference |
+
+### What the last two have in common with the first three, and what changed
+
+**The first three were caught by the corpus or by CI. The last three were caught by a self-test, by an
+assertion written before the write, or by the checker's own rule.** *Five* of the six had the guard placed
+before the mutation, so the failure left the file untouched.
+
+**And the sixth is the reason to keep the guards**: the file-wide deletion would have removed a reference
+line belonging to a different item — a plausible, silent, wrong edit of exactly the kind this session's
+`→ Done:` corrections were made to repair.
+
+### The rule, stated so it can be applied rather than re-derived
+
+**Anchor on the smallest thing that is unique, assert the range before mutating, and prefer a measured
+coordinate to a quoted string — because a long anchor encodes a layout, and a layout is not a claim.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

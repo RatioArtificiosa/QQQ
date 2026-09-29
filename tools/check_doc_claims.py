@@ -247,8 +247,18 @@ def _checklist() -> dict[str, int]:
 def _observation() -> dict[str, int]:
     """The `\u00a7O` heading count and its highest id, from the register that owns them."""
     text = (ROOT / "QQQ-Observations-and-Memories.md").read_text(encoding="utf-8")
-    ids = [int(n) for n in re.findall(r"^## \u00a7O-(\d+)", text, re.M)]
-    return {"headings": len(set(ids)), "highest": max(ids) if ids else 0}
+    # **A heading, not a distinct number.** `\u00a7O-218f` is its own heading and is not `\u00a7O-218`, but the
+    # pattern captured only the digits and `len(set(...))` then collapsed the pair -- so the figure this
+    # key names under-reported by one per suffixed variant, in two documents, with a resolver as its
+    # owner. Capturing the full id counts headings; the numeric prefix still orders them.
+    # **A heading inside a code fence is a QUOTATION, not a heading.** `\u00a7O-403` quotes two real
+    # headings as examples, and counting them moved the register's own figure by three when one
+    # observation was added. `len(set(ids))` had hidden this: quoting an *existing* heading produced a
+    # number already in the set, so the count never moved. Correcting the count exposed it.
+    body = re.sub(r"(?ms)^```.*?^```", "", text)
+    full = re.findall(r"^## \u00a7O-(\d+[a-z]*)", body, re.M)
+    nums = [int(n) for n in re.findall(r"^## \u00a7O-(\d+)", body, re.M)]
+    return {"headings": len(full), "highest": max(nums) if nums else 0}
 
 
 RESOLVERS = {

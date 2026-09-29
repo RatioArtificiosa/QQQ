@@ -30564,6 +30564,164 @@ Three defects were found in one chain, and each concealed the next.
 
 **What the sequence cost, and what it bought.** Four commits — `5533089` (the truncation), `0273188` (the stream), `53176d6` (the product defect the fixed message revealed), `654bb38` (the `finally`). The middle one is the payoff: with a report that could show the tail **and** read the right stream, the bench immediately produced `error[QQQ-1001]: the build succeeded but no component was found in /tmp/…/app/target/wasm32-wasip2/release`, which named both the defect and the directory — `qqqai build` hard-coded `project/target` and ignored `CARGO_TARGET_DIR`. **A real product bug, reachable by any CI that sets a standard cargo variable, and invisible for as long as the report was broken.**
 
+## §O-401 — A declared reason is a claim, and the parity checker validated only that the divergence existed
+
+`tools/check_corpus_at_rest.py` was excluded from the bridge and declared in `docker/entrypoint.sh` with
+this reason:
+
+```
+#   tools/check_corpus_at_rest.py          verifies the documents' bytes against the COMMITTED
+#                                          digest file, so it needs a clean tree -- the same
+#                                          reason `audit_requirements.py` is on this list
+```
+
+**The bridge already guarantees a clean tree.** Its source guard exits `3` when a *tracked* file is
+modified, which is a stronger guarantee than a developer's working copy has. Measured inside the
+container on 2026-09-28, on a tree that `git status --porcelain` reports as empty:
+
+```
+===TREE===
+===CLEAN_IF_EMPTY_ABOVE===
+===CORPUS_AT_REST===
+  at rest  QQQ-Proposal-V1.md
+  at rest  QQQ-Checklist-V1.md
+  at rest  QQQ-Observations-and-Memories.md
+CORPUS AT REST -- 3 document(s) match their recorded digests
+EXIT=0
+```
+
+So the check **runs and passes in the bridge**, and the stated reason for excluding it was false.
+
+**What it cost.** On 2026-09-28 the `§O-400` edit landed without re-recording the corpus digest.
+`ci.yml` caught it; the bridge reported `BRIDGE_EXIT=0` for a tree CI would reject. That is `§O-383`
+-- *a green bridge is not a green CI* -- in the direction that makes the gate weaker rather than
+different. It is now in `entrypoint.sh`, immediately after `self_test_xrefs.py --check-clean`, under
+the comment that already reads *"Final word: the corpus is intact after everything that mutated it."*
+
+**Why the checker could not see it, which is the part worth keeping.** `check_gate_parity.py` has five
+rules, and the third is:
+
+> A declared entry that no longer diverges is a failure. An exclusion for a checker that has since
+> been added to both gates is a stale exemption.
+
+Its implementation is `if not hits:` -- **does the declared token still cover an actual divergence?**
+That is a test of **existence**. Nothing in the checker tests whether the **reason** given for a
+divergence is true, so an entry can diverge in form while its justification has become false, and
+every rule passes. **A declaration is a claim, and this one had no owner** (`§O-277`): the arithmetic
+was validated, the prose was not.
+
+**The general form.** A list of exemptions is a list of *promises that a weaker gate is justified*.
+Validating that the list is non-empty is not validating the promises. The next hardening is to give
+each entry a `requires:` tag from a closed vocabulary and have the checker verify the tag against what
+the bridge can actually provide -- `requires: clean-tree` would fail immediately, because the bridge
+provides exactly that. Recorded here rather than implemented, so the next agent knows the shape.
+
+**And the numbers in that header had no owner either.** The comment carried a **dated** measurement
+(*"Measured on 2026-09-25: `ci.yml` invoked 84 checker commands and this file invoked 65"*) followed by
+*"The remaining thirteen are listed below"* -- and after two were added on 2026-09-27 and one withdrawn
+on 2026-09-28, the list covers **14**. The dated figures stay, because *what changed and why* is what a
+number cannot carry; a line naming the command that re-derives the live totals was added beside them.
+Measured: **114** `ci.yml` invocations, **99** bridge invocations, **48** `tools/check_*.py`, **6**
+declared ci-only entries.
+
+
+## §O-402 — Two ways this harness lies about a count and about a read, both silently
+
+Neither is a defect in the repository. Both are defects in the **instrument**, and both cost real calls
+in the round that found `§O-401`.
+
+**1. `Measure-Object -Line` under-reports.** On `QQQ-Observations-and-Memories.md`:
+
+| method | result |
+|---|---|
+| `(Get-Content f).Count` | 30,574 |
+| `(Get-Content f \| Measure-Object -Line).Lines` | **22,942** |
+| Python `len(t.splitlines())` | 30,574 |
+| Python `t.count("\n")` | 30,574 |
+| `(Get-Item f).Length` | 1,699,529 bytes |
+
+Three methods agree and `Measure-Object -Line` disagrees, so the file is 30,574 lines and the cmdlet is
+wrong. **A counting tool that is confidently wrong is worse than no count**, because the wrong number is
+the one that gets written into a document and then into a claim.
+
+**2. A `pwsh` call that reads a UTF-8 file containing `§` without `-Encoding utf8` dies with NO OUTPUT
+and `exit code 1`.** Not an error message, not a partial result -- silence:
+
+```powershell
+$obs = Get-Content QQQ-Observations-and-Memories.md          # -> (no output) [exit code: 1]
+$n = (Select-String -Path QQQ-Observations-and-Memories.md -Pattern '^## §O-' -Encoding utf8).Count
+```
+
+The same file, the same pattern, one flag apart. This is `§O-268`'s and `§O-273`'s class -- the locale
+encoding -- but in the **shell** rather than in Python, and it fails in the mode that is hardest to
+diagnose: **the harness reports failure without saying what failed.** Two calls in this round were spent
+bisecting a command that had no error to show. The lesson is the one already in the corpus for Python:
+*an unstated encoding is a guess, and on this box the guess is wrong.*
+
+## §O-403 — An instrument that certifies a claim must be held to the standard of the claim, and two of ours read a code fence as content
+
+Three defects in the tooling that owns this register's own numbers, all found in one round, and the
+third was exposed by fixing the first.
+
+**1. The resolver counted distinct NUMBERS and called the result `headings`.** `check_doc_claims.py`
+exists so that a figure has an **owner** (`§O-277`, and the whole of `DoD #8`). Its `_observation()`
+resolver owned two figures, and read:
+
+```python
+ids = [int(n) for n in re.findall(r"^## §O-(\d+)", text, re.M)]
+return {"headings": len(set(ids)), "highest": max(ids) if ids else 0}
+```
+
+The register contains a suffixed variant id, `§O-218f`, whose heading sits beside `§O-218`. The pattern
+captures `218` from both and `len(set(...))` collapses the pair. Measured on 2026-09-28:
+
+| method | result |
+|---|---|
+| the resolver -- `len(set(ids))` | **231** |
+| counting `^## §O-` lines | **232** |
+| `re.findall(r'^## §O-(\d+)')` then `len(...)`, no `set()` | 232 |
+
+So the figure was **one short**, in **two documents** -- `docs/stability.md` and
+`docs/AGENT-HANDBOOK.md` -- for as long as a suffixed variant has existed.
+
+**2. Both the resolver and `check_xrefs.py` read a fenced code block as content.** Adding **one**
+observation moved the count by **three**: `232 -> 235`. The new entry quoted two headings as examples,
+inside a fence, and `^## §O-` matched them. `check_xrefs.py`'s rule `[14]` -- *an id must be unique* --
+reported the same two lines as duplicate **definitions**:
+
+```
+FAIL  [14] §O-218 is defined by 2 headings (lines 17791, 30677); an id must be unique
+FAIL  [14] §O-218f is defined by 2 headings (lines 17929, 30678); an id must be unique
+```
+
+**`len(set(ids))` had been hiding this.** Quoting an *existing* heading produced a number already in the
+set, so the count never moved and nobody saw it. **The old bug was masking the older bug**, and
+correcting the first made the second visible on the first observation that described the register rather
+than extending it. That is worth stating plainly: *fixing one defect in an instrument can reveal a
+second, and the second will look like the fix broke something.* It did not; it stopped hiding something.
+
+**Fixed here:** the resolver counts headings (`\d+[a-z]*`) and strips fenced blocks before counting, so
+it reports **233** and **403**; `check_xrefs.py --self-test` and `check_doc_claims.py --self-test` both
+pass; this entry quotes the headings as prose rather than as heading-shaped lines.
+**Still open:** `check_xrefs.py`'s **definition** detection does not strip fences. It is right to
+complain about what it sees -- two lines that both read as definitions -- but a checker that can be
+tripped by *quoting its own subject* has a pattern that describes the document rather than the
+definitions in it. The resolver's fix is the template; applying it there is the next round's work.
+
+**Why an owned-but-wrong number is worse than an unowned one.** A resolver is the mechanism that makes
+a written number trustworthy. When the resolver is itself wrong, the number acquires an owner who is
+**confidently incorrect** -- and because `check_doc_claims.py` **fails any document that disagrees with
+its resolver**, the wrong figure actively **suppresses** the right one. An unowned number can be
+corrected by anyone who measures. An owned-but-wrong number cannot be corrected at all until someone
+discovers that its owner is broken.
+
+**How it was found, which is the part worth repeating.** Not by reading the resolver. It was found by
+writing `§O-401` and `§O-402`, running `check_doc_claims.py`, and seeing it demand **231** while a
+one-line `re.findall` said **232**. **Two instruments disagreed, and the disagreement was the signal.**
+A single measurement would have been accepted. The same shape caught `§O-400`, where two readings of one
+failure -- one of them an artefact -- were what made the truth visible.
+
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -80,8 +80,18 @@ pub struct AuditedCall {
     pub function: &'static str,
     /// The interface it belongs to, as the linker names it.
     pub interface: &'static str,
-    /// The capability that must be granted for the guest to reach it.
-    pub capability: Capability,
+    /// The capability that must be granted for the guest to reach it, or `None`.
+    ///
+    /// # Why this is an `Option` and not a sentinel
+    ///
+    /// Because `qqq:test/assertions` is deliberately **not** capability-gated, and there is no
+    /// `Capability` that means "none" -- every variant names a real authority. A sentinel would be a
+    /// variant that lies about what it is.
+    ///
+    /// **`None` and [`Enforcement::Ungated`] travel together**, and
+    /// `an_ungated_row_carries_no_capability` asserts the pairing rather than leaving it to a reader
+    /// to notice. A row that said `None` with `PerFunction` would be describing a check on nothing.
+    pub capability: Option<Capability>,
     /// How the call-time check is enforced.
     pub enforced_by: Enforcement,
 }
@@ -117,6 +127,19 @@ pub enum Enforcement {
     /// read the store must move it to [`Self::PerFunction`] — a visible change
     /// to this table rather than an invisible one to a body.
     InterfaceGated,
+    /// The `func_wrap` is registered unconditionally and checks no capability, because the interface
+    /// gates nothing.
+    ///
+    /// # Why this is a variant and not an absence
+    ///
+    /// Because "no capability is involved" is a **claim about the call**, and the three gating
+    /// variants cannot make it. `qqq:test/assertions` is the first: an assertion interface is not a
+    /// capability a guest is granted or denied, and what decides whether a guest gets it is whether a
+    /// *runner* linked it -- `linker.rs` decides per-module, and a `serve` process must not link one.
+    ///
+    /// [`Enforcement::rechecks_each_call`] answers `false` here, and that is not a weakness: **an
+    /// ungated call re-checks nothing because it gates nothing.**
+    Ungated,
 }
 
 impl Enforcement {
@@ -145,62 +168,122 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 8] = [
+pub const AUDITED: [AuditedCall; 14] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
         interface: "qqq:clock/wall-clock@1.0.0",
-        capability: Capability::ClockWall,
+        capability: Some(Capability::ClockWall),
         enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_clock.rs",
         function: "resolution",
         interface: "qqq:clock/wall-clock@1.0.0",
-        capability: Capability::ClockWall,
+        capability: Some(Capability::ClockWall),
         enforced_by: Enforcement::InterfaceGated,
     },
     AuditedCall {
         file: "host_clock.rs",
         function: "timezone",
         interface: "qqq:clock/wall-clock@1.0.0",
-        capability: Capability::ClockWall,
+        capability: Some(Capability::ClockWall),
         enforced_by: Enforcement::InterfaceGated,
     },
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
         interface: "qqq:clock/monotonic-clock@1.0.0",
-        capability: Capability::ClockMonotonic,
+        capability: Some(Capability::ClockMonotonic),
         enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_clock.rs",
         function: "resolution",
         interface: "qqq:clock/monotonic-clock@1.0.0",
-        capability: Capability::ClockMonotonic,
+        capability: Some(Capability::ClockMonotonic),
         enforced_by: Enforcement::InterfaceGated,
     },
     AuditedCall {
         file: "host_crypto.rs",
         function: "get",
         interface: "qqq:crypto/random@1.0.0",
-        capability: Capability::CryptoRandom,
+        capability: Some(Capability::CryptoRandom),
         enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_crypto.rs",
         function: "digest",
         interface: "qqq:crypto/hashing@1.0.0",
-        capability: Capability::CryptoHash,
+        capability: Some(Capability::CryptoHash),
         enforced_by: Enforcement::ViaHelper,
     },
     AuditedCall {
         file: "host_crypto.rs",
         function: "digest-many",
         interface: "qqq:crypto/hashing@1.0.0",
-        capability: Capability::CryptoHash,
+        capability: Some(Capability::CryptoHash),
         enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "mark-fuel",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. Records the fuel *remaining* at a named mark, so a later reading subtracts.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "fuel-since",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. Reads the mark table and the live counter; an unknown mark is `no-fuel-baseline`.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "assert-fuel-below",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. The comparison the item names -- `TEST-008`'s ergonomic surface.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "assert-caps-only",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. A bound on what the guest **attempted**, read from the audit stream -- `TEST-007`.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "assert-no-capability",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. The strict form of the same query against a one-element set.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_test.rs",
+        function: "report",
+        interface: "qqq:test/assertions@1.0.0",
+        capability: None,
+        // No capability is required, and the reason is that one does not exist to require:
+        // an assertion interface is not a capability. It is linked when a runner drives the
+        // guest and not when a server does -- see `Enforcement::Ungated`. Appends a guest-evaluated assertion to the failure list, so one run reports every failure.
+        enforced_by: Enforcement::Ungated,
     },
 ];
 
@@ -605,18 +688,25 @@ fn function_name(body: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The real sources, read the same way the CI checker reads them.
+    /// The real sources, taken from `ARCH-003`'s registry rather than listed again.
+    ///
+    /// # Why this no longer names its files
+    ///
+    /// It used to be `["host_clock.rs", "host_crypto.rs", "host_secrets.rs"]`, and **that list is a
+    /// guard's width** -- the rule that a guard is only as wide as its file list. Adding `host_test.rs`
+    /// made the omission visible in the loud direction, where the scan found eight registrations and
+    /// the table listed fourteen. **The quiet direction is the one that matters**: a new host module
+    /// with registrations would be absent from the scan while every row about it stayed green, and
+    /// nothing would say so.
+    ///
+    /// `crate::arch003::HOST_SOURCES` is the one list. `every_host_module_is_scanned` asserts it is
+    /// complete against the directory, and it arrives through `include_str!` -- which its own doc
+    /// prefers to reading the disk, because *"the content is baked into the crate and cannot change
+    /// between a check and the code it is checking."*
     fn real_sources() -> Vec<(String, String)> {
-        ["host_clock.rs", "host_crypto.rs", "host_secrets.rs"]
+        crate::arch003::HOST_SOURCES
             .iter()
-            .filter_map(|name| {
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("src")
-                    .join(name);
-                std::fs::read_to_string(&path)
-                    .ok()
-                    .map(|text| ((*name).to_owned(), text))
-            })
+            .map(|(name, text)| ((*name).to_owned(), (*text).to_owned()))
             .collect()
     }
 
@@ -795,6 +885,28 @@ mod tests {
     /// The enforcement classification must be honest about which rows survive a
     /// mis-built linker.
     #[test]
+    /// **A row that requires no capability must not claim an enforcement that checks one.**
+    ///
+    /// `capability: None` and [`Enforcement::Ungated`] describe the same call from two sides, so a row
+    /// holding one without the other would be a claim this table cannot keep. **The pairing is the
+    /// invariant**, and asserting it here is what lets the two stay two fields rather than collapsing
+    /// into an enum that makes the mistake unrepresentable -- the rows are claims a reader checks, and
+    /// this is the check.
+    #[test]
+    fn an_ungated_row_carries_no_capability() {
+        for a in AUDITED.iter() {
+            assert_eq!(
+                a.capability.is_none(),
+                matches!(a.enforced_by, Enforcement::Ungated),
+                "`{}` in `{}` disagrees with itself: capability {:?}, enforced_by {:?}",
+                a.function,
+                a.file,
+                a.capability,
+                a.enforced_by
+            );
+        }
+    }
+
     fn the_enforcement_classification_separates_the_two_kinds_of_safety() {
         assert!(Enforcement::PerFunction.rechecks_each_call());
         assert!(Enforcement::ViaHelper.rechecks_each_call());
@@ -827,7 +939,9 @@ mod tests {
     /// premise.
     #[test]
     fn the_table_covers_every_capability_the_host_can_bind() {
-        let covered: BTreeSet<Capability> = AUDITED.iter().map(|a| a.capability).collect();
+        // `filter_map` drops the `None` rows, which is right: **a row requiring no capability
+        // covers none**, so an ungated row must not enter the set this assertion is about.
+        let covered: BTreeSet<Capability> = AUDITED.iter().filter_map(|a| a.capability).collect();
         for expected in [
             Capability::ClockWall,
             Capability::ClockMonotonic,
@@ -857,7 +971,7 @@ mod tests {
     fn the_hashing_functions_are_at_least_helper_checked() {
         for row in AUDITED
             .iter()
-            .filter(|a| a.capability == Capability::CryptoHash)
+            .filter(|a| a.capability == Some(Capability::CryptoHash))
         {
             assert!(
                 row.enforced_by.rechecks_each_call(),

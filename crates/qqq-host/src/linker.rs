@@ -78,6 +78,15 @@ pub struct StoreData {
     /// same wrong answer twice.
     pub grants: GrantSet,
 
+    /// The assertion state a test run accumulates, when one is attached — `TEST-007`, `TEST-008`.
+    ///
+    /// **Opt-in, for the same reason [`Self::audit`] is.** `Instance::create` is used by `qqqai run`,
+    /// by tests and by `qqq-debug`, and none of those should start keeping assertion state because the
+    /// interface happened to be linked. `InstanceOptions::test` is the opt-in, and `prepare` is where
+    /// the two meet — the one assembly step, so a field cannot be wired into one path and missed in
+    /// another.
+    pub test: Option<crate::host_test::TestState>,
+
     /// The resource limiter, applied to every store.
     ///
     /// # Why the limiter lives inside the store data
@@ -252,6 +261,7 @@ impl Default for StoreData {
             // No record unless one is attached; see the field's own doc for why `None` is
             // the honest default.
             audit: None,
+            test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
@@ -301,6 +311,7 @@ impl StoreData {
             // No record unless one is attached; see the field's own doc for why `None` is
             // the honest default.
             audit: None,
+            test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes: Vec::new(),
@@ -399,6 +410,7 @@ impl StoreData {
             // No record unless one is attached; see the field's own doc for why `None` is
             // the honest default.
             audit: None,
+            test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
             allowed_hashes,

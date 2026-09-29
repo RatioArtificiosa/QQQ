@@ -98,6 +98,7 @@ pub mod host_clock;
 pub mod host_crypto;
 mod host_http;
 pub mod host_secrets;
+pub mod host_test;
 mod host_wasi;
 pub mod instance;
 /// Calling a guest: the edge between the host and an application component.

@@ -769,6 +769,28 @@ impl AuditHandle {
             outcome,
         )
     }
+
+    /// Read every recorded capability use, for a caller with a reason to look.
+    ///
+    /// # Why a closure rather than a returned slice
+    ///
+    /// Because the records live behind a `Mutex`, and a slice handed back would have to outlive the
+    /// guard that protects them. The closure holds the lock for exactly as long as the read, which is
+    /// the only shape in which this can borrow safely.
+    ///
+    /// # Why `pub(crate)`
+    ///
+    /// For the reason [`Self::record`] gives, from the other side. The only caller is
+    /// [`crate::host_test`], which answers a test assertion about what the guest *did* -- and the
+    /// runner that owns the stream already holds the `Arc` and can read it directly. **A caller
+    /// outside this crate reading it would be building a report from rows it did not witness.**
+    pub(crate) fn with_records<R>(&self, f: impl FnOnce(&[AuditRecord]) -> R) -> R {
+        let stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(stream.records())
+    }
 }
 
 /// An append-only, hash-chained record of capability use — `CAP-015`.

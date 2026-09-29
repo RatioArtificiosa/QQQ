@@ -67,7 +67,7 @@
 /// module added to the tree without being added here is caught by
 /// [`every_host_module_is_scanned`], so the rule cannot silently apply to three
 /// files out of four.
-pub const HOST_MODULES: [&str; 5] = [
+pub const HOST_MODULES: [&str; 6] = [
     "host_clock.rs",
     "host_crypto.rs",
     "host_secrets.rs",
@@ -77,11 +77,23 @@ pub const HOST_MODULES: [&str; 5] = [
     // enforces starts with "every host module is scanned" -- an unlisted module
     // would escape the rule whether or not it happens to contain registrations.
     "host_wasi.rs",
-    // The only host module using `bindgen!` rather than `func_wrap`: `qqq:http`'s
-    // functions take records, which `func_wrap` cannot express. It registers through
-    // the generated `add_to_linker`, so like `host_wasi` it contributes no
+    // A host module using `bindgen!` rather than `func_wrap`: `qqq:http`'s functions
+    // take records, which `func_wrap` cannot express. It registers through the
+    // generated `add_to_linker`, so like `host_wasi` it contributes no
     // [`Registration`] of its own.
+    //
+    // That sentence used to begin "The only host module using `bindgen!`", and
+    // `host_test.rs` makes it false -- but not by being a second member of the same
+    // category. **It is a third one.** `qqq:test`'s functions return
+    // `result<_, assertion-error>`, whose error half a `func_wrap` closure cannot
+    // express (its `Err` is a trap), so the error *type* has to come from
+    // `bindgen!`; and three of its six functions read the **fuel counter**, which
+    // lives on the `Store` and not on `StoreData`, so the *registration* has to be
+    // `func_wrap` — a `bindgen!` host trait receives `&mut StoreData` and cannot
+    // reach it. It therefore contributes six [`Registration`]s where `host_http`
+    // contributes none.
     "host_http.rs",
+    "host_test.rs",
 ];
 
 /// How many host functions the tree registers.
@@ -103,7 +115,7 @@ pub const HOST_MODULES: [&str; 5] = [
 /// The number is not a transcription: [`registered_from_sources`] derives it from
 /// the source with the standard library available, and `arch012`'s
 /// both-directions scan independently confirms `AUDITED` matches the tree.
-pub const EXPECTED_REGISTRATIONS: usize = 8;
+pub const EXPECTED_REGISTRATIONS: usize = 14;
 
 /// Why a WIT-definition check could not be completed.
 ///
@@ -166,7 +178,7 @@ impl std::error::Error for Indeterminate {}
 /// Because `include_str!` is the compiler reading the file, so the content is
 /// baked into the crate and cannot change between a check and the code it is
 /// checking. It also means the scanner needs no I/O and can run anywhere.
-pub const HOST_SOURCES: [(&str, &str); 5] = [
+pub const HOST_SOURCES: [(&str, &str); 6] = [
     ("host_clock.rs", include_str!("host_clock.rs")),
     ("host_crypto.rs", include_str!("host_crypto.rs")),
     ("host_secrets.rs", include_str!("host_secrets.rs")),
@@ -174,6 +186,7 @@ pub const HOST_SOURCES: [(&str, &str); 5] = [
     // registers no `func_wrap` of its own.
     ("host_wasi.rs", include_str!("host_wasi.rs")),
     ("host_http.rs", include_str!("host_http.rs")),
+    ("host_test.rs", include_str!("host_test.rs")),
 ];
 
 /// A `func_wrap` registration found in a host module.

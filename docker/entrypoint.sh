@@ -937,6 +937,13 @@ cmd_checks() {
     # the divergence had accumulated without anyone deciding it.
     python3 tools/check_checklist_counts.py
     python3 tools/check_checklist_counts.py --self-test
+    # The same subject one level down: a `-> Done:` block that repeats a substantial line, or a ticked
+    # item with no evidence line. **`check_checklist_counts` counts items and `check_doc_claims` resolves
+    # numerals; neither reads prose** -- so a duplicated sentence rendered as a repeated clause and
+    # passed. The self-test fabricates both defects, and the 53 items ticked before the convention
+    # existed are listed by name so that list can only shrink.
+    python3 tools/check_done_lines.py
+    python3 tools/check_done_lines.py --self-test
     # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
     python3 tools/gen_backlog.py --check
     python3 tools/gen_backlog.py --self-test
@@ -1109,7 +1116,8 @@ cmd_checks() {
     git -c safe.directory="${WORKSPACE}" -C "${WORKSPACE}" archive --format=tar HEAD \
         | tar -x -C "${_eol_guard_dir}"
     for _t in check_error_catalogue check_glossary check_reconciliation check_wit_reference \
-              check_tombstones check_checklist_counts check_advisories check_verified_facts; do
+              check_tombstones check_checklist_counts check_done_lines check_advisories check_verified_facts; \
+                do
         ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/${_t}.py" --self-test >/dev/null )
     done
     if ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/normalize_eol.py" --check ); then

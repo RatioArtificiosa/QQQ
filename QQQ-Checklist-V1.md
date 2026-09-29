@@ -353,7 +353,6 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified: `python tools/check_xrefs.py` passes (§ references resolve, no new anchor
     duplicates), and `python tools/gen_llms_txt.py --check` confirms the generated index still
     matches the tree after the edit.
-  → §3.4 Positioning statement and the language we use
 - [x] **DOC-016** Publish `docs/verified-facts.md` as the live, dated register of external facts the project depends on, with a re-verification cadence.
   → Done: `docs/verified-facts.md` — **30 facts** from the Proposal's Appendix B, each
     with its verification method and a **re-verification cadence**.

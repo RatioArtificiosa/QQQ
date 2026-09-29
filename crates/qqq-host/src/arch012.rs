@@ -533,10 +533,19 @@ pub fn scan(file: &str, text: &str) -> Vec<Registered> {
         if !is_identifier(&name) {
             continue;
         }
-        let line = text[..text.len().saturating_sub(production.len() - *start)]
-            .matches('\n')
-            .count()
-            + 1;
+        // **Counted in `production`, whose line numbering is aligned with `text` on purpose.**
+        // `production_lines` pushes exactly one `\n` per input line -- including the comment lines it
+        // replaces with a bare newline -- so line `n` of `production` is line `n` of `text`.
+        //
+        // The previous version went the other way and derived a byte offset from the *lengths*:
+        // `text.len() - (production.len() - start)`. That is the same position only while everything
+        // after `start` is the same length in both strings, and it is not -- `production` has collapsed
+        // every comment line to one byte -- so the index was arbitrary. It panicked with `not a char
+        // boundary` the first time an edit moved it inside a multi-byte character, which is how a latent
+        // defect waits: it needed the file to change length, not to change meaning.
+        //
+        // A `match_indices` boundary is always a char boundary, so this cannot panic.
+        let line = production[..*start].matches('\n').count() + 1;
         let checks =
             body.contains("grants.grants(") || CHECKING_HELPERS.iter().any(|h| body.contains(h));
         out.push(Registered {

@@ -134,8 +134,23 @@ fn build_the_guest() -> Option<Vec<u8>> {
 
     // **The root Cargo actually wrote to.** `CARGO_TARGET_DIR` wins when it is set, which is every run
     // inside the bridge.
-    let root = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| crate_dir.join("target"), std::path::PathBuf::from);
+    //
+    // **A relative value is resolved against `crate_dir`, because that is what Cargo does.** The
+    // variable is relative to the *invocation's* working directory, and the `current_dir` above makes
+    // that `crate_dir`; resolving it against this test process instead names a directory Cargo never
+    // wrote to. That is what this did until the review caught it -- it traded a silent skip for a loud
+    // panic rather than for the right path, which is better and still wrong.
+    let root = match std::env::var_os("CARGO_TARGET_DIR") {
+        None => crate_dir.join("target"),
+        Some(dir) => {
+            let candidate = std::path::PathBuf::from(&dir);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                crate_dir.join(candidate)
+            }
+        }
+    };
     let artifact = root
         .join("wasm32-wasip2")
         .join("debug")

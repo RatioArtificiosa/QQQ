@@ -378,6 +378,13 @@ pub struct Metrics {
     fuel: AtomicU64,
     /// Executions that completed successfully.
     executions_ok: AtomicU64,
+    /// Executions for which fuel was **actually reported**.
+    ///
+    /// This is the denominator `cost_per_request` divides by, and it is deliberately not
+    /// `executions_ok`. Fuel accumulates only over metered executions, so dividing by every
+    /// successful one understates the cost whenever metering was off for part of the traffic --
+    /// silently, because both counters are individually correct.
+    executions_metered: AtomicU64,
     /// Traps, by bounded label.
     traps: [AtomicU64; TrapLabel::all().len()],
 
@@ -404,6 +411,7 @@ impl Metrics {
             acquire_latency: Histogram::new(),
             fuel: Z,
             executions_ok: Z,
+            executions_metered: Z,
             traps: [Z; TrapLabel::all().len()],
             peak_memory: Z,
             live_memory: Z,
@@ -473,6 +481,7 @@ impl Metrics {
     pub fn note_execution(&self, fuel: Option<u64>) {
         self.executions_ok.fetch_add(1, Ordering::Relaxed);
         if let Some(f) = fuel {
+            self.executions_metered.fetch_add(1, Ordering::Relaxed);
             let _ = self
                 .fuel
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(f));
@@ -562,6 +571,90 @@ impl Metrics {
         self.fuel.load(Ordering::Relaxed)
     }
 
+    /// Executions whose fuel was actually recorded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qqq_host::Metrics;
+    ///
+    /// let m = Metrics::new();
+    /// m.note_execution(None);
+    /// m.note_execution(Some(10));
+    /// assert_eq!(m.executions_ok(), 2);
+    /// assert_eq!(m.executions_metered(), 1, "only one of the two reported a delta");
+    /// ```
+    #[must_use]
+    pub fn executions_metered(&self) -> u64 {
+        self.executions_metered.load(Ordering::Relaxed)
+    }
+
+    /// The CPU cost of one request, derived from fuel.
+    ///
+    /// # Why the denominator is `executions_metered` and not `executions_ok`
+    ///
+    /// `fuel` accumulates only over executions that reported a delta. `executions_ok` counts every
+    /// successful execution. Dividing one by the other understates the cost whenever metering was
+    /// off for part of the traffic -- and it does so **silently**, because both counters are
+    /// individually correct. Measured by `execution_fuel_is_not_summed_when_unmetered`: after one
+    /// unmetered and one metered execution the naive quotient is `1000 / 2 = 500`, while the true
+    /// per-metered-request cost is `1000 / 1 = 1000`.
+    ///
+    /// # Why `None` rather than zero
+    ///
+    /// No metered execution is not a cost of zero; it is the absence of a measurement. `§O-258`:
+    /// a budget that hides a shortfall is worse than one that shows it, and a zero here would be a
+    /// shortfall reported as a perfect result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qqq_host::Metrics;
+    ///
+    /// let m = Metrics::new();
+    /// m.note_execution(Some(1_000));
+    /// m.note_execution(Some(3_000));
+    /// assert_eq!(m.cost_per_request(), Some(2_000), "4000 over the 2 metered executions");
+    /// ```
+    ///
+    /// With nothing metered there is no measurement to report, which is not a cost of zero:
+    ///
+    /// ```
+    /// use qqq_host::Metrics;
+    ///
+    /// let m = Metrics::new();
+    /// m.note_execution(None);
+    /// assert_eq!(m.cost_per_request(), None);
+    /// ```
+    #[must_use]
+    pub fn cost_per_request(&self) -> Option<u64> {
+        let metered = self.executions_metered();
+        (metered > 0).then(|| self.fuel() / metered)
+    }
+
+    /// The share of successful executions whose fuel was recorded, in basis points.
+    ///
+    /// A cost-per-request figure is only as meaningful as this number. At 10,000 it describes all
+    /// traffic; at 300 it describes a sample; at zero, `cost_per_request` is `None`. It is reported
+    /// beside the cost rather than folded into it, because the two answer different questions --
+    /// *what does a request cost* and *how much of the traffic does that answer cover*.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qqq_host::Metrics;
+    ///
+    /// let m = Metrics::new();
+    /// m.note_execution(Some(1));
+    /// m.note_execution(None);
+    /// assert_eq!(m.metering_coverage_bps(), Some(5_000), "one of two executions was measured");
+    /// ```
+    #[must_use]
+    pub fn metering_coverage_bps(&self) -> Option<u64> {
+        let ok = self.executions_ok();
+        (ok > 0).then(|| self.executions_metered().saturating_mul(10_000) / ok)
+    }
+
     /// Successful executions.
     #[must_use]
     pub fn executions_ok(&self) -> u64 {
@@ -622,7 +715,13 @@ impl Metrics {
 
     /// Write every counter, including the ones still at zero.
     fn write_counters(&self, out: &mut String) {
-        let counters: [(&str, &str, u64); 7] = [
+        // **No explicit length.** This was `[(&str, &str, u64); 7]`, and adding
+        // `qqq_execution_metered_total` made it eight -- which the compiler caught, but as a *type
+        // error* rather than as a missing metric. The size is a second copy of a fact the array
+        // already carries, and a hand-maintained count is exactly what `§O-277` is about: it has to
+        // be kept in step by hand, and nothing derives it. Inferred, the list maintains itself and
+        // a new counter is one edit.
+        let counters = [
             (
                 "qqq_instance_created_total",
                 "Instances instantiated from scratch.",
@@ -657,6 +756,11 @@ impl Metrics {
                 "qqq_execution_fuel_total",
                 "Fuel consumed by guest execution.",
                 self.fuel(),
+            ),
+            (
+                "qqq_execution_metered_total",
+                "Executions whose fuel was actually recorded, and which `cost_per_request` divides by.",
+                self.executions_metered(),
             ),
         ];
         for (name, help, value) in counters {
@@ -917,6 +1021,82 @@ mod tests {
         h.observe(100);
         h.observe(250);
         assert_eq!(h.sum(), 350);
+    }
+
+    /// `PERF-025`: the per-request cost must divide over the METERED population.
+    ///
+    /// # The defect this test exists for
+    ///
+    /// `fuel` accumulates only over metered executions; `executions_ok` counts every successful one.
+    /// The naive quotient `fuel() / executions_ok()` is therefore wrong whenever metering was off
+    /// for part of the traffic -- and wrong in the direction that **flatters** the result, which is
+    /// the direction that stops work (`§O-258`).
+    ///
+    /// # Why it asserts the naive answer is different
+    ///
+    /// Because asserting only that `cost_per_request() == Some(1_000)` would pass for an
+    /// implementation that happened to divide by the metered count by accident. Naming `500` as the
+    /// value that must **not** be returned is what makes this a test of the denominator rather than
+    /// of the arithmetic.
+    #[test]
+    fn cost_per_request_divides_by_the_metered_count_not_the_successful_one() {
+        let m = Metrics::new();
+        m.note_execution(None);
+        m.note_execution(Some(1_000));
+        m.note_execution(Some(3_000));
+
+        assert_eq!(m.executions_ok(), 3, "every execution counts as successful");
+        assert_eq!(m.executions_metered(), 2, "only two reported a fuel delta");
+        assert_eq!(m.fuel(), 4_000);
+
+        assert_eq!(
+            m.cost_per_request(),
+            Some(2_000),
+            "4000 over the 2 metered executions"
+        );
+        assert_ne!(
+            m.cost_per_request(),
+            Some(1_333),
+            "1333 is what dividing by all 3 successful executions gives, and it is wrong"
+        );
+    }
+
+    /// No metered execution is the absence of a measurement, not a cost of zero.
+    #[test]
+    fn cost_per_request_is_none_when_nothing_was_metered() {
+        let m = Metrics::new();
+        m.note_execution(None);
+        m.note_execution(None);
+
+        assert_eq!(m.executions_ok(), 2);
+        assert_eq!(m.executions_metered(), 0);
+        assert_eq!(m.fuel(), 0);
+        assert_eq!(
+            m.cost_per_request(),
+            None,
+            "zero metered executions is not a cost of zero -- a zero here would be a shortfall \
+             reported as a perfect result"
+        );
+        assert_eq!(m.metering_coverage_bps(), Some(0));
+    }
+
+    /// The coverage figure says how much of the traffic the cost actually describes.
+    #[test]
+    fn metering_coverage_reports_the_share_of_traffic_that_was_measured() {
+        let m = Metrics::new();
+        for _ in 0..3 {
+            m.note_execution(Some(10));
+        }
+        m.note_execution(None);
+
+        assert_eq!(m.executions_ok(), 4);
+        assert_eq!(m.executions_metered(), 3);
+        assert_eq!(
+            m.metering_coverage_bps(),
+            Some(7_500),
+            "three of four executions were measured, so the cost describes 75% of the traffic"
+        );
+        assert_eq!(m.cost_per_request(), Some(10));
     }
 
     #[test]

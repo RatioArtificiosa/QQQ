@@ -30897,6 +30897,69 @@ one here** -- the failure mode is that a *correct* tool is read as broken, which
 the wrong direction. The rule already says *grep for the verdict*; the sharper form is that **an exit
 code read through a truncated pipeline is not an exit code.**
 
+## §O-407 — The metric is right, and nothing feeds it; and the goal's premise that "fuel is already metered" was half true
+
+`PERF-025` is implemented in `crates/qqq-host/src/metrics.rs`. The registry already had the two totals
+`fuel()` and `executions_ok()`, and its own doc comment named the hazard:
+
+    `fuel` is `None` when metering was disabled, which is a different fact from "zero fuel consumed"
+    and must not be summed as zero.
+
+and `metrics.rs`'s `execution_fuel_is_not_summed_when_unmetered` measured it:
+
+    m.note_execution(None);          // executions_ok = 1, fuel = 0
+    m.note_execution(Some(1_000));   // executions_ok = 2, fuel = 1_000
+
+**So the naive `fuel() / executions_ok()` returns 500 where the true per-metered-request cost is 1_000** --
+and it is wrong in the direction that flatters the result, which is the direction that stops work
+(`§O-258`). What is added is the denominator the arithmetic actually needs:
+
+| | |
+|---|---|
+| `executions_metered` | executions whose fuel was **actually reported** |
+| `cost_per_request()` | `fuel / executions_metered`, or **`None`** when nothing was metered |
+| `metering_coverage_bps()` | metered / successful, in basis points -- how much of the traffic the cost describes |
+| `qqq_execution_metered_total` | the new Prometheus counter |
+
+**Fault-injected in both directions**, and the shape of the result matters: with the denominator made
+naive, `cargo test` reported **`19 passed; 3 failed`** -- exactly the three tests added, and no others.
+A defect that breaks one test while others still pass is a set of tests each holding its own property;
+one that breaks everything is a set of tests that are entangled. **All three of the new methods also
+carry doctests**, because `check_api_examples.py --allow N` passes at N or fewer *undocumented* items and
+the recorded convention is never to raise that allowance -- so an example is part of the change rather
+than an afterthought.
+
+**And then the measurement that matters more than the implementation.** `note_execution` is called from
+**nothing but its own tests**:
+
+```
+=== is note_execution called from a non-test, non-doc site? ===
+crates/qqq-serve/src/lifecycle.rs:91://! [a doc comment only]
+```
+
+`crates/qqq-serve/src/lifecycle.rs` already says so in prose: *"[it] records fuel delta, traps and peak
+memory. **They are two registries, not one**, and nothing joins them, so a request's fuel cost and its
+latency are recorded in different places."* So in the served path `fuel()` is **always 0** and
+`cost_per_request()` is **always `None`**.
+
+**`None` is the correct answer to that, and this is the first real use of the design.** A metric that
+returned `0` would report *"cost per request: zero"* for a system that never measures -- a shortfall
+reported as a perfect result. `None` says *there is no measurement*, which is the truth, and
+`metering_coverage_bps() == Some(0)` says why.
+
+**Which corrects the goal's own premise.** It reads: *"PERF-025 is honest and buildable: fuel is already
+metered, so cost-per-request is a subtraction."* Measured: **fuel is metered but not recorded.**
+`HOST-006` (*"Implement fuel metering for exact accounting"*) is `[x]` and the metering is real --
+`Instance::fuel_consumed()` exists and is tested -- but the *recording* of it into the registry is
+unwired, so `PERF-025` is a subtraction between a correct numerator and a denominator that production
+never increments. **The brief is a hypothesis; the tree is the evidence**, and the tree says the gap is
+one layer below where the goal expected it.
+
+**A small one alongside it.** `write_counters` declared `let counters: [(&str, &str, u64); 7] = [`, and
+adding an eighth counter made the compiler report a **type error** rather than a missing metric. The size
+is a second copy of a fact the array already carries -- a hand-maintained count of the kind `§O-277` is
+about -- so it is inferred now and a new counter is one edit.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

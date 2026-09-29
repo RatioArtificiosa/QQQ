@@ -1364,6 +1364,135 @@ mod tests {
     /// The regression test for the defect that removed the second mapping. It
     /// lives here as well as in `commands.rs` because `run`'s remediation is
     /// where the wrong answer reached a user.
+    /// A run with neither replay flag gets no endpoints at all, so `InstanceOptions::default()` is what
+    /// an ordinary `qqqai run` still passes and no evidence file is written unasked.
+    #[test]
+    fn no_replay_flags_means_no_endpoints() {
+        let opts = RunOptions::default();
+        let (sink, source) = replay_endpoints(&opts, "sha256:abc").expect("no flags, no failure");
+        assert!(sink.is_none(), "a sink is opt-in");
+        assert!(source.is_none(), "and so is a source");
+    }
+
+    /// **The header names the artifact and the engine rather than the user** — `DET-010`.
+    ///
+    /// Three of the four comparability inputs come from the component and the build, and this asserts the
+    /// two that a caller supplies: the digest it was handed, and the triple compiled in. **A header a user
+    /// could fill in is a header a user could fill in wrongly**, and its whole purpose is to be believed.
+    #[test]
+    fn the_replay_sink_header_names_the_artifact_and_the_engine() {
+        let opts = RunOptions {
+            deterministic: true,
+            replay_log: Some(temp_dir("replay-header").join("one.replay")),
+            ..RunOptions::default()
+        };
+        let (sink, source) = replay_endpoints(&opts, "sha256:9f2c").expect("a sink");
+        assert!(source.is_none());
+        let log = sink.expect("a sink was asked for");
+        let log = log.lock().expect("log");
+        assert_eq!(log.header().artifact_digest, "sha256:9f2c");
+        assert_eq!(
+            log.header().engine_version,
+            qqq_host::config::ENGINE_VERSION
+        );
+        assert_eq!(log.header().target_triple, qqq_host::config::TARGET_TRIPLE);
+        assert!(log.header().deterministic);
+        // And the triple is a real triple, not a `cfg` approximation: `x86_64-windows` would be missing
+        // the vendor and the ABI, which is exactly what makes a `.cwasm` valid or not.
+        assert!(
+            log.header().target_triple.matches('-').count() >= 2,
+            "a triple has at least arch-vendor-os, got `{}`",
+            log.header().target_triple
+        );
+    }
+
+    /// A file this crate wrote is accepted, and the values come back.
+    #[test]
+    fn a_written_log_replays_through_the_source() {
+        let dir = temp_dir("replay-source");
+        let path = dir.join("one.replay");
+        let opts = RunOptions {
+            deterministic: true,
+            replay_log: Some(path.clone()),
+            ..RunOptions::default()
+        };
+        let (sink, _) = replay_endpoints(&opts, "sha256:9f2c").expect("a sink");
+        // Bound once: `Option::expect` consumes, and calling it twice was the first version's error.
+        let sink = sink.expect("a sink");
+        sink.lock()
+            .expect("log")
+            .record("clock.wall", qqq_host::replay::ReplayValue::Clock(7))
+            .expect("room");
+        let text = sink.lock().expect("log").to_text();
+        std::fs::write(&path, text.as_bytes()).expect("write");
+
+        let replay_opts = RunOptions {
+            deterministic: true,
+            replay: Some(path),
+            ..RunOptions::default()
+        };
+        let (sink, source) = replay_endpoints(&replay_opts, "sha256:9f2c").expect("a source");
+        assert!(sink.is_none(), "replaying is not recording");
+        let source = source.expect("a source");
+        assert_eq!(
+            source
+                .lock()
+                .expect("log")
+                .next_record("clock.wall")
+                .expect("recorded"),
+            qqq_host::replay::ReplayValue::Clock(7)
+        );
+    }
+
+    /// **A file that does not verify is refused, and the message says why.** The chain is re-derived on
+    /// load, so an edit is a failure here rather than a run that silently reproduces something else.
+    #[test]
+    fn a_tampered_log_is_refused_with_its_cause() {
+        let dir = temp_dir("replay-tampered");
+        let path = dir.join("one.replay");
+        let opts = RunOptions {
+            deterministic: true,
+            replay_log: Some(path.clone()),
+            ..RunOptions::default()
+        };
+        let (sink, _) = replay_endpoints(&opts, "sha256:9f2c").expect("a sink");
+        let log = sink.expect("a sink");
+        log.lock()
+            .expect("log")
+            .record("clock.wall", qqq_host::replay::ReplayValue::Clock(7))
+            .expect("room");
+        // Edit the value and leave the chain as written.
+        let edited = log.lock().expect("log").to_text().replacen(" 7 ", " 8 ", 1);
+        assert!(edited.contains(" 8 "), "the edit must have landed");
+        std::fs::write(&path, edited.as_bytes()).expect("write");
+
+        let replay_opts = RunOptions {
+            deterministic: true,
+            replay: Some(path),
+            ..RunOptions::default()
+        };
+        let err = replay_endpoints(&replay_opts, "sha256:9f2c").expect_err("a tampered file");
+        let rendered = err.render();
+        assert!(
+            rendered.contains("chain") || rendered.contains("edited"),
+            "the refusal must name the edit, got: {rendered}"
+        );
+    }
+
+    /// A path that cannot be read is a failure, not a silent `None`.
+    #[test]
+    fn an_unreadable_replay_path_is_refused() {
+        let opts = RunOptions {
+            deterministic: true,
+            replay: Some(temp_dir("replay-missing").join("nothing.replay")),
+            ..RunOptions::default()
+        };
+        assert!(
+            replay_endpoints(&opts, "sha256:9f2c").is_err(),
+            "a missing file must fail rather than run against the real clock"
+        );
+    }
+
     #[test]
     fn the_clock_halves_do_not_collapse() {
         assert_eq!(

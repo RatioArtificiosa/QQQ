@@ -122,7 +122,7 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 if !store.data().grants.grants(Capability::ClockWall) {
                     return Err(denied(Capability::ClockWall));
                 }
-                Ok((store.data().ambient.now_nanos(),))
+                Ok((store.data().ambient.read_wall_nanos()?,))
             })
         },
     )?;
@@ -164,7 +164,7 @@ fn register_monotonic_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<
                 if !store.data().grants.grants(Capability::ClockMonotonic) {
                     return Err(denied(Capability::ClockMonotonic));
                 }
-                Ok((store.data().ambient.elapsed_nanos(),))
+                Ok((store.data().ambient.read_monotonic_nanos()?,))
             })
         },
     )?;

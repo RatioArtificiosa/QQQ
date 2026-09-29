@@ -123,6 +123,21 @@ pub struct AmbientState {
     /// file.** [`Self::with_replay`] is the opt-in, mirroring
     /// `Instance::create_with_audit`.
     replay: Option<Arc<Mutex<ReplayLog>>>,
+    /// The log a run is **replaying**, when `--replay` was given — `DET-008`.
+    ///
+    /// # Why this is separate from [`Self::replay`]
+    ///
+    /// Because they are opposite directions and a run does one or the other. `replay` is a sink the
+    /// live path writes to; this is a source the replayed path reads from. **A single field would make
+    /// "record" and "replay" the same state, and a run that both read from and wrote to one log would
+    /// produce a file that describes itself.**
+    ///
+    /// # Why attaching this changes every read
+    ///
+    /// Because that is what a replay *is*. [`Self::with_replay_source`] is the opt-in, and every read
+    /// then consults the cursor instead of the clock — through one decision point per read, so the two
+    /// modes cannot drift.
+    replay_source: Option<Arc<Mutex<ReplayLog>>>,
 }
 
 /// The floor the host reports as its real-time clock resolution.
@@ -157,7 +172,136 @@ impl AmbientState {
             max_random_bytes: DEFAULT_MAX_RANDOM_BYTES,
             origin: OnceLock::new(),
             replay: None,
+            replay_source: None,
         }
+    }
+
+    /// Attach a log to **replay from** — `DET-008`.
+    ///
+    /// # Why this refuses outside deterministic mode
+    ///
+    /// Because a replayed run must build the same engine configuration the recorded one did, or the
+    /// values it feeds back describe a different engine. The header carries `deterministic` for this
+    /// reason, and [`Self::replay_mismatches`] is how a caller can say *which* field differs.
+    ///
+    /// # Why it also refuses when a sink is attached
+    ///
+    /// Because recording while replaying would append the replayed values to the log being read,
+    /// which grows it as it is consumed and makes `is_exhausted` depend on how far the reader got.
+    /// **The two directions are mutually exclusive by construction rather than by convention.**
+    #[must_use]
+    pub fn with_replay_source(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
+        if self.deterministic && self.replay.is_none() {
+            self.replay_source = Some(log);
+        }
+        self
+    }
+
+    /// Whether this state is replaying a recorded run.
+    #[must_use]
+    pub fn has_replay_source(&self) -> bool {
+        self.replay_source.is_some()
+    }
+
+    /// Read the next recorded value for `function`, or `None` when this is a live run.
+    ///
+    /// # Why this is the single decision point
+    ///
+    /// Because the recording and the replaying have to agree about *which read this is*, and two
+    /// functions that each decided independently would be two places a future change could miss. Every
+    /// read below calls this first.
+    ///
+    /// A poisoned lock becomes [`crate::replay::ReplayError::ChainBroken`] rather than being ignored:
+    /// unlike [`Self::note`], this path is what the guest's value *comes from*, and returning a
+    /// fabricated one would be the failure the whole mechanism exists to prevent.
+    fn next_replayed(
+        &self,
+        function: &'static str,
+    ) -> Option<Result<crate::replay::ReplayValue, crate::replay::ReplayError>> {
+        let source = self.replay_source.as_ref()?;
+        Some(match source.lock() {
+            Ok(mut log) => log.next_record(function),
+            Err(_) => Err(crate::replay::ReplayError::ChainBroken),
+        })
+    }
+
+    /// The wall clock, replaying if a source is attached — `DET-002` and `DET-008`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::replay::ReplayError`] when replaying and the log is exhausted, or when its next record
+    /// is for a different function. **Both are errors rather than fallbacks**, so a replayed run that
+    /// diverged from its recording stops instead of continuing against a real clock.
+    pub fn read_wall_nanos(&self) -> Result<u64, crate::replay::ReplayError> {
+        if let Some(next) = self.next_replayed("clock.wall") {
+            return match next? {
+                crate::replay::ReplayValue::Clock(v) => Ok(v),
+                other => Err(crate::replay::ReplayError::Unexpected {
+                    expected: "clock.wall",
+                    // A value whose kind does not match the function it was recorded under. The
+                    // function names already agree, so the log is internally inconsistent.
+                    found: other.kind(),
+                }),
+            };
+        }
+        let value = self.live_wall_nanos();
+        self.note("clock.wall", crate::replay::ReplayValue::Clock(value));
+        Ok(value)
+    }
+
+    /// The monotonic clock, replaying if a source is attached.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_wall_nanos`].
+    pub fn read_monotonic_nanos(&self) -> Result<u64, crate::replay::ReplayError> {
+        if let Some(next) = self.next_replayed("clock.monotonic") {
+            return match next? {
+                crate::replay::ReplayValue::Clock(v) => Ok(v),
+                other => Err(crate::replay::ReplayError::Unexpected {
+                    expected: "clock.monotonic",
+                    found: other.kind(),
+                }),
+            };
+        }
+        let value = self.live_monotonic_nanos();
+        self.note("clock.monotonic", crate::replay::ReplayValue::Clock(value));
+        Ok(value)
+    }
+
+    /// Random bytes, replaying if a source is attached.
+    ///
+    /// # Errors
+    ///
+    /// [`RandomFailure::Replay`] when replaying and the log cannot supply the bytes, and the live
+    /// failures otherwise.
+    pub fn read_random(&self, len: u32) -> Result<Vec<u8>, RandomFailure> {
+        if let Some(next) = self.next_replayed("crypto.random") {
+            return match next.map_err(RandomFailure::Replay)? {
+                crate::replay::ReplayValue::Random(bytes) => {
+                    // **The recorded length is checked against the request**, because a log that
+                    // supplies 8 bytes for a 32-byte request would hand the guest a short buffer --
+                    // which is a correctness failure the guest cannot see.
+                    if bytes.len() == len as usize {
+                        Ok(bytes)
+                    } else {
+                        Err(RandomFailure::Replay(
+                            crate::replay::ReplayError::Unexpected {
+                                expected: "crypto.random",
+                                found: "crypto.random (wrong length)",
+                            },
+                        ))
+                    }
+                }
+                other => Err(RandomFailure::Replay(
+                    crate::replay::ReplayError::Unexpected {
+                        expected: "crypto.random",
+                        found: other.kind(),
+                    },
+                )),
+            };
+        }
+        self.random_bytes(len)
     }
 
     /// Attach a replay log, so every nondeterministic read is recorded — `DET-007`.
@@ -231,28 +375,78 @@ impl AmbientState {
         self.max_random_bytes
     }
 
-    /// The current virtual time, in nanoseconds since the epoch.
+    /// The wall clock **without consulting a replay source** — the computation itself.
     ///
-    /// In deterministic mode: the fixed instant plus `ticks` advances.
-    /// Otherwise: the real system clock.
-    ///
-    /// **The value is recorded before it is returned**, so a replay reproduces
-    /// what the guest saw rather than recomputing it — `DET-007`.
-    #[must_use]
-    pub fn now_nanos(&self) -> u64 {
-        let value = if self.deterministic {
+    /// Split out so [`Self::read_wall_nanos`] and [`Self::now_nanos`] share one definition of what the
+    /// virtual clock *is*. Two copies would be two places a change to `tick_nanos` could miss.
+    fn live_wall_nanos(&self) -> u64 {
+        if self.deterministic {
             let ticks = self.ticks.load(Ordering::Relaxed);
             self.fixed_nanos
                 .saturating_add(self.tick_nanos.saturating_mul(ticks))
         } else {
             match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 Ok(d) => u64::try_from(d.as_nanos()).unwrap_or(u64::MAX),
-                // A clock before 1970 means the system clock is wrong. Report
-                // the epoch rather than wrapping to a huge value, which a guest
-                // might store.
+                // A clock before 1970 means the system clock is wrong. Report the epoch rather than
+                // wrapping to a huge value, which a guest might store.
                 Err(_) => 0,
             }
-        };
+        }
+    }
+
+    /// The monotonic clock **without consulting a replay source**.
+    fn live_monotonic_nanos(&self) -> u64 {
+        if self.deterministic {
+            let ticks = self.ticks.load(Ordering::Relaxed);
+            self.tick_nanos.saturating_mul(ticks)
+        } else {
+            // `get_or_init` rather than reading a stored `Instant`: the origin is the moment the
+            // monotonic clock was *first read*, so two instances constructed at different times still
+            // both start at zero, which is what makes a monotonic reading comparable only within one
+            // instance — exactly what the WIT promises.
+            let origin = self.origin.get_or_init(Instant::now);
+            u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        }
+    }
+
+    /// Panic if this state is replaying, for the infallible wrappers below.
+    ///
+    /// # Why a panic rather than a live read
+    ///
+    /// Because the alternative is the failure the whole mechanism exists to prevent: a replayed run
+    /// that silently read the real clock would produce an execution that looks plausible and shares
+    /// nothing with the recorded one. **A panic here is a programming error in the host** — the
+    /// production call sites use the fallible [`Self::read_wall_nanos`] family — and it is loud on
+    /// purpose.
+    ///
+    /// # Why the wrappers exist at all
+    ///
+    /// Because 25 tests call them, and a test that had to unwrap a `Result` for a value it knows is
+    /// present would be noise. **The wrappers are the live path with a guard, not a second
+    /// implementation.**
+    fn assert_not_replaying(&self) {
+        assert!(
+            self.replay_source.is_none(),
+            "a replayed run must read through `read_*`, not the infallible wrappers: \
+             reading the live clock here would reproduce a different execution"
+        );
+    }
+
+    /// The current virtual time, in nanoseconds since the epoch.
+    ///
+    /// In deterministic mode: the fixed instant plus `ticks` advances.
+    /// Otherwise: the real system clock.
+    ///
+    /// **The value is recorded before it is returned**, so a replay reproduces what the guest saw
+    /// rather than recomputing it — `DET-007`.
+    ///
+    /// # Panics
+    ///
+    /// If a replay source is attached. Use [`Self::read_wall_nanos`] on a replayed run.
+    #[must_use]
+    pub fn now_nanos(&self) -> u64 {
+        self.assert_not_replaying();
+        let value = self.live_wall_nanos();
         self.note("clock.wall", ReplayValue::Clock(value));
         value
     }
@@ -287,21 +481,10 @@ impl AmbientState {
     /// guest measuring a latency must never see a negative elapsed time.
     #[must_use]
     pub fn elapsed_nanos(&self) -> u64 {
-        let value = if self.deterministic {
-            let ticks = self.ticks.load(Ordering::Relaxed);
-            self.tick_nanos.saturating_mul(ticks)
-        } else {
-            // `get_or_init` rather than reading a stored `Instant`: the origin
-            // is the moment the monotonic clock was *first read*, so two
-            // instances constructed at different times still both start at
-            // zero, which is what makes a monotonic reading comparable only
-            // within one instance — exactly what the WIT promises.
-            let origin = self.origin.get_or_init(Instant::now);
-            u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
-        };
-        // A separate function name from `clock.wall`, because the two answer
-        // different questions and a replay reader comparing them would otherwise
-        // see one series where the guest saw two.
+        self.assert_not_replaying();
+        let value = self.live_monotonic_nanos();
+        // A separate function name from `clock.wall`, because the two answer different questions and a
+        // replay reader comparing them would otherwise see one series where the guest saw two.
         self.note("clock.monotonic", ReplayValue::Clock(value));
         value
     }
@@ -334,6 +517,7 @@ impl AmbientState {
     /// failure there is surfaced by the caller rather than substituted, because
     /// falling back to a weaker source would be worse than failing.
     pub fn random_bytes(&self, len: u32) -> Result<Vec<u8>, RandomFailure> {
+        self.assert_not_replaying();
         if len > self.max_random_bytes {
             return Err(RandomFailure::TooLong);
         }
@@ -445,6 +629,13 @@ pub enum RandomFailure {
     TooLong,
     /// The OS entropy source failed.
     SourceFailed,
+    /// A replay could not supply the recorded bytes — `DET-008`.
+    ///
+    /// **A separate variant rather than a reuse of [`Self::SourceFailed`]**, and the reason is the one
+    /// `§O-280` states from the other side: a report that cannot state its cause is not a report.
+    /// "The entropy source failed" and "the replay log ended early" send a reader to different files,
+    /// and collapsing them would make a truncated log look like an OS problem.
+    Replay(crate::replay::ReplayError),
 }
 
 /// The result of a grant-checked host call.
@@ -1079,6 +1270,153 @@ mod tests {
             ),
             "the random read must carry bytes, not an instant"
         );
+    }
+
+    /// **The positive half of `DET-008`.** A state replaying a log must return the recorded values
+    /// rather than computing its own — and the values must be the ones in the log, not merely
+    /// *some* values, which is why the recorded instant is deliberately different from the fixed one.
+    #[test]
+    fn a_replaying_state_returns_the_recorded_values() {
+        let mut written = crate::replay::ReplayLog::new(replay_header(), 8);
+        // Deliberately NOT the fixed instant `AmbientState::new(true)` reports, so a state that
+        // computed its own value would return something else and the assertion would catch it.
+        written
+            .record("clock.wall", crate::replay::ReplayValue::Clock(42))
+            .unwrap();
+        written
+            .record("clock.monotonic", crate::replay::ReplayValue::Clock(7))
+            .unwrap();
+        written
+            .record(
+                "crypto.random",
+                crate::replay::ReplayValue::Random(vec![0xAB; 4]),
+            )
+            .unwrap();
+
+        let source = std::sync::Arc::new(std::sync::Mutex::new(written));
+        let s = AmbientState::new(true).with_replay_source(std::sync::Arc::clone(&source));
+        assert!(s.has_replay_source());
+        assert_eq!(
+            s.read_wall_nanos().unwrap(),
+            42,
+            "the recorded instant, not the fixed one"
+        );
+        assert_eq!(s.read_monotonic_nanos().unwrap(), 7);
+        assert_eq!(s.read_random(4).unwrap(), vec![0xAB; 4]);
+        assert!(
+            source.lock().expect("log").is_exhausted(),
+            "all three reads must have consumed the log"
+        );
+    }
+
+    /// **A truncated log must fail, not fall back to the real clock.** This is the property the whole
+    /// mechanism exists for: a replay that continued against a live clock would reproduce a different
+    /// execution and report success.
+    #[test]
+    fn an_exhausted_replay_fails_rather_than_reading_the_clock() {
+        let mut written = crate::replay::ReplayLog::new(replay_header(), 8);
+        written
+            .record("clock.wall", crate::replay::ReplayValue::Clock(1))
+            .unwrap();
+        let s = AmbientState::new(true)
+            .with_replay_source(std::sync::Arc::new(std::sync::Mutex::new(written)));
+        assert!(s.read_wall_nanos().is_ok());
+        assert_eq!(
+            s.read_wall_nanos(),
+            Err(crate::replay::ReplayError::Exhausted),
+            "the second read must fail, not fall back"
+        );
+    }
+
+    /// **A recorded length that does not match the request is refused.** A log supplying four bytes
+    /// for a thirty-two-byte request would hand the guest a short buffer it cannot see.
+    ///
+    /// # What the first version of this test got wrong
+    ///
+    /// It requested 4 against a 4-byte record and asserted a refusal — but those *match*, so it
+    /// asserted the opposite of the behaviour. And its second assertion reused the same state, whose
+    /// only record the first call had already consumed, so it would have failed with `Exhausted`
+    /// rather than with a length mismatch. **Two errors in three lines, both from writing the test
+    /// against an imagined shape rather than the real one.** Each case now gets its own state.
+    #[test]
+    fn a_replayed_length_mismatch_is_refused() {
+        // Recorded 4, requested 32: the refusal this test exists for.
+        let s = state_replaying_one_random(4);
+        assert!(
+            matches!(s.read_random(32), Err(RandomFailure::Replay(_))),
+            "a short record must not satisfy a longer request"
+        );
+
+        // And the matching case, which the first version asserted backwards.
+        let s = state_replaying_one_random(4);
+        assert_eq!(
+            s.read_random(4).expect("a matching length").len(),
+            4,
+            "4 recorded bytes satisfy a 4-byte request"
+        );
+    }
+
+    /// A state replaying exactly one `crypto.random` record of `len` bytes.
+    fn state_replaying_one_random(len: usize) -> AmbientState {
+        let mut written = crate::replay::ReplayLog::new(replay_header(), 8);
+        written
+            .record(
+                "crypto.random",
+                crate::replay::ReplayValue::Random(vec![0x5A; len]),
+            )
+            .unwrap();
+        AmbientState::new(true)
+            .with_replay_source(std::sync::Arc::new(std::sync::Mutex::new(written)))
+    }
+
+    /// **The infallible wrappers must refuse to run while replaying.** They exist for tests and for
+    /// the live path; a replayed run reaching one would read the real clock and diverge silently, so
+    /// the guard converts that into a loud failure.
+    #[test]
+    #[should_panic(expected = "must read through `read_*`")]
+    fn the_infallible_wrapper_refuses_while_replaying() {
+        let written = crate::replay::ReplayLog::new(replay_header(), 8);
+        let s = AmbientState::new(true)
+            .with_replay_source(std::sync::Arc::new(std::sync::Mutex::new(written)));
+        let _ = s.now_nanos();
+    }
+
+    /// A real-time state refuses a replay source, for the same reason it refuses a sink: a replay of
+    /// a non-deterministic run is not a replay.
+    #[test]
+    fn a_real_time_state_refuses_a_replay_source() {
+        let written = crate::replay::ReplayLog::new(replay_header(), 8);
+        let s = AmbientState::new(false)
+            .with_replay_source(std::sync::Arc::new(std::sync::Mutex::new(written)));
+        assert!(
+            !s.has_replay_source(),
+            "a real-time state must refuse a source"
+        );
+    }
+
+    /// **Recording while replaying is refused**, so a log cannot grow as it is consumed.
+    #[test]
+    fn a_state_cannot_record_and_replay_at_once() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            replay_header(),
+            8,
+        )));
+        let s = AmbientState::new(true).with_replay(log.clone());
+        assert!(s.has_replay());
+        let s = s.with_replay_source(log);
+        assert!(
+            !s.has_replay_source(),
+            "attaching a source beside a sink must be refused"
+        );
+    }
+
+    fn replay_header() -> crate::replay::ReplayHeader {
+        crate::replay::ReplayHeader {
+            artifact_digest: "sha256:test".to_owned(),
+            engine_version: "48.0.2".to_owned(),
+            target_triple: "test".to_owned(),
+            deterministic: true,
+        }
     }
 
     fn hex(bytes: &[u8]) -> String {

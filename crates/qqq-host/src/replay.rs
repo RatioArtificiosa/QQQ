@@ -329,6 +329,17 @@ impl std::fmt::Display for ReplayError {
     }
 }
 
+/// So a replay failure can propagate through a host function's `wasmtime::Result`.
+///
+/// # Why this is required rather than optional
+///
+/// The three host functions that read a nondeterministic value return `wasmtime::Result`, and
+/// `read_wall_nanos()?` inside one of them needs `ReplayError` to convert. **Without this the
+/// conversion is a compile error, which is the right outcome**: the alternative a caller would reach
+/// for is `map_err(|_| ...)`, and that discards the cause — the failure mode `§O-280` names, where a
+/// report cannot say what happened.
+impl std::error::Error for ReplayError {}
+
 /// A bounded, append-only, hash-chained log of the values an execution read.
 #[derive(Debug, Clone)]
 pub struct ReplayLog {

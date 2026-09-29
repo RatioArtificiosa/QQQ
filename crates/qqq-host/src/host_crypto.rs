@@ -194,7 +194,7 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 store
                     .data()
                     .ambient
-                    .random_bytes(length)
+                    .read_random(length)
                     .map(|b| (b,))
                     .map_err(|e| {
                         // A source failure must fail closed. Surfacing it as a host
@@ -209,6 +209,13 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             crate::ambient::RandomFailure::SourceFailed => {
                                 "the host entropy source failed; refusing to substitute a weaker source"
                                     .to_owned()
+                            }
+                            // **`DET-008`'s failure, and it is not the same finding as a source
+                            // failure.** A truncated replay log and a broken OS entropy source send
+                            // a reader to different files, and the replay's own message already
+                            // names which record diverged.
+                            crate::ambient::RandomFailure::Replay(err) => {
+                                format!("the replay log could not supply these bytes: {err}")
                             }
                         })
                     })

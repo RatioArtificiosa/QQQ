@@ -4386,13 +4386,24 @@ Each language has eight required items. The parity matrix makes any gap visible.
     never generated.**
     **The assertion reads the audit stream, so it discloses nothing about the grant set.** It is about what
     the code *attempted* — what the WIT says, and what §2.5's "absent, not denied" requires. A denied
-    attempt is still an attempt, which is why every recorded row counts rather than only the granted ones.
-    **And the limit belongs in this line: no test drives a guest through the macro into the host.** The host
-    half is covered by `host_test.rs`'s own tests and the macro half by the artefact; **the seam between
-    them is witnessed by neither**, because a `std` guest cannot be instantiated (`§O-424`) and a
-    hand-written WAT against a lowered `result<_, variant>` is the trap `host_crypto.rs` records four
-    attempts into — *"each attempt failed to instantiate whether or not the capability was granted, making
-    the ungranted case pass for the wrong reason."*
+    **And the seam is witnessed.** `crates/qqq-host/tests/guest_assertions.rs` builds
+    `examples/qqq-test` for `wasm32-wasip2`, instantiates it through `Instance::create_with` with
+    the caller's own `TestState` attached, and calls its exported `run-assertions` — so the guest's
+    `mark_fuel("block")` **reaches the handle the test holds**, through the macro, the generated
+    binding, the component's import and the host function. Measured at `a15a0af`: passes in 0.26 s,
+    and **fault-injected** — with `InstanceOptions.test` set to `None` the host guard refuses with
+    `not-assertable`, the guest's `.expect` panics inside it at `src/lib.rs:167`, the instance
+    traps, and the test fails.
+    **The assertion is on `state.marks() == 1` rather than on `all_passed()`**, because
+    `all_passed()` is true of a state that recorded *nothing* — which is what a broken seam
+    produces. **An assertion that can only report agreement is the same defect as one that cannot
+    report a problem.**
+    **And the first version of this line was wrong about why the seam was unwitnessed.** It said
+    *"a `std` guest cannot be instantiated (`§O-424`)"*, but `§O-424` is about **`qqqai run`'s
+    manifest**, which grants none of the fourteen WASI interfaces such a guest imports. **A test
+    builds its own linker**, and `build_linker` registers `host_wasi` unconditionally — the
+    authority is withheld by the *context*, not by the registration. *"Cannot be run by the tool"
+    is not "cannot be run."*
 - [x] **TEST-008** Implement fuel assertions (`assert_fuel_below!`).
   → §6.7 `qqqai test` — test runner
   → Done: `assert_fuel_below!` in `examples/qqq-test`, over the host's `assert-fuel-below`
@@ -4404,8 +4415,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
     **A missing mark is `no-fuel-baseline`, not a pass**, and the macro's panic says so; the host returns
     it as a WIT error rather than a trap, because a trap would end the instance and hide every later
     assertion.
-    **The limit is `TEST-007`'s**, stated the same way: the expansion is proven by the artefact and the
-    comparison by unit tests, and no guest has been driven through it. **And the item requires deterministic
+    **The seam is witnessed, and `TEST-007`'s line records how.** What is **not** witnessed is
+    the *failing* direction of this comparison end to end: the reference guest asserts a limit
+    it satisfies (`1_000_000`, against a mark it takes immediately before), so the figure this
+    item trades in — *"a performance regression becomes a test failure"* — has its arithmetic
+    covered by unit tests and its **pass** covered by a guest. **A limit the guest genuinely
+    exceeds has not been driven through the macro**, and that is the next thing to add here.
+    **And the item requires deterministic metering** — the proposal's own footnote on this row —
+    which is `DET-002`'s virtual clock and `DET-009`'s 10,000-trial result.
     metering** — the proposal's own footnote on this row — which is `DET-002`'s virtual clock and
     `DET-009`'s 10,000-trial result. **The comparison is exact only because the counter is.**
 - [ ] **TEST-009** Implement property tests with shrinking and replayable failures.

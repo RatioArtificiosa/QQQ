@@ -1099,7 +1099,15 @@ cmd_checks() {
     rm -rf "${_eol_guard_dir}"
 
     # Final word: the corpus is intact after everything that mutated it.
+    #
+    # `check_corpus_at_rest.py` belongs HERE, and it was declared ci-only below for as long as it has
+    # existed. The declared reason was *"it needs a clean tree"*, and **this file already guarantees
+    # one** -- the source guard exits 3 on a modified tracked file. Measured in this image on
+    # 2026-09-28: `git status --porcelain` empty, and the check itself `EXIT=0`. Keeping it out cost
+    # a CI failure when the `§O-400` edit landed without a digest re-record, so the exclusion made
+    # this a strictly weaker gate than the one it protected.
     python3 tools/self_test_xrefs.py --check-clean
+    python3 tools/check_corpus_at_rest.py
     python3 tools/normalize_eol.py --check
 }
 
@@ -1126,6 +1134,14 @@ cmd_checks() {
 # `check_schema_conformance.py`, `check_subprocess_encoding.py` and `check_include_str.py` were
 # found running nowhere at all.
 #
+#
+# **The live counts belong to the checker, not to this comment.** `python tools/check_gate_parity.py`
+# prints the current invocation totals for both gates, how many `tools/check_*.py` exist, and how many
+# declarations it found -- then fails if those declarations no longer match reality. The figures above
+# are dated measurements and are kept deliberately: *what changed and why* is the part a number cannot
+# carry. Measured on 2026-09-28, that command prints **114** `ci.yml` invocations, **99** bridge
+# invocations, **48** `tools/check_*.py`, and **6** declared ci-only entries.
+#
 #   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
 #                                          of a working tree that is usually dirty
 #   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
@@ -1140,9 +1156,6 @@ cmd_checks() {
 #                                          against itself. A VACUOUS COMPARISON CERTIFIES
 #                                          NOTHING, which is the rule three other checkers in
 #                                          this repository already apply.
-#   tools/check_corpus_at_rest.py          verifies the documents' bytes against the COMMITTED
-#                                          digest file, so it needs a clean tree — the same
-#                                          reason `audit_requirements.py` is on this list
 #   tools/self_test_xrefs.py --prove-isolation  leaves a mutation UN-RESTORED, because that is
 #                                          how it proves a leftover is detectable. Against a bind
 #                                          mount of a working tree the leftover IS the defect, so

@@ -1867,6 +1867,117 @@ const NEEDS_WALL_CLOCK: &str = r#"(component
   (core instance $i (instantiate $m))
 )"#;
 
+/// A component that reads the wall clock **at instantiation**, so a replay log has something in it.
+///
+/// # Why this is not `NEEDS_WALL_CLOCK`
+///
+/// That fixture declares the same import and its core module is `(core module $m)` — empty. **A component
+/// that calls nothing produces a replay log with a header and no records**, and a comparison of two such
+/// logs would be identical for the trivial reason that neither says anything. **The read is what makes a
+/// comparison mean something.**
+///
+/// # Why the read is in a `start` function
+///
+/// `qqqai run` instantiates and drops without calling an export — see its own comment, which says that
+/// guessing an export name *"would make `run` succeed or fail for reasons unrelated to the capability
+/// model"*. A core module's `start` runs when its instance is created, and the component instantiates its
+/// core module as part of its own instantiation, so this reads the clock exactly once per run.
+///
+/// # Why the result goes into a global
+///
+/// A call whose result is discarded can be eliminated, and an eliminated call is not a read the host ever
+/// sees. Storing it keeps the call observable.
+const READS_WALL_CLOCK: &str = r#"(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c
+    (export "now" (func (result u64)))
+    (export "resolution" (func (result u64)))
+    (export "timezone" (func (result string)))
+  ))
+  (alias export $c "now" (func $c_now))
+  (core func $now (canon lower (func $c_now)))
+  (core module $m
+    (import "" "now" (func $now (result i64)))
+    (global $seen (mut i64) (i64.const 0))
+    (func $init (global.set $seen (call $now)))
+    (start $init)
+  )
+  (core instance $i (instantiate $m
+    (with "" (instance (export "now" (func $now))))
+  ))
+)"#;
+
+/// The manifest the replay fixtures run under, granting the one capability they use.
+///
+/// # Why the grant is in the file rather than on the command line
+///
+/// `RunOptions::caps` is *"a **developer overlay**, which may only narrow the manifest's grants"*, so
+/// `--cap clock.wall` against a manifest that grants nothing is refused — and that refusal is the subject
+/// of `run_refuses_an_ungranted_import_and_names_the_right_capability` below, not a defect. **A manifest
+/// that grants nothing has nothing to narrow.**
+const CLOCK_GRANTED: &str =
+    "[package]\nname = \"replay-fixture\"\nversion = \"0.1.0\"\n\n[capabilities.clock]\nwall = true\n";
+
+/// **`--replay` reproduces a recorded execution, and a log that runs out is a failure rather than a
+/// fallback to the real clock** — Checklist `TEST-006`, and Gate 1's *"`--replay` reproduces it"*.
+///
+/// # Why the negative case is the one that matters
+///
+/// A replayed run that read the real clock at the point its log ended would produce output that looks
+/// plausible and shares nothing with the recording. **So the assertion is not "the replay succeeded" but
+/// "the replay failed, at the read, with the reason"** — and the zero-record log is how that is reached
+/// without editing a record, which `from_text` would refuse instead.
+///
+/// The trap names the start function that read:
+///
+/// ```text
+/// 0:     0xa4 - m!init: the replay log ended before the execution did
+/// ```
+///
+/// That message comes from `ReplayError::Exhausted`, so it is evidence that the host function consulted
+/// the log rather than the clock.
+#[test]
+fn replay_reproduces_a_recorded_run_and_refuses_an_exhausted_log() {
+    let s = Sandbox::new("replay-round-trip");
+    s.write("qqq.toml", CLOCK_GRANTED);
+    let Some(wasm) = encode(&s, "reads-clock", READS_WALL_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    // Record.
+    let record = s.run(&[
+        "run",
+        &wasm,
+        "--deterministic",
+        "--replay-log",
+        "one.replay",
+    ]);
+    record.assert_ok();
+    let log = s.read("one.replay");
+    assert!(
+        log.contains("qqq-replay 1"),
+        "the log must be a replay file, got: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l.starts_with("1 clock.wall clock ")),
+        "the guest must have read the clock, or the comparison is vacuous: {log}"
+    );
+
+    // Replay it: this is the assertion the item is about.
+    s.run(&["run", &wasm, "--deterministic", "--replay", "one.replay"])
+        .assert_ok();
+
+    // And a log with no records must fail **at the read**, not fall back to the clock.
+    let header: Vec<&str> = log
+        .lines()
+        .filter(|l| !l.starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    s.write("empty.replay", &(header.join("\n") + "\n"));
+    s.run(&["run", &wasm, "--deterministic", "--replay", "empty.replay"])
+        .assert_failed()
+        .assert_contains("the replay log ended before the execution did");
+}
+
 /// An ungranted import is **refused**, and the error names the right capability.
 ///
 /// This is the runtime half of the project's central claim. `inspect` reports

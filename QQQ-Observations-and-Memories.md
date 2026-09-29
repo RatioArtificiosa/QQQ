@@ -31345,6 +31345,199 @@ substantially built; **two it called high-value-and-pending are exactly that.** 
 in every case and it is the repository's own rule — **measure the thing, not the column that describes
 it.**
 
+## §O-413 — A pattern one character too narrow reported "there are none", and the false negative became a brief
+
+The goal asked a direct question:
+
+> *"`PLAN-015` — the decision log that feeds Observations. `§D-` decisions are referenced by the corpus
+> and **there are no `§D-` headings in it** — check whether that is a gap or a naming difference, and fix
+> whichever it is."*
+
+**The answer is: neither. There are ten `§D-` headings, and the claim that there are none came from a
+measurement of mine with a pattern one character too narrow.**
+
+**Measured 2026-09-28, in `QQQ-Observations-and-Memories.md`:**
+
+```
+with ^## exactly  : 0      <- the earlier measurement
+with ^### exactly : 10     <- the truth
+with ^#+ (any)    : 10
+```
+
+and the ten are substantive, each a decision the rest of the corpus cites:
+
+```
+line   45  D-001  — Product name is **QQQ**; technical surfaces are `qqqai`
+line   87  D-002  — V1 supports five languages: Rust, TypeScript/AssemblyScript, ...
+line  101  D-003  — Execution engine is Wasmtime, pinned to the 48.x line
+line  113  D-004  — Licence model is open core with a **governance** boundary
+line  143  D-005  — Keep Tokio; do not rewrite the async reactor
+line  211  D-006  — Default guest concurrency is async-single-threaded
+line  277  D-007  — Determinism is a headline feature, not a testing convenience
+line  287  D-008  — Every host capability is a WIT interface first, a language binding second
+line  297  D-009  — README is a sales surface, written to the "premium tech" register
+line  317  D-010  — The nine layers are fixed, and authority flows down only
+```
+
+**The chain, and it is fully traceable.** An earlier round ran
+`($obs | Select-String -Pattern '^## §D-').Count` and got **0**. That zero was written down as *"there are
+no `§D-` headings"*, the note survived into the durable record, and **the record became the brief.** So a
+question the brief asked me to investigate was created by a measurement the brief's own author had taken
+and never re-taken.
+
+**And the corpus was already telling me.** `§D-003` is the Wasmtime pin, and it is cited in the same
+durable record that carried the claim it did not exist. **Two statements in one document disagreed, and
+nothing compared them** — which is `§O-401`'s and `§O-408`'s shape, applied this time to a document
+comparing itself.
+
+**The general form, and it is the fifth occurrence in one session.** `§O-282` — *a guard is only as narrow
+as its pattern* — has now bitten in both directions:
+
+| pattern | result | direction |
+|---|---|---|
+| `#+\s` | **31** "heading-shaped" lines, all shell comments | **false positive** |
+| `store` | 70+ files, no evidence | **no signal** |
+| `shrink\|property` | 139 files, no evidence | **no signal** |
+| `^## §D-` | **0** headings when there are 10 | **false negative** |
+
+**A false positive costs a look. A false negative becomes a fact.** The first two are visible the moment
+anyone reads the output; the fourth is invisible precisely because it produces nothing to read, and it
+survived long enough to be quoted back as a premise.
+
+**The remedy is the one this repository applies to numbers and now must apply to patterns: a count of
+zero is a measurement like any other, and it needs the same second reading a count of thirty would get.**
+`§O-277` says a number with no owner is a number nobody compares; **`0` is the number most likely to be
+believed without one**, because it looks like an answer rather than an absence of data.
+
+## §O-414 — Phase 3's plumbing is a single decision point with four consumers, so a language is added in one place
+
+The brief calls `LANG` *"40 — the largest block — unbuildable now"* and orders it last. **The toolchains
+are indeed absent, and the plumbing around them is the best-designed thing this reconnaissance has
+found.** Both halves matter, because the second is what makes the first cheap.
+
+**The decision point is one function.**
+
+```rust
+// crates/qqq-run/src/build.rs
+#[must_use]
+pub fn toolchain_for(language: &str, target: &str) -> Option<Vec<ToolRequirement>> {
+    // `target` is not yet a discriminator: `wasm32-wasip2` is the only target
+    // any language can emit, so it does not change which tools are needed.
+    // Taking it now keeps the signature stable for `wasm32-wasip3`, which will
+    // need a different `wasm-tools` path.
+    let _ = target;
+
+    if language != "rust" {
+        return None;
+    }
+    Some(vec![ToolRequirement { program: "cargo", version_args: &["--version"], install: "https://rustup.rs", .. }])
+}
+```
+
+**and everything else reads it.**
+
+| consumer | how |
+|---|---|
+| `Language::is_buildable` | `crate::build::toolchain_for(self.as_str(), "wasm32-wasip2").is_some()` — a one-line delegation |
+| the generated project's guidance | reports it, so a user is told before they run the next command |
+| `conformance/suite.json`'s parity status | **derived** from the same guard, so the fixture cannot drift from the code |
+| `qqqai new` | scaffolds all five; `Language` carries `Rust`, `TypeScript`, `Go`, `Python`, `Cpp` and each has a source path (`src/index.ts`, `main.go`, `src/app.py`, `src/main.cpp`) |
+
+**Two doc comments state the reasoning, and both are the kind of claim this corpus usually has to
+reconstruct.**
+
+```rust
+/// Whether `qqqai build` can drive this language today.
+///
+/// Reported honestly in the generated project's guidance: a scaffold that
+/// silently produces a project that cannot build is a trap, and the user
+/// would discover it one command later with no explanation.
+```
+
+and, at the call site that would otherwise fake it:
+
+```rust
+Language::Rust => rust_sources(opts, crate_name),
+// ... pretends to work. See `Language::is_buildable`.
+```
+
+**So `LANG-009`–`LANG-040` are not blocked by architecture; they are blocked by four missing toolchains,
+and the architecture is arranged so that adding one is a single edit.** `toolchain_for` returning `None`
+is the honest gate: it makes `qqqai new --language go` say *this cannot build yet* rather than produce a
+project that fails one command later.
+
+**Which corrects the ordering argument from the other side.** The brief's reason for putting `LANG` last
+is that *"five toolchains built against an unbuilt suite produce five unverifiable claims"* — and the
+suite is not unbuilt (`§O-410`: fixture, runner, nine fault injections, an owned parity matrix, both
+gates). **The toolchains are missing and the machinery to verify them is present and waiting**, which is
+the opposite arrangement from the one the ordering assumes.
+
+**And it is worth naming what makes this design good, because it is the pattern the rest of this goal's
+findings say is missing elsewhere.** A source file stating *"Implements `PKG-001`"* has **no** consumer;
+this guard has **four**, and every one of them reads it rather than restating it. **The difference
+between a claim and a decision point is whether anything reads it** — which is `§O-277`'s rule applied to
+structure rather than to a number.
+
+## §O-415 — Source files name the checklist items they implement, and nothing compares that claim to the checklist
+
+Reconnaissance for this goal kept finding briefed "unbuilt" items that were built. **This round found the
+mechanism**, and it is a checkable one: **the source files state which checklist items they implement,
+in their own module docs, and no tool compares that statement to the checklist's status column.**
+
+Measured 2026-09-28, in `crates/qqq-pkg/src/`:
+
+```
+store.rs:      //! Implements `PKG-001` (layout and verification) and `PKG-014` (offline
+               //! operation); Proposal §6.5.
+semver.rs:     //! Implements the versioning half of `PKG-003` and the version format checked by
+               //! `CON-007`.
+signature.rs:  //! Ed25519 signing and verification for artifacts — §7.4.
+```
+
+and the checklist says `[ ]` for `PKG-001`, `PKG-014` and `PKG-003`.
+
+**So a source file asserts that an item is implemented and the checklist says it is not started.** Both
+cannot be true, and **which one is wrong is exactly the question a reader cannot answer from either
+document alone** — the file does not know the item's status, and the status does not know what the file
+contains.
+
+**Two of the three claims are precise enough to be worth copying.** `store.rs` names **both** items and
+gives the reason each is in scope. `semver.rs` says *"the **versioning half** of `PKG-003`"* — a
+**partial** claim, which is the honest form: `PKG-003` is *"the version solver with lockfile-first
+resolution"*, and a version **parser** is not a **solver**, so the item may genuinely still be open. The
+file says so and the checklist agrees; **the disagreement is with `PKG-001` and `PKG-014`, where the
+claims are total.**
+
+**And the third claim is a Proposal section, not an item.** `signature.rs` cites `§7.4` and never names
+`SUP-001` or `SUP-002`, so a reader looking for the signing implementation cannot find it from the
+checklist and cannot find the checklist from the file. **That is the same shape as the rest of this
+goal's reconnaissance: the corpus contains the answer and the two halves of it do not reference each
+other.**
+
+**What the checker would do**, and it is the shape this repository already uses in three places:
+
+1. **Parse** every `Implements <ID>` / `Implements the <part> half of <ID>` claim out of `crates/**/*.rs`
+   module docs — a bounded, greppable form, not prose interpretation.
+2. **Compare** each named id to the backlog's status for it (`PLAN-001` already carries the status).
+3. **Fail** when a file claims an item is implemented and the checklist says `[ ]`, **and** when a file
+   claims it while the checklist says `[x]` and the file no longer exists — the stale-claim direction
+   `check_checklist_counts.py` and `check_gate_parity.py` both already apply to their own declarations.
+
+**Why this is worth building rather than noting.** It is the **third** independent signal about the same
+question — *is this item done* — and the other two are the ones that have been unreliable all goal: the
+checklist's status column, and a reader's grep. **A claim in a source file is written by the person who
+wrote the code**, which makes it the closest thing to evidence the tree contains, and it is currently
+**unowned**. `§O-277`'s rule applies unchanged: a claim nothing compares is a claim with no owner, and
+these are written in a form that makes comparing them cheap.
+
+**And the honest caveat, which is the reason the checker must be careful.** The claims are **prose**,
+and prose is what `§O-411` warned about — *a comment is a claim about code, and a claim is not the code.*
+`semver.rs`'s *"the versioning half"* is a claim the checker should read as **partial**, not as done;
+`store.rs`'s is **total**. A checker that cannot tell those apart would report a false defect on the
+first and miss a real one on the second. **So the first step is a bounded vocabulary — `Implements <ID>`
+and `Implements the <part> half of <ID>` — and the files that do not use it are left unmeasured rather
+than guessed at.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -3,7 +3,7 @@
 The Wasmtime execution engine: pooling allocator, AOT-first compilation, fuel
 and epoch limits, the trap taxonomy, and the per-instance linker.
 
-Pins **Wasmtime 48.x** (`48.0.2`). Implements `QQQ-Proposal-V1.md` §6.1 and
+Pins **Wasmtime 48.x** (`48.0.3`). Implements `QQQ-Proposal-V1.md` §6.1 and
 Checklist `HOST-001` … `HOST-024`.
 
 ## Why the engine version is pinned, and why that is a decision

@@ -22,7 +22,7 @@
 # # Why the check is "does it work" rather than "is it the right version"
 #
 # The first version of this script pinned `wasm-tools` to a number I invented.
-# The real latest is `1.259.0`, and the pinned `wasmtime` crate is `48.0.2` —
+# The real latest is `1.259.0`, and the pinned `wasmtime` crate is `48.0.3` —
 # the numbers matter, and a wrong one installs a CLI that cannot do the job.
 #
 # But a version string is still a proxy. What actually matters is whether the
@@ -59,7 +59,7 @@ set -euo pipefail
 WASM_TOOLS_MIN_MAJOR="1"
 
 # The `wasmtime` CLI must match the crate the engine is built against. `Cargo.toml`
-# says `wasmtime = "48"` and `Cargo.lock` resolves it to `48.0.2`, so the major is
+# says `wasmtime = "48"` and `Cargo.lock` resolves it to `48.0.3`, so the major is
 # the contract and the patch is not.
 WASMTIME_MAJOR="48"
 

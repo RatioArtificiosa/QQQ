@@ -31993,6 +31993,119 @@ three uses of it and none of them owns it. **An item that owns the job — start
 readiness, bench it, report per-budget with the unmeasured rows named — would make all three closable**,
 and would make `DET-016` a second invocation rather than a second mechanism.
 
+## §O-422 — `SEC-014`'s process ran for the first time, and the guard that caught the half-done version was written for exactly this
+
+`GHSA-j2g9-4prp-pf6h` was published against **`wasmtime 48.0.2`**, with the fix stated as *"Upgrade to
+>=36.0.16, <37.0.0 OR **>=48.0.3, <49.0.0** OR >=49.0."* CI went red on `647bf1f` — `advisories FAILED,
+bans ok, licenses ok, sources ok` — and `SEC-014`, the 72-hour patch target, was `[x]`. **So this is the
+process's first live exercise rather than a new item.**
+
+**The pin did not have to move, and that is the first thing worth recording.** `§D-003` says:
+
+> Host on **Wasmtime 48.x** … **Consequence accepted.** We inherit Wasmtime's release cadence and its CVE
+> exposure. Mitigations: a recurring quarterly upgrade sprint (`PLAN-012`), a 72-hour patch target on
+> advisories (`SEC-014`) …
+
+**`48.0.3` is inside the 48.x line**, so the patch bump is not a departure from the pin — it is the
+mitigation the pin's own decision names. **"Do not upgrade Wasmtime" means do not adopt `49.x`.**
+
+**And the ignore was not the fix.** `deny.toml` carries `ignore = []` under a comment that states the
+reason:
+
+> A vulnerability in a dependency is a security event for this project specifically: QQQ's entire claim is
+> that a guest cannot escape, and a vulnerable host dependency is a path out. **Denied, never warned.**
+
+**An ignore would have turned a red build green while leaving the escape path open**, which is the
+substitution this project's own prose forbids.
+
+---
+
+### What the bump moved
+
+`cargo update -p wasmtime --precise 48.0.3` and the same for `wasmtime-wasi`, because they are separate
+crates. **28 crates moved**, all inside the pinned lines:
+
+| | |
+|---|---|
+| `wasmtime`, `wasmtime-wasi`, `wasmtime-environ`, 17 × `wasmtime-internal-*` | `48.0.2 → 48.0.3` |
+| `pulley-interpreter`, `pulley-macros` | `48.0.2 → 48.0.3` |
+| 13 × `cranelift-*`, `cranelift-assembler-x64*` | `0.135.2 → 0.135.3` |
+
+**`cargo build --workspace` passes, `cargo test --workspace` passes, `cargo test --doc -p qqq-host` passes
+(51), and `cargo fmt --all -- --check` is clean.**
+
+---
+
+### And one test failed, which is the point of this observation
+
+```
+test config::tests::engine_version_matches_the_resolved_lockfile ... FAILED
+```
+
+**A lockfile bump cannot silently desynchronise the AOT cache key**, because `qqq-host::config` carries
+`ENGINE_VERSION: &str` and **two** tests hold it:
+
+| test | compares against | what it catches |
+|---|---|---|
+| `engine_version_matches_the_pinned_dependency` | the workspace **requirement** (`"48"`) | a major-line change; **passes for any 48.x** |
+| `engine_version_matches_the_resolved_lockfile` | the version `Cargo.lock` **resolves** | **a patch bump with the constant left behind** |
+
+**The first passed on the bump and the second failed** — and that asymmetry is the whole design. The weak
+guard is satisfied by `48.0.3`; the exact one is not. **`config.rs`'s own doc for the second test had
+already written the failure mode out, naming the very versions involved:**
+
+> if `Cargo.lock` resolved `wasmtime 48.0.3` while the constant still said `48.0.2`, the cache key would be
+> computed with the wrong engine version and a `.cwasm` compiled by one patch release could be loaded by
+> another — producing **native code that is subtly wrong rather than obviously broken**.
+
+**That is a hypothetical that became the lived state for about four minutes**, and the guard's doc named
+the exact pair before either number existed in a lockfile. **`config.rs` also cross-references `SEC-014`
+by name**, so the advisory process and the cache-key hazard were already joined.
+
+---
+
+### Two things found in front of the change, and fixed
+
+**1. A comment that contradicted its own code — `§O-411`.** `aot_cache_key`'s body carried:
+
+```rust
+// `wasmtime` does not re-export its version as a constant, so the engine
+// version is captured via Cargo's own crate metadata instead.
+h.update(ENGINE_VERSION.as_bytes());
+```
+
+**It does not use Cargo metadata; it uses the constant.** The comment described a mechanism that was never
+implemented, and a reader trusting it would conclude the cache key self-updates — **the opposite of the
+truth, and the truth is the security-relevant direction.** Replaced with what the line does and which test
+keeps it honest.
+
+**2. A process document that understated its own guard.** `docs/wasmtime-advisory-process.md`'s "The
+current pin" section said *"The anti-drift test asserts the constant against the workspace requirement"* —
+**singular, and the weaker of the two.** The document now names both and says which one matters after a
+patch release. **A process document that describes the weaker check is a process document that will be
+believed.**
+
+---
+
+### And seven `48.0.2` strings were deliberately left, which is a distinction rather than an oversight
+
+A version string in a document is either **current state** or **a measurement's provenance**, and rewriting
+the second kind falsifies a record:
+
+| left as `48.0.2` | why |
+|---|---|
+| `docs/abi-cost-measured.md` | a provenance block: *"Measured 2026-09-22 · Commit `d3e71fd` · Engine Wasmtime 48.0.2"*. **The measurement was made with 48.0.2.** |
+| `docs/verified-facts.md` ×3 | *"**Value at 2026-09-20.** 48.0.2, published 2026-09-10"* — a dated fact, and the dev machine's installed CLI |
+| `docs/reconciliation.md` | a historical correction |
+| `crates/qqq-host/src/config.rs` | the hazard description above |
+| `tools/check_sbom.py` | a **synthetic** SBOM fixture; the version is arbitrary test data |
+
+**`abi-cost-measured.md` states the rule itself**: *"§9.1 requires pinned hardware listed by model, pinned
+OS and kernel, and pinned toolchain versions, published **with** every result. **A number without them is
+not comparable to anything, including another run of this same harness.**"* **Updating that line would make
+the document claim a comparability it does not have** — which is `§O-258`'s failure in a provenance block
+rather than in a budget.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

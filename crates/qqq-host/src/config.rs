@@ -341,7 +341,7 @@ impl StoreLimits {
 /// `wasmtime` does not re-export its version, so this is pinned alongside the
 /// workspace's `wasmtime` dependency and **verified by a test** that fails if
 /// the two drift. That test is the mechanism that keeps this constant honest.
-pub const ENGINE_VERSION: &str = "48.0.2";
+pub const ENGINE_VERSION: &str = "48.0.3";
 
 /// The `wasmtime` requirement declared in the workspace manifest.
 ///
@@ -375,14 +375,12 @@ pub fn aot_cache_key(component_digest: &str, target: &str, cfg: &EngineConfig) -
     h.update(b"\x00");
     h.update(target.as_bytes());
     h.update(b"\x00");
-    // `wasmtime` does not re-export its version as a constant, so the engine
-    // version is captured via Cargo's own crate metadata instead. `qqq-host`
-    // depends on the exact `wasmtime` version in the workspace manifest, so a
-    // change to that dependency changes this crate's version-independent
-    // build metadata — and, more importantly, the workspace pins `wasmtime`
-    // exactly, so a different engine cannot appear without a source change.
-    // Using `env!("CARGO_PKG_VERSION")` here would be wrong (it is qqq-host's
-    // version); the engine version is baked in by `build.rs`-free means below.
+    // **`ENGINE_VERSION`, not `env!("CARGO_PKG_VERSION")`.** The latter is *qqq-host's* version and
+    // would key the cache on the wrong crate; a previous version of this comment claimed the version
+    // was "captured via Cargo's own crate metadata", which the line below has never done. The constant
+    // is hand-maintained and kept honest by `engine_version_matches_the_resolved_lockfile`, which reads
+    // `Cargo.lock` -- so a lockfile bump cannot silently desynchronise this key from the engine that
+    // actually produced the artifact.
     h.update(ENGINE_VERSION.as_bytes());
     h.update(b"\x00");
     // Configuration that affects codegen.

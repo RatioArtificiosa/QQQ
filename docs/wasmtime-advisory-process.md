@@ -159,10 +159,14 @@ mechanism in this repository, not an intention:
 
 ### The current pin
 
-`wasmtime = "48"` in `[workspace.dependencies]`, resolved to **48.0.2** by
-`Cargo.lock`, and mirrored by `qqq-host::config::ENGINE_VERSION`. The anti-drift
-test asserts the constant against the workspace requirement, so an upgrade that
-forgets one of the two fails rather than shipping a mislabelled engine.
+`wasmtime = "48"` in `[workspace.dependencies]`, resolved to **48.0.3** by
+`Cargo.lock`, and mirrored by `qqq-host::config::ENGINE_VERSION`. **Two** anti-drift
+tests hold the pair together, and the second is the one that matters after a patch
+release: one asserts the constant against the workspace requirement (`48`), and one
+asserts it against the version `Cargo.lock` **actually resolves**. The first is
+satisfied by any `48.x`; the second is what fails when a lockfile moves and the
+constant does not -- which is the state this section described until the 48.0.3
+bump exercised it.
 
 ---
 

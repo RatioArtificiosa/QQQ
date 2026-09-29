@@ -90,7 +90,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-ut
 #
 # `§D-003` pins the engine to 48, and the whole point of the numbers in
 # `docs/abi-cost-measured.md` is that they describe the engine QQQ actually uses.
-# A floating `wasmtime = "48"` resolves through `Cargo.lock` to the same 48.0.2
+# A floating `wasmtime = "48"` resolves through `Cargo.lock` to the same 48.0.3
 # that `qqq-host` compiles against, so the harness and the host cannot drift onto
 # different canonical ABIs -- the failure mode the workspace manifest records for
 # `wasmtime-wasi`.

@@ -58,7 +58,7 @@ $ErrorActionPreference = 'Stop'
 $WasmToolsMinMajor = 1
 
 # The `wasmtime` CLI must match the crate the engine is built against.
-# Cargo.toml says `wasmtime = "48"`; Cargo.lock resolves it to 48.0.2, so the
+# Cargo.toml says `wasmtime = "48"`; Cargo.lock resolves it to 48.0.3, so the
 # major is the contract and the patch is not.
 $WasmtimeMajor = 48
 

@@ -30838,6 +30838,65 @@ the same defect as an unchecked claim about a number** (`§O-277`). The remedy i
 keeps arriving at -- **measure the input before asserting on it** -- and the cheapest form of that here is
 to let the mutation run and read whether the clause actually fired, rather than reasoning that it would.
 
+## §O-406 — The checklist assigns work to eleven of the Proposal's twelve milestones, and a piped exit code reported success for six commands that failed
+
+`PLAN-003` is built: `tools/milestones.json` turns each milestone's **prose** deliverable into named
+checklist items, and `tools/check_milestones.py` decides them against `tools/backlog.json`. Both gates
+run the report and the self-test. Measured on 2026-09-28:
+
+```
+  M0 MET 6/6   M1 MET 4/4   M2 MET 4/4   M3 MET 4/4
+  M4 OPEN 5/6  M5 OPEN 0/10 M6 OPEN 1/4  M8 OPEN 0/2  M9 OPEN 4/5  M11 OPEN 2/3
+  M7  EXTERNAL 0/1 criteria, 2 external
+  M10 EXTERNAL 1/4 criteria, 2 external
+  NOTICE  M7 is declared but no phase assigns items to it
+MILESTONES OK -- 4 of 12 met; the rest report their real position
+```
+
+**The NOTICE is a real gap in the corpus, and it is the kind a checker exists to surface.** The Proposal
+names twelve milestones. The checklist's phase table references **eleven**:
+
+| referenced by a phase | `M0 M1 M2 M3 M4 M5 M6 M8 M9 M10 M11` |
+|---|---|
+| **not referenced** | **`M7`** |
+
+M7 is *V1 private alpha* -- the release gate for security audit #1 and the first external users. Its work
+is legitimately spread across the phases that precede it, so this is a **NOTICE and not a failure**; but
+until this checker ran, nothing had compared the two tables, and the milestone the project calls a
+release gate was the one with no phase of its own. The two items whose titles name a milestone place them
+elsewhere as well: `SEC-024` (*"audit #1 before the private alpha (M7)"*) and `SEC-025` (*"audit #2
+before the public beta (M10)"*) both live in **P2**.
+
+**`EXTERNAL` is not a polite `OPEN`.** M7 and M10 each require a *commissioned security audit*, and
+`DOD-004` and `DOD-020` exist so that no amount of local work closes them. `--milestone M7` therefore
+**fails while any external entry is declared**, and the self-test proves it: a case sets M7's criteria to
+three already-done items and asserts the verdict stays `EXTERNAL`. A checker that let those pass would
+manufacture exactly the false confidence those two items guard against.
+
+**And the exit codes lied, in a way this corpus already has a rule about.** The first measurement of the
+executable form read:
+
+```
+M5 NOT MET -- OPEN
+  M5 exit=0 (expect 1)      <- wrong
+M7 NOT MET -- EXTERNAL
+  M7 exit=0 (expect 1)      <- wrong
+```
+
+**That was the pipe, not the tool.** `python ... 2>&1 | Select-Object -First 3` **kills the pipeline**
+(`§O-284`), and `$LASTEXITCODE` then reports whatever the pipeline's last element left behind. Measured
+again with `*> $null` and no pipe:
+
+```
+M0 exit=0 (MET)   M5 exit=1 (OPEN)   M7 exit=1 (EXTERNAL)
+M11 exit=1 (OPEN) --report exit=0    unknown-milestone exit=1
+```
+
+All six correct. **`§O-284` is in the process rules precisely because it costs real runs, and it cost
+one here** -- the failure mode is that a *correct* tool is read as broken, which sends the next hour in
+the wrong direction. The rule already says *grep for the verdict*; the sharper form is that **an exit
+code read through a truncated pipeline is not an exit code.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

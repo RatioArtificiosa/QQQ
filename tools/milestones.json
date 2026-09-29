@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "source": "QQQ-Proposal-V1.md, the §14.1 milestone table",
+  "_why": [
+    "PLAN-003: the Proposal states each milestone's deliverable in PROSE, in a table. This file is that",
+    "prose turned into something a command can decide.",
+    "",
+    "`criteria` names checklist items that must be `done`. Every id is checked against",
+    "`tools/backlog.json`, so a typo or a renamed item is a failure rather than a silently ignored line.",
+    "",
+    "`external` names what the milestone needs from a party outside this repository. A milestone with a",
+    "non-empty `external` list CANNOT pass, however many criteria are met -- that is the point. M7 and M10",
+    "each need a commissioned security audit, and a checker that let them pass would be manufacturing the",
+    "false confidence DOD-004 and DOD-020 exist to prevent.",
+    "",
+    "`delivers` quotes the Proposal so a reader can see what was translated and judge whether the",
+    "translation is faithful. It is NOT checked -- a criterion list can be complete and still wrong about",
+    "the milestone, and only a reader can catch that."
+  ],
+  "milestones": {
+    "M0": {
+      "delivers": "Repo, CI, PRINCIPLES.md, licence, workspace skeleton, xref checker, ADR process",
+      "criteria": ["FND-001", "FND-002", "FND-006", "DOC-006", "DOC-007", "LIC-001"],
+      "external": []
+    },
+    "M1": {
+      "delivers": "Load a hand-written component; call a host function; enforce memory + fuel + epoch; trap taxonomy",
+      "criteria": ["ARCH-003", "HOST-005", "HOST-006", "HOST-008"],
+      "external": []
+    },
+    "M2": {
+      "delivers": "Manifest -> grants -> linker; `qqqai inspect` produces a static capability report",
+      "criteria": ["CAP-007", "CAP-008", "CAP-009", "CLI-015"],
+      "external": []
+    },
+    "M3": {
+      "delivers": "`qqqai serve` runs a real component over HTTP/1.1 and HTTP/2; streaming bodies; TLS",
+      "criteria": ["SRV-001", "SRV-004", "SRV-007", "CLI-011"],
+      "external": []
+    },
+    "M4": {
+      "delivers": "`qqqai new/build/run/dev`; hot reload tier 1; error catalogue v1",
+      "criteria": ["CLI-003", "CLI-008", "CLI-009", "CLI-010", "DX-006", "DOC-019"],
+      "external": []
+    },
+    "M5": {
+      "delivers": "AssemblyScript and Go pass the conformance suite. The make-or-break milestone for the multi-language claim.",
+      "criteria": [
+        "LANG-009", "LANG-010", "LANG-011", "LANG-012", "LANG-013",
+        "LANG-017", "LANG-018", "LANG-019", "LANG-020", "LANG-021"
+      ],
+      "external": []
+    },
+    "M6": {
+      "delivers": "`qqqai add/install`, lockfile, registry MVP, capability diff",
+      "criteria": ["PKG-001", "PKG-003", "PKG-004", "PKG-011"],
+      "external": []
+    },
+    "M7": {
+      "delivers": "Security audit #1 complete; benchmark suite published; first external users",
+      "criteria": ["PERF-021"],
+      "external": [
+        {"what": "SEC-024 -- commissioned external security audit #1", "why": "a second party must perform it; this repository cannot audit itself"},
+        {"what": "first external users", "why": "a population that does not exist until the private alpha is offered"}
+      ]
+    },
+    "M8": {
+      "delivers": "Python (CPython/WASI) and C/C++ pass conformance",
+      "criteria": ["LANG-028", "LANG-036"],
+      "external": []
+    },
+    "M9": {
+      "delivers": "`qqqai mcp`, `schema --all`, agent cookbook, migration tool v1",
+      "criteria": ["AGENT-001", "AGENT-004", "AGENT-005", "AGENT-024", "CLI-022"],
+      "external": []
+    },
+    "M10": {
+      "delivers": "Docs, installers, registry public, two reference apps, security audit #2",
+      "criteria": ["DIST-001", "DIST-002", "PKG-006", "SRV-018"],
+      "external": [
+        {"what": "SEC-025 -- commissioned external security audit #2", "why": "a second party must perform it"},
+        {"what": "registry.qqq.codes served publicly", "why": "PKG-006 builds it; publishing it needs a host outside this workstation"}
+      ]
+    },
+    "M11": {
+      "delivers": "Stability guarantees in force, deprecation policy published, governance published",
+      "criteria": ["CON-017", "GOV-001", "GOV-005"],
+      "external": []
+    }
+  }
+}

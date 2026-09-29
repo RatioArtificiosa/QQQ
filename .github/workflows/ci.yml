@@ -462,6 +462,14 @@ jobs:
       - name: Prove the backlog check catches drift and vacuity
         run: python tools/gen_backlog.py --self-test
 
+      # `PLAN-003`: the Proposal states each milestone's deliverable in prose; `tools/milestones.json`
+      # turns it into named items and this decides them. `--report` exits 0 by design -- most
+      # milestones are not met. The executable form is `--milestone MX`, which a release invokes.
+      - name: Report every milestone's real position
+        run: python tools/check_milestones.py --report
+      - name: Prove the milestone declaration is validated and the external gate holds
+        run: python tools/check_milestones.py --self-test
+
       # §9.2 is a contract with twelve stated budgets. `Budget::ALL` in
       # `crates/qqq-bench/src/budget.rs` is its machine-readable copy, and this
       # compares the Proposal, that table and the checklist against each other.

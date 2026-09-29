@@ -935,6 +935,10 @@ cmd_checks() {
     # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
     python3 tools/gen_backlog.py --check
     python3 tools/gen_backlog.py --self-test
+    # `PLAN-003`: the milestones against their declared criteria. `--report` exits 0; a release runs
+    # `--milestone MX`, which does not.
+    python3 tools/check_milestones.py --report
+    python3 tools/check_milestones.py --self-test
     python3 tools/check_lifecycle_counts.py
     python3 tools/check_lifecycle_counts.py --self-test
     python3 tools/check_error_catalogue.py

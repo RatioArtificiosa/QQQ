@@ -74,61 +74,73 @@ mod bindings {
 /// be a second answer to what `unknown-capability` means.
 pub use bindings::qqq::test::assertions::AssertionError;
 
-/// The WIT package this module implements.
-pub const INTERFACE: &str = "qqq:test/assertions@1.0.0";
-
-/// What a run's assertions have accumulated — `TEST-007`, `TEST-008`.
-///
-/// # Why this is state on the store rather than a value threaded through
-///
-/// Because `mark-fuel` and `assert-fuel-below` are separate host calls with the guest's own code between
-/// them, so the mark table has to outlive one call. The store is what an instance owns; the state belongs
-/// to the instance.
-///
-/// # Why `None` is the default on `StoreData`
-///
-/// For the same reason `audit` is: `Instance::create` is used by `qqqai run`, by tests and by
-/// `qqq-debug`, and **none of those should start keeping assertion state because the interface happened
-/// to be linked.** `InstanceOptions::test` is the opt-in.
+/// What a run's assertions accumulate. Private: reached through [`TestState`]'s methods.
 #[derive(Debug, Default)]
-pub struct TestState {
+struct Inner {
     /// Fuel *remaining* at each mark, so a later reading subtracts.
-    ///
-    /// **Remaining and not consumed, because that is what the engine reports.** `Store::get_fuel()`
-    /// decreases as the guest runs, so `mark - now` is the consumption since the mark and no separate
-    /// starting figure has to be retained. Storing "consumed at the mark" would require the initial
-    /// budget, which is a number this module has no business knowing.
     marks: BTreeMap<String, u64>,
     /// What `report` recorded, in order.
-    ///
-    /// # Why the guest's `location` is stored verbatim
-    ///
-    /// The WIT is explicit: *"`location` is a caller-supplied string and is **not** trusted: it appears in
-    /// the report verbatim, so a test that lies about where it failed makes a confusing report rather
-    /// than a false one. **It cannot affect whether the test passed.**"* Nothing in this module branches
-    /// on it.
     failures: Vec<String>,
 }
 
+/// The assertion state a run accumulates, shared with the caller — `TEST-007`, `TEST-008`.
+///
+/// # Why this is a handle and not a plain struct
+///
+/// Because a test runner has to read the result *after* the run, and the state lives inside the store,
+/// which lives inside the `Instance`. `crate::audit::AuditHandle` is the precedent: the runner builds a
+/// handle over an `Arc<Mutex<..>>`, passes it in, and keeps its own way in. **`Clone` is the mechanism**
+/// -- a host function clones the state out of the store before touching the fuel counter, so the two
+/// borrows cannot interleave.
+#[derive(Debug, Clone, Default)]
+pub struct TestState {
+    inner: std::sync::Arc<std::sync::Mutex<Inner>>,
+}
+
 impl TestState {
-    /// The messages `report` recorded as failed.
+    /// The state under the lock.
+    ///
+    /// # Why a guard rather than `&mut self`
+    ///
+    /// Because a host function clones the state out of the store and **then** calls
+    /// `store.get_fuel()`, which needs `&mut Store`. `&mut self` would require the two borrows to
+    /// interleave, and they cannot.
+    ///
+    /// Poisoning is recovered rather than propagated, for the reason
+    /// [`crate::audit::AuditHandle::record`] gives: a host function that has already decided to proceed
+    /// must not fail because a previous panic left the lock poisoned.
+    fn data(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The messages `report` recorded as failed, copied out from under the lock.
+    ///
+    /// # Why a copy rather than a slice
+    ///
+    /// Because a slice would have to outlive the guard that protects it. The failures of a run are a
+    /// handful of strings, and a runner wants them after the lock is released.
     #[must_use]
-    pub fn failures(&self) -> &[String] {
-        &self.failures
+    pub fn failures(&self) -> Vec<String> {
+        self.data().failures.clone()
     }
 
     /// How many assertions the guest marked.
     #[must_use]
     pub fn marks(&self) -> usize {
-        self.marks.len()
+        self.data().marks.len()
     }
 
     /// Whether every recorded assertion passed.
     #[must_use]
     pub fn all_passed(&self) -> bool {
-        self.failures.is_empty()
+        self.data().failures.is_empty()
     }
 }
+
+/// The WIT package this module implements.
+pub const INTERFACE: &str = "qqq:test/assertions@1.0.0";
 
 /// Register the interface.
 ///
@@ -153,7 +165,7 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // `mark-fuel: func(name: string) -> result<_, assertion-error>`
     inst.func_wrap(
         "mark-fuel",
-        |mut store: StoreContextMut<'_, StoreData>,
+        |store: StoreContextMut<'_, StoreData>,
          (name,): (String,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.mark-fuel", || {
@@ -162,17 +174,27 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
+                };
                 let remaining = store.get_fuel()?;
-                if let Some(state) = store.data_mut().test.as_mut() {
-                    state.marks.insert(name, remaining);
-                }
+                state.data().marks.insert(name, remaining);
                 Ok((Ok(()),))
             })
         },
@@ -194,18 +216,31 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
-                let remaining = store.get_fuel()?;
-                let Some(state) = store.data().test.as_ref() else {
-                    return Ok((Err(AssertionError::NoFuelBaseline),));
                 };
-                match state.marks.get(&mark) {
+                let remaining = store.get_fuel()?;
+                // `.copied()` before the `match`, because the scrutinee's temporary guard would
+                // otherwise be dropped while an arm still borrowed from it -- E0597. The same
+                // expression is written this way in `assert-fuel-below` below.
+                let at = state.data().marks.get(&mark).copied();
+                match at {
                     Some(at) => Ok((Ok(at.saturating_sub(remaining)),)),
                     None => Ok((Err(AssertionError::NoFuelBaseline),)),
                 }
@@ -216,7 +251,7 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // `assert-fuel-below: func(mark: string, limit: u64) -> result<_, assertion-error>`
     inst.func_wrap(
         "assert-fuel-below",
-        |mut store: StoreContextMut<'_, StoreData>,
+        |store: StoreContextMut<'_, StoreData>,
          (mark, limit): (String, u64)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-fuel-below", || {
@@ -225,25 +260,34 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
-                let remaining = store.get_fuel()?;
-                let Some(state) = store.data_mut().test.as_mut() else {
-                    return Ok((Err(AssertionError::NoFuelBaseline),));
                 };
-                let Some(at) = state.marks.get(&mark).copied() else {
+                let remaining = store.get_fuel()?;
+                let Some(at) = state.data().marks.get(&mark).copied() else {
                     return Ok((Err(AssertionError::NoFuelBaseline),));
                 };
                 let consumed = at.saturating_sub(remaining);
                 if consumed < limit {
                     Ok((Ok(()),))
                 } else {
-                    state.failures.push(format!(
+                    state.data().failures.push(format!(
                         "`{mark}` consumed {consumed} fuel, which is not below {limit}"
                     ));
                     Ok((Ok(()),))
@@ -255,7 +299,7 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // `assert-caps-only: func(allowed: list<string>) -> result<_, assertion-error>`
     inst.func_wrap(
         "assert-caps-only",
-        |mut store: StoreContextMut<'_, StoreData>,
+        |store: StoreContextMut<'_, StoreData>,
          (allowed,): (Vec<String>,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-caps-only", || {
@@ -264,13 +308,25 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
+                };
                 // Every name has to resolve, or a typo would assert nothing and pass -- which the WIT
                 // calls *"the one error here that is almost always a test bug"*.
                 let mut wanted = Vec::with_capacity(allowed.len());
@@ -290,12 +346,10 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     Ok((Ok(()),))
                 } else {
                     let names: Vec<String> = outside.iter().map(ToString::to_string).collect();
-                    if let Some(state) = store.data_mut().test.as_mut() {
-                        state.failures.push(format!(
-                            "the code under test attempted {} outside the allowed set",
-                            names.join(", ")
-                        ));
-                    }
+                    state.data().failures.push(format!(
+                        "the code under test attempted {} outside the allowed set",
+                        names.join(", ")
+                    ));
                     Ok((Ok(()),))
                 }
             })
@@ -305,7 +359,7 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // `assert-no-capability: func(capability: string) -> result<_, assertion-error>`
     inst.func_wrap(
         "assert-no-capability",
-        |mut store: StoreContextMut<'_, StoreData>,
+        |store: StoreContextMut<'_, StoreData>,
          (capability,): (String,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-no-capability", || {
@@ -314,13 +368,25 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
+                };
                 let Some(c) = capability_named(&capability) else {
                     return Ok((Err(AssertionError::UnknownCapability(capability)),));
                 };
@@ -329,11 +395,10 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     Err(e) => return Ok((Err(e),)),
                 };
                 if outside.contains(&c) {
-                    if let Some(state) = store.data_mut().test.as_mut() {
-                        state
-                            .failures
-                            .push(format!("the code under test attempted {c}"));
-                    }
+                    state
+                        .data()
+                        .failures
+                        .push(format!("the code under test attempted {c}"));
                 }
                 Ok((Ok(()),))
             })
@@ -343,7 +408,7 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // `report: func(passed: bool, message: string, location: option<string>) -> result<_, assertion-error>`
     inst.func_wrap(
         "report",
-        |mut store: StoreContextMut<'_, StoreData>,
+        |store: StoreContextMut<'_, StoreData>,
          (passed, message, location): (bool, String, Option<String>)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.report", || {
@@ -352,19 +417,29 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // report a problem is an assertion that passes. The WIT has the error for it, and
                 // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
                 // the other means 'fix the test'"*.
-                if store.data().test.is_none() {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                //
+                // The clone is what keeps the borrows apart: `store.get_fuel()` below needs
+                // `&mut Store`, and writing into the state needs the state. Cloned out first, the two
+                // never overlap. **It also removes the dead re-lookups the bodies used to carry** --
+                // this guard already established that a state is present, so a body answering
+                // `NoFuelBaseline` for a `None` that cannot occur was reporting the wrong error for a
+                // case already handled.
+                let Some(state) = store.data().test.clone() else {
                     return Ok((Err(AssertionError::NotAssertable(
                         "no assertion state is attached to this store; create the instance with \
-                         `InstanceOptions::test`"
+                         `InstanceOptions::with_test`"
                             .to_owned(),
                     )),));
-                }
+                };
                 if !passed {
-                    if let Some(state) = store.data_mut().test.as_mut() {
-                        match location {
-                            Some(at) => state.failures.push(format!("{message} (at {at})")),
-                            None => state.failures.push(message),
-                        }
+                    match location {
+                        Some(at) => state.data().failures.push(format!("{message} (at {at})")),
+                        None => state.data().failures.push(message),
                     }
                 }
                 Ok((Ok(()),))
@@ -494,7 +569,9 @@ mod tests {
             .next()
             .unwrap_or_default();
         let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
-        let guards = squeezed.matches("ifstore.data().test.is_none(){").count();
+        let guards = squeezed
+            .matches("letSome(state)=store.data().test.clone()else{")
+            .count();
         let wraps = squeezed.matches("func_wrap(\"").count();
         assert_eq!(
             wraps, 6,

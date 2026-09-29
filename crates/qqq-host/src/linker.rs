@@ -950,6 +950,22 @@ pub fn build_linker<'a>(
     // the deny is enforced.
     crate::host_wasi::register(&mut linker)?;
 
+    // `qqq:test/assertions` -- the assertion interface a test runner drives -- `TEST-007`, `TEST-008`.
+    //
+    // # Why this is unconditional, and why that is not a hole in deny-by-default
+    //
+    // It has no capability, so `required_interfaces` never names it and the `match` below cannot
+    // reach it. It belongs here, beside `host_wasi`, and that precedent's reasoning applies with one
+    // change of instrument: for WASI the authority is withheld by the *context* -- no preopens, no
+    // filesystem, no sockets -- and here by `StoreData::test`.
+    //
+    // **A store created without `InstanceOptions::test` has no assertion state, and every function
+    // in this interface then refuses with `not-assertable`** rather than passing. The presence of the
+    // interface is not the authority; the function is. The alternative would be worse than untidy:
+    // an absent interface gives the guest `unknown import`, which names the wrong problem, where
+    // `not-assertable` names this one.
+    crate::host_test::register(&mut linker)?;
+
     let required = required_interfaces(grants);
     let mut interfaces: Vec<String> = Vec::with_capacity(required.len());
     let mut unimplemented = Vec::new();

@@ -157,6 +157,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (name,): (String,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.mark-fuel", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 let remaining = store.get_fuel()?;
                 if let Some(state) = store.data_mut().test.as_mut() {
                     state.marks.insert(name, remaining);
@@ -177,6 +189,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (mark,): (String,)|
          -> wasmtime::Result<(Result<u64, AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.fuel-since", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 let remaining = store.get_fuel()?;
                 let Some(state) = store.data().test.as_ref() else {
                     return Ok((Err(AssertionError::NoFuelBaseline),));
@@ -196,6 +220,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (mark, limit): (String, u64)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-fuel-below", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 let remaining = store.get_fuel()?;
                 let Some(state) = store.data_mut().test.as_mut() else {
                     return Ok((Err(AssertionError::NoFuelBaseline),));
@@ -223,6 +259,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (allowed,): (Vec<String>,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-caps-only", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 // Every name has to resolve, or a typo would assert nothing and pass -- which the WIT
                 // calls *"the one error here that is almost always a test bug"*.
                 let mut wanted = Vec::with_capacity(allowed.len());
@@ -258,6 +306,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (capability,): (String,)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.assert-no-capability", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 let Some(c) = capability_named(&capability) else {
                     return Ok((Err(AssertionError::UnknownCapability(capability)),));
                 };
@@ -280,6 +340,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (passed, message, location): (bool, String, Option<String>)|
          -> wasmtime::Result<(Result<(), AssertionError>,)> {
             crate::guard::guard("qqq:test/assertions.report", || {
+                // **An assertion with no state to record into cannot be evaluated.** Returning `Ok`
+                // here is the vacuous pass this interface exists to prevent: an assertion that cannot
+                // report a problem is an assertion that passes. The WIT has the error for it, and
+                // distinguishes it from a failed assertion deliberately -- *"one means 'fix the code',
+                // the other means 'fix the test'"*.
+                if store.data().test.is_none() {
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "no assertion state is attached to this store; create the instance with \
+                         `InstanceOptions::test`"
+                            .to_owned(),
+                    )),));
+                }
                 if !passed {
                     if let Some(state) = store.data_mut().test.as_mut() {
                         match location {

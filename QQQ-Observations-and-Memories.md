@@ -32106,6 +32106,90 @@ not comparable to anything, including another run of this same harness.**"* **Up
 the document claim a comparability it does not have** — which is `§O-258`'s failure in a provenance block
 rather than in a budget.
 
+## §O-423 — `--deterministic` never reaches the ambient state, so the flag virtualizes the compiler and not the clock
+
+**The gate condition is `qqqai run --deterministic` twice producing byte-identical output. Measured, that
+cannot hold today for any guest that reads the clock or the RNG**, and the reason is a call that does not
+exist rather than code that is wrong.
+
+### The measurement
+
+```
+$ rg -n -g '*.rs' -e 'with_deterministic_ambient' crates/
+crates/qqq-host/src/linker.rs:454:    pub fn with_deterministic_ambient(mut self, deterministic: bool) -> Self {
+crates/qqq-host/src/linker.rs:455:        self.ambient = crate::ambient::AmbientState::new(deterministic);
+crates/qqq-host/src/linker.rs:1661:            .with_deterministic_ambient(true)      <- a test I wrote this round
+crates/qqq-host/src/linker.rs:1675:            .with_deterministic_ambient(false)     <- ditto
+crates/qqq-host/src/linker.rs:1690:            .with_deterministic_ambient(true)      <- ditto
+crates/qqq-host/src/linker.rs:1703:            .with_deterministic_ambient(true)      <- ditto
+```
+
+**Four callers, all tests, all written after the observation. No production path calls it.** And the default
+is the other half of the finding:
+
+```rust
+impl Default for AmbientState {
+    fn default() -> Self { Self::new(false) }        // real time
+}
+// linker.rs:307
+ambient: crate::ambient::AmbientState::default(),
+```
+
+### What `--deterministic` actually does
+
+`crates/qqq-run/src/run.rs:603`:
+
+```rust
+let mut cfg = if opts.deterministic { EngineConfig::deterministic() } else { … };
+```
+
+**That is the whole of it.** `EngineConfig::deterministic()` sets Cranelift's NaN canonicalization, disables
+relaxed SIMD and float fusion — **compiler-level properties, all of them.** It does not touch the store, and
+nothing between `run_options()` and `Instance::create` builds the ambient state for a mode. So a guest that
+calls `clock.wall.now` gets `SystemTime::now()` and a guest that calls `crypto.random.get` gets
+`getrandom::fill`, **in a run the user asked to be reproducible.**
+
+### Why nothing caught it, and this is the part worth keeping
+
+**`DET-002` and `DET-003` are not false.** `ambient.rs` does implement a virtualized wall clock, a virtual
+monotonic clock and a seeded `splitmix64`, and its tests exercise all three. **The claim those items make is
+about code, and the code is there.** What is missing is a *call* — and every checker in this repository
+compares **documents to documents** or **claims to source text**:
+
+| checker | what it compares | why it is silent here |
+|---|---|---|
+| `check_xrefs.py` | ids to ids | the ids are all defined |
+| `check_doc_claims.py` | a document's figure to a resolver | no figure is wrong |
+| `check_source_claims.py` | a module's stated items to the checklist's status | `ambient.rs` **does** implement them |
+| `check_api_examples.py` | a fence to a public item | unrelated |
+| the gate, CI | exit codes | no test asserts the wiring |
+
+**A module can implement an item completely and be unreachable, and no instrument here measures reachability
+from the CLI.** That is `§O-282` one level out: the guards are as wide as their *patterns*, and every pattern
+in this repository asks about text.
+
+### And the second consequence, which is worse
+
+**`DET-008`'s `--replay` could not have worked either.** `AmbientState::set_replay_source` refuses outside
+deterministic mode — deliberately, because a log recorded with a real clock records nothing reproducible —
+so a `--replay` wired to the current `prepare` would attach a source to a real-time state, be refused, and
+**the run would proceed reading the real clock while reporting that it replayed.** The refusal would be
+correct and the user would never see it.
+
+**So the fix is not "add the call to `--deterministic`".** It is that the ambient mode has to travel with
+the store from the same decision the engine config comes from, and the store is built in
+`ReadyStore::prepare` from a `StoreData::new` default that has no way to hear about it.
+
+### What this changes about the phase's reading
+
+`DET-002`/`DET-003`'s code is done; **their wiring is not, and no checklist item owns a wiring.** `DET-001`
+(*"deterministic mode as an engine configuration profile, not a scattering of if statements — one place
+decides; everything else reads it"*) is the item whose text this violates most directly: **there is one place
+that decides for the engine, and no place at all for the ambient state.** The constructor's parameter list
+is the symptom — `create`, `create_with_audit`, `create_async`, `create_for` — and the next two additions
+would be `create_with_replay` and `create_with_audit_and_replay`, **which is a combinatorial surface rather
+than a decision point.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

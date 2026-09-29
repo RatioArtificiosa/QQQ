@@ -194,10 +194,10 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
                     serving.port = addr.port();
                     return serving;
                 }
-                // The child's stdout closed without announcing, so it cannot ever announce.
-                Ok(None) => break,
+                // The child's stdout closed without announcing, or the reader thread ended before it
+                // could: either way this attempt cannot succeed, so try the next port.
+                Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
             std::thread::sleep(Duration::from_millis(25));
         }

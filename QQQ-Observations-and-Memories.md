@@ -31607,6 +31607,105 @@ and this round adds the converse: **a guard is only as *useful* as its premise, 
 produces a tool that acts confidently on files that were correct.** The corpus validates; the scripts
 were working; **and a check I invented to protect them broke eighteen of them while reporting success.**
 
+## §O-417 — Five blind spots in one checker, four found by reading the output and one only by injecting a defect
+
+`§O-415` proposed that source files state which checklist items they implement and that nothing compares
+that statement to the checklist. **This entry is the checker, built and run**, and the useful part is the
+record of how the instrument was wrong five times before it was right.
+
+**The tool.** `tools/check_source_claims.py` -- `--report` (exits 0), `--check` (the gate mode),
+`--self-test` (8 cases). It parses `Implements <ID>` claims out of `crates/**/*.rs` module docs and
+compares each id to `tools/backlog.json`'s status.
+
+**Measured on the real tree:**
+
+```
+32 item(s) claimed | agreeing 27 | scoped-and-open 5 | TOTAL-and-open 0 | unknown 0
+SOURCE CLAIMS OK -- every total claim agrees with the backlog
+```
+
+**Every claim in the tree is either in agreement with the checklist or genuinely scoped**, and no id is
+unknown. That is the result: **an empty finding set, and the tool says so in one line.**
+
+**And a demonstrated end-to-end failure**, which is the part that makes the empty set meaningful:
+
+```
+clean      -> exit 0
+injected   -> exit 1   (a total `Implements \`DIST-001\`` appended to store.rs's module doc)
+restored   -> exit 0
+```
+
+**The five blind spots, in the order they were found.**
+
+**1. The singular pattern missed comma lists.** `Implements\s+(?:the\s+\S+\s+half\s+of\s+)?\`?(ID)\`?` found
+**22** claims, and the first thing it flagged was itself -- `qqq-core/src/lib.rs` writes
+
+    //! Implements `ARCH-007`, `ARCH-008`, `CON-009`, `CON-016`, `AGENT-021`,
+    //! `AGENT-022`. See `QQQ-Proposal-V1.md` §4.3 and §8.3.
+
+**Six items in one claim, and the singular form caught the first.** A checker built on it would report
+`ARCH-007` and be **silent about five items it had just read.**
+
+**2. The fix for #1 lost `PKG-003`.** Capturing the whole backtick list found **29** claims and dropped
+`the versioning half of \`PKG-003\``, which has no backtick immediately after the verb. **Two patterns, two
+blind spots in opposite directions, and only the union is complete.**
+
+**3. A parenthetical inside a list broke the list.** `store.rs` writes
+
+    //! Implements `PKG-001` (layout and verification) and `PKG-014`
+
+and a list pattern expecting only ids separated by `,`/`and` **stopped at the parenthesis** -- reading
+`PKG-001` and skipping `PKG-014`. **`PKG-014` was claimed and never compared.** Found because a fault
+injection went inert: removing the parenthetical changed nothing, which meant the id it made total was
+already invisible.
+
+**4. `## Checklist coverage` is a weaker claim than "implements".** `qqq-core/src/lib.rs` heads its claim
+with that phrase, and `ARCH-007` is *"Create **all crates** listed in the topology"* -- **which one crate
+cannot complete.** The first version read coverage as implementation and reported a defect. **That was a
+false positive, found by reading the finding rather than counting it.**
+
+**5. The partiality marker matched by CLASS, not by the id -- and only the injection found this one.** The
+markers are written with `{ID}`, which is the *class* `[A-Z]{2,6}-\d{3}`. So `PKG-001`'s own
+parenthetical, sitting inside `DIST-001`'s 440-character window, **excused `DIST-001`**:
+
+```
+injected `Implements `DIST-001`` into store.rs
+-> 33 item(s) claimed | scoped-and-open 6 | TOTAL-and-open 0      <- classified as SCOPED
+```
+
+**And the first fix did not fix it.** I narrowed the test to *"the marker hit must contain a backticked
+id"* -- which accepts **any** backticked id, so `PKG-001`'s parenthesis still passed it and the injection
+stayed green. **Narrowing a check by one clause is not narrowing it to the thing being checked.** The
+working version tests that the hit names **`iid`**.
+
+**Which is `§O-280` doing exactly what it exists for.** Four times the injection was run and the result
+*read* rather than the exit code taken: *did the file change? did the classification move? is the marker
+about this id?* **A green `--check` on an injected defect is indistinguishable from a correct `--check`
+until the premise is confirmed** -- and this was the fifth `§O-282` occurrence in a single file.
+
+**The failure condition had to be narrower than "a claim disagrees".** Three of the disagreements are
+**honest partials the checklist is right to leave open**, each scoped in its own words:
+
+| item | the claim | the item |
+|---|---|---|
+| `ARCH-011` | *"Implements `ARCH-011`'s **step 1**"* | *"the **fifteen-step** request lifecycle"* |
+| `PKG-003` | *"the **versioning half** of `PKG-003`"* | *"the version **solver** with lockfile-first resolution"* |
+| `PKG-001` | *"`PKG-001` (**layout and verification**)"* | *"with hard-link/reflink **materialisation**"* |
+
+A checker failing on all three would produce **two false defects out of three** -- the failure `--trials`'
+own doc names: *"a check that fires on a stable suite is worse than no check, because it teaches the
+reader to ignore the one signal it exists to give."*
+
+**And the self-test was wrong before the code was.** Three of its cases failed on the first run, naming
+the code as broken when the assertion was: I had asserted `want_claimed=False` for scoped claims, but **a
+scoped claim is still a claim** -- `claims_in()` and `is_partial()` answer two independent questions.
+**`§O-411` from the other side: a test is a claim about what is possible, and this one claimed the
+impossible.**
+
+**What it deliberately does not check**, and the header says so: a `[x]` item whose implementing file has
+been deleted. That needs the checklist to name the file, and it does not. **Reporting it as covered would
+be `§O-375` -- a rule that cannot fire.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

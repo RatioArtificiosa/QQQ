@@ -901,6 +901,11 @@ cmd_checks() {
     python3 tools/check_conformance.py
     python3 tools/check_conformance.py --matrix
     python3 tools/check_conformance.py --self-test
+    # `§O-415`: source module docs state which checklist items they implement, and nothing
+    # compared that to `tools/backlog.json`. It found five blind spots in its own vocabulary and
+    # has a demonstrated end-to-end failure: an injected total claim against an open item exits 1.
+    python3 tools/check_source_claims.py --check
+    python3 tools/check_source_claims.py --self-test
     python3 tools/check_batch_first.py
     python3 tools/audit_unsafe.py
     python3 tools/audit_unsafe.py --self-test

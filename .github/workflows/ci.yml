@@ -713,6 +713,14 @@ jobs:
       - name: Prove the conformance checker rejects an unowned gap and a drifting status
         run: python tools/check_conformance.py --self-test
 
+      # `§O-415`: source module docs state which checklist items they implement, and nothing
+      # compared that to `tools/backlog.json`. Both forms are identical to `docker/entrypoint.sh`
+      # because `check_gate_parity.py` compares invocations rather than scripts.
+      - name: Compare the source files' checklist claims against the backlog
+        run: python tools/check_source_claims.py --check
+      - name: Prove the source-claims checker rejects a total claim and accepts a scoped one
+        run: python tools/check_source_claims.py --self-test
+
       # `check_wit.py` above proves each file PARSES. It cannot prove the
       # annotation policy is followed, and that was verified rather than
       # assumed: `wasm-tools` accepts a WIT file with no `@since` at all and

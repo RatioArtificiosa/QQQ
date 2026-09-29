@@ -277,7 +277,12 @@ impl AppendCounters {
     }
 }
 
-/// Why a record could not be appended.
+/// Why a record could not be appended, or could not be read back.
+///
+/// `Copy` is retained, and the new variant is the reason it is worth stating: the two fields are
+/// `&'static str` because **the function names in this log are `&'static str` by design** — bounded by
+/// the interfaces' own WIT, the same reason [`crate::audit`]'s allowlist exists. A `String` here would
+/// have cost the `Copy`, and nothing needed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayError {
     /// The log is at capacity. **Refused rather than overwritten**, so the first records — the ones a
@@ -287,16 +292,40 @@ pub enum ReplayError {
     ChainBroken,
     /// A record's `sequence` is not the next in order.
     OutOfOrder,
+    /// The log is exhausted — the execution read more values than were recorded.
+    ///
+    /// **This is the failure a truncated log produces**, and it must be an error rather than a
+    /// fallback: a replay that silently began reading the real clock at the point the log ended would
+    /// reproduce a *different* execution and report success.
+    Exhausted,
+    /// The next record is for a different function than the one being replayed.
+    ///
+    /// **The property this protects is the one that makes a replay trustworthy.** Records are
+    /// replayed in order, so if the log's next entry is a `clock.wall` and the execution is asking
+    /// for `crypto.random`, the two runs diverged before this point — and feeding the clock value to
+    /// the RNG would produce a plausible-looking execution that shares nothing with the recorded one.
+    Unexpected {
+        /// What the execution asked for.
+        expected: &'static str,
+        /// What the log holds next.
+        found: &'static str,
+    },
 }
 
 impl std::fmt::Display for ReplayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Full => "the replay log is full",
-            Self::ChainBroken => "a record's `previous` does not match the one before it",
-            Self::OutOfOrder => "a record's sequence is not the next in order",
-        };
-        f.write_str(s)
+        match self {
+            Self::Full => f.write_str("the replay log is full"),
+            Self::ChainBroken => {
+                f.write_str("a record's `previous` does not match the one before it")
+            }
+            Self::OutOfOrder => f.write_str("a record's sequence is not the next in order"),
+            Self::Exhausted => f.write_str("the replay log ended before the execution did"),
+            Self::Unexpected { expected, found } => write!(
+                f,
+                "the execution asked to replay `{expected}` but the log's next record is `{found}`"
+            ),
+        }
     }
 }
 
@@ -307,6 +336,18 @@ pub struct ReplayLog {
     records: Vec<ReplayRecord>,
     capacity: usize,
     counters: AppendCounters,
+    /// How far a *reader* has consumed the log — `DET-008`.
+    ///
+    /// # Why the cursor lives here rather than in the caller
+    ///
+    /// Because the read position and the records are one piece of state: a cursor in a caller could
+    /// be advanced against a different log, or rewound while a replay is in flight. Keeping them
+    /// together is what makes [`Self::next_record`] the only way to consume, and therefore the only
+    /// place the exhaustion and wrong-function checks have to live.
+    ///
+    /// It is distinct from `records.len()`: a log may be written and then read, and the writer's
+    /// count is not a read position.
+    cursor: usize,
 }
 
 impl ReplayLog {
@@ -322,7 +363,61 @@ impl ReplayLog {
             records: Vec::new(),
             capacity,
             counters: AppendCounters::default(),
+            cursor: 0,
         }
+    }
+
+    /// Consume the next record, which must be for `function` — `DET-008`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Exhausted`] when the execution read more values than were recorded, and
+    /// [`ReplayError::Unexpected`] when the log's next record is for a different function. **Both are
+    /// failures rather than fallbacks**, and the reason is the same for each: a replay that quietly
+    /// substituted a real clock reading at the point the log ended, or that fed a recorded instant to
+    /// an RNG, would produce an execution that looks plausible and shares nothing with the recorded
+    /// one. **The whole mechanism exists to make that impossible rather than unlikely.**
+    ///
+    /// # Why the caller must name the function
+    ///
+    /// Because order alone is not enough to detect a divergence. Two runs of the same component can
+    /// reach the same *number* of reads in a different *order* — a branch that reorders two calls
+    /// changes nothing about the count — so the check has to be on identity, not position.
+    pub fn next_record(&mut self, function: &'static str) -> Result<ReplayValue, ReplayError> {
+        let Some(record) = self.records.get(self.cursor) else {
+            return Err(ReplayError::Exhausted);
+        };
+        if record.function != function {
+            return Err(ReplayError::Unexpected {
+                expected: function,
+                found: record.function,
+            });
+        }
+        self.cursor += 1;
+        Ok(record.value.clone())
+    }
+
+    /// Whether a reader has consumed every record.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.cursor >= self.records.len()
+    }
+
+    /// How many records a reader has consumed.
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Return the read position to the start, so a log can be replayed again.
+    ///
+    /// # Why this exists when a replay reads forward once
+    ///
+    /// Because `--trials N` with `--replay` runs the same log N times and compares the outputs — which
+    /// is `DET-009`'s verification from the other side. A log that could only be consumed once would
+    /// make that a re-read of the file rather than a rewind of the same value.
+    pub fn rewind(&mut self) {
+        self.cursor = 0;
     }
 
     /// The header this log was opened with.
@@ -439,6 +534,81 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The positive half of `DET-008`.** A log written by one run feeds the next, in order, and the
+    /// values are the ones that were recorded.
+    #[test]
+    fn a_replay_feeds_the_recorded_values_in_order() {
+        let mut written = log(8);
+        written
+            .record("clock.wall", ReplayValue::Clock(1_767_225_600_000_000_000))
+            .unwrap();
+        written
+            .record("crypto.random", ReplayValue::Random(vec![0x51; 8]))
+            .unwrap();
+        written
+            .record("clock.monotonic", ReplayValue::Clock(4_200))
+            .unwrap();
+
+        let mut replayed = written.clone();
+        assert_eq!(
+            replayed.next_record("clock.wall").unwrap(),
+            ReplayValue::Clock(1_767_225_600_000_000_000)
+        );
+        assert_eq!(
+            replayed.next_record("crypto.random").unwrap(),
+            ReplayValue::Random(vec![0x51; 8])
+        );
+        assert_eq!(
+            replayed.next_record("clock.monotonic").unwrap(),
+            ReplayValue::Clock(4_200)
+        );
+        assert!(replayed.is_exhausted());
+        assert_eq!(replayed.cursor(), 3);
+    }
+
+    /// **A truncated log must fail, not fall back.** A replay that began reading the real clock where
+    /// the log ended would reproduce a *different* execution and report success.
+    #[test]
+    fn an_exhausted_log_fails_rather_than_falling_back() {
+        let mut l = log(8);
+        l.record("clock.wall", ReplayValue::Clock(1)).unwrap();
+        let mut r = l.clone();
+        assert!(r.next_record("clock.wall").is_ok());
+        assert_eq!(r.next_record("clock.wall"), Err(ReplayError::Exhausted));
+    }
+
+    /// **The property that makes a replay trustworthy.** Order alone cannot detect a divergence —
+    /// two runs can reach the same number of reads in a different order — so the check is on identity.
+    /// Feeding a recorded instant to an RNG would produce an execution that looks plausible and shares
+    /// nothing with the recorded one.
+    #[test]
+    fn a_wrong_function_fails_rather_than_diverging() {
+        let mut l = log(8);
+        l.record("clock.wall", ReplayValue::Clock(1)).unwrap();
+        let mut r = l.clone();
+        assert_eq!(
+            r.next_record("crypto.random"),
+            Err(ReplayError::Unexpected {
+                expected: "crypto.random",
+                found: "clock.wall",
+            })
+        );
+        assert_eq!(r.cursor(), 0, "a refused read must not advance the cursor");
+    }
+
+    /// A rewind lets the same log be replayed again, which is what `--trials N --replay` needs.
+    #[test]
+    fn a_rewind_lets_a_log_be_replayed_again() {
+        let mut l = log(8);
+        l.record("clock.wall", ReplayValue::Clock(7)).unwrap();
+        let mut r = l.clone();
+        let first = r.next_record("clock.wall").unwrap();
+        assert!(r.is_exhausted());
+        r.rewind();
+        assert!(!r.is_exhausted());
+        assert_eq!(r.next_record("clock.wall").unwrap(), first);
+    }
 
     fn header() -> ReplayHeader {
         ReplayHeader {

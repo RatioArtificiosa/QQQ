@@ -282,7 +282,10 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                         }
                     }
                 }
-                let outside = recorded_outside(&store, &wanted);
+                let outside = match recorded_outside(&store, &wanted) {
+                    Ok(v) => v,
+                    Err(e) => return Ok((Err(e),)),
+                };
                 if outside.is_empty() {
                     Ok((Ok(()),))
                 } else {
@@ -321,7 +324,11 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 let Some(c) = capability_named(&capability) else {
                     return Ok((Err(AssertionError::UnknownCapability(capability)),));
                 };
-                if recorded_outside(&store, &[]).contains(&c) {
+                let outside = match recorded_outside(&store, &[]) {
+                    Ok(v) => v,
+                    Err(e) => return Ok((Err(e),)),
+                };
+                if outside.contains(&c) {
                     if let Some(state) = store.data_mut().test.as_mut() {
                         state
                             .failures
@@ -393,20 +400,49 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
 fn recorded_outside(
     store: &StoreContextMut<'_, StoreData>,
     allowed: &[Capability],
-) -> Vec<Capability> {
-    let Some(handle) = store.data().audit.as_ref() else {
-        // An unattached stream cannot distinguish "no attempt" from "no record". The interface's own
-        // rule applies: an assertion that cannot be evaluated must not report success.
-        return Vec::new();
-    };
+) -> Result<Vec<Capability>, AssertionError> {
+    let handle = stream_of(store.data().audit.as_ref())?;
     let mut out = Vec::new();
     handle.with_records(|records| {
-        for record in records {
-            if !allowed.contains(&record.capability) && !out.contains(&record.capability) {
-                out.push(record.capability);
-            }
-        }
+        let attempted: Vec<Capability> = records.iter().map(|r| r.capability).collect();
+        out = unaccounted(allowed, &attempted);
     });
+    Ok(out)
+}
+
+/// The audit stream a capability query reads, or the error for its absence.
+///
+/// # Why this takes the `Option` rather than a store
+///
+/// Because the branch it guards is the one the defect lived in, and **a store cannot be constructed in a
+/// test** -- `StoreData` has a dozen fields and no test-only constructor. Taking the absence as an
+/// argument makes "no stream attached" a value a caller can pass, so the branch that returned a pass
+/// instead of a refusal is reachable from a unit test.
+///
+/// Returning `Ok(&AuditHandle)` from a `&Option<&AuditHandle>` borrows the handle, which is what the
+/// caller needs and is why the absent case has to be an error rather than a sentinel.
+fn stream_of(
+    handle: Option<&crate::audit::AuditHandle>,
+) -> Result<&crate::audit::AuditHandle, AssertionError> {
+    handle.ok_or_else(|| {
+        AssertionError::NotAssertable(
+            "no audit stream is attached, so `assert-caps-only` cannot tell an attempt that was not              recorded from one that did not happen"
+                .to_owned(),
+        )
+    })
+}
+
+/// Which of `recorded` fall outside `allowed` -- the pure half of the query.
+///
+/// Ordered by first appearance rather than sorted: the caller reports the names, and an order that
+/// matches the guest's own execution is easier to read than an alphabetical one.
+fn unaccounted(allowed: &[Capability], recorded: &[Capability]) -> Vec<Capability> {
+    let mut out: Vec<Capability> = Vec::new();
+    for c in recorded {
+        if !allowed.contains(c) && !out.contains(c) {
+            out.push(*c);
+        }
+    }
     out
 }
 
@@ -423,4 +459,122 @@ fn recorded_outside(
 /// A local table would be a second answer to "what is a capability name", and the two would drift.
 fn capability_named(name: &str) -> Option<Capability> {
     Capability::from_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every assertion must refuse when the store carries no state — the call-site half.
+    ///
+    /// # Why a source-level test rather than a component
+    ///
+    /// `host_crypto` records both halves of this. Extracting a helper closes one hole; **"a second
+    /// injection — neutering the call site while leaving the helper correct — also left every test
+    /// green, because a test that calls the helper directly proves the helper works and proves nothing
+    /// about whether the host function uses it."**
+    ///
+    /// So the property is: **six** `func_wrap` closures, **six** refusals. The count is asserted rather
+    /// than a bare `contains`, because a `contains` is satisfied by one guard in one function.
+    ///
+    /// Whitespace is stripped first, for the reason `registers` gives in `host_crypto`: a test whose
+    /// result depends on where a line breaks is not testing the property it names, and `rustfmt` has
+    /// already moved this layout once.
+    #[test]
+    fn every_assertion_refuses_when_the_store_has_no_state() {
+        // **The production half only, and the reason is the rule this file has quoted twice.**
+        //
+        // The first version of this test squeezed the whole file and counted 7 guards for 6
+        // registrations, because the pattern it searches for appears in the `matches` call below it.
+        // That is a guard matching its own explanation -- the pattern describing the reader rather than
+        // the code. `arch012::production_lines` splits at the same marker, for the same reason: a test
+        // module is not production, and a checker should not read itself.
+        let production = include_str!("host_test.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+        let guards = squeezed.matches("ifstore.data().test.is_none(){").count();
+        let wraps = squeezed.matches("func_wrap(\"").count();
+        assert_eq!(
+            wraps, 6,
+            "this file should register six functions, found {wraps}"
+        );
+        assert_eq!(
+            guards, wraps,
+            "every `func_wrap` in this file must refuse when no assertion state is attached; found \
+             {guards} guard(s) for {wraps} registration(s). **An assertion that cannot report a problem \
+             is an assertion that passes.**"
+        );
+    }
+
+    /// **And the call site, because a correct helper proves nothing about its use.**
+    ///
+    /// `host_crypto` records this as its second gap: *"neutering the call site while leaving the helper
+    /// correct — also left every test green."* `stream_of`'s own test passes whether or not
+    /// `recorded_outside` consults it, and the defect this module was written to remove lived exactly
+    /// there — in a branch that returned `Vec::new()` instead of calling anything.
+    ///
+    /// So the property is asserted where it can be violated: inside `recorded_outside`'s own body.
+    #[test]
+    fn the_capability_query_consults_the_stream_it_guards() {
+        let production = include_str!("host_test.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let body = production
+            .split("fn recorded_outside(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("recorded_outside must be defined");
+        // **The `?` is the property, not the call.** The first version of this assertion asked only
+        // whether the body contained `stream_of(`, and an injection that kept the call but answered
+        // `Err(_) => return Ok(Vec::new())` sailed through it -- the replacement text contains the
+        // call. **What must be present is the propagation**, because an absent stream becoming an
+        // empty set is the defect this whole module was written to remove.
+        assert!(
+            body.contains("stream_of(store.data().audit.as_ref())?"),
+            "`recorded_outside` must propagate `stream_of`'s refusal with `?`. Without the `?` the \
+             guard is consulted and its answer discarded, so an absent stream becomes an empty set -- \
+             which the caller reads as success."
+        );
+    }
+
+    /// **An absent audit stream is a refusal, not an empty set.**
+    ///
+    /// This is the branch that read `return Vec::new();` — an empty "outside the allowed set", which the
+    /// caller reads as success — while the function's own doc said *"an absent stream yields every
+    /// capability as unaccounted-for and the assertion fails loudly."*
+    #[test]
+    fn an_absent_stream_refuses_rather_than_reporting_nothing_outside() {
+        let err = stream_of(None).expect_err("an absent stream must not be a pass");
+        assert!(
+            matches!(err, AssertionError::NotAssertable(_)),
+            "an absent stream is a `not-assertable` -- the assertion could not be evaluated -- and not \
+             a failure of the code under test: got {err:?}"
+        );
+    }
+
+    /// And with a stream present, the comparison is over **attempts**, not grants.
+    #[test]
+    fn unaccounted_reports_attempts_outside_the_allowed_set() {
+        use Capability::{ClockWall, CryptoHash, CryptoRandom};
+        // A denied attempt is still an attempt, and that is the whole reason this reads the audit
+        // stream: `Outcome::Denied` rows are exactly the fact the assertion is about.
+        assert_eq!(
+            unaccounted(&[ClockWall], &[ClockWall, CryptoRandom, CryptoRandom]),
+            vec![CryptoRandom],
+            "an attempt outside the set is reported once, however many times it was made"
+        );
+        assert_eq!(
+            unaccounted(&[ClockWall, CryptoRandom], &[ClockWall, CryptoRandom]),
+            Vec::new(),
+            "nothing outside the set is an empty report, which is a pass"
+        );
+        assert_eq!(
+            unaccounted(&[], &[CryptoHash]),
+            vec![CryptoHash],
+            "an empty allowed set permits nothing"
+        );
+    }
 }

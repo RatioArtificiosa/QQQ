@@ -66,4 +66,32 @@ world qqq-test {
   /// keeps the import in the artifact.** The same reason `examples/orders-api` exports its handler: a
   /// component's contract is what a host can call.
   export run-assertions: func();
+
+  /// Assert a capability name that does not exist, so the misspelling path is reachable.
+  ///
+  /// # Why a reference app exports something that fails
+  ///
+  /// Because this is not an app — it is the crate the macros live in, and `run-assertions` above is
+  /// already documented as *"a reference, not an API."* **The failing paths need a caller that can reach
+  /// them**, and only an export keeps an import in the artefact.
+  ///
+  /// `assert_caps!("clock.wal")` — one letter short. The host has no such capability, so
+  /// `assert-caps-only` answers **`unknown-capability`** rather than a verdict, and the macro panics with
+  /// the name. That is the WIT's own reason: *"a typo in a capability name would otherwise assert nothing,
+  /// and pass. **This is the one error here that is almost always a test bug.**"*
+  export assert-caps-unknown: func();
+
+  /// Mark, then assert a limit that cannot be met, so the *recording* path is reachable.
+  ///
+  /// # Why the limit is zero
+  ///
+  /// `assert-fuel-below` records a failure when `consumed < limit` is false — and for `u64` that
+  /// comparison is false for every consumption when `limit` is `0`. **So this export fails without needing
+  /// the guest to burn a specific amount of fuel**, which would make the reference depend on the engine's
+  /// cost model rather than on the macro.
+  ///
+  /// **And it distinguishes the two ways an assertion can go wrong**: with the mark below, the failure is
+  /// *recorded* and the call succeeds; without it the host answers `no-fuel-baseline` and the macro
+  /// panics. The mark is here, so this is the recording path.
+  export assert-fuel-exceeded: func();
 }

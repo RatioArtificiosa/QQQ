@@ -1,10 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! **The seam, witnessed** — a real guest reaches the assertion host through the macros.
+//! **The seam, witnessed** — a real guest reaches the assertion host through the macros, and both ways an
+//! assertion can go wrong are witnessed too.
 //!
 //! `TEST-007` and `TEST-008` are ticked with a limit in their own `→ Done:` lines: *"no test drives a
-//! guest through the macro into the host. The two halves are each witnessed and the seam between them
-//! is not."* This file is that seam.
+//! guest through the macro into the host. The two halves are each witnessed and the seam between them is
+//! not."* This file is that seam — and, since a passing path alone proves only that the plumbing connects,
+//! it also drives the two refusals the interface exists for.
+//!
+//! # The three cases, and why each is a separate measurement
+//!
+//! | export | what the host does | what this file asserts |
+//! |---|---|---|
+//! | `run-assertions` | records a mark; all assertions hold | `marks() == 1` and `all_passed()` |
+//! | `assert-fuel-exceeded` | **records a failure**; the call returns `Ok` | the call succeeded **and** `failures()` names the bound |
+//! | `assert-caps-unknown` | returns `unknown-capability`; the macro panics | **the call fails** |
+//!
+//! **The middle row is the one that needs care**, because the host treats a false bound and an
+//! unevaluable assertion differently — and that difference is the whole reason `assertion-error` exists:
+//!
+//!   * a **false bound** is a failed assertion: `assert-fuel-below` pushes to the failure list and returns
+//!     `Ok(())`, so one run reports every failure rather than stopping at the first;
+//!   * an **unevaluable** assertion is `not-assertable` or `no-fuel-baseline`: a WIT error, which the macro
+//!     panics on, because a comparison with nothing behind it must not look like a verdict.
+//!
+//! **A test that only asserted "it failed" would pass on either path**, which is why the recording case
+//! asserts on the *message* and the refusal case asserts on the *trap*.
 //!
 //! # Why the subject is the shipped example rather than a fixture
 //!
@@ -21,16 +42,9 @@
 //! > second would be a test bug, and swallowing it would make the test vacuous.*
 //!
 //! **A test that returns early on any error is a test that passes when the code under it is broken.**
-//!
-//! # And why the assertion is on `marks()` rather than on `all_passed()`
-//!
-//! Because `all_passed()` is true of a state that recorded nothing, and a state that recorded nothing is
-//! exactly what a broken seam produces. **`marks() == 1` cannot be satisfied by an empty state**: the
-//! guest calls `mark_fuel("block")`, and nothing else in this process does. **An assertion that cannot
-//! report a problem is an assertion that passes, and the same is true of one that can only report
-//! agreement.**
 
 use std::process::Command;
+use std::sync::OnceLock;
 
 use qqq_cap::manifest::Manifest;
 use qqq_cap::resolve::GrantSet;
@@ -38,12 +52,13 @@ use qqq_host::audit::{AuditHandle, AuditStream};
 use qqq_host::host_test::TestState;
 use qqq_host::instance::InstanceOptions;
 use qqq_host::tenant::{ComponentDigest, GrantDigest};
-// The same set `guest_invocation.rs` imports, and measured from there rather than guessed:
-// `LimitSet` is re-exported at the crate root, and `instance.rs` calls it `StoreLimits` locally.
 use qqq_host::{Instance, LimitSet, PreparedComponent};
 
-/// The world-level export the example declares, and the only thing this test calls.
-const EXPORT: &str = "run-assertions";
+/// The exit gate, so all three cases share one build rather than running three nested `cargo build`s.
+///
+/// `None` means the target is not installed, and that is a distinct answer from "the build failed" — the
+/// distinction `dwarf_e2e.rs` records as the reason its skip is honest.
+static GUEST: OnceLock<Option<Vec<u8>>> = OnceLock::new();
 
 fn engine() -> wasmtime::Engine {
     let mut cfg = wasmtime::Config::new();
@@ -70,12 +85,6 @@ fn ordinary_limits() -> LimitSet {
 }
 
 /// Build the tracked guest crate for `wasm32-wasip2`, or `None` when the target is not installed.
-///
-/// # Why `examples/qqq-test` and not a sibling of this file
-///
-/// Because it is the artefact under test. **A copy of it here would be a second answer to "what do the
-/// macros expand to", and the two could drift** — the failure `check_wit_vendoring.py` exists to prevent
-/// for WIT files, and the same argument applies to a source fixture.
 fn build_the_guest() -> Option<Vec<u8>> {
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -90,9 +99,6 @@ fn build_the_guest() -> Option<Vec<u8>> {
         .ok()?;
 
     if !out.status.success() {
-        // **A skip and a panic are different measurements.** "No target installed" means this test did
-        // not run; a compile error means the guest crate is broken and the test would be lying if it
-        // returned. Copied verbatim in spirit from `dwarf_e2e.rs`.
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains("can't find crate for `std`")
             || stderr.contains("target may not be installed")
@@ -106,27 +112,18 @@ fn build_the_guest() -> Option<Vec<u8>> {
     std::fs::read(crate_dir.join("target/wasm32-wasip2/debug/qqq_test.wasm")).ok()
 }
 
-#[test]
-fn a_guest_reaches_the_assertion_host_through_the_macros() {
-    let Some(wasm) = build_the_guest() else {
-        eprintln!(
-            "SKIPPED: the wasm32-wasip2 target is not installed - this test did not run.\n\
-             Install it with: rustup target add wasm32-wasip2"
-        );
-        return;
-    };
-
+/// Run one export with a **fresh** assertion state, and hand back both the outcome and the state.
+///
+/// A fresh state per case is not tidiness: `run-assertions` asserts `all_passed()`, so a failure left
+/// behind by another case would make it fail for a reason that has nothing to do with what it tests.
+fn run_export(wasm: &[u8], export: &str) -> (bool, TestState) {
     let engine = engine();
     let prepared =
-        PreparedComponent::compile(&engine, &wasm).expect("the guest must compile as a component");
-
-    // The caller's handle, which is what makes the seam observable at all. Without it the guest's
-    // assertions would record into a value nobody reads -- and every function in the interface refuses
-    // with `not-assertable` rather than passing, so this test would fail rather than mislead.
+        PreparedComponent::compile(&engine, wasm).expect("the guest must compile as a component");
     let state = TestState::default();
 
-    // The audit stream, because the guest calls `assert_caps!("clock.wall")` and a capability assertion
-    // with no stream to read is `not-assertable` -- deliberately, so that an assertion which cannot be
+    // The audit stream, because `assert_caps!` reads what the code *attempted* and refuses with
+    // `not-assertable` when there is no stream to read -- deliberately, so an assertion that cannot be
     // evaluated never looks like one that passed.
     let stream = std::sync::Arc::new(std::sync::Mutex::new(AuditStream::with_default_capacity()));
     let audit = AuditHandle::new(
@@ -138,31 +135,62 @@ fn a_guest_reaches_the_assertion_host_through_the_macros() {
 
     // **Built directly rather than through `create_with_audit`**, because that constructor fills the
     // remaining fields from `InstanceOptions::default()` and would leave `test` as `None` -- silently
-    // dropping the handle this test exists to read. The fields are `pub`, so the intent is visible here.
+    // dropping the handle this file exists to read.
     let opts = InstanceOptions {
         audit: Some(audit),
         test: Some(state.clone()),
         ..InstanceOptions::default()
     };
 
-    // **Not `mut`**: `run` takes `self` by value, so the binding is consumed rather than borrowed — and
-    // `unused_mut` is a warning CI turns into an error.
-    let instance = Instance::create_with(&engine, &prepared, &no_grants(), ordinary_limits(), &opts)
-        .expect("the guest must instantiate: it imports qqq:test/assertions, which is linked unconditionally, and the fourteen WASI interfaces, which host_wasi registers");
+    let instance =
+        Instance::create_with(&engine, &prepared, &no_grants(), ordinary_limits(), &opts).expect(
+            "the guest must instantiate: it imports qqq:test/assertions, which is linked unconditionally, \
+             and the fourteen WASI interfaces, which host_wasi registers",
+        );
 
-    instance
+    let ok = instance
         .run(|store, wasm| {
             let index = wasm
-                .get_export_index(&mut *store, None, EXPORT)
-                .expect("the world declares `export run-assertions: func()`");
+                .get_export_index(&mut *store, None, export)
+                .unwrap_or_else(|| panic!("the world declares `export {export}: func()`"));
             let func = wasm
                 .get_func(&mut *store, index)
                 .expect("the export must be a lifted function")
                 .typed::<(), ()>(&*store)
-                .expect("`run-assertions: func()` takes and returns nothing");
+                .expect("the export takes and returns nothing");
             func.call(&mut *store, ())
         })
-        .expect("the guest must not trap: every assertion it makes is one it satisfies");
+        .is_ok();
+
+    (ok, state)
+}
+
+/// The skip message, kept in one place so all three cases say the same thing.
+///
+/// # Why this is a helper rather than three copies
+///
+/// Because `OnceLock::get_or_init` is what makes the three cases share one build — and a skip that was
+/// spelled three ways could drift into one of them returning early for a reason of its own.
+fn skipped() -> bool {
+    if GUEST.get_or_init(build_the_guest).is_some() {
+        return false;
+    }
+    eprintln!(
+        "SKIPPED: the wasm32-wasip2 target is not installed - this test did not run.\n\
+         Install it with: rustup target add wasm32-wasip2"
+    );
+    true
+}
+
+#[test]
+fn a_guest_reaches_the_assertion_host_through_the_macros() {
+    if skipped() {
+        return;
+    }
+    let wasm = GUEST.get().and_then(Option::as_ref).expect("checked above");
+
+    let (ok, state) = run_export(wasm, "run-assertions");
+    assert!(ok, "the reference guest satisfies every assertion it makes");
 
     // **The seam.** The guest's `mark_fuel("block")` reached the handle this test holds, through the
     // macro, the generated binding, the component's import, and the host function.
@@ -173,19 +201,69 @@ fn a_guest_reaches_the_assertion_host_through_the_macros() {
          a broken seam looks like** -- `all_passed()` would still be true of a state that recorded \
          nothing, which is why this assertion is on the mark and not on the verdict."
     );
-
-    // And the guest's own `report(true, ..)` said it passed, which is the other half of the same fact.
     assert!(
         state.all_passed(),
         "the guest reported success and its failures list is {:?}",
         state.failures()
     );
+}
+
+/// **A typo in a capability name is a refusal, not a silent pass.**
+///
+/// The WIT calls this *"the one error here that is almost always a test bug"*, and explains why it exists:
+/// an unresolvable name would otherwise assert nothing and succeed. **The host returns
+/// `unknown-capability` rather than a verdict, and the macro panics** — so the assertion cannot be
+/// mistaken for one that held.
+#[test]
+fn a_misspelled_capability_refuses_rather_than_passing() {
+    if skipped() {
+        return;
+    }
+    let wasm = GUEST.get().and_then(Option::as_ref).expect("checked above");
+
+    let (ok, state) = run_export(wasm, "assert-caps-unknown");
     assert!(
-        !stream
-            .lock()
-            .expect("the stream must not be poisoned")
-            .is_empty()
-            || state.marks() == 1,
-        "the audit stream is attached, so `assert_caps!` had something to read"
+        !ok,
+        "the guest asserted `clock.wal`, which is not a capability this runtime knows, so the macro must \
+         panic -- and an assertion that checked nothing must never look like one that held. Its failures \
+         list is {:?}",
+        state.failures()
+    );
+}
+
+/// **A bound the guest exceeds is *recorded*, not returned** — and the message says which bound.
+///
+/// The two are not the same refusal, and the difference is the reason `assertion-error` exists: a false
+/// bound is a failed assertion that one run collects with every other, where an unevaluable one is an
+/// error the macro panics on. **Asserting only "it failed" would pass on either path**, so this asserts on
+/// the call's success *and* on the message.
+#[test]
+fn a_bound_the_guest_exceeds_is_recorded_rather_than_passing() {
+    if skipped() {
+        return;
+    }
+    let wasm = GUEST.get().and_then(Option::as_ref).expect("checked above");
+
+    let (ok, state) = run_export(wasm, "assert-fuel-exceeded");
+    assert!(
+        ok,
+        "a false bound is a *failed assertion*, not an error: the host records it and returns `Ok`, so one \
+         run reports every failure instead of stopping at the first"
+    );
+
+    let failures = state.failures();
+    assert_eq!(
+        failures.len(),
+        1,
+        "the guest exceeded exactly one bound and the caller's handle must hold exactly that: {failures:?}"
+    );
+    assert!(
+        failures[0].contains("which is not below 0"),
+        "the recorded failure must name the bound it broke, because `assert_fuel_below!(\"exceeded\", 0)` \
+         and a missing mark both end in a failure-shaped string: {failures:?}"
+    );
+    assert!(
+        failures[0].contains("exceeded"),
+        "the failure must name the mark, so a reader can find the assertion that broke: {failures:?}"
     );
 }

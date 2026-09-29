@@ -46,11 +46,15 @@ wit_bindgen::generate!({
 // Only what the macros and a caller need. The generated module is public either way, so a caller that
 // wants a function this file does not name can reach `qqq::test::assertions` directly.
 pub use qqq::test::assertions::{
-    assert_caps_only, assert_no_capability, fuel_since, mark_fuel, report,
+    AssertionError,
+    assert_caps_only,
     // Aliased, because `macro_rules!` puts the macro at the crate root too and two items of one name in
     // one module is a puzzle for a reader even where the namespaces keep them apart.
     assert_fuel_below as fuel_check,
-    AssertionError,
+    assert_no_capability,
+    fuel_since,
+    mark_fuel,
+    report,
 };
 
 /// Fail unless the code under test attempted nothing outside the listed capabilities.
@@ -117,7 +121,8 @@ macro_rules! assert_fuel_below {
                     "assert_fuel_below!: there is no mark named `{}`. \
                      Call `mark_fuel(\"{}\")` before the code under test -- the comparison has \
                      nothing to stand on, and a missing baseline is not a pass.",
-                    mark, mark
+                    mark,
+                    mark
                 )
             }
             ::std::result::Result::Err(other) => {
@@ -178,6 +183,42 @@ impl Guest for Component {
             None,
         )
         .expect("report cannot fail while assertion state is attached");
+    }
+
+    /// Assert a capability name that does not exist, so the misspelling path is reachable.
+    ///
+    /// # What this proves
+    ///
+    /// That a typo is a **refusal** and not a silent pass. `assert-caps-only` resolves every name in
+    /// `allowed` before it looks at anything the guest did, so an unresolvable one is `unknown-capability`
+    /// — the host's own error, not a verdict — and the macro panics naming it. **The alternative, which
+    /// the WIT calls out, is an assertion that checks nothing and reports success.**
+    fn assert_caps_unknown() {
+        // One letter short of `clock.wall`.
+        assert_caps!("clock.wal");
+    }
+
+    /// Mark, then assert a limit that cannot be met, so the *recording* path is reachable.
+    ///
+    /// # Why this does not panic, when the export above does
+    ///
+    /// Because the host treats a false bound and an unevaluable assertion differently, and the difference
+    /// is the whole reason `assertion-error` exists:
+    ///
+    ///   * **A false bound is a failed assertion** — `assert-fuel-below` pushes to the failure list and
+    ///     returns `Ok(())`, so one run reports every failure rather than stopping at the first;
+    ///   * **An unevaluable assertion is `not-assertable` or `no-fuel-baseline`** — a WIT error, which the
+    ///     macro panics on, because a comparison with nothing behind it must not look like a verdict.
+    ///
+    /// The mark below is what keeps this on the first path. **Without it the host would answer
+    /// `no-fuel-baseline` and the macro would panic**, and a test asserting "the call failed" would pass
+    /// for the wrong reason.
+    fn assert_fuel_exceeded() {
+        mark_fuel("exceeded").expect("mark_fuel cannot fail while assertion state is attached");
+        // `consumed < 0` is false for every `u64`, so the bound cannot hold — and that is the point: the
+        // reference fails by arithmetic rather than by burning a specific amount of fuel, which would tie
+        // it to the engine's cost model.
+        assert_fuel_below!("exceeded", 0);
     }
 }
 

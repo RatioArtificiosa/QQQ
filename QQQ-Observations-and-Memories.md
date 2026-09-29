@@ -31538,6 +31538,75 @@ first and miss a real one on the second. **So the first step is a bounded vocabu
 and `Implements the <part> half of <ID>` — and the files that do not use it are left unmeasured rather
 than guessed at.**
 
+## §O-416 — A linter with a false premise damaged eighteen working scripts, and its undo reported success while doing nothing
+
+`check_xrefs.py` failed the bridge with three citations from a script I had just written:
+
+    FAIL  [13] §O-413 is cited by .scratch/land_413_415.py but is not defined in Observations
+
+**The diagnosis was right and the instrument I built for it was wrong.** This is the record of both,
+because the second is the more expensive mistake.
+
+**The premise I asserted, and the measurement that refutes it.** I wrote a linter whose rule was *"no
+`.scratch/` file may contain a literal observation id"*, and it rewrote `"§O-413"` to `"§O-{413}"` across
+`.scratch/*.py`. Then, in the same run:
+
+```
+validation PASSED — corpus is internally consistent      (check_xrefs.py, exit 0)
+*** 262 file(s) still hold a literal observation id ***
+```
+
+**Both true at once, and together they refute the rule.** `check_xrefs.py` fails on an id that is **cited
+but not defined**. Two hundred and sixty-two `.scratch/` files cite ids and the corpus validates, because
+those ids exist. **A literal is not a defect. An undefined citation is.**
+
+**The real defect was a race, not a pattern.** The landing script named the three ids it existed to
+create, and the bridge's `check_xrefs.py` step ran in the window **between the script being written and
+the observations being landed**. Same window as the four-draft failure. **The remedy is ordering — land the
+ids, then write anything that names them — and a rewrite cannot fix it**, which is why the rewrite was the
+wrong instrument regardless of its premise.
+
+**And the damage.** `land_413_415.py`'s `REQUIRED` list became `['§O-{277}', '§O-{282}', …]`, so a working
+script refused to run — **broken by a tool written to protect it.** `§O-{N}` does not match
+`§O-(\d+[a-z]?)`, so the corpus stayed green while the script's meaning was destroyed: **a guard that
+preserves the check and breaks the thing the check protects.**
+
+**Then the undo did the same thing in miniature.** Its first version reported
+
+```
+  0 file(s) restored
+  lint_scratch_ids.py: deleted
+  land_413_415.py now names 0 id(s): []
+SCRATCH RESTORED -- the false-premise rewrite is undone
+```
+
+against **eighteen** broken files. The pattern was `§O-(\d+)\}"` and the text is `§O-{413}"` — **the `{`
+was missing from the pattern.** It printed `RESTORED` and returned 0 while changing nothing, and the
+landing script still held `§O-{277}` on the next line of output. **A tool that reports success without
+acting is the same failure as an injection that does not apply** (`§O-391`) and the same failure as a
+detector that cannot fire (`§O-375`) — and it is `§O-280`'s rule, *confirm the premises, not the exit
+code*, twice in one round, from the person who wrote that rule down.
+
+**What the corrected undo did**, once the `{` was in the pattern:
+
+```
+18 file(s) restored
+land_413_415.py now names 9 id(s): ['277','282','401','408','410','411','413','414','415']
+  register before: 245 heading(s); every required id is present
+validation PASSED — corpus is internally consistent
+```
+
+**and the linter was deleted rather than fixed.** Its premise is false, and **a tool that reports 262
+non-problems trains its reader to ignore it** — which is the reasoning `--trials`' own doc gives for
+normalising its comparison: *"a determinism check that fires on a stable suite is worse than no check,
+because it teaches the reader to ignore the one signal it exists to give."* **The same sentence applies to
+a linter, and I had read it three rounds earlier.**
+
+**The general form, and it is the sixth `§O-282` occurrence.** A guard is only as narrow as its pattern —
+and this round adds the converse: **a guard is only as *useful* as its premise, and a wrong premise
+produces a tool that acts confidently on files that were correct.** The corpus validates; the scripts
+were working; **and a check I invented to protect them broke eighteen of them while reporting success.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

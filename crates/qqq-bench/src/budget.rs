@@ -245,7 +245,7 @@ impl Budget {
     ///
     /// # Rows deliberately absent
     ///
-    /// `§9.2` has twelve rows. Nine are here, because three define *this*
+    /// `§9.2` has eleven directive rows. Ten are here, because three define *this*
     /// harness rather than a running system and are met by their own items:
     /// `qqqai --version` (≤ 15 ms) belongs to a CLI item, and the two
     /// "cold instantiate from `.wasm`" rows are the same measurement as
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn the_excluded_rows_are_recorded_with_reasons() {
-        // §9.2 has twelve rows and Budget::ALL has nine. The three absent ones
+        // §9.2 has eleven directive rows and Budget::ALL has ten. The three absent ones
         // must be named, or the discrepancy is indistinguishable from an
         // oversight -- which is exactly what this project refuses.
         // 10 implemented + 3 excluded = 13 decisions, and §9.2 has 11

@@ -33161,6 +33161,181 @@ line belonging to a different item — a plausible, silent, wrong edit of exactl
 **Anchor on the smallest thing that is unique, assert the range before mutating, and prefer a measured
 coordinate to a quoted string — because a long anchor encodes a layout, and a layout is not a claim.**
 
+## §O-437 — The verification set was not the gate's: sixteen consecutive red runs behind a green local pass
+
+**Every round of this session ended with a report that the checkers were green**, and CI failed on
+**sixteen consecutive commits** — `16aeaaa` through `acbe31b`, with `dd40706` the first success.
+
+**The instrument was `.scratch/run_ci_checkers.py`**, whose docstring claims:
+
+> *"Run every checker CI runs, and every self-test, exactly as CI invokes them. Reproduces the CI command
+> set from `.github/workflows/ci.yml` **so a local pass means what it says**."*
+
+and whose final line was:
+
+```
+ALL CI CHECKERS PASS
+```
+
+**Its invocation pattern was `python3?\s+tools/[\w./-]+`** — so it reproduced **123** `python tools/…`
+invocations and **none** of the **23** commands CI runs that are not Python:
+
+```
+NOT RUN  cargo fmt --all -- --check
+NOT RUN  cargo clippy --workspace --all-targets --all-features -- -D warnings
+NOT RUN  cargo test --workspace --all-features --verbose          <- THE STEP THAT FAILED
+NOT RUN  cargo test --all-features --locked --verbose
+NOT RUN  cargo check --workspace --all-targets --locked
+NOT RUN  cargo deny check · cargo machete · cargo cyclonedx · fuzz targets … (23 total)
+```
+
+### And the narrowness was structural, not accidental
+
+**A local `cargo clippy -p qqq-host --all-targets -- -D warnings` is not CI's `--workspace`**, and a local
+`cargo test -p qqq-host --lib` is not CI's `--workspace`. **Both were run every round and both were
+narrower than the gate they were taken as evidence about.**
+
+**The script's own comment records the same pattern being widened once before, for `run: |` blocks:**
+
+> *"It was, and it could not see a `run: |` block … Measured: `ci.yml` carries **116** command lines and
+> the old pattern saw **97** … so this script, whose whole job is *'reproduce the EXACT command CI runs'*,
+> was quietly running three fewer commands than CI."*
+
+**It needed widening for `cargo` for exactly that reason, and nobody widened it.**
+
+### The asymmetry that made it costly
+
+**A missing checker fails LOUDLY at the gate and SILENTLY locally.** The local run reported `OK` for the
+120-odd things it did run, and said nothing at all about the 23 it did not — **so the honest reading of
+`ALL CI CHECKERS PASS` was *"the subset I remembered to include is green"*, and the dishonest reading was
+*"CI will pass."*** That is `§O-375` — *a checker that silently skips certifies nothing* — one level up:
+**a runner that silently narrows certifies nothing about the set it narrowed away.**
+
+### What was changed
+
+**The script now names its own blind spot.** It prints every non-Python invocation CI runs, prefixed
+`NOT RUN`, and its verdict reads:
+
+```
+ALL 123 REPRODUCED CHECKER(S) PASS
+**AND 23 COMMAND(S) WERE NOT RUN** -- a pass above is a pass about that set, not about the tree.
+Run `cargo test --workspace --all-features` and `cargo clippy --all-targets` yourself; `clippy`
+COMPILES the integration tests without running them, which is how five test failures sat behind a
+green local pass.
+```
+
+**A verdict that cannot name its exclusions is a verdict about the set, not about the tree.**
+
+### And the second half of the same defect, measured in the other direction
+
+**`cargo clippy --all-targets` COMPILES the integration tests without RUNNING them.** So after five
+`arch012` tests began failing, clippy stayed green and `cargo test --doc` stayed green — **the two
+instruments used to verify a Rust change could not observe a failing test.** The measurement that finds it
+is `cargo test --workspace --all-features`, which is what `ci.yml` runs and which had not been run.
+
+```
+cargo test --workspace --all-features   ->  WORKSPACE=0, 69 test binaries ok, 0 FAILED
+```
+
+## §O-438 — A readiness probe that could not tell "someone holds the port" from "we hold the port"
+
+**The last failure standing once every other cause was fixed**, and it is the clearest instance this
+project has of a guard whose predicate is weaker than its name.
+
+`crates/qqq-run/tests/serve_policy.rs` spawns the real `qqqai serve` and drives it over a real socket.
+**Its own comment already named the class:**
+
+> *"`bind().is_err()` proves **some** process holds the port. It does not prove **ours** does, and
+> `cargo test` runs test binaries concurrently — so another test's server holding this port satisfies the
+> probe, this helper returns believing its own server is up, and the caller writes to a server whose
+> lifecycle it does not own."*
+
+**It then added `try_wait()` as the guard — and `try_wait()` proves the child has not *exited*, which a
+child that is still *starting* also satisfies.** So the compound guard was:
+
+```
+our child is alive          AND  someone holds the port
+```
+
+**when the property needed is:**
+
+```
+our child bound the port
+```
+
+### The evidence was in the panic, and it said nothing
+
+```
+panicked at crates/qqq-run/tests/serve_policy.rs:453:5:
+a CORS decision must vary on Origin:
+```
+
+**Nothing after the colon.** The message is `"…must vary on Origin:\n{response}"` — **so `response` was
+empty**, the request reached a server that was not ours, and **the assertion was never about CORS.**
+Ten of eleven CI jobs passed. The test passed on `dd40706` and failed on `eb1bba9`: **a race, not a
+regression.**
+
+### The instrument existed, was documented, and was unused
+
+`crates/qqq-serve/src/server.rs`, `announce_bound`:
+
+> *"**A caller that guesses a port races with every other process on the machine; a caller that reads this
+> line does not.**"*
+
+**Measured by running the binary rather than by reading it** (`§O-286`):
+
+```
+$ qqqai serve --listen 127.0.0.1:47831 --accept-limit 1
+stdout: {"level":"info",…,"component":"qqq-serve","manifest_rev":"unknown","msg":"listening on 127.0.0.1:47831"}
+stderr: (empty)
+
+$ qqqai serve --listen 127.0.0.1:0
+error[QQQ-6002]: `--listen 127.0.0.1:0` is not a usable address: port 0 does not name a port to listen on
+```
+
+**Two facts follow, and both are load-bearing.** The line is on **stdout** and `--accept-limit 1` does not
+affect it — so reading it consumes no accept, which is the objection that ruled out a readiness *connect*.
+And port `0` is **refused by design**, so the caller must still propose a port; **it no longer has to
+believe the proposal took.**
+
+### The fix, and the injection that proves it
+
+`start()` now takes the child's stdout, reads it on its own thread, and returns when **our own server
+announces** — recording **the port the server reported**, not the one requested, so a disagreement would
+be data rather than an assumption. The address is a character run after `listening on ` rather than a JSON
+field, **because the log format is configurable and a parser keyed on a field name would stop matching
+silently.**
+
+**The injection is the needle itself** — `"listening on "` → `"listening nowhere "`:
+
+```
+`qqqai serve` never bound a port for cors-deny in 5 attempt(s); each attempt lost its port to a race
+… for body-under, body-limit, public
+restored: 1e8c3c3f67776464   (identical before, during-detection and after)
+```
+
+**Under the old probe that change would have made no difference at all, because it never read stdout** —
+which is what makes the injection decisive rather than decorative.
+
+**And it is faster**: 0.29 s against 0.76 s, because it stops when the server speaks instead of polling a
+bind on a 25 ms tick. **A guard that is both correct and cheaper is the rare case where the honest fix was
+also the better one.**
+
+### The three earlier members of this family, all still in the file
+
+**This was the fourth instance of one race, and the first three were each patched in place:**
+
+| the previous fix | what it added | what it still could not see |
+|---|---|---|
+| probe by *binding* instead of connecting | nothing is accepted, so the probe does not consume itself | whether the holder is ours |
+| retry on the child exiting (`CodeRabbit` #15) | a lost port is retried instead of waited out | whether the child is merely slow |
+| retry the *connect* in `request()` | a connect failure is not mistaken for a missing status line | the same thing, one layer down |
+
+**Four patches to one race, each correct about the case that prompted it, and the invariant — *our own
+server bound* — was only established by the fourth.** That is the argument for a probe that reads a fact
+only the subject can produce, rather than one that infers the fact from an observable its rivals also
+satisfy.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

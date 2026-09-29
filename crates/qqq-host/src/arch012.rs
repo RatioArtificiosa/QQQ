@@ -882,9 +882,6 @@ mod tests {
         );
     }
 
-    /// The enforcement classification must be honest about which rows survive a
-    /// mis-built linker.
-    #[test]
     /// **A row that requires no capability must not claim an enforcement that checks one.**
     ///
     /// `capability: None` and [`Enforcement::Ungated`] describe the same call from two sides, so a row
@@ -894,7 +891,7 @@ mod tests {
     /// this is the check.
     #[test]
     fn an_ungated_row_carries_no_capability() {
-        for a in AUDITED.iter() {
+        for a in &AUDITED {
             assert_eq!(
                 a.capability.is_none(),
                 matches!(a.enforced_by, Enforcement::Ungated),
@@ -907,6 +904,9 @@ mod tests {
         }
     }
 
+    /// The enforcement classification must be honest about which rows survive a
+    /// mis-built linker.
+    #[test]
     fn the_enforcement_classification_separates_the_two_kinds_of_safety() {
         assert!(Enforcement::PerFunction.rechecks_each_call());
         assert!(Enforcement::ViaHelper.rechecks_each_call());

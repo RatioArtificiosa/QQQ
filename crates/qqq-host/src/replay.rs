@@ -76,6 +76,17 @@ use std::borrow::Cow;
 /// deterministic run**, and a reader that assumed it was would compare a virtual clock against a real
 /// one and conclude the engine was broken.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// ```
+/// use qqq_host::replay::ReplayHeader;
+///
+/// let h = ReplayHeader {
+///     artifact_digest: "sha256:9f2c".to_owned(),
+///     engine_version: "48.0.2".to_owned(),
+///     target_triple: "x86_64-pc-windows-msvc".to_owned(),
+///     deterministic: true,
+/// };
+/// assert!(h.mismatches(&h).is_empty());
+/// ```
 pub struct ReplayHeader {
     /// The artifact the execution ran, as the lockfile records it.
     pub artifact_digest: String,
@@ -97,6 +108,19 @@ impl ReplayHeader {
     /// mismatch list sends them to one. The same reasoning `audit.rs` gives for travelling as a struct
     /// rather than positionally.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::ReplayHeader;
+    ///
+    /// let a = ReplayHeader {
+    ///     artifact_digest: "a".to_owned(),
+    ///     engine_version: "48.0.2".to_owned(),
+    ///     target_triple: "test".to_owned(),
+    ///     deterministic: true,
+    /// };
+    /// let mut b = a.clone();
+    /// b.engine_version = "49.0.0".to_owned();
+    /// assert_eq!(a.mismatches(&b), vec!["engine_version"]);
+    /// ```
     pub fn mismatches(&self, other: &Self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if self.artifact_digest != other.artifact_digest {
@@ -124,6 +148,13 @@ impl ReplayHeader {
 /// variant would have to invent a meaning for it, and a variant nobody defined is a value nobody can
 /// replay. **Closed means a new kind of nondeterminism is a compile error rather than a silent gap.**
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// ```
+/// use qqq_host::replay::ReplayValue;
+///
+/// assert_eq!(ReplayValue::Clock(1).kind(), "clock");
+/// assert_eq!(ReplayValue::Random(vec![0x51]).kind(), "random");
+/// assert_eq!(ReplayValue::Network(4_200).kind(), "network");
+/// ```
 pub enum ReplayValue {
     /// A wall-clock or monotonic reading, in nanoseconds since the Unix epoch.
     Clock(u64),
@@ -136,6 +167,11 @@ pub enum ReplayValue {
 impl ReplayValue {
     /// The variant's name, for a report and for the JSON encoding.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::ReplayValue;
+    ///
+    /// assert_eq!(ReplayValue::Clock(0).kind(), "clock");
+    /// ```
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Clock(_) => "clock",
@@ -163,6 +199,21 @@ impl ReplayValue {
 
 /// One recorded read.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// ```
+/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+///
+/// let mut log = ReplayLog::new(
+///     ReplayHeader {
+///         artifact_digest: "sha256:9f2c".to_owned(),
+///         engine_version: "48.0.2".to_owned(),
+///         target_triple: "test".to_owned(),
+///         deterministic: true,
+///     },
+///     8,
+/// );
+/// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+/// assert_eq!(log.records()[0].sequence, 1, "the first record is 1, not 0");
+/// ```
 pub struct ReplayRecord {
     /// 1-based position in the log.
     ///
@@ -189,6 +240,18 @@ pub struct ReplayRecord {
 /// string cannot be copied. That is the whole point of the type — a caller that already has the string
 /// passes a borrow, and one that had to build it passes the value.
 #[derive(Debug, Clone)]
+/// ```
+/// use qqq_host::replay::ReplayFields;
+///
+/// let f = ReplayFields {
+///     sequence: 1,
+///     function: "clock.wall",
+///     kind: "clock",
+///     canonical: "7".into(),
+///     previous: "genesis",
+/// };
+/// assert_eq!(f.sequence, 1);
+/// ```
 pub struct ReplayFields<'a> {
     /// 1-based position in the log.
     pub sequence: u64,
@@ -211,6 +274,21 @@ pub struct ReplayFields<'a> {
 impl ReplayRecord {
     /// This record's own fields, for re-hashing during verification.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "a".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     4,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// assert_eq!(log.records()[0].fields().sequence, 1);
+    /// ```
     pub fn fields(&self) -> ReplayFields<'_> {
         ReplayFields {
             sequence: self.sequence,
@@ -231,6 +309,25 @@ impl ReplayRecord {
     /// that can ask for `random.get(n)` can construct two different records with one digest, and a
     /// chain that can be made to collide is a chain that cannot detect an edit.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayFields, ReplayRecord};
+    ///
+    /// let a = ReplayRecord::compute_chain(&ReplayFields {
+    ///     sequence: 1,
+    ///     function: "clock.wall",
+    ///     kind: "clock",
+    ///     canonical: "abcd".into(),
+    ///     previous: "genesis",
+    /// });
+    /// let b = ReplayRecord::compute_chain(&ReplayFields {
+    ///     sequence: 1,
+    ///     function: "clock.wall",
+    ///     kind: "clock",
+    ///     canonical: "abc".into(),
+    ///     previous: "genesis",
+    /// });
+    /// assert_ne!(a, b, "the encoding must be injective");
+    /// ```
     pub fn compute_chain(fields: &ReplayFields<'_>) -> String {
         let mut h = Sha256::new();
         field(&mut h, &fields.sequence.to_string());
@@ -249,6 +346,11 @@ impl ReplayRecord {
     /// produced one by mistake, and then the mistake is indistinguishable from a valid genesis. A
     /// named constant makes "this is the first record" a value no other field can take.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::ReplayRecord;
+    ///
+    /// assert_eq!(ReplayRecord::genesis_digest().len(), 64, "a SHA-256 in hex");
+    /// ```
     pub fn genesis_digest() -> String {
         let mut h = Sha256::new();
         field(&mut h, "qqq-replay-log-genesis-v1");
@@ -262,6 +364,12 @@ impl ReplayRecord {
 /// silently dropped a record would reproduce a *different* execution and report success, which is the
 /// one outcome the whole mechanism exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// ```
+/// use qqq_host::replay::AppendCounters;
+///
+/// let c = AppendCounters { recorded: 2, refused: 1 };
+/// assert!(c.has_gaps(), "a refused record is a gap, and it is visible as a value");
+/// ```
 pub struct AppendCounters {
     /// Records accepted.
     pub recorded: u64,
@@ -272,6 +380,11 @@ pub struct AppendCounters {
 impl AppendCounters {
     /// Whether any record was refused.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::AppendCounters;
+    ///
+    /// assert!(AppendCounters { recorded: 1, refused: 1 }.has_gaps());
+    /// ```
     pub const fn has_gaps(self) -> bool {
         self.refused > 0
     }
@@ -284,6 +397,11 @@ impl AppendCounters {
 /// the interfaces' own WIT, the same reason [`crate::audit`]'s allowlist exists. A `String` here would
 /// have cost the `Copy`, and nothing needed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ```
+/// use qqq_host::replay::ReplayError;
+///
+/// assert_eq!(ReplayError::Exhausted.to_string(), "the replay log ended before the execution did");
+/// ```
 pub enum ReplayError {
     /// The log is at capacity. **Refused rather than overwritten**, so the first records — the ones a
     /// reader needs to reproduce the *start* of an execution — are the ones that survive.
@@ -342,6 +460,24 @@ impl std::error::Error for ReplayError {}
 
 /// A bounded, append-only, hash-chained log of the values an execution read.
 #[derive(Debug, Clone)]
+/// ```
+/// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+///
+/// let mut log = ReplayLog::new(
+///     ReplayHeader {
+///         artifact_digest: "sha256:9f2c".to_owned(),
+///         engine_version: "48.0.2".to_owned(),
+///         target_triple: "test".to_owned(),
+///         deterministic: true,
+///     },
+///     2,
+/// );
+/// log.record("clock.wall", ReplayValue::Clock(1)).expect("room");
+/// log.record("clock.wall", ReplayValue::Clock(2)).expect("room");
+/// // A full log refuses rather than overwriting, so the first records survive.
+/// assert!(log.record("clock.wall", ReplayValue::Clock(3)).is_err());
+/// assert!(log.counters().has_gaps());
+/// ```
 pub struct ReplayLog {
     header: ReplayHeader,
     records: Vec<ReplayRecord>,
@@ -368,6 +504,20 @@ impl ReplayLog {
     /// caller that wants the chain and the counters without retaining values — and it is *not* treated
     /// as "unbounded", which is the reading that turns a bound into a memory leak.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog};
+    ///
+    /// let log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "a".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     0,
+    /// );
+    /// assert!(log.records().is_empty(), "a zero-capacity log refuses everything");
+    /// ```
     pub fn new(header: ReplayHeader, capacity: usize) -> Self {
         Self {
             header,
@@ -394,6 +544,23 @@ impl ReplayLog {
     /// Because order alone is not enough to detect a divergence. Two runs of the same component can
     /// reach the same *number* of reads in a different *order* — a branch that reorders two calls
     /// changes nothing about the count — so the check has to be on identity, not position.
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// assert_eq!(log.next_record("clock.wall").expect("recorded"), ReplayValue::Clock(7));
+    /// // A truncated log fails rather than falling back to the real clock.
+    /// assert!(log.next_record("clock.wall").is_err());
+    /// ```
     pub fn next_record(&mut self, function: &'static str) -> Result<ReplayValue, ReplayError> {
         let Some(record) = self.records.get(self.cursor) else {
             return Err(ReplayError::Exhausted);
@@ -410,12 +577,40 @@ impl ReplayLog {
 
     /// Whether a reader has consumed every record.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// assert!(log.is_exhausted(), "nothing recorded, nothing left to read");
+    /// ```
     pub fn is_exhausted(&self) -> bool {
         self.cursor >= self.records.len()
     }
 
     /// How many records a reader has consumed.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// assert_eq!(log.cursor(), 0);
+    /// ```
     pub const fn cursor(&self) -> usize {
         self.cursor
     }
@@ -427,24 +622,83 @@ impl ReplayLog {
     /// Because `--trials N` with `--replay` runs the same log N times and compares the outputs — which
     /// is `DET-009`'s verification from the other side. A log that could only be consumed once would
     /// make that a re-read of the file rather than a rewind of the same value.
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// assert!(log.next_record("clock.wall").is_ok());
+    /// log.rewind();
+    /// assert!(!log.is_exhausted(), "a rewind lets the log be replayed again");
+    /// ```
     pub fn rewind(&mut self) {
         self.cursor = 0;
     }
 
     /// The header this log was opened with.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// assert_eq!(log.header().engine_version, "48.0.2");
+    /// ```
     pub const fn header(&self) -> &ReplayHeader {
         &self.header
     }
 
     /// The records, in order.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// assert!(log.records().is_empty());
+    /// ```
     pub fn records(&self) -> &[ReplayRecord] {
         &self.records
     }
 
     /// How many were accepted and how many refused.
     #[must_use]
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// assert_eq!(log.counters().recorded, 0);
+    /// ```
     pub const fn counters(&self) -> AppendCounters {
         self.counters
     }
@@ -455,6 +709,21 @@ impl ReplayLog {
     ///
     /// [`ReplayError::Full`] when the log is at capacity. **The record is not stored and the counter
     /// moves**, so a caller that ignores the error still produces a log that reports the gap.
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// assert_eq!(log.counters().recorded, 1);
+    /// ```
     pub fn record(
         &mut self,
         function: &'static str,
@@ -489,6 +758,21 @@ impl ReplayLog {
     /// [`ReplayError::ChainBroken`] at the first record whose `previous` does not match, or whose own
     /// digest does not recompute. **Both directions matter**: an edited value breaks the second, and a
     /// removed record breaks the first.
+    /// ```
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    ///
+    /// let mut log = ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// );
+    /// log.record("clock.wall", ReplayValue::Clock(7)).expect("room");
+    /// assert!(log.verify().is_ok(), "a log written in order verifies");
+    /// ```
     pub fn verify(&self) -> Result<(), ReplayError> {
         let mut expected_previous = ReplayRecord::genesis_digest();
         for (n, record) in self.records.iter().enumerate() {

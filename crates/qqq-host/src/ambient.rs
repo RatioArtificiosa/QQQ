@@ -190,6 +190,23 @@ impl AmbientState {
     /// which grows it as it is consumed and makes `is_exhausted` depend on how far the reader got.
     /// **The two directions are mutually exclusive by construction rather than by convention.**
     #[must_use]
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// log.lock().expect("log").record("clock.wall", ReplayValue::Clock(42)).expect("room");
+    /// let state = AmbientState::new(true).with_replay_source(Arc::clone(&log));
+    /// assert_eq!(state.read_wall_nanos().expect("recorded"), 42);
+    /// ```
     pub fn with_replay_source(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
         if self.deterministic && self.replay.is_none() {
             self.replay_source = Some(log);
@@ -199,6 +216,21 @@ impl AmbientState {
 
     /// Whether this state is replaying a recorded run.
     #[must_use]
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// assert!(!AmbientState::new(true).has_replay_source());
+    /// ```
     pub fn has_replay_source(&self) -> bool {
         self.replay_source.is_some()
     }
@@ -232,6 +264,24 @@ impl AmbientState {
     /// [`crate::replay::ReplayError`] when replaying and the log is exhausted, or when its next record
     /// is for a different function. **Both are errors rather than fallbacks**, so a replayed run that
     /// diverged from its recording stops instead of continuing against a real clock.
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// log.lock().expect("log").record("clock.wall", ReplayValue::Clock(42)).expect("room");
+    /// let state = AmbientState::new(true).with_replay_source(Arc::clone(&log));
+    /// assert_eq!(state.read_wall_nanos().expect("recorded"), 42, "the recorded instant, not the fixed one");
+    /// assert!(state.read_wall_nanos().is_err(), "an exhausted log fails rather than reading the clock");
+    /// ```
     pub fn read_wall_nanos(&self) -> Result<u64, crate::replay::ReplayError> {
         if let Some(next) = self.next_replayed("clock.wall") {
             return match next? {
@@ -254,6 +304,23 @@ impl AmbientState {
     /// # Errors
     ///
     /// As [`Self::read_wall_nanos`].
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// log.lock().expect("log").record("clock.monotonic", ReplayValue::Clock(7)).expect("room");
+    /// let state = AmbientState::new(true).with_replay_source(Arc::clone(&log));
+    /// assert_eq!(state.read_monotonic_nanos().expect("recorded"), 7);
+    /// ```
     pub fn read_monotonic_nanos(&self) -> Result<u64, crate::replay::ReplayError> {
         if let Some(next) = self.next_replayed("clock.monotonic") {
             return match next? {
@@ -275,6 +342,23 @@ impl AmbientState {
     ///
     /// [`RandomFailure::Replay`] when replaying and the log cannot supply the bytes, and the live
     /// failures otherwise.
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// log.lock().expect("log").record("crypto.random", ReplayValue::Random(vec![0xAB; 4])).expect("room");
+    /// let state = AmbientState::new(true).with_replay_source(Arc::clone(&log));
+    /// assert_eq!(state.read_random(4).expect("recorded"), vec![0xAB; 4]);
+    /// ```
     pub fn read_random(&self, len: u32) -> Result<Vec<u8>, RandomFailure> {
         if let Some(next) = self.next_replayed("crypto.random") {
             return match next.map_err(RandomFailure::Replay)? {
@@ -321,6 +405,22 @@ impl AmbientState {
     /// attaching one here would produce a file whose header and whose contents
     /// disagree. The caller gets `None` back and can see it.
     #[must_use]
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// let state = AmbientState::new(true).with_replay(Arc::clone(&log));
+    /// assert!(state.has_replay());
+    /// ```
     pub fn with_replay(mut self, log: Arc<Mutex<ReplayLog>>) -> Self {
         if self.deterministic {
             self.replay = Some(log);
@@ -330,6 +430,21 @@ impl AmbientState {
 
     /// Whether a replay log is attached.
     #[must_use]
+    /// use qqq_host::ambient::AmbientState;
+    /// use qqq_host::replay::{ReplayHeader, ReplayLog, ReplayValue};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let log = Arc::new(Mutex::new(ReplayLog::new(
+    ///     ReplayHeader {
+    ///         artifact_digest: "sha256:9f2c".to_owned(),
+    ///         engine_version: "48.0.2".to_owned(),
+    ///         target_triple: "test".to_owned(),
+    ///         deterministic: true,
+    ///     },
+    ///     8,
+    /// )));
+    /// assert!(!AmbientState::new(true).has_replay(), "a sink is opt-in");
+    /// ```
     pub fn has_replay(&self) -> bool {
         self.replay.is_some()
     }
@@ -635,6 +750,14 @@ pub enum RandomFailure {
     /// `§O-280` states from the other side: a report that cannot state its cause is not a report.
     /// "The entropy source failed" and "the replay log ended early" send a reader to different files,
     /// and collapsing them would make a truncated log look like an OS problem.
+    /// ```
+    /// use qqq_host::ambient::RandomFailure;
+    /// use qqq_host::replay::ReplayError;
+    ///
+    /// let f = RandomFailure::Replay(ReplayError::Exhausted);
+    /// // A distinct variant from `SourceFailed`, so the cause survives to the report.
+    /// assert_ne!(f, RandomFailure::SourceFailed);
+    /// ```
     Replay(crate::replay::ReplayError),
 }
 

@@ -4833,8 +4833,19 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-008** Implement `--replay` reproducing a recorded execution exactly.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-009** Implement the 10,000-trial bit-identical verification required by the Definition of Done.
+- [x] **DET-009** Implement the 10,000-trial bit-identical verification required by the Definition of Done.
   → §16 — Definition of Done for V1
+  → Done: `tools/det009_trials.py --full` — **10000 of 10000 byte-identical replay logs, 0 failed, 0
+    divergent**, 16.8 ms/trial on an uncontended machine at `03928cc` (`§O-428`), reproduced by the
+    tracked command at 189.8 ms/trial under concurrent load (`§O-431`). **The subject is a pinned
+    281-byte WAT component** — `reads-clock.wasm`, digest `2a9c3fb3…` — which imports only
+    `qqq:clock/wall-clock@1.0.0` and reads `now` once at instantiation; it is carried base64 inside
+    the tool with its digest asserted, and the WAT beside it re-derives exactly those bytes.
+    **`--inject` mutates the baseline by one byte and requires every trial to be counted as
+    diverged**, so the `0` is a measurement rather than a comparison that cannot answer
+    "different"; `--self-test` (13 pure-logic cases) runs in both gates and
+    `check_gate_parity.py` reports parity. **The subject is not the reference application** —
+    `qqqai run` cannot instantiate one (`§O-424`).
 - [ ] **DET-010** Document determinism's honest limits (engine version, target triple, external I/O).
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-011** Implement network-timing recording for replay.
@@ -5127,8 +5138,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §16 — Definition of Done for V1
 - [ ] **DOD-002** Run the reference application under sustained load for 72 hours with zero crashes.
   → §16 — Definition of Done for V1
-- [ ] **DOD-003** Verify bit-identical results across 10,000 deterministic trials.
+- [~] **DOD-003** Verify bit-identical results across 10,000 deterministic trials.
   → §16 — Definition of Done for V1
+  → Partial: **verified over a WAT guest and not over the product, and that is why this is `[~]`
+    rather than `[x]`.** Measured: 10,000 of 10,000 byte-identical replay logs, 0 failed, 0 divergent
+    (`python tools/det009_trials.py --full`, `§O-428`). What remains is the subject: the guest is a
+    281-byte component that reads the wall clock once, **not the reference application**, because
+    `qqqai run` cannot instantiate one (`§O-424`). A `[x]` would read as *"the product produces
+    bit-identical results across 10,000 trials"*, which is a stronger claim than the measurement
+    supports — the same asymmetry `§O-426` records for `TEST-010`. Raise this deliberately once
+    the reference application runs, not by editing this line.
 - [ ] **DOD-004** Confirm both external audits are complete and all critical and high findings are fixed.
   → §16 — Definition of Done for V1
 - [ ] **DOD-005** Confirm the ≥200-case hostile-guest suite passes with zero host memory-safety incidents.

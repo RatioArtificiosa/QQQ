@@ -1078,6 +1078,19 @@ cmd_checks() {
     python3 tools/check_handoff.py --self-test
     python3 tools/check_xrefs.py --self-test
 
+    # `DET-009` / `DOD-003`: the 10,000-trial harness's own guards.
+    #
+    # Its `--self-test` is pure logic -- it needs neither a built `qqqai` nor a guest -- which is
+    # exactly why it runs here and the end-to-end half does not. This image builds workspace tests,
+    # not the CLI binary: the `cli` halves of `DX-004` and `AGENT-024` are declared skips below for
+    # the same reason. So the gate proves the *instrument* (the pinned digest, the vacuity guards,
+    # and the divergence counter firing on a one-byte mutation) while the 10,000-trial measurement
+    # itself is re-derived by `python tools/det009_trials.py --full` where a binary exists.
+    #
+    # Without this, the number `DOD-003` publishes would come from an instrument nothing had ever
+    # watched fail -- the defect `§O-354` records for `check_wit.py`.
+    python3 tools/det009_trials.py --self-test
+
     # # Why the line-ending guard runs LAST, and why the scratch copy is deliberate
     #
     # Ten of the steps above inject a defect into a *generated* tracked document and

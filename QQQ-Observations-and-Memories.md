@@ -32336,6 +32336,681 @@ starts slowly under a loaded runner, or a connection that is refused and retried
 measured**, and a plausible mechanism recorded as a finding is the failure this corpus's own rules name. What
 *is* measured: the same eleven tests, twice green here, twice red there, on one platform of five.
 
+## §O-426 — Gate 2's `TEST-010` cannot reach `[x]` before Phase 3, and the checklist already says why
+
+**The goal's chain orders Phase 2 (`TEST`) before Phase 3 (`LANG`) and states Gate 2 as:**
+
+> *"TEST-010's `[~]` becomes `[x]` with a → Done: line naming the code, the test and the measured value."*
+
+**Measured, that gate is unreachable in that order, and the reason is a back-edge rather than a slack item.**
+
+### What `TEST-010` actually is, measured
+
+```
+$ python tools/check_conformance.py
+  supported   : rust (from build::toolchain_for's own guard)
+  capabilities: 15 package(s) under wit/, 15 in the fixture
+  cases       : 8 (6 definition, each naming its enforcing checker; 2 execution, each naming its runner)
+  exceptions  : 0
+CONFORMANCE FIXTURE OK -- statuses agree with the code, every gap is owned and dated,
+                          and every obligation is enforced in both gates
+
+$ the fixture's cases
+  definition  wit-parses · wit-embedded-in-runtime · wit-versioned · wit-typed-errors ·
+              wit-no-ambient-state · wit-style
+  execution   component-layer · qqq-imports-all-mapped      <- both crates/qqq-run/tests/conformance_exec.rs
+```
+
+**Six definition cases and two execution cases, all eight enforced, zero exceptions, both gates demanding
+every obligation's checker, nine fault injections every one detected.** So the suite is built. What is not
+built is **execution for four of the five languages**, and the fixture says which:
+
+```
+languages: 5      supported: rust
+```
+
+### And the checklist states the consequence itself, more plainly than a brief could
+
+> *"**What keeps this `[~]` is breadth, not absence**: `LANG-009`…`LANG-040` are the four other languages,
+> and a suite four fifths of which is unexecuted reports gaps rather than results. **Marking this `[x]`
+> would claim a cross-language result from one language's pass.**"*
+
+**That is the goal's own rule — a false tick is worse than an open item — applied by the corpus to its own
+status, and it is correct.** A `[x]` here would mean a reader takes *"cross-language conformance"* from a
+matrix with one supported row.
+
+**So the back-edge is: `TEST-010` → `[x]` requires execution cases for `LANG-009`…`LANG-040`; `LANG-009`…
+`LANG-040` are Phase 3; Phase 3 is sequenced after Phase 2.**
+
+### What that changes, and what it does not
+
+**Phase 2's real deliverable is not `[x]` on `TEST-010` — it is that the suite is *runnable before the
+toolchains exist*, which the goal states in the same breath** (*"runnable before the toolchains exist so
+`LANG-012`, `LANG-020`, `LANG-028`, `LANG-036` have something to pass"*). **That half is done**, and it is
+done the only way that makes the later ticks mean anything: the fixture derives each language's status from
+`build::toolchain_for`'s own guard, so **the fixture cannot drift from the code and a language cannot be
+declared supported by editing a JSON file.**
+
+**What the next agent should do differently: read Gate 2 as met when the suite is runnable and `TEST-010`
+is honestly `[~]` with its gap named — and treat the `[x]` as arriving with Phase 3, not before.** The
+remaining Phase 2 work that *is* closable in order is `TEST-005`/`006` (which `DET-007`/`008` now unblock),
+`TEST-007`/`008` (designed, see `.scratch/plan_test007_008.md`), `TEST-001`/`002`, and `TEST-013`/`014`.
+
+### And one thing the corpus already recorded about building this
+
+The `[~]` note continues:
+
+> *"building it found a checker nobody had watched fail: `tools/check_wit.py` had neither a `--self-test` nor
+> a `fault_inject_*.py` harness… it injects one missing semicolon, **which every structural assertion in
+> `qqq-abi` accepts and only a parser rejects**."*
+
+**Already recorded, with its id, so this observation does not re-record it.** It is the same class as the
+rest of this session: **a checker is only as strong as the narrowest thing that can fail in it**, and a
+structural assertion over text will accept what a parser rejects.
+
+### Why this is not a defect report
+
+**Nothing here is wrong.** The checklist is honest, the fixture is guarded, and the gap is named with its
+owner. **This observation exists because a brief's gate and the corpus's own status can disagree, and the
+corpus is the one that measured.** A next agent that treats Gate 2 as a checklist item to close will mark
+`TEST-010` `[x]` to satisfy it, and that tick would be false — **which is exactly what the `[~]` note warns
+against, three lines above where the gate is written.**
+
+## §O-427 — `qqqai test --trials` runs a native test binary, so it cannot produce the 10,000-trial number the Definition of Done asks for
+
+**The Definition of Done says what the number is about:**
+
+```
+QQQ-Proposal-V1.md §16
+    - [ ] Deterministic mode produces bit-identical results across 10,000 trials
+QQQ-Checklist-V1.md
+    DET-009  [ ] Implement the 10,000-trial bit-identical verification required by the DoD
+    DOD-003  [ ] Verify bit-identical results across 10,000 deterministic trials
+```
+
+**The subject is a guest, executed under the runtime in deterministic mode, 10,000 times.** Measured, the
+only `--trials` in this tree does something else:
+
+```rust
+// crates/qqq-run/src/test.rs:353 — locate the test binaries
+let output = Command::new("cargo").args(["test", "--no-run", "--message-format", "json"])
+
+// crates/qqq-run/src/test.rs:488 — run one of them, once
+let output = Command::new(program)
+    .args(run_args).arg(name).arg("--").arg("--exact").arg("--nocapture")
+    .arg("--test-threads").arg("1")
+```
+
+`program` is a **native** executable that `cargo` produced, and the module's own doc says so twice:
+
+> *"`discover` then **runs each binary directly**, so attribution is exact by construction: the binary that
+> produced a test is the binary that was asked for it."*
+
+> *"A trial here runs one test, but a test binary's `#[cfg(test)]` modules share process state -- a
+> `OnceLock`-cached store, a global counter -- and tests in the same binary can still be started
+> concurrently by that default."*
+
+**So `--trials N` compares the stdout of a native Rust binary across N runs.** That is a real and useful
+measurement -- it is what caught the reference application's own one-in-eight flake, recorded at
+`test.rs:477-486` and cited there as `§O-188` -- **and the QQQ runtime is not in the path at all.** No guest,
+no Wasmtime store, no virtual clock, no seeded generator, no fuel.
+
+### And the module states a dependency it does not use
+
+The same doc argues for the feature this way:
+
+> *"A determinism check needs only what `qqq-host` already provides: **a fixed clock, a seeded RNG, and fuel
+> metering.** It does **not** need DWARF source mapping (coverage), Wasm instrumentation, or the registry.
+> It is therefore the highest-value architecture-enabled feature per unit of unbuilt dependency."*
+
+**`qqq-host` does provide all three, and this feature uses none of them.** The sentence names the right
+dependencies and describes an implementation that does not consume them -- and the paragraph immediately
+above it calls `--trials` *"the one that works today **without instrumentation**"*, which is the same fact
+stated correctly, two paragraphs earlier, in the opposite direction.
+
+**That is `§O-411`'s phenomenon with a different subject**: a claim about code that the code does not bear
+out. `§O-411` found it in a comment and in a field doc; this one is the module-level justification for a
+feature's priority order.
+
+### What this costs, precisely
+
+**Nothing about `--trials` is wrong as a test-runner feature.** `§6.7` is the test runner, `TEST-005` cites
+it, and a runner that reports *"this test's output varied across three runs"* is doing what a runner should.
+**The cost is at the join:**
+
+| claim | its subject | what actually produces it |
+|---|---|---|
+| `TEST-005` *"`--trials N` determinism checking"* | a project's tests, as native binaries | **`qqqai test --trials N`** -- built |
+| **`DET-009` / `DOD-003` / §16** | **a guest in deterministic mode** | **not built** |
+| **the goal's Phase 1.5** | *"run it, publish the number"* | **assumes the first produces the second** |
+
+**Running `qqqai test --trials 10000` today would produce a number, and publishing it as the engine's
+10,000-trial verification would be false** -- it would be a statement about `cargo`'s reproducibility. **The
+goal's own rule is that a number's owner must be nameable; this one's owner would be the wrong subject.**
+
+### What would satisfy it, and how close it now is
+
+**`DET-009` needs a guest, run under `qqqai run --deterministic`, many times, with the outputs compared.**
+**Both halves landed in this session:**
+
+| piece | state |
+|---|---|
+| `--deterministic` reaches the store, so the clock and the generator are virtual | **built** -- this session |
+| `--replay-log <path>` records every read as a chain-verified file | **built** -- this session |
+| two runs producing **byte-identical logs** is the verification | **holds by construction** -- the header carries digest, engine version, target triple and config |
+| a guest the runtime will instantiate | **missing** |
+
+**And that last row is `§O-424`:** `qqqai run` refuses the reference application and the session's own guest
+probe, both with `QQQ-6003`, because `std` for `wasm32-wasip2` imports fourteen WASI interfaces that no
+manifest in this repository grants and `--cap` may only narrow. **So the 10,000-trial verification is one
+runnable guest away -- not one mechanism away.**
+
+**`crates/qqq-host/tests/hostile_guests.rs` and `crates/qqq-run/tests/cli.rs` both build guests for tests,
+and `cli.rs` runs `["run", &wasm, "--cap", "clock.wall"]` against a manifest it writes from
+`const MINIMAL`.** That is the shape of the guest `DET-009` needs: one that imports a clock and nothing else,
+so no WASI grant is required, and that reads the clock so the virtual one is observable.
+
+## §O-428 — `DET-009`'s number is 10,000 of 10,000, over a guest that reads the clock once at instantiation
+
+**Proposal §16 asks for one thing:**
+
+```
+- [ ] Deterministic mode produces bit-identical results across 10,000 trials
+```
+
+**Measured, on this machine, with a binary built from the tree at `03928cc`, and this time the output
+is preserved -- the first run's was not:**
+
+```
+$ python .scratch\det009_trials.py --trials 10000
+ARTIFACT     E:\QQQ\.scratch\det009_guest\reads-clock.wasm
+ARTIFACT_SHA 2a9c3fb3c48572a78b8119318690f6ffe13a30b1f5dddacd153ef93eccb67b39
+REFERENCE_BYTES 351
+REFERENCE_SHA256 d65d35f34959be17feaa05c098c1f53070b97497beb382920c347f7aefe9a3b1
+REFERENCE_HEADER_KEYS_OK 5
+PROGRESS trials=1000 compared=1000 failed=0 diverged=0 rate=61.5/s
+PROGRESS trials=5000 compared=5000 failed=0 diverged=0 rate=59.8/s
+PROGRESS trials=10000 compared=10000 failed=0 diverged=0 rate=59.4/s
+TRIALS_ATTEMPTED=10000
+COMPARISONS_PERFORMED=10000
+RUNS_THAT_FAILED=0
+LOGS_THAT_DIVERGED=0
+ELAPSED_SECONDS=168.5
+MS_PER_TRIAL=16.8
+DET009 OK 10000/10000 byte-identical, 0 failed
+```
+
+**10,000 of 10,000, and zero divergent.** The comparison is each run's replay log against the first,
+**over the whole 351-byte file** -- the five header keys, the one record, and its hash chain -- so the
+result is byte-identical rather than value-identical. **A log whose *contents* agreed but whose bytes did
+not would still have been counted as divergent**, which is the stricter reading and the one section 16's
+wording supports.
+
+**And the harness re-derived the first run's artifact rather than trusting it.** The reference log written
+by this run hashes to `d65d35f3...`, and the file left on disk by the previous session's run -- written at
+`05:13:51` and interrupted by the power outage that ended that session -- hashes to `d65d35f3...` as well.
+Two runs five hours apart, in different processes, from a binary that `git status` confirms is built from
+the clean tree at `03928cc`, produce the same 351 bytes. **That is the property under test, measured twice
+by accident.**
+
+### The `0` is only worth something because the counter was made to fire
+
+**A divergence count of zero is produced both by a deterministic engine and by a comparison that cannot
+answer "different".** The first harness -- `.scratch/det009_trials.cmd` -- reported
+`LOGS_THAT_DIVERGED=0` and had never been shown able to report anything else. So its replacement carries
+`--inject`, which mutates the baseline by **one byte** and asserts that every trial is then counted:
+
+```
+$ python .scratch\det009_trials.py --trials 20 --inject
+INJECTED_BASELINE_SHA256 f7cb7f4134fe2353dbba1320b7da21155a443f9be31e5a267ef0943bd4688ddc
+TRIALS_ATTEMPTED=20
+COMPARISONS_PERFORMED=20
+RUNS_THAT_FAILED=0
+LOGS_THAT_DIVERGED=20
+INJECTION_DETECTED 20/20 -- the counter can fire
+```
+
+**20 of 20, from a baseline that differs by a single byte** -- so the comparison reads the file, and the
+`0` above is a measurement rather than a silence. Two further guards make the number's subject explicit,
+because two empty files are also identical: the harness asserts the reference log is **non-empty**, that it
+carries all **five header keys**, and that `COMPARISONS_PERFORMED == TRIALS_ATTEMPTED` -- so a loop that
+ran zero comparisons reports `INERT_LOOP` rather than a clean zero.
+
+### The superseded harness had a comment that was false, which is why it was replaced
+
+The `.cmd` version carried this line and no other progress code:
+
+```
+rem Progress every 1000, so a broken loop is visible in the first minute rather than the tenth.
+set /a rem1000=%n% %% 1000
+```
+
+**It computed a variable and never printed it.** The claim -- that a broken loop is visible in the first
+minute -- was therefore false, and false in the direction this corpus keeps recording: a reader who trusts
+it waits ten minutes for a signal that was never going to arrive. The replacement prints real, flushed
+progress, which is how the `trials=1000` / `5000` / `10000` lines above exist at all.
+
+### The subject, and why it is not the reference application
+
+**The guest is `.scratch/det009_guest/reads-clock.wasm` — 281 bytes, built by `wasm-tools parse` from WAT.**
+
+```wat
+(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c (export "now" (func (result u64))) …))
+  (alias export $c "now" (func $c_now))
+  (core func $now (canon lower (func $c_now)))
+  (core module $m
+    (import "" "now" (func $now (result i64)))
+    (global $seen (mut i64) (i64.const 0))
+    (func $init (global.set $seen (call $now)))
+    (start $init)
+  )
+  (core instance $i (instantiate $m (with "" (instance (export "now" (func $now))))))
+)
+```
+
+**`wasm-tools component wit` confirms it imports one interface and nothing else:**
+
+```
+world root {
+  import qqq:clock/wall-clock@1.0.0;
+}
+```
+
+**Two design points, and both were forced by measurement rather than chosen.**
+
+**The read is in a `start` function, not an exported entry point**, because `qqqai run` instantiates and
+drops without calling an export. Its own comment: *"Calling a specific export is the job of `qqqai serve` and
+the entrypoint declared in the manifest; guessing an export name here would make `run` succeed or fail for
+reasons unrelated to the capability model."* **So the read has to happen where `run` actually reaches.**
+
+**It is a WAT component rather than a Rust guest**, because `std` for `wasm32-wasip2` is implemented over
+fourteen WASI CLI interfaces and **no manifest in this repository grants them** -- `§O-424`'s finding, and
+the reason `qqqai run` refuses both bundled examples. **A WAT component imports exactly what it names.**
+
+**So the number above verifies the mechanism over a minimal subject. It does not verify the reference
+application, and it could not: `qqqai run` cannot instantiate one today.** That limit belongs in the same
+breath as the number.
+
+### What the log says, and why it is the right instrument
+
+```
+$ qqqai run --manifest .scratch\det009_guest\qqq.toml \
+            --artifact .scratch\det009_guest\reads-clock.wasm \
+            --deterministic --replay-log one.replay
+
+qqq-replay 1
+artifact_digest 2a9c3fb3c48572a78b8119318690f6ffe13a30b1f5dddacd153ef93eccb67b39
+engine_version 48.0.3
+target_triple x86_64-pc-windows-msvc
+deterministic true
+refused 0
+1 clock.wall clock 1767225600000000000 4d1c4fa9697246a34f2918ba432c21fbdcdf9828fd45ee95dfabbf4d8eb0df4f 5a4bae6
+```
+
+**Three things in that file are worth naming.**
+
+**The instant is the virtual one.** `1767225600000000000` is `AmbientState::fixed_nanos`, not a reading of
+the system clock -- so the recorded value is the fixed point the deterministic profile defines, and a log
+that carried a real instant would differ between runs by construction.
+
+**The triple is real.** `x86_64-pc-windows-msvc`, from `crates/qqq-host/build.rs` via `Cargo`'s own
+`$TARGET` -- **not the `x86_64-windows` that `cfg!(target_arch)` and `cfg!(target_os)` combine into.** A
+header that could not tell a GNU build from an MSVC one would compare equal across two targets whose
+`.cwasm` files are not interchangeable.
+
+**And the durations differ while the logs do not.** Run 1 reported `33 µs` and run 2 `18 µs`, and the two
+files were byte-identical. **That is the property under test, stated as a contrast:** the wall-clock cost of
+a run is not part of its result, which is what makes the replay log the right instrument rather than a
+timing comparison.
+
+### Two refusals that fired on the way, and one that taught the invocation
+
+**`--replay-log` without `--deterministic` exits `2` with `QQQ-7001`** -- verified against the real binary,
+the second independent confirmation of the parse-time guard.
+
+**And a first attempt at the manifest granted nothing**, expecting `--cap clock.wall` to supply it:
+
+```
+error[QQQ-6003]: the component imports `qqq:clock/wall-clock@1.0.0` that no grant provides
+  capability: clock.wall
+  → add to qqq.toml:
+      [capabilities.clock]
+      wall = true            # for clock.wall
+```
+
+**That is the capability model working**: `RunOptions::caps` is documented as *"a **developer overlay**,
+which may only narrow the manifest's grants"*, and a manifest granting nothing has nothing to narrow.
+**`crates/qqq-run/tests/cli.rs` passes `--cap clock.wall` against the same empty manifest deliberately --
+its test is `run_refuses_an_ungranted_import_and_names_the_right_capability`, and the refusal is the
+subject,** which is why the invocation that works is a manifest that grants it.
+
+**And the error message supplied the fix.** The remediation named the exact TOML keys, and the edit was
+mechanical. A refusal that states its remedy is worth more than one that states its cause, and this one
+states both.
+
+### What this changes
+
+**`DET-009` is `[ ]` and the Definition of Done's determinism clause is `[ ]`.** Both can now carry a
+`→ Done:` line with a measured value, **and the line must name the subject** -- a WAT guest reading the
+clock once, not the reference application.
+
+## §O-429 — `DET-016` measured at the CLI: the cost is zero on a guest with no arithmetic, and the instrument cannot resolve it
+
+**The item says *"report what determinism costs"*, and `crates/qqq-run/src/serve.rs:712` has `let cfg =
+EngineConfig::default();` unconditionally — so a deterministic server cannot be started and the
+server-side cost is unmeasurable.** What *is* measurable is the CLI, where `--deterministic` selects
+`EngineConfig::deterministic()`:
+
+```rust
+// crates/qqq-run/src/run.rs:603
+let mut cfg = if opts.deterministic { EngineConfig::deterministic() } else { EngineConfig::default() };
+```
+
+**Measured, 200 runs each way, against the same component:**
+
+```
+                      guest (median)      wall (median)
+without --deterministic      25 µs           17.124 ms
+with    --deterministic      25 µs           16.964 ms
+delta                        0.0%             −0.9%
+```
+
+### The result is not "determinism is free", and saying so would be the defect this corpus keeps naming
+
+**Three facts, and the number is the least of them.**
+
+**The guest is `reads-clock.wasm`, 281 bytes, which reads the clock once and drops.** Measured by
+`wasm-tools component wit`, it imports one interface and contains no arithmetic to speak of. **The
+deterministic profile's costs are codegen-level — Cranelift's NaN canonicalization, relaxed SIMD disabled,
+float fusion disabled — and they apply to guest *code*.** A guest with none of the operations those
+settings constrain cannot exhibit them. **A 0.0% delta here is the expected result, not the finding.**
+
+**The wall-time instrument has 0.07% resolution for this workload.** A run takes **17 ms** and the guest
+takes **25 µs**, so **99.85% of the wall time is process startup and teardown.** A codegen difference in a
+25 µs workload is three orders of magnitude below the noise floor of a 17 ms measurement. **That the
+deterministic column came out 0.9% *faster* is the demonstration** — a real cost cannot be expressed as a
+negative percentage, so the delta is noise and the sign is arbitrary.
+
+**And the guest's own reported duration is the only instrument with the right resolution** — `ran in 25
+µs`, printed by `qqqai run` from `run_measured`'s `Instant` — and at 25 µs it moves by whole microseconds
+across runs (the same harness produced 18 µs, 22 µs and 33 µs for identical work). **So it resolves to
+about 4%, and a codegen difference smaller than that is invisible in it too.**
+
+### What would measure the cost, stated so the next agent does not re-derive a zero
+
+**A guest that does the work the profile constrains.** The settings `EngineConfig::deterministic()` applies
+are about floating point and SIMD, so the subject has to contain arithmetic: a component with a loop over
+`f32`/`f64` values and a reduced or vectorized operation, run enough times that the guest's own duration is
+in milliseconds rather than microseconds. **At that point the delta is measurable on either instrument, and
+the report says something.**
+
+**And the second half of the item is blocked on a design question rather than a flag.** `serve`'s
+configuration deliberately differs from `run`'s — `serve.rs:712`'s comment explains that the server omits
+`debug_info` because it serves an untrusted artifact and *"a source line is not going to be read by
+anyone"*, where `run` sets it for exactly the opposite reason. **So `qqqai serve --deterministic` is a
+change to what a server is, not a switch**, and it is the prerequisite for any cost number a *user* would
+recognise: a per-request figure rather than a per-process one.
+
+### What can be stated now
+
+**On this machine, over this component, `--deterministic` costs nothing measurable — and the reason is that
+the component cannot be affected by what the setting changes.** A reader who takes only that sentence gets
+a comfortable and false impression; a reader who takes it with the two measurements' resolutions gets an
+accurate one. **The number is published, its subject is named, and what the instruments can see is
+stated** — the same three things `§O-258` asks of a budget, applied to a cost.
+
+## §O-430 — `§O-411` overclaimed `TEST-014`, and it made the error its own thesis names
+
+**`§O-411` is an observation about inferring code from prose.** Its title: *"A comment is a claim about code,
+not the code; and `TEST-005` is finished while its checkbox is not."* In it, `TEST-014` appears twice:
+
+> *"And `TEST-014`'s detector is the same machinery naming the differing trials (`test.rs:135`, "the indices
+> of trials whose output differs from the first")."*
+
+> *"`TEST-005` and `TEST-014` join `TEST-010` in the set of items whose **status lags the tree** -- three in
+> one phase, all with substantial implementations, all unticked."*
+
+**The first half is right and the second does not follow.** Measured:
+
+```rust
+pub fn is_nondeterministic(&self) -> bool {
+    if self.trial_outputs.len() < 2 {
+        return false;
+    }
+    let first = &self.trial_outputs[0];
+    self.trial_outputs.iter().any(|o| o != first)
+}
+```
+
+**`trial_outputs` are the N trials of one invocation.** So this answers *"did this test vary within one
+`--trials N` run"* -- which is what `TEST-005` is for. **A flaky-test detector answers a different
+question: *"has this test passed on some runs and failed on others, across CI runs."*** That needs a
+**history**, and nothing in this tree keeps one:
+
+```
+$ rg -n -e 'flaky|flake' crates/ tools/ .github/
+  twelve hits. Every one is a comment about a past flake or a comment explaining why an assertion was
+  written to avoid one. No history. No detector.
+```
+
+**So `TEST-014`'s `[ ]` is correct, and `§O-411`'s inference was one word wide** -- it read *"naming the
+differing trials"* and concluded the same machinery answers the cross-run question.
+
+### And the shape is worth recording, because it is `§O-411`'s own
+
+`§O-411` says, of itself:
+
+> *"Both were inferences from prose, and the code contradicted both ... This is the same defect pointed at
+> the reader: a comment is a claim about code, and a claim is not the code. Twice in one round, from the
+> same file, the inference was narrower than the implementation."*
+
+**This is the third instance, and the claim it inferred from was its own prose rather than the source's.**
+That is the variant worth naming: `§O-411` locates the defect in `//`-comments and in field docs, **but an
+observation is also a claim about code**, and it is a claim that no checker reads. `check_xrefs.py` verifies
+that the ids resolve; `check_doc_claims.py` verifies that a document's figures match a resolver; **nothing
+verifies that an observation's *characterisation* of an implementation is the implementation.**
+
+**And the remedy `§O-411` prescribes is the one that settles this** -- *"run the thing"*. Here the thing is
+four lines and `rg` is one command. **Two of the three readings cost nothing and one had already been paid
+for.**
+
+### What it changes
+
+**`TEST-014` must not be ticked.** Its absence has a cost, and `§O-425` records it: a macOS-only failure in
+`serve_policy` took three separate measurements to attribute, and a detector that said *"this test has failed
+1 of the last N runs on this platform"* would have turned three into one. **That observation stands.**
+
+**And the tick it deletes is the useful half of this correction.** Of the three items `§O-411` named as
+status-lagged, **two are (`TEST-005`, `TEST-010` is correctly `[~]`) and one is not
+(`TEST-014`)** -- so the set is smaller than recorded, and the honest count is worth more than the larger
+one.
+
+## §O-431 — Three defects in one round, and two of them were in the instrument I had just built to fix the first
+
+### 1 — My pre-landing checker reproduced the narrow-pattern defect the corpus had already recorded
+
+**Five observations (`§O-426`..`§O-430`) were drafted before the power outage that ended the previous
+session and never landed.** Before inserting them I wrote a scratch checker to prove every `§O-NNN` the
+drafts cite resolves, because `check_xrefs.py` reads the working tree and a draft naming an undefined id
+fails the bridge even though `.scratch/` is invisible to CI (`§O-400`).
+
+**It reported `obs429` unresolved on `§O-258`, and blocked the landing.** Measured:
+
+```
+$ python .scratch\check_draft_xrefs.py
+  §O-429  obs429_draft.md   refs=  1 unresolved=258   FAIL
+VERDICT: FAIL -- do not land
+```
+
+**`§O-258` is defined.** It is written as a bold paragraph, `**§O-258 — Decision: ...` — one of fourteen
+observations (`§O-253`..`§O-266`) that live inside `§O-252`'s section. My pattern was
+`^#+\s*§O-(\d+[a-z]?)\s`, which requires a heading, so it could not see them.
+
+**And `tools/check_xrefs.py` rule [14] already records this exact mistake**, in its own comment:
+
+> *"**And the register uses a THIRD form, which this pattern could not see.** … `§O-253` through `§O-266`,
+> fourteen observations, are written as bold paragraphs opening `**§O-NNN — claim.**`, all inside
+> `§O-252`'s section."*
+
+**So the register has three forms** — `## §O-NNN`, the bare early form `### O-NNN`, and the bold form — and
+a guard that knows two of them reports a false gap. **That is `§O-282` with the file list replaced by a
+pattern**, and the size of the blind spot is measurable:
+
+| pattern | ids found |
+|---|---|
+| `^#+\s*§O-(\d+[a-z]?)\s` (mine) | **589** |
+| `^(?:#+\|\*\*)\s*§?O-(\d+[a-z]?)\b` (rule [14]'s) | **619** |
+
+**Thirty ids — the entire bold-form block — were invisible.** The fix was not to widen my pattern by
+invention but to **take the project's**, which is what the goal's own rule asks: extend the existing shape
+rather than inventing a parallel one. The false gap cost one script and one run; had I trusted it, five
+observations would have been rewritten to remove a reference that was correct.
+
+### 2 — And then I reproduced the buffering defect `§O-428` was written to criticize
+
+`§O-428` records that `.scratch/det009_trials.cmd` carried a comment claiming *"progress every 1000, so a
+broken loop is visible in the first minute rather than the tenth"* **while computing the variable and never
+printing it** — a comment that lies about its code. I wrote that observation, and then rewrote the harness
+into `tools/det009_trials.py` **dropping the `flush=True` the scratch version had.**
+
+**Python block-buffers stdout when it is a file, so the tracked tool printed nothing.** Measured on its own
+10,000-trial run, 57 seconds in:
+
+```
+$ Get-Content .scratch\det009_tracked_full.log      # empty
+ALIVE cpu=7.6s at 08:22:43                          # and running
+```
+
+**`7.6 s` of CPU proved the run was healthy; the empty log said nothing about it.** That is the same pair of
+facts `§O-428` separates — a frozen log is not a liveness check — arriving from the other side.
+
+**Fixed with `_stream.reconfigure(..., line_buffering=True)` plus a comment naming this observation**, because
+the argument looks like noise to a reader who has not hit it. **And the reason it survived review is worth
+recording: to a terminal the output is line-buffered and looks perfect.** The defect is only visible when
+stdout is redirected — which is exactly how the 10,000-trial run and every CI invocation read it.
+
+### 3 — The published number was coming from a gitignored directory
+
+**`DET-009`'s harness lived in `.scratch/`.** That directory is gitignored and, as `§O-400` records, visible
+to the bridge and invisible to CI. **So the 10,000-trial verification was not re-derivable by anyone who
+cloned this repository** — the number was real and the command that produced it was not in the tree.
+
+**Promoted to `tools/det009_trials.py`.** It carries the guest as **base64 with its digest asserted**
+(`2a9c3fb3…`, 281 bytes) and the WAT beside it, so the subject is pinned by value and readable without a
+tool. The provenance check re-derives the bytes from the WAT with `wasm-tools parse` and asserts the digest
+still matches; measured, **the WAT derives exactly the embedded bytes**, so the two cannot drift apart
+silently.
+
+Three design points were forced by measurement rather than chosen:
+
+| constraint | measured | consequence |
+|---|---|---|
+| the repo tracks **no** `.wasm` or `.wat` fixture | `git ls-files '*.wasm' '*.wat'` → empty | embed the bytes rather than add a binary fixture |
+| the bridge **has** `wasm-tools` but **does not build `qqqai`** | `entrypoint.sh:885` vs `:1006`, `:1022` | `--self-test` must be pure logic; the end-to-end half runs only where a binary exists |
+| `check_gate_parity.py` rule 5 covers `tools/check_*.py` only | `glob("check_*.py")` | this tool is not *required* in a gate — so wiring it in both is a choice, and the choice is the point |
+
+**Reproduced with the tracked command, not the scratch one:**
+
+```
+$ python tools/det009_trials.py --full
+TRIALS_ATTEMPTED=10000
+COMPARISONS_PERFORMED=10000
+RUNS_THAT_FAILED=0
+LOGS_THAT_DIVERGED=0
+ELAPSED_SECONDS=189.8
+MS_PER_TRIAL=19.0
+DET009 OK 10000/10000 byte-identical, 0 failed
+```
+
+`--self-test` (13 pure-logic cases) is wired into **both** gates; `check_gate_parity.py` reports `GATE PARITY
+OK` with the two gates at 121 and 106 invocations. Without it, the number `DOD-003` publishes would come from
+an instrument nothing had ever watched fail — the defect `§O-354` records for `check_wit.py`.
+
+### 4 — And that run's timing is contaminated, so it is not the timing that gets published
+
+**Two runs of the same 10,000 trials, on the same binary, five minutes apart:**
+
+| run | elapsed | ms/trial | reference log |
+|---|---|---|---|
+| uncontended | 168.5 s | **16.8** | `d65d35f3…` |
+| concurrent with my own tree reads and gate checks | 189.8 s | 19.0 | `d65d35f3…` |
+
+**The determinism result is identical in both — 0 diverged, 0 failed — and the timing is not.** The second
+run's progress lines show the cause without my having to infer it: **57–59 trials/s before, then 50–52/s
+across exactly the window where the concurrent work ran.** A 13% swing appeared, and it is attributable.
+
+**So 16.8 ms/trial is the figure, from the run that had the machine to itself**, and the 189.8 s run is
+reported as a *reproduction of the result* rather than of the cost. A number measured under load is not
+comparable to one measured without it, and publishing the larger one as "the cost" would understate the
+engine while looking conservative.
+
+### What this changes
+
+**`DET-009` can carry a `→ Done:` line naming a tracked command, a pinned subject and a measured value** —
+and the value is `10000/10000` over a WAT guest, not over the reference application, which `qqqai run` still
+cannot instantiate (`§O-424`). **The three defects above were all in instruments, and all three were found by
+running the thing rather than by reading it** — which is the remedy this corpus prescribes and keeps having
+to re-prescribe.
+
+## §O-432 — the handbook's checked figures stayed right while the arithmetic explaining them went stale
+
+**`check_doc_claims.py` did its job this round and caught ten stale figures** after `DET-009` landed:
+`checklist-done` 243 → 244, `checklist-open` 340 → 338, `observation-headings` 285 → 291,
+`observation-highest` 425 → 431, `tools-python` 79 → 80. `.scratch/sync_resolved_figures.py` rewrote
+all ten from the resolvers and reported **"examined 14 claimed figure(s)"** -- not zero, which is the
+number that matters, because a sync tool that matches nothing is indistinguishable from one that
+finds nothing wrong.
+
+### And in the same sentence it could not see, four figures had no owner
+
+`docs/AGENT-HANDBOOK.md` section 12 read:
+
+> **`244` / `587` checklist items (41.1%)** — 342 `[ ]`, 2 blocked (`SEC-024`, `SEC-025`, both
+> external third-party audits).
+
+**`244` and `587` were behind `qqq:claim` markers and are now correct. The four numbers around them
+were plain text.** Measured against the tree:
+
+| the sentence said | the tree has |
+|---|---|
+| 41.1% | **41.6%** (244 / 587) |
+| 342 `[ ]` | **338** `[ ]` |
+| 2 blocked | 2 blocked — correct |
+| — (not mentioned) | **3** `[~]` in progress |
+
+**So the checker kept the checked pair right and the sentence containing them wrong**, and the two
+disagreed **within one line**. That is `§O-277`'s rule -- *a number that cannot be compared is a number
+with no owner* -- applied to a document that already has a resolver mechanism, which makes it worse
+rather than better: the machinery to own those four figures exists, and they were simply not put behind
+it.
+
+**The percentage is the sharpest case.** `41.1%` was correct for `241/587`; it survived two further
+ticks while the `244` beside it was rewritten by the resolver. **A derived value and its own inputs can
+drift apart in a single edit, and only the input had a checker.**
+
+### And a duplicated `##` heading sat outside the guard that covers `###`
+
+Section 12 opened with **two** `## 12. Current state` headings -- ``c6905eb`` immediately above
+``ca79aef``, the first with no body, left behind when the newer state section was written above it.
+
+`tools/check_tombstones.py` reports *"ANCHOR STABILITY OK -- 93 heading(s), 0 tombstoned"*: it guards
+`###` headings, so a duplicated `##` is outside its pattern. **`§O-282` again** -- a guard is only as
+wide as its pattern -- and the third time in one round that a check's *shape* rather than its logic was
+the gap.
+
+### What was done, and what would close it properly
+
+**Both were fixed in the same round**: the four figures corrected to the measured values, and the stale
+heading removed, with `check_tombstones.py` re-run to confirm the removal is not a tombstone violation
+(it is not -- `##` is not in its pattern).
+
+**But the fix is a correction, not a guard.** The honest closure is to put the marker breakdown and the
+percentage behind resolvers, so that the sentence can no longer disagree with itself: the resolvers for
+its inputs (`checklist-done`, `checklist-open`) already exist, and the two missing ones are arithmetic
+over them. **Until then this observation is the guard**, which is the weaker form this corpus keeps
+naming.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

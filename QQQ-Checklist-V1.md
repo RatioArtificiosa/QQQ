@@ -4404,6 +4404,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
     builds its own linker**, and `build_linker` registers `host_wasi` unconditionally — the
     authority is withheld by the *context*, not by the registration. *"Cannot be run by the tool"
     is not "cannot be run."*
+    **And the misspelling refusal is witnessed too.** `examples/qqq-test` exports
+    `assert-caps-unknown`, which asserts `clock.wal` — one letter short — so the host answers
+    **`unknown-capability`** rather than a verdict and **the macro panics naming it**. Measured
+    at `11843f0`, and the message that reaches a human is the WIT's own reasoning: *"a typo in a
+    capability name would otherwise assert nothing, and pass. **This is the one error here that
+    is almost always a test bug.**"* **Injected by dropping an unresolvable name from the wanted
+    set, which makes the typo check against one fewer capability and succeed — and only this
+    test fails.**
 - [x] **TEST-008** Implement fuel assertions (`assert_fuel_below!`).
   → §6.7 `qqqai test` — test runner
   → Done: `assert_fuel_below!` in `examples/qqq-test`, over the host's `assert-fuel-below`
@@ -4415,16 +4423,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
     **A missing mark is `no-fuel-baseline`, not a pass**, and the macro's panic says so; the host returns
     it as a WIT error rather than a trap, because a trap would end the instance and hide every later
     assertion.
-    **The seam is witnessed, and `TEST-007`'s line records how.** What is **not** witnessed is
-    the *failing* direction of this comparison end to end: the reference guest asserts a limit
-    it satisfies (`1_000_000`, against a mark it takes immediately before), so the figure this
-    item trades in — *"a performance regression becomes a test failure"* — has its arithmetic
-    covered by unit tests and its **pass** covered by a guest. **A limit the guest genuinely
-    exceeds has not been driven through the macro**, and that is the next thing to add here.
+    **Both directions are witnessed.** `TEST-007`'s line records how the seam was closed, and
+    the *failing* half of this comparison is closed too: `examples/qqq-test` exports
+    `assert-fuel-exceeded`, which marks and then asserts a limit of **zero** — `consumed < 0` is
+    false for every `u64`, so the bound cannot hold. Measured at `11843f0`: the call **succeeds**
+    and the caller's `failures()` holds one message naming the mark and the bound, because the
+    host **records a false bound and returns `Ok`**, so one run reports every failure rather than
+    stopping at the first.
     **And the item requires deterministic metering** — the proposal's own footnote on this row —
-    which is `DET-002`'s virtual clock and `DET-009`'s 10,000-trial result.
-    metering** — the proposal's own footnote on this row — which is `DET-002`'s virtual clock and
-    `DET-009`'s 10,000-trial result. **The comparison is exact only because the counter is.**
+    which is `DET-002`'s virtual clock and `DET-009`'s 10,000-trial result. **The comparison is
+    exact only because the counter is.**
 - [ ] **TEST-009** Implement property tests with shrinking and replayable failures.
   → §6.7 `qqqai test` — test runner
 - [~] **TEST-010** Implement the cross-language conformance suite and wire it into CI.

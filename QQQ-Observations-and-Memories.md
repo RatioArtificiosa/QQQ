@@ -34928,5 +34928,16 @@ workspace doctest count accounts for it and the allowance remains unchanged.
 **A new public enum variant is an API-surface change: document it with a
 compiling example before treating the coverage ratchet as stable.**
 
-*End of `QQQ-Observations-and-Memories.md`.*
+## §O-488 — Error-code additions must update the behavioral cookbook taxonomy
 
+The same new `DeterminismUnsupported` (`QQQ-6008`) code that changed the API
+example denominator also made `AGENT-024` fail: `docs/errors.md` declared 44
+codes, while `docs/agent-cookbook.md` still classified only the previous 43.
+The code is named by runtime source and by no test, so its honest classification
+is `src`-only. The cookbook now reports **44 total**, **29 `src`**, and **0
+unreachable**; `check_agent_cookbook.py`'s 44-code invariant and mutation
+self-test were updated with it. **Generated catalogue completeness and
+behavioral reachability are separate contracts; adding a code requires updating
+both.**
+
+*End of `QQQ-Observations-and-Memories.md`.*

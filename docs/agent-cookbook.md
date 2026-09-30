@@ -15,7 +15,7 @@ tree for the code *string* — `QQQ-7004` — and the tree raises the code as an
 happen to spell it out, so **ten codes were reported as emitted by nothing when every one of them is
 named in the tree**. A guard is only as narrow as its pattern (`§O-282`), and a checker that reads a
 different language than the code writes measures something else (`§O-361`). The predicate now matches
-the **variant** and excludes the enum declaration — which names all 43, so including it would have
+the **variant** and excludes the enum declaration — which names all 44, so including it would have
 matched everything and certified nothing. See `§O-374`.
 
 ```bash
@@ -39,8 +39,8 @@ omitted **28 of the 43 codes**, and an agent that read `docs/errors.md` would ha
 of the 43 it could ever see.
 
 **`unreachable` is now empty, and that is the honest result rather than a disappointment.** Every one
-of the 43 codes has a construction site. What the corrected measurement does say — and it is the claim
-that survives — is that **only five can be reached from a shell**, and that **28 have no test
+of the 44 codes has a construction site. What the corrected measurement does say — and it is the claim
+that survives — is that **only five can be reached from a shell**, and that **29 have no test
 reproducing them**.
 
 ### Measured, by kind
@@ -49,10 +49,10 @@ reproducing them**.
 |---|---|---|
 | `cli` | **5** | `1001`, `2001`, `2002`, `6004`, `7001` |
 | `test` | **10** | `3001`, `3002`, `3003`, `3004`, `3006`, `3007`, `3008`, `4003`, `6002`, `6003` |
-| `src` | **28** | `1002`, `1003`, `1004`, `1005`, `2003`, `2004`, `2005`, `2006`, `2007`, `3005`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `7002`, `7003`, `7004` |
+| `src` | **29** | `1002`, `1003`, `1004`, `1005`, `2003`, `2004`, `2005`, `2006`, `2007`, `3005`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `6008`, `7002`, `7003`, `7004` |
 | `unreachable` | **0** | *(none)* |
 
-**Only 5 of 43 codes can be reproduced from the command line.** The other 38 need a Rust test, a
+**Only 5 of 44 codes can be reproduced from the command line.** The other 39 need a Rust test, a
 running server, or a hostile guest — which is itself the most useful thing this page can tell an
 agent: *if you are debugging from a shell, you will see at most these five.*
 
@@ -171,6 +171,7 @@ any of them is invisible.
 | `QQQ-6005` | `HostResourceExhausted` |
 | `QQQ-6006` | `RequestBodyTooLarge` |
 | `QQQ-6007` | `HostPanicContained` |
+| `QQQ-6008` | `DeterminismUnsupported` |
 | `QQQ-7002` | `UnknownSchemaSurface` |
 | `QQQ-7003` | `ProtocolVersionUnsupported` |
 | `QQQ-7004` | `CliFlagUnknown` |
@@ -196,7 +197,7 @@ report: nothing emits it. If a code here *should* be reachable, the work is to r
 place — and if it should not, the work is to remove it from the catalogue, which is generated.
 
 **This is the finding the cookbook was written to produce.** The catalogue is complete by its own
-checker — *"43 code(s), every one with a cause and a remediation"* — and completeness of
+checker — *"44 code(s), every one with a cause and a remediation"* — and completeness of
 **documentation** is not completeness of **behaviour**. What survives the correction is the size of
-the gap that is real: **38 of 43 codes cannot be reached from a shell, and 28 have no test
+the gap that is real: **39 of 44 codes cannot be reached from a shell, and 29 have no test
 reproducing them**, so a regression in any of those is invisible.

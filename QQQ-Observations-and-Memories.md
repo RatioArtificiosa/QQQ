@@ -34275,6 +34275,85 @@ does the same thing to an exit code**, and the general rule is the one that cove
 between a command and its verdict replaces the verdict with its own.** Read the command's exit code directly,
 or grep for the verdict in the output -- **never through a filter.**
 
+## §O-465 — The ratchet notices every new declaration, and the remedy is an example
+
+**The same change moved `check_api_examples.py` twice, in two consecutive rounds.**
+
+```
+round 113  pub const DRIVEN           2105 -> 2106   FAILED ON ALL THREE PLATFORMS
+round 114  pub fn supported_phrase()  2105 -> 2106   caught locally, fixed in the same commit
+```
+
+**`DX-015`'s allowance is a ratchet and its own documentation says why** -- *"the number cannot silently
+drift"* -- **so every new public declaration without an example is a red run**, and that is the design
+working. What differed between the two rounds was **where it was noticed**, and the difference is `§O-461`:
+
+**Round 113 was found by CI, because my verification script ran three of the gate's four commands and omitted
+this one.** Round 114 was found **by me**, because the lesson had been written down and the script now runs
+all four. **`§O-461` is one observation old and it has already paid for itself once.**
+
+### And the remedy is an example, never a bigger allowance
+
+`§O-258` forbids raising a budget to make a check pass, and here the temptation is unusually concrete: the
+number is **one**, the allowance is a literal in `ci.yml`, and editing it is a one-character diff. **Raising
+it would be precisely the drift the tool exists to notice**, and doing it twice would have made it three.
+
+**The two examples are also different shapes on purpose, and the difference is the point:**
+
+```rust
+// DRIVEN: a LITERAL assertion, because the value is a decision a reader wants to see pinned.
+assert_eq!(qqq_run::build::DRIVEN, &["rust"]);
+
+// supported_phrase: a DERIVED assertion, because the function's property is that it names them all.
+for language in qqq_run::build::DRIVEN {
+    assert!(phrase.contains(language), "{language} is driven but not named");
+}
+```
+
+**A doctest that pins a value must be edited whenever the value changes** -- which is right for `DRIVEN`, where
+someone should have to think before adding a language. **A doctest that pins a property stays true while the
+list grows**, which is right for a derivation. **An example that must be edited to stay true is an example that
+will eventually be edited to hide a change**; an example that asserts a property cannot be.
+
+## §O-466 — One fact in four places, and the repair is a pointer rather than a fifth statement
+
+**`rg` for the sentence describing which languages `qqqai build` can drive found it four times:**
+
+```
+new.rs:123      "Rust -- the only language with a working `build` driver today."
+build.rs:445    "Rust is fully supported today; `{}` is tracked by the language matrix in ..."
+build.rs:575    "Rust is fully supported today; `{}` is tracked by the language matrix in ..."
+style.rs:178    "Rust is fully supported today; `{language}` is tracked by the language matrix ..."
+```
+
+**Three copies of one user-facing sentence and one doc comment stating the same fact** -- the shape `§O-439`
+records. **Adding a language to `DRIVEN` would have required finding all four, and nothing would have reported
+one that was missed.**
+
+### The repair, and why a doc comment is treated differently
+
+`build::supported_phrase()` returns `DRIVEN.join(", ")` and **the three strings call it**, so the user-facing
+text updates by construction. **`new.rs`'s doc comment cannot call a function**, so it **stops stating the
+fact and starts pointing at it** -- *"see `crate::build::DRIVEN` for the authority on which languages have a
+driver."*
+
+**That is `§O-446`'s "must not own" distinction applied to prose:** the fix is not a better sentence in four
+places, it is **one place and three references**. And the enum now says what it is -- *"this variant does not
+say how many there are"* -- **because `new.rs`'s enum lists the languages the MANIFEST understands while
+`DRIVEN` lists the ones the build can DRIVE, and conflating those two lists is how an unexecuted language
+comes to be marked supported.**
+
+### The measured difference
+
+**Before:** four statements, no connection, and the compiler's help limited to `an_unimplemented_language_is_
+declared_not_faked` asserting that **one** of them names `LANG-0`. **After:** one function, and **a doctest
+that fails if it stops naming a language `DRIVEN` says is driven.**
+
+**The general shape, stated so it can be applied elsewhere: a fact stated in N places has N chances to be
+wrong and no mechanism to notice. Deriving it where derivation is possible, and pointing at it where it is
+not, reduces N to one -- and the pointer is the part a reader is most likely to skip, which is why it is
+phrased as an authority rather than a summary.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -120,8 +120,27 @@ def load_blocks():
     return module.blocks
 
 
+# **A marker that names a blocker, and a status that says open, are contradictory.** Measured at landing:
+# exactly two items in the checklist carry the marker, both as `[ ]`, and both were corrected rather than
+# exempted -- which is what makes the rule enforceable on its first run rather than needing a ratchet.
+# **The MARKER, not the substring.** The markers this convention uses are bold -- `**blocked-by-...**` --
+# and a note that *discusses* the convention quotes it in backticks or plain prose. Matching the substring
+# reported `PLAN-009`, which does not name a blocker and merely explains one: **a guard that matches its own
+# explanation describes the reader, not the code** (`§O-399`), and it was reproduced here by writing a check
+# about a convention into the text that discusses it.
+BLOCKED_MARKER = re.compile(r"\*\*blocked-by-[a-z-]+\*\*")
+
+
+def blocked_disagreements(text: str) -> list[tuple[str, str]]:
+    """`(id, status)` for every item whose prose names a blocker and whose status does not say blocked."""
+    out: list[tuple[str, str]] = []
+    for status, oid, body in load_blocks()(text):
+        if any(BLOCKED_MARKER.search(line) for line in body) and status != "!":
+            out.append((oid, status))
+    return out
+
 def audit(text: str) -> tuple[int, list[tuple[str, str]]]:
-    """(claims without a falsifier, the ones that are new since the budget was set)."""
+    """(claims without a falsifier, items whose blocker and status disagree)."""
     blocks = load_blocks()(text)
     without = 0
     for _status, _name, body in blocks:
@@ -130,7 +149,7 @@ def audit(text: str) -> tuple[int, list[tuple[str, str]]]:
                 continue  # a pointer, and the document says it must pass
             if not admits(note):
                 without += 1
-    return without, []
+    return without, blocked_disagreements(text)
 
 
 def notes_in(body: list[str]) -> list[str]:
@@ -178,15 +197,29 @@ def main(argv: list[str]) -> int:
         return 0
 
     text = CHECKLIST.read_text(encoding="utf-8")
-    count, _ = audit(text)
+    count, disagreements = audit(text)
     budget = CLAIMS_WITHOUT_FALSIFIER_BUDGET
+
+    # **A contradiction is reported before a budget**, because a budget is a ratchet and a contradiction is a
+    # defect: an item whose prose names a blocker while its status says open is invisible to every count that
+    # reads this file.
+    if disagreements:
+        for oid, status in disagreements:
+            print(f"ADMISSION FAILED -- `{oid}` names a blocker but its status is `[{status}]`.")
+        print("  An item whose prose says `blocked-by-...` must carry `[!]`, or the counts read it as work")
+        print("  waiting to be started. See docs/definition-of-ready.md section 3.")
+        return 1
+
     if count > budget:
         print(f"ADMISSION FAILED -- {count} claim(s) without a falsifier; the budget is {budget}.")
         print("  A claim must name a number, a path, a command with its verdict, or state why none exists.")
         print("  See docs/definition-of-ready.md section 2.")
         print("  **The budget may only fall.** Raising it is the drift this check exists to notice.")
         return 1
-    print(f"ADMISSION OK -- {count} claim(s) without a falsifier, at or under the budget of {budget}.")
+    print(
+        f"ADMISSION OK -- {count} claim(s) without a falsifier, at or under the budget of {budget}; "
+        "no item's blocker disagrees with its status."
+    )
     if count < budget:
         print(f"  The budget can be tightened to {count} -- it may only fall.")
     return 0
@@ -246,6 +279,18 @@ def self_test() -> int:
             False,
         ),
         (
+            "a `blocked-by-` marker with status [!] passes",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [!] **TEST-010** does a thing.\n"
+            "  \u2192 **blocked-by-upstream-and-time**. See `docs/x.md` for what would unblock it.\n",
+            True,
+        ),
+        (
+            "CONTROL: a `blocked-by-` marker with status [ ] FAILS",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [ ] **TEST-011** does a thing.\n"
+            "  \u2192 **blocked-by-upstream-and-time**. See `docs/x.md`.\n",
+            False,
+        ),
+        (
             "a claim naming NOTHING fails",
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-007** does a thing.\n"
             "  \u2192 Done: it is implemented.\n",
@@ -255,8 +300,8 @@ def self_test() -> int:
 
     wrong = 0
     for label, src, expected in cases:
-        count, _ = audit(src)
-        got = count == 0
+        count, disagreements = audit(src)
+        got = count == 0 and not disagreements
         mark = "OK  " if got == expected else "FAIL"
         if got != expected:
             wrong += 1

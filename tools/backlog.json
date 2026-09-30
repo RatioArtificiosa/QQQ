@@ -154,9 +154,9 @@
       "withdrawn": 0
     },
     "LANG": {
-      "blocked": 0,
+      "blocked": 2,
       "done": 15,
-      "open": 25,
+      "open": 23,
       "partial": 0,
       "total": 40,
       "unknown": 0,
@@ -345,9 +345,9 @@
       "withdrawn": 0
     },
     "P5": {
-      "blocked": 0,
+      "blocked": 2,
       "done": 15,
-      "open": 25,
+      "open": 23,
       "partial": 0,
       "total": 40,
       "unknown": 0,
@@ -545,9 +545,9 @@
       "withdrawn": 0
     },
     "LANG": {
-      "blocked": 0,
+      "blocked": 2,
       "done": 15,
-      "open": 25,
+      "open": 23,
       "partial": 0,
       "total": 40,
       "unknown": 0,
@@ -3359,7 +3359,7 @@
       "id": "LANG-023",
       "line": 4187,
       "phase": "P5",
-      "status": "open",
+      "status": "blocked",
       "title": "Contribute upstream fixes to TinyGo where the component path is weak."
     },
     {
@@ -3367,7 +3367,7 @@
       "id": "LANG-024",
       "line": 4190,
       "phase": "P5",
-      "status": "open",
+      "status": "blocked",
       "title": "Track standard-Go component support and re-evaluate quarterly."
     },
     {

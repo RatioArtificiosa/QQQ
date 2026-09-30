@@ -4184,10 +4184,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **LANG-022** Document TinyGo's runtime differences, reduced stdlib, and in-guest GC.
   → Done: `docs/languages/phase3.md` documents TinyGo 0.42.0 / Go 1.27.1, precise GC, asyncify and unverified stdlib/package compatibility. `tools/run_language_probes.py --language go` records the failing 64 KiB vector; no standard-Go runtime parity is claimed.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-023** Contribute upstream fixes to TinyGo where the component path is weak.
+- [!] **LANG-023** Contribute upstream fixes to TinyGo where the component path is weak.
   → **blocked-by-upstream-and-time**. See the reproducer and dated reassessment in `docs/languages/phase3.md`; no upstream contribution or future review is claimed complete.
   → §15 — Risk Register
-- [ ] **LANG-024** Track standard-Go component support and re-evaluate quarterly.
+- [!] **LANG-024** Track standard-Go component support and re-evaluate quarterly.
   → **blocked-by-upstream-and-time**. See the reproducer and dated reassessment in `docs/languages/phase3.md`; no upstream contribution or future review is claimed complete.
   → §6.10 Language toolchains — one per target language
 

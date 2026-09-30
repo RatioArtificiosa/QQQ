@@ -33336,6 +33336,139 @@ server bound* — was only established by the fourth.** That is the argument for
 only the subject can produce, rather than one that infers the fact from an observable its rivals also
 satisfy.
 
+## §O-439 — Three docs described a program that did not exist, and the flag was inert because of it
+
+**`TEST-012`'s `--isolate` was written, compiled, lint-clean and did nothing**, and the reason was in three
+docstrings that all agreed with each other and disagreed with the code.
+
+### What the three said
+
+`Runner::program`'s field doc:
+
+> *"The program that compiles and reports test targets. **Used only to *build*: discovery runs the
+> resulting binaries directly**, which is what makes a test's source file exact rather than inferred."*
+
+`discover`'s doc:
+
+> *"`executable`, and [`discover`] then runs **each binary directly**."*
+
+`TEST-005`'s ticked `-> Done:` line:
+
+> *":488 runs each reported executable directly."*
+
+### What the code did
+
+```rust
+// test.rs:248
+"rust" => Some(Runner { program: "cargo", run_args: &["test"] }),
+
+// run_once
+let output = Command::new(program)      // "cargo"
+    .args(run_args)                     // ["test"]
+    .current_dir(workdir)
+```
+
+**`discover` really does run the binary directly — for `--list`, at line 321.** The **run** went through
+`cargo test <name> -- …`. So the first two sentences are true of the listing and read as though they
+covered the run, **and the third is simply false about the line it names.**
+
+### Why that made the flag inert, measured
+
+`.current_dir(workdir)` sets **Cargo's** working directory. **Cargo gives the test binary the package root
+as *its* CWD**, so the directory reached a process that was about to exec another one, and the test never
+saw it.
+
+Three facts settled it, none of them inferred:
+
+```
+DIAG isolate=true test=a_writes_a_marker
+DIAG isolate=true test=z_cannot_see_another_tests_state
+isolation_dir's create_dir_all eprintln: DID NOT FIRE      -> the directory was created
+marker in the project root: TRUE                           -> the tests still shared one
+```
+
+### And the two inferences that cost rounds before the measurement
+
+**A premise read from an assertion that never ran.** `isolated.assert_ok()` failed **before**
+`isolated.assert_contains("a_writes_a_marker")`, so that second assertion never executed — and the
+conclusion *"the writer fails"* was drawn from it anyway and written into an `#[ignore]` reason as
+though it were measured. **`§O-281`: confirm the premise, not the exit code.** The corrected reason
+carries the root cause instead.
+
+**A binary that predated the source.** A direct run used `target\debug\qqqai.exe` built before the edits
+to `test.rs`, so its failure said nothing about the change. **`§O-400`: before believing a failure, prove
+the thing under test is the thing you built.**
+
+### What the fix was, and which field proved it
+
+`DiscoveredTest` carries `executable` — **which `discover` already had**, since `binaries` is
+`(executable, source)` pairs — and `run_once` spawns it directly. `Runner::run_args` was then **deleted**,
+because the compiler said:
+
+```
+error: field `run_args` is never read
+```
+
+**The compiler's finding and the docstring's defect are the same finding.** A field that exists to describe
+a call the code no longer makes is a dead field, and a docstring that describes a slightly different
+program is how a reader — including the agent that wrote both — concludes the wrong thing.
+
+## §O-440 — A bulk regex over a partitioned region ate the file, and the count assertion is the fix
+
+**The first attempt at `§O-439`'s fix destroyed `crates/qqq-run/src/test.rs`.**
+
+```python
+head, sep, body = t.partition("#[cfg(test)]")
+body = re.sub(r'(parse_libtest_list\((?:[^()]|\([^()]*\))*?)\)', lambda m: m.group(1) + ', Path::new("b"))', body)
+```
+
+**Two things were wrong and both were structural.**
+
+**`partition` splits on the *first* occurrence**, so `body` was everything from the first `#[cfg(test)]`
+onward — which is the whole test module, and the regex was meant for it. But the nested-paren alternative
+`(?:\([^()]*\))` lets the group match **past** a closing paren, so **one call site matched twice** and
+gained **two** arguments:
+
+```
+error: expected expression, found `,`            --> test.rs:353:17
+error: expected one of `:` or `|`, found `)`     --> test.rs:463:82
+Error writing files: failed to resolve mod `test_runner`: cannot parse test.rs
+```
+
+**Recovered with `git checkout --`, which is only available because the previous commit was clean.**
+
+### What the second attempt did differently
+
+**A count asserted before every substitution, and a pattern that cannot match the thing it must not.**
+
+```python
+CALL_TWO_ARGS = re.compile(r'parse_libtest_list\(([^,()\n]+), ("[^"\n]*")\)')
+...
+n_calls = len(CALL_TWO_ARGS.findall(text))
+if n_calls != 12:
+    print(f"*** refusing; expected 12 simple call sites, found {n_calls} ***")
+    return 1
+text, count = CALL_TWO_ARGS.subn(r'parse_libtest_list(\1, \2, Path::new("b"))', text)
+assert count == 12
+```
+
+**The pattern requires exactly two arguments and neither may contain a parenthesis, a comma or a
+newline** — and the production call has three arguments whose first is
+`&String::from_utf8_lossy(&o.stdout)`, so it **cannot** match. Measured before the change: 12 simple calls,
+1 production call, and the production call did not match.
+
+**And it still missed one**, because that call site's first argument is
+`"0 tests, 0 benchmarks\n"` — which contains a comma. **The compiler named it**, which is the argument for
+letting the compiler enumerate rather than enumerating by hand: a count assertion catches a pattern that
+matched too often, and only the compiler catches one that matched too rarely.
+
+### The rule, stated so it can be applied
+
+**Never run a bulk substitution over a partitioned region without a count asserted first, and prefer a
+pattern constrained so that what must not match cannot.** Where a change touches many call sites, make the
+signature change first and let the compiler list the sites — `E0061: this function takes 3 arguments but 2
+were supplied` is a complete and correct enumeration, and a regex is not.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

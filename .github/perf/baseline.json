@@ -1,0 +1,81 @@
+{
+  "budget_misses": [
+    "hello",
+    "json",
+    "multi",
+    "tailp99"
+  ],
+  "commit": "e902b7fa506bee1bc1d933c64fe464d85e249f4d",
+  "does_not_measure": [
+    "run on AMD EPYC 7763 64-Core Processor by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+    "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+    "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+  ],
+  "environment": {
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "kernel": "6.17.0-1022-azure",
+    "memory_bytes": 16766410752,
+    "os": "linux x86_64",
+    "physical_cores": 4,
+    "toolchains": {
+      "qqqai": "0.0.0",
+      "rustc": "unknown"
+    }
+  },
+  "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+  "measured_budget_items": [
+    "PERF-002",
+    "PERF-010",
+    "PERF-011"
+  ],
+  "metrics": {
+    "hello": {
+      "median": 524180.0,
+      "metric": "p99_nanos",
+      "samples": [
+        513299.0,
+        537816.0,
+        524180.0
+      ]
+    },
+    "json": {
+      "median": 1859.1190138071174,
+      "metric": "requests_per_second",
+      "samples": [
+        1915.3076085195405,
+        1840.5532984451672,
+        1859.1190138071174
+      ]
+    },
+    "multi": {
+      "median": 11440.29814873695,
+      "metric": "requests_per_second",
+      "samples": [
+        11126.79472507723,
+        11555.224665123957,
+        11440.29814873695
+      ]
+    },
+    "tailp99": {
+      "median": 6717426.0,
+      "metric": "p99_nanos",
+      "samples": [
+        6717426.0,
+        6369775.0,
+        6895406.0
+      ]
+    }
+  },
+  "not_measured_budget_items": [
+    "PERF-003",
+    "PERF-004",
+    "PERF-007",
+    "PERF-008",
+    "PERF-009",
+    "PERF-012",
+    "PERF-013"
+  ],
+  "profile": "ubuntu-latest",
+  "samples": 3,
+  "schema_version": 1
+}

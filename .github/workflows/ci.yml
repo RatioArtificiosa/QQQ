@@ -1725,10 +1725,9 @@ jobs:
       - name: Prove the regression harness can fail
         run: python tools/run_perf_regression.py --self-test
 
-      # The first run deliberately emits target/perf-regression/candidate.json so
-      # it can be reviewed and committed as .github/perf/baseline.json. Once that
-      # baseline is checked in, remove --allow-missing-baseline: absence must then
-      # fail rather than silently establishing a new comparison point.
+      # The committed baseline is the reviewed comparison point for this runner
+      # profile. A missing baseline is intentionally a hard failure: refreshing
+      # it is a deliberate, reviewed change rather than an automatic bootstrap.
       - name: Measure and compare the reference application (PERF-020)
         run: |
           python tools/run_perf_regression.py \
@@ -1738,8 +1737,7 @@ jobs:
             --samples 3 \
             --baseline .github/perf/baseline.json \
             --candidate target/perf-regression/candidate.json \
-            --runs-dir target/perf-regression \
-            --allow-missing-baseline
+            --runs-dir target/perf-regression
 
       - uses: actions/upload-artifact@v4
         if: always()

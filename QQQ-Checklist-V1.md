@@ -4625,26 +4625,19 @@ Each language has eight required items. The parity matrix makes any gap visible.
     the run as direct when it went through Cargo** — `Runner::program`'s field doc, `discover`'s doc, and
     `TEST-005`'s ticked `→ Done:` line. `Runner::run_args` is now **deleted**, because the compiler said
     `field run_args is never read` — the same finding as the docstring above it.
-- [ ] **TEST-013** Implement benchmark-as-test: fail a build when a performance budget regresses.
+- [x] **TEST-013** Implement benchmark-as-test: fail a build when a performance budget regresses.
   → §9.2 The performance budget
-  → **Measured: the mechanism exists and is tested; the gate is not wired, so the item is not met.**
-    `crates/qqq-run/src/bench.rs` holds `fail_on_miss` (`:72`), the `--fail-on-miss` flag (`:180`),
-    `should_fail(&BenchOutput, bool)` (`:532`), and `main.rs:2171` maps the decision to an exit code. Four
-    unit tests cover it, **including the control that makes them evidence** — `:1150` a miss without the
-    flag is reported rather than failed, `:1154` with it a miss fails, `:1162` a budget that was **met**
-    does not fail, and `:1181` is the control an always-false implementation would fail.
-  → **What does not exist is a build that fails**, because no gate calls it:
-    `rg -n -e 'qqqai bench|bench --' .github/workflows/ci.yml docker/entrypoint.sh` is **empty**.
-  → **The reason is `PERF-020`'s, and it is stated there rather than twice**: regression detection needs a
-    stable measurement to compare against, and `§O-248` records that this machine's numbers are neither on
-    the reference profile nor stable enough to be a baseline — the best throughput measured is **1,679 RPS**
-    against a **60,000 RPS** target, and a threshold set from that would ratify a number the budget says is
-    wrong by **36×**. **The two items are one prerequisite seen from two sides**: this one names the
-    mechanism, `PERF-020` names the comparison.
-  → **And it is not ticked, because the item's own words are "fail a build".** `--fail-on-miss` makes a
-    *process* exit non-zero; wiring it into a gate that would fail on a real regression is the missing
-    half. **"A miss can fail an exit code" and "a build fails on a miss" are different facts**, which is
-    the distinction `PERF-025`'s own note draws for fuel and CPU-cost-per-request.
+  → Done: `tools/run_perf_regression.py` starts the real reference app, drives `qqqai bench --json`
+    through the public socket path three times, takes medians, and returns non-zero when the same-profile
+    latency or throughput baseline regresses beyond its explicit tolerance. Its self-test proves both
+    failure directions, malformed output rejection, environment/profile mismatch rejection, and strict
+    missing-baseline behavior.
+  → **Measured in the live gate.** `.github/workflows/ci.yml`'s `Performance regression (PERF-020)` job
+    builds `qqqai`, builds `examples/orders-api`, runs the harness, and uploads the raw candidate. A real
+    regression therefore fails the CI build. `--fail-on-miss` remains the absolute-budget primitive, but
+    the hosted runner's four measured rows currently miss the §9.2 targets and seven rows are explicitly
+    `NOT_IMPLEMENTED`; those are reported as informational rather than misrepresented as product-budget
+    passes.
 - [x] **TEST-014** Implement the flaky-test detector.
   → §6.7 `qqqai test` — test runner
   → Done: `crates/qqq-run/src/flaky.rs` — a JSON Lines history of `(test, platform, passed, commit, run)`
@@ -4971,23 +4964,19 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §9.4 Specific optimizations planned
 - [ ] **PERF-019** Implement and measure huge-page allocation for guest memory.
   → §9.4 Specific optimizations planned
-- [ ] **PERF-020** Implement continuous performance regression detection in CI.
+- [x] **PERF-020** Implement continuous performance regression detection in CI.
   → §9.2 The performance budget
-  → **Measured and not met.** `grep` of `.github/workflows/ci.yml` finds **no step
-    that runs a benchmark, stores a number, or compares one run against another**.
-    What CI has is `check_bench_contract.py`, which verifies the *budget table* is
-    internally consistent — a static check on data, not a measurement of the system.
-  → **Why the gate cannot exist yet, stated as the reason rather than the excuse.**
-    Regression detection needs a stable measurement to compare against, and `§O-248`
-    records that this machine's numbers are neither on the reference profile nor
-    stable enough to be a baseline: the best throughput measured is **1,679 RPS**
-    against a 60,000 RPS target, on loopback with `Connection: close`. A threshold
-    set from that would ratify a number the budget says is wrong by 36×. The
-    prerequisite is a reference-class runner with pinned hardware (`§9.1`'s
-    requirement), not a CI step.
-  → The harness itself is ready for it (`qqqai bench --fail-on-miss` exits non-zero
-    on a miss, which is the mechanism a gate would call) — what is missing is the
-    baseline to compare against.
+  → Done: `.github/workflows/ci.yml` now runs `Performance regression (PERF-020)` on
+    `ubuntu-latest`. It builds the CLI and reference application, starts the real
+    `qqqai serve`, executes all ten workloads through `qqqai bench --json` for three
+    samples, compares medians with `.github/perf/baseline.json`, and uploads the raw
+    runs. Missing baselines are hard failures after the reviewed bootstrap baseline.
+  → **Scope is intentionally explicit.** The baseline measures `PERF-002`, `PERF-010`,
+    and `PERF-011` (`hello`, `json`, `multi`, `tailp99`) and names the seven
+    `NOT_IMPLEMENTED` rows. On the hosted runner, the absolute §9.2 misses are
+    informational because this is not the pinned reference hardware; the gate detects
+    relative regressions against the same runner profile, with exact stable identity
+    and a ±1 MiB allowance for hosted memory telemetry jitter.
 - [ ] **PERF-021** Publish the benchmarks dashboard with hardware disclosure.
   → §11.3 Documentation as a product surface
   → **Measured and not met.** No dashboard exists: no file matching `*dashboard*`

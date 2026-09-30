@@ -34993,4 +34993,30 @@ self-test for both paths. **A measured failure must first be shown to reach
 the guest and its intended capability policy; a harness launch error or an
 invalid grant set is not language evidence.**
 
+## §O-492 — PERF-020 is live, but the hosted baseline is a regression sentinel, not a product target
+
+The missing performance job was implemented in `tools/run_perf_regression.py` and
+`.github/workflows/ci.yml`. It builds the real CLI and `examples/orders-api`, starts
+`qqqai serve`, waits for `/healthz`, drives all ten workloads through `qqqai bench --json`
+three times, aggregates medians, and fails on relative latency/throughput regressions.
+The first successful live job was GitHub Actions run
+`36766669331` at commit `e902b7f`; its reviewed candidate is now
+`.github/perf/baseline.json`.
+
+That candidate measures `PERF-002`, `PERF-010`, and `PERF-011` through `hello`, `json`,
+`multi`, and `tailp99`. Four rows miss the absolute §9.2 targets on the ordinary hosted
+runner, and seven rows are `NOT_IMPLEMENTED`; both facts are emitted and remain
+informational. The job therefore detects a material regression against the same runner
+profile without pretending that GitHub-hosted hardware proves the published product
+budgets. Stable identity fields remain exact; hosted memory telemetry is allowed a
+documented symmetric ±1 MiB tolerance after two otherwise identical runs differed by
+4 KiB. Raw memory remains in every artifact.
+
+The rollout also exposed two gate defects that are now fixed: adding the new tool without
+regenerating `llms.txt` broke DOC-020 (`3dea8e7`), and the server subprocess initially
+decoded with the platform locale (`e902b7f`). CodeRabbit found no issue after the UTF-8
+fix and again found no issue after the explicit memory-compatibility rule. A missing
+baseline is now a hard failure; refresh requires a reviewed artifact and a deliberate
+commit.
+
 *End of `QQQ-Observations-and-Memories.md`.*

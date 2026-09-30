@@ -327,15 +327,26 @@ pub fn probe(program: &str, version_args: &[&str]) -> Option<String> {
 // The build plan
 // ---------------------------------------------------------------------------
 
-/// A fully-resolved invocation, ready to run.
+/// One fully-resolved invocation.
 ///
-/// Exposed as a value rather than executed inline so that `--dry-run` can print
-/// it, `--json` can report it, and tests can assert on it **without running a
-/// compiler**. That last one is the point: the logic that decides what to run is
-/// exactly the logic worth testing, and it should not require a toolchain to
-/// test.
+/// **The step and its working directory travel together on purpose.** A plan holding `programs: Vec<String>`
+/// and `cwds: Vec<PathBuf>` would be two lists that must stay the same length, and this file already carries
+/// the lesson for that shape: its toolchain code reports *"the two lists in build.rs disagree"* when two
+/// parallel lists drift.
+/// # Examples
+///
+/// A step is one invocation, and it carries the directory it runs in:
+///
+/// ```
+/// let step = qqq_run::build::BuildStep {
+///     program: "cargo".to_owned(),
+///     args: vec!["build".to_owned()],
+///     cwd: std::path::PathBuf::from("."),
+/// };
+/// assert_eq!(step.render(), "cargo build");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildPlan {
+pub struct BuildStep {
     /// The program to execute.
     pub program: String,
     /// Its arguments, one element per argument.
@@ -344,12 +355,24 @@ pub struct BuildPlan {
     pub cwd: PathBuf,
 }
 
-impl BuildPlan {
+impl BuildStep {
     /// Render the invocation as one line, quoted for display.
     ///
     /// Quoted because the point of showing it is that the user can paste it
     /// into a shell and get the same result. Unquoted, a path with a space would
     /// paste into something different from what ran.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use qqq_run::build::BuildStep;
+    /// let step = BuildStep {
+    ///     program: "clang".to_owned(),
+    ///     args: vec!["--target=wasm32-wasip2".to_owned()],
+    ///     cwd: std::path::PathBuf::from("."),
+    /// };
+    /// assert_eq!(step.render(), "clang --target=wasm32-wasip2");
+    /// ```
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = shell_quote(&self.program);
@@ -358,6 +381,157 @@ impl BuildPlan {
             out.push_str(&shell_quote(a));
         }
         out
+    }
+}
+
+/// A fully-resolved sequence of invocations, ready to run **in order**.
+///
+/// Exposed as a value rather than executed inline so that `--dry-run` can print
+/// it, `--json` can report it, and tests can assert on it **without running a
+/// compiler**. That last one is the point: the logic that decides what to run is
+/// exactly the logic worth testing, and it should not require a toolchain to
+/// test.
+///
+/// # Why this is a sequence and not one command
+///
+/// **Because only Rust needs one.** `cargo build --target wasm32-wasip2` emits a component directly -- this
+/// file's own comment at the `wasm-tools` question says so -- while each of the other four languages is a
+/// pipeline: Go is `wit-bindgen-go`, then `tinygo build`, then `wasm-tools component new`; C is four steps.
+/// **A driver for any of them cannot be written against a one-command plan**, which is why this type came
+/// first.
+///
+/// **And this does not touch [`DRIVEN`]:** the type can now *hold* a driver; the build still cannot drive
+/// one.
+/// # Examples
+///
+/// A one-step plan renders as its command; a longer one joins with ` && `, which is the shell's *then* and
+/// **the same semantics the executor implements**:
+///
+/// ```
+/// use qqq_run::build::{BuildPlan, BuildStep};
+/// let step = |program: &str| BuildStep {
+///     program: program.to_owned(),
+///     args: Vec::new(),
+///     cwd: std::path::PathBuf::from("."),
+/// };
+/// assert_eq!(BuildPlan::one(step("cargo")).render(), "cargo");
+/// let two = BuildPlan { steps: vec![step("clang"), step("wasm-ld")] };
+/// assert_eq!(two.render(), "clang && wasm-ld");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPlan {
+    /// The steps, in execution order.
+    pub steps: Vec<BuildStep>,
+}
+
+impl BuildPlan {
+    /// A plan of exactly one step.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use qqq_run::build::{BuildPlan, BuildStep};
+    /// let step = BuildStep {
+    ///     program: "cargo".to_owned(),
+    ///     args: Vec::new(),
+    ///     cwd: std::path::PathBuf::from("."),
+    /// };
+    /// assert_eq!(BuildPlan::one(step).steps.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn one(step: BuildStep) -> Self {
+        Self { steps: vec![step] }
+    }
+
+    /// The single step of a one-step plan, for callers that know there is one.
+    ///
+    /// # Why this exists instead of indexing `steps[0]` at the call sites
+    ///
+    /// **Because "the only step" is a meaning, and `steps[0]` is a coincidence.** Fourteen test assertions read
+    /// a plan that has one step today, because only Rust has a driver; written as index `0`, each would encode
+    /// that fact silently, and **the day a language gains a second step fourteen tests fail for a reason none
+    /// of them is about.**
+    ///
+    /// # Panics
+    ///
+    /// If the plan does not have exactly one step. **That is the point**: a caller that meant "the only step"
+    /// and got two should be told, not handed the first.
+    /// # Panics
+    ///
+    /// If the plan does not have exactly one step. **That is the point**: a caller that meant *"the only
+    /// step"* and got two should be told, not handed the first.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use qqq_run::build::{BuildPlan, BuildStep};
+    /// let step = BuildStep {
+    ///     program: "cargo".to_owned(),
+    ///     args: vec!["build".to_owned()],
+    ///     cwd: std::path::PathBuf::from("."),
+    /// };
+    /// let plan = BuildPlan::one(step);
+    /// assert_eq!(plan.only_step().program, "cargo");
+    /// assert_eq!(plan.steps.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn only_step(&self) -> &BuildStep {
+        assert_eq!(
+            self.steps.len(),
+            1,
+            "`only_step` was called on a plan with {} steps; use `steps` if the plan may have more",
+            self.steps.len()
+        );
+        &self.steps[0]
+    }
+
+    /// The directory the plan operates in, taken from its first step.
+    ///
+    /// Every step of every plan built here runs in the project directory, so this is the project root rather
+    /// than a guess -- and artifact discovery below reads it.
+    ///
+    /// The directory the plan operates in, taken from its first step.
+    ///
+    /// Every step of every plan built here runs in the project directory, so this is the project root rather
+    /// than a guess -- and artifact discovery reads it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use qqq_run::build::{BuildPlan, BuildStep};
+    /// let step = BuildStep {
+    ///     program: "cargo".to_owned(),
+    ///     args: Vec::new(),
+    ///     cwd: std::path::PathBuf::from("app"),
+    /// };
+    /// assert_eq!(BuildPlan::one(step).cwd(), std::path::Path::new("app"));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: [`BuildPlan::one`] and `plan_pure` both produce at least one step, and
+    /// [`Self::steps`] is never constructed empty.
+    #[must_use]
+    pub fn cwd(&self) -> &Path {
+        self.steps
+            .first()
+            .map_or_else(|| Path::new("."), |s| s.cwd.as_path())
+    }
+
+    /// Render the plan as one pasteable line, quoted for display.
+    ///
+    /// # Why ` && `
+    ///
+    /// Because the shell's `&&` is **the semantics the executor implements**: the next step runs only if this
+    /// one succeeded. **A one-step plan therefore renders byte-for-byte as it did before**, so no existing
+    /// assertion moves, and a four-step plan renders as something a reader can paste and run.
+    #[must_use]
+    pub fn render(&self) -> String {
+        self.steps
+            .iter()
+            .map(BuildStep::render)
+            .collect::<Vec<_>>()
+            .join(" && ")
     }
 }
 
@@ -636,7 +810,7 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
         }
     };
 
-    Ok(BuildPlan {
+    Ok(BuildPlan::one(BuildStep {
         program: "cargo".to_owned(),
         args,
         cwd: loaded
@@ -644,7 +818,7 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf(),
-    })
+    }))
 }
 
 /// `1 thing` / `2 things`.
@@ -973,6 +1147,39 @@ pub fn component_path(project_dir: &Path, name: &str) -> PathBuf {
         .join(format!("{name}.{COMPONENT_EXTENSION}"))
 }
 
+/// Run a plan's steps in order, stopping at the first failure.
+///
+/// # Returns
+///
+/// `Ok(None)` if every step succeeded; `Ok(Some((index, status)))` if step `index` failed. **The index is the
+/// point**: a four-step C build that reports only *"the build failed"* leaves the reader to guess which of
+/// `wit-bindgen`, `clang`, `wasm-ld` or `wasm-tools` broke.
+///
+/// # Errors
+///
+/// `QQQ-1003` when a step's program cannot be spawned at all -- **which is a different failure from a step
+/// that ran and returned non-zero**, and the caller reports the two with different remediations.
+fn run_steps(plan: &BuildPlan) -> Result<Option<(usize, std::process::ExitStatus)>> {
+    for (index, step) in plan.steps.iter().enumerate() {
+        let status = Command::new(&step.program)
+            .args(&step.args)
+            .current_dir(&step.cwd)
+            .status()
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::MissingTarget,
+                    format!("could not run `{}`", step.program),
+                )
+                .with_cause(e.to_string())
+                .with_remediation("confirm the toolchain is on PATH")
+            })?;
+        if !status.success() {
+            return Ok(Some((index, status)));
+        }
+    }
+    Ok(None)
+}
+
 /// Run a build and return the report.
 ///
 /// # Errors
@@ -1013,32 +1220,33 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     // is the one command where the underlying tool's own output is better than
     // anything we could synthesise: colours, progress, warnings with source
     // spans. Capturing it to reprint it would lose all of that for no gain.
-    let status = Command::new(&plan.program)
-        .args(&plan.args)
-        .current_dir(&plan.cwd)
-        .status()
-        .map_err(|e| {
-            Error::new(
-                ErrorCode::MissingTarget,
-                format!("could not run `{}`", plan.program),
-            )
-            .with_cause(e.to_string())
-            .with_remediation("confirm the toolchain is on PATH")
-        })?;
+    let failure = run_steps(&plan)?;
 
-    if !status.success() {
-        return Err(Error::new(
-            ErrorCode::CompilationFailed,
+    if let Some((index, status)) = failure {
+        // **A one-step plan keeps its exact previous message**, because that spelling is what the tests
+        // assert and what a user of the only working language sees. **A multi-step plan says which step**,
+        // because a plan of four commands that reports only "the build failed" leaves the reader to guess.
+        let detail = if plan.steps.len() > 1 {
+            format!(
+                "step {} of {} failed with {}: `{}`",
+                index + 1,
+                plan.steps.len(),
+                describe_exit(status.code()),
+                plan.render()
+            )
+        } else {
             format!(
                 "`{}` failed with {}",
                 plan.render(),
                 describe_exit(status.code())
-            ),
-        )
-        .with_remediation(
-            "the compiler's own output is above; `qqqai doctor` diagnoses an \
+            )
+        };
+        return Err(
+            Error::new(ErrorCode::CompilationFailed, detail).with_remediation(
+                "the compiler's own output is above; `qqqai doctor` diagnoses an \
              incomplete toolchain",
-        ));
+            ),
+        );
     }
 
     // The compiler succeeded; now find what it produced.
@@ -1056,9 +1264,9 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     // succeeded but `<name>.wasm` was not produced". The fix is to look at what
     // is actually there, and to name every candidate in the error when nothing
     // is.
-    let produced = find_artifact(&plan.cwd, profile, target, loaded.name());
+    let produced = find_artifact(plan.cwd(), profile, target, loaded.name());
     let Some(produced) = produced else {
-        let dir = artifact_dir(&plan.cwd, profile, target);
+        let dir = artifact_dir(plan.cwd(), profile, target);
         let seen = list_wasm_files(&dir);
         return Err(Error::new(
             ErrorCode::CompilationFailed,
@@ -1082,7 +1290,7 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     // Classify before staging: an artifact that is not a component must never
     // reach `qqqai run`, because the failure there is far from its cause.
     let kind = verify_artifact(&produced)?;
-    let (dest, bytes) = stage(&produced, &plan.cwd, loaded.name())?;
+    let (dest, bytes) = stage(&produced, plan.cwd(), loaded.name())?;
 
     // `--reproducible`: the digest is what a deployment pins, so an unstable
     // digest is a supply-chain problem rather than a cosmetic one. Comparing
@@ -1090,19 +1298,19 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     // artifact twice" is caught, rather than discovered at deploy time.
     let digest = qqq_host::digest_of(&bytes);
     if opts.reproducible() {
-        check_reproducible(&plan.cwd, loaded.name(), &digest)?;
+        check_reproducible(plan.cwd(), loaded.name(), &digest)?;
     }
 
     if opts.aot() {
         crate::aot::emit(
             &bytes,
-            &plan.cwd.join("target/qqq/aot"),
+            &plan.cwd().join("target/qqq/aot"),
             opts.aot_cache.as_deref(),
         )?;
     }
     Ok(BuildOutput {
         aot_performed: opts.aot(),
-        artifact: Some(relative_display(&dest, &plan.cwd)),
+        artifact: Some(relative_display(&dest, plan.cwd())),
         digest: Some(digest),
         size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
         kind: Some(kind.as_str().to_owned()),
@@ -1308,7 +1516,7 @@ mod tests {
     /// a shell.
     #[test]
     fn shell_metacharacters_stay_inside_one_argument() {
-        let plan = BuildPlan {
+        let plan = BuildPlan::one(BuildStep {
             program: "cargo".to_owned(),
             args: vec![
                 "build".to_owned(),
@@ -1316,11 +1524,11 @@ mod tests {
                 "wasm32-wasip2".to_owned(),
             ],
             cwd: PathBuf::from("app; rm -rf ~"),
-        };
+        });
         // The cwd is not part of the argument vector at all: `Command::current_dir`
         // takes it as a path, so it cannot be interpreted as a command.
-        assert_eq!(plan.args.len(), 3);
-        assert!(!plan.args.iter().any(|a| a.contains(';')));
+        assert_eq!(plan.only_step().args.len(), 3);
+        assert!(!plan.only_step().args.iter().any(|a| a.contains(';')));
     }
 
     #[test]
@@ -1347,8 +1555,8 @@ mod tests {
     #[test]
     fn a_rust_project_plans_a_cargo_build() {
         let plan = plan_pure(&loaded(RUST), &BuildOptions::default()).expect("must plan");
-        assert_eq!(plan.program, "cargo");
-        assert!(plan.args.contains(&"build".to_owned()));
+        assert_eq!(plan.only_step().program, "cargo");
+        assert!(plan.only_step().args.contains(&"build".to_owned()));
         assert!(plan.render().contains("wasm32-wasip2"));
     }
 
@@ -1385,14 +1593,14 @@ mod tests {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nprofile = \"debug\"\n";
         let opts = BuildOptions::from_flags(BuildOptions::RELEASE, None);
         let plan = plan_pure(&loaded(src), &opts).expect("must plan");
-        assert!(plan.args.contains(&"--release".to_owned()));
+        assert!(plan.only_step().args.contains(&"--release".to_owned()));
     }
 
     #[test]
     fn the_manifest_profile_is_used_when_no_flag_is_given() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nprofile = \"debug\"\n";
         let plan = plan_pure(&loaded(src), &BuildOptions::default()).expect("must plan");
-        assert!(!plan.args.contains(&"--release".to_owned()));
+        assert!(!plan.only_step().args.contains(&"--release".to_owned()));
     }
 
     /// The environment-aware entry point must agree with the pure one about the
@@ -1406,7 +1614,8 @@ mod tests {
         let pure = plan_pure(&loaded(RUST), &opts).expect("pure planning must succeed");
         match plan(&loaded(RUST), &opts) {
             Ok(probed) => assert_eq!(
-                probed.args, pure.args,
+                probed.only_step().args,
+                pure.only_step().args,
                 "the toolchain probe must not change the command"
             ),
             Err(e) => {
@@ -1453,8 +1662,8 @@ mod tests {
     fn planning_never_panics_whatever_is_installed() {
         match plan(&loaded(RUST), &BuildOptions::default()) {
             Ok(p) => {
-                assert!(!p.args.is_empty());
-                assert_eq!(p.program, "cargo");
+                assert!(!p.only_step().args.is_empty());
+                assert_eq!(p.only_step().program, "cargo");
             }
             Err(e) => {
                 assert_eq!(e.code, ErrorCode::MissingTarget);

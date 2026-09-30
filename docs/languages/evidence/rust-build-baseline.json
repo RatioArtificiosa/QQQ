@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "commit": "1dffb35d7990b15b59d2eb06bf36fd0ad27cd1c6",
+  "command": "qqqai build --release",
+  "cwd": "examples/orders-api",
+  "target": "wasm32-wasip2",
+  "jobs": 8,
+  "budget_seconds": 20,
+  "budget_workload_loc": 10000,
+  "source_lines": 2726,
+  "source_sha256": {
+    "src/compute.rs": "3f412d4280312dd8a20dc56a4b7bf196cfe1594cf8e59efbf694c122c37e1ca7",
+    "src/hash.rs": "8f2ad2d03e2665df7014de67b010c4914f2efe47c1685cb07e5f21f9165e6726",
+    "src/json.rs": "34ffe81cb4f5d8f5f1f524d359136e717c4c69a0cc4d0b67b7bcf21803f56aa5",
+    "src/lib.rs": "b439c3e561533ed9cc56a7a86f8d9d3421ef87bbd47c8d9264229c1cb16511d6",
+    "src/orders.rs": "c6afa9e79b9b6e88d56fe22e6be7f59ba82d0fbe7ef53315af7bc3cc978f78ea",
+    "src/router.rs": "fef319ab1ab2279c824c1932e87ca88df5ab628505c7c817f06ae49cf6023f88"
+  },
+  "kernel": "Linux-6.18.49-x86_64-with-glibc2.34",
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.90GHz",
+  "available_cpus": 4,
+  "cpu_quota": "max 100000",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "warmup": "none; each target directory empty, dependency download cache retained",
+  "runs": [
+    {
+      "seconds": 15.679031623999435,
+      "exit_code": 0,
+      "artifact_bytes": 167388
+    },
+    {
+      "seconds": 15.019132977000481,
+      "exit_code": 0,
+      "artifact_bytes": 167388
+    },
+    {
+      "seconds": 15.009310170999925,
+      "exit_code": 0,
+      "artifact_bytes": 167388
+    }
+  ],
+  "limitations": [
+    "Reference guest has fewer than 10000 LOC. This is a baseline, not proof of the LANG-007 workload.",
+    "8 build jobs do not imply 8 dedicated physical cores.",
+    "Guest artifact bytes are not installed host footprint."
+  ],
+  "median_seconds": 15.019132977000481,
+  "status": "unmet-or-not-demonstrated"
+}

@@ -898,6 +898,9 @@ cmd_checks() {
     # **All three forms, because `check_gate_parity.py` compares INVOCATIONS, not scripts.** The
     # first version ran `--matrix` here and the bare form in ci.yml, and parity failed on both
     # directions at once -- the two gates ran the same file and different commands.
+    python3 tools/check_language_parity.py
+    python3 tools/check_language_parity.py --self-test
+    python3 tools/run_language_probes.py --self-test
     python3 tools/check_conformance.py
     python3 tools/check_conformance.py --matrix
     python3 tools/check_conformance.py --self-test
@@ -1181,6 +1184,10 @@ cmd_checks() {
 #   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
 #                                          of a working tree that is usually dirty
 #   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
+#   tools/run_language_probes.py --language  foreign compilers installed only by language-probes CI;
+#                                          fixture-only self-test runs in both gates.
+#   tools/check_language_parity.py --results  requires fresh execution reports from those compilers;
+#                                          static policy and negative controls run in both gates.
 #   tools/check_live_dev.py              builds an isolated Rust/WASI guest and needs the
 #                                       guest target plus wasm-tools, provided by the Rust CI job.
 #   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public

@@ -1,0 +1,345 @@
+{
+  "schema": 1,
+  "assemblyscript_http_wit_sha256": "da34eb49b49c5ac7b13c50582e956a87fd91a88ee82ae93325d79f757e02d038",
+  "languages": {
+    "assemblyscript": {
+      "expected_probe": "passed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "HTTP probe only; qqqai build driver, all-interface bindings and ten-workload reference app remain open."
+    },
+    "go": {
+      "expected_probe": "failed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "TinyGo precise-GC probe corrupts request URL at 64 KiB body; four simpler vectors pass. Root cause needs upstream/toolchain investigation; M5 not met.",
+      "failure_contains": "/echo expected 65536 bytes"
+    },
+    "python": {
+      "expected_probe": "failed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "componentize-py imports unused qqq:http/http.send; least-privilege linking fails. Experimental; no pooling until linking and reset semantics are proven.",
+      "failure_contains": "function implementation is missing"
+    },
+    "c": {
+      "expected_probe": "passed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "HTTP probe only; qqqai build driver, all-interface bindings and ten-workload reference app remain open."
+    },
+    "cpp": {
+      "expected_probe": "passed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "HTTP probe only; qqqai build driver, all-interface bindings and ten-workload reference app remain open."
+    },
+    "typescript": {
+      "expected_probe": "failed",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "cli_driver": "gap",
+      "capability_parity": "gap",
+      "reference_application": "gap",
+      "reason": "TypeScript erased to JS and embedded with SpiderMonkey imports unused outbound HTTP send; least-privilege linking fails.",
+      "failure_contains": "function implementation is missing"
+    }
+  },
+  "obligations": {
+    "LANG-001": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust toolchain integration: `wasm32-wasip2` build path, verified end to end.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-002": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust bindings generated from `wit/` via `wit-bindgen`.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-003": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust project template with tests and CI.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-004": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust conformance-suite pass.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-005": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust reference application implementation.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-006": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust documentation, recipes and examples.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-007": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust build-time and binary-size budget met.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-008": {
+      "status": "existing",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Rust language-guide page published with honest limitations (there are few).",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-009": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "AssemblyScript toolchain integration and build path.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-010": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "AssemblyScript bindings generated from `wit/`.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-011": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "TypeScript-shaped project template using AssemblyScript.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-012": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "AssemblyScript conformance-suite pass.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-013": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "AssemblyScript reference application implementation.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-014": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Documentation that states clearly what AssemblyScript is not (full TypeScript).",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-015": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Evaluate and document the full-TypeScript-via-engine-in-Wasm path, with measurements.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-016": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Resolve open question `OQ-002`: how we name and market this path.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-017": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "TinyGo toolchain integration and build path.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-018": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Go bindings generated from `wit/`.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-019": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Go project template.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-020": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Go conformance-suite pass.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-021": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Go reference application implementation.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-022": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Document TinyGo's runtime differences, reduced stdlib, and in-guest GC.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-023": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Contribute upstream fixes to TinyGo where the component path is weak.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-024": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-12-30",
+      "reason": "Track standard-Go component support and re-evaluate quarterly.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-025": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Spike: CPython compiled to WASI, measured for size, cold start and correctness.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-026": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Python bindings generated from `wit/` via `componentize-py` or equivalent.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-027": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Python project template.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-028": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Python conformance-suite pass.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-029": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Python reference application implementation.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-030": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-031": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-032": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Document Python's honest limits (component size, startup, stdlib coverage).",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-033": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Clang `--target=wasm32-wasip2` integration and build path.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-034": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "C and C++ bindings generated from `wit/`.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-035": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "C and C++ project templates.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-036": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "C and C++ conformance-suite pass.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-037": {
+      "status": "open",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "C and C++ reference application implementation.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-038": {
+      "status": "done",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Document the C/C++ path and the `wasm-ld`/`wit-bindgen` toolchain requirements.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-039": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Publish the language parity matrix, generated from CI, with every gap owned and dated.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-040": {
+      "status": "partial",
+      "owner": "QQQ language maintainer",
+      "review_by": "2026-10-30",
+      "reason": "Implement the CI job that fails when the parity matrix gains an unexplained gap.",
+      "evidence": "docs/languages/phase3.md"
+    }
+  }
+}

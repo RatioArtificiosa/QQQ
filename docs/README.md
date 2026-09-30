@@ -150,3 +150,5 @@ hand-edit fails CI instead of disappearing.
 * **Understanding a decision** → search the Observations for the identifier. Every
   decision is `§D-NNN`, every observation `§O-NNN`, every mistake `§M-NNN`, every
   correction `§C-NNN`.
+
+- [Phase 3 language scaffolding and measured gaps](languages/phase3.md)

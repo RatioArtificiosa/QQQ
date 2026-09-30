@@ -721,6 +721,12 @@ jobs:
       # `TEST-010`: the cross-language conformance fixture, its parity matrix, and the rule that
       # every gap carries an owner and a date (Proposal §6.10). It also requires each obligation's
       # checker to be invoked in BOTH gates, so it is a check on the gates as well as the fixture.
+      - name: Check all LANG obligations and dated gaps
+        run: python tools/check_language_parity.py
+      - name: Prove language evidence cannot pass vacuously
+        run: python tools/check_language_parity.py --self-test
+      - name: Prove language compiler/result failures are detected
+        run: python tools/run_language_probes.py --self-test
       - name: Check the conformance fixture
         run: python tools/check_conformance.py
       - name: Print the language parity matrix
@@ -1995,3 +2001,50 @@ jobs:
           set -euo pipefail
           cargo test -p qqq-cap --test fuzz_corpus
           cargo test -p qqq-host --test fuzz_corpus
+
+  language-probes:
+    name: Measured language probes (known failures remain gaps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98'
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: examples/language-probes/go/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned compiler archives and bindings
+        run: |
+          python conformance/languages/install_toolchains.py "$RUNNER_TEMP/language-tools"
+          echo "$RUNNER_TEMP/language-tools/tinygo/tinygo/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/language-tools/wasi-sdk/wasi-sdk-34.0-x86_64-linux/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/language-tools/wit-bindgen/wit-bindgen-0.62.0-x86_64-linux" >> "$GITHUB_PATH"
+          go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0
+          pip install componentize-py==0.25.1
+          cargo install wasm-tools --version 1.259.0 --locked
+          npm ci --ignore-scripts --prefix examples/language-probes
+          npm audit --prefix examples/language-probes --audit-level=moderate
+      - name: Execute every probe, retaining actual failures
+        run: |
+          for language in assemblyscript go python c cpp typescript; do
+            status=0
+            python tools/run_language_probes.py --language "$language" || status=$?
+            echo "$language execution exit: $status"
+          done
+      - name: Reject unexplained failures and publish the measured matrix
+        run: python tools/check_language_parity.py --results target/language-probes --matrix target/language-probes/matrix.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: measured-language-probes
+          path: target/language-probes/
+          if-no-files-found: error

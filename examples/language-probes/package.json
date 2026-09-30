@@ -1,0 +1,15 @@
+{
+  "name": "qqq-language-probes",
+  "private": true,
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/preview2-shim": "0.17.4",
+    "assemblyscript": "0.28.20",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@bytecodealliance/weval": "0.5.0"
+  }
+}

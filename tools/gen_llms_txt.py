@@ -221,6 +221,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/languages/phase3.md",
+        "Measured language probes, decisions, owned gaps and the path to production drivers.",
+        "both",
+        "use",
+    ),
+    (
         "docs/languages/rust.md",
         "The Rust toolchain's state, and its limitations — each measured rather "
         "than recalled. Read this before believing a Rust build is servable.",

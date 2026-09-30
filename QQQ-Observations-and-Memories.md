@@ -34354,6 +34354,51 @@ wrong and no mechanism to notice. Deriving it where derivation is possible, and 
 not, reduces N to one -- and the pointer is the part a reader is most likely to skip, which is why it is
 phrased as an authority rather than a summary.**
 
+## §O-467 — The API counter is a subtraction, so a broken example costs more than a missing one
+
+`tools/check_api_examples.py` reports two numbers and one of them is not what it looks like:
+
+```python
+outstanding = max(total_items - ran, 0)
+```
+
+**`total_items` counts public declarations -- and `mask_source` removes comments first**, so a doc example
+contributes **zero** items. **`ran` is `cargo test --doc --workspace`, summing every `running N tests` line**
+-- **the number cargo actually executed, not the number of fences written.**
+
+**Measured per crate:**
+
+```
+qqq_abi 0 · qqq_bench 1 · qqq_cap 1 · qqq_core 5 · qqq_debug 0 · qqq_host 78
+qqq_io 0 · qqq_pkg 0 · qqq_run 55 · qqq_serve 28 · qqq_sys 0
+                                                       total 168
+2273 - 168 = 2105                                      the allowance, exactly
+```
+
+### The consequence, which cost a round
+
+**A doc example that does not compile is worse than no doc example at all.** It adds nothing to `ran`, and it
+takes the doctests around it out of the run with it -- so `outstanding` **rises by more than the declaration
+it was meant to cover.**
+
+That is what happened to a complete, compiling refactor: **six new public declarations and two dozen doc
+examples moved the count from 2105 to 2133**, and the arithmetic was `+5 items` and `-23 doctests that stopped
+running`. **The work was reverted rather than committed red, and the next attempt knows to run
+`cargo test --doc -p qqq-run` before the gate rather than after it.**
+
+### And the generalisation, which is the part worth keeping
+
+**A ratio whose denominator moves is a number with no owner (`§O-277`).** `outstanding` reads like a count of
+uncovered declarations. It is a count of declarations **minus doctests that ran**, so **an edit that breaks a
+doctest and an edit that adds a declaration look identical from outside** -- both raise it, and for different
+reasons. **The tool prints `of N public declarations` next to it, which is the numerator's total and not the
+denominator's, and that is the wording that made three rounds of this look like a mystery about
+declarations.**
+
+**Two fixes are worth making and neither is this observation's to make:**
+`--list` should name the items it counts as uncovered, and the report should print `ran` beside `outstanding`
+**so that a falling denominator is visible the moment it falls.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

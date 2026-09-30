@@ -95,24 +95,157 @@ pub fn toolchain_for(language: &str, target: &str) -> Option<Vec<ToolRequirement
     // need a different `wasm-tools` path.
     let _ = target;
 
-    if language != "rust" {
+    // **This is the driver gate, and it has to come first.** It was previously spelled
+    // `if language != "rust"` right here, and a reader could be forgiven for thinking
+    // `BuildSpec::supports_language` did the refusing -- it does not: its test
+    // `an_unimplemented_language_is_declared_not_faked` passes for `"ts"`, which means this function was the
+    // only thing saying no. **A one-word misreading with a real consequence: replacing this guard with the
+    // table below let TypeScript past every gate and `plan_pure` begin returning a plan for a language with
+    // no driver.** `cargo test` said so in one line.
+    if !DRIVEN.contains(&language) {
         return None;
     }
-    Some(vec![
-        ToolRequirement {
-            program: "cargo",
-            version_args: &["--version"],
-            install: "https://rustup.rs",
-            why: "compiles Rust to the component model",
-        },
-        ToolRequirement {
-            program: "wasm-tools",
-            version_args: &["--version"],
-            install: "cargo install wasm-tools",
-            why: "validates that the output is a component, not a core module",
-        },
-    ])
+
+    TOOLCHAINS
+        .iter()
+        .find(|(id, _)| *id == language)
+        .map(|(_, reqs)| reqs.to_vec())
 }
+
+/// The languages `qqqai build` can **drive** today.
+///
+/// # Why this is separate from [`TOOLCHAINS`]
+///
+/// Because they answer different questions. [`TOOLCHAINS`] answers *"what does this language need?"* -- and
+/// the delivery measured that for all five. This answers *"can we build it?"* -- and the answer is Rust,
+/// because the other four have no driver: their probes compiled, and Go's fails the 65,536-byte echo while
+/// Python's and TypeScript's fail least-privilege linking. **A stated toolchain is not a working driver, and
+/// conflating them is how an unexecuted language comes to be marked supported.**
+///
+/// # Why a list rather than a `match`
+///
+/// Because `tools/check_conformance.py` reads this to decide which languages are supported **and fails
+/// loudly if it cannot find exactly one definition** -- *"passing here would mean reading nothing and
+/// reporting agreement."* A named constant is a stable thing to read across a refactor; a string comparison
+/// inside a branch is not, which is exactly how this was missed the first time.
+pub const DRIVEN: &[&str] = &["rust"];
+
+/// Every language's toolchain, measured rather than assumed.
+///
+/// # What this is, and what it is NOT
+///
+/// **This is what a language NEEDS, not what `qqqai build` can DO.** The driver gate is
+/// [`BuildSpec::supports_language`], it is still Rust-only, and **this table does not touch it.** A language
+/// with a stated toolchain and no driver is **declared, not implemented** -- exactly the state
+/// [`toolchain_for`] returns `None` to describe, one level up.
+///
+/// # Why the versions are written down here
+///
+/// Because `docs/languages/phase3.md` **compiled and ran** each one, and a list assembled from documentation
+/// instead would be **a claim about a toolchain nobody executed** -- the defect `O-439` records, one document
+/// over. Measured there: `AssemblyScript` `0.28.20`; `TinyGo` `0.42.0` with Go `1.27.1` and
+/// `wit-bindgen-go` `0.7.0`; `componentize-py` `0.25.1`; WASI SDK 34 Clang `23.1.0-wasi-sdk` with `wasm-ld`;
+/// `wit-bindgen` `0.62.0`; `tsc` `5.9.3` with `ComponentizeJS` `0.23.0`.
+///
+/// # Why Go and Python are here despite their probes FAILING
+///
+/// Because **their toolchains exist and their failures are elsewhere.** The `TinyGo` probe fails the
+/// 65,536-byte echo and `componentize-py`'s fails least-privilege linking -- **neither is a missing
+/// compiler**, and omitting them would say the tools are unknown when they are merely insufficient. **A
+/// requirement list is about what must be installed, not about whether the result links.**
+const TOOLCHAINS: &[(&str, &[ToolRequirement])] = &[
+    (
+        "rust",
+        &[
+            ToolRequirement {
+                program: "cargo",
+                version_args: &["--version"],
+                install: "https://rustup.rs",
+                why: "compiles Rust to the component model",
+            },
+            ToolRequirement {
+                program: "wasm-tools",
+                version_args: &["--version"],
+                install: "cargo install wasm-tools",
+                why: "validates that the output is a component, not a core module",
+            },
+        ],
+    ),
+    (
+        "ts",
+        &[
+            ToolRequirement {
+                program: "npm",
+                version_args: &["--version"],
+                install: "https://nodejs.org",
+                why: "installs the pinned AssemblyScript and ComponentizeJS toolchains",
+            },
+            ToolRequirement {
+                program: "wasm-tools",
+                version_args: &["--version"],
+                install: "cargo install wasm-tools",
+                why: "validates the componentised output",
+            },
+        ],
+    ),
+    (
+        "go",
+        &[
+            ToolRequirement {
+                program: "tinygo",
+                version_args: &["version"],
+                install: "https://tinygo.org/getting-started/install/",
+                why: "compiles Go to wasm32-wasip2; the standard toolchain cannot emit components yet",
+            },
+            ToolRequirement {
+                program: "wit-bindgen-go",
+                version_args: &["--version"],
+                install: "go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0",
+                why: "generates the bindings from the canonical WIT",
+            },
+        ],
+    ),
+    (
+        "python",
+        &[
+            ToolRequirement {
+                program: "python3",
+                version_args: &["--version"],
+                install: "https://www.python.org/downloads/",
+                why: "runs componentize-py, which packages the interpreter with the guest",
+            },
+            ToolRequirement {
+                program: "componentize-py",
+                version_args: &["--version"],
+                install: "pip install componentize-py==0.25.1",
+                why: "builds the component from the generated bindings",
+            },
+        ],
+    ),
+    (
+        "cpp",
+        &[
+            ToolRequirement {
+                program: "clang",
+                version_args: &["--version"],
+                install: "https://github.com/WebAssembly/wasi-sdk/releases (WASI SDK 34)",
+                why: "compiles C and C++ to wasm32-wasip2; the system clang alone is not enough",
+            },
+            ToolRequirement {
+                program: "wasm-ld",
+                version_args: &["--version"],
+                install: "ships with WASI SDK 34",
+                why: "links the reactor module",
+            },
+            ToolRequirement {
+                program: "wit-bindgen",
+                version_args: &["--version"],
+                install: "cargo install wit-bindgen-cli --version 0.62.0",
+                why: "generates the C headers, glue and component-type object from the canonical WIT",
+            },
+        ],
+    ),
+];
 
 /// Whether a program can be executed, and its reported version.
 ///
@@ -366,8 +499,23 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
             format!("`{}` is not a language this build can drive", spec.language),
         )
         .with_remediation(format!(
-            "supported languages: {}",
-            BuildSpec::LANGUAGES.join(", ")
+            "supported languages today: {}. {}",
+            BuildSpec::LANGUAGES.join(", "),
+            // **The requirements travel in the refusal**, because this is the only place a caller reaches
+            // them: the driver gate fires before the toolchain is consulted, so a `--dry-run` for a Go
+            // manifest never asks about tools. **Naming them turns "not supported" into "not supported, and
+            // here is what it would take" -- and it does not make the language drivable.**
+            match toolchain_for(&spec.language, spec.target.as_str()) {
+                Some(reqs) => format!(
+                    "`{}` would need: {}",
+                    spec.language,
+                    reqs.iter()
+                        .map(|r| r.program)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => format!("`{}` has no stated toolchain", spec.language),
+            }
         )));
     }
 

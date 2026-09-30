@@ -79,7 +79,8 @@ LANGUAGES_RE = re.compile(r"LANGUAGES:\s*\[&'static str;\s*\d+\]\s*=\s*\[([^\]]*
 #     if language != "rust" {
 #         return None;
 #     }
-LANGUAGE_GUARD_RE = re.compile(r'if\s+language\s*!=\s*"([a-z]+)"\s*\{')
+# The driver decision is a named constant, not a guard buried in `toolchain_for`.
+DRIVEN_RE = re.compile(r"pub const DRIVEN: &\[&str\] = &\[([^\]]*)\]")
 
 # `package qqq:fs@1.0.0;` -> `qqq:fs`
 PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z0-9_:\-]+)\s*@", re.MULTILINE)
@@ -99,18 +100,36 @@ def read_languages() -> list[str]:
 
 
 def read_supported() -> str:
-    """The one language `build::toolchain_for` gives a driver to, parsed from its own guard."""
+    """The one language `qqqai build` can drive, parsed from `build::DRIVEN`.
+
+    # Why this reads a named constant now
+
+    It used to read `if language != "..."` -- a string comparison inside a branch of `toolchain_for`. **That
+    worked and was the wrong thing to read**: `BuildSpec::supports_language` is named as though it decides
+    which languages are supported, and it does not (`an_unimplemented_language_is_declared_not_faked` passes
+    for `"ts"`). **Reading the constant makes the dependency explicit**: a refactor that moves the decision
+    moves the constant, and the checker fails loudly if there is not exactly one.
+
+    **The failure mode this preserves is the one it was written for: passing here must never mean reading
+    nothing and reporting agreement.**
+    """
     text = BUILD_RS.read_text(encoding="utf-8")
-    found = LANGUAGE_GUARD_RE.findall(text)
+    found = DRIVEN_RE.findall(text)
     if len(found) != 1:
         raise SystemExit(
-            f"FATAL: expected exactly one `if language != \"...\"` guard in "
-            f"{BUILD_RS.relative_to(ROOT)}, found {len(found)}. Either the toolchain dispatch was "
-            "restructured or a second guard was added; this checker reads that guard to decide "
-            "which languages are supported, so it must be updated. **Passing here would mean "
-            "reading nothing and reporting agreement.**"
+            f"FATAL: expected exactly one `pub const DRIVEN: &[&str] = &[...]` in "
+            f"{BUILD_RS.relative_to(ROOT)}, found {len(found)}. The driver decision is what this checker "
+            "reads to decide which languages are supported, so it must be updated. **Passing here would "
+            "mean reading nothing and reporting agreement.**"
         )
-    return found[0]
+    ids = re.findall(r'\"([a-z]+)\"', found[0])
+    if len(ids) != 1:
+        raise SystemExit(
+            f"FATAL: `DRIVEN` names {len(ids)} language(s) ({', '.join(ids)}). This checker's whole subject "
+            "is `toolchain_for` returning `None` for a language with no driver, so a second driven language "
+            "means the claim it guards has changed and this file must be updated with it."
+        )
+    return ids[0]
 
 
 def read_wit_packages() -> set[str]:

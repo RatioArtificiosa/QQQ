@@ -34940,4 +34940,35 @@ self-test were updated with it. **Generated catalogue completeness and
 behavioral reachability are separate contracts; adding a code requires updating
 both.**
 
+## §O-489 — The live-component delivery's controls were rerun, not inherited
+
+At commit `8791a7f`, with the repository's pinned Rust/MSVC environment, the
+delivery controls were rerun after the later runtime and error-surface changes.
+The three non-mutating controls passed: `fault_inject_live_components.py
+--self-test`, `check_live_dev.py --self-test`, and
+`check_language_parity.py --self-test`. The real
+`python tools/fault_inject_live_components.py` run then detected all **4/4**
+executed mutations by failing assertions — stale update, publication,
+aggregate capacity, and native-cache wiring — and restored each source file's
+bytes exactly. A compiler failure would not have counted.
+
+The end-to-end development check measured the same PID/listener serving the
+reloaded guest, failed-build retention, the manifest restart barrier, and CLI
+AOT output. `python tools/check_language_parity.py` reported **40** obligations
+and **six** probe paths accounted for; the known language failures remain gaps,
+not conformance passes. This is evidence for the delivery's existing review
+claims, not a reason to tick the still-open hot-reload or language items.
+
+## §O-490 — PLAN-016 closes the loop only when both gates invoke its read-only half
+
+`tools/sync_docs.py` already defined the three-document ritual, but neither
+`.github/workflows/ci.yml` nor `docker/entrypoint.sh` invoked its read-only
+`--check` mode. The writer mode remains deliberately developer-only: CI must
+reject stale derived files, not rewrite them. Adding the check to both gate
+surfaces measured **134** CI invocations and **116** bridge invocations, with
+`check_gate_parity.py` still reporting `GATE PARITY OK`. The ritual itself
+reported **9/9** checker verdicts agreeing after regeneration. This is the
+missing enforcement half of PLAN-016; it does not change the meaning of
+`--record` or turn a clean sync into a release claim.
+
 *End of `QQQ-Observations-and-Memories.md`.*

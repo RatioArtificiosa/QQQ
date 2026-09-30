@@ -605,6 +605,12 @@ jobs:
         run: |
           python tools/check_corpus_at_rest.py
 
+      # PLAN-016: the read-only half of the three-document sync ritual belongs
+      # in both gates. `--record` remains a developer-only writer; this check
+      # proves CI sees the same derived-file drift before it can be merged.
+      - name: Verify the three-document sync ritual
+        run: python tools/sync_docs.py --check
+
       # `HOST-011` requires every host function to be panic-guarded, and the
       # guard is a *wrapper*: a host function added without it compiles, passes
       # every test that does not panic, and kills the process (the release

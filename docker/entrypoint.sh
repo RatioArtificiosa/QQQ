@@ -1149,6 +1149,9 @@ cmd_checks() {
     # this a strictly weaker gate than the one it protected.
     python3 tools/self_test_xrefs.py --check-clean
     python3 tools/check_corpus_at_rest.py
+    # PLAN-016: the bridge runs the read-only ritual too. `--record` is a
+    # developer-only writer; both gates must reject stale derived documents.
+    python3 tools/sync_docs.py --check
     python3 tools/normalize_eol.py --check
 }
 

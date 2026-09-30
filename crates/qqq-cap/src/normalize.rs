@@ -749,6 +749,7 @@ fn is_absolute_host_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.starts_with('/')
         || (normalized.len() >= 3
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
             && normalized.as_bytes()[1] == b':'
             && normalized.as_bytes()[2] == b'/')
 }
@@ -1205,6 +1206,14 @@ mod tests {
         assert!(path_is_within("/etc/qqq/config", "/"));
         assert!(path_is_within("/", "/"));
         assert!(!path_is_within("relative/file", "/"));
+    }
+
+    #[test]
+    fn absolute_host_path_validation_requires_a_real_drive_letter() {
+        assert!(is_absolute_host_path("/var/lib/qqq"));
+        assert!(is_absolute_host_path("C:\\var\\lib\\qqq"));
+        assert!(!is_absolute_host_path("1:/var/lib/qqq"));
+        assert!(!is_absolute_host_path("C:var/lib/qqq"));
     }
 
     // -- Normalization -----------------------------------------------------

@@ -34894,8 +34894,17 @@ reconfigures its diagnostic streams to UTF-8 with replacement for unsupported
 console sinks. The self-test measured **12 of 12 passed**, and the full
 `sync_docs.py --check` ritual measured **9 of 9 checkers agreeing**.
 
-*End of `QQQ-Observations-and-Memories.md`.*
+## §O-485 — Cross-platform absolute paths still need a valid drive grammar
 
+The first portable path predicate accepted any `X:/...`-shaped string, including
+`1:/...`, as absolute. CodeRabbit reviewed all **18 changed files** in commit
+`86bd0f1` and identified this as a valid minor boundary defect. The predicate now
+requires an ASCII alphabetic drive letter while retaining POSIX-rooted paths and
+Windows backslash normalization; a regression covers `/var`, `C:\\var`, `1:/var`,
+and drive-relative `C:var`. The focused normalizer suite is rerun before the
+follow-up commit.
+
+*End of `QQQ-Observations-and-Memories.md`.*
 
 
 

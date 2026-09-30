@@ -557,11 +557,14 @@ fn run_once(workdir: &Path, test: &DiscoveredTest) -> (bool, String) {
     // through it: measured with a two-test fixture whose first test writes a marker, the marker was still
     // found under `--isolate`, and a diagnostic showed the flag was true and the directory was created.
     //
-    // **The arguments are the test binary's own.** `cargo test` passes everything after `--` to the
-    // binary, so dropping cargo means the flags go straight in -- which they now do.
+    // **The arguments are the test binary's own, and there is no `--`.** `cargo test` separates its own
+    // flags from the binary's with `--`; **libtest does not use that convention**, so running the binary
+    // directly means the separator is a bare argument libtest has to tolerate. It was left in when this
+    // stopped going through cargo, and the comment above it said the flags "go straight in" while the code
+    // passed a separator that says otherwise -- **a comment and a code that disagree, which is the defect
+    // this file's own docstrings have already cost three rounds.** The line is gone; the comment is true.
     let output = Command::new(&test.executable)
         .arg(&test.name)
-        .arg("--")
         .arg("--exact")
         .arg("--nocapture")
         .arg("--test-threads")
@@ -887,14 +890,20 @@ fn isolation_dir(project_dir: &Path, test: &str) -> std::path::PathBuf {
     // A previous run of the same test in the same process cannot happen -- the name carries the test -- so
     // this only clears a leftover from a killed one.
     let _ = std::fs::remove_dir_all(&dir);
-    // **Not swallowed.** The first version used `let _ =` and that is exactly why the isolation failure
-    // was undiagnosable: the child ran with a working directory that did not exist, its own `fs::write`
-    // failed, and the report said only `passed 0/1`. A helper whose failure looks like success is the
-    // defect `§O-375` names, and the message here names the path so the next reader does not have to guess.
+    // **A failure here PANICS, and the second version of this is why.** The first printed a warning
+    // saying *"tests will run in the project directory instead, which is NOT isolated"* **and then
+    // returned `dir` anyway** -- so the message described a fallback the code did not perform, and the
+    // child ran in a directory that did not exist. That is the same shape as the `let _ =` before it: a
+    // failure that looks like success (`§O-375`).
+    //
+    // **`--isolate` is opt-in, so there is no sensible recovery.** The user asked for isolation; a run
+    // without it is not the run that was requested, and a `Result` would invite an `unwrap_or(project_dir)`
+    // at the call site -- which is the silent fallback itself. **The message names the path and the error**,
+    // so the next reader does not have to guess, and `cli.rs`'s `Sandbox::new` already panics this way for
+    // the same reason.
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!(
-            "qqqai test: could not create the isolation directory {} -- tests will run in the project \
-             directory instead, which is NOT isolated: {e}",
+        panic!(
+            "could not create the isolation directory {}, so `--isolate` cannot be honoured: {e}",
             dir.display()
         );
     }

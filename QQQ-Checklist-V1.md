@@ -4497,10 +4497,17 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.7 `qqqai test` — test runner
 - [x] **TEST-012** Implement test isolation guarantees: no test can observe another test's state.
   → §6.7 `qqqai test` — test runner
-  → Done: `qqqai test --isolate` runs **each test in its own empty working directory**, created by
-    `isolation_dir` under the project's `target/` and removed after the test whether it passed or failed.
-    The directory is per **test** and not per binary, because the failure this exists for is *between*
+  → Done: **the guarantee is provided, and it is OPT-IN rather than the default.** `qqqai test
+    --isolate` runs **each test in its own empty working directory**, created by `isolation_dir`
+    under the project's `target/` and removed after the test whether it passed or failed. The
+    directory is per **test** and not per binary, because the failure this exists for is *between*
     tests in one binary.
+  → **What the default is, stated plainly, because the item's own words are "no test can observe
+    another test's state":** without `--isolate`, every test still runs with the **package root** as
+    its working directory, so **a test CAN observe another's files by default** — measured, not
+    assumed, and it is the premise the hostile fixture proves. Tests are already isolated at the
+    **process** level (`--exact` and `--test-threads 1`), so no other channel is open; the
+    filesystem is the one this flag closes, and only when it is asked for.
   → **And the line that makes it real is not the flag.** `run_once` now spawns the **discovered
     executable** with the test binary's own arguments, instead of `cargo test <name> -- …`. **Cargo gives
     the test binary the package root as its CWD regardless of what the caller set**, so `.current_dir`
@@ -4563,11 +4570,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
     it corrected `§O-411`: `TestOutcome::is_nondeterministic()` answers *"did this test vary within one
     `--trials N` run"* and this answers *"has it passed on some runs and failed on others"*. Before this
     the tree held twelve mentions of flake and **every one was a comment about a past one**.
-  → **And the limit belongs here rather than in a caveat elsewhere.** A history exists only when
-    `--history` is passed, and nothing in this repository writes one yet — the detector reports against
-    whatever it is given. `--flaky` also **reports** rather than gates: a flake is information about
-    reliability, not a regression in the change under test, and failing a build on one is `TEST-013`'s
-    question.
+  → **And the limit belongs here rather than in a caveat elsewhere: nothing records a history
+    unless it is asked to.** `record_run` **does** write one — that is the code this item lands —
+    but only when `--history <path>` is given, and **no caller passes it by default**, so a project
+    that does not opt in accumulates nothing and the detector reports against whatever it is handed.
+    `--flaky` also **reports** rather than gates: a flake is information about reliability, not a
+    regression in the change under test, and failing a build on one is `TEST-013`'s question.
 - [x] **TEST-015** Implement the dead-code and unused-capability detector ("this app declares a capability it never uses").
   → Done: `qqq/unused-grant` in `crates/qqq-run/src/audit.rs` -- the sixth audit rule, and the detector the item names: **a capability is granted that the artifact does not import**. It is a **warning**, not an error, and that is a decision: granting ahead of the code is legitimate, so the rule reports only the **inert grant** -- the one nothing can ever exercise -- because the linker is built from the grant set alone and an inert grant is surface the guest should not hold. The reference application takes the stronger position for itself (`LANG-005` asserts grants and imports are **equal in both directions**), which is right for the file a reader is invited to copy; this states the weaker claim that is true for every project. **The predicate and the plumbing are separate functions**, because the predicate has to be provable without a build: `unused_grants_from(granted, required)` is pure and tested directly, and `unused_grants(loaded)` reads the staged artifact `target/qqq/<name>.component.wasm` and returns **nothing** when it is absent rather than guessing from the source -- guessing would be a second opinion about what the build produces, which is the defect `§O-361`/`§O-374` records. **PROVED TO FIRE THREE WAYS.** (1) Unit: an inert grant is reported and a used one is not, with a **silent** case for a correct project, because a rule that fired on correct code would be turned off within a day. (2) Injected: the filter made inert -> the test **FAILS** with `assertion left == right failed: one finding, naming both`, and the restore is **byte-identical** (sha256 `4b8d5058…` before and after, verified against a value recorded beforehand -- `§O-373`). (3) End to end through the rebuilt CLI: a scaffolded `http` project reports **no** `qqq/unused-grant`, and the same project with `[capabilities.clock] wall = true` added reports `[warning] qqq/unused-grant  1 capability(ies) are granted and never imported: clock.wall`. Audit lib tests **31 passed / 0 failed**.
   → §7.1 What we are defending, precisely

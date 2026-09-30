@@ -202,8 +202,26 @@ impl Flake {
 /// rather than a record that is skipped: a skipped record under-reports a failure, and the failures are
 /// the whole point of the file. A missing file is **not** an error -- see the example above.
 pub fn read_history(path: &Path) -> Result<Vec<TestRecord>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(Vec::new());
+    // **Only `NotFound` is an empty history.** The first version was `let Ok(text) = … else { return
+    // Ok(Vec::new()) }`, which **swallowed every error** -- so a permission failure, a path that is a
+    // directory, or an I/O error all read as *"this history has no records"*, and a detector reading an
+    // empty history reports that nothing is flaky. **A check that cannot tell "nothing to report" from "I
+    // could not read it" is not a check**, and this is the same class as the two `let _ =`s that hid the
+    // isolation defect for a round.
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!("cannot read the history at {}: {e}", path.display()),
+            )
+            .with_remediation(
+                "a missing history is an empty one and is not an error; anything else -- a permission \
+                 failure, a path that is a directory, a full disk -- is, because reporting no flakes is \
+                 the same answer a detector gives when it has read nothing",
+            ));
+        }
     };
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {

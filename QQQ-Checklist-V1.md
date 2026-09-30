@@ -642,7 +642,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §14.4 What we would cut first, in order
 - [ ] **PLAN-008** Establish the risk-review cadence against the register, with trigger monitoring.
   → §15 — Risk Register
-- [ ] **PLAN-009** Define the definition-of-ready for a checklist item (clear acceptance test, no unresolved dependency).
+- [~] **PLAN-009** Define the definition-of-ready for a checklist item (clear acceptance test, no unresolved dependency).
   → §16 — Definition of Done for V1
   → **Measured: neither half is written, and the second half is the same gap as `PLAN-015`'s.**
     *"A clear acceptance test"* -- nothing states what makes an item's acceptance test clear, and
@@ -667,6 +667,12 @@ Items are grouped below by **phase**, because dependency order matters more than
     it yet."* The rule is prose; `tools/check_admission.py` is named in §5 and not built. **Ticking here would
     be a status reporting more than the evidence** -- the precedent is `PLAN-010`, `[ ]` with its executable
     half already in a gate.
+  → **And it is `[~]` rather than `[x]`, measured:** the acceptance-test half is now executable --
+    `tools/check_admission.py` runs in **both** gates, `GATE PARITY OK` still reports, its `--self-test` is
+    **7 cases including two controls**, and a fault injection moves the count `556 -> 557 -> 556` with the file
+    byte-identical on restore. **The dependency half is written and not checked**: §2's fourth admissible form
+    is where a blocked item states what would unblock it, and the document's own §6 says *"This document states
+    it; no checker reads it yet."* `[x]` would report more than that evidence supports.
 - [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
   → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by
@@ -696,7 +702,13 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §9.1 The honest benchmark position
 - [ ] **PLAN-014** Establish the on-call and incident-response process for the project itself, not just for users.
   → §7.2 Adversary model
-- [ ] **PLAN-015** Create the decision log that feeds the Observations document.
+- [x] **PLAN-015** Create the decision log that feeds the Observations document.
+  → Done: the log exists as `QQQ-Observations-and-Memories.md` §2, `§D-001` .. `§D-010`, and
+    `tools/check_xrefs.py` rule [10] validates it -- measured 63 citations (45 in the observations, 6 in the
+    checklist, 12 in the proposal) with **zero** unmatched, and `check_xrefs.py` reports
+    `validation PASSED` in both gates. The admission rule for a decision is §3 of
+    [`docs/definition-of-ready.md`](definition-of-ready.md), and `tools/check_admission.py` reports
+    `ADMISSION OK -- 556 claim(s) without a falsifier, at or under the budget of 556.`
   → §0.3 Document map
   → **Measured: the register EXISTS and is cited 63 times -- and the brief that named it said it did not.**
     `QQQ-Observations-and-Memories.md` §2 is the decision log: `### §D-001` … `### §D-010`, ten entries, with

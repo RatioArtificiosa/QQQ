@@ -44,7 +44,7 @@ CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
 DONE_LINES = ROOT / "tools" / "check_done_lines.py"
 
 # **The budget, measured at landing.** It may fall and never rise; `--record` prints the value to use.
-CLAIMS_WITHOUT_FALSIFIER_BUDGET = 556
+CLAIMS_WITHOUT_FALSIFIER_BUDGET = 331
 
 # ---------------------------------------------------------------- the three admissible forms
 
@@ -125,16 +125,46 @@ def audit(text: str) -> tuple[int, list[tuple[str, str]]]:
     blocks = load_blocks()(text)
     without = 0
     for _status, _name, body in blocks:
-        for line in body:
-            stripped = line.lstrip()
-            if not stripped.startswith("\u2192"):
-                continue
-            note = stripped[1:].strip()
+        for note in notes_in(body):
             if REFERENCE_ONLY.match(note):
                 continue  # a pointer, and the document says it must pass
             if not admits(note):
                 without += 1
     return without, []
+
+
+def notes_in(body: list[str]) -> list[str]:
+    """Each `\u2192` note **joined with its continuation lines**.
+
+    # The defect this fixes
+
+    The first version read one physical line per note, so a note whose falsifier was on a later line was
+    reported as having none:
+
+        *** NO FALSIFIER ***  **And it is `[~]` rather than `[x]`, measured:** the acceptance-test half is ...
+
+    **The rule is about a NOTE and the implementation was about a LINE**, which is the shape this repository
+    records three times over: *a guard is only as wide as its pattern.*
+
+    # What counts as a continuation
+
+    A line that is **not** itself a new arrow, and whose text is deeper-indented than the arrow's own column, or
+    blank-but-followed-by-more. **Quoted evidence lines inside a note are part of the note**, which is why the
+    join is unconditional rather than stopping at the first blank.
+    """
+    notes: list[str] = []
+    current: list[str] | None = None
+    for line in body:
+        stripped = line.lstrip()
+        if stripped.startswith("\u2192"):
+            if current is not None:
+                notes.append(" ".join(current))
+            current = [stripped[1:].strip()]
+        elif current is not None and stripped:
+            current.append(stripped)
+    if current is not None:
+        notes.append(" ".join(current))
+    return notes
 
 
 def main(argv: list[str]) -> int:
@@ -200,6 +230,20 @@ def self_test() -> int:
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [ ] **TEST-006** does a thing.\n"
             "  \u2192 \u00a74.3 Crate topology\n",
             True,
+        ),
+        (
+            "a WRAPPED claim whose falsifier is on its continuation line passes",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-008** does a thing.\n"
+            "  \u2192 Done: the acceptance-test half is executable --\n"
+            "    `tools/check_admission.py` runs in **both** gates and reports `556` at or under `556`.\n",
+            True,
+        ),
+        (
+            "a WRAPPED claim with a falsifier on NEITHER line fails",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-009** does a thing.\n"
+            "  \u2192 Done: the acceptance-test half is executable --\n"
+            "    and it is implemented.\n",
+            False,
         ),
         (
             "a claim naming NOTHING fails",

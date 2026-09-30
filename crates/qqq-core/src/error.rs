@@ -24,6 +24,12 @@
 //!   meaning is a **breaking** change and requires an RFC (Proposal §0.5).
 //!
 //! See Proposal §8.3 and Checklist `AGENT-021`, `AGENT-022`, `CON-009`.
+//!
+//! ```
+//! use qqq_core::ErrorCode;
+//!
+//! assert_eq!(ErrorCode::DeterminismUnsupported as u16, 6008);
+//! ```
 
 use std::fmt;
 

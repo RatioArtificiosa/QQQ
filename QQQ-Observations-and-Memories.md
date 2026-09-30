@@ -34917,6 +34917,16 @@ the checker now reports all 44 codes and its 8/8 self-test passes. **When an
 `ErrorCode` doc comment changes, generation and the catalogue checker are part of
 the final gate, not optional documentation cleanup.**
 
-*End of `QQQ-Observations-and-Memories.md`.*
+## §O-487 — A new public error code must carry a compiling API example
 
+The first post-fix GitHub matrix exposed a one-item drift in the DX-015 API
+example ratchet: all three Rust platforms measured **2,106** uncovered public
+declarations while `.github/workflows/ci.yml` correctly retained its **2,105**
+allowance. The added `DeterminismUnsupported` error-code variant was the new
+declaration. A module-level compiling example now exercises that code, so the
+workspace doctest count accounts for it and the allowance remains unchanged.
+**A new public enum variant is an API-surface change: document it with a
+compiling example before treating the coverage ratchet as stable.**
+
+*End of `QQQ-Observations-and-Memories.md`.*
 

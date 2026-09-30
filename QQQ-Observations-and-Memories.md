@@ -33993,6 +33993,48 @@ are not a contradiction: they are snapshots at different points -- *"final-gate 
 *"delivered revision"* at the end, and the manifest's own. **A fingerprint whose stamp is a revision and a
 tree is comparable; a fingerprint alone is not.**
 
+## §O-457 — A rule this repository wrote corrected a contributor it had never seen
+
+`VALIDATION.md:144` records a failure **this repository's own checker caused**, and it is the strongest
+argument for the checker set that has appeared in the session:
+
+> *"Affected checklist/proposal/workflow sweep: 12 of 13 checks passed initially. **`check_done_lines` failed
+> because the new evidence used `→ Evidence:`/`→ Decision` instead of the repository's required `→ Done:`
+> marker.** Replaced with specific measured evidence/decision text, regenerated backlog/index, and
+> `check_done_lines` passed."*
+
+**An external agent, working from a bundle on a different machine, with its own conventions, was corrected by a
+rule written here** -- and the rule is a **ratchet with an explicit 53-item exemption list**, so it fired on
+new work and not on the history it was never meant to re-litigate.
+
+### It is the mirror image of `§O-450`
+
+`§O-450` is about a local command **too narrow to certify** -- `clippy` without `-D warnings`, `--check`
+without `--self-test`. **This is a gate rule wide enough to catch a stranger.** One is a guard you cannot
+trust; the other is a guard that reached outside the repository that wrote it. **Both are measurements of the
+same property from opposite ends: how far a rule actually reaches.**
+
+### And the last twenty lines of the log are the same standard
+
+* **`:132`** -- *"CI/bridge parity passes (**131/113** invocations)"*. **This session's
+  `.scratch/run_ci_checkers.py` independently measured 131 reproduced** across a merged tree the delivery
+  never saw, so the two numbers agree by measurement and not by inheritance.
+* **`:138`** -- the Phase 3 review's **four findings: two major describing the same missing explicit CI
+  toolchain pin, two minor about date-dependent validation** -- followed by *"**the earlier expiry-fails
+  description above is superseded**"*, **a document correcting itself rather than letting a stale sentence
+  stand.**
+* **`:141`** -- *"**Governance passes do not turn these failed executions into conformance passes**"*: the
+  sentence `LOCAL-AGENT-PROMPT.md` point 2 asks for, written by the party it constrains.
+* **`:145`** -- pass 2's two minors: **input-hash read errors escaped failure reporting**, and the matrix
+  output could translate LF on Windows. **The first is the `read_history` class** -- a read that fails and is
+  reported as though nothing were wrong -- **which the same reviewer found in OUR code three rounds later.**
+  Two independent authors, one defect shape, in two halves of one repository.
+* **`:150`** -- *"the audit's generic **'objective met'** label **does not close** the user's broader language
+  roadmap or runtime merge gates."* **A tool printed a green light and the author refused it.**
+* **`:151`** -- *"`git am` applied all four delivery commits to a disposable baseline worktree; **`git
+  write-tree` exactly matched delivered tree `13688c5fe0fd9cee2562924dbf53b911d49b6b2f`**"*. **Patch
+  completeness proved by rebuilding the tree and comparing hashes -- not by trusting the patch.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

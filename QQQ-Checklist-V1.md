@@ -4488,6 +4488,24 @@ Each language has eight required items. The parity matrix makes any gap visible.
     `field run_args is never read` — the same finding as the docstring above it.
 - [ ] **TEST-013** Implement benchmark-as-test: fail a build when a performance budget regresses.
   → §9.2 The performance budget
+  → **Measured: the mechanism exists and is tested; the gate is not wired, so the item is not met.**
+    `crates/qqq-run/src/bench.rs` holds `fail_on_miss` (`:72`), the `--fail-on-miss` flag (`:180`),
+    `should_fail(&BenchOutput, bool)` (`:532`), and `main.rs:2171` maps the decision to an exit code. Four
+    unit tests cover it, **including the control that makes them evidence** — `:1150` a miss without the
+    flag is reported rather than failed, `:1154` with it a miss fails, `:1162` a budget that was **met**
+    does not fail, and `:1181` is the control an always-false implementation would fail.
+  → **What does not exist is a build that fails**, because no gate calls it:
+    `rg -n -e 'qqqai bench|bench --' .github/workflows/ci.yml docker/entrypoint.sh` is **empty**.
+  → **The reason is `PERF-020`'s, and it is stated there rather than twice**: regression detection needs a
+    stable measurement to compare against, and `§O-248` records that this machine's numbers are neither on
+    the reference profile nor stable enough to be a baseline — the best throughput measured is **1,679 RPS**
+    against a **60,000 RPS** target, and a threshold set from that would ratify a number the budget says is
+    wrong by **36×**. **The two items are one prerequisite seen from two sides**: this one names the
+    mechanism, `PERF-020` names the comparison.
+  → **And it is not ticked, because the item's own words are "fail a build".** `--fail-on-miss` makes a
+    *process* exit non-zero; wiring it into a gate that would fail on a real regression is the missing
+    half. **"A miss can fail an exit code" and "a build fails on a miss" are different facts**, which is
+    the distinction `PERF-025`'s own note draws for fuel and CPU-cost-per-request.
 - [x] **TEST-014** Implement the flaky-test detector.
   → §6.7 `qqqai test` — test runner
   → Done: `crates/qqq-run/src/flaky.rs` — a JSON Lines history of `(test, platform, passed, commit, run)`

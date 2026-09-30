@@ -175,8 +175,9 @@ pub fn plan(language: &str, verb: StyleVerb, manifest_dir: &std::path::Path) -> 
             format!("`{language}` has no `{}` driver yet", verb.name()),
         )
         .with_remediation(format!(
-            "Rust is fully supported today; `{language}` is tracked by the language matrix \
-             (`LANG-*`) in QQQ-Checklist-V1.md"
+            "{} is fully supported today; `{language}` is tracked by the language matrix \
+             (`LANG-*`) in QQQ-Checklist-V1.md",
+            crate::build::supported_phrase()
         )));
     };
 

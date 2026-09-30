@@ -143,6 +143,42 @@ pub fn toolchain_for(language: &str, target: &str) -> Option<Vec<ToolRequirement
 /// adding one here is a claim that `qqqai build` can drive it, and that claim is not yet true.
 pub const DRIVEN: &[&str] = &["rust"];
 
+/// Which languages `qqqai build` supports today, as prose, **derived from [`DRIVEN`]**.
+///
+/// # Why this exists rather than a sentence written where it is needed
+///
+/// Because the sentence was written **three times** -- twice in this file and once in `style.rs` -- and a
+/// fourth statement of the same fact sits in `new.rs` as a doc comment. **Every one of them could drift from
+/// [`DRIVEN`] independently, and adding a language would have required finding all four.**
+/// `§O-439` is the record of what that costs: a claim written in several places, each able to disagree with
+/// the code, and nothing reporting the one that is missed.
+///
+/// **A doc comment cannot call this**, so `new.rs` points at [`DRIVEN`] instead of restating it. Everything
+/// that *can* derive, does.
+///
+/// # Why the `LANG-*` reference stays
+///
+/// Because the language work is tracked there, and `an_unimplemented_language_is_declared_not_faked` asserts
+/// that the remediation names it -- so this is a refactor of where the text comes from, not of what it says.
+///
+/// # Examples
+///
+/// **The assertion is derived rather than literal on purpose.** A doctest that pinned the current text would
+/// have to be edited whenever [`DRIVEN`] gained a language -- and **an example that must be edited to stay
+/// true is an example that will eventually be edited to hide a change.** This one asks the property the
+/// function exists to provide:
+///
+/// ```
+/// let phrase = qqq_run::build::supported_phrase();
+/// for language in qqq_run::build::DRIVEN {
+///     assert!(phrase.contains(language), "{language} is driven but not named");
+/// }
+/// ```
+#[must_use]
+pub fn supported_phrase() -> String {
+    DRIVEN.join(", ")
+}
+
 /// Every language's toolchain, measured rather than assumed.
 ///
 /// # What this is, and what it is NOT
@@ -442,8 +478,9 @@ pub fn plan(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPlan> {
             ),
         )
         .with_remediation(format!(
-            "Rust is fully supported today; `{}` is tracked by the language matrix in \
+            "{} is fully supported today; `{}` is tracked by the language matrix in \
              QQQ-Checklist-V1.md (LANG-001..LANG-040)",
+            supported_phrase(),
             spec.language
         )));
     };
@@ -572,8 +609,9 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
             ),
         )
         .with_remediation(format!(
-            "Rust is fully supported today; `{}` is tracked by the language matrix in \
+            "{} is fully supported today; `{}` is tracked by the language matrix in \
              QQQ-Checklist-V1.md (LANG-001..LANG-040)",
+            supported_phrase(),
             spec.language
         ))
     })?;

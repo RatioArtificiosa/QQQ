@@ -120,7 +120,11 @@ impl Template {
 /// Which language to scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
-    /// Rust — the only language with a working `build` driver today.
+    /// Rust -- see [`crate::build::DRIVEN`] for the authority on which languages have a driver.
+    ///
+    /// **This variant does not say how many there are**, because a doc comment cannot call a function and a
+    /// restated fact drifts. `new.rs`'s enum lists the languages the manifest understands; `build::DRIVEN`
+    /// lists the ones the build can drive.
     Rust,
     /// TypeScript, compiled through a QQQ-managed toolchain.
     TypeScript,

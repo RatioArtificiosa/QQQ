@@ -34713,6 +34713,58 @@ parent's `Command::env`.** Under that hypothesis the child takes its early `retu
 the parent uses, **and the child saw the variable every time.** So the hypothesis survives this measurement
 rather than being supported by it.
 
+## §O-474 — A check about a text is itself a text, and it ages
+
+**Three defects in three consecutive rounds, each found in something a previous round had written:**
+
+| where | the measurement |
+|---|---|
+| `check_admission.py`, first version | read **one physical line** per note: **556** claims reported without a falsifier, **331** after the fix -- **a 40% false-positive rate** |
+| the same checker, one round later | matched the **substring** `blocked-by-` and reported an item that merely *discussed* the convention |
+| a `-> Done:` line the round before | said `--self-test` was **7 cases** and the ratchet **556**; measured one round later, **11** and **331** |
+
+**They are not three unrelated bugs.** Each is the same thing: **the checker's subject is text, the checker is
+text, and the text moves.**
+
+### The 40% one is the sharpest, because the fix was a WIDTH
+
+A note is a first line **and its continuation lines**; the implementation was about a **line**. **225 of 556
+reports were false** -- notes whose falsifier sat on a line the checker never read. And the same round had
+already recorded the principle for a different guard: **a guard is only as wide as its file list and only as
+narrow as its pattern.** Here it was neither too wide nor too narrow **in the corpus**; it was too narrow **in
+what it read of one note.**
+
+**The measurement that proves the width was wrong is the difference: 556 -> 331.** A fix that changed nothing
+would have left the number where it was, **and a fix that made it *rise* would have been the defect wearing a
+patch.**
+
+### And `§O-399` arrived in the checker that cites it
+
+The blocked-state rule matches `**blocked-by-...**` in a note. **The first version matched the substring**, and
+it fired on `PLAN-009` -- whose note **explains the gap and quotes the convention**:
+
+    ... no checker looks for one: the `blocked-by-*` convention used by `LANG-023`/`LANG-024` ...
+
+**A guard that matches its own explanation describes the reader, not the code** -- and this repository already
+records it. **I reproduced it by writing a check about a convention INTO THE TEXT THAT DISCUSSES THE
+CONVENTION.** The narrowing is to the bold marker the convention actually uses, **which is also the form the
+two complying items carry** -- so the fix is a better reading of the rule rather than a carve-out for one item.
+
+### And a `-> Done:` line is a claim about a running program
+
+`PLAN-009`'s note was written with `7 cases` and `556`. **One round later the checker had 11 cases and a
+ratchet of 331, and nothing noticed** -- the note was read by a human who happened to look. **`§O-439` records a
+docstring describing a slightly different program; this is the same shape one level up, in the checklist's own
+evidence.** The tick that fixed it says so in place, **because a corrected number with no note explaining why
+it changed is a number the next reader cannot audit.**
+
+### What follows, if anything does
+
+**A checker should read the smallest unit the rule is about, not the smallest unit that is convenient to
+iterate.** One line is convenient; **a note is what the rule is about.** And **a claim about a running program
+should name the command that produces its number**, so a reader can re-run it -- `§O-277`'s *"a number that
+cannot be compared is a number with no owner"*, applied to the evidence lines themselves.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

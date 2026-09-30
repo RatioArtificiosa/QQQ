@@ -34399,6 +34399,80 @@ declarations.**
 `--list` should name the items it counts as uncovered, and the report should print `ran` beside `outstanding`
 **so that a falling denominator is visible the moment it falls.**
 
+## §O-468 — A flake five local runs cannot reproduce, and the one leftover was mine
+
+**`45d034e` failed on `Rust (windows-latest)` and nowhere else**, at `live_components.rs:184`:
+
+```
+live_components.rs:179  assert!(child.status.success(), "{stderr}")            <- PASSED
+live_components.rs:184  std::fs::read(cache_dir.join("child-hit")).unwrap()    <- Os { code: 2, NotFound }
+```
+
+**Five consecutive local runs of the same test binary passed `8 passed; 0 failed`**, and the single leftover
+`qqq-native-4656` temp directory turned out to be **left by my own failed experiment** -- a run where a change
+I was testing panicked before it reached the cleanup. **`a32fc45` passed on Windows with `12/0`, and the
+thirteen commits between it and `45d034e` touch only docs, tools, and `build.rs`/`style.rs`/`new.rs` -- none of
+which this test uses.**
+
+**So the honest statement is: the failure is real, one platform saw it, and I have not reproduced it. That is
+different from "it is a flake", and the difference matters -- a flake nobody can reproduce is a flake nobody
+has fixed.**
+
+### And a "fix" I wrote for it was a regression, caught before it was committed
+
+**`cache_child` has a silent early return:**
+
+```rust
+let Some(directory) = std::env::var_os("QQQ_TEST_CACHE") else {
+    return;                  // exit 0, no file written, no complaint
+};
+```
+
+**I read that as the defect** -- a child reporting success while writing nothing -- **and changed it to a
+panic, on the theory that a skip indistinguishable from a pass is what `§O-438` names.** It compiled, and it
+made the failure **loud**:
+
+```
+test cache_child ... FAILED
+  panicked at live_components.rs:222:9
+```
+
+**Then the experiment that settled it: stash the change and re-run.**
+
+```
+without my change:   test result: ok. 8 passed; 0 failed
+```
+
+**`cargo test` runs `cache_child` as a TOP-LEVEL test too**, with no `QQQ_TEST_CACHE` set, **and the early
+`return` is the intended skip for exactly that case.** The parent's spawned child **does** see the variable --
+`a32fc45` proves it on Windows. **So the panic was the regression, not the fix, and it was dropped with
+`git stash drop` rather than committed.**
+
+**The rule, which is cheap to state and was expensive to learn: when a test fails only after your change, the
+change is the first suspect -- and the experiment that settles it is to remove the change and re-run, not to
+reason about the design.** Formal verification of a new failure mode is not what a green suite needs; **a
+control is.**
+
+### The structural weakness that IS measurable -- and it is not the explanation
+
+The temp directory is **keyed by PID**:
+
+```rust
+let root = std::env::temp_dir().join(format!("qqq-native-{}", std::process::id()));
+let _ = std::fs::remove_dir_all(&root);
+```
+
+**CI machines reuse PIDs, and that clear is a `let _ =`.** The comment beside it is right about *why* the
+tolerance is there -- a directory from a previous run is not this run's failure -- **but it does not state the
+consequence: if the clear fails, the run continues against a directory holding another run's contents**, and
+`cache_child` writes `child-hit` into it. **That is `§O-438` for the fourth time in this session: a check that
+cannot tell "the directory is clean" from "I could not clean it".**
+
+**And the failure it predicts is the OPPOSITE of what CI saw** -- a stale `child-hit` would make line 184
+*pass*. **So it is a real weakness and not the cause, and saying both is the point:** a structural defect that
+fits the symptom is evidence, and one that contradicts the symptom is still a defect -- **but it must not be
+dressed up as the diagnosis.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

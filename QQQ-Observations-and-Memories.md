@@ -33740,6 +33740,61 @@ before the run — legitimately best-effort, because a directory left by a previ
 failure of this run — but **`let _ =` is the shape this corpus hunts**, so the tolerance is now written where
 a reader finds it. **The removal at the end does not get it.**
 
+## §O-450 — A local command that resembles the gate but is narrower than it certifies nothing
+
+**Three times in one session, a local verification passed on code the gate rejected.** Each time the command
+*looked* like the gate, and each time the difference was a flag or a sibling mode that only CI ran.
+
+### The three, and what each hid
+
+**1. `gen_llms_txt.py --check` versus `--self-test`.** `--check` compares `llms.txt` against the tree and
+reported OK; `--self-test` runs the tool's own rules and reported
+`FAIL every docs/*.md is indexed or excluded -- these are neither: ['docs/languages/evidence/matrix.md']`.
+**The index was correct and the rule that produces it was broken.** CI ran the self-test.
+
+**2. `check_done_lines.py` on the corpus versus `--self-test`.** The corpus run reports OK on the real file;
+the self-test fabricates each defect and requires detection. A checker whose rule never fires is
+**indistinguishable from one that finds nothing wrong**, which is why this file has a self-test at all --
+and it is why the `PLAN-010` rule added in round 100 shipped with **four cases including a control.**
+
+**3. `cargo clippy -p qqq-run --all-targets --all-features` versus the same with `-- -D warnings`.** The
+narrower form reported clean locally; **all three CI platforms failed**, because
+`clippy::manual_assert` fired on `if now() >= deadline { panic!(...) }` and this workspace's gate turns every
+warning into an error. **Running it as written then found a second error the narrow form had also hidden** --
+`value assigned to `last` is never read`, because with `assert!` the initialiser is dead.
+
+### The rule, and why it is not the same as "run the self-test"
+
+**The command you verify with must be the command the gate runs, character for character.** This is not a
+taste preference: the three failures above were **not** caught by any amount of care in reading the code.
+They were caught by CI, and each cost a red run.
+
+**A narrower instrument is not a weaker instrument; it is a different one, and it measures a different
+thing.** `clippy` without `-D warnings` answers *"is there a lint?"*; with it, the gate asks *"is there a
+lint, as a failure?"* -- and `-p qqq-run` asks about one crate where the gate asks about the workspace.
+
+**It connects to `§O-282`** -- *a guard is only as wide as its file list and only as narrow as its pattern* --
+**one level up**: a guard is also only as strong as **the command that invokes it**. And it is the same shape
+as `§O-383`, where the bridge and CI do not run the same things and **a green bridge is not a green CI**.
+
+### What this session did as a result
+
+**The gate commands are now run as written**, and they are recorded in one place so the next agent does not
+have to reconstruct them:
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+python tools/check_api_examples.py --allow 2105
+python tools/gen_llms_txt.py --self-test      # NOT just --check
+python tools/check_done_lines.py --self-test  # NOT just the corpus run
+python .scratch/run_ci_checkers.py            # reproduces the ci.yml command set
+```
+
+**And the last one exists for exactly this reason** -- it prints every command CI runs that it did **not**
+reproduce, **with its working directory**, because a `run:` line is not the whole command.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

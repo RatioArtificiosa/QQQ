@@ -642,7 +642,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §14.4 What we would cut first, in order
 - [ ] **PLAN-008** Establish the risk-review cadence against the register, with trigger monitoring.
   → §15 — Risk Register
-- [~] **PLAN-009** Define the definition-of-ready for a checklist item (clear acceptance test, no unresolved dependency).
+- [x] **PLAN-009** Define the definition-of-ready for a checklist item (clear acceptance test, no unresolved dependency).
   → §16 — Definition of Done for V1
   → **Measured: neither half is written, and the second half is the same gap as `PLAN-015`'s.**
     *"A clear acceptance test"* -- nothing states what makes an item's acceptance test clear, and
@@ -667,12 +667,22 @@ Items are grouped below by **phase**, because dependency order matters more than
     it yet."* The rule is prose; `tools/check_admission.py` is named in §5 and not built. **Ticking here would
     be a status reporting more than the evidence** -- the precedent is `PLAN-010`, `[ ]` with its executable
     half already in a gate.
-  → **And it is `[~]` rather than `[x]`, measured:** the acceptance-test half is now executable --
-    `tools/check_admission.py` runs in **both** gates, `GATE PARITY OK` still reports, its `--self-test` is
-    **7 cases including two controls**, and a fault injection moves the count `556 -> 557 -> 556` with the file
-    byte-identical on restore. **The dependency half is written and not checked**: §2's fourth admissible form
-    is where a blocked item states what would unblock it, and the document's own §6 says *"This document states
-    it; no checker reads it yet."* `[x]` would report more than that evidence supports.
+      → Done: **both halves are defined and checked.** *"Clear acceptance test"* is
+        `docs/definition-of-ready.md` §2's four admissible falsifiers, enforced by
+        `tools/check_admission.py` in **both** gates with a **331-claim ratchet** that may only fall,
+        `--self-test` **11 cases including two controls**, and a fault injection `0 -> 1 -> 0` with the
+        file byte-identical on restore. *"No unresolved dependency"* is §3, plus the same checker's
+        `blocked_disagreements`, which reports any item whose prose names a blocker while its status says
+        open — **and two items were corrected by it rather than exempted**, measured: the checklist went
+        from `open 320, blocked 2` to `open 316, blocked 4`.
+      → **And `[~]`'s sub-case is deliberately OUT OF SCOPE rather than missing**, which is why this is
+        `[x]`: §3 says *"A `[~]` or `[!]` item is not required to have a falsifier, because it is a
+        statement that the work is not ready — and requiring one there would fire on the 325 open items
+        nobody has investigated yet."* **The boundary is stated, and stating it was the item.**
+      → **And the note above was STALE when this tick was written, which is worth recording.** It said
+        `--self-test` was **7 cases** and the ratchet **556**; measured at the tick they are **11** and
+        **331**. **A `→ Done:` line is a claim about a running program and nothing re-reads it** —
+        the shape `§O-439` records, found in the note that cites it.
 - [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
   → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by

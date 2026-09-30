@@ -1633,6 +1633,108 @@ mod tests {
         assert!(!plan.only_step().args.iter().any(|a| a.contains(';')));
     }
 
+    /// **A plan stops at the first step that fails, and the index says which.**
+    ///
+    /// # Why this test exists at all
+    ///
+    /// `run_steps` was extracted to keep `execute` under clippy's line limit, and **it had no test**. A version
+    /// that ran *every* step and reported the last would have passed the entire suite -- **while breaking the
+    /// one property the multi-step plan exists for.** The type was tested; the semantics were not.
+    ///
+    /// # Why the commands are `cfg`-split
+    ///
+    /// Because nothing else in this crate spawns a process, so there is no helper to reuse, and **a test that
+    /// needed `cargo` would not run in the bare environment the API-example checker warns about.** `cmd /c` and
+    /// `sh -c` are each guaranteed on their own platforms, which covers all three CI runners.
+    ///
+    /// # The control
+    ///
+    /// **The second half asserts `None` for a plan whose steps all succeed.** Without it, an implementation
+    /// that always returned `Some((0, ...))` would satisfy the first half, and a test that cannot fail is not a
+    /// test -- the rule this repository applies to every checker it adds.
+    #[test]
+    fn a_plan_stops_at_the_first_step_that_fails() {
+        let dir = std::env::temp_dir().join(format!("qqq-plan-steps-{}", std::process::id()));
+        // Best-effort, and said so: a directory left by a previous run is not this run's failure. The removal
+        // at the end does assert, because that one is about this run.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // **One helper per outcome, so the two arms cannot disagree about the shell.**
+        let succeeds = |also_touch: Option<&str>| BuildStep {
+            program: if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
+            args: if cfg!(windows) {
+                let mut a = vec!["/c".to_owned()];
+                a.push(match also_touch {
+                    Some(name) => format!("echo ran > {name}"),
+                    None => "exit 0".to_owned(),
+                });
+                a
+            } else {
+                let mut a = vec!["-c".to_owned()];
+                a.push(match also_touch {
+                    Some(name) => format!("echo ran > {name}"),
+                    None => "exit 0".to_owned(),
+                });
+                a
+            },
+            cwd: dir.clone(),
+        };
+        let fails = || BuildStep {
+            program: if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
+            args: if cfg!(windows) {
+                vec!["/c".to_owned(), "exit 3".to_owned()]
+            } else {
+                vec!["-c".to_owned(), "exit 3".to_owned()]
+            },
+            cwd: dir.clone(),
+        };
+
+        // -- the control: every step succeeds, so nothing is reported as failing --
+        let all_ok = BuildPlan {
+            steps: vec![succeeds(None), succeeds(None)],
+        };
+        assert!(
+            run_steps(&all_ok).unwrap().is_none(),
+            "a plan whose steps all succeed must report no failure"
+        );
+
+        // -- and the case the type exists for: the second step fails --
+        //
+        // The first step leaves a marker, so the assertion can tell "the plan ran step one and stopped" from
+        // "the plan ran nothing" -- a check that cannot distinguish those is the defect this file already
+        // records three times over.
+        let marker = "step-one-ran";
+        let stops = BuildPlan {
+            steps: vec![
+                succeeds(Some(marker)),
+                fails(),
+                succeeds(Some("step-three-ran")),
+            ],
+        };
+        let (index, status) = run_steps(&stops).unwrap().expect("the second step fails");
+        assert_eq!(index, 1, "the plan must report the step that failed");
+        assert!(!status.success());
+        assert!(
+            dir.join(marker).exists(),
+            "step one must have run -- otherwise `index` is 1 for the wrong reason"
+        );
+        assert!(
+            !dir.join("step-three-ran").exists(),
+            "step three must NOT have run: a plan stops at the first failure"
+        );
+
+        remove_dir_all_best_effort(&dir);
+    }
+
+    /// Best-effort removal for a test's scratch directory.
+    ///
+    /// **A failure here is not the test's subject**, and saying so in a function whose name says so is better
+    /// than a `let _ =` a reader has to interpret -- the shape `live_components.rs` documents at length.
+    fn remove_dir_all_best_effort(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn quoting_renders_a_pastable_command() {
         assert_eq!(shell_quote("cargo"), "cargo");

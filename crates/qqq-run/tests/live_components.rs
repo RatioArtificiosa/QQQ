@@ -99,9 +99,57 @@ fn malformed_and_wrong_abi_candidates_preserve_active_code() {
     }
 }
 
+/// Remove a directory that a background writer may still be touching, with a deadline.
+///
+/// # Why this exists rather than `remove_dir_all`
+///
+/// **`std::fs::remove_dir_all` is documented to fail if the directory changes while it is being removed**,
+/// and macOS surfaces that race as `DirectoryNotEmpty`. This test drops the `engine`, `config` and
+/// `cache` handles and then removes the directory -- but Wasmtime's managed cache is a directory of
+/// `.cwasm` files written by cache machinery whose shutdown is not synchronised with a `Drop` of the
+/// handle. **It passed on Linux and Windows and failed on macOS at the cleanup line, after every assertion
+/// in the test had already run.**
+///
+/// # Why not `let _ =`
+///
+/// **This repository has paid for that shape five times.** A cleanup that cannot fail is a cleanup that
+/// hides the next real failure, and the whole point of this repository's `let _ =` observations is that a
+/// helper whose failure looks like success is worse than an ugly panic.
+///
+/// # What is asserted instead
+///
+/// **The removal must ultimately succeed.** The retry is bounded by a deadline, so a directory that is
+/// genuinely unremovable still fails the test -- but with the last OS error attached, after giving a
+/// flush that was already in flight a chance to finish. **A retry is not a weakened assertion; it is the
+/// correct assertion for a path another thread may still hold.**
+fn remove_dir_all_retrying(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut last = None;
+    loop {
+        match std::fs::remove_dir_all(path) {
+            // **Already gone is success.** A previous attempt or a concurrent cleaner may have won.
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => last = Some(e),
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "could not remove {} within 10s, so something is still writing to it: {}",
+                path.display(),
+                last.map_or_else(|| "no error recorded".to_owned(), |e| e.to_string())
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn native_output_is_real_and_cache_survives_engine_recreation() {
     let root = std::env::temp_dir().join(format!("qqq-native-{}", std::process::id()));
+    // **Legitimately best-effort, and said so rather than left as a bare `let _ =`.** A directory left by a
+    // previous run of this same PID is not a failure of this run -- but `let _ =` is the shape this
+    // repository hunts, so the tolerance is documented where a reader finds it. The removal at the END of
+    // this test does not get the same tolerance: it asserts.
     let _ = std::fs::remove_dir_all(&root);
     let cache_dir = root.join("cache");
     let output =
@@ -145,7 +193,10 @@ fn native_output_is_real_and_cache_survives_engine_recreation() {
     drop(engine);
     drop(config);
     drop(cache);
-    std::fs::remove_dir_all(root).unwrap();
+    // **The AOT cache directory is removed here, and macOS says `DirectoryNotEmpty` if it is not.**
+    // See `remove_dir_all_retrying` for why this gives a background flush a bounded chance to finish
+    // instead of trusting one `remove_dir_all` one statement after the handle was dropped.
+    remove_dir_all_retrying(&root);
 }
 
 #[test]

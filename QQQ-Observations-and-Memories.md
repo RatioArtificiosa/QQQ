@@ -34668,6 +34668,51 @@ verdict rather than trust the exit code.**
 selected, 546 were filtered -- **so the test that failed is the test that was added, and the injection changed
 the SEMANTICS rather than the assertion.**
 
+## §O-473 — The Windows flake's second occurrence, its measured rate, and `§O-438` in the script that measured it
+
+**`45d034e` and `c435c66` both failed `Rust (windows-latest)` at the same place:**
+
+```
+native_output_is_real_and_cache_survives_engine_recreation
+  panicked at .\tests\live_components.rs:184:59
+  Os { code: 2, kind: NotFound }
+```
+
+**Same test, same line, same error -- and `c435c66` is a commit that wrote a document about admission rules
+and touches nothing the test uses.** `45d034e`'s re-run passed (`§O-469`), so the failure is non-deterministic.
+
+### The rate, which is what this observation adds
+
+**Twelve consecutive runs on this machine: `12 passed, 0 failed`.** Each reported `7 filtered out`, so the
+filter selected one test and ran it **in the same process**, and the parent's spawned `cache_child` saw
+`QQQ_TEST_CACHE` and wrote its file. **The rate here is zero; the rate on `windows-latest` is two in roughly
+eight.**
+
+**A rate of zero does not mean the flake is absent -- it means this machine cannot reproduce it**, and that is
+a different statement from *"it does not happen."* The two occurrences remain the instrument.
+
+### And `§O-438` in the script that measured it
+
+**The first version of the rate measurement reported `0 passed, 12 failed`.** It ran
+`cmd.exe /c "call VsDevCmd.bat && cd /d E:\QQQ && cargo test ..."` through Python's `subprocess`, which
+produced **`exit=1` and ZERO BYTES of output** -- and the counter treated *"(no verdict)"* as a failure.
+
+**That is `§O-438` for the fifth time in this session: a check that cannot tell "nothing" from "could not
+read".** The script whose purpose was to measure a defect **had the defect**, and it reported a 100% failure
+rate that was entirely its own. **The fix was structural rather than arithmetic** -- a `.cmd` file invoked
+directly, which is the pattern this repository already uses for anything containing quotes.
+
+**And the symptom was visible before the cause was known:** twelve identical `(no verdict)` lines are not
+twelve test results, and reading them as results is what produced the false 100%.
+
+### What remains a hypothesis
+
+**That Windows' libtest sometimes runs a filtered test in a different process from the one holding the
+parent's `Command::env`.** Under that hypothesis the child takes its early `return`, writes nothing, and line
+184 fails -- **which is exactly the observed failure.** But the twelve local runs used `--exact`, which is what
+the parent uses, **and the child saw the variable every time.** So the hypothesis survives this measurement
+rather than being supported by it.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

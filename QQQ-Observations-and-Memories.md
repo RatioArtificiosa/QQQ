@@ -33499,6 +33499,167 @@ also exposed a Landlock kernel refusal in this sandbox; it remains a failed gate
 See the live-components handoff for review and deployment boundaries.
 
 
+## §O-442 — The delivery kept four kinds apart, and that is why twelve ticks are all documents and decisions
+
+The hot-swap/AOT and Phase 3 delivery advanced **exactly twelve** checklist items -- `POS-006`,
+`LANG-014`, `LANG-015`, `LANG-016`, `LANG-022`, `LANG-025`, `LANG-031`, `LANG-032`, `LANG-038`, `OQ-002`
+and `OQ-003` -- and **every one is a documentation or decision item.** No execution item was ticked.
+
+Six open items gained a `-> Progress:` note instead, and each note ends by saying so:
+
+```
+ARCH-015   "…Signed installation and trusted native-artifact distribution remain separate
+            work; this item remains open."
+DX-006     "…See docs/live-components-checklist.md for measured acceptance, failure controls
+            and remaining merge gates. Kept open pending review."
+LANG-007   "…Therefore the <=20 s / 10k LOC budget remains open."
+LANG-023   "blocked-by-upstream-and-time"
+LANG-024   "blocked-by-upstream-and-time"
+```
+
+**`LANG-023` and `LANG-024` are marked `blocked-by-upstream-and-time`**, which is the marking the corpus
+asks for and the one that is easiest to fake: `LANG-024`'s reassessment is due **2026-12-30** and the
+delivery says so instead of ticking it. And `LANG-023` is explicit that *"the TinyGo failure below is a
+**reproducible candidate for upstream investigation, not proof of an upstream root cause**"* -- and that
+*"no upstream issue or patch has been submitted by this task."*
+
+**AND THE DELIVERY CORRECTED THE CORPUS, WHICH IS THE PART WORTH RECORDING.** `LANG-039`'s note said the
+item stays open because *"the goal's sequencing forbids starting `LANG-009`…`LANG-040` before `TEST-010`
+lands."* It now says the item stays open because *"the complete language x capability execution coverage is
+still missing."* **The sequencing rule stopped being the blocker the moment the scaffolding existed**, and
+leaving the old reason in place would have retired a true sentence into a false one.
+
+**A green gap-governance check does not mean the known failing guest passed** -- and the delivery's
+`REVIEW.md` says that in its own words, then adds that *"reviews do not turn the known
+TinyGo/Python/TypeScript execution failures into passes, and do not close Landlock, Docker or remote
+CI/platform merge gates."*
+
+## §O-443 — A hello-only test missed the TinyGo defect, so the vector is the instrument
+
+The Phase 3 probes run **five** HTTP vectors: hello, UTF-8 output, 404, an empty POST, and a
+**65,536-byte binary echo**. Measured results:
+
+| path | component bytes | observed |
+|---|---:|---|
+| AssemblyScript 0.28.20 | 4,590 | 5/5 passed |
+| TinyGo 0.42.0 + Go 1.27.1 | 592,028 | four small cases pass; **the 64 KiB echo fails** |
+| componentize-py 0.25.1 | 18,364,731 | link rejected; **0 vectors executed** |
+| WASI SDK 34 C | 54,146 | 5/5 passed |
+| WASI SDK 34 C++17 | 54,146 | 5/5 passed |
+| TypeScript 5.9.3 -> ComponentizeJS 0.23.0 | 12,035,099 | link rejected; **0 vectors executed** |
+
+**The 64 KiB vector is the one that matters, and the delivery says why in a single sentence: "a hello-only
+test missed the TinyGo defect."** A suite of small payloads would have reported **Go 5/5 passing** -- and
+every claim built on it would have been false.
+
+**This is `§O-281` in a new shape.** That observation is about confirming a premise rather than an exit
+code; this is the same defect one level down: **an input that does not exercise the failure cannot observe
+it.** The corollary belongs here too: the TinyGo failure is `404` where `200` was expected, with **the
+method intact and the URL corrupted**, and the delivery records the cause as *"allocation or GC interaction
+during canonical ABI lowering is a **hypothesis, not a proven root cause**."*
+
+**And the vector is preserved rather than fixed around:** *"Do not close M5 or disable GC to hide it."*
+
+## §O-444 — "Time to rejection" is not "cold start", and the name is part of the measurement
+
+Python was rejected after about **6.01 seconds** and TypeScript after about **8.51 seconds**. The delivery
+calls those *"**time to rejection**, not successful cold starts."*
+
+**Both are numbers in seconds and only one of them is a startup cost.** A document that printed
+"Python: 6.01 s" under a *cold start* heading would be wrong in a way no reader could detect, because the
+number is real and the label is the lie. **The label is the measurement.**
+
+The same discipline appears twice more in the same file:
+
+* Component sizes are given with the reason they may move -- *"because these engine-in-Wasm tools snapshot
+  initialization; **bit reproducibility is unproven**."*
+* Engine/preparation timings are given as *"approximately 38.7 ms for AssemblyScript, 49.3 ms for C and
+  34.7 ms for C++"* and then bounded by what they are **not**: *"these debug-host, single-sample probes are
+  not production SLOs, percentiles, comparative throughput benchmarks, or interpreter-pool
+  measurements."*
+
+**A number with no owner cannot be compared (`§O-277`); a number with the wrong owner cannot be corrected.**
+
+## §O-445 — The RFC refuses three things by name, and one of them protects `#![forbid(unsafe_code)]`
+
+`docs/rfc/live-components-and-aot.md` declines three plausible optimizations in as many sentences:
+
+1. **`ArcSwap` is not adopted.** *"A short-held `Mutex` is sufficient. **`ArcSwap` is a later measured
+   optimization, not a correctness requirement.**"*
+2. **A task abort is not a cancellation.** *"An epoch ticker provides preemption for Wasm execution, but
+   host I/O requires its own timeouts. **Do not claim that aborting a Tokio task cancels a synchronous host
+   operation.**"*
+3. **Native-artifact deserialization is not approved.** *"Explicit loading of arbitrary `.cwasm` needs a
+   separate trusted-artifact wrapper: **Wasmtime's deserialization API is unsafe. This RFC does not approve
+   weakening `#![forbid(unsafe_code)]`.**"*
+
+**The third is the one that matters most**, because it is the point where the feature wanted something the
+repository forbids. The RFC's answer is not to widen the forbid but to **use the safe managed cache and
+reject standalone native input through the component loader** until a safety argument and independent
+approval exist -- which is exactly the existing exception process, unnamed but followed.
+
+**Two more refusals are about not over-claiming novelty and not over-claiming safety:**
+
+* *"Bun already supports process-preserving hot reload; **QQQ's contribution is its component, capability
+  and lifecycle contract.**"* -- a feature described by what is actually new about it.
+* *"**A source package signature does not authenticate unrelated native bytes.**"* -- the AOT cache's
+  identity is source digest **plus** exact Wasmtime version, target/CPU compatibility and compiler
+  settings, because a signed component says nothing about the native code derived from it.
+
+And the review section closes by refusing to grade its own homework:
+*"do not approve tier 2, explicit native-artifact loading or a performance SLO on the strength of tier-1 or
+managed-cache tests."*
+
+## §O-446 — "Must not own" is the column that prevents the defect
+
+The RFC's ownership table has three columns, and the third is the one this corpus has not used before:
+
+| Owner | Responsibility | **Must not own** |
+|---|---|---|
+| `qqq-host` | engine, compiled component, store limits, guest invocation | CLI paths, package download, UI |
+| `qqq-run` | explicit cache location, build, preparation, registry, dev orchestration | **a second capability policy** |
+| `qqq-serve` | listener, routing, authentication, request bodies, transport draining | **compilation or guest package selection** |
+| `qqq-pkg` | artifact integrity, signatures, content-addressed storage | engine-specific execution |
+| `qqq-abi` / `wit` | published guest contracts | application session state |
+
+**A responsibility list describes what a module does; a "must not own" list describes the defect that
+appears when two modules both think they do.** `qqq-run` must not own a second capability policy because
+two policies is how a grant is enforced in one path and not the other; `qqq-serve` must not own compilation
+because a listener that compiles is a listener that blocks.
+
+The design sections carry the same shape in prose -- *"A registry lock must never span guest code,
+compilation, network I/O, audit persistence or waiting for drain"* -- and one honesty item is left visibly
+unfinished rather than implied: *"Compiled-code memory is not yet governed by a process-wide byte budget;
+**the checklist keeps that remaining resource limit explicit**."*
+
+## §O-447 — Two writers reached for `§O-439`, and the collision was invisible until the merge
+
+The delivery branched from `d12ad758` and appended its observations at the end of the file; so did this
+session. **Both reached for the next free id, which was `§O-439` for each, because neither could see the
+other's work.**
+
+Measured at the merge: **ids 1-438 are shared history, `§O-439` is the only collision, and `main` also holds
+`§O-440`.** The delivery's became `§O-441`.
+
+**Two things made this cheap, and both were luck worth converting into practice.**
+
+**First, it was cited nowhere** -- the renumbered id had no inbound references, so no citation needed
+updating. Had it been cited, `check_xrefs.py` rule 13 resolves by **plain substring over the whole
+document**, so a stale `§O-439` citation would have **resolved successfully to the wrong observation** --
+a silent wrongness the checker cannot see, because the id exists.
+
+**Second, the collision was found by merging, not by a checker.** The rule this suggests is the one already
+in force for `.scratch/` drafts: **an id is a shared resource and cannot be reserved by writing it down.**
+Landing the heading first, or using a placeholder that cannot match the id pattern, is what makes the claim
+safe; appending and hoping is what produces two `§O-439`s and one unanswerable question about which a
+citation meant.
+
+**And the same shape appeared one file over:** `crates/qqq-run/src/lib.rs` conflicted because both sides
+added a `pub mod` -- `flaky` on ours, `generations` on theirs. **Both additive, both kept.** The merge
+conflicted on five files and **only three of them had no correct merge at all**, because a derived file --
+`tools/backlog.json` with 486 hunks, `docs/stability.md` saying 250 against 259, `docs/unsafe-audit.md`
+saying 173 against 176 -- **is a third number after a merge and must be regenerated, never resolved.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

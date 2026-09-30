@@ -151,6 +151,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "status",
     ),
     (
+        "docs/live-components-review.md",
+        "The independent review: findings first, the commands and exit codes behind every claim, "
+        "what was verified rather than inherited, and what was not verified.",
+        "both",
+        "status",
+    ),
+    (
         "docs/live-components-handoff.md",
         "How to run and review the live-component foundation, with scope limits and merge gates.",
         "both",

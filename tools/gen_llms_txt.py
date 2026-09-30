@@ -183,6 +183,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "contract",
     ),
     (
+        "docs/definition-of-done-for-a-change.md",
+        "Which of the five artefacts a change requires -- code, tests, docs, xref, observations -- and the "
+        "rule that a `-> Done:` line must name the command that produces its number.",
+        "agent",
+        "contract",
+    ),
+    (
         "docs/definition-of-ready.md",
         "The admission rule for checklist items, decisions and observations: what may be written down, and "
         "what must be true before it is.",
@@ -435,6 +442,7 @@ CORPUS_EXCLUDED: dict[str, str] = {
     "docs/contributing/claims-policy.md": "a contributor rule, not a fact about QQQ",
     "docs/wit-style-guide.md": "a contributor rule, not a fact about QQQ",
     "docs/definition-of-ready.md": "a rule this repository applies to its own writing, not a fact about QQQ",
+    "docs/definition-of-done-for-a-change.md": "a rule this repository applies to its own writing, not a fact about QQQ",
     "docs/development-bridge.md": "this repository's verification environment",
     "docs/languages/evidence/matrix.md": "generated from a CI job's execution reports, so the \
         numbers are a result rather than a fact about QQQ",

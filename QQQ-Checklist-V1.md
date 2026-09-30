@@ -683,7 +683,7 @@ Items are grouped below by **phase**, because dependency order matters more than
         `--self-test` was **7 cases** and the ratchet **556**; measured at the tick they are **11** and
         **331**. **A `→ Done:` line is a claim about a running program and nothing re-reads it** —
         the shape `§O-439` records, found in the note that cites it.
-- [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
+- [x] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
   → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by
     `tools/check_done_lines.py`, which runs in **both** gates (`check_gate_parity.py` rule 5 requires it):
@@ -700,10 +700,22 @@ Items are grouped below by **phase**, because dependency order matters more than
     for the reference, `check_doc_claims.py` for a published figure, `check_corpus_at_rest.py` for the
     normative documents, and the `→ Done:` requirement for the evidence. `PLAN-016` names the ritual that
     ties them together and is separately open.
-  → **Not ticked, and the reason is the item's own wording**: *"code, tests, docs, xref, observations
-    updated"* is a definition of done for **a change**, and what exists here is a definition of the
-    **entry's shape**. The change-shaped half — saying which of the four a given item requires — is not
-    written.
+      → Done: **the change-shaped half is written**, in
+        [`docs/definition-of-done-for-a-change.md`](definition-of-done-for-a-change.md): which of the five
+        artefacts a change requires, and the rule that a `→ Done:` line **names the command that
+        produces its number** — which is what `§O-474` measured the absence of. Enforced by the
+        existing gate: `check_admission.py` -> `ADMISSION OK -- 331 at or under the budget of 331`,
+        `check_done_lines.py` -> `DONE LINES OK`, `check_xrefs.py` -> `validation PASSED`,
+        `self_test_xrefs.py` -> `SELF-TEST PASSED`, and `check_gate_parity.py` -> `GATE PARITY OK`.
+      → **And the note above was wrong about its own count, which is worth recording.** It said *"which of
+        the **four**"*; the item names **five** -- `code, tests, docs, xref, observations`. Measured:
+        `"the four"` occurs **once** in the corpus and `"the five"` **zero** times, so the sentence
+        describing what was missing was the thing that was wrong.
+      → **And `§3`'s artefact-naming has no checker, deliberately.** Requiring a `→ Done:` line to name an
+        artefact would be a **word list**, and `§O-474` records what that costs -- a detector one third as
+        wide as its rule, and a 40% false-positive rate. **A convention carried by a document that says it
+        is a convention is not a missing check.** Proposal §16, which this item cites, is V1's definition
+        of done and not an item's; the new document's §6 says so.
 - [ ] **PLAN-011** Track and publish the language-spike schedule starting at M1, not M8 (risk `R-02`).
   → §15 — Risk Register
 - [ ] **PLAN-012** Establish the quarterly engine-upgrade sprint (Wasmtime), budgeted as recurring work (risk `R-03`).

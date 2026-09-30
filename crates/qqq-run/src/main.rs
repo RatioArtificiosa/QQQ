@@ -1298,15 +1298,20 @@ fn dispatch_build(
 
     with_manifest(name, out, args, |loaded| {
         if flags.dry_run() {
-            // A rehearsal plans but does not execute, so it reports the command
-            // without touching the toolchain. It still plans *fully* —
-            // including probing for missing tools — because discovering a
-            // missing compiler is the main reason to rehearse.
+            // A rehearsal plans but does not execute, so **it reports the plan** without
+            // touching the toolchain. It still plans *fully* — including probing for
+            // missing tools — because discovering a missing compiler is the main reason
+            // to rehearse.
+            //
+            // **It reports the plan rather than "the command", because a plan may be several
+            // commands**; `steps` is the sequence and `command` is the same sequence joined, so a
+            // consumer that wants the stages of a pipeline does not have to re-split a shell line.
             return qqq_run::build::plan(loaded, &opts).map(|p| qqq_run::BuildOutput {
                 project: loaded.name().to_owned(),
                 language: loaded.manifest.build.language.clone(),
                 target: loaded.manifest.build.target.clone(),
                 profile: loaded.manifest.build.profile.clone(),
+                steps: p.step_commands(),
                 command: p.render(),
                 artifact: None,
                 digest: None,

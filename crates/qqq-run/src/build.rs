@@ -559,6 +559,32 @@ impl BuildPlan {
             .map_or_else(|| Path::new("."), |s| s.cwd.as_path())
     }
 
+    /// Each step rendered, in order -- **the plan as a sequence rather than as one line**.
+    ///
+    /// # Why this exists beside [`Self::render`]
+    ///
+    /// Because a machine consumer wants the steps and a human wants the line, **and deriving one from the
+    /// other at read time means re-splitting on ` && `, which is wrong the first time an argument contains
+    /// it.** `--json` reports this list; `command` reports the join.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use qqq_run::build::{BuildPlan, BuildStep};
+    /// let step = |program: &str| BuildStep {
+    ///     program: program.to_owned(),
+    ///     args: Vec::new(),
+    ///     cwd: std::path::PathBuf::from("."),
+    /// };
+    /// let plan = BuildPlan { steps: vec![step("clang"), step("wasm-tools")] };
+    /// assert_eq!(plan.step_commands(), vec!["clang", "wasm-tools"]);
+    /// assert_eq!(plan.render(), "clang && wasm-tools");
+    /// ```
+    #[must_use]
+    pub fn step_commands(&self) -> Vec<String> {
+        self.steps.iter().map(BuildStep::render).collect()
+    }
+
     /// Render the plan as one pasteable line, quoted for display.
     ///
     /// # Why ` && `
@@ -566,13 +592,12 @@ impl BuildPlan {
     /// Because the shell's `&&` is **the semantics the executor implements**: the next step runs only if this
     /// one succeeded. **A one-step plan therefore renders byte-for-byte as it did before**, so no existing
     /// assertion moves, and a four-step plan renders as something a reader can paste and run.
+    ///
+    /// **It is [`Self::step_commands`] joined, rather than a second walk of the steps**, so the two cannot
+    /// disagree about what the plan is.
     #[must_use]
     pub fn render(&self) -> String {
-        self.steps
-            .iter()
-            .map(BuildStep::render)
-            .collect::<Vec<_>>()
-            .join(" && ")
+        self.step_commands().join(" && ")
     }
 }
 
@@ -1256,6 +1281,7 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
         target: target.to_owned(),
         profile: profile.to_owned(),
         command: plan.render(),
+        steps: plan.step_commands(),
         artifact: None,
         digest: None,
         size_bytes: None,
@@ -1472,7 +1498,20 @@ pub struct BuildOutput {
     /// The profile that was used.
     pub profile: String,
     /// The exact command that ran, for reproducibility and bug reports.
+    ///
+    /// **The steps joined with ` && `** -- one line, for a reader who wants to paste it. A machine that wants
+    /// the plan unjoined reads [`Self::steps`], which is the same plan and cannot disagree with this one,
+    /// because both come from `BuildPlan::step_commands`.
     pub command: String,
+    /// The plan as a sequence, one entry per step -- **the same plan as `command`, unjoined**.
+    ///
+    /// # Why a machine wants this and not `command`
+    ///
+    /// Because splitting a joined shell line back into steps is wrong the first time an argument contains
+    /// ` && `, and a consumer that does it will be wrong only for the inputs nobody tested. **A language whose
+    /// build is a pipeline gets one entry per stage here**, so a diagnostic can name the stage that failed
+    /// without guessing.
+    pub steps: Vec<String>,
     /// The artifact, or `None` for a dry run.
     pub artifact: Option<String>,
     /// The artifact's content digest, the identity used by the AOT cache.
@@ -2138,6 +2177,7 @@ mod tests {
             target: "wasm32-wasip2".to_owned(),
             profile: "release".to_owned(),
             command: "cargo build --release".to_owned(),
+            steps: vec!["cargo build --release".to_owned()],
             artifact: None,
             digest: None,
             size_bytes: None,
@@ -2160,6 +2200,7 @@ mod tests {
             target: "wasm32-wasip2".to_owned(),
             profile: "release".to_owned(),
             command: "cargo build --release".to_owned(),
+            steps: vec!["cargo build --release".to_owned()],
             artifact: Some("app.component.wasm".to_owned()),
             digest: Some("abc".to_owned()),
             size_bytes: Some(1234),

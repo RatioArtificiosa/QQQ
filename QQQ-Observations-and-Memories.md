@@ -34904,7 +34904,19 @@ Windows backslash normalization; a regression covers `/var`, `C:\\var`, `1:/var`
 and drive-relative `C:var`. The focused normalizer suite is rerun before the
 follow-up commit.
 
-*End of `QQQ-Observations-and-Memories.md`.*
+## §O-486 — CI caught a generated error-catalogue drift that the Rust gate missed
 
+Commit `86bd0f1` changed the `DeterminismUnsupported` (`QQQ-6008`) enum
+documentation, but `docs/errors.md` still carried the previous generated cause
+and remediation text. The local Rust gate remained green because it did not run
+`check_error_catalogue.py`; GitHub CI caught the drift in its cross-reference job,
+and the same checker failure caused the line-ending job's self-test aggregate to
+fail before it reached the EOL assertion. Regenerating with
+`python tools/gen_error_catalogue.py` restored the source-of-truth relationship;
+the checker now reports all 44 codes and its 8/8 self-test passes. **When an
+`ErrorCode` doc comment changes, generation and the catalogue checker are part of
+the final gate, not optional documentation cleanup.**
+
+*End of `QQQ-Observations-and-Memories.md`.*
 
 

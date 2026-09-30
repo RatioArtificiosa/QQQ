@@ -440,11 +440,9 @@ logs and issue trackers reference them indefinitely.
 
 ### `QQQ-6008` — `DeterminismUnsupported`
 
-**Cause.** Deterministic mode was requested for asynchronous execution, but the
-runtime does not yet provide a deterministic scheduler for that path.
+**Cause.** A requested execution-mode combination cannot provide the promised determinism guarantees.
 
-**Remediation.** Disable deterministic mode for asynchronous execution, or use
-the synchronous execution path until deterministic scheduling is implemented.
+**Remediation.** Disable deterministic mode for asynchronous execution, or use the synchronous execution path until deterministic scheduling is implemented.
 
 ```json
 { "code": "QQQ-6008" }

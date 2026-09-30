@@ -469,6 +469,12 @@ jobs:
       - name: Prove the evidence check catches a duplicate line and a newly unevidenced tick
         run: python tools/check_done_lines.py --self-test
 
+      - name: The admission rule for items and observations (PLAN-009, PLAN-015)
+        run: python tools/check_admission.py
+
+      - name: The admission rule's own cases
+        run: python tools/check_admission.py --self-test
+
       # `PLAN-001`: the checklist as machine-readable data. The tracked `tools/backlog.json` is what a
       # consumer reads instead of re-parsing markdown, and this fails when it has drifted from the
       # document -- the same shape as `corpus_at_rest.json` and `gen_llms_txt.py --check`.

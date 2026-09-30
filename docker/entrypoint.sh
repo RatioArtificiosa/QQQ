@@ -950,6 +950,8 @@ cmd_checks() {
     # existed are listed by name so that list can only shrink.
     python3 tools/check_done_lines.py
     python3 tools/check_done_lines.py --self-test
+    python3 tools/check_admission.py
+    python3 tools/check_admission.py --self-test
     # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
     python3 tools/gen_backlog.py --check
     python3 tools/gen_backlog.py --self-test
@@ -1122,7 +1124,7 @@ cmd_checks() {
     git -c safe.directory="${WORKSPACE}" -C "${WORKSPACE}" archive --format=tar HEAD \
         | tar -x -C "${_eol_guard_dir}"
     for _t in check_error_catalogue check_glossary check_reconciliation check_wit_reference \
-              check_tombstones check_checklist_counts check_done_lines check_advisories check_verified_facts; \
+              check_tombstones check_checklist_counts check_done_lines check_admission check_advisories check_verified_facts; \
                 do
         ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/${_t}.py" --self-test >/dev/null )
     done

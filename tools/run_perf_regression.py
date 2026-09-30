@@ -18,6 +18,7 @@ failure, never an automatic pass.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import http.client
 import json
 import os
@@ -48,6 +49,7 @@ EXPECTED_WORKLOADS = {
 LATENCY_METRICS = {"hello": "p99_nanos", "tailp99": "p99_nanos"}
 THROUGHPUT_METRICS = {"json": "requests_per_second", "multi": "requests_per_second"}
 SCHEMA_VERSION = 1
+MEMORY_TOLERANCE_BYTES = 1024 * 1024
 
 
 class PerfError(RuntimeError):
@@ -112,7 +114,21 @@ def environment_signature(environment: dict[str, Any]) -> str:
         value = environment.get(key)
         if value in (None, "", {}, []):
             raise PerfError(f"benchmark environment is missing `{key}`")
-    return json.dumps({key: environment[key] for key in required}, sort_keys=True)
+    memory_bytes = environment["memory_bytes"]
+    if not isinstance(memory_bytes, int) or isinstance(memory_bytes, bool) or memory_bytes <= 0:
+        raise PerfError("benchmark environment `memory_bytes` must be a positive integer")
+    comparable = {key: environment[key] for key in required if key != "memory_bytes"}
+    return json.dumps(comparable, sort_keys=True)
+
+
+def environments_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Compare stable runner identity exactly and allow only small memory telemetry drift."""
+
+    left_signature = environment_signature(left)
+    right_signature = environment_signature(right)
+    if left_signature != right_signature:
+        return False
+    return abs(left["memory_bytes"] - right["memory_bytes"]) <= MEMORY_TOLERANCE_BYTES
 
 
 def normalize_run(document: Any, source: str, implemented_items: set[str]) -> dict[str, Any]:
@@ -195,8 +211,11 @@ def metric_value(run: dict[str, Any], name: str, metric: str) -> float:
 def aggregate(runs: list[dict[str, Any]], profile: str, commit: str) -> dict[str, Any]:
     if not runs:
         raise PerfError("no benchmark runs were supplied")
-    signatures = {run["environment_signature"] for run in runs}
-    if len(signatures) != 1:
+    first_environment = runs[0]["environment"]
+    if any(
+        not environments_compatible(first_environment, run["environment"])
+        for run in runs[1:]
+    ):
         raise PerfError("benchmark runs disagree about their measured environment")
 
     metrics: dict[str, dict[str, Any]] = {}
@@ -219,7 +238,7 @@ def aggregate(runs: list[dict[str, Any]], profile: str, commit: str) -> dict[str
         "profile": profile,
         "commit": commit,
         "samples": len(runs),
-        "environment": runs[0]["environment"],
+        "environment": deepcopy(runs[0]["environment"]),
         "metrics": metrics,
         "budget_misses": sorted(set(budget_misses)),
         "measured_budget_items": sorted(
@@ -246,7 +265,7 @@ def compare(
         raise PerfError(
             f"baseline profile `{baseline.get('profile')}` does not match `{candidate['profile']}`"
         )
-    if baseline.get("environment") != candidate["environment"]:
+    if not environments_compatible(baseline.get("environment", {}), candidate["environment"]):
         raise PerfError(
             "baseline environment does not match the current runner; refresh it only after "
             "reviewing the runner/profile change"
@@ -461,7 +480,7 @@ def fixture_run(scale: float = 1.0) -> dict[str, Any]:
     environment = {
         "cpu_model": "fixture-cpu",
         "physical_cores": 4,
-        "memory_bytes": 1024,
+        "memory_bytes": 16 * 1024 * 1024 * 1024,
         "os": "fixture x86_64",
         "kernel": "fixture-kernel",
         "toolchains": {"rustc": "fixture"},
@@ -553,6 +572,20 @@ def self_test() -> int:
         0.20,
     ):
         raise AssertionError("throughput regression was accepted")
+    small_memory_drift = aggregate(runs, "fixture", "current")
+    small_memory_drift["environment"]["memory_bytes"] += 4096
+    if compare(baseline, small_memory_drift, 0.25, 0.20):
+        raise AssertionError("a page-sized runner memory fluctuation was treated as a profile change")
+    negative_memory_drift = aggregate(runs, "fixture", "current")
+    negative_memory_drift["environment"]["memory_bytes"] -= 4096
+    if compare(baseline, negative_memory_drift, 0.25, 0.20):
+        raise AssertionError("a negative page-sized runner memory fluctuation was treated as a profile change")
+    large_memory_drift = aggregate(runs, "fixture", "current")
+    large_memory_drift["environment"]["memory_bytes"] += MEMORY_TOLERANCE_BYTES + 1
+    expect_error(
+        "a materially different memory profile",
+        lambda: compare(baseline, large_memory_drift, 0.25, 0.20),
+    )
     mismatched = aggregate(runs, "other-profile", "current")
     expect_error("a profile mismatch", lambda: compare(baseline, mismatched, 0.25, 0.20))
     malformed = fixture_run()

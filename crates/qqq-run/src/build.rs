@@ -1317,11 +1317,24 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
                 describe_exit(status.code())
             )
         };
+        // **The partial output is still on disk, and nothing was saying so.** A pipeline that fails at
+        // step 2 leaves step 1's artifacts where step 1 put them, and `execute` returns before the artifact
+        // search, so nothing here deletes anything -- the information existed and was not reported. That is
+        // `§O-438`'s shape in a third place: a state that is real and indistinguishable from its absence.
+        //
+        // **And the remediation was unconditionally wrong for this case.** `run_steps` maps a *spawn*
+        // failure to `MissingTarget` and a *non-zero exit* to here, so a compiler error was being told to run
+        // `qqqai doctor`, which diagnoses an incomplete toolchain. It is the right next step when the tool is
+        // at fault, and the wrong one when the code is -- so the message says which question each answer
+        // settles rather than asserting the toolchain is incomplete.
+        let workdir = plan.cwd().display();
         return Err(
-            Error::new(ErrorCode::CompilationFailed, detail).with_remediation(
-                "the compiler's own output is above; `qqqai doctor` diagnoses an \
-             incomplete toolchain",
-            ),
+            Error::new(ErrorCode::CompilationFailed, detail).with_remediation(format!(
+                "the failing tool's own output is above. **Any artifact an earlier step produced is still \
+                 in `{workdir}`** -- nothing is deleted on failure, so a partial build can be inspected \
+                 there. If the tool itself is missing or too old, `qqqai doctor` diagnoses that; if the \
+                 tool ran and rejected the input, its message above is the diagnosis."
+            )),
         );
     }
 

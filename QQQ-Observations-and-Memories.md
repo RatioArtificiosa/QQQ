@@ -34035,6 +34035,79 @@ same property from opposite ends: how far a rule actually reaches.**
   write-tree` exactly matched delivered tree `13688c5fe0fd9cee2562924dbf53b911d49b6b2f`**"*. **Patch
   completeness proved by rebuilding the tree and comparing hashes -- not by trusting the patch.**
 
+## §O-458 — A self-test that must inject a valid-shaped id while its own source stays clean
+
+**`tools/sync_docs.py --self-test` fabricates an observation heading in a copy of the tree and requires
+`check_doc_claims` to report it.** Writing that fabricated id down is not possible, and the reason is three
+constraints pulling in different directions:
+
+1. **The injected id must look like a real observation.** Its resolver counts `## §O-NNN` headings, so an id
+   that does not match the pattern moves nothing and the case **measures nothing**.
+2. **The source file must not contain that literal.** `check_xrefs.py` rule 13 resolves by **plain substring
+   search over the working tree** -- not the git index -- so a literal `§O-9999` in `tools/sync_docs.py` is
+   reported as **a citation of an undefined observation**, and both the bridge and CI fail.
+3. **A placeholder does not solve (2).** `§O-TBD` was verified safe for `.scratch/` drafts, but **rule 13
+   matches the `§O-` prefix followed by digits**, so a bare `§O-` in a tracked file is still a candidate.
+   **The placeholder is safe against the definitional pattern and not against the citation pattern.**
+
+**`"## §O-" + "9999"` satisfies all three at once.** The file's bytes contain no matching literal; the copy
+receives a well-formed heading; and the case still measures what it says. **It is the same defence `.scratch/`
+drafts use, made robust against the rule that actually fires.**
+
+**And this was found the hard way.** The first fix was `t.replace("§O-9999", "§X-9999")` -- **unscoped** -- so
+it also rewrote the id the self-test *injects*. Case 1 then injected `## §X-9999`, which **cannot** match
+`§O-(\d+)`, so `check_doc_claims` correctly saw no change and **the self-test failed its own case 1**. **A bulk
+substitution with no count and no scope, inside the tool whose subject is exactly that class of defect** --
+and the self-test caught it, which is what a self-test is for (`§O-447`).
+
+**A third instance from the same hour, recorded because they are one lesson:** the tool's **first run against
+the real tree** reported `tools-python says 85, the tree has 86` -- **because adding the tool moved the tool
+count.** A tool that had read `git status` for changed *paths* would not have predicted that. **The drift loop
+row exists for it** (`any tools/*.py -> docs/AGENT-HANDBOOK.md, hand`) **and the run found it anyway.**
+
+## §O-459 — A ritual must be defined by its checkers, not by a list of changed paths
+
+**`tools/sync_docs.py` is the three-document sync ritual as one command** (`PLAN-016`), and the design decision
+worth recording is what it deliberately does **not** do: **it never reads `git status`.**
+
+**A tool that inspected changed paths would be a reimplementation of rules it does not own.** It would be only
+as wide as its path list and only as narrow as its patterns, and **the first rule it did not know about would
+be a silent gap** (`§O-282`). Instead:
+
+* **`--check` runs nine checkers and reports which disagree with the tree**, printing each verdict;
+* **`--record` regenerates through five named steps and re-checks**, printing what each step touched;
+* **`--self-test` fabricates two drifts in a copy of the tree, with a third case as the control.**
+
+**Asking each checker what it thinks makes the tool incapable of being stale about its own subject**, because
+its subject is their verdicts. **That is the difference between a ritual and a checklist of remembered steps:
+the first cannot forget.**
+
+### It is not in a gate, and that is deliberate
+
+**CI must not write.** `check_gate_parity.py` rule 5 requires every `tools/check_*.py` to be invoked in both
+gates, and this file is **not named `check_*` on purpose** -- wiring a writer into a gate would be worse than
+the drift it prevents. It is a developer's tool, and `--check` is the read-only half.
+
+### And it found two real drifts on its first run, both already pushed
+
+```
+STALE  docs/AGENT-HANDBOOK.md:119  `tools-python` says 85, the tree has 86
+FAIL   [13] ... is cited by tools/sync_docs.py but is not defined in Observations
+```
+
+**The first is one of the drift loop's own rows and the second is `§O-458`.** Two defects, in two different
+classes, in a tree this session had already pushed and believed clean -- **found by a tool on its first
+execution, before it had ever been trusted with anything.**
+
+### And the tick that landed it is the demonstration
+
+**Ticking `PLAN-016` moved `checklist-done` 261 -> 262 and `checklist-open` 321 -> 320 across two documents**,
+and the checklist is one of the three normative documents, so **its digest moved too**. `--check` reported
+exactly those two and nothing else; `--record` ran the five generators -- `SYNC OK -- 5 figure(s) updated`,
+`wrote tools\backlog.json`, `wrote llms-full.txt (207 KB)` -- and the re-check returned
+**`SYNC OK -- regenerated, and every checker now agrees with the tree`.** **The ritual's first real job was
+the change that created it.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

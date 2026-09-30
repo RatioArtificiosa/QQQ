@@ -4458,8 +4458,34 @@ Each language has eight required items. The parity matrix makes any gap visible.
     which every structural assertion in `qqq-abi` accepts and only a parser rejects. `§O-354`.
 - [ ] **TEST-011** Implement snapshot testing with a reviewable diff format.
   → §6.7 `qqqai test` — test runner
-- [ ] **TEST-012** Implement test isolation guarantees: no test can observe another test's state.
+- [x] **TEST-012** Implement test isolation guarantees: no test can observe another test's state.
   → §6.7 `qqqai test` — test runner
+  → Done: `qqqai test --isolate` runs **each test in its own empty working directory**, created by
+    `isolation_dir` under the project's `target/` and removed after the test whether it passed or failed.
+    The directory is per **test** and not per binary, because the failure this exists for is *between*
+    tests in one binary.
+  → **And the line that makes it real is not the flag.** `run_once` now spawns the **discovered
+    executable** with the test binary's own arguments, instead of `cargo test <name> -- …`. **Cargo gives
+    the test binary the package root as its CWD regardless of what the caller set**, so `.current_dir`
+    through Cargo was inert: measured with a two-test fixture, the marker the first test wrote was still
+    found under `--isolate`, a diagnostic showed the flag was `true`, and `isolation_dir` had created its
+    directory without error. `DiscoveredTest` carries the executable, which `discover` already had.
+  → Tests: `crates/qqq-run/tests/cli.rs` — **both directions**, which is why this is a measurement and not
+    a claim. `test_isolate_stops_one_test_seeing_another_tests_state` asserts that the hostile fixture
+    **fails** without the flag (so an inert fixture cannot pass), and
+    `test_isolate_gives_each_test_its_own_directory` asserts the same fixture **passes** with it.
+  → **Measured**: `cargo test -p qqq-run --test cli isolate` → **2 passed, 0 failed, 0 ignored**;
+    `cargo test --workspace --all-features` → `WORKSPACE=0`, 70 binaries, 0 failed;
+    `cargo clippy --workspace --all-targets --all-features -- -D warnings` → 0.
+  → **The scope is honest and belongs on this line**: `--isolate` is **off by default**, because Cargo's
+    convention is that a test binary's working directory is the package root and a fixture that reads a
+    file beside itself relies on that. This makes isolation **available and provable**; it does not claim
+    the default was isolated. `--fail-fast` and the rest combine with it freely (the item that would make
+    isolation unconditional is a decision about breaking Cargo's convention, not a flag).
+  → Corrected the same round, because it was the reason the cause stayed hidden: **three docs described
+    the run as direct when it went through Cargo** — `Runner::program`'s field doc, `discover`'s doc, and
+    `TEST-005`'s ticked `→ Done:` line. `Runner::run_args` is now **deleted**, because the compiler said
+    `field run_args is never read` — the same finding as the docstring above it.
 - [ ] **TEST-013** Implement benchmark-as-test: fail a build when a performance budget regresses.
   → §9.2 The performance budget
 - [x] **TEST-014** Implement the flaky-test detector.

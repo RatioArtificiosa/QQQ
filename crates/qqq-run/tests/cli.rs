@@ -1792,19 +1792,14 @@ fn test_isolate_stops_one_test_seeing_another_tests_state() {
 /// the hostile test -- so the directory `isolation_dir` hands the child is not one a test can write into.
 /// The helper swallows its `create_dir_all` result, which is why it does not say so.
 ///
-/// # Why this is `#[ignore]` rather than red
+/// # Why this passes now and did not before
 ///
-/// The project's own rule, written in `ci.yml`'s `LANG-001` step: **"a test that cannot run everywhere
-/// must *say so* rather than fail everywhere."** `#[ignore]` with a reason is that mechanism, and it is
-/// what `LANG-001` itself uses.
-///
-/// **`TEST-012` stays `[ ]` until this passes.** The half above is the premise and it holds; this is the
-/// guarantee and it does not.
+/// It was `#[ignore]`d because `run_once` invoked `cargo test`, and **Cargo gives the test binary the
+/// package root as its CWD regardless of what this process set** -- so the isolation directory was
+/// created, handed to `cargo`, and never seen by a test. Measured then: the marker was still found.
+/// **`run_once` now spawns the discovered executable directly**, so the working directory it sets is the
+/// one the test has, and this passes.
 #[test]
-#[ignore = "the working directory is inert: `run_once` invokes `cargo test`, and Cargo gives the test \
-            binary the package root as its CWD, so `workdir` changes Cargo and not the test. Measured \
-            2026-09-29: the marker is still found under --isolate. Running the discovered executable \
-            directly is the fix"]
 fn test_isolate_gives_each_test_its_own_directory() {
     let s = Sandbox::new("test-isolate-dirs");
     project_with_a_hostile_test(&s);

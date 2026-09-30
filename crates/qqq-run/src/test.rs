@@ -125,6 +125,23 @@ pub struct DiscoveredTest {
     /// `None` is honest rather than `0`: a language whose runner does not
     /// report line numbers is not a language whose tests are on line 0.
     pub line: Option<u32>,
+    /// The compiled test binary this test was listed from.
+    ///
+    /// # Why it is carried rather than recovered
+    ///
+    /// Because `discover` already has it -- `binaries` is `(executable, source)` pairs and the `--list`
+    /// call uses it -- and **the run needs the same value.** Before this, `run_once` went back through
+    /// `cargo test`, which put the test binary's working directory where Cargo decided rather than where
+    /// the caller asked, **making `--isolate` inert**: its directory was created, handed to `cargo`, and
+    /// never seen by a test.
+    ///
+    /// # Why the error cases carry it too
+    ///
+    /// They push a `DiscoveredTest` whose *name* is a diagnostic (`<could not list: …>`). Running that
+    /// name against its own binary fails immediately, which is the loud outcome -- **a target whose tests
+    /// silently vanish is a green run for work that did not happen**, and that is why those cases are
+    /// reported at all.
+    pub executable: std::path::PathBuf,
 }
 
 /// The outcome of running one test.
@@ -247,17 +264,17 @@ struct Runner {
     /// **This doc said "used only to *build*", which was true of the listing and read as though it
     /// covered the run.** Corrected rather than deleted, because the distinction is the defect.
     program: &'static str,
-    /// Arguments that run named tests -- **through `program`**, with the caveat above.
-    run_args: &'static [&'static str],
 }
 
 /// The runner for a language, if QQQ knows one.
 fn runner_for(language: &str) -> Option<Runner> {
     match language {
-        "rust" => Some(Runner {
-            program: "cargo",
-            run_args: &["test"],
-        }),
+        // **`run_args` is gone, and it was `&["test"]`.** It described the arguments `cargo` would be
+        // given to run a named test -- and `run_once` no longer invokes `cargo` at all, because doing so
+        // put the test binary's working directory where Cargo decided rather than where the caller asked.
+        // The compiler said `field run_args is never read`, which is the same finding as the docstring
+        // above it and the reason `--isolate` was inert.
+        "rust" => Some(Runner { program: "cargo" }),
         // The other four languages are declared in the manifest and have no
         // runner wired yet. Returning `None` rather than a guess means the
         // error names the language and the checklist item, instead of failing
@@ -335,6 +352,7 @@ pub fn discover(project_dir: &Path, language: &str) -> Result<Vec<DiscoveredTest
                 tests.extend(parse_libtest_list(
                     &String::from_utf8_lossy(&o.stdout),
                     source,
+                    Path::new(executable),
                 ));
             }
             // A binary that will not list its own tests is **reported**, not
@@ -344,11 +362,13 @@ pub fn discover(project_dir: &Path, language: &str) -> Result<Vec<DiscoveredTest
                 name: format!("<could not list: {}>", first_stderr_line(&o.stderr)),
                 file: source.clone(),
                 line: None,
+                executable: std::path::PathBuf::from(executable),
             }),
             Err(e) => tests.push(DiscoveredTest {
                 name: format!("<could not run {executable}: {e}>"),
                 file: source.clone(),
                 line: None,
+                executable: std::path::PathBuf::from(executable),
             }),
         }
     }
@@ -443,7 +463,7 @@ fn test_binaries(project_dir: &Path) -> BTreeMap<String, String> {
 /// listing for the whole project and split it across headers by count, which
 /// guessed wrong on a real project.
 #[must_use]
-fn parse_libtest_list(stdout: &str, file: &str) -> Vec<DiscoveredTest> {
+fn parse_libtest_list(stdout: &str, file: &str, executable: &Path) -> Vec<DiscoveredTest> {
     let mut tests: Vec<DiscoveredTest> = stdout
         .lines()
         .filter_map(|line| {
@@ -460,6 +480,7 @@ fn parse_libtest_list(stdout: &str, file: &str) -> Vec<DiscoveredTest> {
                 name: name.to_owned(),
                 file: file.to_owned(),
                 line: None,
+                executable: executable.to_owned(),
             })
         })
         .collect();
@@ -530,10 +551,16 @@ pub fn filter_tests(tests: &[DiscoveredTest], filter: Option<&str>) -> Vec<Disco
 /// already isolated -- one test, `--exact`, `--test-threads 1` -- so a file written into the shared
 /// `project_dir` was the whole of the remaining channel, and it is the channel `serve_policy`'s four
 /// patches to one port race were aimed at.
-fn run_once(workdir: &Path, program: &str, run_args: &[&str], name: &str) -> (bool, String) {
-    let output = Command::new(program)
-        .args(run_args)
-        .arg(name)
+fn run_once(workdir: &Path, test: &DiscoveredTest) -> (bool, String) {
+    // **The discovered executable, directly.** `cargo test <name> -- …` runs the binary with the package
+    // root as *its* working directory no matter what this process set, so `--isolate` could not work
+    // through it: measured with a two-test fixture whose first test writes a marker, the marker was still
+    // found under `--isolate`, and a diagnostic showed the flag was true and the directory was created.
+    //
+    // **The arguments are the test binary's own.** `cargo test` passes everything after `--` to the
+    // binary, so dropping cargo means the flags go straight in -- which they now do.
+    let output = Command::new(&test.executable)
+        .arg(&test.name)
         .arg("--")
         .arg("--exact")
         .arg("--nocapture")
@@ -551,9 +578,9 @@ fn run_once(workdir: &Path, program: &str, run_args: &[&str], name: &str) -> (bo
 
     match output {
         Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.success(), normalise_run_output(&text))
+            let mut run_stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+            run_stdout.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), normalise_run_output(&run_stdout))
         }
         Err(e) => (false, format!("could not run: {e}")),
     }
@@ -791,7 +818,6 @@ fn first_difference(outputs: &[String]) -> String {
 /// a reader most wants to look at and least wants to confuse with a later run's.
 fn run_one_test(
     project_dir: &Path,
-    runner: &Runner,
     test: &DiscoveredTest,
     trials: u32,
     isolate: bool,
@@ -807,7 +833,7 @@ fn run_one_test(
     let workdir: &Path = isolated.as_deref().unwrap_or(project_dir);
 
     for _ in 0..trials {
-        let (ok, run_stdout) = run_once(workdir, runner.program, runner.run_args, &test.name);
+        let (ok, run_stdout) = run_once(workdir, test);
         if ok {
             trials_passed += 1;
         }
@@ -884,7 +910,11 @@ fn isolation_dir(project_dir: &Path, test: &str) -> std::path::PathBuf {
 /// silently fails produces a history with holes, and a detector reading a history with holes reports the
 /// absence of a failure as evidence that there was none.
 pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result<TestOutput> {
-    let runner = runner_for(language).ok_or_else(|| {
+    // **`runner_for` is still checked, and the binding is not kept.** `discover` refuses a language with
+    // no runner, and this refuses it *before* doing any work, so the error comes back without compiling
+    // anything. The binding itself is gone because `run_one_test` runs the **discovered executable**
+    // rather than `cargo` -- which is what makes `--isolate` a directory a test can actually see.
+    runner_for(language).ok_or_else(|| {
         Error::new(
             ErrorCode::ManifestSchemaViolation,
             format!("no test runner for `{language}` yet"),
@@ -925,7 +955,7 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
     let mut outcomes = Vec::with_capacity(selected.len());
 
     for test in &selected {
-        let outcome = run_one_test(project_dir, &runner, test, trials, opts.isolate);
+        let outcome = run_one_test(project_dir, test, trials, opts.isolate);
 
         // When the trials disagreed, record **how** — the first differing line,
         // from the first two trials that differ.
@@ -1492,7 +1522,7 @@ benches::throughput: benchmark
 
     #[test]
     fn a_libtest_listing_is_parsed_into_named_tests() {
-        let tests = parse_libtest_list(LISTING, "tests/smoke.rs");
+        let tests = parse_libtest_list(LISTING, "tests/smoke.rs", Path::new("b"));
         let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1519,7 +1549,7 @@ benches::throughput: benchmark
     /// exceptions.
     #[test]
     fn every_test_in_one_listing_shares_that_binarys_source() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         assert!(!tests.is_empty());
         for t in &tests {
             assert_eq!(
@@ -1537,8 +1567,9 @@ benches::throughput: benchmark
     /// has no module prefix and lives in `tests/smoke.rs`.
     #[test]
     fn two_binaries_produce_two_sources() {
-        let unit = parse_libtest_list("tests::health: test\n", "src/app.rs");
-        let integration = parse_libtest_list("the_crate_builds: test\n", "tests/smoke.rs");
+        let unit = parse_libtest_list("tests::health: test\n", "src/app.rs", Path::new("b"));
+        let integration =
+            parse_libtest_list("the_crate_builds: test\n", "tests/smoke.rs", Path::new("b"));
 
         assert_eq!(unit[0].file, "src/app.rs");
         assert_eq!(integration[0].file, "tests/smoke.rs");
@@ -1550,7 +1581,7 @@ benches::throughput: benchmark
     /// takes different arguments — and the fix would look unrelated to the cause.
     #[test]
     fn benchmarks_are_not_treated_as_tests() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         assert!(
             !tests.iter().any(|t| t.name.contains("throughput")),
             "a benchmark is not a test: {tests:?}"
@@ -1564,7 +1595,7 @@ benches::throughput: benchmark
     #[test]
     fn an_unfamiliar_line_is_skipped_rather_than_failing() {
         let noisy = "some future preamble\napp::tests::works: test\nnonsense\n";
-        let tests = parse_libtest_list(noisy, "src/app.rs");
+        let tests = parse_libtest_list(noisy, "src/app.rs", Path::new("b"));
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "app::tests::works");
     }
@@ -1572,15 +1603,15 @@ benches::throughput: benchmark
     #[test]
     fn duplicate_names_are_collapsed() {
         assert_eq!(
-            parse_libtest_list("a::b: test\na::b: test\n", "x.rs").len(),
+            parse_libtest_list("a::b: test\na::b: test\n", "x.rs", Path::new("b")).len(),
             1
         );
     }
 
     #[test]
     fn an_empty_listing_yields_no_tests() {
-        assert!(parse_libtest_list("", "x.rs").is_empty());
-        assert!(parse_libtest_list("0 tests, 0 benchmarks\n", "x.rs").is_empty());
+        assert!(parse_libtest_list("", "x.rs", Path::new("b")).is_empty());
+        assert!(parse_libtest_list("0 tests, 0 benchmarks\n", "x.rs", Path::new("b")).is_empty());
     }
 
     // -- output normalisation -----------------------------------------------
@@ -1789,7 +1820,7 @@ benches::throughput: benchmark
 
     #[test]
     fn a_filter_matches_a_substring() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         let chosen = filter_tests(&tests, Some("health"));
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].name, "tests::health_is_available");
@@ -1803,7 +1834,7 @@ benches::throughput: benchmark
     /// expects. Recorded rather than left as a surprise.
     #[test]
     fn a_filter_matching_a_filename_selects_nothing_when_no_name_contains_it() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         // No test is *named* after the file it lives in.
         let chosen = filter_tests(&tests, Some("smoke"));
         assert!(
@@ -1817,7 +1848,7 @@ benches::throughput: benchmark
 
     #[test]
     fn no_filter_selects_everything() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         assert_eq!(filter_tests(&tests, None).len(), tests.len());
     }
 
@@ -1827,7 +1858,7 @@ benches::throughput: benchmark
     /// report a full green run for a selection the user did not ask for.
     #[test]
     fn a_filter_matching_nothing_selects_nothing() {
-        let tests = parse_libtest_list(LISTING, "src/app.rs");
+        let tests = parse_libtest_list(LISTING, "src/app.rs", Path::new("b"));
         assert!(filter_tests(&tests, Some("no_such_test")).is_empty());
     }
 
@@ -1878,6 +1909,7 @@ benches::throughput: benchmark
     fn outcome_with_trials(outputs: &[&str]) -> TestOutcome {
         TestOutcome {
             test: DiscoveredTest {
+                executable: std::path::PathBuf::new(),
                 name: "t".to_owned(),
                 file: "src/t.rs".to_owned(),
                 line: None,

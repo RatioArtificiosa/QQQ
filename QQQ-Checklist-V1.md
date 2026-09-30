@@ -658,6 +658,15 @@ Items are grouped below by **phase**, because dependency order matters more than
     gates; `check_done_lines.py` has four self-test cases including a control; `PLAN-016`'s ritual
     (`tools/sync_docs.py`) makes the derived-file half mechanical; and `check_gate_parity.py` rule 5 catches a
     checker that no gate invokes. **The gap is the PART OF SPEECH before the writing, not the writing.**
+  → **That part of speech is now written: [`docs/definition-of-ready.md`](definition-of-ready.md).** It states
+    the rule for items and for decisions in one sentence -- *what may be written down is a claim, and what must
+    be true before it is written is that its author can name the observation that would falsify it* -- and §2
+    makes *"clear"* checkable by naming the four admissible falsifiers (a number, a path with a line, a
+    command with its verdict, or an explicit statement that none exists, with the reason).
+  → **Not ticked, and the reason is the new document's own §6:** *"This document states it; no checker reads
+    it yet."* The rule is prose; `tools/check_admission.py` is named in §5 and not built. **Ticking here would
+    be a status reporting more than the evidence** -- the precedent is `PLAN-010`, `[ ]` with its executable
+    half already in a gate.
 - [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
   → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by
@@ -694,6 +703,11 @@ Items are grouped below by **phase**, because dependency order matters more than
     the document's own status line reading *"Living document -- **append-only for the decision log**; sections
     1-4 may be edited."* Measured citations: **45 in the observations, 6 in the checklist, 12 in the
     proposal.**
+  → **The decision-log half of the admission rule is now written too:** §3 of
+    [`docs/definition-of-ready.md`](definition-of-ready.md) requires a `§D-NNN` entry to state **what would
+    reverse it**, which is the same requirement §2 makes of an item -- *one rule serves both*, as this item's
+    own note argued. **Not ticked for the same reason as `PLAN-009`:** the rule is written and no checker
+    reads it.
   → **And a checker already validates them.** `tools/check_xrefs.py` rule **[10]** takes definitions with
     `^###\s+§(D-\d{3})\b` and reports any proposal citation with no matching definition. Its own comment
     records why the rule exists: *"`§O-249` was cited by eleven references across the checklist, a checker and

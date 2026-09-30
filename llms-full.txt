@@ -1,6 +1,6 @@
 # QQQ — full documentation
 
-21 of the 40 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 19 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
+21 of the 41 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 20 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
 
 ---
 

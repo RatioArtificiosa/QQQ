@@ -183,6 +183,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "contract",
     ),
     (
+        "docs/definition-of-ready.md",
+        "The admission rule for checklist items, decisions and observations: what may be written down, and "
+        "what must be true before it is.",
+        "agent",
+        "contract",
+    ),
+    (
         "schema/qqq-toml.schema.json",
         "JSON Schema for `qqq.toml`, generated from the Rust type that parses it.",
         "agent",
@@ -427,6 +434,7 @@ CORPUS_EXCLUDED: dict[str, str] = {
     "docs/contributing/anchors.md": "a contributor rule, not a fact about QQQ",
     "docs/contributing/claims-policy.md": "a contributor rule, not a fact about QQQ",
     "docs/wit-style-guide.md": "a contributor rule, not a fact about QQQ",
+    "docs/definition-of-ready.md": "a rule this repository applies to its own writing, not a fact about QQQ",
     "docs/development-bridge.md": "this repository's verification environment",
     "docs/languages/evidence/matrix.md": "generated from a CI job's execution reports, so the \
         numbers are a result rather than a fact about QQQ",

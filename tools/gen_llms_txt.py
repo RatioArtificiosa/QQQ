@@ -221,6 +221,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "use",
     ),
     (
+        "docs/languages/evidence/matrix.md",
+        "The generated parity matrix: each language against the HTTP probe vectors, with its "
+        "gap owners and review dates. Generated from a CI job, so the numbers move with it.",
+        "both",
+        "status",
+    ),
+    (
         "docs/languages/phase3.md",
         "Measured language probes, decisions, owned gaps and the path to production drivers.",
         "both",
@@ -414,6 +421,8 @@ CORPUS_EXCLUDED: dict[str, str] = {
     "docs/contributing/claims-policy.md": "a contributor rule, not a fact about QQQ",
     "docs/wit-style-guide.md": "a contributor rule, not a fact about QQQ",
     "docs/development-bridge.md": "this repository's verification environment",
+    "docs/languages/evidence/matrix.md": "generated from a CI job's execution reports, so the \
+        numbers are a result rather than a fact about QQQ",
     "docs/unsafe-audit.md": "a result about this repository's own source",
     "docs/stability.md": "a change-promise table, fetched by path",
     "docs/wasmtime-advisory-process.md": "an operational commitment, fetched by path",

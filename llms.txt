@@ -18,6 +18,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/rfc/live-components-and-aot.md](docs/rfc/live-components-and-aot.md) — Draft live-component and AOT design: verified baseline, architecture, lifecycle and phased delivery. (13 KB)
 - [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (9 KB)
 - [docs/live-components-handoff.md](docs/live-components-handoff.md) — How to run and review the live-component foundation, with scope limits and merge gates. (8 KB)
+- [docs/languages/evidence/matrix.md](docs/languages/evidence/matrix.md) — The generated parity matrix: each language against the HTTP probe vectors, with its gap owners and review dates. Generated from a CI job, so the numbers move with it. (836 B)
 
 ## The machine contracts (for an agent)
 

@@ -159,9 +159,11 @@ pub fn pinned_tools(language: &str) -> Option<Vec<ToolRequirement>> {
 ///
 /// Because they answer different questions. [`TOOLCHAINS`] answers *"what does this language need?"* -- and
 /// the delivery measured that for all five. This answers *"can we build it?"* -- and the answer is Rust,
-/// because the other four have no driver: their probes compiled, and Go's fails the 65,536-byte echo while
-/// Python's and TypeScript's fail least-privilege linking. **A stated toolchain is not a working driver, and
-/// conflating them is how an unexecuted language comes to be marked supported.**
+/// because the other four have no driver: their probes are deliberately narrower than the full language
+/// promise, and Go still fails the 65,536-byte echo. Python and TypeScript now pass the HTTP probe under
+/// an explicit `http.server` grant, but that is not a production driver or full conformance. **A stated
+/// toolchain is not a working driver, and conflating a narrow probe with support is how an unexecuted
+/// language comes to be marked supported.**
 ///
 /// # Why a list rather than a `match`
 ///
@@ -179,9 +181,10 @@ pub fn pinned_tools(language: &str) -> Option<Vec<ToolRequirement>> {
 /// assert!(qqq_run::build::DRIVEN.contains(&"rust"));
 /// ```
 ///
-/// **The other four are deliberately absent.** Their toolchains are stated in [`TOOLCHAINS`] and their probes
-/// compiled, but Go fails the 65,536-byte echo and Python and TypeScript fail least-privilege linking -- so
-/// adding one here is a claim that `qqqai build` can drive it, and that claim is not yet true.
+/// **The other four are deliberately absent.** Their toolchains are stated in [`TOOLCHAINS`], but the probe
+/// is not the production build driver: Go fails the 65,536-byte echo, while Python and TypeScript only pass
+/// the narrow HTTP probe. Adding one here is a claim that `qqqai build` can drive it, and that claim is not
+/// yet true.
 pub const DRIVEN: &[&str] = &["rust"];
 
 /// Which languages `qqqai build` supports today, as prose, **derived from [`DRIVEN`]**.
@@ -237,12 +240,12 @@ pub fn supported_phrase() -> String {
 /// `wit-bindgen-go` `0.7.0`; `componentize-py` `0.25.1`; WASI SDK 34 Clang `23.1.0-wasi-sdk` with `wasm-ld`;
 /// `wit-bindgen` `0.62.0`; `tsc` `5.9.3` with `ComponentizeJS` `0.23.0`.
 ///
-/// # Why Go and Python are here despite their probes FAILING
+/// # Why the foreign-language toolchains are here despite no production driver
 ///
-/// Because **their toolchains exist and their failures are elsewhere.** The `TinyGo` probe fails the
-/// 65,536-byte echo and `componentize-py`'s fails least-privilege linking -- **neither is a missing
-/// compiler**, and omitting them would say the tools are unknown when they are merely insufficient. **A
-/// requirement list is about what must be installed, not about whether the result links.**
+/// Because **the toolchain table answers installation, not production support.** The `TinyGo` probe fails
+/// the 65,536-byte echo; Python and TypeScript can now execute the narrow HTTP probe, but neither has a
+/// `qqqai build` driver or full capability/conformance parity. Omitting these tools would say they are
+/// unknown, while listing them does not overclaim that their production paths exist.
 const TOOLCHAINS: &[(&str, &[ToolRequirement])] = &[
     (
         "rust",

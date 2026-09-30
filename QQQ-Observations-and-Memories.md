@@ -34971,4 +34971,26 @@ reported **9/9** checker verdicts agreeing after regeneration. This is the
 missing enforcement half of PLAN-016; it does not change the meaning of
 `--record` or turn a clean sync into a release claim.
 
+## §O-491 — Measured language probes must grant the server type they actually import
+
+The language probe's empty `GrantSet` was not a valid inbound HTTP deployment
+for Python and TypeScript: both retain the imported `qqq:http/http` type
+instance even when the handler never calls outbound `send`. The host linker
+already binds that shared instance when `http.server` is granted, so the
+least-privilege correction belongs in the probe manifest, not in a wider host
+registration. C and AssemblyScript happened not to retain the same import,
+which had hidden the harness defect. With the server-only grant, the Windows
+reruns using `componentize-py` 0.25.1 and TypeScript 5.9.3 executed all five
+vectors; the full production drivers, bindings, conformance suites and
+pooling/compatibility claims remain open. The Linux CI artifact is the source
+of truth for replacing the interim Windows measurements in the language
+evidence matrix.
+
+The same rerun exposed a portability defect in the Python probe runner: npm's
+POSIX `node_modules/.bin` shims are not directly executable on Windows. The
+runner now selects `.cmd` on Windows and the POSIX shim elsewhere, with a
+self-test for both paths. **A measured failure must first be shown to reach
+the guest and its intended capability policy; a harness launch error or an
+invalid grant set is not language evidence.**
+
 *End of `QQQ-Observations-and-Memories.md`.*

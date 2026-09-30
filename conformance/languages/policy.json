@@ -22,14 +22,13 @@
       "failure_contains": "/echo expected 65536 bytes"
     },
     "python": {
-      "expected_probe": "failed",
+      "expected_probe": "passed",
       "owner": "QQQ language maintainer",
       "review_by": "2026-10-30",
       "cli_driver": "gap",
       "capability_parity": "gap",
       "reference_application": "gap",
-      "reason": "componentize-py imports unused qqq:http/http.send; least-privilege linking fails. Experimental; no pooling until linking and reset semantics are proven.",
-      "failure_contains": "function implementation is missing"
+      "reason": "HTTP probe passes under the explicit http.server grant; the production driver, full bindings, conformance suite and safe interpreter pooling remain open."
     },
     "c": {
       "expected_probe": "passed",
@@ -50,14 +49,13 @@
       "reason": "HTTP probe only; qqqai build driver, all-interface bindings and ten-workload reference app remain open."
     },
     "typescript": {
-      "expected_probe": "failed",
+      "expected_probe": "passed",
       "owner": "QQQ language maintainer",
       "review_by": "2026-10-30",
       "cli_driver": "gap",
       "capability_parity": "gap",
       "reference_application": "gap",
-      "reason": "TypeScript erased to JS and embedded with SpiderMonkey imports unused outbound HTTP send; least-privilege linking fails.",
-      "failure_contains": "function implementation is missing"
+      "reason": "HTTP probe passes under the explicit http.server grant; the production driver, full bindings, conformance suite and npm-compatibility claims remain open."
     }
   },
   "obligations": {

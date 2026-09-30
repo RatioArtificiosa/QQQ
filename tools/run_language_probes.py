@@ -34,6 +34,22 @@ def run(args, cwd, timeout=600, env=None):
     return result.stdout
 
 
+def npm_bin(name):
+    """Return a node_modules/.bin entry that is executable on this host.
+
+    npm installs POSIX shell shims alongside Windows `.cmd` shims.  The
+    former are the useful files on Linux, but launching one directly on
+    Windows raises ``WinError 193`` before the probe reaches its compiler.
+    Choosing the platform-specific wrapper here keeps the measured probe
+    identical while making the local and CI drivers agree about what was
+    actually executed.
+    """
+    path = SOURCE / 'node_modules/.bin' / name
+    if os.name == 'nt':
+        return path.with_suffix('.cmd')
+    return path
+
+
 def runtime_result(text):
     rows = [line.split(MARKER, 1)[1] for line in text.splitlines() if line.startswith(MARKER)]
     if len(rows) != 1:
@@ -61,10 +77,9 @@ def build(language, work):
     # Read the current canonical type declarations, not a stale vendored copy.
     shutil.copyfile(ROOT / 'wit/qqq-http.wit', wit / 'deps/qqq-http/qqq-http.wit')
     out = work / 'app.wasm'
-    npm = SOURCE / 'node_modules/.bin'
     if language == 'assemblyscript':
         shutil.copyfile(SOURCE / language / 'index.ts', work / 'index.ts')
-        run([npm / 'asc', 'index.ts', '--runtime', 'stub', '--use', 'abort=index/abort',
+        run([npm_bin('asc'), 'index.ts', '--runtime', 'stub', '--use', 'abort=index/abort',
              '--outFile', 'core.wasm', '--optimize'], work)
         wat = run(['wasm-tools', 'print', 'core.wasm'], work)
         anchor = '(export "handle" '
@@ -110,7 +125,7 @@ def build(language, work):
         # for production: componentize-py's seed is snapshotted into the guest.
         run(['componentize-py', '-d', wit, '-w', 'app', 'componentize', '--stub-wasi', 'app', '-o', out], work)
     else:
-        run([npm / 'tsc', SOURCE / 'typescript/app.ts', '--target', 'es2022',
+        run([npm_bin('tsc'), SOURCE / 'typescript/app.ts', '--target', 'es2022',
              '--module', 'es2022', '--outDir', work], work)
         run(['node', SOURCE / 'typescript/build.mjs', work / 'app.js', wit, out], work)
     run(['wasm-tools', 'validate', out], work)
@@ -126,8 +141,8 @@ def measure(language, destination):
                  'python': [['componentize-py', '--version']],
                  'c': [['clang', '--version'], ['wit-bindgen', '--version']],
                  'cpp': [['clang++', '--version'], ['wit-bindgen', '--version']],
-                 'assemblyscript': [[str(SOURCE / 'node_modules/.bin/asc'), '--version']],
-                 'typescript': [['node', '--version'], [str(SOURCE / 'node_modules/.bin/tsc'), '--version']]}[language]
+                 'assemblyscript': [[npm_bin('asc'), '--version']],
+                 'typescript': [['node', '--version'], [npm_bin('tsc'), '--version']]}[language]
     with tempfile.TemporaryDirectory(prefix=f'qqq-{language}-') as scratch:
         work = Path(scratch)
         try:
@@ -158,6 +173,9 @@ def measure(language, destination):
 
 
 def self_test():
+    expected_suffix = '.cmd' if os.name == 'nt' else ''
+    assert str(npm_bin('tsc')).endswith(f'tsc{expected_suffix}')
+    assert str(npm_bin('asc')).endswith(f'asc{expected_suffix}')
     good = MARKER + json.dumps({'cases_passed': 5, 'call_ms': [1] * 5})
     assert runtime_result(good)['cases_passed'] == 5
     for bad in ('', good + '\n' + good, MARKER + '{"cases_passed":0}'):

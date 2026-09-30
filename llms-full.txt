@@ -2674,11 +2674,11 @@ language support, capability parity, or the five reference applications.
 - **LANG-016 / OQ-002 / POS-006:** call the path **AssemblyScript (TypeScript-like)**.
   Preserve the existing manifest identifier `ts` for compatibility. Never label
   AssemblyScript as full TypeScript. The production CLI driver remains open.
-- **LANG-031 / OQ-003:** Python is **experimental**. The measured component cannot
-  link under the same least-privilege policy as the Rust HTTP handler. Its size and
-  failed cold preparation also prevent a first-class performance claim. Revisit
-  after the binding problem, correctness suite, and startup work pass; no date or
-  future milestone automatically promotes it.
+- **LANG-031 / OQ-003:** Python is **experimental**. Its narrow HTTP probe now
+  links and executes under the explicit `http.server` grant, but its size and
+  startup cost still prevent a first-class performance claim. Revisit after the
+  production bindings, correctness suite, and startup work pass; no date or future
+  milestone automatically promotes it.
 - **LANG-023:** **blocked-by-upstream-and-time**. The TinyGo failure below is a
   reproducible candidate for upstream investigation, not proof of an upstream root
   cause. No upstream issue or patch has been submitted by this task.
@@ -2720,14 +2720,19 @@ language compiled its real source. Five vectors exercise hello, UTF-8 output,
 404, empty POST and a **65,536-byte binary echo**. The last vector matters: a
 hello-only test missed the TinyGo defect.
 
+The corrected Python and TypeScript rows below are currently the Windows
+rerun; they are included to record the fixed behavior, not to make a
+cross-platform performance comparison. The next Linux CI artifact will replace
+those interim measurements and refresh `docs/languages/evidence/`.
+
 | Path | Component bytes | Observed result |
 |---|---:|---|
 | AssemblyScript 0.28.20 | 4,590 | 5/5 vectors passed |
 | TinyGo 0.42.0 + Go 1.27.1 | 592,028 | Four small cases pass; 64 KiB echo fails |
-| componentize-py 0.25.1 | 18,364,731 | Link rejected; 0 vectors executed |
+| componentize-py 0.25.1 | 18,360,111 | 5/5 vectors passed |
 | WASI SDK 34 C | 54,146 | 5/5 vectors passed |
 | WASI SDK 34 C++17 using C ABI bindings | 54,146 | 5/5 vectors passed |
-| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,099 | Link rejected; 0 vectors executed |
+| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,718 | 5/5 vectors passed |
 
 A prior sample in this session (before the final C optional-body fix) measured uncached engine/preparation at approximately **38.7 ms** for
 AssemblyScript, **49.3 ms** for C and **34.7 ms** for C++. First request samples
@@ -2735,9 +2740,11 @@ were approximately **0.49 / 0.44 / 0.38 ms**, respectively. Every call creates a
 fresh Store. These debug-host, single-sample probes are **not** production SLOs,
 percentiles, comparative throughput benchmarks, or interpreter-pool measurements.
 
-That earlier sample rejected Python after about **6.01 seconds** and TypeScript after about
-**8.51 seconds** of compilation/preparation. Those are *time to rejection*, not
-successful cold starts. Component sizes can change between builds because these
+The earlier Linux sample rejected Python after about **6.01 seconds** and TypeScript after about
+**8.51 seconds** because the probe supplied `GrantSet::empty()` to an inbound HTTP component. The
+corrected probe grants only `http.server`; the Windows rerun measured successful preparation in about
+**4.27 seconds** for Python and **5.03 seconds** for TypeScript. These are successful probe cold
+preparations, not production cold-start SLOs. Component sizes can change between builds because these
 engine-in-Wasm tools snapshot initialization; bit reproducibility is unproven.
 
 #### LANG-007: keep the original budget
@@ -2777,14 +2784,16 @@ suite, and LANG-013 remains open for the ten-workload reference app.
 
 The source is actual TypeScript, erased by `tsc` and embedded with SpiderMonkey.
 This exercises a different runtime from AssemblyScript. ComponentizeJS's Weval
-AOT option is disabled for this baseline. The resulting 12 MB component fails
-linking because the generator requests `qqq:http/http.send` even though this
-handler never calls it. Host outbound HTTP permission remains absent.
+AOT option is disabled for this baseline. The resulting 12 MB component imports
+the shared `qqq:http/http` type instance even though this handler never calls
+outbound HTTP; the probe supplies `http.server` only, so the host binds the
+instance without granting outbound permission. The corrected harness executes
+all five vectors.
 
 The benchmark therefore rejects first-class compatibility for now. Node/Bun API
-compatibility and the full npm ecosystem are not implied by successful TypeScript
-parsing. Before comparison: fix unused imports without widening grants, execute
-all vectors, then measure size, successful cold start and throughput with and
+compatibility and the full npm ecosystem are not implied by a passing HTTP probe.
+Before comparison: add a production driver and full bindings, execute the complete
+conformance suite, then measure size, successful cold start and throughput with and
 without Weval. Wasmtime native-code caching is a separate layer from Weval.
 
 ### Go / TinyGo: preserve the failing case
@@ -2811,15 +2820,17 @@ including the large payload; a compiler version check is insufficient.
 ### Python: experimental, with the startup work sequenced
 
 The spike generates bindings from the actual HTTP WIT and packages CPython with
-`componentize-py`. Its unused outbound `send` import prevents least-privilege
-linking. The probe's `--stub-wasi` traps WASI operations and snapshots the random
-seed. **This configuration is only for the deterministic HTTP probe**, not a
-production Python template or secure randomness source. Native extension wheels,
-networking and stdlib coverage are unverified.
+`componentize-py`. The generated component imports the shared HTTP type instance;
+the probe supplies `http.server` only, so the host binds it without granting
+outbound HTTP. The corrected probe executes all five vectors. Its `--stub-wasi`
+mode traps WASI operations and snapshots the random seed. **This configuration is
+only for the deterministic HTTP probe**, not a production Python template or
+secure randomness source. Native extension wheels, networking and stdlib coverage
+are unverified.
 
-LANG-025 is a completed spike with a negative correctness result. LANG-026/027
+LANG-025 is a completed spike with a narrow HTTP correctness result. LANG-026/027
 have probe scaffolding, not a production SDK/template. LANG-028/029 remain open.
-For LANG-030, first remove unnecessary imports and pass correctness. Then measure
+For LANG-030, first establish reset-safe interpreter reuse. Then measure
 source versus explicit `.pyc` bundling using the *guest interpreter's* magic/version,
 not the host Python version. Verify whether componentize-py's existing snapshot
 already pays that cost. Next introduce opt-in interpreter reuse only with reset,
@@ -2863,7 +2874,7 @@ zero npm audit findings. The preview2 shim is explicit because ComponentizeJS's
 published embedding imports it. No install scripts are run.
 
 The `language-probes` CI job builds all six paths, executes the real Rust host
-test, and uploads the results and generated matrix. A known failing probe remains
+test, and uploads the results and generated matrix. The TinyGo probe remains
 **FAILED**; the governance gate accepts only its recorded diagnostic, with a
 compiled artifact, current source hashes, tool versions, owner and review date.
 Expired review dates produce reminders without changing pass/fail overnight.
@@ -2891,9 +2902,9 @@ WIT types does not prove the host implements each capability.
    capability remains owned in the matrix. Hot-replace AS↔Go components through
    the existing live controller, retain old leases, reject a wrong ABI and prove
    AOT-cache execution produces the same output.
-4. **Python integration.** Resolve linking, measure successful cold start, then
-   `.pyc`/pooling experiments with explicit reset semantics; retain experimental
-   status until evidence justifies a new decision.
+4. **Python integration.** Add production bindings and a CLI driver, measure
+   successful cold start, then run `.pyc`/pooling experiments with explicit reset
+   semantics; retain experimental status until evidence justifies a new decision.
 5. **C/C++ integration and parity.** Complete CLI templates, capability bindings,
    tests and reference app. Promote per-capability cells only from real CI calls.
 

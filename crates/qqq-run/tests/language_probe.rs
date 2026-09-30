@@ -3,9 +3,25 @@
 
 use std::time::Instant;
 
-use qqq_cap::resolve::GrantSet;
+use qqq_cap::{manifest::Manifest, resolve::GrantSet};
 use qqq_host::{config::EngineConfig, LimitSet};
 use qqq_run::guest_handler::GuestApp;
+
+/// The probe is an inbound HTTP server, so its test manifest must grant the
+/// capability that makes the `qqq:http/http` type instance linkable.
+///
+/// C and `AssemblyScript` happen to lower the handler without importing that
+/// instance. Python and TypeScript retain the imported type interface, which
+/// exposed that the old empty grant set was testing an impossible deployment.
+/// Keeping the grant in the test (rather than widening the host linker) makes
+/// the probe exercise the same least-privilege policy as a real server.
+fn server_grants() -> GrantSet {
+    let manifest = Manifest::parse(
+        "[package]\nname = \"language-probe\"\nversion = \"0.0.0\"\n\n[capabilities.http]\nserver = true\n",
+    )
+    .expect("the probe manifest is static and valid");
+    GrantSet::from_manifest(&manifest)
+}
 
 #[test]
 #[ignore = "requires QQQ_LANGUAGE_COMPONENT from the language probe builder"]
@@ -18,7 +34,7 @@ fn compiled_language_handles_real_requests() {
     let app = GuestApp::with_capacity(
         engine,
         &bytes,
-        GrantSet::empty(),
+        server_grants(),
         LimitSet {
             memory_bytes: 128 * 1024 * 1024,
             fuel: 100_000_000,

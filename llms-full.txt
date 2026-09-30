@@ -1,6 +1,6 @@
 # QQQ — full documentation
 
-16 of the 34 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 18 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
+20 of the 38 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 18 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
 
 ---
 
@@ -282,6 +282,554 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`PRINCIPLES.md`](PRINCIPLES.md) f
 <p align="center">
   <sub><em>Run anything. Trust nothing.</em></sub>
 </p>
+
+---
+
+<!-- source: docs/rfc/live-components-and-aot.md -->
+
+## Live components and AOT preparation
+
+Status: implementation proposal; review required before merge.
+
+Owners: QQQ maintainer and reviewing local agent. Baseline:
+`d12ad758d35e807e28ce178f4bb2df28b946d174`.
+
+This RFC advances Proposal §4.6, §6.1, §6.6, §8.1 and §10.5 and checklist
+ARCH-015, HOST-002, HOST-013, HOST-021, DX-006, DX-007 and DX-008. It does
+not replace the existing proposal, renumber its items, or declare its targets met.
+The companion [delivery checklist](../live-components-checklist.md) is the
+acceptance ledger for this change. The repository's RFC review period applies to
+new guest contracts and changes to the artifact trust boundary.
+
+### Outcome
+
+A developer can rebuild a component while QQQ keeps its listener and host alive.
+New requests use the successfully prepared generation. An invocation already
+admitted retains its generation until it finishes. Failed builds and failed
+preparation leave the last working generation active. AOT preparation moves
+compilation out of request dispatch and reuses compatible native code between
+processes through Wasmtime's managed cache.
+
+The runtime abstraction is a component. Agents, application handlers and plugins
+are uses of components. There is no TUI in this repository. Applications may
+observe registry revisions and refresh their own displays. Existing Node/Bun
+applications must be adapted to supported WIT interfaces; installing them does
+not convert their runtime, dependencies or extension model.
+
+### Verified baseline
+
+* `PreparedComponent::compile` calls `wasmtime::component::Component::new`.
+* `GuestApp` instantiates a fresh store for every HTTP request. Dispatch closures
+  retain one fixed app. Routing policy already belongs to `qqq-serve`.
+* `dev` watches and rebuilds; it does not serve or activate replacements.
+* `preload` returns serialized native bytes without storing them. `build --aot`
+  accepts the flag and reports `aot_performed: false`.
+* Wasmtime cache configuration and explicit component deserialization are not wired.
+* `qqq:agent/descriptor` is authored WIT, not a runnable agent/session manager.
+* Stores have epoch deadlines, but the production host lacks an epoch ticker.
+* The build driver supports Rust. Other languages remain separate roadmap work.
+
+These statements describe the baseline, not the status of the implementation
+beside this RFC. Validation results belong in the delivery checklist and PR.
+
+### Architecture map
+
+```mermaid
+flowchart TD
+    Author[Source or component package] --> Watch[Watcher or explicit update]
+    Watch --> Build[Bounded build and preparation]
+    Build --> Policy[Manifest and capability validation]
+    Policy --> Cache[Managed native compilation cache]
+    Cache --> Candidate[Immutable candidate generation]
+    Candidate --> Publish[Revision-checked publication]
+    Publish --> Registry[Versioned component registry]
+    Registry --> Lease[Invocation or session lease]
+    Lease --> Instance[Fresh limited Wasmtime store]
+    Instance --> Dispatch[Existing WIT handler]
+    Publish --> Retire[Retirement tracking]
+    Lease --> Retire
+    Retire --> Drop[Release after last lease]
+```
+
+| Owner | Responsibility | Must not own |
+|---|---|---|
+| `qqq-host` | engine, compiled component, store limits, guest invocation | CLI paths, package download, UI |
+| `qqq-run` | explicit cache location, build, preparation, registry, dev orchestration | a second capability policy |
+| `qqq-serve` | listener, routing, authentication, request bodies, transport draining | compilation or guest package selection |
+| `qqq-pkg` | artifact integrity, signatures and content-addressed storage | engine-specific execution |
+| `qqq-abi` / `wit` | published guest contracts | application session state |
+
+Use one compatible engine for concurrent generations. Engine configuration is
+immutable; sharing it must not share mutable guest stores. Keep registry identity,
+artifact digest, package version, interface version and state schema separate.
+
+### Publication protocol
+
+1. Reserve an update revision before expensive preparation.
+2. Read one complete artifact into owned bytes and compute its digest.
+3. Validate the manifest and artifact against the unchanged effective policy.
+4. Compile or load through the managed cache, instantiate with limits, and validate
+   the full handler signature. Preparation must not call a business handler.
+5. Acquire the publication lock and compare the expected revision. A stale build
+   cannot supersede a newer request to update or remove the component.
+6. Publish the complete generation atomically. Release the lock before execution.
+7. Retain retired generations only for leases already admitted. Bound simultaneous
+   retired generations; refuse further updates when the retention limit is reached.
+
+Acquiring a generation lease is the admission boundary. A lease obtained before
+publication may begin executing afterwards; it still belongs to the old generation.
+Never reload the slot halfway through an invocation. Removal stops new admissions
+and permits outstanding leases to finish. Re-adding a name must not make an old
+preparation token valid again (the ABA problem).
+
+A short-held `Mutex` is sufficient. `ArcSwap` is a later measured optimization,
+not a correctness requirement. Listing uses stable ordering. Revisions allow
+observers to resynchronize after a missed event; audit events must not depend on
+a lossy UI notification channel.
+
+### Concurrency and resources
+
+Compilation and language builds run away from the socket executor. Guest calls
+remain bounded by fuel and an independently driven epoch clock. A registry lock must never
+span guest code, compilation, network I/O, audit persistence or waiting for drain.
+The update path has a separate nonblocking preparation guard; concurrent updates
+are refused for retry while a candidate is being prepared.
+The same logical component shares invocation capacity and audit ownership across
+generations. A replacement must not double `--workers` capacity or fork the audit
+chain. Candidate preparation is limited to one candidate per live app. Compiled-code
+memory is not yet governed by a process-wide byte budget; the checklist keeps
+that remaining resource limit explicit.
+
+References preserve lifetime; they do not guarantee termination. Long-lived
+streams/sessions need a deadline and cancellation policy. An epoch ticker provides
+preemption for Wasm execution, but host I/O requires its own timeouts. Do not claim
+that aborting a Tokio task cancels a synchronous host operation.
+
+### State and session map
+
+Stateless HTTP replacement is tier 1 and matches the current request isolation
+model. A session can pin its generation explicitly; that is continuity without
+migration. The runtime must never infer that copying linear memory is safe.
+
+Tier 2 requires the following guest protocol, subject to a separate WIT review:
+
+* `checkpoint`: bounded bytes plus schema identity and logical checkpoint number.
+* `restore`: accept an explicitly supported schema and report rejection without
+  publishing the candidate.
+* Quiescence: stop admission and wait for writers before checkpointing.
+* Ownership: fence the old writer before activating the restored writer.
+* Failure: resume the original owner if preparation fails before commit.
+* External effects: application idempotency/transactions are required; a registry
+  rollback does not reverse an HTTP request, database write or emitted message.
+
+Native resources, network connections and capability handles cannot be serialized
+into guest state. Recreate them under current grants. Checkpoint confidentiality,
+maximum size, supported schema transitions and timeout behavior must be tested.
+Persistent agent execution is a separate WIT contract from HTTP request dispatch.
+
+### Authority changes
+
+Code-only replacement preserves the effective manifest. Manifest changes must be
+detected before publication. Until a reviewed tier-3 coordinator exists, report
+that a restart is required and retain the last working configuration; do not
+announce a restart that never happened. A removed grant must not silently remain
+authorized for newly admitted work under a purportedly updated manifest.
+
+Dynamic installation is a privileged host operation, not a capability every guest
+receives. Package verification, policy approval and activation are distinct steps.
+The registry does not itself grant filesystem, network or installation authority.
+
+### AOT map
+
+Portable `.component.wasm` remains the source of truth. Wasmtime's managed cache
+is enabled only with an explicit directory selected by orchestration. That
+directory is host-owned native-code storage and must not be writable by guests
+or untrusted package authors. Do not read ambient user Wasmtime configuration.
+
+`build --aot` prepares native code and emits `.cwasm`
+plus metadata using atomic file replacement. The report becomes true only after
+successful output. Adding `--aot-cache` also warms the managed cache. An emitted artifact is a cache product, not portable Wasm and
+not a replacement for the original component.
+
+Startup and reload use the same configuration and cache. Cache identity includes
+source digest, exact Wasmtime version, target/CPU compatibility and compiler
+settings. A source package signature does not authenticate unrelated native bytes.
+Capability checks and linker construction still occur on cache hits.
+
+Explicit loading of arbitrary `.cwasm` needs a separate trusted-artifact wrapper:
+Wasmtime's deserialization API is unsafe. This RFC does not approve weakening
+`#![forbid(unsafe_code)]`. The existing exception process requires a safety
+argument and independent approval. Until that boundary is accepted, use the safe
+managed cache and reject standalone native input through the component loader.
+
+### Performance claims
+
+Measure source compilation, cache lookup/load, instantiation, first response,
+activation, drain, peak RSS and latency under concurrent requests separately.
+Publish hardware, engine/compiler versions, component identity, sample counts and
+percentiles. A nanosecond pointer operation does not imply an equally fast update.
+Background work still competes for CPU and memory. No target is marked met by this
+RFC. Bun already supports process-preserving hot reload; QQQ's contribution is its
+component, capability and lifecycle contract.
+
+### Rollout and rollback
+
+Land executable slices: managed cache and AOT output; registry/leases; served
+replacement; dev wiring; session protocols. Existing CLI output fields retain
+their meanings. Failed preparation is observable and does not replace the active
+app. For the first rollout, deployment rollback selects a previously verified
+artifact as a new generation. Keep the old portable artifact until rollback policy
+permits deletion. Repeated updates and removal must not retain generations forever.
+
+### Source integration map
+
+| File | Integration in this patch | Boundary preserved |
+|---|---|---|
+| `qqq-run/src/generations.rs` | Generic registry, reservations, immutable generation leases | Guest-independent orchestration |
+| `qqq-run/src/live.rs` | Typed preparation and live HTTP dispatch | Existing HTTP WIT |
+| `qqq-run/src/guest_handler.rs` | Shared pool/audit/epoch ownership and full signature check | Fresh store per request; original grants |
+| `qqq-host/src/instance.rs` | Explicit epoch ticks when a production clock is present | Legacy deadline default for other callers |
+| `qqq-host/src/abi.rs` | Correct Rust HTTP error binding to WIT variant | Existing published WIT stays unchanged |
+| `qqq-run/src/serve.rs` | Host controller plus per-invocation resolution | Existing listener, routing and authentication |
+| `qqq-serve/src/server.rs` | Offload synchronous guest calls; track and drain connections | Existing HTTP/WS transport contracts |
+| `qqq-run/src/dev.rs` | Rebuild, validate, activate and preserve manifest barrier | Existing watcher and manifest policy |
+| `qqq-run/src/aot.rs` | Explicit managed cache, native emission and provenance | Portable source; no unsafe native loader |
+| `qqq-run/src/build.rs`, `run.rs`, `main.rs` | Wire build/run/serve flags to actual behavior | Existing CLI fields and flag aliases |
+| `qqq-run/tests/live_components.rs` | Real ABI, sockets, overlap and cross-process cache evidence | Executable assertions |
+| `tools/check_live_dev.py`, `tools/fault_inject_live_components.py` | CLI end-to-end and four intentional defects | Evidence that integration is reached |
+
+Paths in this table are relative to `crates/` unless they start with `tools/`.
+The bundled RFC and checklist are additional documents; the root proposal remains
+the governing specification. The attached handbook was reconciled against current
+source rather than treated as proof that its historical status is current.
+
+### Smallest useful first PR and review split
+
+If the maintainer prefers incremental PRs, extract **registry + validated live HTTP
+controller + served-dispatch integration** first. Include the epoch driver, shared
+quota/audit ownership and HTTP binding correction that make that path safe and
+executable. Its real caller is `serve::Prepared.live`, exercised through the same
+listener by an embedding host. Acceptance requires old/new results, stale-token
+rejection, bad-candidate retention, shared quota, removal refusal and reclamation.
+A registry without a running caller is insufficient.
+
+Then review watcher/CLI activation, and finally managed AOT cache/emission as
+separate follow-ups. This delivery includes all three connected foundation slices
+for local review, with tests. It does not implement the persistent-agent protocol
+or package installer described in later phases. Agree those contracts before
+writing their guest-facing code; otherwise multiple agents would invent competing
+interfaces while the main roadmap is still open.
+
+### Review decision
+
+The local reviewing agent must distinguish implemented behavior, tests actually
+executed, proposed contracts and approvals outstanding. In particular, do not
+approve tier 2, explicit native-artifact loading or a performance SLO on the
+strength of tier-1 or managed-cache tests. See the delivery checklist for executable
+acceptance and the precise merge checklist.
+
+---
+
+<!-- source: docs/live-components-checklist.md -->
+
+## Live components and AOT delivery checklist
+
+Specification: [RFC](rfc/live-components-and-aot.md). Baseline:
+`d12ad758d35e807e28ce178f4bb2df28b946d174`. These work-package labels are local to
+this document; they do not create or renumber the root checklist IDs.
+
+An unchecked box means outstanding, including code awaiting execution evidence.
+Root items remain open until their whole contract is demonstrated.
+
+### Dependency map
+
+```mermaid
+flowchart LR
+    Policy[Existing manifest and capability policy] --> Loader[Shared component preparation]
+    Loader --> AOT[Managed cache and AOT output]
+    Loader --> Versions[Registry and generation leases]
+    Versions --> Serve[Live served replacement]
+    Serve --> Dev[Watcher-driven activation]
+    Versions --> Sessions[Session pinning]
+    Sessions --> Migration[Reviewed WIT migration protocol]
+    Trust[Approved native-artifact trust boundary] --> Native[Explicit cwasm loading]
+    AOT --> Native
+```
+
+### A. Preparation and AOT — HOST-002, HOST-013, HOST-021, ARCH-015
+
+- [x] One preparation path is called by startup and updates.
+- [x] Cache directory is explicit; no ambient configuration is loaded.
+- [x] Managed cache is used by the engine, not merely constructed.
+- [x] `build --aot` and `--emit-cwasm` produce native bytes and metadata.
+- [ ] Output is atomically published; temporary files are cleaned after failures.
+- [x] Source digest identifies the actual loaded bytes.
+- [x] Compatible cached code survives a process boundary and is actually reused.
+- [ ] Source/configuration changes cause misses; authority is checked on hits.
+- [ ] Absent/unwritable cache has a documented, tested behavior.
+- [x] No cache file is trusted solely because its name contains a digest.
+- [ ] Explicit native loading has its own approved safety/trust design.
+
+### B. Registry and lifecycle — DX-006, Proposal §6.6 / §8.1
+
+- [ ] Add, list, acquire, replace and remove have concrete callers and tests.
+- [x] A logical name, activation revision and artifact digest are separate values.
+- [x] Stable listing order and bounded registry/retirement capacity.
+- [x] Preparation occurs outside the publication lock.
+- [x] Publication checks a reservation token; stale completion is rejected.
+- [x] Remove/re-add does not resurrect a stale token.
+- [x] An invocation pins one generation from admission through completion.
+- [x] Old code remains alive for existing work and becomes reclaimable afterwards.
+- [x] Shared capacity and audit ownership span overlapping generations.
+- [x] Candidate exports are validated before publication, including signatures.
+- [x] Failed compilation, instantiation and validation preserve active service.
+
+- [ ] Bound aggregate compiled-code bytes and preparation CPU across all live apps.
+
+### C. Reachable development flow — DX-006, DX-008, DX-009
+
+- [x] `qqqai dev` starts the existing HTTP server and keeps it alive across edits.
+- [ ] Both flat and body-aware requests observe the same active generation.
+- [x] A keep-alive connection sees the new generation on its next invocation.
+- [x] Debounce accumulates all changed paths, including manifest changes.
+- [x] Build failures do not stop observation or replace the active generation.
+- [x] Manifest changes cannot silently change or retain authority under a false report.
+- [x] Reload status describes activation success, not only compiler success.
+- [ ] Ctrl-C/termination joins owned tasks and stops ticker/watch work.
+- [x] Unsupported options are refused rather than reported as performed.
+
+### D. Persistent agents and migration — DX-007, ABI-012
+
+- [ ] Agree and review a runnable agent world separately from descriptor WIT.
+- [ ] Session ownership and cancellation are explicit.
+- [ ] Checkpoint/restore has schema identity, limits and error contracts.
+- [ ] Quiescence prevents writes while taking a checkpoint.
+- [ ] Ownership fencing prevents two versions acting as the same session writer.
+- [ ] Migration failure resumes the original owner without losing its state.
+- [ ] External effects and incompatible schemas have explicit application policies.
+- [ ] Capabilities/native resources are recreated, never serialized as raw handles.
+
+### E. Tests that must detect the defect
+
+| Boundary | Positive test | Negative control / fault injection |
+|---|---|---|
+| Registry publication | A lease sees A; later acquisition sees B | Disable publication; B assertion fails |
+| Stale preparation | Newer reserved revision wins | Remove revision check; stale build test fails |
+| Drain | Old lease executes after replacement | Drop/redirect old lease; old-result assertion fails |
+| Reclamation | Retired weak reference expires | Retain generation; reclamation assertion fails |
+| Capacity | Two generations share one ceiling | Allocate separate pools; ceiling assertion fails |
+| ABI validation | Compatible component activates | Wrong signature rejected before first live request |
+| AOT | Real component executes after cached preparation | Disable cache attachment; reuse assertion fails |
+| Artifact output | Native bytes and metadata appear after `--aot` | Skip emission; file/content assertion fails |
+| Live HTTP | Same PID/listener answers A then B | Capture the old app permanently; socket test fails |
+| Authority | Unchanged policy on replacement | Candidate requesting an ungranted import is refused |
+
+Do not count a compile failure as successful fault injection. Record the failed
+assertion, restore the input byte-for-byte, and rerun the test. Do not deserialize
+attacker-controlled native bytes merely to see whether an unsafe function returns
+an error; test rejection before that boundary.
+
+### F. Merge evidence
+
+- [ ] All changed behavior has been executed with the pinned toolchain.
+- [x] `cargo fmt --all -- --check`.
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [ ] `cargo test --workspace --all-features` and relevant guest tests.
+- [ ] Repository Python checks, including self-tests and generated-doc checks.
+- [x] Security/dependency gates (`cargo deny check`, `cargo machete`).
+- [ ] CodeRabbit review completed; every pass/finding accounted for.
+- [ ] CI run belongs to the reviewed commit and required jobs passed.
+- [ ] RFC/safety approvals obtained for contract changes requiring them.
+- [x] Root checklist states measurements and remaining gaps accurately.
+
+The checked merge-evidence rows above have these recorded results on the unchanged
+Rust/runtime inputs of the live-component delivery (Rust 1.98.1):
+
+| Claim | Command and result |
+|---|---|
+| Formatting | `cargo +1.98 fmt --all -- --check` — exit 0 |
+| Lint | `cargo +1.98 clippy --workspace --all-targets --all-features --locked -- -D warnings` — exit 0 |
+| Dependency/security checks | `cargo deny check` — exit 0 (advisories, bans, licenses, sources); `cargo machete` — exit 0 (no unused dependencies) |
+| Root-checklist consistency | `python tools/check_xrefs.py`, `python tools/check_checklist_counts.py`, `python tools/check_done_lines.py`, `python tools/check_doc_claims.py`, `python tools/gen_backlog.py --check` — each exit 0 after regeneration; ARCH-015 and DX-006 remain open |
+
+The [handoff validation table](live-components-handoff.md#validation-performed-in-the-cloud-sandbox)
+records the separate failed and blocked gates. These results do not claim a clean
+full workspace suite or remote CI pass. Later language changes require their own
+affected checks; a checked row is evidence for this delivery, not a permanent exemption.
+
+### Evidence and outstanding coverage
+
+Completed boxes refer to this patch's local execution, not to a release or approval.
+The handoff records exact commands and limitations. Registry unit tests, real HTTP
+components, a persistent TCP connection, a real CLI rebuild and child-process cache
+checks provide the evidence. Four injected defects demonstrate the new assertions
+are live; existing repository fault injectors also pass and restore their inputs.
+
+The combined cache-configuration/authority criterion remains open: source misses
+and `fs.write` rejection are tested, but the full compatibility and import-policy
+matrix is not. Atomic file staging is implemented; I/O failure/cleanup injection
+remains outstanding. The generic registry's listing API has tests but no package
+management command yet. Full body-aware replacement and signal-driven shutdown
+need dedicated integration cases beyond the current shared-helper and bounded-exit
+coverage. All migration boxes remain open.
+
+### Local-agent review prompt
+
+Read the RFC, this checklist, the root proposal and checklist, and the supplied
+agent handbook. Inspect the actual branch diff against its stated baseline.
+Trace every new public API to a production caller. Reproduce the tests and inspect
+failure controls. Specifically challenge stale activation, remove/re-add races,
+overlapping resource limits, audit continuity, cache provenance, cache invalidation,
+guest signature checks, termination and manifest-policy changes. Compare the claims
+in documentation and PR text with actual outcomes. Preserve unrelated changes.
+
+Do not merge on the strength of a clean unit suite alone. Do not mark an unchecked
+phase complete because a neighboring feature works. Fix justified findings, rerun
+affected and mandatory gates, and report exact remaining blockers. Merge only after
+the maintainer's normal review and approval conditions are met. A draft PR is not a
+release and is not authorization to publish a release.
+
+---
+
+<!-- source: docs/live-components-handoff.md -->
+
+## Live components: review and operation
+
+Read the [proposal and architecture map](rfc/live-components-and-aot.md) and
+[acceptance checklist](live-components-checklist.md) first. The baseline is
+`d12ad758d35e807e28ce178f4bb2df28b946d174`.
+
+### What this patch adds
+
+| Surface | Behavior |
+|---|---|
+| `Registry<T>` | Bounded named generations; reservations; stale-update rejection; removal; leases; revision/list APIs |
+| `LiveApp` | Validated HTTP component replacement under the original grants, engine, audit chain and aggregate quota |
+| `serve::Prepared.live` | A host-side controller; existing dispatch closures resolve a generation per request |
+| `qqqai dev` | Initial build, HTTP listener, watched rebuild, candidate validation and activation; last good version survives failed reload |
+| `qqqai build --aot` | Native compilation, content-addressed `.cwasm` plus JSON provenance in `target/qqq/aot/` |
+| `--aot-cache PATH` | Explicit Wasmtime cache for `build`, `run` and `serve`; `build` also enables AOT emission |
+| HTTP execution | Blocking guest calls leave the socket executor; generation leases own their execution; shared epoch timer bounds guest CPU work |
+| Shutdown | Connection tasks are tracked, reaped and given a drain deadline |
+
+The registry is a Rust embedding API. Independently created `GuestApp` families
+need dedicated engines: each family owns its epoch clock. Replacements share
+that engine and clock through explicit ownership, without a global registry. This patch does **not** expose a remote
+installation endpoint, scan arbitrary package directories, implement a runnable
+agent WIT world, or migrate persistent guest state. It does not add language
+compilers beyond the existing Rust build driver. Compatible components from other
+toolchains must implement the existing WIT contract.
+
+### Try the implemented path
+
+Use the repository's Rust 1.98 toolchain, `wasm32-wasip2` target and `wasm-tools`.
+From a QQQ project with a valid manifest and HTTP component:
+
+```sh
+qqqai dev --host 127.0.0.1 --port 3000
+## Edit guest source. Successful rebuilds activate without rebinding the listener.
+```
+
+`--once` remains build-only. The initial build must succeed. Unsupported live-dev
+options are refused. A manifest edit requires restart and prevents later source
+edits from activating under the old policy. It does not silently widen grants.
+
+For native compilation and reuse, select an absolute cache directory owned by the
+runtime operator, outside guest-writable paths:
+
+```sh
+qqqai build --release --aot --aot-cache /absolute/operator-owned/qqq-cache
+qqqai serve --aot-cache /absolute/operator-owned/qqq-cache
+```
+
+Without `--aot-cache`, AOT emission still happens, but there is no persistent
+execution cache. `run` enables debug information; `serve` does not. Their cache
+entries may differ. Wasmtime controls engine/configuration/CPU compatibility;
+the JSON fingerprint is diagnostic metadata, not an authorization mechanism.
+
+On Unix, cache ownership and writable ancestors are checked; on Windows the
+operator must protect directory ACLs. Cached execution with `fs.write` guests is
+refused until path-aware exclusion is available. Missing cache directories are
+created; unusable explicit directories cause an error. No ambient Wasmtime cache
+configuration is read. Downloaded `.cwasm` is never automatically deserialized.
+
+### Validation performed in the cloud sandbox
+
+Environment: Amazon Linux x86_64, Rust 1.98.1 (repository channel `1.98`),
+Wasmtime 48.0.3 from unchanged `Cargo.lock`, Python 3.12.14, wasm-tools 1.259.0.
+
+| Check | Observed result |
+|---|---|
+| Workspace tests, all features | 2,761 passed, 1 failed, 7 ignored before stopping; workspace doctests not reached |
+| Failed workspace test | Existing `qqq-sys` Landlock enforcement case: sandbox kernel reports incompatible access rights; security gate remains failed |
+| `qqq-run` all features, including doctests | 780 passed, 5 ignored; subsequent narrow live-component check covers the final dispatch/cache-child test edits |
+| Normally ignored `qqq-run` tests | All 5 executed and passed with guest toolchain available |
+| Live component integration suite | 8 passed: real calls, wrong ABI, old leases, shared quota, epoch interruption, removal, keep-alive replacement and child-process AOT cache |
+| Real CLI development/AOT check | Passed after final runtime changes |
+| New fault injections | 4 defects detected by failing assertions; exact bytes restored |
+| Existing fault-injection gates | All 8 scripts passed; repository restore verification passed |
+| Format, all-target/all-feature Clippy | Passed |
+| Dependency/security checks | `cargo deny check` and `cargo machete` passed; unchanged manifests/lockfile |
+| API documentation allowance | Passed: 156 doctests; 2,105 remaining undeclared examples within existing allowance |
+| Independent CodeRabbit review | Enabled after initial delivery; the two minor findings and two follow-up major test-harness findings have fixes. Consult the delivery review report for the final pass on the reviewed patch |
+| Container check | Blocked: `docker info` cannot reach a daemon; no privileged daemon started |
+| Remote CI and other operating systems | Not executed; must pass on the exact reviewed commit before merge |
+
+These counts come from separate commands and must not be added as unique tests.
+The later narrow checks reuse unaffected earlier workspace results. Python static,
+generated-document and self-test gates are also run locally; the delivery report
+records their final outcomes. The docs-index self-test now checks a hypothetical
+8 GiB length without allocating 8 GiB; its real-byte and line-ending checks remain.
+
+The patch is **not merge-ready** while the Landlock gate and
+required CI/platform gates are unresolved. Independent review findings must also be resolved. No performance SLO has been measured.
+The local maintainer must also follow the repository's issue/RFC review process;
+new contracts requiring an RFC have a minimum seven-day public review period.
+
+### Review gates
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+python tools/check_live_dev.py
+python tools/fault_inject_live_components.py
+cargo test -p qqq-run --all-features --locked --test live_components
+cargo deny check
+cargo machete
+```
+
+Run the repository's remaining Python, guest, container and platform CI gates as
+declared in `.github/workflows/ci.yml`. The fault injector temporarily changes
+source files and restores their exact bytes; run it without concurrent builds.
+Its success requires a failing assertion, not a compiler failure.
+
+### Follow-up PR boundaries
+
+1. **This foundation:** validate and merge stateless replacement, lifecycle and
+   AOT preparation only after its gates pass.
+2. **Package installation:** manifest/version metadata, integrity/signature policy,
+   declared capabilities, staging transaction, serialized updates and status API.
+   Test partial installs, unauthorized changes, update races and removal.
+3. **Persistent agents:** reviewed runnable world; explicit session ownership,
+   cancellation and generation pinning. Test streams and long-lived resources.
+4. **State migration:** schema negotiation, bounded checkpoint/restore, quiescence,
+   writer fencing and rollback before commit. Test failures at every transition.
+5. **Trusted native distribution:** only after an approved safety boundary and
+   compatibility/provenance policy. Preserve the safe portable-WASM fallback.
+
+WASM isolation, background compilation and reference counting do not guarantee
+zero latency, zero leaks or recovery from every host failure. Epochs interrupt
+guest code; blocking host imports need separate I/O deadlines. A registry rollback
+cannot undo a guest's external side effects. Performance claims need measurements.
+
+### Local agent instruction
+
+Audit the implementation against the proposal, checklist and supplied handbook.
+Reproduce each completed check; exercise the executable failure controls. Review
+the exact commit and CI results, then fix justified findings. Keep unchecked
+roadmap work unchecked. Obtain the normal maintainer and RFC approvals before
+merging; this draft is not a release or a claim that persistent agents are complete.
 
 ---
 
@@ -1929,6 +2477,252 @@ When a class moves from out-of-scope to defended, it moves to
 documents are checked against each other by `tools/check_security_scope.py`, because
 a threat model that disagrees with the security policy means one of them is wrong and
 neither says which.
+
+---
+
+<!-- source: docs/languages/phase3.md -->
+
+## Phase 3: measured language scaffolding
+
+**Status: experimental probes, 2026-09-30. M5 is not met.** This increment implements
+repeatable builds and execution evidence before adding production language drivers.
+`qqqai build` still supports Rust only. `qqqai new --lang ts/go/python/cpp` still
+reports the existing placeholder status. Do not market these probes as complete
+language support, capability parity, or the five reference applications.
+
+### Decisions taken
+
+- **LANG-016 / OQ-002 / POS-006:** call the path **AssemblyScript (TypeScript-like)**.
+  Preserve the existing manifest identifier `ts` for compatibility. Never label
+  AssemblyScript as full TypeScript. The production CLI driver remains open.
+- **LANG-031 / OQ-003:** Python is **experimental**. The measured component cannot
+  link under the same least-privilege policy as the Rust HTTP handler. Its size and
+  failed cold preparation also prevent a first-class performance claim. Revisit
+  after the binding problem, correctness suite, and startup work pass; no date or
+  future milestone automatically promotes it.
+- **LANG-023:** **blocked-by-upstream-and-time**. The TinyGo failure below is a
+  reproducible candidate for upstream investigation, not proof of an upstream root
+  cause. No upstream issue or patch has been submitted by this task.
+- **LANG-024:** **blocked-by-upstream-and-time**. Initial assessment is 2026-09-30;
+  quarterly reassessment is due **2026-12-30**. Installing current standard Go is
+  not evidence that QQQ's component ABI works on its runtime.
+
+All open rows have the role owner **QQQ language maintainer** in
+`conformance/languages/policy.json`; technical gaps are due for review 2026-10-30.
+These are review dates, not promises of implementation or assigned individuals.
+
+### The map
+
+```mermaid
+flowchart LR
+    W[Canonical wit/qqq-http.wit] --> B[Language-specific binding/build steps]
+    S[Committed language probe sources] --> B
+    B --> C[Portable component]
+    C --> V[wasm-tools validation]
+    V --> R[QQQ GuestApp: fresh Engine and Store]
+    R --> T[Same five HTTP vectors]
+    T --> E[JSON: hashes, versions, size, timings, failures]
+    E --> P[Parity gate: owned gaps and regression detection]
+    P --> A[CI matrix artifact]
+    C -. future CLI driver .-> D[qqqai build and dev]
+    D -. existing host machinery .-> H[Prepared live generation / managed AOT cache]
+```
+
+The probe runner is `tools/run_language_probes.py`; the real host executor is
+`crates/qqq-run/tests/language_probe.rs`. No interpreter is added to the Rust host,
+no host capability is widened, and no native artifact deserialization is added.
+The existing hot-swap/AOT implementation remains the integration boundary.
+
+### Measurements and what they mean
+
+Measured on the Amazon Linux x86_64 sandbox, Rust 1.98.1, Wasmtime 48.0.3.
+`docs/languages/evidence/` contains the source-hashed execution records. Each
+language compiled its real source. Five vectors exercise hello, UTF-8 output,
+404, empty POST and a **65,536-byte binary echo**. The last vector matters: a
+hello-only test missed the TinyGo defect.
+
+| Path | Component bytes | Observed result |
+|---|---:|---|
+| AssemblyScript 0.28.20 | 4,590 | 5/5 vectors passed |
+| TinyGo 0.42.0 + Go 1.27.1 | 592,028 | Four small cases pass; 64 KiB echo fails |
+| componentize-py 0.25.1 | 18,364,731 | Link rejected; 0 vectors executed |
+| WASI SDK 34 C | 54,146 | 5/5 vectors passed |
+| WASI SDK 34 C++17 using C ABI bindings | 54,146 | 5/5 vectors passed |
+| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,099 | Link rejected; 0 vectors executed |
+
+A prior sample in this session (before the final C optional-body fix) measured uncached engine/preparation at approximately **38.7 ms** for
+AssemblyScript, **49.3 ms** for C and **34.7 ms** for C++. First request samples
+were approximately **0.49 / 0.44 / 0.38 ms**, respectively. Every call creates a
+fresh Store. These debug-host, single-sample probes are **not** production SLOs,
+percentiles, comparative throughput benchmarks, or interpreter-pool measurements.
+
+That earlier sample rejected Python after about **6.01 seconds** and TypeScript after about
+**8.51 seconds** of compilation/preparation. Those are *time to rejection*, not
+successful cold starts. Component sizes can change between builds because these
+engine-in-Wasm tools snapshot initialization; bit reproducibility is unproven.
+
+#### LANG-007: keep the original budget
+
+Three clean guest-target-directory builds through `qqqai build --release`, with
+cached dependency downloads and eight build jobs, took **15.68 / 15.02 / 15.01 s**.
+Each produced a **167,388-byte** Rust component. The app is **2,726 lines**, not the
+required 10,000. Therefore the **≤20 s / 10k LOC budget remains open**. Earlier
+25.34-second evidence is retained in the root checklist; this is a different
+measurement, not a retroactive correction or a raised limit.
+
+The native GNU release host binary is **26,382,040 bytes** and gzip level 9 is
+**8,073,848 bytes**, below the unchanged **60,000,000 / 25,000,000-byte** limits.
+Command: `cargo build --release --locked -p qqq-run -j 2`, then byte count and
+`gzip.compress(data, compresslevel=9, mtime=0)`. This is not the production image
+measurement. Docker is unavailable in this sandbox; its existing gate stays open.
+
+### AssemblyScript: narrow and explicit
+
+AssemblyScript uses a TypeScript-like syntax but a different type system, numeric
+model, standard library and runtime. This probe provides no Node/Bun modules,
+DOM, arbitrary npm compatibility, dynamic JavaScript objects or general async I/O.
+The name is decided; full TypeScript is a separate experimental pipeline.
+
+There is no AssemblyScript generator in the installed `wit-bindgen` CLI. The
+probe includes a **narrow canonical HTTP ABI adapter**, with a SHA-256 guard on
+the canonical WIT file. It compiles with a stub allocator, renames exactly one
+export through `wasm-tools`, embeds the WIT and componentizes the result. A WIT
+change fails closed and requires adapter review. This is not LANG-010's general
+binding generator. Stub allocations rely on QQQ's fresh Store per call and its
+memory/fuel limits; reuse of that instance would need an allocator/reset design.
+
+LANG-009/010/011 are partial scaffolding. LANG-012 remains open for the full
+suite, and LANG-013 remains open for the ten-workload reference app.
+
+#### Full TypeScript evaluation (LANG-015)
+
+The source is actual TypeScript, erased by `tsc` and embedded with SpiderMonkey.
+This exercises a different runtime from AssemblyScript. ComponentizeJS's Weval
+AOT option is disabled for this baseline. The resulting 12 MB component fails
+linking because the generator requests `qqq:http/http.send` even though this
+handler never calls it. Host outbound HTTP permission remains absent.
+
+The benchmark therefore rejects first-class compatibility for now. Node/Bun API
+compatibility and the full npm ecosystem are not implied by successful TypeScript
+parsing. Before comparison: fix unused imports without widening grants, execute
+all vectors, then measure size, successful cold start and throughput with and
+without Weval. Wasmtime native-code caching is a separate layer from Weval.
+
+### Go / TinyGo: preserve the failing case
+
+Use `wit-bindgen-go 0.7.0` and `go.bytecodealliance.org/cm 0.3.0`. The general
+`wit-bindgen 0.62.0 go` generator is a different path and is not substituted here.
+The runner adds the **pinned TinyGo distribution's WASI CLI imports** required by
+its runtime, alongside QQQ's unchanged HTTP contract.
+
+TinyGo uses the target's default **precise GC and asyncify scheduler**. It is not
+standard Go's runtime; stdlib, reflection, networking and scheduler behavior must
+be verified package by package. Guest GC still exists even though the host is Rust.
+
+The 64 KiB vector fails with `404` instead of `200`. A diagnostic probe showed a
+corrupted URL with method `post` intact; the smaller vectors succeed. Allocation
+or GC interaction during canonical ABI lowering is a **hypothesis**, not a proven
+root cause. Keep this reproducer before investigating the generator, TinyGo's
+`cabi_realloc`, and argument lifetime. Do not close M5 or disable GC to hide it.
+
+Reproduce: `python tools/run_language_probes.py --language go`. The nonzero exit
+and report must be preserved. Quarterly standard-Go work must run the same suite,
+including the large payload; a compiler version check is insufficient.
+
+### Python: experimental, with the startup work sequenced
+
+The spike generates bindings from the actual HTTP WIT and packages CPython with
+`componentize-py`. Its unused outbound `send` import prevents least-privilege
+linking. The probe's `--stub-wasi` traps WASI operations and snapshots the random
+seed. **This configuration is only for the deterministic HTTP probe**, not a
+production Python template or secure randomness source. Native extension wheels,
+networking and stdlib coverage are unverified.
+
+LANG-025 is a completed spike with a negative correctness result. LANG-026/027
+have probe scaffolding, not a production SDK/template. LANG-028/029 remain open.
+For LANG-030, first remove unnecessary imports and pass correctness. Then measure
+source versus explicit `.pyc` bundling using the *guest interpreter's* magic/version,
+not the host Python version. Verify whether componentize-py's existing snapshot
+already pays that cost. Next introduce opt-in interpreter reuse only with reset,
+GC, error recovery, isolation and cross-request data-leak tests. QQQ's current pool
+limits concurrent requests; it does **not** reuse Python interpreter instances.
+No `.pyc` or pooling speedup is claimed or implemented in this increment.
+
+### C and C++
+
+The build uses WASI SDK 34's Clang 23.1.0-wasi-sdk, its `wasm-ld`, sysroot and
+component linker, with `--target=wasm32-wasip2 -mexec-model=reactor`. System Clang
+alone is insufficient. `wit-bindgen 0.62.0 c` generates headers, glue and the
+component-type object from canonical WIT; all three are used. C++17 consumes this
+C ABI with the header's C linkage. This is a real C++ compiler invocation, but
+not a separate high-level C++ SDK or a C++-specific stdlib/exception test.
+
+Both paths pass the five HTTP probes. LANG-033/034/035 are partial pending
+production CLI integration and wider bindings. LANG-036/037 remain open for full
+conformance and the ten-workload app. No native shared-library loading is used.
+
+### Run locally and in CI
+
+Required: repository Rust toolchain, `wasm-tools 1.259.0`, Node 24.14.1, Go 1.27.1,
+Python 3.12+, and the compiler versions above. Linux x86_64 archive installation:
+
+```sh
+python conformance/languages/install_toolchains.py /absolute/new/tool-prefix
+## Add the three extracted compiler bin directories to PATH (see the CI job).
+go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0
+pip install componentize-py==0.25.1
+npm ci --ignore-scripts --prefix examples/language-probes
+python tools/run_language_probes.py --language assemblyscript
+## Repeat for go, python, c, cpp, typescript; retain nonzero exits and JSON reports.
+python tools/check_language_parity.py --results target/language-probes \
+  --matrix target/language-probes/matrix.md
+```
+
+The npm lockfile pins the full tree. A Weval 0.5.0 override removes the vulnerable
+archive-extraction dependency from an older transitive copy; the tested tree has
+zero npm audit findings. The preview2 shim is explicit because ComponentizeJS's
+published embedding imports it. No install scripts are run.
+
+The `language-probes` CI job builds all six paths, executes the real Rust host
+test, and uploads the results and generated matrix. A known failing probe remains
+**FAILED**; the governance gate accepts only its recorded diagnostic, with a
+compiled artifact, current source hashes, tool versions, owner and review date.
+Expired review dates produce reminders without changing pass/fail overnight.
+A new failure, missing compiler, stale result, missing report, vacuous test, or an
+unexpected success fails the gate for review. CI has been wired but **has not run
+remotely** in this task. Local equivalent probes and checker controls have run.
+
+LANG-039/040 remain partial: this generates a measured **HTTP probe matrix** and
+checks all 40 obligations; the existing `conformance/suite.json` still owns the
+full language × capability matrix. Its four non-Rust rows remain gaps. Declaring
+WIT types does not prove the host implements each capability.
+
+### Next implementation increments and acceptance gates
+
+1. **Resolve M5 blockers first.** Fix or isolate TinyGo's large-payload failure;
+   build AS bindings from a parsed WIT model instead of expanding handwritten ABI
+   layouts. Prove absent capabilities stay absent. Preserve negative reproducers.
+2. **Production drivers and scaffolds.** Extend `build::toolchain_for`, `plan_pure`,
+   `execute` and `new::source_files` together. Represent all build steps in dry-run
+   and JSON output; pass argument arrays, preserve errors, atomically stage only
+   validated components. Update the existing conformance checker's Rust-only
+   guard parser. Keep manifest IDs and Rust behavior compatible.
+3. **Complete M5.** AS and Go run the identical full suite and the ten-workload
+   reference app; measure budgets without changing them. Every unsupported host
+   capability remains owned in the matrix. Hot-replace AS↔Go components through
+   the existing live controller, retain old leases, reject a wrong ABI and prove
+   AOT-cache execution produces the same output.
+4. **Python integration.** Resolve linking, measure successful cold start, then
+   `.pyc`/pooling experiments with explicit reset semantics; retain experimental
+   status until evidence justifies a new decision.
+5. **C/C++ integration and parity.** Complete CLI templates, capability bindings,
+   tests and reference app. Promote per-capability cells only from real CI calls.
+
+First production-driver PR acceptance: missing tools diagnose clearly; generation
+comes from the canonical WIT; dry-run predicts every command; failed builds retain
+the prior artifact; Rust CLI/manifest compatibility passes; new-language HTTP and
+large-buffer vectors pass; wrong ABI fails before live publication; no new grants,
+no budget increase, and no unexecuted language is marked supported.
 
 ---
 

@@ -3017,12 +3017,21 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
     // Flags that take a value and must not be mistaken for boolean switches.
     const TAKES_VALUE: [&str; 2] = ["--manifest", "--target"];
 
+    let mut cache = None;
     let mut bits = 0u8;
     let mut target: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
+            "--aot-cache" => {
+                cache = Some(std::path::PathBuf::from(
+                    args.get(i + 1)
+                        .ok_or_else(|| missing_value("--aot-cache"))?,
+                ));
+                bits |= qqq_run::BuildOptions::AOT;
+                i += 1;
+            }
             "--release" => bits |= qqq_run::BuildOptions::RELEASE,
             "--debug" => bits |= qqq_run::BuildOptions::DEBUG,
             "--aot" | "--emit-cwasm" => bits |= qqq_run::BuildOptions::AOT,
@@ -3055,7 +3064,9 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
         }
         i += 1;
     }
-    Ok(qqq_run::BuildOptions::from_flags(bits, target))
+    let mut options = qqq_run::BuildOptions::from_flags(bits, target);
+    options.aot_cache = cache;
+    Ok(options)
 }
 
 /// The error for a flag that needs a value and did not get one.
@@ -3111,6 +3122,13 @@ fn run_options(
                     .get(i + 1)
                     .ok_or_else(|| missing_value("--replay-log"))?;
                 opts.replay_log = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            "--aot-cache" => {
+                opts.aot_cache = Some(std::path::PathBuf::from(
+                    args.get(i + 1)
+                        .ok_or_else(|| missing_value("--aot-cache"))?,
+                ));
                 i += 1;
             }
             "--replay" => {

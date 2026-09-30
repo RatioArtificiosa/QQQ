@@ -75,6 +75,7 @@ use crate::guest_bridge;
 /// *concurrency*, and reuse is the optimisation a later tier adds.
 pub struct GuestApp {
     engine: wasmtime::Engine,
+    ticker: Arc<EpochTicker>,
     prepared: PreparedComponent,
     handle: HandlerHandle,
     grants: GrantSet,
@@ -82,7 +83,7 @@ pub struct GuestApp {
     /// The authority every guest-visible URL is built from. See the module docs.
     authority: String,
     /// Bounds how many requests may hold an instance at once.
-    pool: Pool,
+    pool: Arc<Pool>,
     /// Completed requests per second, for the pool's `Retry-After` estimate.
     ///
     /// Kept at `0.0`, which the pool reads as "no rate known" and answers with its
@@ -119,7 +120,7 @@ pub struct GuestApp {
     /// case a record is least needed for. The cost is one `write` syscall per served request, and
     /// the honest way to avoid it is to not enable the file rather than to enable it and lose the
     /// guarantee.
-    audit_file: Option<std::sync::Mutex<qqq_host::audit_sink::AuditFile>>,
+    audit_file: Option<Arc<std::sync::Mutex<qqq_host::audit_sink::AuditFile>>>,
     /// The component's identity, as the audit record states it — `OBS-002`.
     ///
     /// Computed **once**, at construction, because `ComponentDigest::new` validates that the
@@ -175,6 +176,10 @@ impl GuestApp {
 
     /// Prepare a guest whose request concurrency is bounded to `workers` instances.
     ///
+    /// Give independently constructed applications dedicated engines: this app
+    /// owns the engine's millisecond epoch clock. Use [`Self::replacement`] to
+    /// share its clock, quota and audit history across code generations.
+    ///
     /// # Why `workers` and not `max_instances`
     ///
     /// They are different quantities and the distinction is what `--workers` was
@@ -199,7 +204,30 @@ impl GuestApp {
         authority: impl Into<String>,
         workers: u32,
     ) -> Result<Self> {
-        let authority = authority.into();
+        Self::with_context(
+            engine,
+            bytes,
+            grants,
+            limits,
+            authority.into(),
+            (workers, None),
+        )
+    }
+
+    fn with_context(
+        engine: wasmtime::Engine,
+        bytes: &[u8],
+        grants: GrantSet,
+        limits: LimitSet,
+        authority: String,
+        context: (u32, Option<Arc<EpochTicker>>),
+    ) -> Result<Self> {
+        let (workers, ticker) = context;
+        let ticker = match ticker {
+            Some(ticker) => ticker,
+            None => Arc::new(EpochTicker::start(engine.clone())?),
+        };
+
         if authority.is_empty() {
             return Err(Error::new(
                 ErrorCode::InternalInvariantViolated,
@@ -215,7 +243,8 @@ impl GuestApp {
         // A throwaway instance, purely to resolve the export. Creating one here is
         // what turns "not a QQQ application" into a start-up failure.
         let handle = {
-            let instance = Instance::create(&engine, &prepared, &grants, limits)?;
+            let instance =
+                Instance::create_with(&engine, &prepared, &grants, limits, &timed_options(limits))?;
             instance.run(|store, wasm| {
                 HandlerHandle::resolve(&mut *store, wasm, "guest")
                     .map_err(|e| wasmtime::Error::msg(e.message.clone()))
@@ -255,6 +284,7 @@ impl GuestApp {
 
         Ok(Self {
             engine,
+            ticker,
             prepared,
             handle,
             grants,
@@ -264,7 +294,7 @@ impl GuestApp {
             // is a deadlock rather than a configuration. `serve::options` already
             // refuses `--workers 0`, so this is a second line of defence rather than
             // the check.
-            pool: Pool::new(u64::from(workers)),
+            pool: Arc::new(Pool::new(u64::from(workers))),
             // The stream the served path appends to. `with_default_capacity` cannot fail —
             // the capacity is a non-zero constant and the check lives in `AuditStream::new`.
             audit: std::sync::Arc::new(std::sync::Mutex::new(
@@ -276,6 +306,92 @@ impl GuestApp {
             grant_digest,
             completion_rate: 0.0,
         })
+    }
+
+    /// Prepare a replacement under the same authority and aggregate resource limits.
+    /// Compilation and admission finish before a caller publishes this value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> qqq_core::Result<()> {
+    /// # fn update(app: &qqq_run::guest_handler::GuestApp, wasm: &[u8]) -> qqq_core::Result<()> {
+    /// let next = app.replacement(wasm)?;
+    /// assert_eq!(app.capacity(), next.capacity());
+    /// # Ok(())
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Refuses compilation, instantiation and HTTP signature failures.
+    pub fn replacement(&self, bytes: &[u8]) -> Result<Self> {
+        let mut next = Self::with_context(
+            self.engine.clone(),
+            bytes,
+            self.grants.clone(),
+            self.limits,
+            self.authority.clone(),
+            (1, Some(Arc::clone(&self.ticker))),
+        )?;
+        next.validate_interface()?;
+        next.pool = Arc::clone(&self.pool);
+        next.audit = Arc::clone(&self.audit);
+        next.audit_file.clone_from(&self.audit_file);
+        Ok(next)
+    }
+
+    /// Validate the entire HTTP function signature before live activation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> qqq_core::Result<()> {
+    /// # fn validate(app: &qqq_run::guest_handler::GuestApp) -> qqq_core::Result<()> {
+    /// app.validate_interface()?;
+    /// # Ok(())
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Refuses failed instantiation and any mismatch with the declared HTTP handler signature.
+    pub fn validate_interface(&self) -> Result<()> {
+        let instance = Instance::create_with(
+            &self.engine,
+            &self.prepared,
+            &self.grants,
+            self.limits,
+            &timed_options(self.limits),
+        )?;
+        instance.run(|store, wasm| {
+            let func = self.handle.func(store, wasm)
+                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+            func.typed::<(abi::Request,), (std::result::Result<abi::Response, abi::HttpError>,)>(&*store)?;
+            Ok(())
+        }).map_err(|e| Error::new(ErrorCode::InvalidComponentArtifact,
+            format!("HTTP interface validation failed: {e}")))
+    }
+
+    /// Digest used by the active-generation registry and audit records.
+    #[must_use]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> qqq_core::Result<()> {
+    /// # fn inspect(app: &qqq_run::guest_handler::GuestApp) {
+    /// assert_eq!(app.digest().len(), 64);
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn digest(&self) -> &str {
+        self.prepared.digest()
     }
 
     /// The authority guest-visible URLs are built from.
@@ -343,8 +459,9 @@ impl GuestApp {
         // `run` both return `Result`, and a slot leaked on failure would shrink the
         // capacity monotonically — a server that gets slower the more it errors is a
         // worse failure than the error itself.
+        let permit = RequestPermit(&self.pool);
         let outcome = self.serve_one(&request);
-        self.pool.release();
+        drop(permit);
 
         // --- §4.4 step 15: AUDIT APPEND ---------------------------------------
         //
@@ -475,12 +592,14 @@ impl GuestApp {
             self.grant_digest.clone(),
             None,
         );
-        let instance = Instance::create_with_audit(
+        let mut options = timed_options(self.limits);
+        options.audit = Some(handle);
+        let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
             &self.grants,
             self.limits,
-            handle,
+            &options,
         )?;
 
         // The guest's answer travels out of the closure in a slot: `Instance::run`
@@ -575,7 +694,7 @@ impl GuestApp {
             })?;
 
         self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
-        self.audit_file = Some(std::sync::Mutex::new(file));
+        self.audit_file = Some(Arc::new(std::sync::Mutex::new(file)));
         Ok(())
     }
 
@@ -720,10 +839,68 @@ pub fn to_served(response: &abi::Response) -> Response {
 ///
 /// The message is the guest's own where there is one, because an operator
 /// debugging an app wants the app's reason rather than QQQ's.
-fn failure_response(e: &Error) -> Response {
+pub(crate) fn failure_response(e: &Error) -> Response {
     let mut r = Response::text(502, format!("the application failed: {}", e.message));
     r.set_header("X-QQQ-Error", &format!("{:?}", e.code));
     r
+}
+
+// Release capacity during unwinding too; successful responses and traps share this guard.
+struct RequestPermit<'a>(&'a Pool);
+impl Drop for RequestPermit<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+fn timed_options(limits: LimitSet) -> qqq_host::InstanceOptions {
+    qqq_host::InstanceOptions {
+        epoch_ticks: Some(limits.epoch_deadline_ms.max(1)),
+        ..Default::default()
+    }
+}
+
+/// One timer per engine lineage, retained until all generations drain. Fuel
+/// remains a second bound; an epoch cannot interrupt a blocking host import.
+struct EpochTicker {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl EpochTicker {
+    fn start(engine: wasmtime::Engine) -> Result<Self> {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let driver = engine;
+        let thread = std::thread::Builder::new()
+            .name("qqq-epochs".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let mut emitted = 0;
+                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    // Account for scheduler/timer granularity (notably Windows):
+                    // one sleep is not necessarily one millisecond of elapsed time.
+                    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    for _ in emitted..elapsed {
+                        driver.increment_epoch();
+                    }
+                    emitted = elapsed;
+                }
+            })
+            .map_err(|e| Error::new(ErrorCode::InternalInvariantViolated, e.to_string()))?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -733,7 +733,8 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §3.4 Positioning statement and the language we use
 - [ ] **POS-005** Define the "agent sandbox" positioning as the beachhead and validate it with design partners.
   → §8.4 The "agent sandbox" reference architecture
-- [ ] **POS-006** Resolve the TypeScript-versus-AssemblyScript naming question (open question `OQ-002`).
+- [x] **POS-006** Resolve the TypeScript-versus-AssemblyScript naming question (open question `OQ-002`).
+  → Done: Decision taken 2026-09-30: AssemblyScript (TypeScript-like); retain manifest `ts`; full TypeScript is a separate experimental path. See `docs/languages/phase3.md`.
   → §6.10 Language toolchains — one per target language
 
 ---
@@ -1064,6 +1065,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **ARCH-014** Implement the manifest opt-in for shared memory, off by default.
   → §4.7 Concurrency model for guests
 - [ ] **ARCH-015** Implement the artifact model: component + signed manifest envelope + AOT cache keying.
+  → Progress: explicit Wasmtime managed-cache configuration and `build --aot` native emission
+    are covered by `docs/rfc/live-components-and-aot.md`. Signed installation and trusted
+    native-artifact distribution remain separate work; this item remains open.
   → §4.6 Where the artifacts live and how they move
 - [ ] **ARCH-016** Implement build-time component composition with load-time composition as fallback.
   → §4.6 Where the artifacts live and how they move
@@ -3497,6 +3501,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     found already implemented by reading the item and measuring the code.
   → §8.3 The machine contract layer
 - [ ] **DX-006** Implement the TIER-1 hot reload: component swap preserving the host process.
+  → Progress: versioned generation leases, live HTTP dispatch and dev rebuild activation are
+    implemented in the live-components draft. See `docs/live-components-checklist.md` for
+    measured acceptance, failure controls and remaining merge gates. Kept open pending review.
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-007** Implement TIER-2 state-preserving swap with declared guest state.
   → §6.6 `qqq-run` — CLI and dev server
@@ -4060,6 +4067,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: `docs/recipes/rust.md` — task-oriented Rust recipes, written to `docs/contributing/claims-policy.md`'s four kinds and indexed in `docs/README.md`, in `llms.txt`'s `CURATED` and therefore in `llms-full.txt`. It carries **four recipes for the capabilities the host actually binds** — serve an HTTP request, hash bytes on the host, read a monotonic clock, and run untrusted code with no capabilities — each naming the test that proves it (`lang003_template.rs`, `lang002_bindings.rs`, `lang005_reference_app.rs`). **THE FINDING IS THE ABSENCES.** `§11.3` names four recipes; measured, **three cannot be written today**, because `qqq-host`'s linker registers **4** modules — the WASI baseline plus `host_clock`, `host_crypto` and `host_http` — while `wit/` declares **15** packages. So: **connect to Postgres** needs `qqq:sql`, which is declared and **not bound**, and a guest importing it fails at **instantiation**; **rate limit** has **no implementation** in `qqq-serve` (`[limits]` bounds cost per request, not rate); **stream a large file** is **not expressible**, because `wit/qqq-http.wit` declares only `http` and `incoming-handler` and `handle` returns a single `body: list<u8>`. Each is an **Absent** entry with what to do instead. Two further absences are recorded: the four non-`http` templates are libraries that build to `world root { }`, and `generate_all` makes `monotonic-clock` drag in `wall-clock`, so a monotonic-clock guest must also grant `wall` — the clock a deterministic workload must not have. The page adds **2** claims behind a **new resolver**, `host-bound-modules` (**4**, read textually from `linker.rs` with its limitation stated: it can under-report and cannot over-report), so `check_doc_claims.py` checks **11** claims rather than 9. Every generated Rust path in the recipes was **measured by compiling a probe**, not read off a convention.
   → §11.3 Documentation as a product surface
 - [ ] **LANG-007** Rust build-time and binary-size budget met.
+  → 2026-09-30 follow-up: 2,726-line clean builds 15.68/15.02/15.01 s; native GNU host 26,382,040 bytes / 8,073,848 gzip. The 10k-LOC requirement and production-image verification remain open; limits unchanged. `docs/languages/phase3.md` preserves exact evidence.
   → Partial: **The binary-size half is MET and the build-time half is NOT, and both are now measured rather than asserted.** §5.1 declared four SLOs and said they were *"measured in CI on every commit"* — and nothing measured any of them. Measured from the shipped image: installed footprint **20,201,728 bytes (19.3 MiB)** against ≤ 60 MB, and download size **6,420,492 bytes (6.1 MiB)** gzipped against ≤ 25 MB. Both are now **gates**: the `production-image` job extracts the binary with `docker create` + `docker cp` (the runtime stage is distroless, so there is no tool inside it) and fails when either is exceeded; the step's two failure branches and its anti-vacuity guard were each exercised and each exits 1. `qqqai --version` measures **7.75 ms p50** natively (min 6.68, max 12.72) against ≤ 15 ms, and is **reported rather than gated** because the same command through `docker run` reads 599.8 ms — the container runtime's startup, not the binary's. **The build-time budget is `§9.2`'s ≤ 20 s for 10k LOC Rust, and it is not met**: a cold release build of the reference application takes **25.34 s**, and the application is 2,513 lines rather than 10,000 — four times smaller than the subject the budget names and still 27% over (recorded in full against `PERF-013`). **`qqqai run` cold start (≤ 40 ms) is not measured anywhere**, and §5.1 now says so instead of implying otherwise.
   → §5.1 What a user actually installs
 - [x] **LANG-008** Rust language-guide page published with honest limitations (there are few).
@@ -4078,11 +4086,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **LANG-013** AssemblyScript reference application implementation.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-014** Documentation that states clearly what AssemblyScript is not (full TypeScript).
+- [x] **LANG-014** Documentation that states clearly what AssemblyScript is not (full TypeScript).
+  → Done: `docs/languages/phase3.md` documents AssemblyScript’s distinct type system, standard library and runtime, absent Node/Bun compatibility, and the narrow WIT-digest-guarded HTTP adapter. The name does not claim full TypeScript.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-015** Evaluate and document the full-TypeScript-via-engine-in-Wasm path, with measurements.
+- [x] **LANG-015** Evaluate and document the full-TypeScript-via-engine-in-Wasm path, with measurements.
+  → Done: Actual `tsc 5.9.3` → ComponentizeJS 0.23.0 probe measured in `docs/languages/evidence/typescript.json`: roughly 12 MB, with least-privilege linking rejected on unused `send`. Successful cold start and conformance are not claimed; the evaluated path stays experimental.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-016** Resolve open question `OQ-002`: how we name and market this path.
+- [x] **LANG-016** Resolve open question `OQ-002`: how we name and market this path.
+  → Done: Decision taken 2026-09-30: **AssemblyScript (TypeScript-like)**, preserving manifest identifier `ts`. Full TypeScript is a separate experimental engine-in-Wasm path; `docs/languages/phase3.md` records the decision and evidence.
   → §6.10 Language toolchains — one per target language
 
 **Go (Tier B)**
@@ -4097,16 +4108,20 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **LANG-021** Go reference application implementation.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-022** Document TinyGo's runtime differences, reduced stdlib, and in-guest GC.
+- [x] **LANG-022** Document TinyGo's runtime differences, reduced stdlib, and in-guest GC.
+  → Done: `docs/languages/phase3.md` documents TinyGo 0.42.0 / Go 1.27.1, precise GC, asyncify and unverified stdlib/package compatibility. `tools/run_language_probes.py --language go` records the failing 64 KiB vector; no standard-Go runtime parity is claimed.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-023** Contribute upstream fixes to TinyGo where the component path is weak.
+  → **blocked-by-upstream-and-time**. See the reproducer and dated reassessment in `docs/languages/phase3.md`; no upstream contribution or future review is claimed complete.
   → §15 — Risk Register
 - [ ] **LANG-024** Track standard-Go component support and re-evaluate quarterly.
+  → **blocked-by-upstream-and-time**. See the reproducer and dated reassessment in `docs/languages/phase3.md`; no upstream contribution or future review is claimed complete.
   → §6.10 Language toolchains — one per target language
 
 **Python (Tier B)**
 
-- [ ] **LANG-025** Spike: CPython compiled to WASI, measured for size, cold start and correctness.
+- [x] **LANG-025** Spike: CPython compiled to WASI, measured for size, cold start and correctness.
+  → Done: Completed the spike with a negative result: `tools/run_language_probes.py --language python` compiles CPython via componentize-py 0.25.1, measures roughly 18 MB and time to link rejection, and records zero executed vectors in `docs/languages/evidence/python.json`. Successful cold start is unavailable because least-privilege linking fails; this is not a Python support tick.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-026** Python bindings generated from `wit/` via `componentize-py` or equivalent.
   → §6.10 Language toolchains — one per target language
@@ -4118,9 +4133,11 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **LANG-030** Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-031** Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement.
+- [x] **LANG-031** Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement.
+  → Done: Decision taken 2026-09-30: **experimental**, based on the failed Python linking probe and measured size in `docs/languages/evidence/python.json`. First-class promotion requires a new evidence-backed decision after correctness/startup work.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-032** Document Python's honest limits (component size, startup, stdlib coverage).
+- [x] **LANG-032** Document Python's honest limits (component size, startup, stdlib coverage).
+  → Done: `docs/languages/phase3.md` documents measured Python size, failed preparation, unverified stdlib/native extensions, stub-WASI limitations and the unimplemented `.pyc`/interpreter-pooling work. Time to failure is explicitly separated from successful cold start.
   → §6.10 Language toolchains — one per target language
 
 **C / C++ (Tier A)**
@@ -4135,12 +4152,13 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **LANG-037** C and C++ reference application implementation.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-038** Document the C/C++ path and the `wasm-ld`/`wit-bindgen` toolchain requirements.
+- [x] **LANG-038** Document the C/C++ path and the `wasm-ld`/`wit-bindgen` toolchain requirements.
+  → Done: `docs/languages/phase3.md` specifies WASI SDK 34, Clang/wasm-ld, sysroot, wit-bindgen 0.62.0 C glue/type object, and C++17 C-ABI consumption. Real C and C++ builds each pass five HTTP vectors; full SDK/reference-app work stays open.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-039** Publish the language parity matrix, generated from CI, with every gap owned and dated.
   → §2.4 NN-4 — Multi-Language by Design
   → **The mechanism now exists and is wired, but this item stays open because it is a LANG item and
-    the goal's sequencing forbids starting `LANG-009`…`LANG-040` before `TEST-010` lands.**
+    the complete language × capability execution coverage is still missing.**
     `tools/check_conformance.py --matrix` prints the matrix in **both** gates, and every gap in
     `conformance/suite.json` carries an owner and a target (§O-354). What remains is the language
     work itself: four of the five rows are gaps, and **a matrix of gaps is not a published parity
@@ -5465,9 +5483,11 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 - [ ] **OQ-001** Define and close the free-tier eligibility boundary and revenue-attestation mechanism.
   → §13.2 The licence model, and why NN-8 still holds
-- [ ] **OQ-002** Decide how the AssemblyScript path is named and marketed.
+- [x] **OQ-002** Decide how the AssemblyScript path is named and marketed.
+  → Done: Decision taken 2026-09-30: AssemblyScript (TypeScript-like); retain manifest `ts`; full TypeScript is a separate experimental path. See `docs/languages/phase3.md`.
   → §6.10 Language toolchains — one per target language
-- [ ] **OQ-003** Decide whether Python is first-class or experimental, based on the M5 spike.
+- [x] **OQ-003** Decide whether Python is first-class or experimental, based on the M5 spike.
+  → Done: Decision taken 2026-09-30: Python is experimental based on the measured linking failure and component size; promotion requires new evidence. See `docs/languages/phase3.md`.
   → §6.10 Language toolchains — one per target language
 - [ ] **OQ-004** Decide whether Windows is first-class or best-effort.
   → §6.10 Language toolchains — one per target language

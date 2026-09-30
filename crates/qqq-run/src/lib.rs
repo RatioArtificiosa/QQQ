@@ -30,6 +30,7 @@
 
 pub mod audit;
 pub use audit::{AuditOutput, FindingOutput};
+pub mod aot;
 pub mod bench;
 pub mod bench_output;
 pub mod build;
@@ -37,6 +38,7 @@ pub mod commands;
 pub mod deps;
 pub mod dev;
 pub mod flaky;
+pub mod generations;
 /// The bridge from a served request to a guest call: `qqq-serve` + `qqq-abi` +
 /// `qqq-host`, joined.
 ///
@@ -47,6 +49,7 @@ pub mod guest_bridge;
 /// composed into the shape `qqq-serve` wants.
 pub mod guest_handler;
 pub mod install;
+pub mod live;
 pub mod manifest_loader;
 pub mod mcp;
 /// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.

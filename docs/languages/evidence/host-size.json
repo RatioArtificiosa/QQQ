@@ -1,0 +1,7 @@
+{
+  "kind": "native GNU host binary; not production image",
+  "bytes": 26382040,
+  "gzip_bytes": 8073848,
+  "installed_budget_bytes": 60000000,
+  "download_budget_bytes": 25000000
+}

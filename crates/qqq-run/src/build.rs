@@ -865,17 +865,31 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
     let toolchain = toolchain_for(&spec.language, target)
         .ok_or_else(|| driver_not_implemented(&spec.language))?;
 
-    // `toolchain` is intentionally unused beyond proving a driver exists:
-    // probing for the programs it names is `plan`'s job, and doing it here
-    // would make this function depend on the host.
-    let _ = toolchain;
+    // **The toolchain is READ for the name of the program the plan will run, and never PROBED.** Probing is
+    // `plan`'s job and doing it here would make this function depend on the host -- which is what the original
+    // comment was protecting. **But discarding it altogether was how `"cargo"` came to be written twice for
+    // one language:** this table already said `cargo` at its first Rust entry, and the plan hard-coded the
+    // same name three lines below.
+    //
+    // **Adding a language is now one edit fewer.** The program comes from the table the language was added
+    // to; only the *arguments* need a new arm.
+    let Some(program) = toolchain.first().map(|t| t.program.to_owned()) else {
+        return Err(Error::new(
+            ErrorCode::InternalInvariantViolated,
+            format!("`{}` has a toolchain with no programs in it", spec.language),
+        )
+        .with_remediation(
+            "this is a qqqai bug; a `TOOLCHAINS` entry must name at least one program",
+        ));
+    };
 
     let args = match spec.language.as_str() {
         "rust" => rust_args(profile, target),
-        // `toolchain_for` returned `Some` for this language, so this arm exists
-        // only if a language was added to one function and not the other.
-        // Failing loudly is the correct behaviour: silently building nothing
-        // is how a language matrix rots.
+        // `toolchain_for` returned `Some` for this language, so this arm exists only if a language was added
+        // to [`TOOLCHAINS`] without an argument builder here. **The program is no longer one of the edits a
+        // new language needs** -- it comes from that same table -- so this is now the ONLY place the two can
+        // disagree about a language, and the message says that rather than "one function and not the other".
+        // Failing loudly is the correct behaviour: silently building nothing is how a language matrix rots.
         other => {
             return Err(Error::new(
                 ErrorCode::InternalInvariantViolated,
@@ -886,7 +900,7 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
     };
 
     Ok(BuildPlan::one(BuildStep {
-        program: "cargo".to_owned(),
+        program,
         args,
         cwd: loaded
             .path

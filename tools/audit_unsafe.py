@@ -274,12 +274,131 @@ def self_test():
             print("  DEAD  doc check accepted a document with no table")
             failures += 1
 
+        # `--record` gets the same treatment as `--check-doc`, for the same reason: **a recorder that has
+        # never been shown to write is a recorder that might be inert**, and the build would stay green
+        # whether it repaired the page or wrote nothing at all.
+        #
+        # Case one: a stale count is repaired AND the repaired file passes the checker. **The second half
+        # is what makes this a test of the recorder rather than of the writer** -- a recorder can write a
+        # number its own gate then rejects.
+        stale = os.path.join(tmp, "stale.md")
+        table = (
+            "| `.rs` files scanned under `crates/` | **{n}** |\n"
+            "| Crates carrying a bare `#![forbid(unsafe_code)]` | **11** (every crate) |\n"
+        )
+        with open(stale, "w", encoding="utf-8") as f:
+            f.write(table.format(n=len(files) + 7))
+        if record_doc(files, lint_hits, stale) == 0 and check_doc(files, lint_hits, stale) == 0:
+            print("  OK    record repairs a stale count and the repaired page passes")
+        else:
+            print("  DEAD  record did not repair a stale count, or wrote one its own check rejects")
+            failures += 1
+
+        # Case two: **a document that lost its row is refused.** A recorder that silently wrote nothing
+        # would report success on a page it never touched, which is the defect `--record` exists to
+        # remove -- so the refusal is the property, not an implementation detail.
+        if record_doc(files, lint_hits, missing) != 0:
+            print("  OK    record refuses a document whose row it cannot find")
+        else:
+            print("  DEAD  record reported success on a document with no row to write")
+            failures += 1
+
+        # Case three: **a correct document is left byte-identical.** A recorder that rewrote what was
+        # already right would churn the page on every run, and this page's own diff is evidence.
+        correct = os.path.join(tmp, "correct.md")
+        with open(correct, "w", encoding="utf-8") as f:
+            f.write(table.format(n=len(files)))
+        before = open(correct, "rb").read()
+        record_doc(files, lint_hits, correct)
+        if open(correct, "rb").read() == before:
+            print("  OK    record leaves a correct page byte-identical")
+        else:
+            print("  DEAD  record rewrote a page that was already correct")
+            failures += 1
+
     print()
     if failures:
         print(f"SELF-TEST FAILED -- {failures} problem(s)")
         return 1
     print("SELF-TEST PASSED -- every injection detected, no prose false positive")
     return 0
+
+
+def record_doc(files, lint_hits, doc_path=None) -> int:
+    """Rewrite the two derived counts in `docs/unsafe-audit.md` to match the live scan.
+
+    # Why this exists beside `check_doc` rather than instead of it
+
+    `check_doc` is the gate and stays one. This is the regenerator. **The two must agree**, so this
+    function deliberately reuses `check_doc`'s own regexes rather than introducing a second pair -- a
+    recorder whose patterns drift from its checker's is a recorder that writes numbers the checker will
+    then reject.
+
+    # Why a missing row is an error and not a no-op
+
+    Because a recorder that quietly does nothing when its pattern stops matching certifies a page it never
+    touched. **Measured cost of getting this wrong**: the same row has taken `files scanned` from 170 to
+    172 to 173 across two rounds, each time because a human typed it. So this prints what it changed and
+    returns 1 when it could not.
+
+    # Why it edits rather than regenerates
+
+    Because the page is an argument. **Two counts are derived; the prose around them is written**, and a
+    generator that reformatted the prose would be editing the argument to protect the numbers -- which is
+    the wrong way round for a page whose whole claim is about evidence.
+    """
+    path = doc_path or DOC
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        print(f"DRIFT: could not read {path}: {e}")
+        return 1
+
+    crate_roots = {
+        rel.split(os.sep)[0] for rel, _ln, kind, _text in lint_hits if kind == "forbid_attr"
+    }
+    wanted = [
+        (
+            r"(\|\s*`\.rs` files scanned under `crates/`\s*\|\s*\*\*)(\d+)(\*\*\s*\|)",
+            len(files),
+            "files scanned",
+        ),
+        (
+            r"(\|\s*Crates carrying a bare `#!\[forbid\(unsafe_code\)\]`\s*\|\s*\*\*)(\d+)(\*\*)",
+            len(crate_roots),
+            "crates carrying a bare forbid",
+        ),
+    ]
+
+    changed = []
+    for pattern, value, label in wanted:
+        m = re.search(pattern, text)
+        # **A missing row is an error.** See the docstring: a no-op that reports success is the defect
+        # this function exists to remove.
+        if not m:
+            print(f"DRIFT: the `{label}` row is missing, so `--record` cannot write it")
+            return 1
+        if int(m.group(2)) == value:
+            print(f"  {label}: {value} (unchanged)")
+            continue
+        print(f"  {label}: {m.group(2)} -> {value}")
+        changed.append(label)
+        text = text[: m.start(2)] + str(value) + text[m.end(2) :]
+
+    # **`newline=""` so the file's own line endings survive.** A recorder that normalised them would be
+    # rewriting every line to change two numbers, and `normalize_eol.py --check` would then disagree with
+    # whichever end-of-line the platform happened to produce.
+    if changed:
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        print(f"recorded {len(changed)} count(s) in {path}")
+    else:
+        print(f"{path} already matches the scan")
+
+    # **Verified by re-reading through `check_doc`.** A recorder that does not check its own output is a
+    # recorder that can write a page its own gate rejects.
+    return check_doc(files, lint_hits, doc_path)
 
 
 def check_doc(files, lint_hits, doc_path=None) -> int:
@@ -358,6 +477,9 @@ def main():
 
     root = os.path.normpath(ROOT)
     files, code_hits, prose_hits, lint_hits = scan(root)
+
+    if "--record" in sys.argv:
+        return record_doc(files, lint_hits)
 
     if "--check-doc" in sys.argv:
         return check_doc(files, lint_hits)

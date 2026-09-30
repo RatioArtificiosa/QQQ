@@ -34618,6 +34618,56 @@ execute, so it reports the command"*. **It now reports the plan, and the comment
 the shape `§O-439` records, where a docstring describing a slightly different program is a defect rather than a
 cosmetic issue.
 
+## §O-472 — A function can be extracted, compile, pass clippy and the whole suite, and have no test
+
+`run_steps` was created by a refactor that kept the gate **green**:
+
+```
+cargo fmt --all                                                       FMT=0
+cargo clippy --workspace --all-targets --all-features -- -D warnings  CLIPPY=0
+cargo test -p qqq-run --all-features                                  546 passed; 0 failed
+```
+
+**Every one of those facts is true and none of them is about `run_steps`.** `rg` for it found three mentions
+-- its definition, its call, and a comment. **No test.**
+
+### And the extraction's whole purpose was a contract
+
+`run_steps` exists so that **a plan stops at the first step that fails and says which one.** That is what
+`BuildPlan` became a `Vec` for. **A version of `run_steps` that ran every step and returned the last would
+have passed all 546 tests** -- because nothing in the suite had a plan with more than one step that failed.
+
+**`clippy` proves a function compiles and is idiomatic. `cargo test` proves the EXISTING contracts hold.
+Neither says anything about a contract nobody wrote a test for** -- and a refactor that moves logic into a new
+function creates a new contract, whether or not anyone says so.
+
+### The test, and the assertion inside it that is load-bearing
+
+The new test asserts index `1` for a three-step plan whose second step fails. **But the assertion that makes it
+a test is that step one left a marker file and step three did not** -- **without it, `index == 1` is also what
+a plan that ran nothing would report.** A check that cannot tell *"step one ran"* from *"nothing ran"* is a
+defect this same file records three times over.
+
+**And the control comes first**: a plan whose steps all succeed returns `None`. **Without it, an implementation
+that always returned `Some((0, ...))` would satisfy the rest.**
+
+### The injection, and the trap that fired again
+
+```
+INJECTED: run_steps now runs every step and reports the last
+
+test build::tests::a_plan_stops_at_the_first_step_that_fails ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 546 filtered out
+```
+
+**`INJECT=9009` in the same output is `findstr`'s exit code, not the test's** -- `§O-464`, one round old,
+doing exactly what it says it does. **The verdict was in the text, which is why the rule is to grep for the
+verdict rather than trust the exit code.**
+
+**And `546 filtered out` is what makes it a measurement rather than a coincidence**: 547 ran, one was
+selected, 546 were filtered -- **so the test that failed is the test that was added, and the injection changed
+the SEMANTICS rather than the assertion.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

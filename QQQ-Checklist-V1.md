@@ -4462,8 +4462,31 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.7 `qqqai test` — test runner
 - [ ] **TEST-013** Implement benchmark-as-test: fail a build when a performance budget regresses.
   → §9.2 The performance budget
-- [ ] **TEST-014** Implement the flaky-test detector.
+- [x] **TEST-014** Implement the flaky-test detector.
   → §6.7 `qqqai test` — test runner
+  → Done: `crates/qqq-run/src/flaky.rs` — a JSON Lines history of `(test, platform, passed, commit, run)`
+    and `detect(&records, window)`, which reports every `(test, platform)` that has **both** passed and
+    failed, with its counts and the commits of its first and last failure. Reachable as `qqqai test
+    --history <path>` (records each test's outcome after a run, annotated from `QQQ_COMMIT` and `QQQ_RUN`)
+    and `qqqai test --flaky <path>` (reads a history and reports, **before** the manifest is loaded so a
+    reader does not need a project that builds).
+  → **Measured, by running the binary**: `1 flaky test(s)` and
+    `serve_policy::an_origin failed 1 of the last 2 run(s) on linux (eb1bba9 .. eb1bba9)`, exit 0; a
+    history with no pass/fail split prints `no flaky tests in the history`; and a history whose second
+    line is not a record fails with `line 2` named rather than reporting nothing.
+  → Tests: `flaky.rs` — eight units, each stating a property rather than a mechanism (`a_test_that_never_passes_is_not_flaky`
+    is the one that keeps a broken test out of the list, and `a_quiet_platform_is_not_crowded_out_by_a_busy_one`
+    is why the window is per-key rather than global) — and `tests/cli.rs` — three end-to-end, including the
+    malformed-line refusal.
+  → **The subject is a history that OUTLIVES one run**, which is the whole distinction `§O-430` drew when
+    it corrected `§O-411`: `TestOutcome::is_nondeterministic()` answers *"did this test vary within one
+    `--trials N` run"* and this answers *"has it passed on some runs and failed on others"*. Before this
+    the tree held twelve mentions of flake and **every one was a comment about a past one**.
+  → **And the limit belongs here rather than in a caveat elsewhere.** A history exists only when
+    `--history` is passed, and nothing in this repository writes one yet — the detector reports against
+    whatever it is given. `--flaky` also **reports** rather than gates: a flake is information about
+    reliability, not a regression in the change under test, and failing a build on one is `TEST-013`'s
+    question.
 - [x] **TEST-015** Implement the dead-code and unused-capability detector ("this app declares a capability it never uses").
   → Done: `qqq/unused-grant` in `crates/qqq-run/src/audit.rs` -- the sixth audit rule, and the detector the item names: **a capability is granted that the artifact does not import**. It is a **warning**, not an error, and that is a decision: granting ahead of the code is legitimate, so the rule reports only the **inert grant** -- the one nothing can ever exercise -- because the linker is built from the grant set alone and an inert grant is surface the guest should not hold. The reference application takes the stronger position for itself (`LANG-005` asserts grants and imports are **equal in both directions**), which is right for the file a reader is invited to copy; this states the weaker claim that is true for every project. **The predicate and the plumbing are separate functions**, because the predicate has to be provable without a build: `unused_grants_from(granted, required)` is pure and tested directly, and `unused_grants(loaded)` reads the staged artifact `target/qqq/<name>.component.wasm` and returns **nothing** when it is absent rather than guessing from the source -- guessing would be a second opinion about what the build produces, which is the defect `§O-361`/`§O-374` records. **PROVED TO FIRE THREE WAYS.** (1) Unit: an inert grant is reported and a used one is not, with a **silent** case for a correct project, because a rule that fired on correct code would be turned off within a day. (2) Injected: the filter made inert -> the test **FAILS** with `assertion left == right failed: one finding, naming both`, and the restore is **byte-identical** (sha256 `4b8d5058…` before and after, verified against a value recorded beforehand -- `§O-373`). (3) End to end through the rebuilt CLI: a scaffolded `http` project reports **no** `qqq/unused-grant`, and the same project with `[capabilities.clock] wall = true` added reports `[warning] qqq/unused-grant  1 capability(ies) are granted and never imported: clock.wall`. Audit lib tests **31 passed / 0 failed**.
   → §7.1 What we are defending, precisely

@@ -1821,6 +1821,76 @@ fn test_trials_runs_each_test_repeatedly() {
         .assert_contains("3 trials each");
 }
 
+/// `TEST-014`. A history holding a pass **and** a failure is reported, with its counts and its commit.
+///
+/// # What this covers that `flaky.rs`'s unit tests do not
+///
+/// The **edge**. `detect` is unit-tested from the module, but until `--flaky` existed nothing established
+/// that a user could reach it — which is the shape `§O-375` names: a detector nothing invokes reports
+/// nothing about the tree it is in.
+///
+/// # Why the fixture carries a third test that never fails
+///
+/// Because `detect` reports a `(test, platform)` only when it holds **both** a pass and a failure. A
+/// fixture of one flake alone cannot tell *"the detector works"* from *"the detector reports every test"*,
+/// so the solid one is the control.
+#[test]
+fn test_flaky_reports_a_test_that_both_passed_and_failed() {
+    let s = Sandbox::new("test-flaky");
+    s.write(
+        "history.jsonl",
+        "{\"test\":\"serve_policy::a_route\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"dd40706\"}\n\
+         {\"test\":\"serve_policy::a_route\",\"platform\":\"linux\",\"passed\":false,\"commit\":\"eb1bba9\"}\n\
+         {\"test\":\"solid\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"dd40706\"}\n",
+    );
+
+    // **The three separable claims**: how many, how bad, and where to look. A report that got the count
+    // and the ratio right but printed an empty commit would satisfy the first two and fail the third.
+    s.run(&["test", "--flaky", "history.jsonl"])
+        .assert_ok()
+        .assert_contains("1 flaky test(s)")
+        .assert_contains("failed 1 of the last 2")
+        .assert_contains("eb1bba9");
+}
+
+/// A history with nothing to report says so, and exits `0`.
+///
+/// **A flake is information about reliability rather than a regression in the change under test**, so
+/// finding one is not a failure — `TEST-013` is the item that would make it a gate. This asserts the
+/// other half of that: a clean history is a success, not a silent no-op, so a CI step reading the exit
+/// code can tell "there was nothing to find" from "the detector did not run".
+#[test]
+fn test_flaky_reports_nothing_for_a_history_without_flakes() {
+    let s = Sandbox::new("test-flaky-clean");
+    s.write(
+        "history.jsonl",
+        "{\"test\":\"solid\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"c1\"}\n\
+         {\"test\":\"solid\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"c2\"}\n",
+    );
+    s.run(&["test", "--flaky", "history.jsonl"])
+        .assert_ok()
+        .assert_contains("no flaky tests");
+}
+
+/// **A history that does not parse is a usage error naming its line**, not a silent empty report.
+///
+/// A skipped record under-reports a failure, and the failures are the whole point of the file — so a
+/// history with a hole in it must not read as a history without one. The message naming the line number
+/// is what makes a truncated final line — what a killed writer leaves — diagnosable rather than mysterious.
+#[test]
+fn test_flaky_refuses_a_history_line_it_cannot_read() {
+    let s = Sandbox::new("test-flaky-bad");
+    s.write(
+        "history.jsonl",
+        "{\"test\":\"a\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"c1\"}\nnot json at all\n",
+    );
+    s.run(&["test", "--flaky", "history.jsonl"])
+        // **A failure, not an empty report.** A history with a hole must not read as a history without
+        // one, which is what `assert_failed` plus the line number together establish.
+        .assert_failed()
+        .assert_contains("line 2");
+}
+
 /// A project whose language has no runner is refused by name.
 ///
 /// The error must name the language and the tracking item, not fail with an

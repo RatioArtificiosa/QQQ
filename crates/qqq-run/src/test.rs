@@ -60,6 +60,17 @@ pub struct TestOptions {
     /// (`junit`, `tap`) is a document for another tool and must not be wrapped in that envelope,
     /// so the two cannot be the same field — see [`TestFormat`].
     pub format: TestFormat,
+    /// Where to append this run's per-test outcomes, as a JSON Lines history (`TEST-014`).
+    ///
+    /// Absent by default, so a run records nothing unless asked. **A runner that always wrote a history
+    /// would be writing files into projects that never opted in.** The commit and the run identifier
+    /// come from `QQQ_COMMIT` and `QQQ_RUN`, which is how a CI step supplies them.
+    pub history: Option<std::path::PathBuf>,
+    /// A history to report flakes from **instead of running anything** (`TEST-014`).
+    ///
+    /// Handled before the manifest is loaded, because a reader asking which tests are flaky should not
+    /// need a project that builds.
+    pub flaky: Option<std::path::PathBuf>,
 }
 
 impl TestOptions {
@@ -725,7 +736,10 @@ fn first_difference(outputs: &[String]) -> String {
 ///
 /// # Errors
 ///
-/// `QQQ-2002` when the language has no runner, as [`discover`].
+/// `QQQ-2002` when the language has no runner, as [`discover`]. And, when `--history` is given, whether
+/// the history can be opened and written -- **an error rather than a warning**, because a recorder that
+/// silently fails produces a history with holes, and a detector reading a history with holes reports the
+/// absence of a failure as evidence that there was none.
 pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result<TestOutput> {
     let runner = runner_for(language).ok_or_else(|| {
         Error::new(
@@ -832,6 +846,13 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
     let passed = outcomes.iter().filter(|o| o.passed).count();
     let failed = outcomes.iter().filter(|o| !o.passed).count();
     let nondeterministic = outcomes.iter().filter(|o| o.nondeterministic).count();
+
+    // `TEST-014`. **Recorded HERE rather than in `dispatch_test`**, because this is what holds each
+    // test's outcome. A recorder reading a `TestOutput` after the report shaping would record what the
+    // report chose to say, and that differs between `human`, `json`, `junit` and `tap`.
+    if let Some(path) = opts.history.as_deref() {
+        crate::flaky::record_run(path, &outcomes)?;
+    }
 
     Ok(TestOutput {
         project: String::new(),

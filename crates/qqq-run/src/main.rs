@@ -1830,6 +1830,31 @@ fn dispatch_test(
         }
     };
 
+    // `TEST-014`. **Before the manifest, deliberately.** A reader asking which of their tests are flaky
+    // has a history file; requiring a project that builds first would make the flag fail on exactly the
+    // tree they are debugging. The exit is `OK` even when flakes are found -- a flake is information
+    // about reliability rather than a regression in the change under test, and `TEST-013` is the item
+    // that would make it a gate.
+    if let Some(path) = opts.flaky.as_deref() {
+        let found = match qqq_run::flaky::read_history(path) {
+            Ok(history) => qqq_run::flaky::detect(&history, 0),
+            Err(e) => {
+                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                return ExitCode::from(exit::USAGE);
+            }
+        };
+        // **Raw to stdout**, the arrangement the foreign report formats use: this is a document rather
+        // than an envelope, and a reader may pipe it.
+        let text = qqq_run::flaky::report(&found);
+        if text.is_empty() {
+            println!("no flaky tests in the history");
+        } else {
+            print!("{text}");
+        }
+        let _ = std::io::stdout().flush();
+        return ExitCode::from(exit::OK);
+    }
+
     let explicit = flag_value(args, "--manifest").map(std::path::PathBuf::from);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, explicit.as_deref()) {
@@ -1960,6 +1985,19 @@ fn test_options(
                 );
                 i += 1;
             }
+            // `TEST-014`. `--history` records a run; `--flaky` reports one. The commit and the run
+            // identifier come from the environment, which keeps this list at nine entries for a help
+            // text with a brevity budget (`DX-013`).
+            "--history" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.history = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            "--flaky" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                opts.flaky = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
             "--manifest" => i += 1,
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
@@ -1968,7 +2006,7 @@ fn test_options(
                 )
                 .with_remediation(
                     "`test` accepts --filter, --fail-fast, --trials, --format, \
-                     --dry-run and --manifest",
+                     --dry-run, --history, --flaky and --manifest",
                 ));
             }
             // A bare argument is treated as a filter, which is what every other

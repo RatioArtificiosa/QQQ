@@ -53,6 +53,8 @@
 //! would report every one of them as flaky everywhere**, which is the same as reporting nothing.
 
 use std::collections::BTreeMap;
+// `write!`/`writeln!` into a `String`, which cannot fail -- hence the `let _ =` at each call site.
+use std::fmt::Write as _;
 use std::path::Path;
 
 use qqq_core::{Error, ErrorCode, Result};
@@ -401,6 +403,109 @@ pub fn detect(records: &[TestRecord], window: usize) -> Vec<Flake> {
                 .last()
                 .map_or_else(String::new, |r| r.commit.clone()),
         });
+    }
+    out
+}
+
+/// Append one run's outcomes to a history, annotated from the environment.
+///
+/// # Errors
+///
+/// **Whether the file can be opened and written.** Every record is appended in one write per line, so a
+/// process killed mid-run leaves a truncated final line and never a corrupted prefix -- and a truncated
+/// line is loud, because `read_history` refuses it by line number. **A recorder that instead swallowed a
+/// write failure would leave a history with holes**, and a detector reading a history with holes reports
+/// the absence of a failure as evidence that there was none.
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::flaky::{detect, read_history, record_run, TestRecord};
+///
+/// // A history is written by the runner, so this example writes one directly and then reads it back
+/// // through the same reader the CLI uses. The record shape is the contract between them.
+/// let dir = std::env::temp_dir().join("qqq-flaky-doc-record");
+/// let _ = std::fs::remove_dir_all(&dir);
+/// let path = dir.join("history.jsonl");
+/// std::fs::create_dir_all(&dir).expect("create");
+/// std::fs::write(
+///     &path,
+///     "{\"test\":\"t\",\"platform\":\"linux\",\"passed\":true,\"commit\":\"c1\"}\n\
+///      {\"test\":\"t\",\"platform\":\"linux\",\"passed\":false,\"commit\":\"c2\"}\n",
+/// )
+/// .expect("write");
+///
+/// let back: Vec<TestRecord> = read_history(&path).expect("read");
+/// assert_eq!(back.len(), 2);
+/// assert_eq!(detect(&back, 0).len(), 1);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// ```
+pub fn record_run(path: &Path, outcomes: &[crate::test_runner::OutcomeReport]) -> Result<()> {
+    let platform = platform();
+    let commit = std::env::var("QQQ_COMMIT").unwrap_or_default();
+    let run = std::env::var("QQQ_RUN").ok();
+    let records: Vec<TestRecord> = outcomes
+        .iter()
+        .map(|o| TestRecord {
+            test: o.name.clone(),
+            platform: platform.clone(),
+            passed: o.passed,
+            commit: commit.clone(),
+            run: run.clone(),
+        })
+        .collect();
+    append_history(path, &records)
+}
+
+/// The human report for a detector result, empty when there is nothing to say.
+///
+/// # Why an empty string rather than a banner saying there are none
+///
+/// Because the caller prints this on the way to a summary it is already printing, and **a line that
+/// says "no flakes" on every green run is a line nobody reads by the third day** -- which is how a
+/// report that matters becomes a report that is skipped. The caller decides whether silence means
+/// success; this returns nothing to say when there is nothing to say.
+///
+/// # Why the first failure's commit is on every line
+///
+/// Because *"failed 1 of 40"* says a test is unreliable and *"first failed at `eb1bba9`"* says where to
+/// look. **The count is what makes a reader act; the commit is what makes the action possible.**
+///
+/// # Example
+///
+/// ```
+/// use qqq_run::flaky::{detect, report, TestRecord};
+///
+/// let history = vec![
+///     TestRecord { test: "serve_policy::a_route".to_owned(), platform: "linux".to_owned(),
+///                  passed: true, commit: "dd40706".to_owned(), run: None },
+///     TestRecord { test: "serve_policy::a_route".to_owned(), platform: "linux".to_owned(),
+///                  passed: false, commit: "eb1bba9".to_owned(), run: None },
+/// ];
+///
+/// let text = report(&detect(&history, 20));
+/// assert!(text.contains("flaky"));
+/// assert!(text.contains("1 of the last 2"));
+/// assert!(text.contains("eb1bba9"));
+/// // And a clean history says nothing at all, which is not the same as saying "fine".
+/// assert!(report(&detect(&history[..1], 20)).is_empty());
+/// ```
+#[must_use]
+pub fn report(found: &[Flake]) -> String {
+    if found.is_empty() {
+        return String::new();
+    }
+    // **`write!` rather than `push_str(&format!(..))`** -- `clippy::format_push_string` is right that
+    // the latter allocates a second `String` per piece for no gain. The `let _ =` is because writing to
+    // a `String` cannot fail, which is the one case where the result is genuinely discardable.
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} flaky test(s) -- each passed on some runs and failed on others:",
+        found.len()
+    );
+    for f in found {
+        let _ = writeln!(out, "  {}", f.summary());
     }
     out
 }

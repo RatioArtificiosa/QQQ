@@ -672,6 +672,19 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
     for entry in &manifest.capabilities.fs {
         let declared_path = entry.path.clone();
 
+        // A capability path is host authority, not a project-relative file
+        // reference. Resolving it against the process CWD would let the same
+        // manifest grant different directories when launched from different
+        // locations. Callers that need project-relative configuration must
+        // resolve it explicitly and record the resulting absolute path before
+        // normalization.
+        if !is_absolute_host_path(&declared_path) {
+            return Err(NormalizeError::PathUnresolvable {
+                declared: declared_path,
+                reason: "filesystem capability paths must be absolute".to_owned(),
+            });
+        }
+
         if !env.exists(&declared_path) {
             return Err(NormalizeError::PathMissing {
                 declared: declared_path,
@@ -725,6 +738,19 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
     }
     fs.dedup_by(|a, b| a.canonical_path == b.canonical_path && a.mode == b.mode);
     Ok(fs)
+}
+
+/// Absolute-path validation that is stable for manifests inspected on a
+/// different host than the path syntax represents. `Path::is_absolute` on
+/// Windows rejects POSIX-style `/var/...` paths even though QQQ accepts them as
+/// portable host-path declarations and normalizes separators consistently.
+#[must_use]
+fn is_absolute_host_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with('/')
+        || (normalized.len() >= 3
+            && normalized.as_bytes()[1] == b':'
+            && normalized.as_bytes()[2] == b'/')
 }
 
 /// Trim, optionally lowercase, sort and deduplicate a string allowlist.
@@ -856,7 +882,11 @@ pub fn path_is_within(candidate: &str, root: &str) -> bool {
     }
 
     if root_parts.is_empty() {
-        return false;
+        // POSIX `/` (and its equivalent repeated-separator spelling) is a real
+        // containment root. Treating it as an empty component list made a
+        // normalized root grant authorize the root itself but reject every
+        // descendant at call time.
+        return c.starts_with('/');
     }
     // A candidate shorter than the root cannot be beneath it.
     if cand.len() < root_parts.len() {
@@ -1170,6 +1200,13 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn path_containment_handles_the_posix_root() {
+        assert!(path_is_within("/etc/qqq/config", "/"));
+        assert!(path_is_within("/", "/"));
+        assert!(!path_is_within("relative/file", "/"));
+    }
+
     // -- Normalization -----------------------------------------------------
 
     #[test]
@@ -1223,6 +1260,15 @@ mod tests {
             matches!(e, NormalizeError::PathNotADirectory { .. }),
             "got {e:?}"
         );
+    }
+
+    #[test]
+    fn normalization_rejects_relative_filesystem_grants() {
+        let m = manifest_with("[[capabilities.fs]]\npath = \"data\"\nmode = \"read-only\"\n");
+        let err = Normalized::from_manifest(&m, &FakeEnv::default())
+            .expect_err("relative authority must not depend on the process CWD");
+        assert!(matches!(err, NormalizeError::PathUnresolvable { .. }));
+        assert!(err.to_string().contains("absolute"));
     }
 
     /// Canonicalization must defeat `..` traversal before the path reaches the

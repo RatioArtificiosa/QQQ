@@ -43,7 +43,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/languages/rust.md](docs/languages/rust.md) — The Rust toolchain's state, and its limitations — each measured rather than recalled. Read this before believing a Rust build is servable. (8 KB)
 - [docs/recipes/rust.md](docs/recipes/rust.md) — Task-oriented Rust recipes for the capabilities the host actually binds, and the §11.3 recipes that cannot be written yet, with what to do instead. (8 KB)
 - [docs/profiling.md](docs/profiling.md) — Where the time goes: which profilers exist on which platform, the measured `--version` startup table, and why `criterion` was rejected twice. (8 KB)
-- [docs/determinism.md](docs/determinism.md) — What determinism controls, what it costs, and where it stops: the nine sources of nondeterminism with the tree's state beside each, the honest limits, and the non-use cases. (7 KB)
+- [docs/determinism.md](docs/determinism.md) — What determinism controls, what it costs, and where it stops: the nine sources of nondeterminism with the tree's state beside each, the honest limits, and the non-use cases. (8 KB)
 - [docs/contributing/claims-policy.md](docs/contributing/claims-policy.md) — How a factual claim must be verified before it enters a document. _(human)_ (7 KB)
 - [docs/contributing/anchors.md](docs/contributing/anchors.md) — The anchor convention, and why a retired section is tombstoned rather than deleted. _(human)_ (6 KB)
 

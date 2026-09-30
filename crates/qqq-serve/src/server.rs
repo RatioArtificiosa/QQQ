@@ -1145,6 +1145,38 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
     Served::BodyRejected
 }
 
+/// Whether a special route carries a body whose size is not bounded by the
+/// parsed request head.
+///
+/// A declared `Content-Length` is already capped by `http1` before this
+/// function runs.  Streaming and upgrade handlers intentionally do not wait
+/// for that declared body, so treating every positive length as a reason to
+/// reject would break their latency contract.  Chunked framing is different:
+/// it has no declared upper bound, and allowing a special route to commit to
+/// its protocol before consuming it would bypass `BodyReader`'s absolute cap.
+#[must_use]
+fn special_route_has_body(head: &RequestHead) -> bool {
+    head.chunked
+}
+
+/// Refuse an unbounded chunked special-route request before its handler or
+/// protocol transition runs. These routes have no HTTP request-body contract,
+/// and the unconsumed chunked body would bypass the absolute body cap.
+async fn reject_special_route_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+    let bytes = response::write_response(
+        &response::from_error(&response::parse_error_response(
+            "special routes do not accept an HTTP request body; send the body to an ordinary route",
+        )),
+        head.version,
+        false,
+        is_head(head),
+    );
+    let _ = stream.write_all(&bytes).await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+    Served::BadRequest
+}
+
 /// Serve a request that arrived on a WebSocket route.
 ///
 /// # Two outcomes, and why both are needed
@@ -1421,6 +1453,10 @@ async fn maybe_serve_metrics(
         crate::route::Method::Get | crate::route::Method::Head
     ) {
         return None;
+    }
+    if special_route_has_body(head) {
+        *span_seq += 1;
+        return Some(reject_special_route_body(stream, head).await);
     }
     *span_seq += 1;
     Some(serve_metrics(stream, head, path, metrics, ctx, tenant, *span_seq).await)
@@ -1880,11 +1916,9 @@ async fn serve_connection(
         // * The per-tenant **declared-length** cap is checked above, before this block.
         // * The absolute `max_request_bytes` cap is enforced by the **parser** on a
         //   declared `Content-Length` (`http1`), which runs before any of this.
-        //
-        // A *chunked* body past the absolute cap on a streaming or WebSocket route is
-        // therefore no longer refused with `413` — and it is not read either, because
-        // nothing reads it and the connection closes. That is the one behaviour change in
-        // this ordering, and it is stated here rather than left to be discovered.
+        // * A body-bearing special route is rejected below before its handler or
+        //   protocol transition. These routes have no HTTP body contract, so
+        //   refusing them keeps the framing unambiguous.
         if let Some(served) = serve_special_route(
             &mut stream,
             &head,
@@ -2029,6 +2063,9 @@ async fn serve_special_route(
         if let Some(requested) = head.header("access-control-request-method") {
             if let Some(cors) = ctx.cors {
                 *span_seq += 1;
+                if special_route_has_body(head) {
+                    return Some(reject_special_route_body(stream, head).await);
+                }
                 return Some(
                     serve_preflight(
                         stream,
@@ -2050,6 +2087,14 @@ async fn serve_special_route(
     }
 
     let m = table.match_route(head.method, path)?;
+
+    if special_route_has_body(head)
+        && (dispatch.websocket_for(&m.handler).is_some()
+            || dispatch.streaming_for(&m.handler).is_some())
+    {
+        *span_seq += 1;
+        return Some(reject_special_route_body(stream, head).await);
+    }
 
     if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
         *span_seq += 1;
@@ -2904,5 +2949,21 @@ mod tests {
     fn a_tenant_is_the_peer_ip() {
         let peer: SocketAddr = "203.0.113.7:54321".parse().unwrap();
         assert_eq!(tenant_of(peer), "203.0.113.7");
+    }
+
+    #[test]
+    fn special_route_body_detection_rejects_only_unbounded_chunked_lengths() {
+        let mut request = head(Version::Http11, &[]);
+        assert!(!special_route_has_body(&request));
+
+        request.content_length = Some(0);
+        assert!(!special_route_has_body(&request));
+
+        request.content_length = Some(1);
+        assert!(!special_route_has_body(&request));
+
+        request.content_length = None;
+        request.chunked = true;
+        assert!(special_route_has_body(&request));
     }
 }

@@ -377,19 +377,14 @@ async fn a_reader_never_reads_more_than_the_caller_asked_for() {
 }
 
 #[tokio::test]
-async fn a_zero_max_returns_no_data_and_reads_nothing() {
-    // Not an error, and emphatically not `End` — the body has not ended. A
-    // decoder that returned `End` here would truncate every body for a caller
-    // that computed a zero-sized buffer.
+async fn a_zero_max_is_rejected_instead_of_returning_a_non_progressing_chunk() {
     let mut r = BodyReader::length_delimited(10, 1000);
     let mut io = Cursor::new(vec![b'q'; 10]);
-    assert_eq!(
-        r.poll_chunk(&mut io, 0).await.expect("read"),
-        BodyChunk::Data(Vec::new())
-    );
+    let err = r
+        .poll_chunk(&mut io, 0)
+        .await
+        .expect_err("a zero read size would never make progress");
+    assert_eq!(err, BodyError::InvalidReadSize);
     assert_eq!(io.position(), 0);
-    assert!(
-        !r.is_finished(),
-        "a zero-size request must not finish the body"
-    );
+    assert!(!r.is_finished(), "a rejected read must not finish the body");
 }

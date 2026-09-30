@@ -69,6 +69,7 @@
 
 use std::io::{self, Write};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -94,6 +95,42 @@ pub const STDERR_PREFIX: &str = "qqq-guest stderr | ";
 /// open for as long as it likes, and a line-oriented collector has nothing to parse
 /// until the guest exits.
 pub const MAX_ESCAPED_RUN: usize = 4096;
+
+/// Maximum guest-written bytes accepted by one stdout or stderr destination.
+///
+/// `MAX_ESCAPED_RUN` bounds one physical line, not the lifetime of a process.
+/// Without a total budget a guest can still fill a host log indefinitely by
+/// emitting many short lines. The budget is shared by all writers obtained from
+/// one `GuestOutput`, so opening multiple WASI streams cannot multiply it.
+pub const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug)]
+struct OutputBudget {
+    used: AtomicU64,
+    limit: u64,
+}
+
+impl OutputBudget {
+    fn reserve(&self, bytes: usize) -> io::Result<()> {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(bytes) else {
+                return Err(io::Error::other("guest output quota exhausted"));
+            };
+            if next > self.limit {
+                return Err(io::Error::other("guest output quota exhausted"));
+            }
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => return Ok(()),
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
 
 /// A destination for guest output, writable through a shared reference.
 ///
@@ -275,6 +312,7 @@ impl Escaper {
 pub struct GuestOutput {
     prefix: &'static str,
     sink: Arc<dyn GuestSink>,
+    budget: Arc<OutputBudget>,
 }
 
 impl std::fmt::Debug for GuestOutput {
@@ -305,9 +343,19 @@ impl GuestOutput {
     /// racing on several.
     #[must_use]
     pub fn to(prefix: &'static str, sink: impl GuestSink) -> Self {
+        Self::to_with_limit(prefix, sink, MAX_OUTPUT_BYTES)
+    }
+
+    /// Construct guest output with an explicit lifetime byte quota.
+    #[must_use]
+    pub fn to_with_limit(prefix: &'static str, sink: impl GuestSink, limit: u64) -> Self {
         Self {
             prefix,
             sink: Arc::new(sink),
+            budget: Arc::new(OutputBudget {
+                used: AtomicU64::new(0),
+                limit,
+            }),
         }
     }
 
@@ -323,6 +371,7 @@ impl GuestOutput {
         SanitisingWriter {
             escaper: Escaper::new(self.prefix),
             sink: Arc::clone(&self.sink),
+            budget: Arc::clone(&self.budget),
         }
     }
 }
@@ -349,6 +398,7 @@ impl StdoutStream for GuestOutput {
 pub struct SanitisingWriter {
     escaper: Escaper,
     sink: Arc<dyn GuestSink>,
+    budget: Arc<OutputBudget>,
 }
 
 impl std::fmt::Debug for SanitisingWriter {
@@ -378,6 +428,9 @@ impl AsyncWrite for SanitisingWriter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        if let Err(error) = this.budget.reserve(buf.len()) {
+            return Poll::Ready(Err(error));
+        }
         let mut escaped = Vec::with_capacity(buf.len() + 16);
         let consumed = this.escaper.push(buf, &mut escaped);
         Poll::Ready(this.sink.write_all_shared(&escaped).map(|()| consumed))
@@ -572,6 +625,24 @@ mod tests {
             !text.lines().any(|l| l == FORGED_RECORD),
             "the forged record became a line of its own through the real trait path: {text:?}"
         );
+    }
+
+    #[test]
+    fn guest_output_enforces_one_shared_total_quota_across_writers() {
+        let captured = captured();
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 5);
+        let mut first = output.writer();
+        let mut second = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        assert!(matches!(
+            Pin::new(&mut first).poll_write(&mut cx, b"123"),
+            Poll::Ready(Ok(3))
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll_write(&mut cx, b"456"),
+            Poll::Ready(Err(_))
+        ));
     }
 
     /// Drive an `AsyncWrite` to completion with a no-op waker.

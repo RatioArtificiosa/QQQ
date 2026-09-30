@@ -108,8 +108,10 @@ would decide it (`DET-003`) is open.
 
 ## 5. The replay log
 
-**Not built yet** — `DET-007` is the format and `DET-008` is `--replay`. Its design is fixed and this
-section records the shape so a reader can follow the work:
+**Implemented for the synchronous CLI path.** `DET-007` is the format and
+`DET-008` is `--replay`; the runtime records and verifies the log before it is
+attached to an execution. Asynchronous deterministic execution is deliberately
+refused until `DET-004` provides a deterministic scheduler (`QQQ-6008`).
 
 - **A header of four fields** — artifact digest, engine version, target triple, `deterministic` — because
   a log that omits any of them cannot tell a reader whether the replay is valid.
@@ -118,6 +120,8 @@ section records the shape so a reader can follow the work:
 - **`recorded` / `refused` counters**, so a gap is a **value** rather than a silence.
 - **A closed set of function names**, so a replay file — which is attacker-supplied by construction —
   cannot make the reader intern an arbitrary string.
+- **Header identity is enforced before consumption**: artifact digest, engine
+  version, target triple, and deterministic setting must match the current run.
 
 **`--replay` fails when the log runs out before the execution does.** A truncated log that silently
 replays a shorter run is the one outcome the whole mechanism exists to prevent.

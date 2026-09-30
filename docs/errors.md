@@ -438,6 +438,18 @@ logs and issue trackers reference them indefinitely.
 { "code": "QQQ-6007" }
 ```
 
+### `QQQ-6008` — `DeterminismUnsupported`
+
+**Cause.** Deterministic mode was requested for asynchronous execution, but the
+runtime does not yet provide a deterministic scheduler for that path.
+
+**Remediation.** Disable deterministic mode for asynchronous execution, or use
+the synchronous execution path until deterministic scheduling is implemented.
+
+```json
+{ "code": "QQQ-6008" }
+```
+
 ## Tooling and diagnostics
 
 ### `QQQ-7001` — `McpArgumentInvalid`

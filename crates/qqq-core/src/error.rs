@@ -336,6 +336,13 @@ pub enum ErrorCode {
     /// **Remediation:** **please report this.** The trap names the interface;
     /// the log line `SEV1 host-panic-contained` carries the message.
     HostPanicContained = 6007,
+    /// A requested execution-mode combination cannot provide the promised
+    /// determinism guarantees.
+    ///
+    /// **Remediation:** disable deterministic mode for asynchronous execution,
+    /// or use the synchronous execution path until deterministic scheduling is
+    /// implemented.
+    DeterminismUnsupported = 6008,
 
     // -- 7xxx: agent / protocol ----------------------------------------------
     /// An MCP tool call had arguments that failed schema validation.
@@ -460,6 +467,9 @@ impl ErrorCode {
             Self::ComponentLoadFailed,
             Self::InternalInvariantViolated,
             Self::HostResourceExhausted,
+            Self::RequestBodyTooLarge,
+            Self::HostPanicContained,
+            Self::DeterminismUnsupported,
             Self::McpArgumentInvalid,
             Self::UnknownSchemaSurface,
             Self::ProtocolVersionUnsupported,

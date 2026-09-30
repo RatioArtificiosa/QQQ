@@ -34765,10 +34765,136 @@ iterate.** One line is convenient; **a note is what the rule is about.** And **a
 should name the command that produces its number**, so a reader can re-run it -- `§O-277`'s *"a number that
 cannot be compared is a number with no owner"*, applied to the evidence lines themselves.
 
+## §O-475 — A valid replay chain is not proof that the file belongs to this run
+
+`qqq-host::replay::ReplayHeader::mismatches` already compared the four identity
+fields, but `qqq-run` did not call it when opening `--replay`. The chain digest
+proved only that the file had not been edited after it was written; a valid log
+from another artifact, engine version, target, or deterministic setting could
+therefore be consumed as if it belonged to the current execution.
+
+The correction is in `crates/qqq-run/src/run.rs`: recording and replay now use
+one `replay_header` constructor, and replay refuses every header mismatch before
+the source is attached. The regression test edits each field independently and
+asserts that the structured error names that field. `cargo test --manifest-path
+E:\QQQ\Cargo.toml -p qqq-run --lib` measured **549 passed, 0 failed** after the
+change.
+
+## §O-476 — A debug assertion cannot enforce a production security contract
+
+`ReadyStore::prepare` used `debug_assert!` to reject deterministic execution in
+an asynchronous context. Debug builds refused the unsupported combination while
+release builds proceeded with scheduler-dependent behavior, contradicting the
+replay guarantee exactly where production users rely on it.
+
+The correction is release-safe: the host returns `QQQ-6008`
+(`DeterminismUnsupported`) with remediation, the code is catalogued in
+`docs/errors.md`, and `docs/determinism.md` now states that deterministic mode is
+implemented only on the synchronous CLI path until `DET-004` exists. The full
+`qqq-host` suite measured **492 unit tests, 6 ABI tests, 6 compatibility tests,
+5 fuzz-corpus tests, 3 guest-assertion tests, 5 guest-invocation tests, 6 hostile
+guest tests, 4 refusal tests, 9 subrequest tests, and 78 doc tests** with zero
+failures.
+
+## §O-477 — Special-route body limits must preserve streaming latency
+
+The first attempted repair for `HTTP-LIMIT-001` rejected every special route
+with a positive `Content-Length`. The existing streaming contract intentionally
+starts a stream without waiting for a declared body, and its regression test
+correctly caught that overreach: the request declared 4096 bytes but sent none,
+and the stream had to begin immediately.
+
+The corrected boundary is narrower and stronger. `http1` already refuses a
+declared `Content-Length` above the absolute cap; declared lengths therefore do
+not need to be re-rejected by the special-route dispatch. Chunked framing has no
+declared upper bound, so metrics, preflight, WebSocket, and streaming special
+routes reject it before the handler or protocol transition. Ordinary routes
+continue through `BodyReader`, which enforces the cap while bytes arrive. This
+preserves the streaming latency contract and removes the unbounded chunked
+bypass. The streaming integration suite measured **6 passed, 0 failed** and the
+new framing test passed.
+
+## §O-478 — A zero-sized body read must fail explicitly, not return a no-progress chunk
+
+`BodyReader::poll_chunk(0)` returned `Data([])` while bytes remained. A caller
+whose loop waits for `End` could repeat that call forever without consuming input.
+The API now returns `BodyError::InvalidReadSize`; the integration regression
+asserts both the error and that the underlying reader was not touched.
+
+## §O-479 — Filesystem authority must not depend on the process working directory
+
+Manifest filesystem grants were accepted as relative paths and were resolved by
+the host environment. The same artifact could therefore authorize different
+directories depending on the launch directory. The normalizer now rejects
+relative authority, accepts both POSIX-rooted and Windows-drive-absolute syntax
+without letting the inspecting host's `Path::is_absolute` semantics change the
+decision, and `path_is_within` treats POSIX `/` as a real containment root.
+The proposal example was corrected from a file path to the V1 directory-grant
+contract. The focused normalization run measured **30 passed, 0 failed**.
+
+## §O-480 — Per-line output limits do not bound a guest's lifetime output
+
+`MAX_ESCAPED_RUN` bounded one physical line but not the total bytes a guest could
+emit across many short lines. `GuestOutput` now shares an atomic lifetime quota
+across every writer obtained from one stdout or stderr destination, with an
+explicit constructor for tests and future policy injection; a regression proves
+that a second writer cannot multiply the quota.
+
+One residual is deliberately not hidden: `SanitisingWriter::poll_write` still
+calls the synchronous `GuestSink::write_all_shared` path. The quota closes the
+unbounded-output resource risk, but not the possibility of blocking an async
+executor on a slow host log sink. Replacing that path needs a bounded async queue
+with ordering and backpressure semantics; it remains an explicit performance
+follow-up rather than an unsafe `block_in_place` patch.
+
+## §O-481 — Pool occupancy is a compound invariant, not two independent counters
+
+`Pool::acquire` incremented `in_use` and decremented `idle` in separate atomic
+operations. Observers could see an impossible intermediate state, and the module
+documentation described memory reuse that V1 did not implement: callers create
+and drop a Wasmtime instance around a slot. The pool now protects the compound
+state with one mutex transaction and documents `Pooled` as returning a clean slot
+to idle accounting, not returning guest memory for reuse. The concurrency tests
+remain green.
+
+## §O-482 — Documentation examples are executable contracts in disguise
+
+The proposal showed HTTP fields that `HttpCapability` does not parse, a file-level
+grant although V1 grants directories, and limits fields absent from `Limits`.
+Those examples could cause an agent or developer to generate manifests that fail
+schema validation. The examples now match the implemented V1 surface and label
+method/response-size policy as future work. The determinism guide no longer says
+the replay log is unbuilt, and the new `QQQ-6008` error is documented.
+
+## §O-483 — Findings that remain intentionally open after this correction set
+
+The following audit findings were rechecked and not silently treated as fixed:
+
+| finding | current disposition |
+|---|---|
+| `PERF-OUT-001` | Lifetime output quota fixed; synchronous sink write in `poll_write` remains the bounded async-queue follow-up described in `§O-480`. |
+| `PERF-AUDIT-001` | Per-record synchronous audit persistence remains a durability choice and a hot-path cost; an async bounded writer needs a separately specified loss/backpressure contract. |
+| `PERF-POOL-001` | The misleading reuse claim is corrected; actual reset-safe instance reuse remains a V1 gap, not something the slot accountant can honestly claim. |
+| `METRICS-001` | Metrics remain an intentionally server-owned endpoint; deployment guidance must keep it on a trusted interface or place auth in front of it until an explicit metrics-auth contract exists. |
+| `HOSTPAT-001` | Current host-pattern grammar is permissive by design for internal names; tightening it requires a declared compatibility policy and corpus before changing behavior. |
+| `HTTP-CLIENT-001` | The outbound HTTP client remains a documented stub and is still reported as unimplemented rather than faked. |
+| `GRAF-PARSER-001` | The known PowerShell parser limitation remains a tooling issue; Graf refresh verification must continue to report parser skips explicitly. |
+
+This table is the honest boundary of this round: implemented corrections are
+covered by tests and the remaining risks retain owners and next actions instead
+of being erased from the audit by optimistic wording.
+
+## §O-484 — A checker that cannot print its verdict is a failed checker
+
+`tools/check_done_lines.py --self-test` was logically green but raised
+`UnicodeEncodeError` while printing its `→ Done:` case names under the Windows
+cp1252 console. `sync_docs.py --record` therefore reported a failed maintenance
+ritual even though the corpus checks themselves were correct. The checker now
+reconfigures its diagnostic streams to UTF-8 with replacement for unsupported
+console sinks. The self-test measured **12 of 12 passed**, and the full
+`sync_docs.py --check` ritual measured **9 of 9 checkers agreeing**.
+
 *End of `QQQ-Observations-and-Memories.md`.*
-
-
-
 
 
 

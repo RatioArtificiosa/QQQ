@@ -97,6 +97,12 @@ pub enum BodyError {
         /// What was wrong.
         reason: &'static str,
     },
+    /// The caller requested a zero-byte read increment.
+    ///
+    /// Returning an empty `Data` chunk is not a harmless no-op: callers that
+    /// loop until `End` would make no progress forever. A zero chunk size is a
+    /// programming error in the pull API and must be explicit.
+    InvalidReadSize,
 }
 
 impl fmt::Display for BodyError {
@@ -117,6 +123,7 @@ impl fmt::Display for BodyError {
             ),
             Self::Truncated => write!(f, "chunked body ended before its final chunk"),
             Self::BadFraming { reason } => write!(f, "malformed chunked framing: {reason}"),
+            Self::InvalidReadSize => f.write_str("body read size must be greater than zero"),
         }
     }
 }
@@ -291,10 +298,7 @@ impl BodyReader {
             return Ok(BodyChunk::End);
         }
         if max == 0 {
-            // A zero-byte request is not an error; it would loop forever, so it
-            // is answered with the only truthful thing: nothing more to give
-            // *this call*. `End` would be a lie while bytes remain.
-            return Ok(BodyChunk::Data(Vec::new()));
+            return Err(BodyError::InvalidReadSize);
         }
 
         match self.framing {

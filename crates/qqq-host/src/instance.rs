@@ -1164,15 +1164,21 @@ impl ReadyStore {
         limits: StoreLimits,
         opts: &InstanceOptions,
     ) -> Result<Self> {
-        // **A deterministic store in an async context is refused in a debug build and accepted in a
-        // release one**, because refusing it for real needs an error code this crate does not have and
-        // `docs/ERRORS.md` is hand-maintained with a count. `DET-004` -- the deterministic
-        // single-threaded scheduler -- is unbuilt, so the combination is not made reproducible by the
-        // flag; `InstanceOptions::deterministic` carries the limitation where a reader will see it.
-        debug_assert!(
-            !(opts.deterministic && matches!(context, ExecutionContext::Async)),
-            "deterministic mode has no scheduler for an async store: DET-004 is unbuilt"
-        );
+        // Determinism without a deterministic scheduler is not a weaker version of
+        // determinism; it is a false contract. A debug-only assertion let release
+        // builds proceed with scheduling-dependent results, which is especially
+        // dangerous when a replay log is treated as evidence. Refuse the invalid
+        // combination in every profile until DET-004 exists.
+        if opts.deterministic && matches!(context, ExecutionContext::Async) {
+            return Err(Error::new(
+                qqq_core::ErrorCode::DeterminismUnsupported,
+                "deterministic mode is not supported for asynchronous execution",
+            )
+            .with_remediation(
+                "disable deterministic mode, or use the synchronous execution path until \
+                 deterministic scheduling is implemented",
+            ));
+        }
 
         // -- Store state: grants, limits, and the limiter ----------------
         let mut data = StoreData::new(grants.clone());

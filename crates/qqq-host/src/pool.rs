@@ -3,23 +3,13 @@
 //! The instance pool: acquisition, backpressure and occupancy — `HOST-012` and
 //! the instance half of `HOST-019`.
 //!
-//! # What a pool is for, and what it must not do
+//! # What a pool is for, and what it must not claim
 //!
-//! Proposal §4.4 step 14 and §2.3 make the same point from two directions: a
-//! pooled instance's linear memory is **reset, not freed**, which is what makes
-//! sub-100 µs instantiation affordable at high tenant counts — and a trapped
-//! instance must never be returned to that pool, because its memory may hold
-//! half-written state and its handles may be half-closed.
-//!
-//! Those two requirements pull in opposite directions, so this module makes the
-//! safe one structural rather than conventional:
-//!
-//! * [`PooledInstance`] can only be returned by [`Pool::release`], and the only
-//!   way to obtain one is [`Pool::acquire`], which hands out an instance whose
-//!   trap state is `Clean`. There is no constructor from a raw `Instance`.
-//! * Discarding is not a variant of release. [`Pool::discard`] takes the
-//!   instance by value and drops it, so "returned a trapped instance" is not a
-//!   mistake a caller can make by choosing the wrong enum arm.
+//! V1 uses this type as a **bounded concurrency gate and occupancy recorder**.
+//! The caller creates and drops the Wasmtime instance around the permit; no
+//! reset-safe instance store exists yet. `release` therefore returns a slot to
+//! the accounting free list, not guest memory. A trapped request calls
+//! `discard`, which returns no idle slot and keeps the trap path distinct.
 //!
 //! # Backpressure, and why 503 is the right answer
 //!
@@ -45,6 +35,7 @@
 //! long (a needlessly idle client). See [`Pool::retry_after_seconds`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use qqq_core::{Error, ErrorCode, Result};
 
@@ -114,13 +105,13 @@ pub fn exhausted_error(reason: Exhausted, capacity: u64, retry_after_seconds: u6
 /// Why an instance left the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseOutcome {
-    /// Returned to the free list, to be reset and reused.
+    /// The clean request returned its concurrency slot to the idle accounting.
     Pooled,
     /// Dropped rather than reused, because it trapped.
     Discarded,
 }
 
-/// A pool of reusable instance slots.
+/// A bounded pool of instance slots.
 ///
 /// # This is a slot accountant, not a memory manager
 ///
@@ -132,13 +123,19 @@ pub enum ReleaseOutcome {
 #[derive(Debug)]
 pub struct Pool {
     capacity: u64,
-    /// Instances currently checked out.
-    in_use: AtomicU64,
-    /// Instances sitting in the free list, ready to be reset and reused.
-    idle: AtomicU64,
+    /// Counts that must change as one transaction. Independent atomics briefly
+    /// made `in_use + idle > capacity` visible between reservation and
+    /// idle-dequeue, so metrics could report an impossible state under load.
+    state: Mutex<PoolState>,
     /// Set when the host begins shutting down.
     draining: AtomicU64,
     metrics: Metrics,
+}
+
+#[derive(Debug, Default)]
+struct PoolState {
+    in_use: u64,
+    idle: u64,
 }
 
 impl Pool {
@@ -152,8 +149,7 @@ impl Pool {
         let capacity = capacity.max(1);
         Self {
             capacity,
-            in_use: AtomicU64::new(0),
-            idle: AtomicU64::new(0),
+            state: Mutex::new(PoolState::default()),
             draining: AtomicU64::new(0),
             metrics: Metrics::new(),
         }
@@ -166,15 +162,27 @@ impl Pool {
     }
 
     /// Instances currently checked out.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the pool state mutex. A poisoned
+    /// state cannot safely produce an occupancy value.
     #[must_use]
     pub fn in_use(&self) -> u64 {
-        self.in_use.load(Ordering::Relaxed)
+        self.state
+            .lock()
+            .expect("pool state is not poisoned")
+            .in_use
     }
 
     /// Instances sitting idle, available for reuse.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the pool state mutex.
     #[must_use]
     pub fn idle(&self) -> u64 {
-        self.idle.load(Ordering::Relaxed)
+        self.state.lock().expect("pool state is not poisoned").idle
     }
 
     /// The metrics recorder this pool feeds.
@@ -252,49 +260,34 @@ impl Pool {
     ///
     /// Returns `QQQ-6001` with `reason`, `capacity` and (when retryable)
     /// `retry-after` in its context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the pool state mutex. A poisoned
+    /// state cannot safely make a capacity decision.
     pub fn acquire(&self, completed_per_second: f64) -> Result<Acquired> {
         if self.is_draining() {
             self.metrics.note_saturation();
             return Err(exhausted_error(Exhausted::Draining, self.capacity, 0));
         }
 
-        // The reservation is a compare-exchange loop rather than a load then
-        // store: two threads that both read `in_use == capacity - 1` would both
-        // decide there is room, and the pool would exceed its capacity under
-        // exactly the load that makes capacity matter.
-        let mut current = self.in_use.load(Ordering::Acquire);
-        loop {
-            if current >= self.capacity {
-                self.metrics.note_saturation();
-                let retry = self.retry_after_seconds(completed_per_second);
-                return Err(exhausted_error(Exhausted::AllBusy, self.capacity, retry));
-            }
-            match self.in_use.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
+        let mut state = self.state.lock().expect("pool state is not poisoned");
+        if state.in_use >= self.capacity {
+            drop(state);
+            self.metrics.note_saturation();
+            let retry = self.retry_after_seconds(completed_per_second);
+            return Err(exhausted_error(Exhausted::AllBusy, self.capacity, retry));
         }
 
-        // Whether this is a pool hit or a fresh instantiation is decided by the
-        // free list. `fetch_update` so the count saturates at zero rather than
-        // wrapping into an enormous value, which would make a non-pooled path
-        // look like it had billions of warm instances.
-        let mut pooled = false;
-        let _ = self
-            .idle
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |idle| {
-                if idle > 0 {
-                    pooled = true;
-                    Some(idle - 1)
-                } else {
-                    None
-                }
-            });
+        // Reservation and idle dequeue are one state transition. This is a
+        // concurrency gate; the caller still creates an instance when `pooled`
+        // is false because V1 has no reset-safe instance store.
+        let pooled = state.idle > 0;
+        state.in_use += 1;
+        if pooled {
+            state.idle -= 1;
+        }
+        drop(state);
 
         Ok(Acquired {
             pooled,
@@ -302,10 +295,10 @@ impl Pool {
         })
     }
 
-    /// Return an instance to the pool intact.
+    /// Return a clean instance's slot to the pool accounting.
     ///
     /// The caller has established that the instance did not trap. This is the
-    /// **only** path that puts an instance back into the free list.
+    /// **only** path that puts a slot back into the free list.
     ///
     /// # Panics
     ///
@@ -314,19 +307,22 @@ impl Pool {
     /// zero when it wraps and let the pool hand out more than its capacity —
     /// which is precisely the guarantee the pool exists to provide.
     pub fn release(&self) -> ReleaseOutcome {
-        let previous = self.in_use.fetch_sub(1, Ordering::AcqRel);
+        let mut state = self.state.lock().expect("pool state is not poisoned");
+        let previous = state.in_use;
         assert!(
             previous > 0,
             "Pool::release called with no instance checked out; this is a QQQ bug"
         );
-        self.idle.fetch_add(1, Ordering::AcqRel);
+        state.in_use -= 1;
+        state.idle += 1;
+        drop(state);
         self.metrics.note_released();
         ReleaseOutcome::Pooled
     }
 
-    /// Record that an instance trapped and must not be reused.
+    /// Record that an instance trapped and must not return an idle slot.
     ///
-    /// This does **not** return the instance to the free list — that is the
+    /// This does **not** return the slot to the free list — that is the
     /// whole point. `HOST-010` and §4.4 step 14 require a trapped instance to be
     /// dropped, and the metric is what makes the drop rate observable.
     ///
@@ -334,11 +330,14 @@ impl Pool {
     ///
     /// As [`Pool::release`].
     pub fn discard(&self) -> ReleaseOutcome {
-        let previous = self.in_use.fetch_sub(1, Ordering::AcqRel);
+        let mut state = self.state.lock().expect("pool state is not poisoned");
+        let previous = state.in_use;
         assert!(
             previous > 0,
             "Pool::discard called with no instance checked out; this is a QQQ bug"
         );
+        state.in_use -= 1;
+        drop(state);
         self.metrics.note_discarded();
         ReleaseOutcome::Discarded
     }

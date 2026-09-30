@@ -728,6 +728,21 @@ pub fn resolve_grants(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Reso
 /// `Mutex` of a `ReplayLog`. The name carries the intent the type does not.
 type SharedLog = std::sync::Arc<std::sync::Mutex<qqq_host::replay::ReplayLog>>;
 
+/// The identity a replay source must match before any recorded value is consumed.
+///
+/// The file format verifies its own chain, but chain integrity only proves that the
+/// file was not edited after it was written. It does not prove that the file belongs
+/// to this artifact or this engine. Keeping construction in one helper prevents the
+/// recording and replay paths from silently acquiring different identity rules.
+fn replay_header(digest: &str, deterministic: bool) -> qqq_host::replay::ReplayHeader {
+    qqq_host::replay::ReplayHeader {
+        artifact_digest: digest.to_owned(),
+        engine_version: qqq_host::config::ENGINE_VERSION.to_owned(),
+        target_triple: qqq_host::config::TARGET_TRIPLE.to_owned(),
+        deterministic,
+    }
+}
+
 /// The replay sink and source a run needs, from its options — `DET-007` and `DET-008`.
 ///
 /// # Why this is a separate function
@@ -758,12 +773,7 @@ fn replay_endpoints(
     // from the component and the build rather than from the user.
     let replay_sink = opts.replay_log.as_ref().map(|_| {
         std::sync::Arc::new(std::sync::Mutex::new(qqq_host::replay::ReplayLog::new(
-            qqq_host::replay::ReplayHeader {
-                artifact_digest: digest.to_owned(),
-                engine_version: qqq_host::config::ENGINE_VERSION.to_owned(),
-                target_triple: qqq_host::config::TARGET_TRIPLE.to_owned(),
-                deterministic: opts.deterministic,
-            },
+            replay_header(digest, opts.deterministic),
             REPLAY_LOG_CAPACITY,
         )))
         // A log of a non-deterministic run is not a contradiction to refuse silently: the parser
@@ -796,6 +806,34 @@ fn replay_endpoints(
                      re-record it with `--replay-log`",
                 )
             })?;
+            let expected = replay_header(digest, opts.deterministic);
+            let mismatches = expected.mismatches(log.header());
+            if !mismatches.is_empty() {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::InvalidComponentArtifact,
+                    format!(
+                        "the replay file `{}` belongs to different execution conditions",
+                        path.display()
+                    ),
+                )
+                .with_context("header_mismatches", mismatches.join(", "))
+                .with_context("expected_artifact_digest", expected.artifact_digest)
+                .with_context(
+                    "recorded_artifact_digest",
+                    log.header().artifact_digest.clone(),
+                )
+                .with_context("expected_engine_version", expected.engine_version)
+                .with_context(
+                    "recorded_engine_version",
+                    log.header().engine_version.clone(),
+                )
+                .with_context("expected_target_triple", expected.target_triple)
+                .with_context("recorded_target_triple", log.header().target_triple.clone())
+                .with_remediation(
+                    "re-record the replay with `--replay-log` using this artifact, engine, \
+                     target, and deterministic setting",
+                ));
+            }
             Some(std::sync::Arc::new(std::sync::Mutex::new(log)))
         }
     };
@@ -1483,6 +1521,63 @@ mod tests {
             rendered.contains("chain") || rendered.contains("edited"),
             "the refusal must name the edit, got: {rendered}"
         );
+    }
+
+    /// Chain integrity and header identity are separate checks. A header can be
+    /// changed without changing the record chain, so each identity field must be
+    /// rejected independently before the source is attached to an instance.
+    #[test]
+    fn a_replay_with_the_wrong_identity_is_refused_before_consumption() {
+        let fields = [
+            ("artifact_digest", "sha256:other"),
+            ("engine_version", "other-engine"),
+            ("target_triple", "other-target"),
+            ("deterministic", "false"),
+        ];
+
+        for (key, replacement) in fields {
+            let dir = temp_dir("replay-header-mismatch");
+            let path = dir.join("one.replay");
+            let opts = RunOptions {
+                deterministic: true,
+                replay_log: Some(path.clone()),
+                ..RunOptions::default()
+            };
+            let (sink, _) = replay_endpoints(&opts, "sha256:9f2c").expect("a sink");
+            let sink = sink.expect("a sink");
+            sink.lock()
+                .expect("log")
+                .record("clock.wall", qqq_host::replay::ReplayValue::Clock(7))
+                .expect("room");
+            let text = sink.lock().expect("log").to_text();
+            let prefix = format!("{key} ");
+            let edited = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&prefix) {
+                        format!("{prefix}{replacement}")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            std::fs::write(&path, edited).expect("write");
+
+            let replay_opts = RunOptions {
+                deterministic: true,
+                replay: Some(path),
+                ..RunOptions::default()
+            };
+            let err = replay_endpoints(&replay_opts, "sha256:9f2c")
+                .expect_err("a mismatched header must be refused");
+            let rendered = err.render();
+            assert!(
+                rendered.contains("header_mismatches") && rendered.contains(key),
+                "the refusal must name {key}, got: {rendered}"
+            );
+        }
     }
 
     /// A path that cannot be read is a failure, not a silent `None`.

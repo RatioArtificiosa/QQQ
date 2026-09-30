@@ -794,9 +794,8 @@ reproducible = true              # fails the build if output digest is unstable
   [capabilities.http]
   server  = true                                  # may receive requests
   client  = ["api.stripe.com:443", "*.internal.example.com:8443"]
-  methods = ["GET", "POST", "PUT", "DELETE"]
-  max_request_bytes  = "10MiB"
-  max_response_bytes = "10MiB"
+  # V1 scopes outbound access by host:port. Method and response-size policy
+  # remain planned until they are represented and enforced end to end.
 
   # Filesystem — pre-opened directories only. Paths are host paths.
   [[capabilities.fs]]
@@ -805,8 +804,10 @@ reproducible = true              # fails the build if output digest is unstable
   quota = "5GiB"
 
   [[capabilities.fs]]
-  path = "/etc/orders/config.json"
+  path = "/etc/orders"
   mode = "read-only"
+  # File-level access is expressed as a guest-relative path below this
+  # pre-opened directory; V1 grants directories, not individual host files.
 
   # Databases — the host holds the credential; the guest never sees a password.
   [[capabilities.sql]]
@@ -864,8 +865,7 @@ epoch_deadline_ms = 5000          # wall-clock preemption backstop
 max_instances     = 200           # concurrency ceiling per worker
 max_open_handles  = 256
 max_subrequests   = 32
-max_response_time = "30s"
-shared_memory     = false         # see §4.7
+max_poll_per_tick = 1000
 
 # ── DEPENDENCIES ────────────────────────────────────────────────────────────
 [dependencies]

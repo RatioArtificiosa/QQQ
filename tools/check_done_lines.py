@@ -180,6 +180,14 @@ def audit(
 
 
 def main(argv: list[str]) -> int:
+    # The self-test names include the same Unicode arrow used by the checklist.
+    # Windows PowerShell commonly gives a direct Python process a cp1252 stdout;
+    # letting that encoding decide whether the checker can report its own result
+    # turns a passing check into an exception. Keep the checker diagnostic path
+    # UTF-8 and replace only characters a redirected sink cannot represent.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     if "--self-test" in argv:
         return self_test()
 

@@ -1686,6 +1686,69 @@ jobs:
           echo "OK: the artifact is a component exporting the qqq:http handler"
 
   # ---------------------------------------------------------------------------
+  # Performance regression detection: run the real reference application through
+  # the public serve/bench path and compare repeated medians with a same-profile
+  # baseline. This is deliberately separate from the absolute §9.2 contract:
+  # ordinary hosted runners are not the pinned reference hardware in §9.1.
+  # ---------------------------------------------------------------------------
+  perf-regression:
+    name: Performance regression (PERF-020)
+    needs: reference-app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            examples/orders-api -> target
+
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@wasm-tools
+
+      - name: Build qqqai
+        run: cargo build --release --locked -p qqq-run
+
+      - name: Build the reference application through qqqai
+        working-directory: examples/orders-api
+        run: ../../target/release/qqqai build --release --json
+
+      - name: Prove the regression harness can fail
+        run: python tools/run_perf_regression.py --self-test
+
+      # The first run deliberately emits target/perf-regression/candidate.json so
+      # it can be reviewed and committed as .github/perf/baseline.json. Once that
+      # baseline is checked in, remove --allow-missing-baseline: absence must then
+      # fail rather than silently establishing a new comparison point.
+      - name: Measure and compare the reference application (PERF-020)
+        run: |
+          python tools/run_perf_regression.py \
+            --binary target/release/qqqai \
+            --project examples/orders-api \
+            --profile ubuntu-latest \
+            --samples 3 \
+            --baseline .github/perf/baseline.json \
+            --candidate target/perf-regression/candidate.json \
+            --runs-dir target/perf-regression \
+            --allow-missing-baseline
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-regression
+          path: target/perf-regression/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Supply chain: licences, advisories, unused dependencies.
   # ---------------------------------------------------------------------------
   supply-chain:

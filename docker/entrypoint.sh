@@ -998,6 +998,10 @@ cmd_checks() {
     # things CI does, or the two drift and the image certifies less than it looks.
     python3 tools/check_bench_contract.py
     python3 tools/check_bench_contract.py --self-test
+    # PERF-020's live half needs the Rust release binary and the reference
+    # application, which the bridge image does not build; its pure failure-mode
+    # self-test runs here and in CI.
+    python3 tools/run_perf_regression.py --self-test
     python3 tools/self_test_schemas.py
 
     # The mutating one, then the validator that proves it restored everything.
@@ -1195,6 +1199,9 @@ cmd_checks() {
 #                                          static policy and negative controls run in both gates.
 #   tools/check_live_dev.py              builds an isolated Rust/WASI guest and needs the
 #                                       guest target plus wasm-tools, provided by the Rust CI job.
+#   tools/run_perf_regression.py         starts qqqai serve and drives the reference app; the
+#                                       live measurement belongs to the PERF-020 CI job, while
+#                                       the pure self-test runs in both gates.
 #   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
 #                                          declaration — a cargo build of the whole workspace
 #   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;

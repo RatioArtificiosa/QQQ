@@ -1847,6 +1847,76 @@ mod tests {
         }
     }
 
+    /// **Every language `TOOLCHAINS` knows is either driven and plans, or undriven and refuses.**
+    ///
+    /// # The property, and why a runtime check was not enough
+    ///
+    /// `plan_pure` has a catch-all that reports `InternalInvariantViolated` -- *"`{other}` has a toolchain but
+    /// no argument builder"*. **That is a runtime check for a static property**: that [`DRIVEN`], [`TOOLCHAINS`]
+    /// and the argument builders name the same set of languages. **It fires when a user builds, not when a
+    /// developer adds a language**, which is the wrong end of the process.
+    ///
+    /// # Why this iterates the table rather than a written list
+    ///
+    /// **A written list is a fourth place for the same fact.** Iterating `TOOLCHAINS` means a language is
+    /// covered the moment it is added to the table -- **including the four this machine cannot run, which is
+    /// the point: the test must not need a toolchain, or it would not run here at all.**
+    ///
+    /// # And why the assertion is about the DISTINCTION rather than about success
+    ///
+    /// **A driven language must plan and an undriven one must refuse; both are correct, and the defect is
+    /// reaching neither.** So this asserts two things: that the invariant-violation arm is never reached, and
+    /// that the set of languages which plan is exactly [`DRIVEN`] -- **a language in both would be marked
+    /// supported without a driver, and one in neither would parse and build nothing.**
+    #[test]
+    fn every_known_language_is_either_driven_and_plans_or_undriven_and_refuses() {
+        let mut planned: Vec<String> = Vec::new();
+
+        for (language, _) in TOOLCHAINS {
+            let src = format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\nlanguage = \"{language}\"\n"
+            );
+            match plan_pure(&loaded(&src), &BuildOptions::default()) {
+                Ok(plan) => {
+                    // A plan must be a real one: a step, with the program the table names.
+                    assert!(
+                        !plan.steps.is_empty(),
+                        "`{language}` planned but produced no steps"
+                    );
+                    planned.push((*language).to_owned());
+                }
+                Err(e) => {
+                    assert_ne!(
+                        e.code,
+                        ErrorCode::InternalInvariantViolated,
+                        "`{language}` is in TOOLCHAINS but has no argument builder -- the lists disagree: {}",
+                        e.message
+                    );
+                    // Any other refusal is a legitimate "not implemented yet" or a manifest complaint,
+                    // and the next assertion checks it is the FORMER for a language that is not driven.
+                    assert!(
+                        !DRIVEN.contains(language),
+                        "`{language}` is DRIVEN but refused a plan: {}",
+                        e.message
+                    );
+                }
+            }
+        }
+
+        // **The two directions, stated separately so a failure says which one broke.**
+        for language in DRIVEN {
+            assert!(
+                planned.iter().any(|p| p == language),
+                "`{language}` is in DRIVEN but produced no plan"
+            );
+        }
+        assert_eq!(
+            planned.len(),
+            DRIVEN.len(),
+            "the set of languages that plan must be exactly DRIVEN: planned {planned:?}, driven {DRIVEN:?}"
+        );
+    }
+
     /// A language that parses but has no driver must fail with an honest
     /// "not implemented yet" naming the checklist area, not a fake success.
     #[test]

@@ -124,22 +124,24 @@ fn malformed_and_wrong_abi_candidates_preserve_active_code() {
 /// correct assertion for a path another thread may still hold.**
 fn remove_dir_all_retrying(path: &std::path::Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut last = None;
     loop {
         match std::fs::remove_dir_all(path) {
             // **Already gone is success.** A previous attempt or a concurrent cleaner may have won.
             Ok(()) => return,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(e) => last = Some(e),
+            Err(e) => {
+                // **The deadline is checked where the error is**, so the message it prints is the error
+                // that just happened rather than a value threaded out of the match arms. `clippy` said the
+                // previous shape assigned `last` without reading it, and it was right: with `assert!` the
+                // initialiser was dead, because every path that reaches the check has just set it.
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "could not remove {} within 10s, so something is still writing to it: {e}",
+                    path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "could not remove {} within 10s, so something is still writing to it: {}",
-                path.display(),
-                last.map_or_else(|| "no error recorded".to_owned(), |e| e.to_string())
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 

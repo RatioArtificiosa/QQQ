@@ -901,6 +901,9 @@ cmd_checks() {
     python3 tools/check_conformance.py
     python3 tools/check_conformance.py --matrix
     python3 tools/check_conformance.py --self-test
+    # These self-tests use temporary fixtures; no guest toolchain or Cargo mutation.
+    python3 tools/check_live_dev.py --self-test
+    python3 tools/fault_inject_live_components.py --self-test
     # `§O-415`: source module docs state which checklist items they implement, and nothing
     # compared that to `tools/backlog.json`. It found five blind spots in its own vocabulary and
     # has a demonstrated end-to-end failure: an injected total claim against an open item exits 1.

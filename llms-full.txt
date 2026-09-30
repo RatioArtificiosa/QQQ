@@ -756,7 +756,7 @@ Wasmtime 48.0.3 from unchanged `Cargo.lock`, Python 3.12.14, wasm-tools 1.259.0.
 | Format, all-target/all-feature Clippy | Passed |
 | Dependency/security checks | `cargo deny check` and `cargo machete` passed; unchanged manifests/lockfile |
 | API documentation allowance | Passed: 156 doctests; 2,105 remaining undeclared examples within existing allowance |
-| Independent CodeRabbit review | Blocked: task review disabled; CLI returned no review findings or review verdict |
+| Independent CodeRabbit review | Enabled after initial delivery; the two minor findings and two follow-up major test-harness findings have fixes. Consult the delivery review report for the final pass on the reviewed patch |
 | Container check | Blocked: `docker info` cannot reach a daemon; no privileged daemon started |
 | Remote CI and other operating systems | Not executed; must pass on the exact reviewed commit before merge |
 
@@ -766,8 +766,8 @@ generated-document and self-test gates are also run locally; the delivery report
 records their final outcomes. The docs-index self-test now checks a hypothetical
 8 GiB length without allocating 8 GiB; its real-byte and line-ending checks remain.
 
-The patch is **not merge-ready** while the Landlock gate, independent review and
-required CI/platform gates are unresolved. No performance SLO has been measured.
+The patch is **not merge-ready** while the Landlock gate and
+required CI/platform gates are unresolved. Independent review findings must also be resolved. No performance SLO has been measured.
 The local maintainer must also follow the repository's issue/RFC review process;
 new contracts requiring an RFC have a minimum seven-day public review period.
 

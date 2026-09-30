@@ -983,7 +983,10 @@ jobs:
 
       - name: Live dev replacement and CLI AOT output
         timeout-minutes: 10
-        run: python tools/check_live_dev.py
+        run: |
+          python tools/fault_inject_live_components.py --self-test
+          python tools/check_live_dev.py --self-test
+          python tools/check_live_dev.py
 
       - name: the wasm32-wasip2 build path produces a component (LANG-001)
         # Bounded, from the rule that cost a 360-minute run once: a hang must fail a named

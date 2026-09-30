@@ -34108,6 +34108,46 @@ exactly those two and nothing else; `--record` ran the five generators -- `SYNC 
 **`SYNC OK -- regenerated, and every checker now agrees with the tree`.** **The ritual's first real job was
 the change that created it.**
 
+## §O-460 — A premise in the brief was false, and measuring it cost one command
+
+**The brief for this goal carries a claim about the corpus, and the corpus disagrees with it:**
+
+> *"`PLAN-015` — the decision log that feeds Observations. **`§D-` decisions are referenced by the corpus and
+> there are no `§D-` headings in it** — check whether that is a gap or a naming difference, and fix whichever
+> it is."*
+
+**Measured: `§D-` headings exist -- ten of them** -- **and 63 citations resolve to them** (observations 45,
+checklist 6, proposal 12). It is **neither a gap nor a naming difference.**
+
+**The brief was right to hedge** -- *"check whether that is a gap or a naming difference"* is the correct
+instruction when a claim about a moving corpus is being carried forward, **and it is the reason this cost one
+command instead of one round.** But the hedged claim was still written as a fact, and a reader who trusted it
+would have gone looking for missing headings and found none, or worse, **written ten new ones.**
+
+### What the register actually is
+
+`QQQ-Observations-and-Memories.md` **§2** is the decision log: `### §D-001` … `### §D-010`, and the document's
+own status line reads *"Living document -- **append-only for the decision log**; sections 1-4 may be edited."*
+**The process is stated in the document's own header.**
+
+**And a checker validates the citations.** `check_xrefs.py` rule **[10]** takes definitions with
+`^###\s+§(D-\d{3})\b` and reports any proposal citation with no matching definition -- **and its comment
+records why it exists:** *"`§O-249` was cited by eleven references across the checklist, a checker and a budget
+table while the entry itself had never been written, and nothing reported it (`§O-266`)."* **The rule was built
+from a recorded incident, and the incident is in the corpus it guards.**
+
+### The shape, which is the point
+
+**A brief is a document, and a document is a claim.** This session has spent its rounds on that sentence in
+five other forms: a checklist status is a claim (`§O-437`), a `→ Done:` line is a claim (`§O-439`), a
+docstring is a claim about code (`§O-439`), a validation log is a claim about a run (`§O-454`), and a hash
+manifest is a claim about a tree (`§O-456`). **A brief is a claim about the corpus, and it moves too.**
+
+**The remedy is the one already in force and already stated in the brief itself** -- *"Re-derive all of that
+before you assert any of it"* -- **applied to the brief's own sentences and not only to its numbers.** `§O-282`
+is the same rule at a smaller scale: *a guard is only as wide as its file list*, and **a premise is only as
+current as the round it was written in.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

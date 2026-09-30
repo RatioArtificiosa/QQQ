@@ -644,6 +644,20 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §15 — Risk Register
 - [ ] **PLAN-009** Define the definition-of-ready for a checklist item (clear acceptance test, no unresolved dependency).
   → §16 — Definition of Done for V1
+  → **Measured: neither half is written, and the second half is the same gap as `PLAN-015`'s.**
+    *"A clear acceptance test"* -- nothing states what makes an item's acceptance test clear, and
+    `tools/check_done_lines.py` enforces only that a `[x]` **has** a `→ Done:` line and a `[~]`/`[!]` **has**
+    a reason; whether either names something checkable is a reader's judgement. *"No unresolved dependency"*
+    -- nothing states what an unresolved dependency is, and no checker looks for one: the `blocked-by-*`
+    convention used by `LANG-023`/`LANG-024` and the `[!]` status are **formats**, not rules.
+  → **And it is the same missing document as `PLAN-015`.** That item needs an **admission rule for
+    decisions**; this one needs an **admission rule for items**. Both answer *"what may be written down, and
+    what must be true before it is"* -- **one rule serves both**, which is why they are recorded together
+    rather than as two independent gaps.
+  → **What DOES exist, so the note is not a list of absences:** `PLAN-010`'s entry-shape rules run in both
+    gates; `check_done_lines.py` has four self-test cases including a control; `PLAN-016`'s ritual
+    (`tools/sync_docs.py`) makes the derived-file half mechanical; and `check_gate_parity.py` rule 5 catches a
+    checker that no gate invokes. **The gap is the PART OF SPEECH before the writing, not the writing.**
 - [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
   → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by
@@ -675,6 +689,20 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §7.2 Adversary model
 - [ ] **PLAN-015** Create the decision log that feeds the Observations document.
   → §0.3 Document map
+  → **Measured: the register EXISTS and is cited 63 times -- and the brief that named it said it did not.**
+    `QQQ-Observations-and-Memories.md` §2 is the decision log: `### §D-001` … `### §D-010`, ten entries, with
+    the document's own status line reading *"Living document -- **append-only for the decision log**; sections
+    1-4 may be edited."* Measured citations: **45 in the observations, 6 in the checklist, 12 in the
+    proposal.**
+  → **And a checker already validates them.** `tools/check_xrefs.py` rule **[10]** takes definitions with
+    `^###\s+§(D-\d{3})\b` and reports any proposal citation with no matching definition. Its own comment
+    records why the rule exists: *"`§O-249` was cited by eleven references across the checklist, a checker and
+    a budget table while the entry itself had never been written, and nothing reported it (`§O-266`)."* **So
+    the rule was built from an incident, and the incident is in the corpus.**
+  → **What is NOT written, and it is the item's own wording:** *"the decision log **that feeds** the
+    Observations document."* The register is the log; **the admission rule -- what qualifies as a decision,
+    and when one is recorded rather than remembered -- is not written anywhere.** An unrecorded decision is
+    invisible in exactly the way an unrecorded observation was before rule [13] (`§O-447`).
 - [x] **PLAN-016** Define the "three-document sync" ritual: every code change updates checklist status and, when relevant, observations.
   → §0.4 How to read the cross-references
   → Done: `tools/sync_docs.py` -- **the ritual is one command, and it is defined by the checkers rather than by

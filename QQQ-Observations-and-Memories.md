@@ -33879,6 +33879,59 @@ found; **an independent review of the same repository, at the same revision, fou
 half** -- because the delivery reviewed its changes and this reviewed the merge's result. **A review is scoped
 to a range, and a range's edges are where the findings are.**
 
+## §O-454 — A validation record that states a failed gate as a failed gate
+
+`VALIDATION.md` in the delivery package is **34 KB of running log**, and the passages worth keeping are the
+ones where it refuses to round a failure up. **Six sections, dated, each with the command, the exit code and
+what the number does not cover.**
+
+**The full workspace run:**
+
+> *"`cargo +1.98 test --workspace --all-features --locked`, **exit 101**: 2,761 passed, 1 failed, 7 ignored
+> across 59 test binaries before stopping. Failure: **unmodified** `qqq-sys` Landlock ruleset integration
+> test; kernel reports fully incompatible access rights. **Doctests were not reached by that command. This is a
+> failed gate, not a green suite.**"*
+
+**Three things are in those four lines that a worse record would omit: the exit code, the fact that the
+failing test was not one they touched, and the fact that "doctests were not reached" means the passing count
+is not coverage.**
+
+**The first Python sweep is recorded at 54/67 with 13 failures** and the reasons are enumerated rather than
+summarised -- *"Cargo missing from PATH, Python 3.9 missing `pathlib` newline support, wasm-tools absent,
+new-file count drift, missing executable, and clean-tree audit."* **It closes with "Do not treat this
+exploratory sweep as final evidence."**
+
+**Two whole gates are recorded as BLOCKED rather than as absent:** `docker info` is **exit 1**, *"Container-image
+gate BLOCKED; no privileged daemon attempted"*; and the first CodeRabbit attempt returned a review-disabled
+message, recorded as **"Review BLOCKED, not completed, no findings reported"** -- **not** as a clean review.
+
+**And the six CodeRabbit passes are recorded with their findings**: 2 minor, then **2 major**, then 3 minor,
+then a narrow committed review with **zero** -- after which `REVIEW.md` still says *"this is not a claim that
+CodeRabbit reported zero findings for the task."*
+
+**The pattern, stated so it can be copied: a status is recorded with the command, the exit code, and what the
+number does not cover.** That is `§O-444`'s rule (*the label is the measurement*) applied to a whole document,
+and it is why the delivery's failures are trustworthy enough to merge.
+
+## §O-455 — The delivery changed a shared tool, for a measured reason, and said so
+
+`tools/gen_llms_txt.py` is **ours** -- it runs in both gates and it owns `llms.txt` and `llms-full.txt`. The
+delivery modified it by 33 lines. `VALIDATION.md` line 89 states the reason:
+
+> *"Python selftest sweep: 45/46 passed; **`gen_llms_txt` self-test killed -9 due 8 GiB allocation on this
+> sandbox.** Changed its numeric boundary test to use a byte-count helper **while retaining real
+> byte/normalization controls**."*
+
+**That is the shape a change to a shared tool should have.** A **measured** reason (an OOM kill -- `-9`, 8 GiB,
+on that sandbox); a **minimal** change (the numeric boundary test, not the tool); a statement of what was
+**kept** (the real byte and normalization controls, so the test is narrowed in cost and not in power); and
+**disclosure in the record** rather than in a commit message nobody reads.
+
+**It merged cleanly with our own later change to the same file**, because the two edits touch different
+regions -- and it is worth recording **why it needed attention**: this file's self-test is one of the three
+commands that passed locally while the gate failed (`§O-450`), so **a change to its boundary test is a change
+to a guard this session leaned on twice.** The merged tree passes both `--check` and `--self-test`.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

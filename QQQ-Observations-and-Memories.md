@@ -34572,6 +34572,52 @@ depth: 0
 both were fixed before anything ran.** That is the whole difference: **the check was moved from after the
 failure to before it.**
 
+## §O-471 — Point 7, audited: six of nine, and the two that remain have evidence against them
+
+`LOCAL-AGENT-PROMPT` point 7 asks for **six phrases and three clauses**. Three commits went to the first three,
+and **nobody had written down which of the others were already satisfied** -- so the next reader either repeats
+work or assumes a gap because no one said otherwise. **The audit:**
+
+| what point 7 asks for | state | the evidence |
+|---|---|---|
+| **typed multi-step plans** | **done** | `4df98eb` -- `BuildPlan` holds `Vec<BuildStep>`; `BuildStep` is the old one-command shape |
+| **truthful dry-run/JSON** | **done** | `9661ada` -- `BuildOutput.steps`, and `render()` is `step_commands().join` |
+| **exact tool diagnostics** | **done** | `a868d03` -- the refusal names the pinned programs and their install commands |
+| **canonical WIT generation** | **already done** | `new.rs:558` -- `const APP_WORLD: &str = include_str!("../../../wit/app/app.wit")` |
+| **validation before atomic staging** | **already done** | `build.rs:1183` `ArtifactKind::classify(&bytes)` runs before `stage` at `1404` |
+| **failed-build artifact retention** | **NOT DONE** | `run_steps` returns on the first failure and **nothing says where the partial output is** |
+| **Rust compatibility** | **done, by not being touched** | `DRIVEN` is still `&["rust"]` and the workspace is green |
+| **live/AOT cross-language tests** | **NOT DONE** | the delivery's `live_components.rs` tests Rust only |
+| **Update the Rust-only conformance guard parser** | **done** | `4e77ef6` -- `check_conformance.py` parses `DRIVEN` |
+
+### Why "already done" needed saying twice
+
+**`include_str!` is a compile-time read of one file**, so `APP_WORLD` and `wit/app/app.wit` **cannot** diverge
+-- the property is guaranteed by construction rather than by a check, and the file's own comment records the
+reasoning (*"the repository's file ... one fact, two ..."*). **And `classify` before `stage` means an artifact
+that is not a component never reaches the staging directory**, which is what *"validation before atomic
+staging"* means. **Both were invisible to a search for the phrase**, because neither uses it.
+
+### And the compiler enumerated the constructions, not `rg`
+
+Adding `steps` to `BuildOutput` needed four construction sites updated. **`rg` for `command:` found three of
+them and showed the fourth at `main.rs:1310` without connecting the line to a struct initialiser** -- and
+`cargo` named it:
+
+```
+error[E0063]: missing field `steps` in initializer of `qqq_run::BuildOutput`
+    --> crates\qqq-run\src\main.rs:1305:64
+```
+
+**That is `§O-470`'s rule one round later, and the fourth site was the dry-run path** -- the one the whole
+change was about. **A search for a field name is not a search for the type's constructions**, and the
+enumerator that cannot miss one is the compiler.
+
+**And the site it found carried a comment describing the old program:** *"A rehearsal plans but does not
+execute, so it reports the command"*. **It now reports the plan, and the comment moved with the code** --
+the shape `§O-439` records, where a docstring describing a slightly different program is a defect rather than a
+cosmetic issue.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

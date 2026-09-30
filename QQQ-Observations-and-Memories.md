@@ -34983,8 +34983,10 @@ which had hidden the harness defect. With the server-only grant, the Windows
 reruns using `componentize-py` 0.25.1 and TypeScript 5.9.3 executed all five
 vectors; the full production drivers, bindings, conformance suites and
 pooling/compatibility claims remain open. The Linux CI artifact is the source
-of truth for replacing the interim Windows measurements in the language
-evidence matrix.
+of truth, and run `36768701926` now supplies that artifact: the tracked matrix
+and Python/TypeScript evidence records were refreshed from its Linux results.
+The earlier Windows rerun remains useful as a portability diagnostic, not as
+the cross-platform evidence row.
 
 The same rerun exposed a portability defect in the Python probe runner: npm's
 POSIX `node_modules/.bin` shims are not directly executable on Windows. The
@@ -35000,8 +35002,11 @@ The missing performance job was implemented in `tools/run_perf_regression.py` an
 `qqqai serve`, waits for `/healthz`, drives all ten workloads through `qqqai bench --json`
 three times, aggregates medians, and fails on relative latency/throughput regressions.
 The first successful live job was GitHub Actions run
-`36766669331` at commit `e902b7f`; its reviewed candidate is now
-`.github/perf/baseline.json`.
+`36766669331` at commit `e902b7f`; its AMD candidate is now one entry in
+`.github/perf/baseline.json`. A later `ubuntu-latest` run exposed a different,
+Intel Xeon host; its reviewed candidate is the second entry. The harness now
+selects only an exact stable runner identity (with the documented memory
+tolerance), so a third unseen host still fails closed and requires review.
 
 That candidate measures `PERF-002`, `PERF-010`, and `PERF-011` through `hello`, `json`,
 `multi`, and `tailp99`. Four rows miss the absolute §9.2 targets on the ordinary hosted
@@ -35018,5 +35023,11 @@ decoded with the platform locale (`e902b7f`). CodeRabbit found no issue after th
 fix and again found no issue after the explicit memory-compatibility rule. A missing
 baseline is now a hard failure; refresh requires a reviewed artifact and a deliberate
 commit.
+
+The refreshed evidence also caught a Windows-only representation defect in the
+parity checker: Linux artifacts correctly store source-hash keys with `/`, while
+the Windows generator emitted `\`. `input_hashes()` now uses `Path.as_posix()`;
+the hash values and the Linux contract are unchanged, and the tracked CI evidence
+validates locally on Windows as well.
 
 *End of `QQQ-Observations-and-Memories.md`.*

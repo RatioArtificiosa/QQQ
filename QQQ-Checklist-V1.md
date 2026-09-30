@@ -4969,8 +4969,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: `.github/workflows/ci.yml` now runs `Performance regression (PERF-020)` on
     `ubuntu-latest`. It builds the CLI and reference application, starts the real
     `qqqai serve`, executes all ten workloads through `qqqai bench --json` for three
-    samples, compares medians with `.github/perf/baseline.json`, and uploads the raw
-    runs. Missing baselines are hard failures after the reviewed bootstrap baseline.
+    samples, compares medians with the reviewed hardware-profile entries in
+    `.github/perf/baseline.json`, and uploads the raw runs. Missing baselines and
+    unseen runner identities are hard failures after the reviewed bootstrap entries.
   → **Scope is intentionally explicit.** The baseline measures `PERF-002`, `PERF-010`,
     and `PERF-011` (`hello`, `json`, `multi`, `tailp99`) and names the seven
     `NOT_IMPLEMENTED` rows. On the hosted runner, the absolute §9.2 misses are

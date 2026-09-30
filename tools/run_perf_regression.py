@@ -10,8 +10,8 @@ the same runner profile catches material regressions without claiming that the
 runner meets the product target.
 
 The first run may use ``--allow-missing-baseline`` to produce a candidate. That
-candidate must be reviewed and committed as the baseline before the flag is
-removed from the workflow. A missing or incompatible baseline is then a hard
+candidate must be reviewed and committed as a baseline entry before the flag is
+removed from the workflow. A missing or incompatible profile is then a hard
 failure, never an automatic pass.
 """
 
@@ -49,6 +49,7 @@ EXPECTED_WORKLOADS = {
 LATENCY_METRICS = {"hello": "p99_nanos", "tailp99": "p99_nanos"}
 THROUGHPUT_METRICS = {"json": "requests_per_second", "multi": "requests_per_second"}
 SCHEMA_VERSION = 1
+BASELINE_COLLECTION_SCHEMA_VERSION = 2
 MEMORY_TOLERANCE_BYTES = 1024 * 1024
 
 
@@ -313,6 +314,47 @@ def baseline_mode(path: Path, allow_missing: bool) -> str:
     )
 
 
+def select_baseline(document: Any, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Select a reviewed baseline for this exact runner identity and workload profile."""
+
+    if not isinstance(document, dict):
+        raise PerfError("baseline must be a JSON object")
+    if document.get("schema_version") == SCHEMA_VERSION and "baselines" not in document:
+        baselines = [document]
+    elif document.get("schema_version") == BASELINE_COLLECTION_SCHEMA_VERSION:
+        baselines = document.get("baselines")
+        if not isinstance(baselines, list) or not baselines:
+            raise PerfError("baseline collection must contain at least one baseline")
+    else:
+        raise PerfError("baseline schema version is not supported")
+
+    for baseline in baselines:
+        if not isinstance(baseline, dict):
+            raise PerfError("baseline collection contains a non-object entry")
+        if baseline.get("profile") != candidate["profile"]:
+            continue
+        try:
+            compatible = environments_compatible(
+                baseline.get("environment", {}), candidate["environment"]
+            )
+        except PerfError as error:
+            raise PerfError(f"baseline entry has an invalid environment: {error}") from error
+        if compatible:
+            return baseline
+
+    profiles = sorted(
+        {
+            str(baseline.get("profile"))
+            for baseline in baselines
+            if isinstance(baseline, dict)
+        }
+    )
+    raise PerfError(
+        f"no reviewed baseline matches profile `{candidate['profile']}` and runner identity; "
+        f"available profiles: {', '.join(profiles) or '(none)'}"
+    )
+
+
 def choose_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -463,7 +505,7 @@ def execute(args: argparse.Namespace) -> int:
         print("PERF-020 BOOTSTRAP: no baseline exists; comparison intentionally skipped")
         return 0
 
-    baseline = read_json(baseline_path)
+    baseline = select_baseline(read_json(baseline_path), candidate)
     failures = compare(baseline, candidate, args.latency_tolerance, args.throughput_tolerance)
     for name, metric in candidate["metrics"].items():
         print(f"{name}: median {metric['median']:.2f} {metric['metric']}")
@@ -608,6 +650,18 @@ def self_test() -> int:
         expect_error("a missing baseline without bootstrap", lambda: baseline_mode(missing_baseline, False))
         if baseline_mode(missing_baseline, True) != "bootstrap":
             raise AssertionError("explicit bootstrap was not accepted")
+    collection = {
+        "schema_version": BASELINE_COLLECTION_SCHEMA_VERSION,
+        "baselines": [baseline],
+    }
+    if select_baseline(collection, baseline) != baseline:
+        raise AssertionError("a matching baseline profile was not selected")
+    different_environment = aggregate(runs, "fixture", "current")
+    different_environment["environment"]["cpu_model"] = "another-fixture-cpu"
+    expect_error(
+        "an unreviewed runner profile",
+        lambda: select_baseline(collection, different_environment),
+    )
     print("PERF REGRESSION SELF-TEST OK — parser, schema, bootstrap inputs and both regression directions")
     return 0
 

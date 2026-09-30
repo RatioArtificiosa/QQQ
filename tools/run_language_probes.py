@@ -67,7 +67,7 @@ def input_hashes():
     paths += list((ROOT / 'crates').rglob('*.rs'))
     paths += list((ROOT / 'crates').rglob('Cargo.toml'))
     paths += [p for p in SOURCE.rglob('*') if p.is_file() and 'node_modules' not in p.parts]
-    return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+    return {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(paths)}
 
 

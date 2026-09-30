@@ -51,25 +51,25 @@ The existing hot-swap/AOT implementation remains the integration boundary.
 
 ## Measurements and what they mean
 
-Measured on the Amazon Linux x86_64 sandbox, Rust 1.98.1, Wasmtime 48.0.3.
+Measured in GitHub Actions run `36768701926` on Linux x86_64 with Rust 1.98.1 and
+`wasm-tools 1.259.0`.
 `docs/languages/evidence/` contains the source-hashed execution records. Each
 language compiled its real source. Five vectors exercise hello, UTF-8 output,
 404, empty POST and a **65,536-byte binary echo**. The last vector matters: a
 hello-only test missed the TinyGo defect.
 
-The corrected Python and TypeScript rows below are currently the Windows
-rerun; they are included to record the fixed behavior, not to make a
-cross-platform performance comparison. The next Linux CI artifact will replace
-those interim measurements and refresh `docs/languages/evidence/`.
+The rows below are the generated Linux CI artifact, not the earlier Windows
+rerun. They are narrow HTTP probes: passing five vectors does not claim full
+conformance, bindings, CLI, capability parity, or reference-app support.
 
 | Path | Component bytes | Observed result |
 |---|---:|---|
 | AssemblyScript 0.28.20 | 4,590 | 5/5 vectors passed |
-| TinyGo 0.42.0 + Go 1.27.1 | 592,028 | Four small cases pass; 64 KiB echo fails |
-| componentize-py 0.25.1 | 18,360,111 | 5/5 vectors passed |
-| WASI SDK 34 C | 54,146 | 5/5 vectors passed |
-| WASI SDK 34 C++17 using C ABI bindings | 54,146 | 5/5 vectors passed |
-| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,718 | 5/5 vectors passed |
+| TinyGo 0.42.0 + Go 1.27.1 | 589,873 | Known gap: 64 KiB echo fails |
+| componentize-py 0.25.1 | 18,316,106 | 5/5 vectors passed |
+| WASI SDK 34 C | 54,147 | 5/5 vectors passed |
+| WASI SDK 34 C++17 using C ABI bindings | 54,147 | 5/5 vectors passed |
+| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,096 | 5/5 vectors passed |
 
 A prior sample in this session (before the final C optional-body fix) measured uncached engine/preparation at approximately **38.7 ms** for
 AssemblyScript, **49.3 ms** for C and **34.7 ms** for C++. First request samples
@@ -79,10 +79,10 @@ percentiles, comparative throughput benchmarks, or interpreter-pool measurements
 
 The earlier Linux sample rejected Python after about **6.01 seconds** and TypeScript after about
 **8.51 seconds** because the probe supplied `GrantSet::empty()` to an inbound HTTP component. The
-corrected probe grants only `http.server`; the Windows rerun measured successful preparation in about
-**4.27 seconds** for Python and **5.03 seconds** for TypeScript. These are successful probe cold
-preparations, not production cold-start SLOs. Component sizes can change between builds because these
-engine-in-Wasm tools snapshot initialization; bit reproducibility is unproven.
+corrected probe grants only `http.server`; the corrected Linux artifact measured successful preparation
+in about **9.06 seconds** for Python and **10.65 seconds** for TypeScript. These are successful probe
+cold preparations, not production cold-start SLOs. Component sizes can change between builds because
+these engine-in-Wasm tools snapshot initialization; bit reproducibility is unproven.
 
 ### LANG-007: keep the original budget
 

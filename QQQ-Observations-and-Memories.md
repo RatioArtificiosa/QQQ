@@ -34473,6 +34473,44 @@ cannot tell "the directory is clean" from "I could not clean it".**
 fits the symptom is evidence, and one that contradicts the symptom is still a defect -- **but it must not be
 dressed up as the diagnosis.**
 
+## §O-469 — The same commit, the same job, a different result
+
+`§O-468` recorded a `Rust (windows-latest)` failure at `live_components.rs:184` that **five consecutive local
+runs could not reproduce**, and it refused to call that a flake: *"a flake nobody can reproduce is a flake
+nobody has fixed."*
+
+**Then the discriminator was run: `gh run rerun <id> --failed` on that exact job. It passed.**
+
+```
+45d034e   Rust (windows-latest)   FAILURE   live_components.rs:184  Os { code: 2, NotFound }
+45d034e   Rust (windows-latest)   SUCCESS   (re-run, same commit, same job, same workflow)
+```
+
+**That is a different kind of evidence from a local run.** A re-run varies exactly one thing -- **nothing**.
+The commit, the job, the workflow file and the runner image are identical, so **the result changed while
+nothing the run controls changed.** The failure is non-deterministic **by measurement rather than by
+inference**, and the five local passes are corroboration rather than the argument.
+
+### The rule, and it costs one command
+
+**`gh run rerun --failed` is the cheapest discriminator between *"the test is wrong"* and *"the test is
+racing"*, and the two need different work:**
+
+| the re-run | what it means | where the work is |
+|---|---|---|
+| **fails again** | the test is wrong about something stable | **the message is the diagnosis** |
+| **passes** | the test is non-deterministic | **what varies**: PID reuse, a temp directory, a background thread, a timing window |
+
+**Without it the two are indistinguishable**, and this session demonstrated the cost: a round on the wrong
+hypothesis, then a "fix" that was itself a regression (`§O-468`), **because the discriminator had not been run
+first.** The order matters — **`rerun` before `reason`.**
+
+### And the standing state it leaves
+
+**`4df98eb` is in flight; the five most recent completed runs are all green** -- `6e41b4b`, `45d034e` (re-run),
+`513b268`, `4ab13f9`, `fb9fc0f`. **The red streak that began with the delivery merge is closed**, and the one
+failure that remained is now characterised rather than merely absent.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

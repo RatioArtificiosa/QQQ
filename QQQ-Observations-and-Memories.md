@@ -33795,6 +33795,90 @@ python .scratch/run_ci_checkers.py            # reproduces the ci.yml command se
 **And the last one exists for exactly this reason** -- it prints every command CI runs that it did **not**
 reproduce, **with its working directory**, because a `run:` line is not the whole command.
 
+## §O-451 — The checker set and the cargo set are complementary, and neither alone is the gate
+
+**`§O-437` recorded that `.scratch/run_ci_checkers.py` claimed to reproduce the CI command set and captured
+`python tools/...` only.** This round measured both halves, and the shape is now clear.
+
+**Measured after the merge, with `ci.yml` at 148 invocations and `entrypoint.sh` at 116:**
+
+```
+131 distinct checker invocation(s) this script reproduces
+OK: 73   FAIL: 0
+NOT RUN: 24 -- every one a cargo, rustup, cargo-deny, cargo-machete or cargo-cyclonedx command
+```
+
+**The 24 are not an omission the script hides; they are its declared and printed exclusions**, each named with
+its `working-directory` where it differs (`cargo fmt -- --check   [in examples/orders-api]`). **And every one of
+the three that matter most was run directly the same round, with the commands as written:**
+
+| the script does not run | run directly, as written | result |
+|---|---|---|
+| `cargo fmt --all -- --check` | `cargo fmt --all` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | **exactly that** | **0** |
+| `cargo test --workspace --all-features --verbose` | `cargo test --workspace --all-features` | **WORKSPACE=0, 71 binaries, 0 FAILED** |
+
+**The rule this makes precise: the gate is a UNION, and a local pass is a claim about the union's parts.**
+`73 OK / 0 FAIL` plus `fmt`, `clippy -D warnings` and `test --workspace` at 0 is a claim about the gate. **Either
+half alone is a claim about a fraction, and `§O-450` is what happens when the fraction is mistaken for the
+whole** -- a `clippy` run without `-D warnings` reports clean on code that turns three platforms red.
+
+**And the counts moved in the right direction:** the previous session measured **108 OK / 3 FAIL** with 23 not
+run; this round is **73 OK / 0 FAIL** with 24 not run **and 131 reproduced**, because the script parses
+`ci.yml` dynamically rather than carrying a list. **The three FAILs that used to be expected locally are gone:
+they were the MSVC-environment artefacts, and this round's runner has the toolchain.**
+
+## §O-452 — `source/` is the delivery's tree, and it is not byte-faithful
+
+**Every file in the delivery's `source/` (427) was hashed and compared against the merged working tree (476).**
+The answer to *"what did the merge actually take"*:
+
+```
+IN source/ BUT NOT IN THE MERGED TREE: 0
+IN THE MERGED TREE BUT NOT source/: 49 (six non-pycache, all explained)
+IN BOTH, DIFFERENT BYTES: 15
+```
+
+**`0` is the number that matters: the merge was complete.** The 49 are `docs/AGENT-HANDBOOK.md` (gitignored),
+`docs/.env` and `docs/Windows-Linux-Docker.md` (gitignored), `__pycache__` (build artefacts), tooling that is
+not part of the delivery, and **`crates/qqq-run/src/flaky.rs` — our `TEST-014`, which the delivery never saw
+because it branched before it existed. The merge preserved user edits, and this is the file that proves it.**
+
+**And the one anomaly was a measurement error on my part.** `tools/bootstrap.ps1` differed by **271 bytes** --
+and 271 was exactly its line count:
+
+```
+theirs 271 lines | mine 271 lines | 0 diff lines | 271 bytes apart
+```
+
+**CRLF against LF, one byte per line.** `normalize_eol.py` enforces LF in this tree, and `source/` was zipped
+on Windows. **So `source/` is a copy of the tree, not the tree** -- the bundle is what preserves bytes, which is
+why the import used `git bundle verify` and `git fetch` rather than the archive. **A comparison against an
+archive must establish that the archive is faithful before its differences mean anything.**
+
+## §O-453 — The review found our code, not theirs
+
+The delivery shipped with `REVIEW.md` recording **six CodeRabbit passes**, and it says of itself: *"This is not a
+claim that CodeRabbit reported zero findings for the task."* **This round ran the reviewer on the merged range
+and it returned five findings -- in OUR code, none in the delivery's.**
+
+| severity | where | what |
+|---|---|---|
+| **Major** | `test.rs` | `.arg("--")` is **Cargo's** separator; libtest does not use it, so the direct invocation passed a bare argument it had to tolerate |
+| minor | `test.rs` | `isolation_dir` printed a fallback it did not perform and returned the unusable path anyway |
+| minor | `flaky.rs` | `read_history` swallowed **every** error, so a permission failure read as an empty history |
+| minor | checklist | `TEST-014`'s note said *"nothing in this repository writes one yet"* -- false; `record_run` does, and no caller passes `--history` by default |
+| minor | checklist | `TEST-012`'s tick presented an **off-by-default** guarantee as met |
+
+**All five were real and all five are fixed** (`9cd2812`). Three of them are shapes this corpus already names:
+the `Major` is **a comment and a code that disagree** (`§O-439`); `read_history` is **a failure that looks like
+success** (`§O-375`); the two checklist lines are **claims that outrun their code.**
+
+**The measurement worth keeping is the asymmetry.** The delivery's own review of its own work found what it
+found; **an independent review of the same repository, at the same revision, found five things in the other
+half** -- because the delivery reviewed its changes and this reviewed the merge's result. **A review is scoped
+to a range, and a range's edges are where the findings are.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

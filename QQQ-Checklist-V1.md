@@ -646,6 +646,25 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §16 — Definition of Done for V1
 - [ ] **PLAN-010** Define the definition-of-done for a checklist item (code, tests, docs, xref, observations updated).
   → §16 — Definition of Done for V1
+  → **Partly met, measured, and the executable half is now in a gate.** The entry shape is enforced by
+    `tools/check_done_lines.py`, which runs in **both** gates (`check_gate_parity.py` rule 5 requires it):
+    a `[x]` item must carry a `→ Done:` line naming its code, test and measured value — **ratcheted by an
+    explicit 53-item list**, because those 53 were ticked before the convention existed; and a `[~]` or
+    `[!]` item must carry a reason beyond its `→ §` reference, **with no exemption list at all**, because
+    measured over this file **5 of 5 comply**.
+  → **Four self-test cases drive the `[~]`/`[!]` rule, including its control** — an open item with only its
+    reference must **pass**, so the rule cannot quietly become "every item needs a reason", which would
+    fail on the 325 open items nobody has investigated yet. A check that fires on the majority is not a
+    check. **Fault-injected**: stripping `TEST-010`'s two reason lines makes it report
+    `TEST-010 [partial]` and exit 1; restoring them exits 0.
+  → **The other half of the definition is not one check but four, and each already runs**: `check_xrefs.py`
+    for the reference, `check_doc_claims.py` for a published figure, `check_corpus_at_rest.py` for the
+    normative documents, and the `→ Done:` requirement for the evidence. `PLAN-016` names the ritual that
+    ties them together and is separately open.
+  → **Not ticked, and the reason is the item's own wording**: *"code, tests, docs, xref, observations
+    updated"* is a definition of done for **a change**, and what exists here is a definition of the
+    **entry's shape**. The change-shaped half — saying which of the four a given item requires — is not
+    written.
 - [ ] **PLAN-011** Track and publish the language-spike schedule starting at M1, not M8 (risk `R-02`).
   → §15 — Risk Register
 - [ ] **PLAN-012** Establish the quarterly engine-upgrade sprint (Wasmtime), budgeted as recurring work (risk `R-03`).

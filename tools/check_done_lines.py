@@ -123,15 +123,46 @@ def has_done(body: list[str]) -> bool:
     return any(l.strip().startswith("→ Done:") for l in body)
 
 
-def audit(text: str) -> tuple[list[tuple[str, str]], list[str], list[str], str | None]:
-    """Return `(duplications, newly evidenceless, stale list entries, fatal)`.
+def has_reason(body: list[str]) -> bool:
+    """Whether the block explains its own status, beyond pointing at the corpus.
+
+    A `→ §…` line says *where the requirement is*; a `→ Done:` line says *what the evidence is*; **anything
+    else an author writes after an arrow is the explanation of the status.** `[~]` means "partly done" and
+    `[!]` means "blocked", and both are meaningless without it: a partly-done item that does not say which
+    part is indistinguishable from a stale tick, and a blocked item that does not name its blocker is not
+    blocked, it is forgotten.
+    """
+    for l in body:
+        s = l.strip()
+        if not s.startswith("→"):
+            continue
+        if s.startswith("→ §") or s.startswith("→ Done:"):
+            continue
+        return True
+    return False
+
+
+def audit(
+    text: str,
+) -> tuple[list[tuple[str, str]], list[str], list[str], list[tuple[str, str]], str | None]:
+    """Return `(duplications, newly evidenceless, stale list entries, unexplained, fatal)`.
 
     Separated from `main` so the self-test drives the same code the check does, rather than a copy of it
     that could drift.
     """
     parsed = blocks(text)
     if not parsed:
-        return [], [], [], "no checklist items were found -- the file was not read"
+        return [], [], [], [], "no checklist items were found -- the file was not read"
+
+    # **`PLAN-010`, executable.** A `[~]` says "partly done" and a `[!]` says "blocked", and neither means
+    # anything without a reason -- so the requirement is the status's own word. **No exemption list**:
+    # measured over the real file, 5 of 5 comply, and a rule that needs a list to pass on its first run is
+    # a rule about the list.
+    unexplained = [
+        (oid, {"~": "partial", "!": "blocked"}[status])
+        for status, oid, body in parsed
+        if status in "~!" and not has_reason(body)
+    ]
 
     dups = [(oid, d) for _, oid, body in parsed for d in duplicates(body)]
     present = {oid for _, oid, _ in parsed}
@@ -145,7 +176,7 @@ def audit(text: str) -> tuple[list[tuple[str, str]], list[str], list[str], str |
     # Intersecting with `present` first is what makes the rule about the file rather than about the list.
     new = sorted(evidenceless - KNOWN_WITHOUT_DONE)
     stale = sorted(KNOWN_WITHOUT_DONE & (present - evidenceless))
-    return dups, new, stale, None
+    return dups, new, stale, unexplained, None
 
 
 def main(argv: list[str]) -> int:
@@ -158,7 +189,7 @@ def main(argv: list[str]) -> int:
         print(f"DONE LINES: cannot read {CHECKLIST}: {e}")
         return 2
 
-    dups, new, stale, fatal = audit(text)
+    dups, new, stale, unexplained, fatal = audit(text)
     if fatal:
         print(f"DONE LINES: {fatal}")
         return 2
@@ -190,12 +221,23 @@ def main(argv: list[str]) -> int:
             "set can be refreshed to the same size while changing membership."
         )
 
-    if dups or new or stale:
+    if unexplained:
+        print(f"\n{len(unexplained)} item(s) carry a status that needs a reason and give none\n")
+        for oid, kind in unexplained[:10]:
+            print(f"  {oid}  [{kind}]")
+        print(
+            "\n  `[~]` means *partly done* and `[!]` means *blocked*, and both are claims a reader cannot "
+            "check without being told which part, or what is blocking. Add a `→` line that explains the "
+            "status -- naming the part that is missing, or the dependency that is held."
+        )
+
+    if dups or new or stale or unexplained:
         return 1
 
     print(
         f"DONE LINES OK -- no block repeats a substantial line; "
-        f"{len(KNOWN_WITHOUT_DONE)} known item(s) without evidence, and the list agrees both ways"
+        f"{len(KNOWN_WITHOUT_DONE)} known item(s) without evidence, and the list agrees both ways; "
+        f"every `[~]` and `[!]` says why"
     )
     return 0
 
@@ -210,8 +252,8 @@ def self_test() -> int:
     cases: list[tuple[str, bool]] = []
 
     def case(name: str, text: str, caught: bool) -> None:
-        dups, new, stale, fatal = audit(text)
-        got = bool(dups) or bool(new) or bool(stale) or fatal is not None
+        dups, new, stale, unexplained, fatal = audit(text)
+        got = bool(dups) or bool(new) or bool(stale) or bool(unexplained) or fatal is not None
         cases.append((name, got == caught))
 
     case("no item at all fails loudly rather than passing", "nothing here", True)
@@ -251,6 +293,30 @@ def self_test() -> int:
         "an item in the list that gained evidence is caught",
         f"- [x] **{next(iter(sorted(KNOWN_WITHOUT_DONE)))}** something.\n  → Done: measured.\n",
         True,
+    )
+    # `PLAN-010`, executable. **A `[~]` or `[!]` with only its reference is caught**, because "partly done"
+    # and "blocked" are claims a reader cannot check without being told which part, or what is holding it.
+    case(
+        "a partial item with no reason is caught",
+        "- [~] **ZZ-001** something.\n  → §1\n",
+        True,
+    )
+    case(
+        "a blocked item with no reason is caught",
+        "- [!] **ZZ-001** something.\n  → §1\n",
+        True,
+    )
+    case(
+        "a partial item that says why passes",
+        "- [~] **ZZ-001** something.\n  → §1\n  → Done so far: the parser; the writer is `PLAN-002`.\n",
+        False,
+    )
+    # **The control.** If this fired, the rule would be "every item needs a reason" -- which fails on the
+    # 325 open items nobody has investigated yet, and a check that fires on the majority is not a check.
+    case(
+        "an open item with only its reference passes",
+        "- [ ] **ZZ-001** something.\n  → §1\n",
+        False,
     )
 
     bad = [n for n, ok in cases if not ok]

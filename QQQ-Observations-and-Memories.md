@@ -34156,6 +34156,125 @@ before you assert any of it"* -- **applied to the brief's own sentences and not 
 is the same rule at a smaller scale: *a guard is only as wide as its file list*, and **a premise is only as
 current as the round it was written in.**
 
+## §O-461 — The gate is a set of four commands, and I verified with three
+
+`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+`cargo test --workspace --all-features`, and `python tools/check_api_examples.py --allow 2105`.
+
+**A verification script of mine ran the first and third and a narrower form of the second, and omitted the
+fourth -- because it needs the MSVC environment and a doctest build, so it was left out for convenience.**
+Adding a single `pub const` moved the public-declaration count from **2105** to **2106**, and CI's step is
+`--allow 2105`:
+
+```
+public-API example coverage (DX-015)
+  outstanding:         2106 of 2272 public declarations
+  allowance:           2105
+API EXAMPLES OVER ALLOWANCE -- 2106 outstanding, allowance 2105
+```
+
+**All three Rust jobs failed identically, on a change whose four other measurements were green.**
+
+### And the fix is the one `§O-258` requires
+
+**`check_api_examples.py` is a ratchet**, and its own documentation says so -- *"the number cannot silently
+drift"*. Raising the allowance for a new declaration is **precisely the drift it was built to notice**, so
+the fix is an example: a `///` fence that rustdoc compiles counts as covering the item.
+
+```
+before:  outstanding 2106 of 2272, allowance 2105   ->  OVER
+after:   outstanding 2105 of 2272, allowance 2105   ->  API EXAMPLES OK
+```
+
+**And the example is worth more than the number it fixed**, because it asserts the value:
+
+```rust
+assert_eq!(qqq_run::build::DRIVEN, &["rust"]);
+```
+
+**A doctest that asserts the current value is a claim the compiler re-checks on every run**, so a change that
+forgets the documentation fails loudly rather than quietly.
+
+## §O-462 — Two harnesses over one validator, and I ran the one that passes
+
+`tools/check_xrefs.py --self-test` and `tools/self_test_xrefs.py` **both test the same validator**. The first
+is a hermetic matrix over a synthetic corpus in a temporary directory; the second mutates the three real
+documents and restores them. **CI runs the second.** My local loop ran the first.
+
+```
+check_xrefs.py --self-test   ->  SELF-TEST PASSED -- 20/20
+self_test_xrefs.py           ->  9/10 fault injections detected
+                                 SELF-TEST FAILED -- a validator check is dead
+```
+
+**Three consecutive commits were red on `Cross-reference integrity` while every local run said
+`validation PASSED` and every local self-test said `PASSED`.** The failure was in a file I had not run at all.
+
+**The remedy is not "run more things"** -- it is to know **which** command the gate invokes, and this
+repository already has the tool for that: `.scratch/run_ci_checkers.py` **parses `ci.yml`** and prints every
+command it does not reproduce. **A self-test I never named was one it did reproduce, and I did not read its
+list.**
+
+## §O-463 — A substring rule makes a fault injection silently stop firing
+
+`tools/self_test_xrefs.py` injects a citation of an observation id into a **copy** of the corpus, to prove
+rule 13 rejects it. **Rule 13 resolves by plain substring search over the working tree.**
+
+**An observation landed one round earlier spelled out a longer id whose leading digits are the same three.**
+So the injected id was found **inside** the longer one, resolved, and the injection stopped being detectable:
+
+```
+check [13] a citation of an observation that does not exist
+  DEAD  checklist cites (a three-digit id): validator did NOT detect this fault
+9/10 fault injections detected
+SELF-TEST FAILED -- a validator check is dead
+```
+
+**And that observation is `§O-458`, which documents exactly this class of defect and prescribes building such
+a string at runtime -- and then spelled one out in prose as an example.** *The observation about a literal
+that must not match contained the literal that matched.*
+
+### Fixing it exposed the second half
+
+Removing the longer id made rule 13 find the injected id **directly**, in the test file's own bytes:
+
+```
+FAIL  [13] ... is cited by tools/self_test_xrefs.py but is not defined in Observations
+```
+
+**A self-test that cites what it injects is a self-test that fails the corpus it guards.** The id is now a
+module constant built from pieces, appearing contiguously nowhere in the file -- five sites, one constant.
+
+### The generalisation
+
+**The same substring rule that makes a stale citation silently resolve to the wrong observation (`§O-447`)
+makes a fault injection silently stop firing.** Both are the rule being **wider than the thing it
+describes**, and **neither is visible to a checker** -- one because the id *exists*, the other because the
+injection *"succeeded"*.
+
+**And a third form of it is in the same fix:** a placeholder such as the project's own `§O-TBD` convention is
+safe against the **definitional** pattern and **not** against the **citation** pattern, because the citation
+rule matches the prefix followed by digits. **The two patterns are not the same pattern, and a defence
+against one is not a defence against the other.**
+
+## §O-464 — `findstr` eats the exit code, exactly as `Select-Object -First N` does
+
+A check script of mine piped clippy through `findstr` and echoed `%ERRORLEVEL%`:
+
+```
+cargo clippy ... | findstr /C:"error"
+echo CLIPPY_GATE=%ERRORLEVEL%
+```
+
+**`%ERRORLEVEL%` is `findstr`'s**, and `findstr` returns **1 when it finds nothing**. So `CLIPPY_GATE=1` meant
+**"no error lines"** -- **the opposite of what it reads as**, and on a script whose purpose was to report a
+verdict.
+
+**This repository already records that `Select-Object -First N` kills a pipeline** (`§O-284`). **`findstr`
+does the same thing to an exit code**, and the general rule is the one that covers both: **a filtering stage
+between a command and its verdict replaces the verdict with its own.** Read the command's exit code directly,
+or grep for the verdict in the output -- **never through a filter.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

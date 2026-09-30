@@ -413,6 +413,8 @@ def execute(args: argparse.Namespace) -> int:
             stdout=stream,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         try:
             wait_for_health(child, port, log, args.health_timeout)

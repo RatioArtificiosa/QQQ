@@ -33660,6 +33660,86 @@ conflicted on five files and **only three of them had no correct merge at all**,
 `tools/backlog.json` with 486 hunks, `docs/stability.md` saying 250 against 259, `docs/unsafe-audit.md`
 saying 173 against 176 -- **is a third number after a merge and must be regenerated, never resolved.**
 
+## §O-448 — An injection that disables one of two success paths measures nothing
+
+**I fault-injected `remove_dir_all_retrying` and the injection was inert, and the reason is worth more than
+the injection.** The helper has two ways to succeed:
+
+```rust
+match std::fs::remove_dir_all(path) {
+    Ok(()) => return,                                            // it removed the directory
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return, // it was already gone
+    Err(e) => last = Some(e),
+}
+```
+
+I changed the first arm to `Ok(()) => {}`, so a removal that *succeeded* would fall through to the deadline
+check, sleep 25 ms and loop -- and **the test still passed, in 0.11 s, while cargo had genuinely rebuilt the
+binary in 33.73 s so the injection was live.**
+
+**The second iteration's `remove_dir_all` returned `NotFound`, and `NotFound` is the other success arm.** The
+loop exited through the path I had not disabled.
+
+**The rule this adds to `§O-281`, in the same family and one level down:** that observation is *"confirm the
+premises, not the exit code"*; this is **"an injection must remove every route to success, not one of them."**
+A guard with two exits needs **both** closed, and an injection that closes one is a measurement of the exit it
+closed and nothing else. **An idempotent helper is the case that hides it**, because its second attempt
+succeeds for a *different* reason than its first.
+
+**The technique that settled it, and which is worth reaching for first next time:** rather than guessing which
+arm fires, **print the arm.** A probe that named the path, whether it existed on entry, its entries and which
+branch returned produced, in one run:
+
+```
+PROBE cleanup path=C:\Users\Usuario\AppData\Local\Temp\qqq-native-28920 exists_on_entry=true entries=Ok(["artifacts", "cache"])
+PROBE arm=Ok
+```
+
+**Two facts, both previously assumed: the directory is populated when cleanup begins, and the first attempt
+succeeds.** No amount of reasoning about `Drop` ordering would have produced them as cheaply.
+
+**And a second slip in the same ladder, recorded because it cost a run:** the follow-up injection **refused to
+apply** — its anchor expected a trailing comma that **my own probe edit had dropped** — so nothing was
+written, and the test that ran next used the *previous* binary, meaning its result said nothing about the new
+injection. The file was restored from a `.scratch` backup and verified **byte-identical by sha256** before the
+final run. **A refused edit is a safe edit precisely because the refusal happens before any mutation**; the
+danger is not applying it, it is *believing the run that followed*.
+
+## §O-449 — A test can be right about its subject and wrong about its environment
+
+`crates/qqq-run/tests/live_components.rs:148` called `std::fs::remove_dir_all(root).unwrap()` one statement
+after dropping `engine`, `config` and `cache`. CI measured:
+
+```
+Rust (ubuntu-latest)   success
+Rust (windows-latest)  success
+Rust (macos-latest)    FAILURE
+  panicked: Os { code: 66, kind: DirectoryNotEmpty }
+  test result: FAILED. 7 passed; 1 failed
+```
+
+**Seven of eight tests passed and the failure was at the cleanup line, after every assertion in the failing
+test had already run.** The test was not wrong about the AOT cache — it was wrong about what one
+`remove_dir_all` can promise.
+
+**The cause is documented, not mysterious:** `std::fs::remove_dir_all` **fails if the directory changes while
+it is being removed**, and macOS surfaces that race as `DirectoryNotEmpty`. Wasmtime's managed cache is a
+directory of `.cwasm` files written by cache machinery whose shutdown is not synchronised with a `Drop` of the
+handle. **The single call asserted that nothing touches a directory one statement after its owner is gone** —
+something the test neither needs nor controls.
+
+**The fix is a bounded retry that still asserts**: up to 10 s, then a panic naming the path and the last OS
+error. **A retry is not a weakened assertion; it is the correct assertion for a path another thread may still
+hold.** Three alternatives were rejected, and two of them are shapes this corpus has already paid for:
+`let _ =` (a cleanup that cannot fail hides the next real failure), `unwrap_or_default()` (the same shape with
+better spelling), and a unique directory per run with no cleanup (honest, but leaks a temp directory per CI
+run forever).
+
+**The prelude kept its tolerance and gained its reason.** Line 105 was a bare `let _ = std::fs::remove_dir_all`
+before the run — legitimately best-effort, because a directory left by a previous run of the same PID is not a
+failure of this run — but **`let _ =` is the shape this corpus hunts**, so the tolerance is now written where
+a reader finds it. **The removal at the end does not get it.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

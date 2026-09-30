@@ -1801,8 +1801,10 @@ fn test_isolate_stops_one_test_seeing_another_tests_state() {
 /// **`TEST-012` stays `[ ]` until this passes.** The half above is the premise and it holds; this is the
 /// guarantee and it does not.
 #[test]
-#[ignore = "measured 2026-09-29: --isolate makes a_writes_a_marker fail with `passed 0/1`, so the \
-            isolation directory is not writable and `isolation_dir` is swallowing the error"]
+#[ignore = "the working directory is inert: `run_once` invokes `cargo test`, and Cargo gives the test \
+            binary the package root as its CWD, so `workdir` changes Cargo and not the test. Measured \
+            2026-09-29: the marker is still found under --isolate. Running the discovered executable \
+            directly is the fix"]
 fn test_isolate_gives_each_test_its_own_directory() {
     let s = Sandbox::new("test-isolate-dirs");
     project_with_a_hostile_test(&s);

@@ -233,12 +233,21 @@ pub struct OutcomeReport {
 /// how the two drift — `build` would gain a language that `test` did not know
 /// about, and the failure would be a confusing "no tests found".
 struct Runner {
-    /// The program that compiles and reports test targets.
+    /// The program that compiles test targets, and that **runs a named test**.
     ///
-    /// Used only to *build*: discovery runs the resulting binaries directly,
-    /// which is what makes a test's source file exact rather than inferred.
+    /// # What it is NOT used for, and what that costs
+    ///
+    /// **Discovery runs the resulting binaries directly** -- `--list --format terse` at the `discover`
+    /// site -- which is what makes a test's source file exact rather than inferred. **The RUN does not.**
+    /// `run_once` invokes `program` with `run_args`, so a named test is run by `cargo test <name> -- …`,
+    /// and **Cargo gives the test binary the package root as its working directory regardless of the
+    /// working directory this process set.** That is why `--isolate` was inert when it was written: the
+    /// isolation point changed Cargo's own CWD and not the child test's.
+    ///
+    /// **This doc said "used only to *build*", which was true of the listing and read as though it
+    /// covered the run.** Corrected rather than deleted, because the distinction is the defect.
     program: &'static str,
-    /// Arguments that run named tests.
+    /// Arguments that run named tests -- **through `program`**, with the caveat above.
     run_args: &'static [&'static str],
 }
 
@@ -530,8 +539,13 @@ fn run_once(workdir: &Path, program: &str, run_args: &[&str], name: &str) -> (bo
         .arg("--nocapture")
         .arg("--test-threads")
         .arg("1")
-        // **The isolation point.** `workdir` is `project_dir` unless `--isolate` asked for a fresh
-        // directory, which the caller owns and removes.
+        // **NOT an isolation point, and that is measured rather than suspected.** `workdir` is
+        // `project_dir` unless `--isolate` asked for a fresh directory -- but this sets **Cargo's**
+        // working directory, and Cargo runs the test binary with the **package root** as *its* working
+        // directory. Measured with a two-test fixture whose first test writes a marker and whose second
+        // asserts it is absent: the marker is still found under `--isolate`, so this line changes nothing
+        // a test can observe. **Running the discovered executable directly is what would make it real**,
+        // and that is the change `TEST-012` needs.
         .current_dir(workdir)
         .output();
 

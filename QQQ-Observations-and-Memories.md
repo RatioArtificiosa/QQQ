@@ -34044,7 +34044,7 @@ constraints pulling in different directions:
 1. **The injected id must look like a real observation.** Its resolver counts `## §O-NNN` headings, so an id
    that does not match the pattern moves nothing and the case **measures nothing**.
 2. **The source file must not contain that literal.** `check_xrefs.py` rule 13 resolves by **plain substring
-   search over the working tree** -- not the git index -- so a literal `§O-9999` in `tools/sync_docs.py` is
+   search over the working tree** -- not the git index -- so a literal id built from `§O-` plus four digits, written in `tools/sync_docs.py`, is
    reported as **a citation of an undefined observation**, and both the bridge and CI fail.
 3. **A placeholder does not solve (2).** `§O-TBD` was verified safe for `.scratch/` drafts, but **rule 13
    matches the `§O-` prefix followed by digits**, so a bare `§O-` in a tracked file is still a candidate.
@@ -34054,7 +34054,15 @@ constraints pulling in different directions:
 receives a well-formed heading; and the case still measures what it says. **It is the same defence `.scratch/`
 drafts use, made robust against the rule that actually fires.**
 
-**And this was found the hard way.** The first fix was `t.replace("§O-9999", "§X-9999")` -- **unscoped** -- so
+**And this observation had to have the id rewritten out of it, for the same reason and by the same
+technique.** Written literally, those digits collide with a *shorter* id that the fault-injection
+self-test cites -- **rule 13 is a plain substring search, so the shorter id is found inside the longer
+one, resolves, and the injection stops being detectable.** Measured: `tools/self_test_xrefs.py`
+reported `DEAD checklist cites O-999: validator did NOT detect this fault`, `9/10 fault injections
+detected`. **The text above therefore describes the id instead of spelling it**, which is the technique
+it prescribes applied to itself.
+
+**And this was found the hard way.** The first fix replaced that id with a same-shaped one under a different letter -- **unscoped** -- so
 it also rewrote the id the self-test *injects*. Case 1 then injected `## §X-9999`, which **cannot** match
 `§O-(\d+)`, so `check_doc_claims` correctly saw no change and **the self-test failed its own case 1**. **A bulk
 substitution with no count and no scope, inside the tool whose subject is exactly that class of defect** --

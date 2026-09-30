@@ -26,8 +26,8 @@ Exit:   0 = all fault injections were correctly detected, 1 = a check is dead
 # observation-citations-exempt
 #
 # Both are declared because this file fabricates references by design: it injects
-# **OQ-099**, ` HOST-999 `, §D-099 and §O-999 into a copy of the corpus to prove
-# the validators reject them. Check [13] would report §O-999 as a citation of an
+# **OQ-099**, ` HOST-999 `, §D-099 and `INJECTED_OBS` into a copy of the corpus to prove
+# the validators reject them. Check [13] would report `INJECTED_OBS` as a citation of an
 # undefined observation, which it is -- and that is the point of the fixture.
 
 This file is exempt from `tools/check_checklist_citations.py`, in full: fabricating
@@ -39,6 +39,21 @@ fabricated marker added later would be missed.
 """
 
 from __future__ import annotations
+
+# **The injected observation id, built from pieces on purpose.**
+#
+# This file injects a citation of an observation that does not exist, into a *copy* of the corpus, to prove
+# `check_xrefs.py` rule [13] rejects it. **The id must not appear literally in this file's bytes**, because
+# rule 13 is a plain substring search over the **working tree** rather than the git index -- so a literal here
+# is read as a citation of an undefined observation and the corpus check fails on the file that tests it.
+#
+# **Measured, and it happened twice.** First a longer id sharing these leading digits resolved this one inside
+# itself and the injection went `DEAD`; when that was fixed, rule 13 found this id directly and reported
+# `FAIL [13] ... is cited by tools/self_test_xrefs.py but is not defined in Observations`.
+#
+# **`O-999` in the case labels below is deliberately left as the bare digits**: rule 13 matches the `§O-`
+# prefix, so the label is readable and inert.
+INJECTED_OBS = "\u00a7O-" + "999"
 
 import importlib.util
 import re
@@ -405,7 +420,7 @@ INJECTION_MARKERS = [
     ("**OQ-099**", CHECKLIST, "check [9]: a checklist open question renamed", False),
     ("`§D-099`", PROPOSAL, "check [10]: the Proposal citing a bad Observations decision", False),
     ("§REMOVED", PROPOSAL, "check [10b]: a decision's citations stripped from the Proposal", False),
-    ("§O-999", CHECKLIST, "check [13]: a citation of an undefined observation", False),
+    (INJECTED_OBS, CHECKLIST, "check [13]: a citation of an undefined observation", False),
     ("## (heading deleted)", OBS, "check [12]: the MISTAKES AND FIXES heading deleted", True),
     ("**CAP-011** duplicate", CHECKLIST, "check [6]: a duplicate checklist ID", False),
     # A safety net for the check [2] variant: the harness renames HOST-001 inside
@@ -509,7 +524,7 @@ REVERSALS = {
     "**OQ-099**": ("**OQ-099**", "**OQ-012**"),
     "`§D-099`": ("`§D-099`", "`§D-003`"),
     "§REMOVED": ("§REMOVED", "§D-005"),
-    "§O-999": ("§O-999", "§O-248"),
+    INJECTED_OBS: (INJECTED_OBS, "§O-248"),
     "## (heading deleted)": ("## (heading deleted)", "## 4. MISTAKES AND FIXES"),
     # # Why this reversal was WRONG the first time, and how it was found
     #
@@ -1022,7 +1037,7 @@ def _run(lock: _Lock) -> int:
     results.append(expect_failure(
         "checklist cites O-999",
         CHECKLIST,
-        lambda t: t.replace("§O-248", "§O-999", 1),
+        lambda t: t.replace("§O-248", INJECTED_OBS, 1),
     ))
 
     print("check [10] Proposal citing a nonexistent Observations decision")

@@ -112,6 +112,47 @@ pub fn toolchain_for(language: &str, target: &str) -> Option<Vec<ToolRequirement
         .map(|(_, reqs)| reqs.to_vec())
 }
 
+/// The tools a language's driver **would** use, whether or not one exists.
+///
+/// # Why this is separate from [`toolchain_for`]
+///
+/// Because the two answer different questions. `toolchain_for` answers *"can this build drive the language
+/// now?"* and returns `None` when it cannot. **This answers *"what would it need?"* and answers for all five**
+/// -- the pinned list is the same table, and only [`DRIVEN`] withholds it.
+///
+/// **That distinction is what makes a refusal diagnostic.** Point 7 of the delivery's prompt asks for *"exact
+/// tool diagnostics"*; a message saying only *"not implemented yet"* is truthful and tells the reader nothing
+/// they can act on.
+///
+/// # What a caller must not do with it
+///
+/// **Treat a `Some` as permission to build.** This is a reporting helper: [`plan_pure`] still refuses an
+/// undriven language, and it must keep refusing -- `toolchain_for`'s own comment records why returning a
+/// plausible requirement list for a driver that does not exist produces *"a build that fails inside a shell
+/// command -- a worse error, further from the cause"*.
+///
+/// # Examples
+///
+/// Rust is driven and Go is not, but **both have a pinned tool list**, which is the point:
+///
+/// ```
+/// let rust = qqq_run::build::pinned_tools("rust").expect("rust has a pinned toolchain");
+/// assert!(rust.iter().any(|t| t.program == "cargo"));
+///
+/// let go = qqq_run::build::pinned_tools("go").expect("go has one too -- it is simply not driven");
+/// assert!(!go.is_empty());
+/// assert!(!qqq_run::build::DRIVEN.contains(&"go"));
+///
+/// assert!(qqq_run::build::pinned_tools("cobol").is_none());
+/// ```
+#[must_use]
+pub fn pinned_tools(language: &str) -> Option<Vec<ToolRequirement>> {
+    TOOLCHAINS
+        .iter()
+        .find(|(id, _)| *id == language)
+        .map(|(_, reqs)| reqs.to_vec())
+}
+
 /// The languages `qqqai build` can **drive** today.
 ///
 /// # Why this is separate from [`TOOLCHAINS`]
@@ -625,6 +666,40 @@ impl BuildOptions {
     }
 }
 
+/// The refusal for a language with no driver, naming the tools it **would** use.
+///
+/// # Why it is a function and not two `format!` calls
+///
+/// Because it was two `format!` calls with identical text, one of them in an `else` branch whose own comment
+/// says it is unreachable. **A message duplicated is a message that drifts** -- the shape `§O-439` and
+/// `§O-466` record -- and the fix there was the same: **one place, and references.**
+///
+/// # What it adds over "not implemented yet"
+///
+/// The pinned programs, from [`pinned_tools`], and the one that installs each. **A reader learns what the
+/// build would run before deciding whether to wait for it.**
+fn driver_not_implemented(language: &str) -> Error {
+    let tools = pinned_tools(language).map(|reqs| {
+        reqs.iter()
+            .map(|r| format!("`{}` (install: {})", r.program, r.install))
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+
+    let message = match tools {
+        Some(tools) => format!(
+            "the `{language}` toolchain driver is not implemented yet; it would use {tools}"
+        ),
+        None => format!("the `{language}` toolchain driver is not implemented yet"),
+    };
+
+    Error::new(ErrorCode::CompilationFailed, message).with_remediation(format!(
+        "{} is fully supported today; `{language}` is tracked by the language matrix in \
+         QQQ-Checklist-V1.md (LANG-001..LANG-040)",
+        supported_phrase()
+    ))
+}
+
 /// Plan a build, checking that the toolchain is actually present.
 ///
 /// This is the entry point the CLI uses. It performs every check in
@@ -644,19 +719,7 @@ pub fn plan(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPlan> {
         // `plan_pure` only returns `Ok` for a language with a driver, so this
         // is unreachable — but returning an error rather than panicking keeps
         // the contract total if the two functions ever disagree.
-        return Err(Error::new(
-            ErrorCode::CompilationFailed,
-            format!(
-                "the `{}` toolchain driver is not implemented yet",
-                spec.language
-            ),
-        )
-        .with_remediation(format!(
-            "{} is fully supported today; `{}` is tracked by the language matrix in \
-             QQQ-Checklist-V1.md (LANG-001..LANG-040)",
-            supported_phrase(),
-            spec.language
-        )));
+        return Err(driver_not_implemented(&spec.language));
     };
 
     // Missing tools are reported here, before any work, naming every one that
@@ -774,21 +837,8 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
         )));
     }
 
-    let toolchain = toolchain_for(&spec.language, target).ok_or_else(|| {
-        Error::new(
-            ErrorCode::CompilationFailed,
-            format!(
-                "the `{}` toolchain driver is not implemented yet",
-                spec.language
-            ),
-        )
-        .with_remediation(format!(
-            "{} is fully supported today; `{}` is tracked by the language matrix in \
-             QQQ-Checklist-V1.md (LANG-001..LANG-040)",
-            supported_phrase(),
-            spec.language
-        ))
-    })?;
+    let toolchain = toolchain_for(&spec.language, target)
+        .ok_or_else(|| driver_not_implemented(&spec.language))?;
 
     // `toolchain` is intentionally unused beyond proving a driver exists:
     // probing for the programs it names is `plan`'s job, and doing it here

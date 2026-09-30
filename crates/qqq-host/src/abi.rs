@@ -153,7 +153,7 @@ pub struct Response {
 ///
 /// The variant order is the WIT file's, for the same reason [`Method`]'s is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ComponentType, Lower, Lift)]
-#[component(enum)]
+#[component(variant)]
 #[repr(u8)]
 pub enum HttpError {
     /// The host is not on the manifest's egress allowlist.

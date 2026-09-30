@@ -33336,6 +33336,35 @@ server bound* — was only established by the fourth.** That is the argument for
 only the subject can produce, rather than one that infers the fact from an observable its rivals also
 satisfy.
 
+## §O-439 — Live replacement needs an execution path and shared ownership
+
+The live-components draft traced `dev` to a rebuild loop without a listener. Its
+old module documentation described component swapping and restart as implemented.
+The new path prepares the existing HTTP server once and publishes validated guest
+generations through its dispatcher. Failed reloads retain the last good generation.
+The executable CLI check changes responses in the same process and verifies a
+failed compiler run does not replace that code.
+
+Replacement must share request capacity and audit ownership with the old version.
+A new pool per version doubles the effective limit during overlap. The new test
+holds an old guest in flight while preparing its successor; a fault injection
+that removes pool sharing produces a failed assertion.
+
+Typed admission also exposed `HttpError` being derived as a component enum while
+`qqq-http.wit` declares a variant. The host type now follows the WIT declaration;
+a candidate with an incompatible handler signature is refused before publication.
+
+AOT output and AOT execution reuse are distinct. `build --aot` now writes native
+bytes and provenance; reuse is enabled by an explicit protected managed cache.
+A cross-process test observes an actual cache hit. Arbitrary `.cwasm` loading,
+persistent-agent execution and state migration are not completed by these changes.
+
+The hostile-guest suite's non-termination cases had no epoch driver and relied on
+ten billion fuel units per case. The test now drives the clock independently,
+so those cases exercise preemption rather than prolonged CPU burn. Full validation
+also exposed a Landlock kernel refusal in this sandbox; it remains a failed gate.
+See the live-components handoff for review and deployment boundaries.
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

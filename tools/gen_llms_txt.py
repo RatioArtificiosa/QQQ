@@ -138,6 +138,24 @@ CURATED: list[tuple[str, str, str, str]] = [
         "both",
         "status",
     ),
+    (
+        "docs/rfc/live-components-and-aot.md",
+        "Draft live-component and AOT design: verified baseline, architecture, lifecycle and phased delivery.",
+        "both",
+        "status",
+    ),
+    (
+        "docs/live-components-checklist.md",
+        "Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence.",
+        "both",
+        "status",
+    ),
+    (
+        "docs/live-components-handoff.md",
+        "How to run and review the live-component foundation, with scope limits and merge gates.",
+        "both",
+        "status",
+    ),
     # --- The machine contracts --------------------------------------------
     (
         "docs/errors.md",
@@ -544,7 +562,12 @@ def label_for(data: bytes) -> str:
     into the repository. Taking bytes makes the label function testable in
     isolation, which is the only way to assert the property that failed twice.
     """
-    kb = len(data.replace(b"\r\n", b"\n")) // 1024
+    return label_for_size(len(data.replace(b"\r\n", b"\n")))
+
+
+def label_for_size(byte_count: int) -> str:
+    """Label a normalized byte count without allocating a hypothetical document."""
+    kb = byte_count // 1024
     if kb < VOLATILE_KB:
         return f"{kb} KB"
     # **One word, with no upper boundary.**
@@ -1072,7 +1095,7 @@ def self_test() -> int:
             label_for(b"x" * (VOLATILE_KB * 1024 * 2)),
             label_for(b"x" * (VOLATILE_KB * 1024 * 20)),
             label_for(b"x" * (VOLATILE_KB * 1024 * 200)),
-            label_for(b"x" * (8 * 1024 * 1024 * 1024)),
+            label_for_size(8 * 1024 * 1024 * 1024),
         ]
         expect(
             "a large document's label never moves, however much it grows",

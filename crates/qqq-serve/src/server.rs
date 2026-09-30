@@ -629,6 +629,10 @@ pub async fn serve(
     // The accept loop hands each connection to a task. `accept_stream` takes a
     // synchronous callback, so the spawn happens here rather than inside it —
     // and the callback must not block, because it runs on the acceptor.
+    // Keep tasks observable and reap completed handles during admission.
+    let tasks = Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new()));
+    let spawned = Arc::clone(&tasks);
+    let drain_timeout = config.connection.drain_timeout;
     let result = listener
         .accept_stream(&shutdown, move |stream, peer| {
             let table = Arc::clone(&table);
@@ -672,7 +676,11 @@ pub async fn serve(
             let limit = accept_limit;
             accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-            tokio::spawn(async move {
+            let mut tasks = spawned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(async move {
                 let id = ConnectionId::new(peer, trace);
                 {
                     let mut l = ledger.lock().await;
@@ -756,13 +764,39 @@ pub async fn serve(
         })
         .await;
 
-    result.map_err(|e: AcceptError| {
-        Error::new(
-            ErrorCode::ListenerBindFailed,
-            "the accept loop stopped with an error",
-        )
-        .with_cause(e.to_string())
+    drain_tasks(tasks, shutdown, drain_timeout).await;
+    result.map_err(|error| accept_failed(&error))
+}
+
+fn accept_failed(error: &AcceptError) -> Error {
+    Error::new(
+        ErrorCode::ListenerBindFailed,
+        "the accept loop stopped with an error",
+    )
+    .with_cause(error.to_string())
+}
+
+async fn drain_tasks(
+    tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    shutdown: Shutdown,
+    timeout: std::time::Duration,
+) {
+    shutdown.signal();
+    let mut tasks = {
+        let mut guard = tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *guard)
+    };
+    if tokio::time::timeout(timeout, async {
+        while tasks.join_next().await.is_some() {}
     })
+    .await
+    .is_err()
+    {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
 }
 
 /// The per-tenant connection ceilings declared by the manifest.
@@ -1255,6 +1289,29 @@ fn route_match_of(m: &crate::route::Match) -> RouteMatch {
 /// A `Response` is produced synchronously and the body is not consumed, so borrowing it
 /// avoids a copy on every request. The lifetime is the caller's stack frame, which is
 /// exactly the handler's duration.
+async fn dispatch_off_thread(
+    table: &RouteTable,
+    dispatch: &Dispatch,
+    head: &RequestHead,
+    path: &str,
+    body: &crate::body_bytes::BodyBytes,
+) -> Response {
+    let Some(matched) = table.match_route(head.method, path) else {
+        return dispatch_flat(table, dispatch, head, path, body);
+    };
+    let matched = route_match_of(&matched);
+    let head = head.clone();
+    let body = body.clone();
+    let flat = Arc::clone(&dispatch.flat);
+    let handler = dispatch.body_for(&matched.handler).cloned();
+    tokio::task::spawn_blocking(move || match handler {
+        Some(handler) => handler(&head, &body),
+        None => flat(&head, &matched),
+    })
+    .await
+    .unwrap_or_else(|_| Response::text(500, "host handler failed"))
+}
+
 fn dispatch_flat(
     table: &RouteTable,
     dispatch: &Dispatch,
@@ -1865,7 +1922,7 @@ async fn serve_connection(
         };
 
         let route_started = std::time::Instant::now();
-        let response = dispatch_flat(table, dispatch, &head, path, &body);
+        let response = dispatch_off_thread(table, dispatch, &head, path, &body).await;
         // **`false`, because this path has no host failure to report** -- `CodeRabbit` finding #23.
         //
         // This used to be `response.status >= 500`, and `response` is the GUEST's answer: a guest that

@@ -1045,6 +1045,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **ARCH-014** Implement the manifest opt-in for shared memory, off by default.
   → §4.7 Concurrency model for guests
 - [ ] **ARCH-015** Implement the artifact model: component + signed manifest envelope + AOT cache keying.
+  → Progress: explicit Wasmtime managed-cache configuration and `build --aot` native emission
+    are covered by `docs/rfc/live-components-and-aot.md`. Signed installation and trusted
+    native-artifact distribution remain separate work; this item remains open.
   → §4.6 Where the artifacts live and how they move
 - [ ] **ARCH-016** Implement build-time component composition with load-time composition as fallback.
   → §4.6 Where the artifacts live and how they move
@@ -3478,6 +3481,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     found already implemented by reading the item and measuring the code.
   → §8.3 The machine contract layer
 - [ ] **DX-006** Implement the TIER-1 hot reload: component swap preserving the host process.
+  → Progress: versioned generation leases, live HTTP dispatch and dev rebuild activation are
+    implemented in the live-components draft. See `docs/live-components-checklist.md` for
+    measured acceptance, failure controls and remaining merge gates. Kept open pending review.
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-007** Implement TIER-2 state-preserving swap with declared guest state.
   → §6.6 `qqq-run` — CLI and dev server

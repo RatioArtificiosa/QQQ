@@ -537,19 +537,29 @@ fn run_case(engine: &wasmtime::Engine, case: &Case, index: usize) {
     let inst = Instance::create(engine, &prepared, &no_grants(), limits)
         .unwrap_or_else(|e| panic!("[{index}] `{}`: must instantiate: {e}", case.behaviour));
 
-    let err = inst
-        .run(|store, instance| {
-            let f = instance.get_typed_func::<(), ()>(&mut *store, case.entry)?;
-            f.call(&mut *store, ())
+    // Epoch interruption requires an independent driver. Without it these forty
+    // cases burned ten billion fuel units each and never exercised the clock.
+    let ticker = (case.behaviour == "non-terminating guest").then(|| {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            engine.increment_epoch();
         })
-        .err()
-        .unwrap_or_else(|| {
-            panic!(
-                "[{index}] `{}`: the hostile guest MUST fail; it completed, which \
+    });
+    let outcome = inst.run(|store, instance| {
+        let f = instance.get_typed_func::<(), ()>(&mut *store, case.entry)?;
+        f.call(&mut *store, ())
+    });
+    if let Some(ticker) = ticker {
+        ticker.join().expect("epoch driver");
+    }
+    let err = outcome.err().unwrap_or_else(|| {
+        panic!(
+            "[{index}] `{}`: the hostile guest MUST fail; it completed, which \
                  means the limit it was supposed to hit was not enforced",
-                case.behaviour
-            )
-        });
+            case.behaviour
+        )
+    });
 
     // The non-terminating case accepts either limit code; every other case must
     // produce exactly its specified one.

@@ -272,6 +272,8 @@ impl std::fmt::Debug for Instance<'_> {
 /// assert!(opts.audit.is_none() && opts.replay_sink.is_none() && opts.replay_source.is_none());
 /// ```
 pub struct InstanceOptions {
+    /// Relative epoch ticks for an externally driven ticker; `None` preserves legacy behavior.
+    pub epoch_ticks: Option<u64>,
     /// Virtualize the guest's clock and randomness — Proposal §10.5.
     ///
     /// # What this does and does not make reproducible
@@ -1278,7 +1280,7 @@ impl ReadyStore {
         // The deadline is expressed in *ticks*, and the host increments the
         // epoch on a timer. Setting it to 1 means "trap at the next tick",
         // which is what the host's ticker converts the millisecond budget into.
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(opts.epoch_ticks.unwrap_or(1).max(1));
 
         // -- Epoch yielding, async contexts only -------------------------
         //

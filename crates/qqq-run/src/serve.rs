@@ -97,6 +97,8 @@ pub const MAX_WORKERS: u32 = 128;
 /// The flags `qqqai serve` accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeOptions {
+    /// Explicit host-owned native cache directory.
+    pub aot_cache: Option<std::path::PathBuf>,
     /// `--listen <host:port>`.
     pub listen: String,
     /// `--workers <n>`. Only `1` is accepted; see the module documentation.
@@ -182,6 +184,7 @@ pub struct ServeOptions {
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
+            aot_cache: None,
             listen: "127.0.0.1:3000".to_owned(),
             // One worker is the honest default: it is what V1 actually runs.
             workers: 1,
@@ -332,6 +335,10 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
+            "--aot-cache" => {
+                opts.aot_cache = Some(value_of(args, i, "--aot-cache")?.into());
+                i += 2;
+            }
             "--listen" => {
                 opts.listen = value_of(args, i, "--listen")?;
                 i += 2;
@@ -590,7 +597,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;
 
-    let (dispatch, guest_loaded, pool_capacity) = build_dispatch(loaded, opts)?;
+    let (dispatch, guest_loaded, pool_capacity, live) = build_dispatch(loaded, opts)?;
 
     Ok(Prepared {
         config,
@@ -599,6 +606,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         routes: server.routes.len(),
         guest_loaded,
         pool_capacity,
+        live,
     })
 }
 
@@ -653,6 +661,8 @@ fn build_cors(server: &qqq_cap::manifest::Server) -> Result<Option<qqq_serve::co
 
 /// A server that is ready to bind.
 pub struct Prepared {
+    /// Host controller for replacement under the initially resolved policy.
+    pub live: Option<crate::live::LiveApp>,
     /// The server configuration, with the address already parsed.
     pub config: ServerConfig,
     /// The route table built from the manifest.
@@ -688,7 +698,7 @@ pub struct Prepared {
 fn build_dispatch(
     loaded: &LoadedManifest,
     opts: &ServeOptions,
-) -> Result<(Dispatch, bool, Option<u64>)> {
+) -> Result<(Dispatch, bool, Option<u64>, Option<crate::live::LiveApp>)> {
     let Some(artifact) = find_artifact(
         project_dir(loaded),
         "release",
@@ -698,7 +708,7 @@ fn build_dispatch(
         // No component means no `GuestApp` and therefore **no pool**. `None` rather than
         // `Some(0)`: `0` would read as "a pool with no capacity", which is a different
         // and false statement about a project that simply has not been built.
-        return Ok((Dispatch::flat(unbuilt(loaded.name())), false, None));
+        return Ok((Dispatch::flat(unbuilt(loaded.name())), false, None, None));
     };
 
     let bytes = std::fs::read(&artifact).map_err(|e| {
@@ -713,8 +723,13 @@ fn build_dispatch(
     // No debug_info: the server serves an untrusted artifact, and a source line
     // is not going to be read by anyone. run.rs sets it for exactly the opposite
     // reason -- see its comment there.
+    crate::aot::check_grants(
+        opts.aot_cache.as_deref(),
+        &GrantSet::from_manifest(&loaded.manifest),
+    )?;
     let cfg = EngineConfig::default();
-    let wasmtime_cfg = cfg.to_wasmtime_config()?;
+    let mut wasmtime_cfg = cfg.to_wasmtime_config()?;
+    crate::aot::configure(&mut wasmtime_cfg, opts.aot_cache.as_deref())?;
     let engine = wasmtime::Engine::new(&wasmtime_cfg).map_err(|e| {
         Error::new(
             ErrorCode::InternalInvariantViolated,
@@ -748,7 +763,8 @@ fn build_dispatch(
         app.attach_audit_file(std::path::Path::new(path))?;
     }
 
-    let app = Arc::new(app);
+    let capacity = app.capacity();
+    let app = crate::live::LiveApp::new(app)?;
     // Captured before the `Arc` is moved into the dispatcher closures, so the report can
     // name the capacity that is actually installed.
 
@@ -770,7 +786,7 @@ fn build_dispatch(
         dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
     }
 
-    Ok((dispatch, true, Some(app.capacity())))
+    Ok((dispatch, true, Some(capacity), Some(app)))
 }
 
 /// The directory a project lives in — the manifest's parent.

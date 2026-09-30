@@ -32,14 +32,10 @@
 //!    that reports success and produces an unloadable file moves the failure to
 //!    deploy time, which is strictly worse.
 //!
-//! # What is deliberately *not* here
-//!
-//! `--aot` does not compile to `.cwasm` in this module yet. The AOT cache is
-//! owned by `qqq-host` (`aot_cache_key`), and wiring it correctly means
-//! agreeing on where the cache lives and how it is invalidated. Rather than
-//! half-build it, the flag is accepted and reported as not-yet-effective — see
-//! `BuildOutput::aot` and the note in `plan()`. That is a **declared gap**, not
-//! a silent one.
+//! `--aot` emits content-addressed native artifacts and provenance under
+//! `target/qqq/aot`. `--aot-cache` also warms an explicit host-owned cache.
+//! Portable WASM remains the deployable source; arbitrary native artifact loading
+//! is not exposed under the workspace's no-unsafe policy.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -208,6 +204,8 @@ pub fn shell_quote(s: &str) -> String {
 /// answer to "how do we carry several command-line switches".
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BuildOptions {
+    /// Explicit host-owned native cache directory.
+    pub aot_cache: Option<PathBuf>,
     /// Bit flags; see the constants below.
     bits: u8,
     /// Override the manifest's target.
@@ -263,7 +261,11 @@ impl BuildOptions {
     /// the command line.
     #[must_use]
     pub fn from_flags(bits: u8, target: Option<String>) -> Self {
-        Self { bits, target }
+        Self {
+            bits,
+            target,
+            aot_cache: None,
+        }
     }
 }
 
@@ -803,8 +805,7 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
         size_bytes: None,
         kind: None,
         aot_requested: opts.aot(),
-        // Declared false, and it stays false: see the module note. The field
-        // exists so the gap is visible in `--json` rather than implied.
+        // Becomes true only after native artifact and provenance are written.
         aot_performed: false,
         dry_run: false,
     };
@@ -893,7 +894,15 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
         check_reproducible(&plan.cwd, loaded.name(), &digest)?;
     }
 
+    if opts.aot() {
+        crate::aot::emit(
+            &bytes,
+            &plan.cwd.join("target/qqq/aot"),
+            opts.aot_cache.as_deref(),
+        )?;
+    }
     Ok(BuildOutput {
+        aot_performed: opts.aot(),
         artifact: Some(relative_display(&dest, &plan.cwd)),
         digest: Some(digest),
         size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
@@ -920,21 +929,9 @@ fn stage(produced: &Path, project_dir: &Path, name: &str) -> Result<(PathBuf, Ve
             .with_cause(e.to_string())
         })?;
     }
-    std::fs::copy(produced, &dest).map_err(|e| {
-        Error::new(
-            ErrorCode::CompilationFailed,
-            format!("could not stage the artifact at `{}`", dest.display()),
-        )
-        .with_cause(e.to_string())
-    })?;
-
-    let bytes = std::fs::read(&dest).map_err(|e| {
-        Error::new(
-            ErrorCode::CompilationFailed,
-            format!("could not read back `{}`", dest.display()),
-        )
-        .with_cause(e.to_string())
-    })?;
+    let bytes = std::fs::read(produced)
+        .map_err(|e| Error::new(ErrorCode::CompilationFailed, e.to_string()))?;
+    crate::aot::atomic_write(&dest, &bytes)?;
     Ok((dest, bytes))
 }
 

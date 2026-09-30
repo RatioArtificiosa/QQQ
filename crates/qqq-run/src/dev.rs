@@ -15,30 +15,10 @@
 //! > Because the guest is a *component instance*, not a language runtime's heap,
 //! > replacing it is a pointer swap.
 //!
-//! Node and Bun cannot do this. Restarting means rebuilding the JS heap. So the
-//! architecture pays for itself here first, and this module is where a user
-//! notices.
-//!
-//! # Tier 1 as implemented, and what is honestly missing
-//!
-//! | Tier | State |
-//! |---|---|
-//! | 1 — component swap, host process preserved | **implemented** |
-//! | 2 — state-preserving swap | not implemented (`DX-007`) |
-//! | 3 — full restart on manifest change | **implemented** (it is the fallback) |
-//!
-//! Tier 1 works by rebuilding the component and **discarding the old instance**
-//! rather than reusing it. That is the same rule `qqq-host` enforces for traps
-//! (`HOST-010`), and it applies here for the same reason: a replaced component
-//! has new code and old state, and reusing an instance across a code change is
-//! the dev-server version of the contaminated-context bug.
-//!
-//! What is genuinely missing is `serve`: there is no HTTP listener yet
-//! (`CLI-011`, `qqq-serve`). So `dev` today rebuilds and re-instantiates on
-//! change and reports it, which is the whole reload loop minus the socket. The
-//! capability warning, the tier selection and the reload timing are all real.
-//! **The absence of a listener is stated in the output**, not hidden — a dev
-//! server that silently does not listen would be the worst kind of stub.
+//! Tier 1 builds and validates a candidate on the watch thread, then publishes
+//! it to the listener's stable dispatch handle. Failed candidates preserve the
+//! last good generation. Tier 2 needs an application state contract; manifest
+//! changes report restart-required and stop further activation under stale policy.
 //!
 //! # Why the capability warning exists
 //!
@@ -73,7 +53,7 @@ use crate::watch::{Change, Debouncer, IgnoreRules, Snapshot};
 /// rather than three.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevOptions {
-    /// The port to listen on, once `serve` exists.
+    /// The port to listen on.
     pub port: u16,
     /// The address to bind.
     pub host: String,
@@ -400,9 +380,8 @@ fn millis(d: Duration) -> u64 {
 /// # Errors
 ///
 /// `QQQ-2001` when the manifest cannot be read; otherwise this reports build
-/// failures in the output rather than returning them, because a dev server that
-/// exits on the first compile error is useless — the whole point is to keep
-/// watching so the next edit can succeed.
+/// failures during reload in the output. The initial build and policy validation
+/// must succeed before a listener starts; later failures retain the last good code.
 ///
 /// # The loop
 ///
@@ -432,26 +411,21 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
     let actions = qqq_cap::resolve::Resolution::from_manifest(&loaded.manifest);
     let capabilities_granted = actions.grants.capabilities().len();
 
-    let mut snapshot = Snapshot::take(&project, &rules);
+    let snapshot = Snapshot::take(&project, &rules);
     let watching: Vec<String> = roots
         .iter()
         .map(|r| relative_display(r, &project))
         .collect();
 
     let mut notes = Vec::new();
-    // Stated plainly rather than buried: there is no listener yet, and a dev
-    // server that silently does not listen would be a stub wearing a working
-    // command's clothes.
-    notes.push(
-        "no HTTP listener yet (`serve` / CLI-011): this build compiles and reloads, \
-         but nothing is served on the port below"
-            .to_owned(),
-    );
+    if opts.once() {
+        notes.push("build-only mode: no HTTP listener started".to_owned());
+    }
     if let Some(err) = &last_error {
         notes.push(format!("the initial build failed: {}", err.message));
     }
 
-    let mut out = DevOutput {
+    let out = DevOutput {
         project: loaded.name().to_owned(),
         listen: format!(
             "{}://{}:{}",
@@ -473,6 +447,55 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
         return Ok(out);
     }
 
+    if let Some(error) = last_error.take() {
+        return Err(error);
+    }
+    watch(loaded, opts, out, snapshot, &rules, &roots)
+}
+
+fn start_listener(
+    loaded: &LoadedManifest,
+    opts: &DevOptions,
+) -> Result<(crate::live::LiveApp, DevServer)> {
+    if opts.https() || opts.open() || opts.inspect.is_some() || opts.deterministic() {
+        return Err(Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "live dev currently supports HTTP without --open, --inspect or --deterministic",
+        ));
+    }
+    if std::fs::read(&loaded.path).ok().as_deref() != Some(loaded.source.as_bytes()) {
+        return Err(Error::new(
+            qqq_core::ErrorCode::ManifestSchemaViolation,
+            "manifest changed during initial build; restart required",
+        ));
+    }
+    let serve_options = crate::serve::ServeOptions {
+        listen: format!("{}:{}", opts.host, opts.port),
+        ..Default::default()
+    };
+    let prepared = crate::serve::prepare(loaded, &serve_options)?;
+    let live = prepared.live.clone().ok_or_else(|| {
+        Error::new(
+            qqq_core::ErrorCode::InvalidComponentArtifact,
+            "dev build produced no loadable component",
+        )
+    })?;
+    let server = DevServer::start(prepared)?;
+
+    Ok((live, server))
+}
+
+fn watch(
+    loaded: &LoadedManifest,
+    opts: &DevOptions,
+    mut out: DevOutput,
+    mut snapshot: Snapshot,
+    rules: &IgnoreRules,
+    roots: &[PathBuf],
+) -> Result<DevOutput> {
+    let project = loaded.path.parent().unwrap_or_else(|| Path::new("."));
+    let (live, server) = start_listener(loaded, opts)?;
+    let mut restart_required = false;
     // -- the watch loop ---------------------------------------------------
     let mut debouncer = Debouncer::with_default_window();
     let mut cycle: u32 = 0;
@@ -483,16 +506,33 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
     let mut last_pending: Vec<Change> = Vec::new();
 
     loop {
+        if server.shutdown.is_signalled() {
+            break;
+        }
+        server.check()?;
         std::thread::sleep(crate::watch::DEFAULT_POLL_INTERVAL);
 
-        let now = Snapshot::take(&project, &rules);
-        let changes = now.changes_since(&snapshot);
+        let now = Snapshot::take(project, rules);
+        let changes: Vec<_> = now
+            .changes_since(&snapshot)
+            .into_iter()
+            .filter(|c| {
+                c.path() == loaded.path || roots.iter().any(|root| c.path().starts_with(root))
+            })
+            .collect();
         if !changes.is_empty() {
             // Update the baseline *before* any rebuild, so a change arriving
             // during a slow build is not lost — it will show up against this
             // snapshot on the next poll rather than being swallowed.
             snapshot = now;
-            last_pending.clone_from(&changes);
+            for change in &changes {
+                if !last_pending
+                    .iter()
+                    .any(|pending| pending.path() == change.path())
+                {
+                    last_pending.push(change.clone());
+                }
+            }
             debouncer.observe(changes.len(), Instant::now());
         }
 
@@ -511,12 +551,23 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
             &loaded.path,
             opts.state_preservation_requested(),
         );
-        let (ms, err) = build_once(loaded, opts)?;
+        // A manifest change remains a barrier across subsequent source edits.
+        // Compare actual bytes even when custom watch roots omit the manifest.
+        restart_required |= tier != ReloadTier::ComponentSwap
+            || std::fs::read(&loaded.path).ok().as_deref() != Some(loaded.source.as_bytes());
+        let started = Instant::now();
+        let err = if restart_required {
+            Some(Error::new(qqq_core::ErrorCode::ManifestSchemaViolation,
+                "restart required: manifest or lifecycle policy changed; active generation retained"))
+        } else {
+            prepare_update(loaded, opts, project, rules, &snapshot, &live)?
+        };
+        let ms = millis(started.elapsed());
         out.reloads.push(ReloadRecord {
             cycle,
             changed: last_pending
                 .iter()
-                .map(|c| relative_display(c.path(), &project))
+                .map(|c| relative_display(c.path(), project))
                 .collect(),
             tier: tier.as_str().to_owned(),
             reason: tier.reason().to_owned(),
@@ -524,7 +575,10 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
             ok: err.is_none(),
             error: err.as_ref().map(|e| e.message.clone()),
         });
-        last_error = err;
+        eprintln!(
+            "reload {cycle}: {}",
+            err.as_ref().map_or("activated", |e| e.message.as_str())
+        );
         last_pending.clear();
 
         if let Some(limit) = max_cycles {
@@ -533,9 +587,42 @@ pub fn run(loaded: &LoadedManifest, opts: &DevOptions) -> Result<DevOutput> {
             }
         }
     }
-    let _ = last_error;
 
     Ok(out)
+}
+
+fn prepare_update(
+    loaded: &LoadedManifest,
+    opts: &DevOptions,
+    project: &Path,
+    rules: &IgnoreRules,
+    snapshot: &Snapshot,
+    live: &crate::live::LiveApp,
+) -> Result<Option<Error>> {
+    let (_, build_error) = build_once(loaded, opts)?;
+    Ok(build_error.or_else(|| {
+        if !Snapshot::take(project, rules)
+            .changes_since(snapshot)
+            .is_empty()
+        {
+            return Some(Error::new(
+                qqq_core::ErrorCode::CompilationFailed,
+                "source changed during preparation; waiting for the next build",
+            ));
+        }
+        let path = build::component_path(project, loaded.name());
+        std::fs::read(path)
+            .map_err(|e| Error::new(qqq_core::ErrorCode::InvalidComponentArtifact, e.to_string()))
+            .and_then(|bytes| live.replace_checked(&bytes, || {
+                if std::fs::read(&loaded.path).ok().as_deref() != Some(loaded.source.as_bytes())
+                    || !Snapshot::take(project, rules).changes_since(snapshot).is_empty() {
+                    return Err(Error::new(qqq_core::ErrorCode::CompilationFailed,
+                        "source or policy changed during candidate preparation; activation refused"));
+                }
+                Ok(())
+            }))
+            .err()
+    }))
 }
 
 /// A path relative to the project, with forward slashes.
@@ -567,6 +654,71 @@ impl DevOptions {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Own the listener thread so every exit signals shutdown and joins it.
+struct DevServer {
+    shutdown: qqq_io::Shutdown,
+    thread: Option<std::thread::JoinHandle<Result<()>>>,
+}
+impl DevServer {
+    fn start(prepared: crate::serve::Prepared) -> Result<Self> {
+        let shutdown = qqq_io::Shutdown::new();
+        let signal = shutdown.clone();
+        let thread = std::thread::Builder::new()
+            .name("qqq-dev-http".into())
+            .spawn(move || {
+                qqq_io::block_on(async move {
+                    let interrupt = signal.clone();
+                    let signal_task = tokio::spawn(async move {
+                        if tokio::signal::ctrl_c().await.is_ok() {
+                            interrupt.signal();
+                        }
+                    });
+                    let result = qqq_serve::serve(
+                        prepared.config,
+                        prepared.table,
+                        prepared.dispatch,
+                        signal,
+                        qqq_serve::access_log::Logger::new(
+                            qqq_serve::access_log::Format::Json,
+                            qqq_serve::access_log::Level::Info,
+                        ),
+                    )
+                    .await;
+                    signal_task.abort();
+                    result
+                })?
+            })
+            .map_err(|e| Error::new(qqq_core::ErrorCode::ListenerBindFailed, e.to_string()))?;
+        Ok(Self {
+            shutdown,
+            thread: Some(thread),
+        })
+    }
+    fn check(&self) -> Result<()> {
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            return Err(Error::new(
+                qqq_core::ErrorCode::ListenerBindFailed,
+                "dev HTTP listener stopped; inspect its startup diagnostics",
+            ));
+        }
+        Ok(())
+    }
+}
+impl Drop for DevServer {
+    fn drop(&mut self) {
+        self.shutdown.signal();
+        if let Some(thread) = self.thread.take() {
+            if let Ok(Err(error)) = thread.join() {
+                eprintln!("dev listener: {error}");
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -52,6 +52,8 @@ use crate::output::{CommandName, CommandOutput};
 /// How `qqqai run` was invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunOptions {
+    /// Explicit host-owned native cache directory.
+    pub aot_cache: Option<PathBuf>,
     /// An explicit artifact to run, overriding the staged path.
     pub artifact: Option<PathBuf>,
     /// Write a replay file for this run — `DET-007`.
@@ -558,6 +560,10 @@ pub fn prepare(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Prepared> {
         .with_cause(e.to_string())
     })?;
 
+    crate::aot::check_grants(
+        opts.aot_cache.as_deref(),
+        &resolve_grants(loaded, opts)?.grants,
+    )?;
     let engine = new_engine(opts)?;
     let prepared = PreparedComponent::compile(&engine, &bytes)?;
 
@@ -657,7 +663,7 @@ pub fn new_engine(opts: &RunOptions) -> Result<wasmtime::Engine> {
     // `run` executes once and exits; Cranelift's default optimisation level is
     // the right trade for that. Revisit when `serve` holds one engine for many
     // requests and the compile cost is amortised.
-    let _ = &mut wasmtime_cfg;
+    crate::aot::configure(&mut wasmtime_cfg, opts.aot_cache.as_deref())?;
     wasmtime::Engine::new(&wasmtime_cfg).map_err(|e| {
         Error::new(
             ErrorCode::InternalInvariantViolated,

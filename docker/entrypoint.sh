@@ -1178,6 +1178,8 @@ cmd_checks() {
 #   tools/audit_requirements.py            needs a CLEAN TREE; this runs against a bind mount
 #                                          of a working tree that is usually dirty
 #   tools/check_sbom.py sbom               needs a built SBOM artifact that only CI produces
+#   tools/check_live_dev.py              builds an isolated Rust/WASI guest and needs the
+#                                       guest target plus wasm-tools, provided by the Rust CI job.
 #   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
 #                                          declaration — a cargo build of the whole workspace
 #   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;

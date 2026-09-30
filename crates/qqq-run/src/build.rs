@@ -128,6 +128,19 @@ pub fn toolchain_for(language: &str, target: &str) -> Option<Vec<ToolRequirement
 /// loudly if it cannot find exactly one definition** -- *"passing here would mean reading nothing and
 /// reporting agreement."* A named constant is a stable thing to read across a refactor; a string comparison
 /// inside a branch is not, which is exactly how this was missed the first time.
+///
+/// # Examples
+///
+/// Exactly one language is driven today, and the list is what the conformance checker reads:
+///
+/// ```
+/// assert_eq!(qqq_run::build::DRIVEN, &["rust"]);
+/// assert!(qqq_run::build::DRIVEN.contains(&"rust"));
+/// ```
+///
+/// **The other four are deliberately absent.** Their toolchains are stated in [`TOOLCHAINS`] and their probes
+/// compiled, but Go fails the 65,536-byte echo and Python and TypeScript fail least-privilege linking -- so
+/// adding one here is a claim that `qqqai build` can drive it, and that claim is not yet true.
 pub const DRIVEN: &[&str] = &["rust"];
 
 /// Every language's toolchain, measured rather than assumed.

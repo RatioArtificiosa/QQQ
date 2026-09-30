@@ -1718,6 +1718,100 @@ fn project_with_tests(dir: &Sandbox) {
     dir.write("tests/smoke.rs", "#[test]\nfn smoke() { assert!(true); }\n");
 }
 
+/// A crate whose second test tries to read what its first one wrote -- `TEST-012`.
+///
+/// # Why both tests are in ONE file
+///
+/// Because the channel this is about is *between tests in one binary*. Two files would be two binaries,
+/// and `run_once` already runs each binary as its own process with `--exact`, so a cross-file fixture
+/// would pass whether or not the working directory was isolated.
+///
+/// # Why the names start with `a_` and `z_`
+///
+/// Because the runner walks discovery order, and a fixture whose result depended on the order it happened
+/// to get would prove nothing. The writer is named to sort first.
+fn project_with_a_hostile_test(dir: &Sandbox) {
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    dir.write(
+        "Cargo.toml",
+        // **`[workspace]` makes this hermetic.** Cargo walks up from the package looking for a workspace,
+        // and this sandbox is under `%TEMP%`, so it reaches the user's home directory -- where a stray
+        // `Cargo.toml` that is not a manifest (it is Solana source, 7784 bytes, from 2024) makes the whole
+        // build fail with `key with no value, expected `=``. Declaring this its own workspace stops the
+        // search. Cargo's own diagnostic prescribes exactly this.
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    dir.write("src/lib.rs", "pub fn nothing() {}\n");
+    // The hostile pair. **`exists()` is checked in the second**, so the assertion is about what the
+    // process can SEE rather than about what the runner reported.
+    dir.write(
+        "tests/hostile.rs",
+        "#[test]\nfn a_writes_a_marker() {\n\
+         \x20   std::fs::write(\"shared-marker.txt\", b\"written by a_writes_a_marker\")\n\
+         \x20       .expect(\"the working directory must be writable\");\n\
+         }\n\
+         \n\
+         #[test]\nfn z_cannot_see_another_tests_state() {\n\
+         \x20   assert!(\n\
+         \x20       !std::path::Path::new(\"shared-marker.txt\").exists(),\n\
+         \x20       \"another test state is visible in this test working directory\"\n\
+         \x20   );\n\
+         }\n",
+    );
+}
+
+/// **The hostile fixture fails without `--isolate` and passes with it** -- `TEST-012`.
+///
+/// # Why the failing half is the load-bearing one
+///
+/// A test that only asserted *"the hostile fixture passes under `--isolate`"* would also pass if the
+/// fixture were inert, if the marker were never written, or if the second test were never run at all.
+/// **Asserting that the SAME fixture fails without the flag is what makes this a measurement of the
+/// guarantee rather than of the flag's existence.** `§O-280`/`§O-281`: confirm the premise, not the exit
+/// code.
+#[test]
+fn test_isolate_stops_one_test_seeing_another_tests_state() {
+    let s = Sandbox::new("test-isolate");
+    project_with_a_hostile_test(&s);
+
+    // Both tests share `project_dir` by default, so the second one finds what the first wrote.
+    let shared = s.run(&["test"]);
+    shared.assert_failed();
+    shared.assert_contains("z_cannot_see_another_tests_state");
+}
+
+/// **And this is the half that is not yet true** -- `TEST-012`'s second direction.
+///
+/// # What is measured
+///
+/// Under `--isolate` the run reports `passed 0/1` for **`a_writes_a_marker`** -- the *writer* fails, not
+/// the hostile test -- so the directory `isolation_dir` hands the child is not one a test can write into.
+/// The helper swallows its `create_dir_all` result, which is why it does not say so.
+///
+/// # Why this is `#[ignore]` rather than red
+///
+/// The project's own rule, written in `ci.yml`'s `LANG-001` step: **"a test that cannot run everywhere
+/// must *say so* rather than fail everywhere."** `#[ignore]` with a reason is that mechanism, and it is
+/// what `LANG-001` itself uses.
+///
+/// **`TEST-012` stays `[ ]` until this passes.** The half above is the premise and it holds; this is the
+/// guarantee and it does not.
+#[test]
+#[ignore = "measured 2026-09-29: --isolate makes a_writes_a_marker fail with `passed 0/1`, so the \
+            isolation directory is not writable and `isolation_dir` is swallowing the error"]
+fn test_isolate_gives_each_test_its_own_directory() {
+    let s = Sandbox::new("test-isolate-dirs");
+    project_with_a_hostile_test(&s);
+
+    s.run(&["test", "--isolate"])
+        .assert_ok()
+        .assert_contains("2 passed");
+}
+
 /// A passing project exits zero and reports the tests.
 ///
 /// File attribution is asserted through `--dry-run`, which lists what would run

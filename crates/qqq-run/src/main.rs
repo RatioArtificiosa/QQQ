@@ -1962,6 +1962,9 @@ fn test_options(
                 i += 1;
             }
             "--fail-fast" => opts.fail_fast = true,
+            // `TEST-012`. A bare boolean, because there is nothing to name: the directory is chosen by the
+            // runner and removed after the test.
+            "--isolate" => opts.isolate = true,
             "--dry-run" => opts.dry_run = true,
             "--json" => {
                 opts.json = true;
@@ -2005,7 +2008,7 @@ fn test_options(
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
-                    "`test` accepts --filter, --fail-fast, --trials, --format, \
+                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --format, \
                      --dry-run, --history, --flaky and --manifest",
                 ));
             }

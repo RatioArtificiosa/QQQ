@@ -675,8 +675,27 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §7.2 Adversary model
 - [ ] **PLAN-015** Create the decision log that feeds the Observations document.
   → §0.3 Document map
-- [ ] **PLAN-016** Define the "three-document sync" ritual: every code change updates checklist status and, when relevant, observations.
+- [x] **PLAN-016** Define the "three-document sync" ritual: every code change updates checklist status and, when relevant, observations.
   → §0.4 How to read the cross-references
+  → Done: `tools/sync_docs.py` -- **the ritual is one command, and it is defined by the checkers rather than by
+    a list of changed paths.** `--check` runs **nine** checkers and reports which disagree with the tree;
+    `--record` regenerates through **five** steps and re-checks; `--self-test` fabricates two drifts in a
+    **copy** of the tree (an added observation heading, and an edited normative document) and requires both to
+    be reported, **with a third case as the control** -- an untouched checker must still pass.
+  → **Why it asks the checkers instead of reading `git status`.** A tool that inspected changed paths would be
+    **a reimplementation of rules it does not own**, and `§O-282` is the record of what happens next: only as
+    wide as its path list and only as narrow as its patterns, with the first rule it did not know about as a
+    silent gap. Asking each checker what it thinks makes the tool **incapable of being stale about its own
+    subject**, because its subject is their verdicts.
+  → **It is not in a gate, on purpose**: CI must not write. `check_gate_parity.py` rule 5 requires every
+    `tools/check_*.py` in both gates, and this file is not named `check_*` because wiring a writer into a gate
+    would be worse than the drift it prevents.
+  → **Measured, on its first run against the real tree:** it reported
+    `STALE docs/AGENT-HANDBOOK.md:119  tools-python says 85, the tree has 86` and
+    `check_xrefs FAIL [13] ... is cited by tools/sync_docs.py but is not defined` -- **two real drifts this
+    session had already pushed**, one of them caused by the tool's own file being added.
+  → **And the sequence is demonstrated end to end by this very tick**: the tick moves `checklist-done` and
+    `checklist-open`, so `--check` must report it and `--record` must clear it.
 - [ ] **PLAN-017** Publish an engineering-metrics page (build times, test durations, benchmark trends).
   → §9.2 The performance budget
 - [ ] **PLAN-018** Establish the external-advisor bench for security and standards review.

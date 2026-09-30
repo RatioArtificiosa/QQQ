@@ -642,6 +642,21 @@ an error; test rejection before that boundary.
 - [ ] RFC/safety approvals obtained for contract changes requiring them.
 - [x] Root checklist states measurements and remaining gaps accurately.
 
+The checked merge-evidence rows above have these recorded results on the unchanged
+Rust/runtime inputs of the live-component delivery (Rust 1.98.1):
+
+| Claim | Command and result |
+|---|---|
+| Formatting | `cargo +1.98 fmt --all -- --check` — exit 0 |
+| Lint | `cargo +1.98 clippy --workspace --all-targets --all-features --locked -- -D warnings` — exit 0 |
+| Dependency/security checks | `cargo deny check` — exit 0 (advisories, bans, licenses, sources); `cargo machete` — exit 0 (no unused dependencies) |
+| Root-checklist consistency | `python tools/check_xrefs.py`, `python tools/check_checklist_counts.py`, `python tools/check_done_lines.py`, `python tools/check_doc_claims.py`, `python tools/gen_backlog.py --check` — each exit 0 after regeneration; ARCH-015 and DX-006 remain open |
+
+The [handoff validation table](live-components-handoff.md#validation-performed-in-the-cloud-sandbox)
+records the separate failed and blocked gates. These results do not claim a clean
+full workspace suite or remote CI pass. Later language changes require their own
+affected checks; a checked row is evidence for this delivery, not a permanent exemption.
+
 ### Evidence and outstanding coverage
 
 Completed boxes refer to this patch's local execution, not to a release or approval.

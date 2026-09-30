@@ -16,7 +16,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 584 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
 - [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (large)
 - [docs/rfc/live-components-and-aot.md](docs/rfc/live-components-and-aot.md) — Draft live-component and AOT design: verified baseline, architecture, lifecycle and phased delivery. (13 KB)
-- [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (8 KB)
+- [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (9 KB)
 - [docs/live-components-handoff.md](docs/live-components-handoff.md) — How to run and review the live-component foundation, with scope limits and merge gates. (8 KB)
 
 ## The machine contracts (for an agent)

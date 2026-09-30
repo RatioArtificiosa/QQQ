@@ -33,6 +33,8 @@ def wait_for(predicate, child, log, timeout=120):
         if predicate():
             return
         if child.poll() is not None:
+            if predicate():
+                return
             raise AssertionError(f"dev exited unexpectedly: {log.read_text(encoding='utf-8')}")
         time.sleep(0.05)
     raise AssertionError(f"dev verification deadline expired: {log.read_text(encoding='utf-8')}")
@@ -53,6 +55,13 @@ def status(port):
 
 def wait_for_activation(child, log, timeout=120):
     wait_for(lambda: "reload 1: activated" in log.read_text(encoding="utf-8"), child, log, timeout)
+
+
+def wait_for_exit(child, log, timeout=120):
+    try:
+        child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f"dev did not exit after reload: {log.read_text(encoding='utf-8')}") from error
 
 
 def verify_retention(observed_status):
@@ -105,7 +114,8 @@ def run(binary):
                 wait_for(lambda: "reload 3: restart required" in log.read_text(encoding="utf-8"), child, log)
                 assert status(port) == 404
                 source.write_text(original, encoding="utf-8", newline="")
-                child.wait(timeout=120)
+                wait_for(lambda: "reload 4: restart required" in log.read_text(encoding="utf-8"), child, log)
+                wait_for_exit(child, log)
                 assert child.returncode == 0
                 verify_manifest_barrier(log.read_text(encoding="utf-8"))
             finally:
@@ -140,6 +150,14 @@ def self_test():
             assert "dev verification deadline expired" in str(error), error
         else:
             raise AssertionError("missing activation was not detected")
+        def stuck_child(timeout):
+            raise subprocess.TimeoutExpired("fixture-child", timeout)
+        try:
+            wait_for_exit(SimpleNamespace(wait=stuck_child), log, timeout=0.01)
+        except AssertionError as error:
+            assert "dev did not exit" in str(error) and "build succeeded" in str(error)
+        else:
+            raise AssertionError("stuck child was not detected")
         diagnostic = io.StringIO()
         with contextlib.redirect_stderr(diagnostic):
             assert run(root / "missing-qqqai") == 1

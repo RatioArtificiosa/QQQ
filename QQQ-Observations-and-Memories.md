@@ -34511,6 +34511,67 @@ first.** The order matters — **`rerun` before `reason`.**
 `513b268`, `4ab13f9`, `fb9fc0f`. **The red streak that began with the delivery merge is closed**, and the one
 failure that remained is now characterised rather than merely absent.
 
+## §O-470 — A missing brace localised by arithmetic, and the check that belongs after every step
+
+**Round 119's refactor took three attempts and the two failures were the same shape: a check run once at the
+end instead of after each step.**
+
+```
+attempt 1   rg found EIGHT mentions of `BuildPlan`; the compiler then named FOURTEEN field accesses
+attempt 2   the file ended `depth: 1` -- `{ 268  } 267` -- and the cause was ONE doc anchor
+attempt 3   the chain ran with a brace count between each script, and it was balanced at every step
+```
+
+### The arithmetic that localised it, which is one command
+
+**Eight anchored replacements, each measured for brace net by loading the script's constants without running
+`main`:**
+
+```
+OLD_TYPES / NEW_TYPES            4/4   vs 10/10   net +0
+OLD_CONSTRUCT / NEW_CONSTRUCT    1/1   vs  1/1    net +0
+OLD_EXEC / NEW_EXEC              5/5   vs 13/13   net +0
+OLD_TEST / NEW_TEST              1/1   vs  1/1    net +0
+                                                  ALL EIGHT NEUTRAL
+```
+
+**All eight provably neutral while the file was one short** -- so the defect was in the bulk pass, and not in
+the anchors. **That is localisation by elimination, and it is a measurement rather than a reading.**
+
+**The cause, once found, is the shape this session keeps meeting: the `only_step` replacement re-added
+`#[must_use] pub fn only_step(&self) -> &BuildStep {` while the original line still followed it** -- one `{`
+with no match. **The other five anchors each included the item they precede; this one was shorter than the
+pattern used for them, so its replacement duplicated the line.**
+
+### And the two rules that follow
+
+**1. Check the invariant after each step, not after the chain.** A brace count between scripts costs
+milliseconds and turns *"the file does not parse"* into *"this script did it"*. **The composition is where the
+defect went** -- each of the three scripts was correct in isolation, which is why reading them found nothing.
+
+**2. A six-item list of anchors needs a per-item check, not a per-list one.** The doc anchors were assembled
+as a list and applied in a loop; **one entry used a different convention from the other five and nothing
+compared them.** The check that would have caught it is the same one: **count the delimiter each item's
+replacement adds, and refuse if the list is not uniform.**
+
+**And the compiler is the enumerator for the other failure.** `rg` for a *type name* is not a search for its
+*uses*: eight mentions, six replaced, fourteen sites named by `cargo`. **A count assertion catches a pattern
+that matched too often; only the compiler catches one that matched too rarely.**
+
+### What the third attempt did differently
+
+**It kept the arithmetic between the steps and it checked the anchors before applying them:**
+
+```
+BuildStep net +0 · BuildStep::render +0 · BuildPlan +0 · one +0 · cwd +0 · only_step +0
+0 pair(s) unbalanced
+depth: 0
+```
+
+**Two of those six were wrong on the first measurement** -- `cwd` at `-1` and `only_step` at `+1` -- **and
+both were fixed before anything ran.** That is the whole difference: **the check was moved from after the
+failure to before it.**
+
 *End of `QQQ-Observations-and-Memories.md`.*
 
 

@@ -33851,10 +33851,28 @@ and 271 was exactly its line count:
 theirs 271 lines | mine 271 lines | 0 diff lines | 271 bytes apart
 ```
 
-**CRLF against LF, one byte per line.** `normalize_eol.py` enforces LF in this tree, and `source/` was zipped
-on Windows. **So `source/` is a copy of the tree, not the tree** -- the bundle is what preserves bytes, which is
-why the import used `git bundle verify` and `git fetch` rather than the archive. **A comparison against an
-archive must establish that the archive is faithful before its differences mean anything.**
+**CRLF against LF, one byte per line.**
+
+**⚠️ CORRECTED, and the correction is the more interesting finding.** This paragraph first said *"`source/` is
+CRLF because it was zipped on Windows"* -- **an inference from this one file, stated as a property of the
+whole tree.** A later measurement disproved it: hashing all **428** entries of the delivery's
+`TESTED-INPUTS.json` manifest against our tree found **411 byte-identical**, so the tree is **LF** and
+**`tools/bootstrap.ps1` is the one file that is not.** **An inference from one sample, stated as a property of
+the population** is the same defect as a guard only as wide as its file list (`§O-282`).
+
+**The numbers, measured on both copies:**
+
+```
+source\tools\bootstrap.ps1 : 271 CRLF,   0 bare LF      <- 100% CRLF
+merged tools\bootstrap.ps1  :   0 CRLF, 271 bare LF      <- 100% LF
+.gitattributes declares this file? False
+```
+
+**So `source/` is a Windows *working-tree* export taken from a zip, not a git export** -- which is exactly what
+`normalize_eol.py` exists to catch, and its `--check` passes on the merged tree. **`bootstrap.ps1` is the one
+file in the manifest whose byte difference is explained by line endings alone**; the other sixteen differ
+because this session changed them. **And it is a file the delivery never touched**, so the CRLF arrived with the
+archive rather than with the patch.
 
 ## §O-453 — The review found our code, not theirs
 
@@ -33931,6 +33949,49 @@ on that sandbox); a **minimal** change (the numeric boundary test, not the tool)
 regions -- and it is worth recording **why it needed attention**: this file's self-test is one of the three
 commands that passed locally while the gate failed (`§O-450`), so **a change to its boundary test is a change
 to a guard this session leaned on twice.** The merged tree passes both `--check` and `--self-test`.
+
+## §O-456 — A hash manifest is a stronger verification than a diff, and 411 of 428 entries match
+
+`TESTED-INPUTS.json` is not a log. It is a **428-entry `path -> sha256` manifest** with a roll-up
+`fingerprint`, stamped with the delivery's `revision` and `tree`:
+
+```
+revision:    ddeae943d32437463559f7c027ac4e57c968a1d0
+tree:        13688c5fe0fd9cee2562924dbf53b911d49b6b2f
+files:       428
+fingerprint: c58375788cc4920477b8c5ebb0ef0c13d1b8a0047305ae82988865b1362a2484
+```
+
+**Hashing every entry against our merged tree:**
+
+```
+IDENTICAL : 411
+DIFFERENT : 17
+ABSENT    : 0
+```
+
+**`411` is the strongest statement about this merge that any measurement has produced**, and it is a
+different kind of statement from `§O-452`'s file-set comparison. That one asked *"is every path present?"* and
+answered `0` missing; **this one asks *"is every byte the same?"* and answers `411` of `428`** -- with **`0`
+absent**, so nothing arrived empty either.
+
+**And the 17 that differ are all ours, except one.** Their checklist merged with our notes; `lib.rs` kept both
+modules; `main.rs` merged with both sides' flags; `test.rs`, `cli.rs` and `live_components.rs` carry our work;
+the six derived files were regenerated; three shared tools carry our changes. **The exception is
+`tools/bootstrap.ps1`, which is a line-ending difference and not a change at all.**
+
+### Why a manifest beats a diff, and why that matters here
+
+**A diff reports what changed; a hash reports what did not.** This session twice drew a conclusion from a diff
+that a hash would have settled: the `bootstrap.ps1` "271 bytes" needed a line count to explain, and `§O-452`
+then generalised that one file to a tree. **`411 IDENTICAL` needs no explanation at all** -- those files were
+either carried perfectly or they were not, and the answer is not a judgement.
+
+**The delivery shipped the manifest and the fingerprint alongside the patch, and cited them in its own
+validation log** (`VALIDATION.md`:74, :97). **Three different fingerprints appear across that log**, and they
+are not a contradiction: they are snapshots at different points -- *"final-gate selection"* mid-implementation,
+*"delivered revision"* at the end, and the manifest's own. **A fingerprint whose stamp is a revision and a
+tree is comparable; a fingerprint alone is not.**
 
 *End of `QQQ-Observations-and-Memories.md`.*
 

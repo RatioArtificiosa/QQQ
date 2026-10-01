@@ -51,7 +51,7 @@ The existing hot-swap/AOT implementation remains the integration boundary.
 
 ## Measurements and what they mean
 
-Measured in GitHub Actions run `36768701926` on Linux x86_64 with Rust 1.98.1 and
+Measured in GitHub Actions run `36789475802` on Linux x86_64 with Rust 1.98.1 and
 `wasm-tools 1.259.0`.
 `docs/languages/evidence/` contains the source-hashed execution records. Each
 language compiled its real source. Five vectors exercise hello, UTF-8 output,
@@ -66,10 +66,10 @@ conformance, bindings, CLI, capability parity, or reference-app support.
 |---|---:|---|
 | AssemblyScript 0.28.20 | 4,590 | 5/5 vectors passed |
 | TinyGo 0.42.0 + Go 1.27.1 | 589,873 | Known gap: 64 KiB echo fails |
-| componentize-py 0.25.1 | 18,316,106 | 5/5 vectors passed |
+| componentize-py 0.25.1 | 18,313,826 | 5/5 vectors passed |
 | WASI SDK 34 C | 54,147 | 5/5 vectors passed |
 | WASI SDK 34 C++17 using C ABI bindings | 54,147 | 5/5 vectors passed |
-| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,096 | 5/5 vectors passed |
+| TypeScript 5.9.3 → JS → ComponentizeJS 0.23.0 | 12,035,072 | 5/5 vectors passed |
 
 A prior sample in this session (before the final C optional-body fix) measured uncached engine/preparation at approximately **38.7 ms** for
 AssemblyScript, **49.3 ms** for C and **34.7 ms** for C++. First request samples

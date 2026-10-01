@@ -207,7 +207,7 @@
     "examples/language-probes/typescript/build.mjs": "297b437ab9d5c05983bb0a8619644123e0a0c4615b905c2345ca1ae307cda41a",
     "examples/orders-api/wit/app.wit": "9ca9624de885e3b946f7aeb86da92a49ebc623e11b069e1f3455a5e40f87713f",
     "rust-toolchain.toml": "b06e7c33cf91ccf8c2ba80bf63b2b51841e620f5a854bef1c511ae37e4a092f1",
-    "tools/run_language_probes.py": "e28c17e9303f50bea11ea81313635dfb83d893b4c501a21efbe1c0ed1009170b",
+    "tools/run_language_probes.py": "773f648a51e208017016674cc23e8438a81f582f3f060dd729a3a6b90d5c9fdc",
     "wit/qqq-http.wit": "da34eb49b49c5ac7b13c50582e956a87fd91a88ee82ae93325d79f757e02d038"
   },
   "environment": {
@@ -219,17 +219,17 @@
     "wasm-tools": "wasm-tools 1.259.0",
     "componentize-py": "componentize-py 0.25.1"
   },
-  "build_seconds": 5.275924152000016,
-  "bytes": 18316106,
-  "component_sha256": "1c9d4683a1d6500f936c4758f3bc8501f7eb9c108c97d621974781192e76b186",
+  "build_seconds": 4.967238767999959,
+  "bytes": 18313826,
+  "component_sha256": "12b5b902af281a9b4a88a971c64873fedb003c80e8599d60a6d1631006f83519",
   "call_ms": [
-    3.488434,
-    3.172035,
-    3.184047,
-    3.356389,
-    9.866539000000001
+    3.6818609999999996,
+    3.225565,
+    2.4442280000000003,
+    2.239534,
+    7.890701999999999
   ],
   "cases_passed": 5,
   "measurement": "fresh engine, no disk cache; fresh Store per call; one sample, not an SLO",
-  "prepare_ms": 9058.866299
+  "prepare_ms": 9175.315773
 }

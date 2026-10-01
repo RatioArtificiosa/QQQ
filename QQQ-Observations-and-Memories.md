@@ -34983,10 +34983,10 @@ which had hidden the harness defect. With the server-only grant, the Windows
 reruns using `componentize-py` 0.25.1 and TypeScript 5.9.3 executed all five
 vectors; the full production drivers, bindings, conformance suites and
 pooling/compatibility claims remain open. The Linux CI artifact is the source
-of truth, and run `36768701926` now supplies that artifact: the tracked matrix
-and Python/TypeScript evidence records were refreshed from its Linux results.
-The earlier Windows rerun remains useful as a portability diagnostic, not as
-the cross-platform evidence row.
+of truth, and the final green run `36789475802` supplies the current artifact:
+the tracked matrix and Python/TypeScript evidence records were refreshed from
+its Linux results. The earlier Windows rerun remains useful as a portability
+diagnostic, not as the cross-platform evidence row.
 
 The same rerun exposed a portability defect in the Python probe runner: npm's
 POSIX `node_modules/.bin` shims are not directly executable on Windows. The
@@ -35027,7 +35027,18 @@ commit.
 The refreshed evidence also caught a Windows-only representation defect in the
 parity checker: Linux artifacts correctly store source-hash keys with `/`, while
 the Windows generator emitted `\`. `input_hashes()` now uses `Path.as_posix()`;
-the hash values and the Linux contract are unchanged, and the tracked CI evidence
-validates locally on Windows as well.
+the hash values and the Linux contract are unchanged, and the final green CI
+artifact validates locally on Windows as well.
+
+## §O-494 — The reviewed profile baseline and language evidence pass their first complete rollout
+
+Commit `d973bdc` rolled the reviewed AMD and Intel runner entries, the POSIX
+source-key normalization, and the refreshed language evidence into `main`.
+GitHub Actions run `36789475802` completed successfully across every matrix job:
+PERF-020 selected a reviewed profile, the language probe artifact was published,
+and the artifact passed the Windows-local parity checker. The measured Go
+64 KiB echo failure remains an explicit known gap; the five passing vectors in
+the other languages remain narrow HTTP-probe evidence, not full language
+conformance or production-driver support.
 
 *End of `QQQ-Observations-and-Memories.md`.*

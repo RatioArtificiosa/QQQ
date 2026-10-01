@@ -207,7 +207,7 @@
     "examples/language-probes/typescript/build.mjs": "297b437ab9d5c05983bb0a8619644123e0a0c4615b905c2345ca1ae307cda41a",
     "examples/orders-api/wit/app.wit": "9ca9624de885e3b946f7aeb86da92a49ebc623e11b069e1f3455a5e40f87713f",
     "rust-toolchain.toml": "b06e7c33cf91ccf8c2ba80bf63b2b51841e620f5a854bef1c511ae37e4a092f1",
-    "tools/run_language_probes.py": "e28c17e9303f50bea11ea81313635dfb83d893b4c501a21efbe1c0ed1009170b",
+    "tools/run_language_probes.py": "773f648a51e208017016674cc23e8438a81f582f3f060dd729a3a6b90d5c9fdc",
     "wit/qqq-http.wit": "da34eb49b49c5ac7b13c50582e956a87fd91a88ee82ae93325d79f757e02d038"
   },
   "environment": {
@@ -220,17 +220,17 @@
     "clang++": "clang version 23.1.0-wasi-sdk (https://github.com/llvm/llvm-project 895aa2c896ada719451be2e3673c83da8ddf1141)\nTarget: wasm32-unknown-wasip1\nThread model: posix\nInstalledDir: /home/runner/work/_temp/language-tools/wasi-sdk/wasi-sdk-34.0-x86_64-linux/bin\nConfiguration file: /home/runner/work/_temp/language-tools/wasi-sdk/wasi-sdk-34.0-x86_64-linux/bin/clang++.cfg",
     "wit-bindgen": "wit-bindgen-cli 0.62.0"
   },
-  "build_seconds": 0.19494067099998347,
+  "build_seconds": 0.19326142700003857,
   "bytes": 54147,
   "component_sha256": "eefd10e10c104552aa9ee24321b7ad97454822dba17694c92932c29a95babae8",
   "call_ms": [
-    0.329964,
-    0.327339,
-    0.31988500000000003,
-    0.356474,
-    8.155753
+    0.446018,
+    0.504958,
+    0.46503300000000003,
+    0.467738,
+    10.978849
   ],
   "cases_passed": 5,
   "measurement": "fresh engine, no disk cache; fresh Store per call; one sample, not an SLO",
-  "prepare_ms": 31.026915
+  "prepare_ms": 30.1524
 }

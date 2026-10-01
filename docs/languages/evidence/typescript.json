@@ -207,7 +207,7 @@
     "examples/language-probes/typescript/build.mjs": "297b437ab9d5c05983bb0a8619644123e0a0c4615b905c2345ca1ae307cda41a",
     "examples/orders-api/wit/app.wit": "9ca9624de885e3b946f7aeb86da92a49ebc623e11b069e1f3455a5e40f87713f",
     "rust-toolchain.toml": "b06e7c33cf91ccf8c2ba80bf63b2b51841e620f5a854bef1c511ae37e4a092f1",
-    "tools/run_language_probes.py": "e28c17e9303f50bea11ea81313635dfb83d893b4c501a21efbe1c0ed1009170b",
+    "tools/run_language_probes.py": "773f648a51e208017016674cc23e8438a81f582f3f060dd729a3a6b90d5c9fdc",
     "wit/qqq-http.wit": "da34eb49b49c5ac7b13c50582e956a87fd91a88ee82ae93325d79f757e02d038"
   },
   "environment": {
@@ -220,17 +220,17 @@
     "node": "v24.14.1",
     "tsc": "Version 5.9.3"
   },
-  "build_seconds": 9.685273236,
-  "bytes": 12035096,
-  "component_sha256": "c7ec4c3b884ce80ee176777ee751dd2ba7b8787e82dbd74642f8cf5a0b57de01",
+  "build_seconds": 9.624314783999978,
+  "bytes": 12035072,
+  "component_sha256": "eefc0ecd627f7f90e0730de485bcdb76e55eec7cedd904d85f0d480d803177d7",
   "call_ms": [
-    1.931095,
-    1.594589,
-    1.5817750000000002,
-    1.600239,
-    8.187754
+    1.692387,
+    1.385631,
+    1.311501,
+    1.2711860000000001,
+    7.206176
   ],
   "cases_passed": 5,
   "measurement": "fresh engine, no disk cache; fresh Store per call; one sample, not an SLO",
-  "prepare_ms": 10654.60135
+  "prepare_ms": 10989.836688000001
 }

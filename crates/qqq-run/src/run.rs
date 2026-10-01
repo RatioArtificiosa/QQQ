@@ -829,6 +829,11 @@ fn replay_endpoints(
                 )
                 .with_context("expected_target_triple", expected.target_triple)
                 .with_context("recorded_target_triple", log.header().target_triple.clone())
+                .with_context("expected_deterministic", expected.deterministic.to_string())
+                .with_context(
+                    "recorded_deterministic",
+                    log.header().deterministic.to_string(),
+                )
                 .with_remediation(
                     "re-record the replay with `--replay-log` using this artifact, engine, \
                      target, and deterministic setting",
@@ -1577,6 +1582,13 @@ mod tests {
                 rendered.contains("header_mismatches") && rendered.contains(key),
                 "the refusal must name {key}, got: {rendered}"
             );
+            if key == "deterministic" {
+                assert!(
+                    rendered.contains("expected_deterministic")
+                        && rendered.contains("recorded_deterministic"),
+                    "a mode mismatch must carry both sides, got: {rendered}"
+                );
+            }
         }
     }
 

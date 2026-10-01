@@ -35164,6 +35164,42 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-503 - Review round two and the per-tenant budget decision
+
+The re-review returned two findings, both real. First, the pump task held the
+whole `Shared`, which holds the inbox sender, so the task could never end: every
+request leaked a task plus its sink and budget. Fixed by passing only the sink,
+the failure slot, and the waker list, with a `Weak`-observed test proving the
+task ends on drop. Second, `poll_flush` could report `Ok` over an already-recorded
+write failure; it now checks the failure slot before and after the marker, with
+a fail-first-then-succeed sink proving it. Fault injection fails both new tests.
+The same round fixed a stale test (unrelated write driven inline instead of
+spawned), an obs-fold request literal, a misplaced doc comment, and exact-count
+contiguity assertions.
+
+The round also added what the first review implied but did not demand: a bounded
+pump queue (`PUMP_QUEUE_MSGS`, full parks with stored wakers rather than blocking
+or dropping), a structured `TruncationEvent` on every breach, and
+expected/recorded deterministic contexts in the replay refusal. A full-queue
+test drives a blocked sink to `Pending` and back.
+
+Per-tenant output budgets are narrowed by decision, not deferred by silence.
+Three facts force it: production stores are built with `tenant: None` and no
+request path below the connection layer carries tenant identity (audit records
+carry `None` for the same reason); the existing `TenantLedger` has no production
+callers, so there is no live per-tenant state to attach bytes to; and every
+other resource in this codebase — fuel, memory, subrequests, handles — is
+budgeted per request or per instance, with tenancy enforced through concurrency
+ceilings, never through cumulative cross-request budgets. A per-tenant byte
+budget would therefore need new cross-layer tenant plumbing (tenant through
+the serve `Handler` signature, a registry with quiescent eviction, budget arcs
+into instance construction) — a checklist-scale feature, not a sub-task of three
+audit findings. What is enforced instead, stated in code and docs: per-instance
+8 MiB per stream quotas with breach events and counters, times the
+ledger-enforced per-tenant connection ceiling. Follow-up design, kept current:
+a `TenantOutputBudgets` registry keyed by tenant string with guard-based eviction
+at zero live requests, threaded through `InstanceOptions` once the request path
+carries tenant identity.
 ## §O-502 - Guest output leaves the executor through a pump, not inline
 
 `SanitisingWriter` wrote synchronously from `poll_write`, so a slow host stream

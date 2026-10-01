@@ -40,7 +40,10 @@ fn replaced_code_answers_while_old_session_keeps_its_version() {
     let old = live.acquire().unwrap();
     let weak = Arc::downgrade(&old);
     assert_eq!(
-        old.value().handle_request(&request(), None).unwrap().body,
+        old.value()
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
         b"v1"
     );
     live.replace(V1.replace("\"v1\"", "\"v2\"").as_bytes())
@@ -48,11 +51,17 @@ fn replaced_code_answers_while_old_session_keeps_its_version() {
     let next = live.acquire().unwrap();
     assert_ne!(old.revision(), next.revision());
     assert_eq!(
-        next.value().handle_request(&request(), None).unwrap().body,
+        next.value()
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
         b"v2"
     );
     assert_eq!(
-        old.value().handle_request(&request(), None).unwrap().body,
+        old.value()
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
         b"v1"
     );
     assert_eq!(
@@ -67,11 +76,15 @@ fn replaced_code_answers_while_old_session_keeps_its_version() {
     live.remove().unwrap();
     assert!(live.acquire().is_err());
     assert_eq!(
-        (live.dispatch_with_body())(&request(), &qqq_serve::BodyBytes::Absent).status,
+        (live.dispatch_with_body())(&request(), &qqq_serve::BodyBytes::Absent, "test-tenant")
+            .status,
         503
     );
     assert_eq!(
-        next.value().handle_request(&request(), None).unwrap().body,
+        next.value()
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
         b"v2"
     );
 }
@@ -91,7 +104,7 @@ fn malformed_and_wrong_abi_candidates_preserve_active_code() {
             live.acquire()
                 .unwrap()
                 .value()
-                .handle_request(&request(), None)
+                .handle_request(&request(), None, "test-tenant")
                 .unwrap()
                 .body,
             b"v1"
@@ -228,7 +241,13 @@ fn cache_child() {
         "localhost:3000",
     )
     .unwrap();
-    assert_eq!(guest.handle_request(&request(), None).unwrap().body, b"v1");
+    assert_eq!(
+        guest
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
+        b"v1"
+    );
     std::fs::write(directory.join("child-hit"), b"hit").unwrap();
 }
 
@@ -252,7 +271,9 @@ fn running_guest_is_preempted_and_capacity_is_released() {
     )
     .unwrap();
     let start = std::time::Instant::now();
-    assert!(guest.handle_request(&request(), None).is_err());
+    assert!(guest
+        .handle_request(&request(), None, "test-tenant")
+        .is_err());
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(guest.in_flight(), 0);
     let live = LiveApp::new(guest).unwrap();
@@ -261,7 +282,7 @@ fn running_guest_is_preempted_and_capacity_is_released() {
         live.acquire()
             .unwrap()
             .value()
-            .handle_request(&request(), None)
+            .handle_request(&request(), None, "test-tenant")
             .unwrap()
             .body,
         b"v1"
@@ -290,7 +311,11 @@ fn overlapping_generations_share_one_capacity_limit() {
     let live = LiveApp::new(guest).unwrap();
     let old = live.acquire().unwrap();
     let invocation = Arc::clone(&old);
-    let call = std::thread::spawn(move || invocation.value().handle_request(&request(), None));
+    let call = std::thread::spawn(move || {
+        invocation
+            .value()
+            .handle_request(&request(), None, "test-tenant")
+    });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while old.value().in_flight() == 0 {
         assert!(std::time::Instant::now() < deadline && !call.is_finished());
@@ -303,11 +328,17 @@ fn overlapping_generations_share_one_capacity_limit() {
         1,
         "replacement must share the old quota"
     );
-    assert!(next.value().handle_request(&request(), None).is_err());
+    assert!(next
+        .value()
+        .handle_request(&request(), None, "test-tenant")
+        .is_err());
     assert!(call.join().unwrap().is_err(), "old CPU work must terminate");
     assert_eq!(next.value().in_flight(), 0);
     assert_eq!(
-        next.value().handle_request(&request(), None).unwrap().body,
+        next.value()
+            .handle_request(&request(), None, "test-tenant")
+            .unwrap()
+            .body,
         b"v1"
     );
 }

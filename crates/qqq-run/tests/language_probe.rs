@@ -76,7 +76,7 @@ fn compiled_language_handles_real_requests() {
         let head = qqq_serve::http1::parse_head(wire.as_bytes()).unwrap().0;
         let start = Instant::now();
         let response = app
-            .handle_request(&head, body.clone())
+            .handle_request(&head, body.clone(), "test-tenant")
             .expect("execute guest");
         call_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         assert_eq!(

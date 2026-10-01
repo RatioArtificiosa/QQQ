@@ -154,6 +154,17 @@ pub struct StoreData {
     /// prevent.
     pub tenant: Option<crate::tenant::TenantScope>,
 
+    /// This request's hold on its tenant's shared output budget, if any.
+    ///
+    /// `None` is the standalone per-instance budget every existing caller
+    /// means. `Some` shares accounting with the tenant's other live requests
+    /// through one ceiling, and dropping the last guard evicts the entry —
+    /// which is what bounds the registry without a reaper task. The guard
+    /// lives here (not beside the store) for the same reason the scope does:
+    /// the store is created with the request and dropped with it, so the hold
+    /// cannot outlive the work it accounts for.
+    pub(crate) tenant_output: Option<crate::guest_output::TenantOutputGuard>,
+
     /// The WASI context, derived from the grants.
     ///
     /// # Why a store cannot exist without one
@@ -247,6 +258,10 @@ impl fmt::Debug for StoreData {
             .field("ambient", &self.ambient)
             .field("has_wasi_ctx", &true)
             .field("tenant", &self.tenant)
+            // Named presence rather than the guard: the budget counters are
+            // live accounting, and a `Debug` that printed them would turn every
+            // log line into a claim about a moving number.
+            .field("has_tenant_output", &self.tenant_output.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -256,6 +271,12 @@ impl Default for StoreData {
     /// default twice over: a store that was not explicitly given grants cannot
     /// do anything, and one without limits has Wasmtime's own defaults.
     fn default() -> Self {
+        // The bundle form keeps one construction path for outputs with and
+        // without a tenant parent; the clones are dropped here because no
+        // tenant budget is linked and nothing observes them.
+        let (wasi, _stdout, _stderr) =
+            crate::host_wasi::context_with_tenant_output(&GrantSet::empty(), &[], None)
+                .expect("an empty grant set and empty environment always build");
         Self {
             grants: GrantSet::empty(),
             // No record unless one is attached; see the field's own doc for why `None` is
@@ -275,12 +296,12 @@ impl Default for StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
             // unreachable -- an empty grant set and an empty environment always
             // produce a context.
-            wasi: crate::host_wasi::context(&GrantSet::empty(), &[])
-                .expect("an empty grant set and empty environment always build"),
+            wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
             incoming_authority: String::new(),
         }
@@ -299,13 +320,43 @@ impl StoreData {
     /// failure at one obvious site rather than a silently wrong grant set.
     #[must_use]
     pub fn new(grants: GrantSet) -> Self {
+        Self::new_with_tenant_output(grants, None)
+    }
+
+    /// Build store data holding one request's share of its tenant's output budget.
+    ///
+    /// The guard keeps the tenant entry alive and counted for exactly this
+    /// store's lifetime: dropping the store drops the guard, and the last guard
+    /// out evicts the entry. A `None` guard is [`StoreData::new`] unchanged.
+    ///
+    /// ```
+    /// use qqq_cap::resolve::GrantSet;
+    /// use qqq_host::linker::StoreData;
+    ///
+    /// let store = StoreData::new_with_tenant_output(GrantSet::empty(), None);
+    /// assert!(store.tenant_scope().is_none());
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// As [`StoreData::new`]: the WASI context construction is infallible for an
+    /// empty environment.
+    #[must_use]
+    pub fn new_with_tenant_output(
+        grants: GrantSet,
+        tenant_output: Option<crate::guest_output::TenantOutputGuard>,
+    ) -> Self {
         // The context borrows `grants` before the struct literal moves it. Ordering
         // matters: calling `context(&grants, ..)` inside a `Self { grants, .. }`
         // literal would borrow after the move, and the compiler rejects it. Computing
         // the value first is the fix — not cloning the grant set, which would leave
         // two copies to keep in step.
-        let wasi = crate::host_wasi::context(&grants, &[])
-            .expect("an empty environment cannot fail to build");
+        let budget = tenant_output
+            .as_ref()
+            .map(|guard| std::sync::Arc::clone(guard.budget()));
+        let (wasi, _stdout, _stderr) =
+            crate::host_wasi::context_with_tenant_output(&grants, &[], budget.as_ref())
+                .expect("an empty environment cannot fail to build");
         Self {
             grants,
             // No record unless one is attached; see the field's own doc for why `None` is
@@ -319,6 +370,7 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
             wasi,
@@ -401,9 +453,11 @@ impl StoreData {
 
         // Built before the struct literal, for the reason `StoreData::new`
         // documents: the context borrows `grants`, and a borrow inside a literal that
-        // also moves it is rejected.
-        let wasi = crate::host_wasi::context(&grants, env)
-            .expect("building a context from an injected environment cannot fail");
+        // also moves it is rejected. The bundle form keeps one construction
+        // path; with no tenant budget the returned outputs are dropped unused.
+        let (wasi, _stdout, _stderr) =
+            crate::host_wasi::context_with_tenant_output(&grants, env, None)
+                .expect("building a context from an injected environment cannot fail");
 
         Self {
             grants,
@@ -421,6 +475,7 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(manifest.limits.max_subrequests),
             handles: crate::quota::HandleQuota::new(manifest.limits.max_open_handles),
             tenant: None,
+            tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
             incoming_authority: String::new(),

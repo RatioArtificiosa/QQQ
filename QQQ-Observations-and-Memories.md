@@ -35164,6 +35164,33 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-504 - Per-tenant output budgets, enforced after all
+
+§O-503 narrowed per-tenant budgets to a documented composition bound on the
+grounds that no production seam exists for tenant-shared state. Adversarial
+review rejected the narrowing and demanded enforcement, and the demand
+survived contact with the code: a seam does exist, one layer up from where
+the search stopped. The serve connection knows the tenant, the body-aware
+dispatch path carries it explicitly (the flat Handler type is untouched —
+production serves guests through the body path, and the flat closure
+attributes to the route name with that stated), serve_one acquires a guard
+from the app registry, and the guard travels options to store to installed
+sinks, which share every counter with the stored clones.
+
+The registry lives per app, matching the pool: tenants are not global
+identities here, so each deployed component bounds its own tenants, exactly
+as each bounds its own instance slots — and replacements inherit the
+registry like the pool and the audit stream, so a rotation neither doubles
+a ceiling nor forgives an over-budget tenant. Eviction is at zero live
+holders: a tenant with no live request restarts at zero, and entries cannot
+accumulate. The ceiling is the TENANT_OUTPUT_BYTES constant until a manifest
+field exists for it; no manifest parsing was touched.
+Proven: shared trip across two independent outputs with the tenant ceiling
+and breach count asserted, lifecycle share-and-evict, linkage from options
+to installed sinks, same-tenant sharing across sequential requests, tenant
+string flow from socket to handler, and fault injection on the registry
+keying, the prepare step, the parent link, and the serve-side tenant — each
+failing its test.
 ## §O-503 - Review round two and the per-tenant budget decision
 
 The re-review returned two findings, both real. First, the pump task held the

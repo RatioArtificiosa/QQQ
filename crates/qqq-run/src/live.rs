@@ -201,7 +201,7 @@ impl LiveApp {
     /// ```
     pub fn dispatch(&self) -> qqq_serve::Handler {
         let live = self.clone();
-        Arc::new(move |head, _matched| live.answer(head, None))
+        Arc::new(move |head, matched| live.answer(head, None, &matched.handler))
     }
 
     /// Body-aware handler with the same admission boundary.
@@ -221,18 +221,19 @@ impl LiveApp {
     /// ```
     pub fn dispatch_with_body(&self) -> qqq_serve::BodyHandler {
         let live = self.clone();
-        Arc::new(move |head, body| {
+        Arc::new(move |head, body, tenant| {
             let body = match body {
                 qqq_serve::BodyBytes::Absent => None,
                 other => Some(other.as_slice().to_vec()),
             };
-            live.answer(head, body)
+            live.answer(head, body, tenant)
         })
     }
     fn answer(
         &self,
         head: &qqq_serve::http1::RequestHead,
         body: Option<Vec<u8>>,
+        tenant: &str,
     ) -> qqq_serve::response::Response {
         let lease = match self.acquire() {
             Ok(lease) => lease,
@@ -242,7 +243,7 @@ impl LiveApp {
                 return response;
             }
         };
-        match lease.value().handle_request(head, body) {
+        match lease.value().handle_request(head, body, tenant) {
             Ok(response) => response,
             Err(error) => failure_response(&error),
         }

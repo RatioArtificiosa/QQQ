@@ -161,10 +161,46 @@ pub const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 /// with the caller's waker stored, and the writer task wakes it after its next
 /// receive — backpressure with no lost wake-up, because a recheck after storing
 /// closes the race where space frees first.
+///
+/// ```
+/// use qqq_host::guest_output::PUMP_QUEUE_MSGS;
+///
+/// assert_eq!(PUMP_QUEUE_MSGS, 64);
+/// ```
 pub const PUMP_QUEUE_MSGS: usize = 64;
 
+/// Default lifetime output budget shared by one tenant's requests on one app.
+///
+/// Eight full-bleed instances at the 8 MiB per-stream quota: large enough that
+/// ordinary tenants never notice it, small enough that a compromised or buggy
+/// guest cannot fill a host log indefinitely. Per application, matching the
+/// pool: tenants are not global identities here (audit records carry `None`
+/// for the same reason), so each deployed component bounds its own tenants,
+/// exactly as each bounds its own instance slots.
+///
+/// ```
+/// use qqq_host::guest_output::TENANT_OUTPUT_BYTES;
+///
+/// assert_eq!(TENANT_OUTPUT_BYTES, 64 * 1024 * 1024);
+/// ```
+pub const TENANT_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A byte budget: standalone per instance, or nested under a tenant ceiling.
+///
+/// Every output owns one; a tenant's requests additionally share one through
+/// [`TenantOutputBudgets`]. Reservation checks the local budget first and the
+/// linked parent second, refusing when either is exhausted, so one tenant's
+/// requests share a ceiling no single request can exceed alone.
+///
+/// ```
+/// use qqq_host::guest_output::OutputBudget;
+///
+/// let budget = OutputBudget::new(8);
+/// assert_eq!(budget.used(), 0);
+/// assert_eq!(budget.breaches(), 0);
+/// ```
 #[derive(Debug)]
-struct OutputBudget {
+pub struct OutputBudget {
     used: AtomicU64,
     limit: u64,
     /// Writes refused for exceeding the quota.
@@ -173,29 +209,339 @@ struct OutputBudget {
     /// `Relaxed` is the correct ordering. It is the host-visible half of the
     /// breach policy — the guest sees a stream error, and the host reads this.
     breaches: AtomicU64,
+    /// The enclosing budget, if this one nests inside one.
+    ///
+    /// A per-instance budget with a tenant parent refuses when *either* is
+    /// exhausted, so one tenant's requests share a ceiling no single request
+    /// can exceed alone. Set once during instance construction; `None` is the
+    /// standalone budget every existing caller means.
+    parent: std::sync::Mutex<Option<Arc<OutputBudget>>>,
 }
 
 impl OutputBudget {
-    fn reserve(&self, bytes: usize) -> io::Result<()> {
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    /// A standalone byte budget.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::OutputBudget;
+    ///
+    /// let budget = OutputBudget::new(8);
+    /// assert_eq!(budget.breaches(), 0);
+    /// ```
+    #[must_use]
+    pub fn new(limit: u64) -> Self {
+        Self {
+            used: AtomicU64::new(0),
+            limit,
+            breaches: AtomicU64::new(0),
+            parent: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Bytes accepted under this budget so far.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::OutputBudget;
+    ///
+    /// let budget = OutputBudget::new(8);
+    /// assert_eq!(budget.used(), 0);
+    /// ```
+    #[must_use]
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Writes refused for exceeding this budget.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::OutputBudget;
+    ///
+    /// let budget = OutputBudget::new(8);
+    /// assert_eq!(budget.breaches(), 0);
+    /// ```
+    #[must_use]
+    pub fn breaches(&self) -> u64 {
+        self.breaches.load(Ordering::Relaxed)
+    }
+
+    /// Enclose this budget in a shared parent.
+    ///
+    /// First call wins: the linkage is made once during instance construction,
+    /// and a second parent would mean two ceilings arguing over one budget.
+    /// `pub(crate)` because only instance construction wires parents; every
+    /// other crate meets budgets through [`TenantOutputGuard::budget`].
+    pub(crate) fn set_parent(&self, parent: &Arc<OutputBudget>) {
+        if let Ok(mut slot) = self.parent.lock() {
+            if slot.is_none() {
+                *slot = Some(Arc::clone(parent));
+            }
+        }
+    }
+
+    /// Reserve `bytes`, first here, then in the parent if one is linked.
+    ///
+    /// Returns the ceiling that refused and its breach count including this
+    /// refusal, so the caller reports the limit that actually tripped rather
+    /// than whichever one it checked first.
+    fn reserve(&self, bytes: usize) -> Result<(), Refusal> {
+        let amount = u64::try_from(bytes).unwrap_or(u64::MAX);
         let mut used = self.used.load(Ordering::Relaxed);
         loop {
-            let Some(next) = used.checked_add(bytes) else {
-                self.breaches.fetch_add(1, Ordering::Relaxed);
-                return Err(io::Error::other("guest output quota exhausted"));
+            let Some(next) = used.checked_add(amount) else {
+                return Err(self.refused());
             };
             if next > self.limit {
-                self.breaches.fetch_add(1, Ordering::Relaxed);
-                return Err(io::Error::other("guest output quota exhausted"));
+                return Err(self.refused());
             }
             match self
                 .used
                 .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Relaxed)
             {
-                Ok(_) => return Ok(()),
+                Ok(_) => break,
                 Err(actual) => used = actual,
             }
         }
+        if let Some(parent) = self.parent.lock().ok().and_then(|p| p.clone()) {
+            if let Err(refusal) = parent.reserve(bytes) {
+                self.unreserve(bytes);
+                return Err(refusal);
+            }
+        }
+        Ok(())
+    }
+
+    /// Count this refusal and name the ceiling that tripped.
+    fn refused(&self) -> Refusal {
+        Refusal {
+            limit: self.limit,
+            breaches: self.breaches.fetch_add(1, Ordering::Relaxed) + 1,
+        }
+    }
+
+    /// Release a reservation `reserve` made, when the write it paid for never
+    /// queued — the parent check runs after the local one, and a parent refusal
+    /// must give the local bytes back rather than burn them on a write that
+    /// never happened.
+    ///
+    /// Private, because the only caller that can owe a refund is `reserve`
+    /// itself, in the same call.
+    fn unreserve(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.used.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Which ceiling refused a reservation, and its breach count including it.
+///
+/// Private: the caller translates it into the I/O error the guest sees and the
+/// [`TruncationEvent`] the host reads, and neither of those names this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Refusal {
+    limit: u64,
+    breaches: u64,
+}
+
+/// One tenant's shared output budget, held by the registry below.
+///
+/// Cloned from the registry on every acquire; all live clones account into
+/// the same counters, so concurrent requests of one tenant share one ceiling
+/// no single request can exceed alone.
+///
+/// ```
+/// use qqq_host::guest_output::TenantOutputBudgets;
+///
+/// let budgets = TenantOutputBudgets::new(10);
+/// let first = budgets.acquire("tenant-a");
+/// let second = budgets.acquire("tenant-a");
+/// assert!(std::ptr::eq(
+///     std::sync::Arc::as_ptr(first.budget()),
+///     std::sync::Arc::as_ptr(second.budget())
+/// ));
+/// ```
+#[derive(Debug, Clone)]
+pub struct TenantOutputBudgets {
+    inner: Arc<TenantBudgetsInner>,
+}
+
+#[derive(Debug)]
+struct TenantBudgetsInner {
+    limit: u64,
+    state: std::sync::Mutex<std::collections::HashMap<String, TenantEntry>>,
+}
+
+/// One tenant's entry in the registry: the shared budget plus its live count.
+#[derive(Debug)]
+struct TenantEntry {
+    budget: Arc<OutputBudget>,
+    /// Requests currently holding this tenant's budget.
+    live: u64,
+}
+
+impl TenantOutputBudgets {
+    /// A registry issuing per-tenant shared budgets of `limit` bytes each.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::TenantOutputBudgets;
+    ///
+    /// let budgets = TenantOutputBudgets::new(1024);
+    /// let _guard = budgets.acquire("tenant-a");
+    /// ```
+    #[must_use]
+    pub fn new(limit: u64) -> Self {
+        Self {
+            inner: Arc::new(TenantBudgetsInner {
+                limit,
+                state: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }),
+        }
+    }
+
+    /// The budget for one tenant, creating it on first use.
+    ///
+    /// The guard keeps the budget alive and counted; dropping the last guard
+    /// for a tenant evicts the entry, which is the reset boundary — a tenant
+    /// with no live request starts its next request at zero, and a tenant
+    /// that never returns cannot accumulate state here.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::TenantOutputBudgets;
+    ///
+    /// let budgets = TenantOutputBudgets::new(1024);
+    /// let guard = budgets.acquire("tenant-a");
+    /// assert_eq!(guard.tenant(), "tenant-a");
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When the registry lock is poisoned — which means another thread panicked
+    /// while acquiring, and proceeding with a possibly half-inserted entry
+    /// would account one tenant's bytes to another.
+    #[must_use]
+    pub fn acquire(&self, tenant: &str) -> TenantOutputGuard {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("tenant output budgets are not poisoned");
+        let entry = state
+            .entry(tenant.to_owned())
+            .or_insert_with(|| TenantEntry {
+                budget: Arc::new(OutputBudget::new(self.inner.limit)),
+                live: 0,
+            });
+        entry.live += 1;
+        TenantOutputGuard {
+            inner: Arc::clone(&self.inner),
+            tenant: tenant.to_owned(),
+            budget: Arc::clone(&entry.budget),
+        }
+    }
+
+    /// Requests currently holding one tenant's budget.
+    ///
+    /// Zero for an unknown or fully released tenant. An operator counter in
+    /// the `LedgerReport` spirit — and the observation point the request-path
+    /// tests poll to prove a live request holds its tenant's entry.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::TenantOutputBudgets;
+    ///
+    /// let budgets = TenantOutputBudgets::new(1024);
+    /// assert_eq!(budgets.live("tenant-a"), 0);
+    /// let _guard = budgets.acquire("tenant-a");
+    /// assert_eq!(budgets.live("tenant-a"), 1);
+    /// ```
+    #[must_use]
+    pub fn live(&self, tenant: &str) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.get(tenant).map(|entry| entry.live))
+            .unwrap_or(0)
+    }
+}
+
+/// One request's hold on its tenant's shared output budget.
+///
+/// Dropping decrements the tenant's live count and evicts the entry at zero,
+/// which is what makes the reset boundary real rather than documented: the map
+/// cannot grow without bound on distinct tenant names, because an entry exists
+/// only while at least one request holds it.
+///
+/// Cloning is manual rather than derived on purpose: a derived clone would
+/// duplicate the guard without counting, and the uncounted clone's drop would
+/// evict a budget a live request still holds — splitting one tenant's
+/// accounting in two. Every live guard is counted, no exceptions.
+#[derive(Debug)]
+pub struct TenantOutputGuard {
+    inner: Arc<TenantBudgetsInner>,
+    tenant: String,
+    budget: Arc<OutputBudget>,
+}
+
+impl Clone for TenantOutputGuard {
+    fn clone(&self) -> Self {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("tenant output budgets are not poisoned");
+        // Created by `acquire`, so the entry exists; a missing entry would
+        // mean an eviction raced a counted guard, which the locking forbids.
+        if let Some(entry) = state.get_mut(&self.tenant) {
+            entry.live += 1;
+        }
+        Self {
+            inner: Arc::clone(&self.inner),
+            tenant: self.tenant.clone(),
+            budget: Arc::clone(&self.budget),
+        }
+    }
+}
+
+impl Drop for TenantOutputGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("tenant output budgets are not poisoned");
+        if let Some(entry) = state.get_mut(&self.tenant) {
+            entry.live = entry.live.saturating_sub(1);
+            if entry.live == 0 {
+                state.remove(&self.tenant);
+            }
+        }
+    }
+}
+
+impl TenantOutputGuard {
+    /// The tenant this guard accounts for.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::TenantOutputBudgets;
+    ///
+    /// let budgets = TenantOutputBudgets::new(1024);
+    /// let guard = budgets.acquire("tenant-a");
+    /// assert_eq!(guard.tenant(), "tenant-a");
+    /// ```
+    #[must_use]
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    /// The shared budget, for wiring into instance outputs.
+    ///
+    /// ```
+    /// use qqq_host::guest_output::TenantOutputBudgets;
+    ///
+    /// let budgets = TenantOutputBudgets::new(1024);
+    /// let guard = budgets.acquire("tenant-a");
+    /// assert_eq!(guard.budget().breaches(), 0);
+    /// ```
+    #[must_use]
+    pub fn budget(&self) -> &Arc<OutputBudget> {
+        &self.budget
     }
 }
 
@@ -496,11 +842,7 @@ impl GuestOutput {
             shared: Arc::new(Shared {
                 stream: prefix,
                 sink: Arc::new(sink),
-                budget: Arc::new(OutputBudget {
-                    used: AtomicU64::new(0),
-                    limit,
-                    breaches: AtomicU64::new(0),
-                }),
+                budget: Arc::new(OutputBudget::new(limit)),
                 pump: std::sync::Mutex::new(None),
                 failure: Arc::new(std::sync::Mutex::new(None)),
                 queue_wakers: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -528,6 +870,16 @@ impl GuestOutput {
     #[must_use]
     pub fn prefix(&self) -> &'static str {
         self.prefix
+    }
+
+    /// Enclose this output's budget in a shared parent.
+    ///
+    /// `pub(crate)` because only instance construction wires parents: every
+    /// other crate meets shared budgets through [`TenantOutputGuard::budget`].
+    /// First call wins — the linkage is made once during construction, and a
+    /// second parent would mean two ceilings arguing over one budget.
+    pub(crate) fn share_parent(&self, parent: &std::sync::Arc<OutputBudget>) {
+        self.shared.budget.set_parent(parent);
     }
 
     /// A fresh writer over this output's sink.
@@ -645,9 +997,9 @@ impl AsyncWrite for SanitisingWriter {
         // escaper is stateful, and re-running it on retry would advance the
         // line marker and the run bound twice for one write.
         if this.pending.is_none() {
-            if let Err(error) = this.shared.budget.reserve(buf.len()) {
-                record_truncation(&this.shared, buf.len());
-                return Poll::Ready(Err(error));
+            if let Err(refusal) = this.shared.budget.reserve(buf.len()) {
+                record_truncation(&this.shared, buf.len(), refusal);
+                return Poll::Ready(Err(io::Error::other("guest output quota exhausted")));
             }
             let mut escaped = Vec::with_capacity(buf.len() + 16);
             let consumed = this.escaper.push(buf, &mut escaped);
@@ -879,14 +1231,16 @@ fn stored_failure(shared: &Shared) -> Option<String> {
 
 /// Remember a quota breach as a structured event.
 ///
-/// Called with the reservation already refused, so the breach count read here
-/// includes this refusal and `total_breaches` names it exactly.
-fn record_truncation(shared: &Shared, requested: usize) {
+/// Called with the reservation already refused; the refusal carries the breach
+/// count including this refusal, so `total_breaches` names it exactly. The
+/// ceiling is whichever tripped — the instance's own, or the shared tenant
+/// ceiling when the parent refused.
+fn record_truncation(shared: &Shared, requested: usize, refusal: Refusal) {
     let event = TruncationEvent {
         stream: shared.stream,
         requested_bytes: u64::try_from(requested).unwrap_or(u64::MAX),
-        limit: shared.budget.limit,
-        total_breaches: shared.budget.breaches.load(Ordering::Relaxed),
+        limit: refusal.limit,
+        total_breaches: refusal.breaches,
     };
     if let Ok(mut slot) = shared.last_truncation.lock() {
         *slot = Some(event);
@@ -1332,6 +1686,96 @@ mod tests {
         fn drop(&mut self) {
             self.sink.release();
         }
+    }
+
+    /// **Tenants that never return leave nothing behind.**
+    ///
+    /// The registry is keyed by names the operator does not control, so an
+    /// entry must exist only while at least one request holds it. Each acquire
+    /// counts, each drop uncounts, and the last drop evicts — which is the
+    /// reset boundary: a tenant with no live request starts its next request
+    /// at zero, and a tenant that never returns cannot accumulate state here.
+    #[test]
+    fn tenant_entries_evict_when_the_last_guard_drops() {
+        let budgets = TenantOutputBudgets::new(1024);
+        let first = budgets.acquire("tenant-a");
+        let second = budgets.acquire("tenant-a");
+        assert!(
+            Arc::ptr_eq(first.budget(), second.budget()),
+            "concurrent requests of one tenant must share one budget object"
+        );
+        let retired = Arc::as_ptr(second.budget());
+        drop(first);
+        drop(second);
+        let third = budgets.acquire("tenant-a");
+        assert!(
+            !std::ptr::eq(Arc::as_ptr(third.budget()), retired),
+            "after eviction the next request must start a fresh budget at zero"
+        );
+        assert_eq!(third.budget().used(), 0);
+    }
+
+    /// **Two tenants never share a budget.**
+    ///
+    /// The control for the test above: shared accounting that keyed on the
+    /// wrong thing — every tenant, or no tenant — would pass a same-tenant
+    /// test while charging one tenant for another's output.
+    #[test]
+    fn different_tenants_get_different_budgets() {
+        let budgets = TenantOutputBudgets::new(1024);
+        let a = budgets.acquire("tenant-a");
+        let b = budgets.acquire("tenant-b");
+        assert!(
+            !Arc::ptr_eq(a.budget(), b.budget()),
+            "tenant budgets must be distinct objects"
+        );
+    }
+
+    /// **Two independent outputs trip one shared tenant ceiling.**
+    ///
+    /// The cross-request property: each output's own quota is generous, but
+    /// their combined bytes exceed the tenant budget, so the second output's
+    /// write is refused, the tenant breach count rises, and the output records
+    /// a structured event naming the tenant ceiling rather than its own.
+    #[test]
+    fn two_outputs_share_one_tenant_ceiling() {
+        let budgets = TenantOutputBudgets::new(10);
+        let guard_a = budgets.acquire("tenant-a");
+        let guard_b = budgets.acquire("tenant-a");
+        let out_a = GuestOutput::to_with_limit(STDOUT_PREFIX, captured(), u64::MAX);
+        out_a.share_parent(guard_a.budget());
+        let out_b = GuestOutput::to_with_limit(STDOUT_PREFIX, captured(), u64::MAX);
+        out_b.share_parent(guard_b.budget());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        let mut w1 = out_a.writer();
+        assert!(matches!(
+            Pin::new(&mut w1).poll_write(&mut cx, b"123456"),
+            Poll::Ready(Ok(6))
+        ));
+        let mut w2 = out_b.writer();
+        assert!(
+            matches!(
+                Pin::new(&mut w2).poll_write(&mut cx, b"789012"),
+                Poll::Ready(Err(_))
+            ),
+            "twelve bytes against a ten-byte tenant ceiling must refuse"
+        );
+        assert_eq!(
+            guard_a.budget().breaches(),
+            1,
+            "the tenant budget must count the refusal"
+        );
+        assert_eq!(
+            out_b.last_truncation(),
+            Some(TruncationEvent {
+                stream: STDOUT_PREFIX,
+                requested_bytes: 6,
+                limit: 10,
+                total_breaches: 1,
+            }),
+            "the event must name the tenant ceiling that tripped"
+        );
     }
 
     /// A sink that blocks until the test releases it.

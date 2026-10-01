@@ -96,7 +96,7 @@ impl BodyBytes {
     }
 }
 
-/// A handler that receives the request body.
+/// A handler that receives the request body, and the tenant that sent it.
 ///
 /// # Why a second type instead of changing [`crate::server::Handler`]
 ///
@@ -110,8 +110,15 @@ impl BodyBytes {
 /// with no `BodyHandler` uses the flat one exactly as before. That is the same shape
 /// `Dispatch` already uses for streaming and WebSocket handlers, and for the same
 /// reason: the kinds differ, so the type says which is in use.
-pub type BodyHandler =
-    Arc<dyn Fn(&crate::http1::RequestHead, &BodyBytes) -> crate::response::Response + Send + Sync>;
+///
+/// # Why the tenant travels here and not in the head
+///
+/// The head is client-controlled; a tenant identity inside it would let a caller
+/// choose whose budget its bytes bill to. The serve layer passes its own name for
+/// the peer instead, which the guest never sees and the client cannot set.
+pub type BodyHandler = Arc<
+    dyn Fn(&crate::http1::RequestHead, &BodyBytes, &str) -> crate::response::Response + Send + Sync,
+>;
 
 #[cfg(test)]
 mod tests {

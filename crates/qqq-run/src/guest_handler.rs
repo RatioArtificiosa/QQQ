@@ -84,6 +84,11 @@ pub struct GuestApp {
     authority: String,
     /// Bounds how many requests may hold an instance at once.
     pool: Arc<Pool>,
+    /// The per-tenant output budgets for this app's requests.
+    ///
+    /// One registry per app, matching the pool: each deployed component bounds
+    /// its own tenants, exactly as each bounds its own instance slots.
+    tenant_outputs: qqq_host::guest_output::TenantOutputBudgets,
     /// Completed requests per second, for the pool's `Retry-After` estimate.
     ///
     /// Kept at `0.0`, which the pool reads as "no rate known" and answers with its
@@ -295,6 +300,12 @@ impl GuestApp {
             // refuses `--workers 0`, so this is a second line of defence rather than
             // the check.
             pool: Arc::new(Pool::new(u64::from(workers))),
+            // One registry per app, matching the pool: tenants are not global
+            // identities here, so each deployed component bounds its own tenants,
+            // exactly as each bounds its own instance slots.
+            tenant_outputs: qqq_host::guest_output::TenantOutputBudgets::new(
+                qqq_host::guest_output::TENANT_OUTPUT_BYTES,
+            ),
             // The stream the served path appends to. `with_default_capacity` cannot fail —
             // the capacity is a non-zero constant and the check lives in `AuditStream::new`.
             audit: std::sync::Arc::new(std::sync::Mutex::new(
@@ -340,6 +351,10 @@ impl GuestApp {
         next.pool = Arc::clone(&self.pool);
         next.audit = Arc::clone(&self.audit);
         next.audit_file.clone_from(&self.audit_file);
+        // The tenant budgets roll with the replacement, like the pool and the
+        // audit stream: a rotation must not double a tenant's ceiling by
+        // accident, and must not forgive an over-budget tenant either.
+        next.tenant_outputs = self.tenant_outputs.clone();
         Ok(next)
     }
 
@@ -408,6 +423,13 @@ impl GuestApp {
 
     /// Answer one request by calling the guest.
     ///
+    /// The `tenant` is the serve layer's name for the caller — the peer address
+    /// today — and it selects the shared output budget this request accounts
+    /// into. It travels as an explicit parameter rather than inside the head
+    /// because the head is client-controlled: a tenant identity the client
+    /// could set would let a guest's heaviest tenant bill its bytes to
+    /// another.
+    ///
     /// # Errors
     ///
     /// * Every slot is busy, or the pool is draining — `QQQ-6001` from
@@ -417,7 +439,12 @@ impl GuestApp {
     /// * The instance could not be created (a grant or limit problem).
     /// * The method cannot be expressed to a guest (`guest_bridge::to_guest`).
     /// * The guest trapped, or returned a value that is not a response.
-    pub fn handle_request(&self, head: &RequestHead, body: Option<Vec<u8>>) -> Result<Response> {
+    pub fn handle_request(
+        &self,
+        head: &RequestHead,
+        body: Option<Vec<u8>>,
+        tenant: &str,
+    ) -> Result<Response> {
         // The body is what the caller read; the head only declares its length.
         let request = guest_bridge::request_from_head(head, &self.authority, body)?;
 
@@ -460,7 +487,7 @@ impl GuestApp {
         // capacity monotonically — a server that gets slower the more it errors is a
         // worse failure than the error itself.
         let permit = RequestPermit(&self.pool);
-        let outcome = self.serve_one(&request);
+        let outcome = self.serve_one(&request, tenant);
         drop(permit);
 
         // --- §4.4 step 15: AUDIT APPEND ---------------------------------------
@@ -582,7 +609,7 @@ impl GuestApp {
     /// Extracted so [`Self::handle_request`] can hold the pool slot across exactly this
     /// work with one release site rather than one per early return — the ordering rule
     /// `§O-184` records for `serve_special_route` and `drain_body`.
-    fn serve_one(&self, request: &abi::Request) -> Result<abi::Response> {
+    fn serve_one(&self, request: &abi::Request, tenant: &str) -> Result<abi::Response> {
         // Built per request because the handle is cheap (an `Arc` clone and two digests that are
         // already owned) and because the store is per instance. The stream behind it is shared, so
         // a per-capability row and this request's row land in one chain.
@@ -592,8 +619,14 @@ impl GuestApp {
             self.grant_digest.clone(),
             None,
         );
+        // Held for exactly this request: dropping it at the end releases the
+        // tenant entry when no request of this tenant remains, which is the
+        // reset boundary. The budget outlives concurrent requests through the
+        // registry, never through this local.
+        let tenant_output = self.tenant_outputs.acquire(tenant);
         let mut options = timed_options(self.limits);
         options.audit = Some(handle);
+        options.tenant_output = Some(tenant_output);
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -758,17 +791,24 @@ impl GuestApp {
     /// correct for a route that declares no body and for the tests that only exercise
     /// the head path -- and it is what the type system permits, not an oversight.
     /// [`Self::dispatch_with_body`] is the one a write route needs.
+    ///
+    /// # Why the tenant here is the route name
+    ///
+    /// The flat handler type carries no tenant: changing it would break every flat
+    /// route in the workspace for callers with no interest in accounting. Production
+    /// registers [`Self::dispatch_with_body`] for every declared route, so guest
+    /// traffic through this closure is test and development traffic, attributed to
+    /// the route rather than to a tenant. A deployment serving guests through flat
+    /// handlers alone gets per-route budgets, stated here rather than discovered.
     #[must_use]
     pub fn dispatch(self: &Arc<Self>) -> qqq_serve::Handler {
         let app = Arc::clone(self);
-        Arc::new(
-            move |head: &RequestHead, _matched: &qqq_serve::RouteMatch| match app
-                .handle_request(head, None)
-            {
+        Arc::new(move |head: &RequestHead, matched: &qqq_serve::RouteMatch| {
+            match app.handle_request(head, None, &matched.handler) {
                 Ok(response) => response,
                 Err(e) => failure_response(&e),
-            },
-        )
+            }
+        })
     }
 
     /// Build a **body-aware** `Dispatch` handler that calls this guest.
@@ -795,16 +835,18 @@ impl GuestApp {
     #[must_use]
     pub fn dispatch_with_body(self: &Arc<Self>) -> qqq_serve::BodyHandler {
         let app = Arc::clone(self);
-        Arc::new(move |head: &RequestHead, body: &qqq_serve::BodyBytes| {
-            let carried = match body {
-                qqq_serve::BodyBytes::Absent => None,
-                other => Some(other.as_slice().to_vec()),
-            };
-            match app.handle_request(head, carried) {
-                Ok(response) => response,
-                Err(e) => failure_response(&e),
-            }
-        })
+        Arc::new(
+            move |head: &RequestHead, body: &qqq_serve::BodyBytes, tenant: &str| {
+                let carried = match body {
+                    qqq_serve::BodyBytes::Absent => None,
+                    other => Some(other.as_slice().to_vec()),
+                };
+                match app.handle_request(head, carried, tenant) {
+                    Ok(response) => response,
+                    Err(e) => failure_response(&e),
+                }
+            },
+        )
     }
 }
 
@@ -978,6 +1020,52 @@ mod tests {
         }
     }
 
+    /// **A live request holds its tenant's output entry, and no other tenant's.**
+    ///
+    /// The tenant string travels `serve` → handler → `serve_one` → registry,
+    /// and the only observable point is mid-flight: the entry exists while the
+    /// request runs and evicts after. A wrong tenant key would show up here as
+    /// a missing entry for the requested tenant, or a present one for a tenant
+    /// with no request.
+    #[test]
+    fn serve_one_accounts_the_request_to_its_tenant() {
+        let Some(app) = test_app() else {
+            return;
+        };
+        let app = Arc::new(app);
+        let worker = Arc::clone(&app);
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = Arc::clone(&done);
+        // Keep requesting until the observer has seen the entry: one pass is
+        // usually enough, and the loop bounds the wait instead of assuming it.
+        let t = std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let head = head(qqq_serve::Method::Get, "/orders");
+                let _ = worker.handle_request(&head, None, "tenant-a");
+            }
+        });
+        let start = std::time::Instant::now();
+        let mut observed = false;
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if app.tenant_outputs.live("tenant-a") >= 1 {
+                assert_eq!(
+                    app.tenant_outputs.live("tenant-b"),
+                    0,
+                    "a request for tenant-a must not open tenant-b's entry"
+                );
+                observed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        t.join().expect("the request thread must finish");
+        assert!(
+            observed,
+            "a live request must hold its tenant's entry; increase the timeout before doubting the wiring"
+        );
+    }
+
     /// **The served path appends to the audit stream — `OBS-002`.**
     ///
     /// Before this change the stream was complete, hash-chained and append-only, and its only
@@ -1003,7 +1091,7 @@ mod tests {
         let head = head(qqq_serve::Method::Get, "/orders");
         // The outcome is not the assertion -- whether this component serves `/orders` is the
         // reference app's business. What matters is that the call reached the guest seam.
-        let _ = app.handle_request(&head, None);
+        let _ = app.handle_request(&head, None, "test-tenant");
 
         let (after, counters) = app.audit_snapshot();
         assert_eq!(
@@ -1043,8 +1131,8 @@ mod tests {
 
         // Two requests, so the chain has a link rather than a single genesis-chained row.
         let head = head(qqq_serve::Method::Get, "/orders");
-        let _ = app.handle_request(&head, None);
-        let _ = app.handle_request(&head, None);
+        let _ = app.handle_request(&head, None, "test-tenant");
+        let _ = app.handle_request(&head, None, "test-tenant");
 
         let (records, counters) = app.audit_snapshot();
         assert_eq!(records.len(), 2, "two requests, two records");
@@ -1186,7 +1274,7 @@ mod tests {
 
         first.attach_audit_file(&path).expect("attach");
         let head = head(qqq_serve::Method::Get, "/orders");
-        let _ = first.handle_request(&head, None);
+        let _ = first.handle_request(&head, None, "test-tenant");
 
         let written = std::fs::read_to_string(&path).expect("the file exists after one request");
         assert_eq!(
@@ -1210,7 +1298,7 @@ mod tests {
             "the resumed history must be the history that was written"
         );
 
-        let _ = second.handle_request(&head, None);
+        let _ = second.handle_request(&head, None, "test-tenant");
         let (after, _) = second.audit_snapshot();
         assert_eq!(
             after.len(),
@@ -1251,7 +1339,7 @@ mod tests {
 
         app.attach_audit_file(&path).expect("attach");
         let head = head(qqq_serve::Method::Get, "/orders");
-        let _ = app.handle_request(&head, None);
+        let _ = app.handle_request(&head, None, "test-tenant");
         let (records, _) = app.audit_snapshot();
         let good = records[0].chain.clone();
 

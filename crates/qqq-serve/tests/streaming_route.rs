@@ -25,7 +25,7 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,7 +36,7 @@ use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::server::{serve, Dispatch, Handler, RouteMatch, ServerConfig};
 use qqq_serve::stream::{StreamError, StreamWriter};
-use qqq_serve::{RequestHead, Response};
+use qqq_serve::{BodyBytes, BodyHandler, RequestHead, Response};
 
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::limits::{Limits, TenantLimits};
@@ -723,5 +723,45 @@ async fn a_truncated_chunked_body_to_a_streaming_route_is_rejected_without_waiti
         invocations.load(Ordering::SeqCst),
         0,
         "a refused request must not reach the handler"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tenant identity reaches body-aware handlers (per-tenant output budgets)
+// ---------------------------------------------------------------------------
+
+/// **A body-aware handler receives the serve layer's tenant name.**
+///
+/// The tenant is the peer address as the server knows it — loopback here, so
+/// `127.0.0.1` — and it must arrive as a parameter, never from the head: the
+/// head is client-controlled, and a tenant identity the client could set would
+/// let a caller bill its bytes to another tenant. A stub that records the
+/// argument pins the flow `serve` → dispatch → handler without a guest.
+#[tokio::test]
+async fn a_body_handler_receives_the_servers_tenant_name() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_in = Arc::clone(&seen);
+    let stub: BodyHandler = Arc::new(
+        move |_head: &RequestHead, _body: &BodyBytes, tenant: &str| {
+            seen_in
+                .lock()
+                .expect("not poisoned")
+                .push(tenant.to_owned());
+            Response::text(200, "ok")
+        },
+    );
+    let dispatch = Dispatch::flat(flat_handler()).with_body("stream", stub);
+    let server = Server::start(dispatch).await;
+
+    let got = server
+        .request_raw(
+            "GET /events HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+        )
+        .await;
+    assert!(got.contains("200 OK"), "the stub must answer: {got:?}");
+    assert_eq!(
+        *seen.lock().expect("not poisoned"),
+        vec!["127.0.0.1".to_owned()],
+        "the handler must see the server's tenant name for the peer"
     );
 }

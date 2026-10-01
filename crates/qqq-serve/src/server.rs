@@ -1327,17 +1327,19 @@ async fn dispatch_off_thread(
     head: &RequestHead,
     path: &str,
     body: &crate::body_bytes::BodyBytes,
+    tenant: &str,
 ) -> Response {
     let Some(matched) = table.match_route(head.method, path) else {
-        return dispatch_flat(table, dispatch, head, path, body);
+        return dispatch_flat(table, dispatch, head, path, body, tenant);
     };
     let matched = route_match_of(&matched);
     let head = head.clone();
     let body = body.clone();
     let flat = Arc::clone(&dispatch.flat);
     let handler = dispatch.body_for(&matched.handler).cloned();
+    let tenant = tenant.to_owned();
     tokio::task::spawn_blocking(move || match handler {
-        Some(handler) => handler(&head, &body),
+        Some(handler) => handler(&head, &body, &tenant),
         None => flat(&head, &matched),
     })
     .await
@@ -1350,13 +1352,14 @@ fn dispatch_flat(
     head: &RequestHead,
     path: &str,
     body: &crate::body_bytes::BodyBytes,
+    tenant: &str,
 ) -> Response {
     if let Some(m) = table.match_route(head.method, path) {
         let matched = route_match_of(&m);
         // A body-aware handler wins when one is registered for this name; otherwise the
         // flat handler answers, which is every caller that predates this distinction.
         if let Some(handler) = dispatch.body_for(&matched.handler) {
-            return handler(head, body);
+            return handler(head, body, tenant);
         }
         return (dispatch.flat)(head, &matched);
     }
@@ -1956,7 +1959,7 @@ async fn serve_connection(
         };
 
         let route_started = std::time::Instant::now();
-        let response = dispatch_off_thread(table, dispatch, &head, path, &body).await;
+        let response = dispatch_off_thread(table, dispatch, &head, path, &body, &tenant).await;
         // **`false`, because this path has no host failure to report** -- `CodeRabbit` finding #23.
         //
         // This used to be `response.status >= 500`, and `response` is the GUEST's answer: a guest that

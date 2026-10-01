@@ -288,6 +288,13 @@ pub struct InstanceOptions {
     pub deterministic: bool,
     /// Record capability uses — `OBS-001`.
     pub audit: Option<crate::audit::AuditHandle>,
+    /// Hold one request's share of its tenant's output budget — `PERF-OUT-001`.
+    ///
+    /// `None` is the standalone per-instance budget every existing caller means.
+    /// `Some` shares accounting with the tenant's other live requests; the guard
+    /// is stored (not just consulted) so the tenant entry outlives this
+    /// construction and evicts only when the last holder drops it.
+    pub tenant_output: Option<crate::guest_output::TenantOutputGuard>,
     /// Keep the assertion state `qqq:test/assertions` records into — `TEST-007`, `TEST-008`.
     ///
     /// # Why this is a flag and not a grant
@@ -1181,9 +1188,11 @@ impl ReadyStore {
         }
 
         // -- Store state: grants, limits, and the limiter ----------------
-        let mut data = StoreData::new(grants.clone());
-        // Attached here rather than in every host function: the seam that records is
-        // `ambient::require`, which reads the store, so the store is where the handle has to be.
+        let mut data = crate::linker::StoreData::new_with_tenant_output(
+            grants.clone(),
+            opts.tenant_output.clone(),
+        ); // Attached here rather than in every host function: the seam that records is
+           // `ambient::require`, which reads the store, so the store is where the handle has to be.
         opts.audit.clone_into(&mut data.audit);
         opts.test.clone_into(&mut data.test);
         // **The ambient mode travels with the store, and this line is the fix.** `StoreData::new`
@@ -2085,6 +2094,49 @@ mod tests {
             real.store.data().ambient.now_nanos() > c,
             "a real clock must move, or the control is measuring nothing"
         );
+    }
+
+    /// **A tenant output guard reaches the store and stays alive with it.**
+    ///
+    /// The option travels `InstanceOptions` → `StoreData`; without that step
+    /// the guard would drop at the end of `prepare` and evict the entry while
+    /// the instance still runs against it. The enforcement itself — shared
+    /// accounting through the installed sinks — is proven where the sinks are
+    /// reachable: the context-level test drives them directly.
+    #[test]
+    fn tenant_output_guard_reaches_the_store() {
+        use crate::guest_output::TenantOutputBudgets;
+
+        let engine = engine();
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let budgets = TenantOutputBudgets::new(4);
+        let guard = budgets.acquire("tenant-a");
+        let opts = InstanceOptions {
+            tenant_output: Some(guard),
+            ..InstanceOptions::default()
+        };
+        let linked =
+            Instance::create_with(&engine, &prepared, &none(), limits(), &opts).expect("instance");
+        let stored = linked.store.data();
+        assert!(
+            stored.tenant_output.is_some(),
+            "the option must reach the store, not only the engine"
+        );
+        assert_eq!(
+            budgets.live("tenant-a"),
+            2,
+            "the options and the instance each hold a guard while both live"
+        );
+        drop(opts);
+        assert_eq!(
+            budgets.live("tenant-a"),
+            1,
+            "with the options gone the instance holds the only guard"
+        );
+
+        let plain =
+            Instance::create(&engine, &prepared, &none(), limits()).expect("a default instance");
+        assert!(plain.store.data().tenant_output.is_none());
     }
 
     // -- The async execution path (HOST-015, HOST-016) ---------------------

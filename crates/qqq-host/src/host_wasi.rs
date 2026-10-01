@@ -183,10 +183,74 @@ pub fn should_deny(grants: &GrantSet, clock: qqq_cap::capability::Capability) ->
 /// infallible for an empty environment, and the `Result` exists so a future refusal
 /// does not change every caller's signature.
 pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
+    Ok(context_impl(grants, env, None).0)
+}
+
+/// A WASI context plus the guest outputs installed in it, with an optional tenant budget.
+///
+/// `None` is the standalone budget every existing caller means; `Some` links
+/// both outputs' quotas under the tenant ceiling before installing them, so
+/// the first guest byte is already accounted. The outputs travel back out
+/// because the store keeps clones over the same budgets — the only way to
+/// observe, in a test, that the linkage reached the installed sinks. Kept
+/// beside [`context`] rather than folded into it so the common path keeps its
+/// signature — and so the tenant wiring stays visible at the call site instead
+/// of hiding in a flag.
+///
+/// ```
+/// use qqq_cap::resolve::GrantSet;
+/// use qqq_host::context_with_tenant_output;
+///
+/// let (_ctx, stdout, _stderr) = context_with_tenant_output(&GrantSet::empty(), &[], None)
+///     .expect("an empty environment builds");
+/// assert_eq!(stdout.prefix(), qqq_host::guest_output::STDOUT_PREFIX);
+/// ```
+///
+/// # Errors
+///
+/// A refusal when an environment entry is malformed, like [`context`]: the
+/// `Result` exists so a future refusal does not change every caller's
+/// signature.
+pub fn context_with_tenant_output(
+    grants: &GrantSet,
+    env: &[(String, String)],
+    tenant: Option<&std::sync::Arc<crate::guest_output::OutputBudget>>,
+) -> Result<(
+    WasiCtx,
+    crate::guest_output::GuestOutput,
+    crate::guest_output::GuestOutput,
+)> {
+    Ok(context_impl(grants, env, tenant))
+}
+
+fn context_impl(
+    grants: &GrantSet,
+    env: &[(String, String)],
+    tenant: Option<&std::sync::Arc<crate::guest_output::OutputBudget>>,
+) -> (
+    WasiCtx,
+    crate::guest_output::GuestOutput,
+    crate::guest_output::GuestOutput,
+) {
     let mut builder = WasiCtxBuilder::new();
 
     // stdout and stderr go to the host's streams, so an app's own output is visible --
     // but through a **sanitising sink**, never by inheritance.
+    //
+    // A linked tenant budget accounts the same bytes twice — once against the
+    // instance, once against the tenant — because the two ceilings answer
+    // different questions and a byte over either one is refused.
+    let stdout = crate::guest_output::GuestOutput::stdout();
+    let stderr = crate::guest_output::GuestOutput::stderr();
+    if let Some(budget) = tenant {
+        stdout.share_parent(budget);
+        stderr.share_parent(budget);
+    }
+    // Cloned on install so the store can keep the same budget objects: the
+    // clones share every counter with the installed sinks, which is what makes
+    // the linkage observable without reaching into `wasmtime-wasi`.
+    builder.stdout(stdout.clone());
+    builder.stderr(stderr.clone());
     //
     // # Why inheritance was wrong
     //
@@ -199,8 +263,6 @@ pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
     //
     // The prefix is what makes that true for every line rather than only the first,
     // and it is why this is a type rather than a flag on `inherit_stdout`.
-    builder.stdout(crate::guest_output::GuestOutput::stdout());
-    builder.stderr(crate::guest_output::GuestOutput::stderr());
 
     // stdin is explicitly **not** inherited: a closed stream makes a read return EOF
     // rather than blocking a request on the host's terminal.
@@ -233,7 +295,7 @@ pub fn context(grants: &GrantSet, env: &[(String, String)]) -> Result<WasiCtx> {
         builder.env(name, value);
     }
 
-    Ok(builder.build())
+    (builder.build(), stdout, stderr)
 }
 
 /// Registration outcome, for diagnostics.
@@ -554,6 +616,50 @@ mod tests {
         // panicking inside a store constructor.
         assert!(context(&GrantSet::empty(), &[]).is_ok());
         assert!(context(&grants_from(NO_CLOCK), &[]).is_ok());
+    }
+
+    /// **A linked tenant budget governs the installed sinks.**
+    ///
+    /// The store keeps only the guard; the linkage into the sinks happens here,
+    /// and this is the one place it is observable without a guest: drive the
+    /// returned outputs directly. A tiny tenant ceiling with generous instance
+    /// quotas isolates the tenant check, and the unlinked control proves the
+    /// refusal comes from the linkage rather than the write.
+    #[test]
+    fn tenant_output_budget_governs_the_installed_sinks() {
+        use crate::guest_output::TenantOutputBudgets;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        fn drive(
+            output: &crate::guest_output::GuestOutput,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            use tokio::io::AsyncWrite as _;
+
+            let mut writer = output.writer();
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            Pin::new(&mut writer).poll_write(&mut cx, bytes)
+        }
+
+        let budgets = TenantOutputBudgets::new(4);
+        let guard = budgets.acquire("tenant-a");
+        let budget = std::sync::Arc::clone(guard.budget());
+        let (_ctx, stdout, _stderr) =
+            context_with_tenant_output(&GrantSet::empty(), &[], Some(&budget))
+                .expect("an empty environment builds");
+        assert!(
+            matches!(drive(&stdout, b"12345"), Poll::Ready(Err(_))),
+            "five bytes against a four-byte tenant ceiling must refuse"
+        );
+        drop(guard);
+
+        let (_plain, plain_out, _) = context_with_tenant_output(&GrantSet::empty(), &[], None)
+            .expect("an empty environment builds");
+        assert!(
+            matches!(drive(&plain_out, b"12345"), Poll::Ready(Ok(5))),
+            "without a linked budget the same bytes answer to the instance quota alone"
+        );
     }
 
     /// **The guest's streams must not be inherited from the host's.**

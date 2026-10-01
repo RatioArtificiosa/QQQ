@@ -154,8 +154,9 @@ pub use host_secrets::{
     PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore, MAX_SECRET_INPUT,
 };
 pub use host_wasi::{
-    context as wasi_context, describe_missing_env as describe_missing_wasi_env,
-    register as register_wasi, DeniedClock, Registered as WasiRegistered,
+    context as wasi_context, context_with_tenant_output,
+    describe_missing_env as describe_missing_wasi_env, register as register_wasi, DeniedClock,
+    Registered as WasiRegistered,
 };
 pub use instance::{
     digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,

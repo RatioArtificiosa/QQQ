@@ -1212,8 +1212,13 @@ mod tests {
     fn absolute_host_path_validation_requires_a_real_drive_letter() {
         assert!(is_absolute_host_path("/var/lib/qqq"));
         assert!(is_absolute_host_path("C:\\var\\lib\\qqq"));
+        assert!(is_absolute_host_path("C:/var/lib/qqq"));
+        assert!(is_absolute_host_path("//fileserver/share/qqq"));
+        assert!(is_absolute_host_path("\\\\fileserver\\share\\qqq"));
         assert!(!is_absolute_host_path("1:/var/lib/qqq"));
         assert!(!is_absolute_host_path("C:var/lib/qqq"));
+        assert!(!is_absolute_host_path("data/relative"));
+        assert!(!is_absolute_host_path(""));
     }
 
     // -- Normalization -----------------------------------------------------
@@ -1271,6 +1276,32 @@ mod tests {
         );
     }
 
+    /// **CAP-FS-001: the proposal's own filesystem example normalizes.**
+    ///
+    /// Parsing is step 1; this is step 2. The §5.3 example grants two
+    /// directories, so both must survive real normalization with their declared
+    /// and canonical forms recorded — a parse test alone cannot see a
+    /// `PathNotADirectory` refusal.
+    #[test]
+    fn proposal_fs_example_normalizes() {
+        let m = manifest_with(
+            "[[capabilities.fs]]\npath = \"/var/lib/orders\"\nmode = \"read-write\"\nquota = \"5GiB\"\n\
+             [[capabilities.fs]]\npath = \"/etc/orders\"\nmode = \"read-only\"\n",
+        );
+        let env = FakeEnv::default()
+            .with_dir("/var/lib/orders")
+            .with_dir("/etc/orders");
+        let n = Normalized::from_manifest(&m, &env).expect("the proposal example must normalize");
+        let mut canonical: Vec<&str> = n.fs.iter().map(|g| g.canonical_path.as_str()).collect();
+        canonical.sort_unstable();
+        assert_eq!(
+            canonical,
+            vec!["/etc/orders", "/var/lib/orders"],
+            "both directory grants must survive with canonical forms recorded"
+        );
+        assert!(n.fs_allows("/etc/orders/config.json", FsMode::ReadOnly));
+    }
+
     #[test]
     fn normalization_rejects_relative_filesystem_grants() {
         let m = manifest_with("[[capabilities.fs]]\npath = \"data\"\nmode = \"read-only\"\n");
@@ -1278,6 +1309,49 @@ mod tests {
             .expect_err("relative authority must not depend on the process CWD");
         assert!(matches!(err, NormalizeError::PathUnresolvable { .. }));
         assert!(err.to_string().contains("absolute"));
+    }
+
+    /// **CAP-FS-003: the same manifest grants identically from any directory.**
+    ///
+    /// Relative grants are rejected before any working-directory read, so the
+    /// outcome cannot depend on where the runtime was launched. This test moves
+    /// the process directory between two real temp dirs and demands the same
+    /// rejection from both — if normalization ever consulted the CWD, the two
+    /// runs could grant different directories.
+    ///
+    /// Process-directory mutation is process-global, so the directory is
+    /// restored even on panic, and every assertion below holds for *any*
+    /// directory value: the rejection never depends on what the CWD is, only
+    /// that a relative path was declared.
+    #[test]
+    fn relative_grants_are_rejected_identically_from_any_working_directory() {
+        struct RestoreCwd {
+            previous: std::path::PathBuf,
+        }
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.previous);
+            }
+        }
+        let previous = std::env::current_dir().expect("a working directory");
+        let _restore = RestoreCwd { previous };
+        let base = std::env::temp_dir().join("qqq-cwd-grant-proof");
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).expect("scratch dir");
+        std::fs::create_dir_all(&second).expect("scratch dir");
+        for dir in [&first, &second] {
+            std::env::set_current_dir(dir).expect("move process directory");
+            let m = manifest_with("[[capabilities.fs]]\npath = \"data\"\nmode = \"read-only\"\n");
+            let err = Normalized::from_manifest(&m, &RealEnv)
+                .expect_err("a relative grant must fail from every directory");
+            assert!(
+                matches!(err, NormalizeError::PathUnresolvable { .. }),
+                "got {err:?} from {}",
+                dir.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Canonicalization must defeat `..` traversal before the path reaches the

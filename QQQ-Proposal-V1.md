@@ -639,7 +639,7 @@ Three guest concurrency models exist and QQQ must state a policy for each. The d
 |---|---|---|
 | **Async single-threaded** | Component Model `async`, `future`, `stream` (WASI 0.3) | **Default and recommended.** One logical task per request; concurrency comes from many instances, not many threads inside one. |
 | **Cooperative threads** | Component Model cooperative threads (gated, 🧵) | **Not enabled in V1.** Tracked as `FUT-004`. Requires stack switching, which Wasmtime still lists as work-in-progress. |
-| **Shared-memory threads** | Wasm `threads` proposal (`SharedMemory`) | **Enabled but discouraged**, behind an explicit manifest opt-in (`[limits] shared_memory = true`). Rationale: shared linear memory is a large attack surface and defeats per-instance memory accounting. It exists for legitimately CPU-parallel workloads where the alternative is worse. |
+| **Shared-memory threads** | Wasm `threads` proposal (`SharedMemory`) | **Not enabled in V1.** No manifest field names it — `[limits]` has no `shared_memory` spelling and would reject one — because shared linear memory is a large attack surface and defeats per-instance memory accounting. Tracked as `FUT-004` alongside cooperative threads; enabling it needs the explicit manifest opt-in, the deterministic-mode rejection (`DET-012`), and the accounting model designed first, not a field added alone. |
 
 **Why the default is async-single-threaded:** it preserves the strongest isolation guarantee (one memory per task), keeps fuel accounting exact, and matches how request-scoped work actually looks. Density replaces threads.
 

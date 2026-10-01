@@ -73,7 +73,7 @@
 //! ```
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::audit::{AuditRecord, AuditStream};
@@ -275,6 +275,67 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
     })
 }
 
+/// How the bytes reach the OS: directly, or through a userspace buffer.
+///
+/// The variant is the difference between the durability modes that flush
+/// counts alone cannot show. A plain [`File`] hands every `write` to the OS
+/// immediately, so `flush` is a passthrough and "buffered" without a buffer
+/// would promise less while doing the same work. [`Durability::Buffered`]
+/// therefore writes through this buffer and flushes it only when full or at
+/// shutdown; the other modes write direct.
+#[derive(Debug)]
+enum FileWriter {
+    /// Every write reaches the OS at once; `flush` is a passthrough.
+    Direct(File),
+    /// Bytes accumulate in userspace until the buffer fills or flushes.
+    Buffered(BufWriter<File>),
+}
+
+impl Write for FileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(file) => file.write(buf),
+            Self::Buffered(buffered) => buffered.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(file) => file.flush(),
+            Self::Buffered(buffered) => buffered.flush(),
+        }
+    }
+}
+
+impl FileWriter {
+    /// Push userspace bytes to the OS without syncing the disk.
+    fn flush_out(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(file) => file.flush(),
+            Self::Buffered(buffered) => buffered.flush(),
+        }
+    }
+
+    /// Push bytes to the OS and wait until the disk holds them.
+    fn sync_out(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(file) => file.sync_all(),
+            Self::Buffered(buffered) => {
+                buffered.flush()?;
+                buffered.get_mut().sync_all()
+            }
+        }
+    }
+}
+
+/// Userspace bytes held back in [`Durability::Buffered`] mode.
+///
+/// Large enough to batch hundreds of records into one syscall, small enough
+/// to bound what a process crash can take with it — and the bound is stated
+/// here rather than discovered, because an unbounded buffer would convert the
+/// mode from "fewer syscalls" into "unbounded loss window".
+pub const BUFFERED_CAPACITY: usize = 64 * 1024;
+
 /// An open, append-only audit file.
 ///
 /// # Example
@@ -304,7 +365,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
 #[derive(Debug)]
 pub struct AuditFile {
     path: PathBuf,
-    file: File,
+    writer: FileWriter,
     /// How many records the file already holds.
     ///
     /// # Why the opener is TOLD this rather than counting it
@@ -360,9 +421,35 @@ impl AuditFile {
             })?;
         Ok(Self {
             path: path.to_path_buf(),
-            file,
+            writer: FileWriter::Direct(file),
             records: already,
         })
+    }
+
+    /// Reopen this handle with userspace buffering for [`Durability::Buffered`].
+    ///
+    /// Consuming rather than toggling, because a file that changed buffering
+    /// mid-run would make the flush counters lie about which bytes took which
+    /// path. The record count carries over untouched.
+    #[must_use]
+    pub fn into_buffered(self, capacity: usize) -> Self {
+        let Self {
+            path,
+            writer,
+            records,
+        } = self;
+        match writer {
+            FileWriter::Direct(file) => Self {
+                path,
+                writer: FileWriter::Buffered(BufWriter::with_capacity(capacity, file)),
+                records,
+            },
+            buffered @ FileWriter::Buffered(_) => Self {
+                path,
+                writer: buffered,
+                records,
+            },
+        }
     }
 
     /// Append one record and flush it.
@@ -408,11 +495,11 @@ impl AuditFile {
     /// let _ = std::fs::remove_dir_all(&dir);
     /// ```
     pub fn append(&mut self, record: &AuditRecord) -> Result<(), SinkError> {
-        writeln!(self.file, "{}", record.to_json()).map_err(|e| SinkError::Io {
+        writeln!(self.writer, "{}", record.to_json()).map_err(|e| SinkError::Io {
             path: self.path.clone(),
             reason: e.to_string(),
         })?;
-        self.file.flush().map_err(|e| SinkError::Io {
+        self.writer.flush().map_err(|e| SinkError::Io {
             path: self.path.clone(),
             reason: e.to_string(),
         })?;
@@ -420,6 +507,130 @@ impl AuditFile {
         // so the next attempt retries that record rather than skipping it -- an evidence file that
         // silently skips a row is worse than one that stops.
         self.records += 1;
+        Ok(())
+    }
+}
+
+/// What one [`AuditFile::append_batch`] pass did to the disk.
+///
+/// Returned so the worker's counters can distinguish "three records, one
+/// flush" from "three records, three flushes" — which is the entire
+/// observable difference between the durability modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchReport {
+    /// Records fully written.
+    pub records: usize,
+    /// `flush` calls issued.
+    pub flushes: u64,
+    /// `sync_all` calls issued.
+    pub fsyncs: u64,
+}
+
+/// A batch that stopped at `completed` records with this I/O error.
+///
+/// The file's own count already covers the completed prefix, so the caller
+/// knows exactly which suffix never reached the disk: no record is counted
+/// as persisted unless its line is complete.
+#[derive(Debug)]
+pub struct BatchFailure {
+    /// What the failed write reported.
+    pub error: SinkError,
+    /// Records fully written before the failure.
+    pub completed: usize,
+}
+
+impl AuditFile {
+    /// Append a batch of records in one disk pass, under a durability contract.
+    ///
+    /// The batch must arrive in sequence order — the worker guarantees it — so
+    /// the file keeps chain-linking and [`resume_or_start`] keeps verifying. The
+    /// count advances per completed line: a batch that fails midway reports how
+    /// far it got, and the unwritten tail belongs to the caller's failure
+    /// policy rather than to a retry that would re-write the completed prefix.
+    ///
+    /// # Errors
+    ///
+    /// [`BatchFailure`] carrying the [`SinkError::Io`] and the completed count.
+    pub fn append_batch(
+        &mut self,
+        batch: &[AuditRecord],
+        durability: Durability,
+    ) -> Result<BatchReport, BatchFailure> {
+        let io_error = |reason: String| SinkError::Io {
+            path: self.path.clone(),
+            reason,
+        };
+        let mut report = BatchReport {
+            records: 0,
+            flushes: 0,
+            fsyncs: 0,
+        };
+        for record in batch {
+            if let Err(error) = write_record_line(&mut self.writer, record) {
+                return Err(BatchFailure {
+                    error: io_error(error.to_string()),
+                    completed: report.records,
+                });
+            }
+            self.records += 1;
+            report.records += 1;
+            if durability == Durability::FlushPerRecord {
+                if let Err(error) = self.writer.flush_out() {
+                    return Err(BatchFailure {
+                        error: io_error(error.to_string()),
+                        completed: report.records,
+                    });
+                }
+                report.flushes += 1;
+            }
+        }
+        if durability != Durability::Buffered && durability != Durability::FlushPerRecord {
+            // Buffered mode never flushes mid-run; FlushPerRecord flushed
+            // every line above, so a trailing flush there would be a syscall
+            // that changes nothing. Only the batch modes flush here.
+            if let Err(error) = self.writer.flush_out() {
+                return Err(BatchFailure {
+                    error: io_error(error.to_string()),
+                    completed: report.records,
+                });
+            }
+            report.flushes += 1;
+        }
+        if durability == Durability::FsyncPerBatch {
+            if let Err(error) = self.writer.sync_out() {
+                return Err(BatchFailure {
+                    error: io_error(error.to_string()),
+                    completed: report.records,
+                });
+            }
+            report.fsyncs += 1;
+        }
+        Ok(report)
+    }
+
+    /// Bring the file to rest at shutdown: flush always, fsync per contract.
+    ///
+    /// Buffered mode waives crash-safety during the run, not at a clean exit —
+    /// a clean shutdown that left bytes in userspace would be a loss nobody
+    /// agreed to. `sync_all` stays exclusive to [`Durability::FsyncPerBatch`],
+    /// which is what that mode promises on every batch including the last.
+    ///
+    /// # Errors
+    ///
+    /// [`SinkError::Io`] when the final flush or sync fails.
+    pub fn flush_for_shutdown(&mut self, durability: Durability) -> Result<(), SinkError> {
+        let io_error = |reason: String| SinkError::Io {
+            path: self.path.clone(),
+            reason,
+        };
+        self.writer
+            .flush_out()
+            .map_err(|error| io_error(error.to_string()))?;
+        if durability == Durability::FsyncPerBatch {
+            self.writer
+                .sync_out()
+                .map_err(|error| io_error(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -548,6 +759,794 @@ pub fn resume_or_start(path: &Path, capacity: usize) -> Result<(AuditStream, Loa
     Ok((stream, loaded))
 }
 
+/// How durably one batch reaches the file before the worker takes more.
+///
+/// Stated as what survives what, because the previous wording promised
+/// distinctions a raw [`File`] cannot keep: every `write` already reaches the
+/// OS, so `flush` is a passthrough and only [`File::sync_all`] — or a real
+/// userspace buffer — changes the guarantee. Crash evidence is only evidence
+/// if it survives the crash, so the default is [`Durability::FlushPerRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Durability {
+    /// Rows accumulate in a [`BUFFERED_CAPACITY`] userspace buffer; a process
+    /// crash loses the tail, a clean shutdown loses nothing. Highest
+    /// throughput, weakest promise — for deployments that keep the stream as
+    /// the record and the file as a convenience copy.
+    Buffered,
+    /// Every record reaches the OS before the call returns: a process crash
+    /// loses nothing. An OS or power loss can still take the OS-buffered tail
+    /// — only `sync_all` bounds that, which is what the next mode buys.
+    #[default]
+    FlushPerRecord,
+    /// Write each batch, then flush and `sync_all` once per batch. Bounds OS
+    /// and power loss to the current batch, at one sync per batch.
+    FsyncPerBatch,
+}
+
+/// How many records may wait for the worker.
+///
+/// Large enough to absorb a burst of concurrent requests without stalling any
+/// of them — at a few hundred bytes per JSON line this bounds queued memory
+/// near 200 KiB — small enough that a wedged worker converts to visible
+/// backpressure quickly rather than after gigabytes of silent queue.
+pub const DEFAULT_APPEND_QUEUE_BOUND: usize = 1024;
+
+/// How many records one disk pass writes.
+///
+/// Batching amortizes the flush/fsync syscall, which is the whole point of the
+/// worker. Opportunistic, not timed: the worker writes whatever arrived, so a
+/// quiet server pays one pass per record exactly like the synchronous path did,
+/// and a busy one pays one pass per batch.
+pub const DEFAULT_APPEND_BATCH: usize = 64;
+
+/// Wiring for [`AuditAppender::spawn`].
+#[derive(Debug, Clone, Copy)]
+pub struct AppenderConfig {
+    /// Records that may wait for the worker; producers block past this.
+    pub queue_bound: usize,
+    /// Records per disk pass.
+    pub batch_size: usize,
+    /// The crash promise each batch keeps.
+    pub durability: Durability,
+    /// How long one request waits for its own rows to persist before
+    /// reporting the persist as failed. A tripwire, not a deadline: the
+    /// worker drains a bounded queue, so tens of seconds without progress
+    /// means it is dead, not slow.
+    pub persist_timeout: std::time::Duration,
+    /// Stall-skip tripwire documented on the worker; see [`append_loop`].
+    pub stall_timeout: std::time::Duration,
+}
+
+impl Default for AppenderConfig {
+    fn default() -> Self {
+        Self {
+            queue_bound: DEFAULT_APPEND_QUEUE_BOUND,
+            batch_size: DEFAULT_APPEND_BATCH,
+            durability: Durability::default(),
+            persist_timeout: std::time::Duration::from_secs(30),
+            stall_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// One item on the worker's queue.
+enum Work {
+    /// A row to persist, in the producer's sequence order.
+    Record(AuditRecord),
+    /// "Tell me when everything through this sequence is durable." The ack
+    /// carries the worker's persisted count after the barrier's batch, so the
+    /// request path keeps the synchronous path's promise — a returned request
+    /// has its evidence on disk — while sharing batches with concurrent
+    /// requests instead of flushing alone.
+    Barrier {
+        /// The highest sequence this barrier covers.
+        through: u64,
+        /// Where the worker reports.
+        ack: std::sync::mpsc::Sender<BarrierAck>,
+    },
+}
+
+/// What the worker reports across a barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarrierAck {
+    /// Records persisted when the barrier cleared.
+    pub persisted: u64,
+}
+
+/// Counters for one appender, readable while it runs.
+///
+/// Atomics, because producers read them without holding the worker's locks —
+/// and because a metric that needed the lock it measures would serialize the
+/// path it observes.
+#[derive(Debug, Default)]
+pub struct AppenderStats {
+    /// Records handed to the worker.
+    submitted: std::sync::atomic::AtomicU64,
+    /// Records written to the file.
+    persisted: std::sync::atomic::AtomicU64,
+    /// Disk passes completed.
+    batches: std::sync::atomic::AtomicU64,
+    /// `flush` calls issued across all batches.
+    flushes: std::sync::atomic::AtomicU64,
+    /// `sync_all` calls issued across all batches.
+    fsyncs: std::sync::atomic::AtomicU64,
+    /// Batches the worker refused after a write failure, with their records.
+    failed_batches: std::sync::atomic::AtomicU64,
+    /// Records never written because the worker had already failed.
+    unpersisted_after_failure: std::sync::atomic::AtomicU64,
+    /// Rows that arrived after the frontier skipped past them. Distinct from
+    /// `resent_skipped` (rows the file already holds) and from
+    /// `unpersisted_after_failure` (rows lost to a dead disk or dead
+    /// producer): these rows existed, arrived late, and fit nowhere, because
+    /// the file already wrote past their position. With the stall timeout tied
+    /// to the epoch deadline this counter stays zero — a nonzero value means a
+    /// guest outlived twice its preemption backstop, which is an engine
+    /// failure, not an audit failure — but a zero nobody reads is not a
+    /// tripwire, so the tests assert it.
+    late_after_skip: std::sync::atomic::AtomicU64,
+    /// Rows dropped as already persisted: at or below the file's initial
+    /// count (history resends), or below a frontier this worker already
+    /// wrote past. A resend is idempotent by counting, not by rewriting.
+    resent_skipped: std::sync::atomic::AtomicU64,
+}
+
+/// A point-in-time copy of [`AppenderStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppenderSnapshot {
+    /// Records handed to the worker.
+    pub submitted: u64,
+    /// Records written to the file.
+    pub persisted: u64,
+    /// Disk passes completed.
+    pub batches: u64,
+    /// `flush` calls issued across all batches.
+    pub flushes: u64,
+    /// `sync_all` calls issued across all batches.
+    pub fsyncs: u64,
+    /// Batches refused after a write failure.
+    pub failed_batches: u64,
+    /// Records never written because the worker had already failed.
+    pub unpersisted_after_failure: u64,
+    /// Rows that arrived after the frontier skipped past them. See the counter.
+    pub late_after_skip: u64,
+    /// Rows dropped as already persisted (history or rewrite resends).
+    pub resent_skipped: u64,
+}
+
+impl AppenderStats {
+    /// Read every counter without stopping the worker.
+    #[must_use]
+    pub fn snapshot(&self) -> AppenderSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        AppenderSnapshot {
+            submitted: self.submitted.load(Relaxed),
+            persisted: self.persisted.load(Relaxed),
+            batches: self.batches.load(Relaxed),
+            flushes: self.flushes.load(Relaxed),
+            fsyncs: self.fsyncs.load(Relaxed),
+            failed_batches: self.failed_batches.load(Relaxed),
+            unpersisted_after_failure: self.unpersisted_after_failure.load(Relaxed),
+            late_after_skip: self.late_after_skip.load(Relaxed),
+            resent_skipped: self.resent_skipped.load(Relaxed),
+        }
+    }
+}
+
+/// Why a record could not be handed to the audit worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppendError {
+    /// The worker thread is gone (it panicked, which is a bug, not a disk
+    /// condition). Fails fast rather than blocking forever on a queue nobody
+    /// drains — a hang here would convert a worker bug into a hung server.
+    WorkerGone,
+    /// The worker hit a write error and stopped; the record was not persisted.
+    /// Carries the underlying reason. The caller must treat this like any
+    /// persist failure: loudly, never as a silent skip.
+    WorkerFailed {
+        /// What the failed write reported.
+        reason: String,
+    },
+    /// The barrier covering this sequence never cleared in time. The bounded
+    /// queue drains in bounded time, so this means the worker is dead or the
+    /// disk is wedged — either way the caller must not assume persistence.
+    WorkerTimeout {
+        /// The highest sequence the barrier covered.
+        through: u64,
+    },
+}
+
+impl std::fmt::Display for AppendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerGone => write!(f, "the audit append worker is gone"),
+            Self::WorkerFailed { reason } => {
+                write!(f, "the audit append worker failed: {reason}")
+            }
+            Self::WorkerTimeout { through } => write!(
+                f,
+                "the audit append worker did not persist through sequence {through} in time"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AppendError {}
+
+/// What [`AuditAppender::shutdown`] found when the worker stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownReport {
+    /// The final counters.
+    pub stats: AppenderSnapshot,
+    /// True when every submitted record reached the file with no failure.
+    /// False means the report's `failed_batches` or
+    /// `unpersisted_after_failure` is nonzero — the caller must say so, not
+    /// round it to success.
+    pub drained_cleanly: bool,
+}
+
+/// The file's persist path: one bounded queue, one writing thread.
+///
+/// # Why a thread rather than a bigger lock
+///
+/// The synchronous path serialized every audit-enabled request on the file
+/// mutex and paid a flush per record on the request's own thread, so a slow
+/// disk became slow requests and the persisted-index scan re-read the stream
+/// per request. The worker inverts that: producers hand off a record with one
+/// blocking send and go back to serving, and a single thread owns the only
+/// file offset — which is also what makes the persisted count O(1) instead of
+/// a scan.
+///
+/// # Why the queue blocks instead of dropping
+///
+/// An audit record that is dropped is a hole in the evidence that looks
+/// exactly like a request that never happened. Backpressure converts "the disk
+/// cannot keep up" into slow requests rather than false history; the bound
+/// keeps that slowness from becoming unbounded memory. A caller that needs a
+/// different tradeoff changes the bound explicitly, in the config, where the
+/// choice is visible.
+///
+/// # Why rows leave in sequence order
+///
+/// [`resume_or_start`] refuses a file whose rows do not chain-link, so file
+/// order is load-bearing across restarts. Concurrent producers hand records
+/// in arrival order, which is not sequence order, so the worker holds a
+/// reorder buffer keyed by sequence and writes only the contiguous run. Gaps
+/// from ambient rows are expected, not exceptional: a request records rows
+/// during its guest call and sends them only when it reaches its own persist,
+/// so a slow request's rows trail the frontier while faster requests flow
+/// past. The worker waits those gaps out; the stall timeout — tied to the
+/// epoch deadline at attach, since guest execution is what bounds the wait —
+/// covers only the producer that died between recording and sending. A gap
+/// at shutdown means exactly that death, which the report surfaces rather
+/// than papers
+/// over.
+///
+/// # Why the worker stops on a write error instead of retrying
+///
+/// A failed disk write is near-certainly persistent (full disk, revoked
+/// permission), and retrying it burns request threads on a condition that will
+/// not clear. One attempt, then the failed state: queued work is counted as
+/// unpersisted, later appends fail fast with the reason, and nothing is
+/// silently skipped.
+#[derive(Debug)]
+pub struct AuditAppender {
+    tx: Option<std::sync::mpsc::SyncSender<Work>>,
+    stats: std::sync::Arc<AppenderStats>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    config: AppenderConfig,
+}
+
+impl AuditAppender {
+    /// Start the worker on an open file.
+    ///
+    /// The file keeps its own record count; the worker's persisted count starts
+    /// there, so a resumed file and a fresh stream agree on what "already held"
+    /// means without a second counter that could drift.
+    ///
+    /// # Panics
+    ///
+    /// When the worker thread cannot be spawned, which means the host cannot
+    /// create threads — a broken process, not a full disk. The `expect` names
+    /// it so the panic message states the condition instead of unwrapping
+    /// silently.
+    #[must_use]
+    pub fn spawn(mut file: AuditFile, config: AppenderConfig) -> Self {
+        if config.durability == Durability::Buffered {
+            file = file.into_buffered(BUFFERED_CAPACITY);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(config.queue_bound.max(1));
+        let stats = std::sync::Arc::new(AppenderStats::default());
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stats = std::sync::Arc::clone(&stats);
+        let worker_failed = std::sync::Arc::clone(&failed);
+        let worker = std::thread::Builder::new()
+            .name("qqq-audit-append".to_owned())
+            .spawn(move || {
+                append_loop(&rx, &mut file, &worker_stats, &worker_failed, &config);
+            })
+            .expect("audit append worker must spawn");
+        Self {
+            tx: Some(tx),
+            stats,
+            worker: Some(worker),
+            failed,
+            config,
+        }
+    }
+
+    /// Hand one record to the worker, waiting if the queue is full.
+    ///
+    /// Blocking is the backpressure policy: the alternative is a dropped
+    /// evidence row. Fails only when the worker is gone — panicked (a bug) or
+    /// stopped after a write error — and then fails fast with the reason
+    /// rather than hanging on a queue nobody drains.
+    ///
+    /// # Errors
+    ///
+    /// [`AppendError::WorkerGone`] when the worker thread died;
+    /// [`AppendError::WorkerFailed`] when it stopped on a write error.
+    pub fn append(&self, record: &AuditRecord) -> Result<(), AppendError> {
+        if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AppendError::WorkerFailed {
+                reason: "a previous batch failed to write".to_owned(),
+            });
+        }
+        match &self.tx {
+            Some(tx) => tx
+                .send(Work::Record(record.clone()))
+                .map_err(|_| AppendError::WorkerGone),
+            None => Err(AppendError::WorkerGone),
+        }
+    }
+
+    /// Persist these rows and wait until they are durable, then report.
+    ///
+    /// The rows travel like [`AuditAppender::append`], then a barrier asks the
+    /// worker to confirm everything through the highest sequence. The wait is
+    /// what keeps the synchronous path's promise — a returned request has its
+    /// evidence on disk — while the shared worker still batches concurrent
+    /// requests into fewer disk passes than one flush per request each.
+    ///
+    /// # Errors
+    ///
+    /// [`AppendError`] when the worker is gone or failed, or when `timeout`
+    /// expires first — a bounded queue drains in bounded time, so tens of
+    /// seconds without progress means the worker is dead, not slow.
+    pub fn persist(
+        &self,
+        records: &[AuditRecord],
+        timeout: std::time::Duration,
+    ) -> Result<BarrierAck, AppendError> {
+        let through = records.iter().map(|record| record.sequence).max();
+        for record in records {
+            self.append(record)?;
+        }
+        let Some(through) = through else {
+            return Ok(BarrierAck {
+                persisted: self
+                    .stats
+                    .persisted
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            });
+        };
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        match &self.tx {
+            Some(tx) => tx
+                .send(Work::Barrier {
+                    through,
+                    ack: ack_tx,
+                })
+                .map_err(|_| AppendError::WorkerGone)?,
+            None => return Err(AppendError::WorkerGone),
+        }
+        ack_rx
+            .recv_timeout(timeout)
+            .map_err(|_| AppendError::WorkerTimeout { through })
+    }
+
+    /// Read the worker's counters without stopping it.
+    #[must_use]
+    pub fn stats(&self) -> AppenderSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// The wiring this appender was spawned with, for tests and diagnostics.
+    ///
+    /// Exposed rather than asserted through behaviour because the stall and
+    /// persist tripwires are configuration: a test that the attach path
+    /// derives them from the epoch deadline needs the values, not a 60-second
+    /// timing run.
+    #[must_use]
+    pub fn config(&self) -> AppenderConfig {
+        self.config
+    }
+
+    /// Stop the worker after it persists everything queued, and report.
+    ///
+    /// The close-then-join order is the whole guarantee: closing wakes the
+    /// worker's blocking receive, and joining waits out the drain, so when this
+    /// returns every submitted record is either in the file or counted in the
+    /// report as unpersisted. A clean report has `persisted == submitted`.
+    #[must_use]
+    pub fn shutdown(mut self) -> ShutdownReport {
+        drop(self.tx.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let stats = self.stats.snapshot();
+        ShutdownReport {
+            drained_cleanly: stats.failed_batches == 0
+                && stats.unpersisted_after_failure == 0
+                && stats.persisted == stats.submitted,
+            stats,
+        }
+    }
+}
+
+impl Drop for AuditAppender {
+    /// Best-effort drain on the way out: close the queue so the worker's
+    /// blocking receive wakes, then wait out the drain. A server that exits
+    /// with queued evidence loses it, and a best-effort join is strictly more
+    /// evidence than a detached thread nobody waited for.
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// The worker: reorder by sequence, write contiguous runs in batches.
+///
+/// See [`AuditAppender`] for why each of those clauses exists. The loop ends
+/// when every sender is gone and the queue is empty; on a write error it
+/// records the failure, counts the unwritten remainder as unpersisted, and
+/// returns — later appends fail fast on the shared flag.
+fn append_loop(
+    rx: &std::sync::mpsc::Receiver<Work>,
+    file: &mut AuditFile,
+    stats: &AppenderStats,
+    failed: &std::sync::atomic::AtomicBool,
+    config: &AppenderConfig,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let batch_size = config.batch_size.max(1);
+    let mut worker = WorkerState {
+        pending: std::collections::BTreeMap::new(),
+        // Anchored to the file, never to the lowest row seen: anchoring to
+        // seen data lets one early high row strand every lower row that
+        // arrives after it — stranded rows the file can never take, which is
+        // silent evidence loss wearing a clean shutdown report.
+        next: Some(file.records() as u64 + 1),
+        batch: Vec::with_capacity(batch_size),
+        barriers: Vec::new(),
+        base: file.records() as u64,
+        written: file.records() as u64 + 1,
+        stalled_since: None,
+    };
+    loop {
+        let Ok(first) = rx.recv() else {
+            break;
+        };
+        sort_work(first, &mut worker, stats);
+        while let Ok(work) = rx.try_recv() {
+            sort_work(work, &mut worker, stats);
+            if worker.pending.len() >= batch_size.saturating_mul(2).max(1) {
+                break;
+            }
+        }
+        match write_frontier(
+            file,
+            &mut worker.pending,
+            worker.next,
+            &mut worker.batch,
+            stats,
+            config.durability,
+        ) {
+            FrontierOutcome::Wrote(cursor) => {
+                worker.next = Some(cursor);
+                worker.written = cursor;
+                worker.stalled_since = None;
+                clear_barriers(&mut worker.barriers, cursor, stats.persisted.load(Relaxed));
+            }
+            FrontierOutcome::GapAt(_) => {
+                // A resend lands entirely behind the frontier — every sequence
+                // already written — so no write happens and its barrier would
+                // wait forever without this. Clearing against the standing
+                // frontier answers it immediately; a barrier past the frontier
+                // stays queued until its records arrive.
+                if let Some(frontier) = worker.next {
+                    clear_barriers(
+                        &mut worker.barriers,
+                        frontier,
+                        stats.persisted.load(Relaxed),
+                    );
+                }
+                // A gap that outlives the stall timeout is a dead producer,
+                // not a slow one: skip the missing sequence loudly and let the
+                // frontier move on, or one death wedges every later row and
+                // every live barrier behind it.
+                let stalled = *worker
+                    .stalled_since
+                    .get_or_insert_with(std::time::Instant::now);
+                if stalled.elapsed() >= config.stall_timeout {
+                    if let Some(frontier) = worker.next {
+                        stats.unpersisted_after_failure.fetch_add(1, Relaxed);
+                        eprintln!(
+                            "error: audit sequence {frontier} never arrived; \
+                             skipping it as orphaned rather than wedging the log"
+                        );
+                        worker.next = Some(frontier + 1);
+                    }
+                    worker.stalled_since = None;
+                }
+            }
+            FrontierOutcome::Failed(failure) => {
+                fail_worker(
+                    stats,
+                    failed,
+                    worker.pending.len(),
+                    worker.batch.len(),
+                    &failure,
+                );
+                return;
+            }
+        }
+    }
+    drain_remaining(rx, file, &mut worker, stats, failed, config.durability);
+}
+
+/// The worker's mutable state, bundled so the loop and the drain pass one
+/// value rather than four parallel arguments that must stay in step.
+struct WorkerState {
+    /// Records received but not yet written, keyed by sequence.
+    pending: std::collections::BTreeMap<u64, AuditRecord>,
+    /// The next sequence the file needs. Anchored at spawn to one past the
+    /// file's own count — never to the lowest sequence seen — because
+    /// anchoring to seen data lets an early high row strand every lower row
+    /// that arrives after it, permanently and silently. `None` only until the
+    /// anchor is read, which happens before the first pull.
+    next: Option<u64>,
+    /// The next sequence never yet written. `next` moves past skipped rows;
+    /// this one moves only across actual writes, so a row arriving between
+    /// the two is recognized as skipped-past (lost, counted loudly) rather
+    /// than mistaken for a harmless duplicate of filed history.
+    written: u64,
+    /// Scratch space for one disk pass, reused across batches.
+    batch: Vec<AuditRecord>,
+    /// Barriers waiting for the frontier to pass the sequence they cover.
+    barriers: Vec<(u64, std::sync::mpsc::Sender<BarrierAck>)>,
+    /// The file's record count at spawn. Rows at or below it are history the
+    /// file already holds; resends of them are skipped, not rewritten.
+    base: u64,
+    /// When the current frontier gap started; a gap that outlives
+    /// `stall_timeout` is a dead producer, not a slow one.
+    stalled_since: Option<std::time::Instant>,
+}
+
+/// Sort one queue item into the reorder buffer or the barrier list.
+///
+/// Rows at or below the file's spawn-time count, or below a frontier this
+/// worker already wrote past, are history or duplicates: they are counted as
+/// skipped resends rather than buffered, because buffering them would either
+/// rewrite the file's history or strand them below the frontier forever —
+/// the exact loss this worker exists to prevent.
+///
+/// Extracted so [`append_loop`] stays under the line limit; the hot loop and
+/// the shutdown drain share it, because two copies of "what a message means"
+/// would eventually disagree about one of them.
+fn sort_work(work: Work, worker: &mut WorkerState, stats: &AppenderStats) {
+    use std::sync::atomic::Ordering::Relaxed;
+    match work {
+        Work::Record(record) => {
+            // Below the written frontier the file already holds the row: a
+            // harmless duplicate. Between the written frontier and the expect
+            // frontier the row was skipped as orphaned and later arrived
+            // anyway — a distinct, loud loss, never a quiet resend — because
+            // with the stall timeout tied to the epoch deadline, arriving
+            // that late means the guest outlived its preemption backstop.
+            if record.sequence < worker.written {
+                stats.resent_skipped.fetch_add(1, Relaxed);
+            } else if record.sequence < worker.next.unwrap_or(worker.base + 1) {
+                stats.late_after_skip.fetch_add(1, Relaxed);
+                eprintln!(
+                    "error: audit sequence {} arrived after the frontier skipped past it; \
+                     the row fits nowhere and is lost",
+                    record.sequence
+                );
+            } else {
+                stats.submitted.fetch_add(1, Relaxed);
+                worker.pending.insert(record.sequence, record);
+            }
+        }
+        Work::Barrier { through, ack } => worker.barriers.push((through, ack)),
+    }
+}
+
+/// Answer every barrier the frontier has passed: the persisted count is
+/// the proof, and a barrier answered is a request unblocked. "Passed"
+/// includes a frontier that started past the barrier on a resumed file —
+/// those rows are the file's history, written before this worker existed.
+fn clear_barriers(
+    barriers: &mut Vec<(u64, std::sync::mpsc::Sender<BarrierAck>)>,
+    frontier: u64,
+    persisted: u64,
+) {
+    let mut waiting = Vec::new();
+    std::mem::swap(&mut waiting, barriers);
+    for (through, ack) in waiting {
+        if through < frontier {
+            let _ = ack.send(BarrierAck { persisted });
+        } else {
+            barriers.push((through, ack));
+        }
+    }
+}
+
+/// Record a write failure and stop the worker.
+///
+/// Only the unwritten suffix counts as lost: the completed prefix is in the
+/// file and the file's own count covers it. Shared by the hot loop and the
+/// shutdown drain so both report the same numbers for the same condition.
+fn fail_worker(
+    stats: &AppenderStats,
+    failed: &std::sync::atomic::AtomicBool,
+    pending_len: usize,
+    batch_len: usize,
+    failure: &BatchFailure,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let lost = pending_len + batch_len.saturating_sub(failure.completed);
+    stats.failed_batches.fetch_add(1, Relaxed);
+    stats
+        .unpersisted_after_failure
+        .fetch_add(lost as u64, Relaxed);
+    failed.store(true, Relaxed);
+    eprintln!(
+        "error: the audit append worker failed to write: {}; {lost} records not persisted",
+        failure.error
+    );
+}
+
+/// Write the contiguous remainder after every sender is gone, then stop.
+///
+/// A gap here means a producer died mid-handoff — counted as unpersisted and
+/// reported, never silently reordered past, because the file must
+/// chain-link for [`resume_or_start`].
+fn drain_remaining(
+    rx: &std::sync::mpsc::Receiver<Work>,
+    file: &mut AuditFile,
+    state: &mut WorkerState,
+    counters: &AppenderStats,
+    failed: &std::sync::atomic::AtomicBool,
+    durability: Durability,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    loop {
+        while let Ok(work) = rx.try_recv() {
+            sort_work(work, state, counters);
+        }
+        if state.pending.is_empty() {
+            break;
+        }
+        match write_frontier(
+            file,
+            &mut state.pending,
+            state.next,
+            &mut state.batch,
+            counters,
+            durability,
+        ) {
+            FrontierOutcome::Wrote(cursor) => {
+                state.next = Some(cursor);
+                state.written = cursor;
+                clear_barriers(
+                    &mut state.barriers,
+                    cursor,
+                    counters.persisted.load(Relaxed),
+                );
+            }
+            FrontierOutcome::GapAt(sequence) => {
+                // Shutdown cannot wait the gap out — no sender remains to fill
+                // it — so the missing sequence is skipped loudly, one at a
+                // time, and the loop continues past it. Clearing the whole
+                // buffer here would drop valid later rows along with the one
+                // that never arrived.
+                counters.unpersisted_after_failure.fetch_add(1, Relaxed);
+                eprintln!(
+                    "error: audit sequence {sequence} never arrived; \
+                     skipping it as orphaned"
+                );
+                state.next = Some(sequence + 1);
+            }
+            FrontierOutcome::Failed(failure) => {
+                fail_worker(
+                    counters,
+                    failed,
+                    state.pending.len(),
+                    state.batch.len(),
+                    &failure,
+                );
+                return;
+            }
+        }
+    }
+    // Shutdown answers stragglers best-effort: every sender is gone, so no
+    // waiter can arrive after this, and a waiter from before gets the final
+    // persisted count rather than hanging on a queue that will never move.
+    // A straggler ack is honest about what it is — the count, not a promise —
+    // and the shutdown report carries the same numbers for the caller that
+    // joined.
+    let final_persisted = counters.persisted.load(Relaxed);
+    for (_, ack) in std::mem::take(&mut state.barriers) {
+        let _ = ack.send(BarrierAck {
+            persisted: final_persisted,
+        });
+    }
+    let _ = file.flush_for_shutdown(durability);
+}
+
+/// What one frontier write attempt found.
+enum FrontierOutcome {
+    /// A contiguous run reached `cursor` (exclusive); the frontier advances.
+    Wrote(u64),
+    /// Nothing at the frontier sequence: a producer died mid-handoff.
+    GapAt(u64),
+    /// The disk refused; carries what failed and how far the batch got, so the
+    /// caller counts exactly the unwritten suffix as unpersisted.
+    Failed(BatchFailure),
+}
+
+/// Write the contiguous run at the frontier, up to one batch.
+///
+/// Shared by the hot loop and the shutdown drain so both agree on what
+/// "write" means: contiguous runs only, in sequence order, counted exactly
+/// once. Returns the advanced cursor, the gap sequence, or the write error.
+fn write_frontier(
+    file: &mut AuditFile,
+    pending: &mut std::collections::BTreeMap<u64, AuditRecord>,
+    next: Option<u64>,
+    batch: &mut Vec<AuditRecord>,
+    stats: &AppenderStats,
+    durability: Durability,
+) -> FrontierOutcome {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(frontier) = next else {
+        return FrontierOutcome::GapAt(0);
+    };
+    batch.clear();
+    let mut cursor = frontier;
+    while let Some(record) = pending.remove(&cursor) {
+        batch.push(record);
+        cursor += 1;
+        if batch.len() >= batch.capacity().max(1) {
+            break;
+        }
+    }
+    if batch.is_empty() {
+        return FrontierOutcome::GapAt(frontier);
+    }
+    match file.append_batch(batch, durability) {
+        Ok(report) => {
+            stats.persisted.fetch_add(report.records as u64, Relaxed);
+            stats.batches.fetch_add(1, Relaxed);
+            stats.flushes.fetch_add(report.flushes, Relaxed);
+            stats.fsyncs.fetch_add(report.fsyncs, Relaxed);
+            FrontierOutcome::Wrote(cursor)
+        }
+        Err(failure) => FrontierOutcome::Failed(failure),
+    }
+}
+
+/// Write one record line; the unit `append_batch` shares with [`AuditFile`].
+fn write_record_line(
+    writer: &mut impl std::io::Write,
+    record: &AuditRecord,
+) -> std::io::Result<()> {
+    writeln!(writer, "{}", record.to_json())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,8 +1623,433 @@ mod tests {
         );
     }
 
-    /// **A restarted process continues the chain rather than starting a new one — `OBS-002`.**
+    /// Build `count` chain-linked records across tenants round-robin, the way
+    /// concurrent requests would record them into one shared stream.
+    fn chained_records(count: usize, tenants: &[&str]) -> Vec<crate::audit::AuditRecord> {
+        use qqq_cap::egress::TenantId;
+        let component = ComponentDigest::new("0011223344556677").expect("digest");
+        let grants = GrantDigest::new("aabbccdd").expect("digest");
+        let ids: Vec<TenantId> = tenants
+            .iter()
+            .map(|name| TenantId::new(name).expect("test tenant"))
+            .collect();
+        let mut stream = AuditStream::with_default_capacity();
+        for i in 0..count {
+            let id = &ids[i % ids.len()];
+            let _ = stream.record(
+                Some(id),
+                &component,
+                &grants,
+                Capability::FsRead,
+                "handle_request",
+                Outcome::Granted,
+            );
+        }
+        assert_eq!(
+            stream.records().len(),
+            count,
+            "the fixture must hold every record it claims"
+        );
+        stream.records().to_vec()
+    }
+
+    /// Read every sequence number from a JSONL file, in file order.
+    fn file_sequences(path: &std::path::Path) -> Vec<u64> {
+        let text = std::fs::read_to_string(path).expect("read file");
+        text.lines()
+            .map(|line| {
+                let start = line.find("\"sequence\":").expect("a sequence field") + 11;
+                let end = line[start..]
+                    .find(',')
+                    .expect("a terminator after the sequence");
+                line[start..start + end]
+                    .parse()
+                    .expect("a numeric sequence")
+            })
+            .collect()
+    }
+
+    /// **PERF-AUDIT-001: concurrent producers land in sequence order, exactly once.**
     ///
+    /// Eight threads submit disjoint slices of one chained record set through
+    /// a queue bound of sixteen — far smaller than the record count, so the
+    /// queue is full most of the run and every send exercises backpressure. The
+    /// file must hold every sequence exactly once, in order, and the resumed
+    /// chain must verify: arrival order is not sequence order, so anything but
+    /// the reorder buffer fails this.
+    #[test]
+    fn concurrent_producers_land_in_sequence_order_exactly_once() {
+        use std::sync::Arc;
+        const COUNT: usize = 400;
+        let scratch = Scratch::new("ordered-contention");
+        let path = scratch.file();
+        let records = Arc::new(chained_records(COUNT, &["acme", "globex"]));
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(
+            file,
+            AppenderConfig {
+                queue_bound: 16,
+                batch_size: 32,
+                durability: Durability::Buffered,
+                ..AppenderConfig::default()
+            },
+        );
+
+        let mut handles = Vec::new();
+        let shared = std::sync::Arc::new(appender);
+        for worker in 0..8 {
+            let records = Arc::clone(&records);
+            let appender = std::sync::Arc::clone(&shared);
+            handles.push(std::thread::spawn(move || {
+                for record in records.iter().skip(worker).step_by(8) {
+                    appender
+                        .append(record)
+                        .expect("a live worker takes every record");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("producer must not panic");
+        }
+        let appender = std::sync::Arc::try_unwrap(shared).expect("all producers joined");
+        let report = appender.shutdown();
+        assert!(
+            report.drained_cleanly,
+            "a clean run must drain cleanly: {:?}",
+            report.stats
+        );
+        assert_eq!(report.stats.submitted, COUNT as u64);
+        assert_eq!(report.stats.persisted, COUNT as u64);
+        assert_eq!(
+            report.stats.late_after_skip, 0,
+            "no row may arrive after a skip on a healthy run"
+        );
+
+        let sequences = file_sequences(&path);
+        let expected: Vec<u64> = (1..=COUNT as u64).collect();
+        assert_eq!(
+            sequences, expected,
+            "the file must hold every sequence exactly once, in order"
+        );
+        let (_stream, loaded) = resume_or_start(&path, 65_536).expect("resume");
+        assert_eq!(
+            loaded.records.len(),
+            COUNT,
+            "the resumed history is complete"
+        );
+    }
+
+    /// **The queue blocks under pressure instead of dropping.**
+    ///
+    /// The contention test above already proves no record is lost with a tiny
+    /// bound; this one names the mechanism. A rendezvous queue (bound zero
+    /// normalizes to one slot) forces every send to meet the worker, and the
+    /// run still reconciles exactly — a dropping implementation cannot pass a
+    /// test whose queue never holds more than one record while eight threads
+    /// submit.
+    #[test]
+    fn a_full_queue_blocks_instead_of_dropping() {
+        use std::sync::Arc;
+        const COUNT: usize = 160;
+        let scratch = Scratch::new("rendezvous");
+        let path = scratch.file();
+        let records = Arc::new(chained_records(COUNT, &["acme"]));
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(
+            file,
+            AppenderConfig {
+                queue_bound: 0,
+                batch_size: 64,
+                durability: Durability::Buffered,
+                ..AppenderConfig::default()
+            },
+        );
+        let mut handles = Vec::new();
+        let shared = std::sync::Arc::new(appender);
+        for worker in 0..8 {
+            let records = Arc::clone(&records);
+            let appender = std::sync::Arc::clone(&shared);
+            handles.push(std::thread::spawn(move || {
+                for record in records.iter().skip(worker).step_by(8) {
+                    appender.append(record).expect("rendezvous still delivers");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("producer must not panic");
+        }
+        let appender = std::sync::Arc::try_unwrap(shared).expect("all producers joined");
+        let report = appender.shutdown();
+        assert!(report.drained_cleanly, "{:?}", report.stats);
+        assert_eq!(file_sequences(&path).len(), COUNT);
+    }
+
+    /// **Every durability mode persists identical content, with its own flush profile.**
+    ///
+    /// The modes differ only in crash promise, never in content: the same
+    /// records through three appenders must produce byte-identical files. The
+    /// stats prove the mechanism behind each promise — per-record flushes for
+    /// [`Durability::FlushPerRecord`], one sync per batch for
+    /// [`Durability::FsyncPerBatch`], and no flush at all before shutdown for
+    /// [`Durability::Buffered`].
+    #[test]
+    fn durability_modes_persist_identical_content() {
+        let records = chained_records(200, &["acme", "globex"]);
+        let mut bytes = Vec::new();
+        let mut profiles = Vec::new();
+        for (tag, durability) in [
+            ("buffered", Durability::Buffered),
+            ("flush", Durability::FlushPerRecord),
+            ("fsync", Durability::FsyncPerBatch),
+        ] {
+            let scratch = Scratch::new(tag);
+            let path = scratch.file();
+            let file = AuditFile::open(&path, 0).expect("open");
+            let appender = AuditAppender::spawn(
+                file,
+                AppenderConfig {
+                    queue_bound: 1024,
+                    batch_size: 32,
+                    durability,
+                    ..AppenderConfig::default()
+                },
+            );
+            for record in &records {
+                appender.append(record).expect("append");
+            }
+            let report = appender.shutdown();
+            assert!(report.drained_cleanly, "{tag}: {report:?}");
+            bytes.push(std::fs::read(&path).expect("read file"));
+            profiles.push((tag, report.stats));
+        }
+        assert_eq!(bytes[0], bytes[1], "buffered and flush-per-record agree");
+        assert_eq!(bytes[1], bytes[2], "flush-per-record and fsync agree");
+        let flush_stats: Vec<u64> = profiles.iter().map(|(_, s)| s.flushes).collect();
+        assert_eq!(
+            flush_stats[1], 200,
+            "flush-per-record must flush per record, got {}",
+            flush_stats[1]
+        );
+        assert_eq!(
+            flush_stats[0], 0,
+            "buffered must not flush before shutdown, got {}",
+            flush_stats[0]
+        );
+        assert!(
+            profiles[2].1.fsyncs >= 1,
+            "fsync-per-batch must sync, got {:?}",
+            profiles[2].1
+        );
+        assert_eq!(
+            profiles[2].1.flushes, profiles[2].1.fsyncs,
+            "each fsync batch flushes once: {:?}",
+            profiles[2].1
+        );
+    }
+
+    /// **A permanently missing sequence is skipped loudly, not wedged on.**
+    ///
+    /// Records 1, 2, 4, and 5 arrive with 3 never sent — the dead-producer
+    /// shape. The worker must not wait forever (which would wedge every later
+    /// row and every live barrier), and must not silently close the gap
+    /// either: sequence 3 is counted as unpersisted, named on stderr, and the
+    /// file holds 1, 2, 4, 5 in order. The 50 ms stall timeout keeps the test
+    /// fast; production uses seconds, which is why this asserts the mechanism
+    /// rather than the duration.
+    #[test]
+    fn a_permanently_missing_sequence_is_skipped_loudly() {
+        let scratch = Scratch::new("stall-skip");
+        let path = scratch.file();
+        let records = chained_records(5, &["acme"]);
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(
+            file,
+            AppenderConfig {
+                stall_timeout: std::time::Duration::from_millis(50),
+                ..AppenderConfig::default()
+            },
+        );
+        for record in records.iter().filter(|record| record.sequence != 3) {
+            appender.append(record).expect("append");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let report = appender.shutdown();
+        assert!(
+            !report.drained_cleanly,
+            "a skipped row is not a clean drain"
+        );
+        assert_eq!(report.stats.persisted, 4);
+        assert_eq!(
+            report.stats.unpersisted_after_failure, 1,
+            "exactly the missing sequence is counted: {:?}",
+            report.stats
+        );
+        assert_eq!(file_sequences(&path), vec![1, 2, 4, 5]);
+    }
+
+    /// **Buffered mode really buffers: the disk stays empty until shutdown.**
+    ///
+    /// Flush counts alone cannot prove the modes differ — on a raw file,
+    /// `flush` is a passthrough and every mode would behave identically while
+    /// reporting different numbers. This test goes through `spawn`, like
+    /// production does, so the wiring that selects the buffered file is
+    /// covered too: four records handed off and drained still leave nothing
+    /// on disk (bytes sit in userspace), and only the shutdown flush
+    /// delivers them. A regression that removed the buffer — or the spawn
+    /// conversion that installs it — fails here while all flush counts stay
+    /// green.
+    #[test]
+    fn buffered_mode_holds_bytes_in_userspace_until_shutdown() {
+        let scratch = Scratch::new("buffered-holds");
+        let path = scratch.file();
+        let records = chained_records(4, &["acme"]);
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(
+            file,
+            AppenderConfig {
+                durability: Durability::Buffered,
+                ..AppenderConfig::default()
+            },
+        );
+        for record in &records {
+            appender.append(record).expect("append");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let on_disk = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            on_disk.is_empty(),
+            "buffered bytes must not reach the disk yet: {on_disk:?}"
+        );
+        let report = appender.shutdown();
+        assert!(report.drained_cleanly, "{:?}", report.stats);
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .lines()
+                .count(),
+            4,
+            "shutdown delivers what the run held back"
+        );
+    }
+
+    /// **Dropping the appender drains before returning.**    ///
+    /// Servers exit through destructors, not through explicit shutdown calls —
+    /// a `Drop` that detached the worker would lose the queued tail. This test
+    /// never calls `shutdown`: the file must still hold every record, because
+    /// the close-then-join order in `Drop` waits out the drain.
+    #[test]
+    fn dropping_the_appender_drains_before_return() {
+        const COUNT: usize = 120;
+        let scratch = Scratch::new("drop-drain");
+        let path = scratch.file();
+        let records = chained_records(COUNT, &["acme"]);
+        {
+            let file = AuditFile::open(&path, 0).expect("open");
+            let appender = AuditAppender::spawn(file, AppenderConfig::default());
+            for record in &records {
+                appender.append(record).expect("append");
+            }
+        }
+        assert_eq!(
+            file_sequences(&path).len(),
+            COUNT,
+            "the drop must have waited out the drain"
+        );
+    }
+
+    /// **A failing writer fails the batch with an exact count, not a guess.**
+    ///
+    /// The worker's failure accounting trusts the completed count, so the
+    /// count itself is pinned here: a writer that dies after two lines reports
+    /// exactly two, and the file holds exactly those two.
+    #[test]
+    fn a_failing_writer_reports_how_far_the_batch_got() {
+        struct FailAfter {
+            remaining: usize,
+        }
+        impl std::io::Write for FailAfter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(std::io::Error::other("injected failure"));
+                }
+                let n = buf.len().min(self.remaining);
+                self.remaining -= n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let records = chained_records(4, &["acme"]);
+        let first_two = records[0].to_json().len() + 1 + records[1].to_json().len() + 1;
+        let mut writer = FailAfter {
+            remaining: first_two,
+        };
+        let mut written = 0;
+        for record in &records {
+            match write_record_line(&mut writer, record) {
+                Ok(()) => written += 1,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(written, 2, "exactly two lines fit before the failure");
+    }
+
+    /// **Throughput by mode, printed as measurements — `PERF-AUDIT-001`.**
+    ///
+    /// Twenty thousand records through the synchronous primitive and through
+    /// each worker mode, timed and printed. The assertions are functional only
+    /// (every record persisted, clean drain): the numbers are evidence for the
+    /// observation, not a budget, and they are not asserted because asserting
+    /// them would turn a measurement into a claim about every machine.
+    #[test]
+    fn audit_append_throughput_by_mode() {
+        const COUNT: usize = 20_000;
+        let records = chained_records(COUNT, &["acme", "globex", "initech"]);
+        let scratch = Scratch::new("throughput-direct");
+        let direct_path = scratch.file();
+        let started = std::time::Instant::now();
+        {
+            let mut file = AuditFile::open(&direct_path, 0).expect("open");
+            for record in &records {
+                file.append(record).expect("append");
+            }
+        }
+        let direct_ms = started.elapsed().as_millis();
+        println!("direct sync append (flush per record): {COUNT} records in {direct_ms} ms");
+        for (tag, durability) in [
+            ("buffered", Durability::Buffered),
+            ("flush-per-record", Durability::FlushPerRecord),
+            ("fsync-per-batch", Durability::FsyncPerBatch),
+        ] {
+            let scratch = Scratch::new(tag);
+            let path = scratch.file();
+            let file = AuditFile::open(&path, 0).expect("open");
+            let appender = AuditAppender::spawn(
+                file,
+                AppenderConfig {
+                    queue_bound: 4096,
+                    batch_size: 256,
+                    durability,
+                    ..AppenderConfig::default()
+                },
+            );
+            let started = std::time::Instant::now();
+            for record in &records {
+                appender.append(record).expect("append");
+            }
+            let report = appender.shutdown();
+            let elapsed_ms = started.elapsed().as_millis().max(1);
+            assert!(report.drained_cleanly, "{tag}: {report:?}");
+            println!(
+                "worker {tag}: {COUNT} records in {elapsed_ms} ms ({} records/s, {} batches)",
+                COUNT as u128 * 1000 / elapsed_ms,
+                report.stats.batches,
+            );
+        }
+    }
+
+    /// **A restarted process continues the chain rather than starting a new one — `OBS-002`.**    ///
     /// This is the property the whole module exists for. Before it, the stream lived in
     /// `GuestApp`'s memory and died with the process, so a record could not outlive the server it
     /// was evidence about.

@@ -35164,6 +35164,158 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-515 - The review caught what the tests could not see: slow rows, raw flushes, lazy fixtures
+
+The full-diff CodeRabbit review of the MEDIUM round returned four findings,
+three of them corrections to evidence that was green and wrong. The major
+one: the stall-skip could drop a legitimate slow ambient row, because gaps
+are not only producer death — a request records during its guest call and
+sends at its persist, so a slow guest's rows trail the frontier exactly like
+a dead producer's would. Fixed by tying the stall to the epoch deadline plus
+a margin at attach (guest execution is what bounds the wait) and by counting
+a row that arrives after a skip as a distinct loud loss (`late_after_skip`),
+never as a harmless resend. The second: durability modes on a raw `File`
+differed only in flush counts, because `flush` is a passthrough without a
+buffer — so `Buffered` now writes through a real 64 KiB `BufWriter`, and a
+test pins the disk staying empty until shutdown. The third: the negative
+manifest test used `= true` for fields whose real values are lists and
+numbers, so a reintroduced field would pass on a type error — each case now
+carries a value that would parse, and the refusal must name the unknown
+field. The fourth asked for hardware and method on the benchmark numbers,
+which now name the machine, the exact test command, and the debug-profile
+caveat. Every finding was reproduced red before fixing (field
+reintroduction, buffer bypass, and the two worker injections all fail their
+tests). → `crates/qqq-host/src/audit_sink.rs`,
+`crates/qqq-run/src/guest_handler.rs`, `crates/qqq-cap/src/manifest.rs`.
+
+## §O-514 - Relative grants are rejected before any working-directory read
+
+`normalize_fs` checks `is_absolute_host_path` before touching the filesystem,
+so a relative grant fails identically from every launch directory — the
+CWD-independence is structural, not tested-in. The test still moves the real
+process directory between two temp dirs with a save/restore guard, because a
+structural claim without a test is §O-124 again. Every assertion in it holds
+for *any* directory value, which is what makes a process-global mutation safe
+to run in a parallel suite — verified by the full `qqq-cap` suite staying
+green (249 passed) with the test inside it. UNC forms (`//server/share`,
+`\\server\share`) now assert alongside drive letters, since the normalizer
+folds separators before checking. Linux-bridge verdict for this finding: the
+full Linux gate ran via `tools/qqqdev.ps1 test` — `qqq-cap` 249/249 green on
+Linux (POSIX roots, UNC/drive-root rejection, and the multi-CWD test all
+hold where paths mean something else) and `qqq-host` 514/514 green. The only
+red was five `build.rs`/`run.rs` artifact-discovery tests, proven
+environmental: the container exports `CARGO_TARGET_DIR=/linux-target`
+globally, so every temp-dir fixture resolves into one shared directory, and
+the same collision was reproduced on Windows by setting the variable (the
+listing test then fails identically with foreign fixtures). Untouched by this
+round's diff. → `crates/qqq-cap/src/normalize.rs`.
+
+## §O-513 - The audit worker: barriers, ambient rows, the resend that hung,
+and the frontier that jumped
+
+Four traps in one build. First, sending only the handle row would have
+dropped every ambient row the guest recorded mid-call — the exact CodeRabbit
+#12 failure in a new place — so the persist sends `records[floor..]` from an
+index taken before the guest runs, and the worker deduplicates by sequence.
+Second, a barrier resent behind an already-passed frontier waited forever
+(the 30 s timeout fired in the test): barriers also clear against the
+standing frontier on gap iterations. Third — the real bug the stress test
+caught — the reorder frontier jump-started at the lowest sequence *seen*, so
+one early high row stranded every lower row arriving after it: stranded rows
+the file could never take, cleared as "unpersisted" at shutdown wearing a
+report that still failed. Five of six full-suite runs failed that way while
+isolated runs passed. The frontier is now anchored to the file's own count,
+resends below it are counted as skipped rather than buffered, and a gap that
+outlives the stall timeout is skipped loudly as orphaned instead of wedging
+every later row and live barrier. Six of six full-suite runs green after. A later review caught the remaining
+overstatement in this entry's first version: gaps are NOT only producer
+death — ambient rows from a still-running request legitimately trail the
+frontier, and the original 5 s stall would have skipped a slow guest's rows
+as orphans. The stall timeout now derives from the epoch deadline plus a
+margin at attach (ambient rows are recorded during guest execution, which
+preemption bounds), the persist tripwire stays ordered after it, and a row
+that still arrives after a skip is counted as a distinct loud loss
+(`late_after_skip`), never as a harmless resend. Method for the numbers
+below, so they can be reproduced rather than believed: `cargo test -p
+qqq-host --lib audit_sink::tests::audit_append_throughput_by_mode` on a
+debug-profile build, 20,000 chained records across three tenants
+round-robin through a fresh temp file per mode, timed wall-clock around
+append-plus-shutdown, on a Xeon E5-1650 v4 with 64 GiB RAM and a Samsung 870
+SATA SSD under Windows 10 Pro. Debug-profile timings on one machine are
+comparisons between modes, not budgets and not cross-machine claims.
+Fourth, the failure path has a stated coverage boundary — `write_record_line`
+fails deterministically against a failing writer and the failed-state
+accounting is unit-tested, but a worker-level I/O failure is not
+deterministically inducible on Windows without `unsafe` (rejected by
+`forbid(unsafe_code)`) or OS tricks, so the three-line branch is reviewed,
+not tested. Measured on this machine, 20,000 records: direct sync 158 ms,
+worker buffered 168 ms, flush-per-record 176 ms, fsync-per-batch 348 ms —
+measurements, not budgets. → `crates/qqq-host/src/audit_sink.rs`,
+`crates/qqq-run/src/guest_handler.rs`.
+
+## §O-512 - A sampler can tear its own read across two correct locks
+
+The new pool stress test failed on correct code: it read `in_use()` then
+`idle()` through separate lock acquisitions, and a release between the two
+reported a sum the pool never held. The observer was the race, not the pool —
+the same shape as asserting on a value the fixture cannot exhibit. The fix is
+a `Pool::snapshot` joint read, documented as the only correct way to assert
+over both counters. With it, the stress test passes on the mutex code and
+fails on the first run against a fault-injected split transaction.
+→ `crates/qqq-host/src/pool.rs`.
+
+## §O-511 - PERF-POOL-001 closed by language surgery, not by reuse
+
+True per-worker instance reuse means guest memory crossing requests with a
+reset protocol as the only isolation — too much machinery and risk for a
+doc-accuracy MEDIUM, and reuse across tenants is exactly what `tenant.rs`
+exists to prevent. So the clarify branch: `Acquired::pooled` is now
+`slot_reused`, `ReleaseOutcome::Pooled` is `SlotFreed`, metric HELP and
+bucket comments speak of slot hits instead of warm pools and §2.3 budgets,
+while the type name, the `QQQ-6001` code, and the honest capacity counters
+stay (catalog and series stability). The hypothetical-danger prose in
+`tenant.rs` and `linker.rs` stays too — it describes the failure being
+prevented, not a claim about what exists. → `crates/qqq-host/src/pool.rs`,
+`crates/qqq-host/src/metrics.rs`, `crates/qqq-run/src/guest_handler.rs`.
+
+## §O-510 - The §4.7 shared-memory row documented a field that never existed
+
+The proposal offered `[limits] shared_memory = true` as an explicit opt-in
+while `Limits` denies unknown fields and no engine flag enables guest
+threads — copying it fails parsing, the DOC-SCHEMA-001 shape exactly. Fixed
+doc-side to not-enabled-in-V1 with the enablement prerequisites named
+(opt-in field, `DET-012` rejection, accounting model), and pinned by negative
+tests asserting all five historical rejected fields (`methods`,
+`max_request_bytes`, `max_response_bytes`, `max_response_time`,
+`shared_memory`) still refuse to parse — including a fault-injection run with
+`deny_unknown_fields` removed, which the test catches. Wider gap recorded but
+deferred: the full §5.3 example's `sql`/`kv`/`telemetry`/`determinism` tables
+and extra `[package]` keys are outside this finding's named locations and
+belong to their own items. → `QQQ-Proposal-V1.md`,
+`crates/qqq-cap/src/manifest.rs`.
+
+## §O-509 - The proposal fixture drifted from the proposal it quoted
+
+The `FULL` manifest test still granted `/etc/orders/config.json` — the exact
+file grant the audit flagged — while the proposal had already been fixed to
+`/etc/orders`. Parse-level testing could not see the difference, because
+parsing never checks directories. Now the fixture matches the document, and a
+normalization test runs the document's own filesystem stanzas through the
+real path with fake dirs, asserting both grants survive with canonical forms
+plus a guest-relative access check. A test fixture that quotes a document
+must be re-read when the document changes, or it pins the old defect.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-cap/src/normalize.rs`.
+
+## §O-508 - DET-ASYNC-001: the code was fixed, the proof was missing
+
+The every-profile refusal (`QQQ-6008` before any guest runs) already existed
+in `ReadyStore::prepare`, but the `InstanceOptions` docs still described a
+`debug_assert`, and no test exercised the refusal — a control believed live
+that was not. Added the refusal test plus a deterministic-sync acceptance
+control, fixed the docs, and ran the pair under `--release` (4 passed on the
+release binary) since the whole finding is that debug is not release. A
+blinded guard fails the test. → `crates/qqq-host/src/instance.rs`.
+
 ## §O-507 - Tenant-bound docs describe the enforced composition, not the narrowed one
 
 The module docs in `guest_output.rs` still said a cross-request shared tenant

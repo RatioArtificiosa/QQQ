@@ -1678,7 +1678,7 @@ mode = "read-write"
 quota = "5GiB"
 
 [[capabilities.fs]]
-path = "/etc/orders/config.json"
+path = "/etc/orders"
 mode = "read-only"
 
 [capabilities.crypto]
@@ -1733,6 +1733,10 @@ allow_origins = ["https://app.example.com"]
 
     /// The full example printed in Proposal §5.3 must parse. If this fails,
     /// the documentation is lying to users.
+    ///
+    /// The text below is the capability, limits, and server surface of that
+    /// example verbatim; the sql/kv/telemetry/determinism tables have their own
+    /// checklist items and are not asserted here.
     #[test]
     fn proposal_full_manifest_example_parses() {
         let m = Manifest::parse(FULL).expect("the proposal's example must parse");
@@ -1756,6 +1760,39 @@ allow_origins = ["https://app.example.com"]
             assert!(
                 caps.contains(&expected),
                 "the proposal's example should grant {expected}, but it did not"
+            );
+        }
+    }
+
+    /// **DOC-SCHEMA-001: the audit's rejected fields still fail.**
+    ///
+    /// The 09-29 audit found `methods`, `max_request_bytes`, and
+    /// `max_response_bytes` in the HTTP example and `max_response_time` and
+    /// `shared_memory` in the limits example — fields the structs reject. The
+    /// proposal no longer prints them, and this test pins the structs: each
+    /// historical field carries a value that would parse if the field existed,
+    /// and the refusal must name it as unknown — so a future edit that adds
+    /// one back with its natural type fails here, and no fix can consist of
+    /// removing `deny_unknown_fields` (a type error would pass a bare
+    /// `is_err` and hide exactly that).
+    #[test]
+    fn proposal_historical_rejected_fields_still_fail() {
+        for (table, field, value) in [
+            ("capabilities.http", "methods", "[\"GET\"]"),
+            ("capabilities.http", "max_request_bytes", "1024"),
+            ("capabilities.http", "max_response_bytes", "1024"),
+            ("limits", "max_response_time", "1000"),
+            ("limits", "shared_memory", "true"),
+        ] {
+            let src = format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[{table}]\n{field} = {value}\n"
+            );
+            let err = Manifest::parse(&src)
+                .expect_err(&format!("`{field}` under `{table}` must be rejected"));
+            let text = err.to_string();
+            assert!(
+                text.contains("unknown field") && text.contains(field),
+                "`{field}` must be refused as unknown, not as a type error: {text}"
             );
         }
     }

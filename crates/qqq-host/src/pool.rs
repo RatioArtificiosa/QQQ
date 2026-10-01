@@ -106,8 +106,8 @@ pub fn exhausted_error(reason: Exhausted, capacity: u64, retry_after_seconds: u6
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseOutcome {
     /// The clean request returned its concurrency slot to the idle accounting.
-    Pooled,
-    /// Dropped rather than reused, because it trapped.
+    SlotFreed,
+    /// Dropped rather than returned, because it trapped.
     Discarded,
 }
 
@@ -116,8 +116,8 @@ pub enum ReleaseOutcome {
 /// # This is a slot accountant, not a memory manager
 ///
 /// Wasmtime's pooling allocator owns the actual memory; this type owns the
-/// *policy* — how many instances may exist at once, whether a returning one is
-/// reusable, and what a caller is told when none is free. Keeping the two
+/// *policy* — how many instances may exist at once, whether a returning slot
+/// is reusable, and what a caller is told when none is free. Keeping the two
 /// separate means the policy is testable without an engine, which is why the
 /// tests below are pure unit tests.
 #[derive(Debug)]
@@ -161,7 +161,7 @@ impl Pool {
         self.capacity
     }
 
-    /// Instances currently checked out.
+    /// Slots currently checked out — at most one live instance per slot.
     ///
     /// # Panics
     ///
@@ -175,7 +175,9 @@ impl Pool {
             .in_use
     }
 
-    /// Instances sitting idle, available for reuse.
+    /// Free slots, available for the next acquisition. A free slot is
+    /// accounting, not a waiting guest: V1 creates the instance after
+    /// acquiring, so this count never implies a reusable instance exists.
     ///
     /// # Panics
     ///
@@ -183,6 +185,22 @@ impl Pool {
     #[must_use]
     pub fn idle(&self) -> u64 {
         self.state.lock().expect("pool state is not poisoned").idle
+    }
+
+    /// `in_use` and `idle` read under one lock acquisition.
+    ///
+    /// Two separate calls can straddle another thread's transition and report
+    /// a sum the pool never held — an observer that reads one counter before
+    /// a release and the other after it sees both sides of the move. Any
+    /// invariant over *both* counters must use this, not the two accessors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the pool state mutex.
+    #[must_use]
+    pub fn snapshot(&self) -> (u64, u64) {
+        let state = self.state.lock().expect("pool state is not poisoned");
+        (state.in_use, state.idle)
     }
 
     /// The metrics recorder this pool feeds.
@@ -271,6 +289,9 @@ impl Pool {
             return Err(exhausted_error(Exhausted::Draining, self.capacity, 0));
         }
 
+        // Reservation and idle dequeue are one state transition. This is a
+        // concurrency gate; the caller still creates an instance when the slot
+        // is fresh because V1 has no reset-safe instance store.
         let mut state = self.state.lock().expect("pool state is not poisoned");
         if state.in_use >= self.capacity {
             drop(state);
@@ -278,19 +299,15 @@ impl Pool {
             let retry = self.retry_after_seconds(completed_per_second);
             return Err(exhausted_error(Exhausted::AllBusy, self.capacity, retry));
         }
-
-        // Reservation and idle dequeue are one state transition. This is a
-        // concurrency gate; the caller still creates an instance when `pooled`
-        // is false because V1 has no reset-safe instance store.
-        let pooled = state.idle > 0;
+        let slot_reused = state.idle > 0;
         state.in_use += 1;
-        if pooled {
+        if slot_reused {
             state.idle -= 1;
         }
         drop(state);
 
         Ok(Acquired {
-            pooled,
+            slot_reused,
             capacity: self.capacity,
         })
     }
@@ -317,7 +334,7 @@ impl Pool {
         state.idle += 1;
         drop(state);
         self.metrics.note_released();
-        ReleaseOutcome::Pooled
+        ReleaseOutcome::SlotFreed
     }
 
     /// Record that an instance trapped and must not return an idle slot.
@@ -344,11 +361,20 @@ impl Pool {
 }
 
 /// The result of a successful acquisition.
+///
+/// # What `slot_reused` is, and the misreading it exists to prevent
+///
+/// `true` when the pool's idle count was above zero at acquisition — a freed
+/// **slot** was reused, never a guest instance. The pool never sees an
+/// instance at all (it is engine-free by design), so this field *cannot* mean
+/// instance reuse; nothing in V1 reuses one, and `serve_one` creates it per
+/// request. A reader meeting the old `pooled` name in the history should read
+/// it as this field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Acquired {
-    /// Whether the instance came from the free list (`true`) or must be built
-    /// from scratch (`false`).
-    pub pooled: bool,
+    /// Whether this acquisition took a freed slot (`true`) or a fresh one
+    /// that the caller must back with a new instance (`false`).
+    pub slot_reused: bool,
     /// The pool's capacity, carried so a caller can log the saturation ratio
     /// without holding a reference to the pool.
     pub capacity: u64,
@@ -359,12 +385,12 @@ impl Acquired {
     ///
     /// A method on the result rather than an argument to [`Pool::acquire`],
     /// because the latency is only known *after* the instance is ready — which
-    /// for a cold path means after compilation. Measuring inside `acquire` would
+    /// for a fresh slot means after compilation. Measuring inside `acquire` would
     /// time the bookkeeping and call it instantiation.
     pub fn note_latency(self, metrics: &Metrics, nanos: u64) {
-        metrics.note_acquire(nanos, self.pooled);
-        if !self.pooled {
-            // A non-pooled acquisition is a creation; `note_acquire` records
+        metrics.note_acquire(nanos, self.slot_reused);
+        if !self.slot_reused {
+            // A fresh slot means a new instance was built; `note_acquire` records
             // only the latency for that case, so `created` is incremented here.
             // See `Metrics::note_created` for why the two are split.
             metrics.note_created();
@@ -379,8 +405,8 @@ mod tests {
     #[test]
     fn a_pool_hands_out_up_to_its_capacity() {
         let p = Pool::new(2);
-        assert!(!p.acquire(0.0).expect("first").pooled);
-        assert!(!p.acquire(0.0).expect("second").pooled);
+        assert!(!p.acquire(0.0).expect("first").slot_reused);
+        assert!(!p.acquire(0.0).expect("second").slot_reused);
         assert_eq!(p.in_use(), 2);
         assert!(
             (p.occupancy() - 1.0).abs() < f64::EPSILON,
@@ -412,18 +438,38 @@ mod tests {
     }
 
     #[test]
-    fn releasing_makes_room_and_the_next_acquire_is_pooled() {
+    fn releasing_makes_room_and_the_next_acquire_reuses_the_slot() {
         let p = Pool::new(1);
         let first = p.acquire(0.0).expect("first");
-        assert!(!first.pooled, "nothing is idle yet");
+        assert!(!first.slot_reused, "nothing is idle yet");
 
         p.release();
         assert_eq!(p.idle(), 1);
         assert_eq!(p.in_use(), 0);
 
         let second = p.acquire(0.0).expect("reuses the slot");
-        assert!(second.pooled, "the freed slot must be reused");
+        assert!(second.slot_reused, "the freed slot must be reused");
         assert_eq!(p.idle(), 0);
+    }
+
+    /// **PERF-POOL-001: a reused slot is not a reused instance.**
+    ///
+    /// The pool never sees an instance — no engine, no component, no store
+    /// passes through it — so `slot_reused` can only ever describe the
+    /// accounting. This test performs the full acquire/release/reacquire cycle
+    /// with no instance anywhere near it and still observes `slot_reused`:
+    /// any reading of that field as guest reuse contradicts the fixture.
+    #[test]
+    fn slot_reuse_is_accounting_not_instance_reuse() {
+        let p = Pool::new(1);
+        let first = p.acquire(0.0).expect("first");
+        assert!(!first.slot_reused);
+        p.release();
+        let second = p.acquire(0.0).expect("second");
+        assert!(
+            second.slot_reused,
+            "the slot was reused with no instance in existence"
+        );
     }
 
     /// **The security property.** A discarded instance must not become reusable.
@@ -440,7 +486,7 @@ mod tests {
 
         let next = p.acquire(0.0).expect("the slot is free");
         assert!(
-            !next.pooled,
+            !next.slot_reused,
             "the replacement must be fresh, not the discarded instance"
         );
     }
@@ -489,7 +535,7 @@ mod tests {
         assert!(p.acquire(0.0).is_err(), "new work is refused");
         assert_eq!(
             p.release(),
-            ReleaseOutcome::Pooled,
+            ReleaseOutcome::SlotFreed,
             "in-flight work must be able to complete"
         );
         assert_eq!(p.in_use(), 0);
@@ -561,6 +607,74 @@ mod tests {
             peak.load(Ordering::Relaxed)
         );
         assert!(granted.load(Ordering::Relaxed) > 0, "the test is vacuous");
+        assert_eq!(p.in_use(), 0, "every acquire was matched by a release");
+    }
+
+    /// **CONC-POOL-002: `in_use + idle` never exceeds capacity, on any sample.**
+    ///
+    /// The existing contention test pins the peak `in_use` bound; this one pins
+    /// the *joint* invariant a split-atomic implementation breaks. Reservation
+    /// and idle-dequeue are one transition under the state mutex, so no sampler
+    /// can observe the increment without the decrement. A sampler thread reads
+    /// both counters while workers churn acquire/release/discard, and every
+    /// sample must satisfy the invariant — including `idle` alone, which a
+    /// double-release accounting bug would push past capacity.
+    #[test]
+    fn concurrent_accounting_never_reports_an_impossible_state() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+
+        const CAPACITY: u64 = 8;
+        const THREADS: usize = 16;
+        const ATTEMPTS: usize = 2000;
+
+        let p = Arc::new(Pool::new(CAPACITY));
+        let done = Arc::new(AtomicBool::new(false));
+        let sample_count = Arc::new(AtomicU64::new(0));
+        let sampler_p = Arc::clone(&p);
+        let sampler_done = Arc::clone(&done);
+        let sampler_samples = Arc::clone(&sample_count);
+        let watcher = std::thread::spawn(move || {
+            while !sampler_done.load(Ordering::Relaxed) {
+                // One joint read: two separate accessor calls could straddle a
+                // transition and report a sum the pool never held, which would
+                // fail the invariant on correct code.
+                let (used, idle) = sampler_p.snapshot();
+                sampler_samples.fetch_add(1, Ordering::Relaxed);
+                assert!(
+                    used + idle <= CAPACITY,
+                    "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
+                );
+                assert!(used <= CAPACITY, "in_use {used} exceeds {CAPACITY}");
+                assert!(idle <= CAPACITY, "idle {idle} exceeds {CAPACITY}");
+            }
+        });
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let p = Arc::clone(&p);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ATTEMPTS {
+                    if p.acquire(1000.0).is_ok() {
+                        if (t + i) % 7 == 0 {
+                            p.discard();
+                        } else {
+                            p.release();
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread must not panic");
+        }
+        done.store(true, Ordering::Relaxed);
+        watcher.join().expect("sampler must not panic");
+
+        assert!(
+            sample_count.load(Ordering::Relaxed) > 100,
+            "too few samples to prove anything; contention never overlapped the sampler"
+        );
         assert_eq!(p.in_use(), 0, "every acquire was matched by a release");
     }
 

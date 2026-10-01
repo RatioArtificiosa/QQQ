@@ -63,20 +63,20 @@ use qqq_core::ErrorCode;
 /// The upper bound is inclusive and the histogram has one extra `+Inf` bucket
 /// beyond it, so `BUCKETS.len() + 1` counts are always recorded.
 const BUCKETS: [u64; 16] = [
-    100,         // 100 ns — pooled acquire, the target
+    100,         // 100 ns — slot-hit bookkeeping range
     250,         // 250 ns
     500,         // 500 ns — measured p50 for a fresh instantiation
     1_000,       // 1 µs
     2_500,       // 2.5 µs
-    5_000,       // 5 µs — cold-from-cache budget is 5 ms, so this is warm
+    5_000,       // 5 µs
     10_000,      // 10 µs
     25_000,      // 25 µs
     50_000,      // 50 µs
-    100_000,     // 100 µs — the warm-pool budget in §2.3
+    100_000,     // 100 µs
     250_000,     // 250 µs
     500_000,     // 500 µs
     1_000_000,   // 1 ms
-    2_500_000,   // 2.5 ms — above the routed p99 budget in §2.3
+    2_500_000,   // 2.5 ms
     10_000_000,  // 10 ms
     100_000_000, // 100 ms — a cold compile of a large component
 ];
@@ -358,11 +358,11 @@ impl Histogram {
 #[derive(Debug, Default)]
 pub struct Metrics {
     // -- Instance ---------------------------------------------------------
-    /// Instances created from scratch (as opposed to acquired from a pool).
+    /// Instances created from scratch (as opposed to a slot hit).
     created: AtomicU64,
-    /// Instances taken from a pool.
+    /// Acquisitions that found an idle slot.
     acquired: AtomicU64,
-    /// Instances returned to a pool.
+    /// Slots returned to the free list.
     released: AtomicU64,
     /// Instances discarded because they trapped, and therefore never released.
     discarded: AtomicU64,
@@ -418,14 +418,14 @@ impl Metrics {
         }
     }
 
-    /// Record that an instance was created rather than pooled.
+    /// Record that an instance was created for a fresh slot.
     ///
     /// # This is the *only* place `created` is incremented
     ///
     /// [`Metrics::note_acquire`] deliberately does **not** touch `created`. The
     /// two are separate events: an instance is created once (compiled and
-    /// instantiated), and acquired once per use (possibly from a pool, many
-    /// times). An earlier version incremented `created` from both, so a fresh
+    /// instantiated) per fresh slot, and acquired once per use. An earlier
+    /// version incremented `created` from both, so a fresh
     /// acquisition counted twice and the "created" series over-reported by
     /// exactly the number of cold starts — the metric a capacity planner would
     /// use to size a pool.
@@ -436,17 +436,18 @@ impl Metrics {
 
     /// Record an instance acquisition, with how long it took.
     ///
-    /// `pooled` distinguishes a pool hit from a fresh instantiation, because
-    /// §2.3's two budgets — 100 µs warm-pool and 5 ms cold-from-cache — are
-    /// different SLOs and averaging them together hides both.
+    /// `slot_reused` distinguishes an idle-slot hit from a fresh slot, because
+    /// the two have different latency shapes and averaging them together hides
+    /// both. It says nothing about instance reuse: V1 creates the instance per
+    /// request either way.
     ///
-    /// A **pooled** acquisition is the only thing this records besides the
-    /// latency: a non-pooled one has already been counted by
+    /// A **slot-reused** acquisition is the only thing this records besides the
+    /// latency: a fresh slot has already been counted by
     /// [`Metrics::note_created`], which the caller performs when it builds the
     /// instance. See that method for why the split matters.
-    pub fn note_acquire(&self, nanos: u64, pooled: bool) {
+    pub fn note_acquire(&self, nanos: u64, slot_reused: bool) {
         self.acquire_latency.observe(nanos);
-        if pooled {
+        if slot_reused {
             self.acquired.fetch_add(1, Ordering::Relaxed);
             self.live.fetch_add(1, Ordering::Relaxed);
         }
@@ -529,13 +530,13 @@ impl Metrics {
         self.created.load(Ordering::Relaxed)
     }
 
-    /// Instances taken from a pool.
+    /// Acquisitions that found an idle slot.
     #[must_use]
     pub fn acquired(&self) -> u64 {
         self.acquired.load(Ordering::Relaxed)
     }
 
-    /// Instances returned to a pool.
+    /// Slots returned to the free list by clean requests.
     #[must_use]
     pub fn released(&self) -> u64 {
         self.released.load(Ordering::Relaxed)
@@ -729,12 +730,12 @@ impl Metrics {
             ),
             (
                 "qqq_instance_acquired_total",
-                "Instances taken from a pool.",
+                "Acquisitions that found an idle slot.",
                 self.acquired(),
             ),
             (
                 "qqq_instance_released_total",
-                "Instances returned to a pool intact.",
+                "Slots returned to the free list intact.",
                 self.released(),
             ),
             (
@@ -818,7 +819,7 @@ impl Metrics {
         const NAME: &str = "qqq_instance_acquire_latency_seconds";
         let _ = writeln!(
             out,
-            "# HELP {NAME} Instance acquisition latency, warm-pool and cold alike."
+            "# HELP {NAME} Instance acquisition latency, idle-slot hits and fresh slots alike."
         );
         let _ = writeln!(out, "# TYPE {NAME} histogram");
         for (bound, cumulative) in self.acquire_latency.snapshot() {
@@ -886,20 +887,20 @@ mod tests {
     }
 
     #[test]
-    fn pooled_and_fresh_acquisitions_are_distinguishable() {
+    fn slot_reused_and_fresh_acquisitions_are_distinguishable() {
         let m = Metrics::new();
         // A fresh acquisition is: create the instance, then record the acquire
         // latency. `created` counts the instantiation; `note_acquire` counts
-        // only a pool hit.
+        // only an idle-slot hit.
         m.note_created();
         m.note_acquire(700, false);
         assert_eq!(m.created(), 1, "a fresh acquisition must count once");
-        assert_eq!(m.acquired(), 0, "a fresh acquisition is not a pool hit");
+        assert_eq!(m.acquired(), 0, "a fresh slot is not a slot hit");
         assert_eq!(m.live(), 1);
 
         m.note_acquire(80, true);
         assert_eq!(m.acquired(), 1);
-        assert_eq!(m.created(), 1, "a pool hit must not re-count creation");
+        assert_eq!(m.created(), 1, "a slot hit must not re-count creation");
         assert_eq!(m.live(), 2);
         assert_eq!(m.acquire_latency().count(), 2);
     }

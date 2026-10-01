@@ -283,8 +283,9 @@ pub struct InstanceOptions {
     /// `DET-004`'s deterministic single-threaded scheduler is not built — so a guest whose output depends
     /// on the order two tasks interleave is not made reproducible by this flag. **A guest whose output
     /// depends only on what it reads is the case this covers, and it is the case `--deterministic`
-    /// advertises.** `ReadyStore::prepare` carries a `debug_assert` refusing the combination, and this note
-    /// is what a release build relies on.
+    /// advertises.** Combining this flag with asynchronous execution is refused in every build profile
+    /// with `QQQ-6008` before any guest runs — a `debug_assert` would let release builds proceed with
+    /// scheduling-dependent results while the flag promises determinism.
     pub deterministic: bool,
     /// Record capability uses — `OBS-001`.
     pub audit: Option<crate::audit::AuditHandle>,
@@ -2140,6 +2141,51 @@ mod tests {
     }
 
     // -- The async execution path (HOST-015, HOST-016) ---------------------
+
+    /// **DET-ASYNC-001: deterministic plus async is refused before any guest runs.**
+    ///
+    /// The guard is a plain `if` in `ReadyStore::prepare`, not a `debug_assert`, so it
+    /// fires identically in debug and release — run this test with `--release` for the
+    /// profile the audit asked about. The refusal must precede instantiation: a guest
+    /// that starts under a determinism promise its scheduler cannot keep produces
+    /// evidence-grade output no replay can defend.
+    #[tokio::test]
+    async fn deterministic_async_is_refused_before_any_guest_runs() {
+        let engine = engine();
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let opts = InstanceOptions {
+            deterministic: true,
+            ..InstanceOptions::default()
+        };
+        let err = Instance::create_async(&engine, &prepared, &none(), limits(), &opts)
+            .await
+            .expect_err("deterministic async execution must be refused");
+        assert_eq!(
+            err.code,
+            qqq_core::ErrorCode::DeterminismUnsupported,
+            "the refusal must carry QQQ-6008, not a generic failure"
+        );
+        assert!(
+            err.render().contains("synchronous"),
+            "the refusal must name the working alternative, got: {}",
+            err.render()
+        );
+    }
+
+    /// The control for the refusal above: deterministic **synchronous** execution is
+    /// the supported combination and must keep creating instances. Without this, the
+    /// refusal could be refusing determinism itself rather than the async combination.
+    #[test]
+    fn deterministic_sync_still_creates_an_instance() {
+        let engine = engine();
+        let prepared = PreparedComponent::compile(&engine, OK_WAT.as_bytes()).expect("compiles");
+        let opts = InstanceOptions {
+            deterministic: true,
+            ..InstanceOptions::default()
+        };
+        let _ = Instance::create_with(&engine, &prepared, &none(), limits(), &opts)
+            .expect("deterministic sync execution must keep working");
+    }
 
     /// The async path runs a real guest to completion and returns its value.
     ///

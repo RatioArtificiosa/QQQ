@@ -118,14 +118,16 @@ pub struct GuestApp {
     /// an evidence file the operator did not ask for would be a surprise, and a *silent* one
     /// because nothing in the response says a file was created.
     ///
-    /// # Why the write is synchronous, inside the append
+    /// # Why a bounded worker rather than a synchronous write
     ///
-    /// Because the record's value is that it exists after a crash. A buffered or backgrounded write
-    /// gives a record that is present only when the process happens to exit cleanly, which is the
-    /// case a record is least needed for. The cost is one `write` syscall per served request, and
-    /// the honest way to avoid it is to not enable the file rather than to enable it and lose the
-    /// guarantee.
-    audit_file: Option<Arc<std::sync::Mutex<qqq_host::audit_sink::AuditFile>>>,
+    /// The synchronous path serialized every audit-enabled request on the file
+    /// mutex and paid a flush per record on the request's own thread, so a slow
+    /// disk became slow requests — `PERF-AUDIT-001`. The appender hands each
+    /// record to a bounded queue with one writing thread: producers block only
+    /// when the disk cannot keep up (backpressure, never a dropped row), and
+    /// the default durability still flushes per record, so the crash promise
+    /// the synchronous path gave is kept, not traded away.
+    audit_appender: Option<Arc<qqq_host::audit_sink::AuditAppender>>,
     /// The component's identity, as the audit record states it — `OBS-002`.
     ///
     /// Computed **once**, at construction, because `ComponentDigest::new` validates that the
@@ -311,7 +313,7 @@ impl GuestApp {
             audit: std::sync::Arc::new(std::sync::Mutex::new(
                 qqq_host::AuditStream::with_default_capacity(),
             )),
-            audit_file: None,
+            audit_appender: None,
             // Computed above, before `grants` is moved into this struct.
             component_digest,
             grant_digest,
@@ -350,7 +352,7 @@ impl GuestApp {
         next.validate_interface()?;
         next.pool = Arc::clone(&self.pool);
         next.audit = Arc::clone(&self.audit);
-        next.audit_file.clone_from(&self.audit_file);
+        next.audit_appender.clone_from(&self.audit_appender);
         // The tenant budgets roll with the replacement, like the pool and the
         // audit stream: a rotation must not double a tenant's ceiling by
         // accident, and must not forgive an over-budget tenant either.
@@ -456,18 +458,18 @@ impl GuestApp {
         // ordering is the same rule `qqq-serve`'s `refuse_before_reading` states for
         // request bodies, applied one layer down.
         //
-        // # What `pooled` means, and the assertion that was wrong about it
+        // # What `slot_reused` means, and the assertion that was wrong about it
         //
-        // `Acquired::pooled` is true when the pool's **idle count was above zero** at
+        // `Acquired::slot_reused` is true when the pool's **idle count was above zero** at
         // acquisition — not when a guest instance was reused. Nothing in V1 reuses an
         // instance: `serve_one` calls `Instance::create` on every request, so isolation is
         // structural rather than promised here.
         //
-        // The first version of this code asserted `!acquired.pooled`, on the reasoning that a
-        // pooled hit would mean reuse had landed without its isolation test. That premise was
+        // The first version of this code asserted `!acquired.slot_reused`, on the reasoning that a
+        // slot hit would mean reuse had landed without its isolation test. That premise was
         // false and the assertion **panicked the server on the second request**, because
         // `release()` increments the idle count and so every subsequent acquire reports
-        // `pooled: true`. Measured: `qqqai serve --workers 4` answered the first request `200`
+        // `slot_reused: true`. Measured: `qqqai serve --workers 4` answered the first request `200`
         // and died on the second with
         // `V1 instantiates per request; a pooled hit would mean reuse landed without its
         // isolation test`.
@@ -487,6 +489,21 @@ impl GuestApp {
         // capacity monotonically — a server that gets slower the more it errors is a
         // worse failure than the error itself.
         let permit = RequestPermit(&self.pool);
+        // Floor index for the persist below: every row this request adds —
+        // ambient rows during the guest call and the handle row after it —
+        // lands at or after this length. The persist sends `records[floor..]`;
+        // rows from concurrent requests may ride along, and the worker
+        // deduplicates by sequence, so over-sending is safe while
+        // under-sending (which would drop evidence) is impossible as long as
+        // the stream only grows — which it does, since a full stream refuses
+        // rather than truncates. Taken and released here, never held across
+        // the guest call.
+        let audit_floor = self
+            .audit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records()
+            .len();
         let outcome = self.serve_one(&request, tenant);
         drop(permit);
 
@@ -553,55 +570,38 @@ impl GuestApp {
                 outcome_kind,
             );
 
-            // Write through to the file when one is attached, **inside the same block** so the
-            // record written is the record appended. Reading the last record after releasing the
-            // lock would race another request and could persist a different row than the one this
-            // call added -- an evidence file that disagrees with the stream it came from.
-            if let (Some(file), qqq_host::Append::Recorded(_)) =
-                (self.audit_file.as_ref(), appended)
+            // Hand this call's rows to the file worker **inside the same block**
+            // so the records persisted are the records appended. `audit_floor`
+            // was taken before the guest ran, so the slice covers the ambient
+            // rows recorded during the call plus the handle row just added —
+            // sending only the handle row would drop the ambient rows, the
+            // exact failure the old `persist_pending` docs record. Rows from
+            // concurrent requests may ride along; the worker deduplicates by
+            // sequence, so every row is persisted exactly once.
+            if let (Some(appender), qqq_host::Append::Recorded(_)) =
+                (self.audit_appender.as_ref(), appended)
             {
-                Self::persist_pending(file, stream.records());
+                let start = audit_floor.min(stream.records().len());
+                let rows = stream.records()[start..].to_vec();
+                // Waited, not fire-and-forget: the barrier keeps the
+                // synchronous path's promise that a returned request has its
+                // evidence durable, while the shared worker still batches
+                // concurrent requests into fewer disk passes.
+                if let Err(error) = appender.persist(
+                    &rows,
+                    qqq_host::audit_sink::AppenderConfig::default().persist_timeout,
+                ) {
+                    eprintln!(
+                        "error: {} capability audit records from sequence {} \
+                         could not be persisted: {error}",
+                        rows.len(),
+                        rows.first().map_or(0, |row| row.sequence),
+                    );
+                }
             }
         }
 
         Ok(to_served(&outcome?))
-    }
-
-    /// Persist every record the file does not already hold -- **finding #12 of `CodeRabbit`'s review**.
-    ///
-    /// # The defect this replaces, and why it was `critical`
-    ///
-    /// It appended `stream.records().last()`. That is the last record in the **stream**, not the records
-    /// **this call appended**. Three lines above the old code a comment says the write happens inside the
-    /// same block *"so the record written is the record appended"* -- and the code did not do that. A guest
-    /// call that appends more than one record (an `ambient::require` during the call is the case the
-    /// review names) had every record but the last **silently dropped from the evidence file**, so the
-    /// file disagreed with the stream it came from. That is the failure the comment exists to prevent, and
-    /// it is why the review is worth running even on a module with an audit trail of its own.
-    ///
-    /// # Why it takes a slice and skips by the file's own count
-    ///
-    /// Because two requests interleave, so the position must be read **under the lock that appends**, and
-    /// it must be the **file's** count rather than a second counter that could drift from the file it
-    /// describes. `file.records()` is that count, and `append` advances it only on a successful write, so
-    /// a failed write is retried rather than skipped.
-    ///
-    /// # Why a failed persist is reported rather than swallowed
-    ///
-    /// The alternative -- continuing to serve while the evidence file silently stops growing -- is the
-    /// "control that reports healthy while measuring nothing" this module exists against.
-    fn persist_pending(
-        file: &std::sync::Mutex<qqq_host::audit_sink::AuditFile>,
-        records: &[qqq_host::audit::AuditRecord],
-    ) {
-        let mut file = file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for record in records.iter().skip(file.records()) {
-            if let Err(e) = file.append(record) {
-                eprintln!("error: the capability audit record could not be persisted: {e}");
-            }
-        }
     }
 
     /// Create an instance for `request`, call the guest, and return its answer.
@@ -726,8 +726,29 @@ impl GuestApp {
             )
             })?;
 
+        // The worker owns the file from here: one queue, one writing thread, rows
+        // in sequence order. The default durability flushes per record, which is
+        // the crash promise the synchronous path gave — kept, not traded away
+        // for the throughput the worker adds. The stall timeout derives from
+        // the epoch deadline: ambient rows are recorded during guest
+        // execution, which preemption bounds, so a gap that outlives twice
+        // that bound plus a margin is a dead producer rather than a slow
+        // request — and skipping it early would drop a legitimate slow row.
+        // The persist tripwire stays ordered after it, so a wedged worker
+        // still fails loudly instead of hanging requests.
+        let stall_timeout = std::time::Duration::from_millis(self.limits.epoch_deadline_ms)
+            + std::time::Duration::from_secs(10);
+        let appender = qqq_host::audit_sink::AuditAppender::spawn(
+            file,
+            qqq_host::audit_sink::AppenderConfig {
+                stall_timeout,
+                persist_timeout: stall_timeout + std::time::Duration::from_secs(30),
+                ..qqq_host::audit_sink::AppenderConfig::default()
+            },
+        );
+
         self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
-        self.audit_file = Some(Arc::new(std::sync::Mutex::new(file)));
+        self.audit_appender = Some(Arc::new(appender));
         Ok(())
     }
 
@@ -1194,8 +1215,18 @@ mod tests {
     /// where the bug was: the write happens inside the block *"so the record written is the record
     /// appended"*. It was not. An evidence file that holds a subset of the stream it came from cannot
     /// answer the only question it exists to answer.
+    /// **The worker persists every row it is handed, and a resend duplicates nothing.**
+    ///
+    /// The property the old `persist_pending` test pinned — three records in,
+    /// three lines out, and a second identical handoff appending nothing —
+    /// now belongs to the worker: sequence-keyed buffering makes a repeated
+    /// row an overwrite of the identical entry rather than a second line.
+    /// Three records make the single-row and whole-suffix behaviours differ,
+    /// which is the whole test.
     #[test]
-    fn persist_pending_writes_every_record_the_file_lacks() {
+    fn worker_persists_every_handed_row_without_duplicating_resends() {
+        use std::time::Duration;
+
         let dir = std::env::temp_dir().join(format!("qqq-cr12-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
@@ -1225,32 +1256,80 @@ mod tests {
         );
 
         let file = qqq_host::audit_sink::AuditFile::open(&path, 0).expect("open");
-        let held = std::sync::Mutex::new(file);
-        GuestApp::persist_pending(&held, stream.records());
+        let appender = qqq_host::audit_sink::AuditAppender::spawn(
+            file,
+            qqq_host::audit_sink::AppenderConfig::default(),
+        );
+        let rows = stream.records().to_vec();
+        let ack = appender
+            .persist(&rows, Duration::from_secs(30))
+            .expect("a live worker persists");
+        assert_eq!(ack.persisted, 3, "the barrier must confirm all three");
+
+        // A second identical handoff to the SAME worker must not duplicate:
+        // every sequence is already past its frontier, so the rows land in
+        // the reorder buffer and never reach the file again. (A fresh worker
+        // would legitimately rewrite them — its frontier starts empty — which
+        // is why sharing one appender per file is structural, not optional.)
+        let ack = appender
+            .persist(&rows, Duration::from_secs(30))
+            .expect("resend reaches a live worker");
+        assert_eq!(ack.persisted, 3, "nothing new may be written twice");
+        assert_eq!(
+            appender.stats().resent_skipped,
+            3,
+            "the resend must be counted as skipped, not buffered"
+        );
+        assert_eq!(
+            appender.stats().late_after_skip,
+            0,
+            "a resend of written rows is a duplicate, not a late loss"
+        );
+        drop(appender);
 
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(
             text.lines().count(),
             3,
-            "the file must hold all three, not only the last: {text}"
-        );
-        assert_eq!(
-            held.lock().expect("lock").records(),
-            3,
-            "and the file must know how many it holds, or the next call re-appends them"
+            "the file must hold all three exactly once: {text}"
         );
 
-        // A second call with nothing new writes nothing: the position is the FILE's count, read
-        // under the same lock that appends, so two interleaved requests cannot both think they are
-        // behind.
-        GuestApp::persist_pending(&held, stream.records());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The attach derives the worker's tripwires from the epoch deadline.**
+    ///
+    /// Ambient rows are recorded during guest execution, which preemption
+    /// bounds — so a stall longer than twice the epoch deadline plus a margin
+    /// is a dead producer, while anything shorter may be a legitimate slow
+    /// request the worker must wait out rather than skip. The test app runs a
+    /// 10 s deadline, so the stall must be 20 s and the persist tripwire 50 s;
+    /// a hardcoded pair would silently stop tracking the limits it claims to
+    /// follow the moment the deadline changed.
+    #[test]
+    fn attach_derives_worker_timeouts_from_the_epoch_deadline() {
+        let Some(mut app) = test_app() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("qqq-audit-timeouts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+
+        app.attach_audit_file(&path).expect("attach");
+        let appender = app
+            .audit_appender
+            .as_ref()
+            .expect("attach installs a worker");
         assert_eq!(
-            std::fs::read_to_string(&path)
-                .expect("read")
-                .lines()
-                .count(),
-            3,
-            "a call with nothing new must not duplicate what is already there"
+            appender.config().stall_timeout,
+            std::time::Duration::from_secs(20),
+            "the 10 s test-app deadline plus the margin"
+        );
+        assert_eq!(
+            appender.config().persist_timeout,
+            std::time::Duration::from_secs(50),
+            "the persist tripwire stays ordered after the stall"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -160,8 +160,9 @@ pub fn pinned_tools(language: &str) -> Option<Vec<ToolRequirement>> {
 /// Because they answer different questions. [`TOOLCHAINS`] answers *"what does this language need?"* -- and
 /// the delivery measured that for all five. This answers *"can we build it?"* -- and the answer is Rust,
 /// because the other four have no driver: their probes are deliberately narrower than the full language
-/// promise, and Go still fails the 65,536-byte echo. Python and TypeScript now pass the HTTP probe under
-/// an explicit `http.server` grant, but that is not a production driver or full conformance. **A stated
+/// promise, and Go's pass depends on an explicit request-scoped GC mitigation for an upstream bug. Python
+/// and TypeScript now pass the HTTP probe under an explicit `http.server` grant, but that is not a production
+/// driver or full conformance. **A stated
 /// toolchain is not a working driver, and conflating a narrow probe with support is how an unexecuted
 /// language comes to be marked supported.**
 ///
@@ -182,9 +183,9 @@ pub fn pinned_tools(language: &str) -> Option<Vec<ToolRequirement>> {
 /// ```
 ///
 /// **The other four are deliberately absent.** Their toolchains are stated in [`TOOLCHAINS`], but the probe
-/// is not the production build driver: Go fails the 65,536-byte echo, while Python and TypeScript only pass
-/// the narrow HTTP probe. Adding one here is a claim that `qqqai build` can drive it, and that claim is not
-/// yet true.
+/// is not the production build driver: Go's mitigation has only been measured by the narrow HTTP probe,
+/// while Python and TypeScript have the same limitation. Adding one here is a claim that `qqqai build` can
+/// drive it, and that claim is not yet true.
 pub const DRIVEN: &[&str] = &["rust"];
 
 /// Which languages `qqqai build` supports today, as prose, **derived from [`DRIVEN`]**.
@@ -236,14 +237,16 @@ pub fn supported_phrase() -> String {
 ///
 /// Because `docs/languages/phase3.md` **compiled and ran** each one, and a list assembled from documentation
 /// instead would be **a claim about a toolchain nobody executed** -- the defect `O-439` records, one document
-/// over. Measured there: `AssemblyScript` `0.28.20`; `TinyGo` `0.42.0` with Go `1.27.1` and
-/// `wit-bindgen-go` `0.7.0`; `componentize-py` `0.25.1`; WASI SDK 34 Clang `23.1.0-wasi-sdk` with `wasm-ld`;
+/// over. Measured there: `AssemblyScript` `0.28.20`; `TinyGo` `0.42.0` with Go `1.27.1`,
+/// `wit-bindgen-go` `0.7.0` and Binaryen `133`; `componentize-py` `0.25.1`; WASI SDK 34 Clang
+/// `23.1.0-wasi-sdk` with `wasm-ld`;
 /// `wit-bindgen` `0.62.0`; `tsc` `5.9.3` with `ComponentizeJS` `0.23.0`.
 ///
 /// # Why the foreign-language toolchains are here despite no production driver
 ///
-/// Because **the toolchain table answers installation, not production support.** The `TinyGo` probe fails
-/// the 65,536-byte echo; Python and TypeScript can now execute the narrow HTTP probe, but neither has a
+/// Because **the toolchain table answers installation, not production support.** The `TinyGo` probe now passes
+/// with QQQ's request-scoped GC mitigation, but the upstream canonical-ABI fix is still a draft; Python and
+/// TypeScript can now execute the narrow HTTP probe, but neither has a
 /// `qqqai build` driver or full capability/conformance parity. Omitting these tools would say they are
 /// unknown, while listing them does not overclaim that their production paths exist.
 const TOOLCHAINS: &[(&str, &[ToolRequirement])] = &[
@@ -295,6 +298,12 @@ const TOOLCHAINS: &[(&str, &[ToolRequirement])] = &[
                 version_args: &["--version"],
                 install: "go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0",
                 why: "generates the bindings from the canonical WIT",
+            },
+            ToolRequirement {
+                program: "wasm-opt",
+                version_args: &["--version"],
+                install: "download Binaryen 133 from https://github.com/WebAssembly/binaryen/releases/tag/version_133",
+                why: "performs TinyGo's final wasip2 component-model lowering",
             },
         ],
     ),
@@ -428,6 +437,111 @@ impl BuildStep {
     }
 }
 
+/// How a completed plan identifies the component it produced.
+///
+/// Cargo's output layout is not a universal build contract. Foreign drivers
+/// such as `TinyGo`, C and `ComponentizeJS` may write a component to an explicit
+/// path after a multi-step pipeline. Keeping that choice in the plan lets the
+/// executor retain one validation/staging path for every language instead of
+/// making each driver copy safety-sensitive artifact code.
+///
+/// ```
+/// let spec = qqq_run::build::ArtifactSpec::File(std::path::PathBuf::from("out/app.component.wasm"));
+/// assert!(matches!(spec, qqq_run::build::ArtifactSpec::File(_)));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactSpec {
+    /// A plan that has not yet been associated with an output.
+    ///
+    /// This is used only by `BuildPlan::one` for callers constructing a plan
+    /// solely to inspect or execute its steps. Production plans created by
+    /// `plan_pure` always replace it with a concrete locator.
+    ///
+    /// ```
+    /// let spec = qqq_run::build::ArtifactSpec::Unspecified;
+    /// assert!(matches!(spec, qqq_run::build::ArtifactSpec::Unspecified));
+    /// ```
+    Unspecified,
+    /// Search Cargo's target directory using the package-name rules.
+    ///
+    /// ```
+    /// let spec = qqq_run::build::ArtifactSpec::cargo("release", "wasm32-wasip2", "orders-api");
+    /// assert!(matches!(spec, qqq_run::build::ArtifactSpec::Cargo { .. }));
+    /// ```
+    Cargo {
+        /// Effective Cargo profile.
+        profile: String,
+        /// Effective compilation target.
+        target: String,
+        /// Cargo package name.
+        package: String,
+    },
+    /// Read a component written by a foreign-language pipeline.
+    ///
+    /// Relative paths are resolved against the plan's working directory;
+    /// absolute paths are accepted so a toolchain can use an explicit
+    /// host-owned temporary output when needed.
+    ///
+    /// ```
+    /// let spec = qqq_run::build::ArtifactSpec::file("out/app.component.wasm");
+    /// assert!(matches!(spec, qqq_run::build::ArtifactSpec::File(_)));
+    /// ```
+    File(PathBuf),
+}
+
+impl ArtifactSpec {
+    /// Construct a Cargo artifact locator.
+    ///
+    /// ```
+    /// let spec = qqq_run::build::ArtifactSpec::cargo("dev", "wasm32-wasip2", "orders-api");
+    /// assert!(matches!(spec, qqq_run::build::ArtifactSpec::Cargo { .. }));
+    /// ```
+    #[must_use]
+    pub fn cargo(
+        profile: impl Into<String>,
+        target: impl Into<String>,
+        package: impl Into<String>,
+    ) -> Self {
+        Self::Cargo {
+            profile: profile.into(),
+            target: target.into(),
+            package: package.into(),
+        }
+    }
+
+    /// Construct a foreign-driver output locator.
+    ///
+    /// ```
+    /// let spec = qqq_run::build::ArtifactSpec::file("out/app.component.wasm");
+    /// assert!(matches!(spec, qqq_run::build::ArtifactSpec::File(_)));
+    /// ```
+    #[must_use]
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File(path.into())
+    }
+
+    /// Resolve the produced file, if one exists.
+    #[must_use]
+    fn resolve(&self, project_dir: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Unspecified => None,
+            Self::Cargo {
+                profile,
+                target,
+                package,
+            } => find_artifact(project_dir, profile, target, package),
+            Self::File(path) => {
+                let resolved = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    project_dir.join(path)
+                };
+                resolved.is_file().then_some(resolved)
+            }
+        }
+    }
+}
+
 /// A fully-resolved sequence of invocations, ready to run **in order**.
 ///
 /// Exposed as a value rather than executed inline so that `--dry-run` can print
@@ -459,13 +573,15 @@ impl BuildStep {
 ///     cwd: std::path::PathBuf::from("."),
 /// };
 /// assert_eq!(BuildPlan::one(step("cargo")).render(), "cargo");
-/// let two = BuildPlan { steps: vec![step("clang"), step("wasm-ld")] };
+/// let two = BuildPlan::from_steps(vec![step("clang"), step("wasm-ld")]);
 /// assert_eq!(two.render(), "clang && wasm-ld");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildPlan {
     /// The steps, in execution order.
     pub steps: Vec<BuildStep>,
+    /// The strategy used to find the output after all steps succeed.
+    pub artifact: ArtifactSpec,
 }
 
 impl BuildPlan {
@@ -484,7 +600,30 @@ impl BuildPlan {
     /// ```
     #[must_use]
     pub fn one(step: BuildStep) -> Self {
-        Self { steps: vec![step] }
+        Self {
+            steps: vec![step],
+            artifact: ArtifactSpec::Unspecified,
+        }
+    }
+
+    /// A plan made from zero or more steps, with no output locator yet.
+    ///
+    /// Foreign-driver scaffolds can attach an explicit output with
+    /// [`Self::with_artifact`] after constructing their pipeline. Keeping this
+    /// constructor total makes dry-run tests independent of a compiler.
+    #[must_use]
+    pub fn from_steps(steps: Vec<BuildStep>) -> Self {
+        Self {
+            steps,
+            artifact: ArtifactSpec::Unspecified,
+        }
+    }
+
+    /// Attach the output locator for this plan.
+    #[must_use]
+    pub fn with_artifact(mut self, artifact: ArtifactSpec) -> Self {
+        self.artifact = artifact;
+        self
     }
 
     /// The single step of a one-step plan, for callers that know there is one.
@@ -579,7 +718,7 @@ impl BuildPlan {
     ///     args: Vec::new(),
     ///     cwd: std::path::PathBuf::from("."),
     /// };
-    /// let plan = BuildPlan { steps: vec![step("clang"), step("wasm-tools")] };
+    /// let plan = BuildPlan::from_steps(vec![step("clang"), step("wasm-tools")]);
     /// assert_eq!(plan.step_commands(), vec!["clang", "wasm-tools"]);
     /// assert_eq!(plan.render(), "clang && wasm-tools");
     /// ```
@@ -910,7 +1049,8 @@ pub fn plan_pure(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildPl
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf(),
-    }))
+    })
+    .with_artifact(ArtifactSpec::cargo(profile, target, loaded.name())))
 }
 
 /// `1 thing` / `2 things`.
@@ -1316,69 +1456,101 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     let failure = run_steps(&plan)?;
 
     if let Some((index, status)) = failure {
-        // **A one-step plan keeps its exact previous message**, because that spelling is what the tests
-        // assert and what a user of the only working language sees. **A multi-step plan says which step**,
-        // because a plan of four commands that reports only "the build failed" leaves the reader to guess.
-        let detail = if plan.steps.len() > 1 {
-            format!(
-                "step {} of {} failed with {}: `{}`",
-                index + 1,
-                plan.steps.len(),
-                describe_exit(status.code()),
-                plan.render()
-            )
-        } else {
-            format!(
-                "`{}` failed with {}",
-                plan.render(),
-                describe_exit(status.code())
-            )
-        };
-        // **The partial output is still on disk, and nothing was saying so.** A pipeline that fails at
-        // step 2 leaves step 1's artifacts where step 1 put them, and `execute` returns before the artifact
-        // search, so nothing here deletes anything -- the information existed and was not reported. That is
-        // `§O-438`'s shape in a third place: a state that is real and indistinguishable from its absence.
-        //
-        // **And the remediation was unconditionally wrong for this case.** `run_steps` maps a *spawn*
-        // failure to `MissingTarget` and a *non-zero exit* to here, so a compiler error was being told to run
-        // `qqqai doctor`, which diagnoses an incomplete toolchain. It is the right next step when the tool is
-        // at fault, and the wrong one when the code is -- so the message says which question each answer
-        // settles rather than asserting the toolchain is incomplete.
-        let workdir = plan.cwd().display();
-        return Err(
-            Error::new(ErrorCode::CompilationFailed, detail).with_remediation(format!(
-                "the failing tool's own output is above. **Any artifact an earlier step produced is still \
-                 in `{workdir}`** -- nothing is deleted on failure, so a partial build can be inspected \
-                 there. If the tool itself is missing or too old, `qqqai doctor` diagnoses that; if the \
-                 tool ran and rejected the input, its message above is the diagnosis."
-            )),
-        );
+        return Err(step_failure(&plan, index, status));
     }
+    let produced = locate_produced(&plan, loaded)?;
+    finish_build(base, &produced, &plan, loaded, opts)
+}
 
-    // The compiler succeeded; now find what it produced.
-    //
-    // # Why this searches rather than computing the name
-    //
-    // The naive approach is `<package name>.wasm`, and it is wrong. Cargo names
-    // the artifact after the **crate** name, which is the package name with
-    // hyphens replaced by underscores — `orders-api` produces `orders_api.wasm`.
-    // It is also wrong when `[lib].path` renames the target, or when the crate
-    // declares a `[lib] name` that differs from the package.
-    //
-    // This was a real defect: `qqqai new` generates a hyphenated project, so
-    // every scaffolded project built successfully and then reported "the build
-    // succeeded but `<name>.wasm` was not produced". The fix is to look at what
-    // is actually there, and to name every candidate in the error when nothing
-    // is.
-    let produced = find_artifact(plan.cwd(), profile, target, loaded.name());
+/// Build the compilation-failure error for a failed plan step.
+///
+/// A one-step plan keeps its exact previous message, because that spelling is
+/// what the tests assert and what a user of the only working language sees. A
+/// multi-step plan names the failing step, because a plan of several commands
+/// that reports only "the build failed" leaves the reader to guess which one
+/// failed. Partial step outputs stay on disk; nothing here deletes them.
+fn step_failure(plan: &BuildPlan, index: usize, status: std::process::ExitStatus) -> Error {
+    let detail = if plan.steps.len() > 1 {
+        format!(
+            "step {} of {} failed with {}: `{}`",
+            index + 1,
+            plan.steps.len(),
+            describe_exit(status.code()),
+            plan.render()
+        )
+    } else {
+        format!(
+            "`{}` failed with {}",
+            plan.render(),
+            describe_exit(status.code())
+        )
+    };
+    // `run_steps` maps a spawn failure to `MissingTarget` and a non-zero exit
+    // to here, so a compiler error was being told to run `qqqai doctor`. That
+    // diagnoses an incomplete toolchain, which is right when the tool is at
+    // fault and wrong when the input is. The message names both questions.
+    let workdir = plan.cwd().display();
+    Error::new(ErrorCode::CompilationFailed, detail).with_remediation(format!(
+        "the failing tool's own output is above. **Any artifact an earlier step produced is still \
+         in `{workdir}`** -- nothing is deleted on failure, so a partial build can be inspected \
+         there. If the tool itself is missing or too old, `qqqai doctor` diagnoses that; if the \
+         tool ran and rejected the input, its message above is the diagnosis."
+    ))
+}
+
+/// Find the component a successful build produced.
+///
+/// Cargo names the artifact after the crate name rather than the package name,
+/// so the search inspects the output directory instead of computing one file
+/// name. Foreign pipelines declare an explicit [`ArtifactSpec::File`] output.
+fn locate_produced(plan: &BuildPlan, loaded: &LoadedManifest) -> Result<std::path::PathBuf> {
+    let produced = plan.artifact.resolve(plan.cwd());
     let Some(produced) = produced else {
-        let dir = artifact_dir(plan.cwd(), profile, target);
-        let seen = list_wasm_files(&dir);
+        let (location, seen) = match &plan.artifact {
+            ArtifactSpec::Cargo {
+                profile, target, ..
+            } => {
+                let dir = artifact_dir(plan.cwd(), profile, target);
+                let seen = list_wasm_files(&dir);
+                (dir, seen)
+            }
+            ArtifactSpec::File(path) => {
+                let resolved = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    plan.cwd().join(path)
+                };
+                let seen = resolved.parent().map_or_else(Vec::new, list_wasm_files);
+                (resolved, seen)
+            }
+            ArtifactSpec::Unspecified => {
+                return Err(Error::new(
+                    ErrorCode::InternalInvariantViolated,
+                    "the build plan has no artifact locator",
+                )
+                .with_remediation(
+                    "this is a qqqai bug; every executable build plan must declare its output",
+                ));
+            }
+        };
+        let remediation = match &plan.artifact {
+            ArtifactSpec::Cargo { .. } => format!(
+                "`[package].name` is `{}`; `Cargo.toml` must declare \
+                 `crate-type = [\"cdylib\"]` and produce a `.wasm` library target",
+                loaded.name()
+            ),
+            ArtifactSpec::File(path) => format!(
+                "the build plan declared `{}` as its output; verify the final pipeline step writes a \
+                 validated `.wasm` component there",
+                path.display()
+            ),
+            ArtifactSpec::Unspecified => unreachable!("an unspecified plan returned above"),
+        };
         return Err(Error::new(
             ErrorCode::CompilationFailed,
             format!(
                 "the build succeeded but no component was found in `{}`",
-                dir.display()
+                location.display()
             ),
         )
         .with_cause(if seen.is_empty() {
@@ -1386,22 +1558,26 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
         } else {
             format!("found: {}", seen.join(", "))
         })
-        .with_remediation(format!(
-            "`[package].name` is `{}`; `Cargo.toml` must declare \
-             `crate-type = [\"cdylib\"]` and produce a `.wasm` library target",
-            loaded.name()
-        )));
+        .with_remediation(remediation));
     };
+    Ok(produced)
+}
 
+/// Validate, stage, digest, and optionally precompile a produced component.
+fn finish_build(
+    mut base: BuildOutput,
+    produced: &std::path::Path,
+    plan: &BuildPlan,
+    loaded: &LoadedManifest,
+    opts: &BuildOptions,
+) -> Result<BuildOutput> {
     // Classify before staging: an artifact that is not a component must never
     // reach `qqqai run`, because the failure there is far from its cause.
-    let kind = verify_artifact(&produced)?;
-    let (dest, bytes) = stage(&produced, plan.cwd(), loaded.name())?;
+    let kind = verify_artifact(produced)?;
+    let (dest, bytes) = stage(produced, plan.cwd(), loaded.name())?;
 
     // `--reproducible`: the digest is what a deployment pins, so an unstable
-    // digest is a supply-chain problem rather than a cosmetic one. Comparing
-    // against a stored digest is how "the same source produced a different
-    // artifact twice" is caught, rather than discovered at deploy time.
+    // digest is a supply-chain problem rather than a cosmetic one.
     let digest = qqq_host::digest_of(&bytes);
     if opts.reproducible() {
         check_reproducible(plan.cwd(), loaded.name(), &digest)?;
@@ -1414,14 +1590,12 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
             opts.aot_cache.as_deref(),
         )?;
     }
-    Ok(BuildOutput {
-        aot_performed: opts.aot(),
-        artifact: Some(relative_display(&dest, plan.cwd())),
-        digest: Some(digest),
-        size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-        kind: Some(kind.as_str().to_owned()),
-        ..base
-    })
+    base.aot_performed = opts.aot();
+    base.artifact = Some(relative_display(&dest, plan.cwd()));
+    base.digest = Some(digest);
+    base.size_bytes = Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    base.kind = Some(kind.as_str().to_owned());
+    Ok(base)
 }
 
 /// Copy the compiler's output to the stable component path, returning both the
@@ -1708,9 +1882,7 @@ mod tests {
         };
 
         // -- the control: every step succeeds, so nothing is reported as failing --
-        let all_ok = BuildPlan {
-            steps: vec![succeeds(None), succeeds(None)],
-        };
+        let all_ok = BuildPlan::from_steps(vec![succeeds(None), succeeds(None)]);
         assert!(
             run_steps(&all_ok).unwrap().is_none(),
             "a plan whose steps all succeed must report no failure"
@@ -1722,13 +1894,11 @@ mod tests {
         // "the plan ran nothing" -- a check that cannot distinguish those is the defect this file already
         // records three times over.
         let marker = "step-one-ran";
-        let stops = BuildPlan {
-            steps: vec![
-                succeeds(Some(marker)),
-                fails(),
-                succeeds(Some("step-three-ran")),
-            ],
-        };
+        let stops = BuildPlan::from_steps(vec![
+            succeeds(Some(marker)),
+            fails(),
+            succeeds(Some("step-three-ran")),
+        ]);
         let (index, status) = run_steps(&stops).unwrap().expect("the second step fails");
         assert_eq!(index, 1, "the plan must report the step that failed");
         assert!(!status.success());
@@ -1779,6 +1949,16 @@ mod tests {
         assert_eq!(plan.only_step().program, "cargo");
         assert!(plan.only_step().args.contains(&"build".to_owned()));
         assert!(plan.render().contains("wasm32-wasip2"));
+        assert!(matches!(plan.artifact, ArtifactSpec::Cargo { .. }));
+    }
+
+    #[test]
+    fn a_foreign_driver_can_resolve_a_relative_explicit_output() {
+        let dir = temp_dir("foreign-artifact");
+        std::fs::write(dir.join("app.wasm"), b"component").expect("write fixture");
+        let locator = ArtifactSpec::file("app.wasm");
+        assert_eq!(locator.resolve(&dir), Some(dir.join("app.wasm")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The planning half must never consult the host. If it did, this test

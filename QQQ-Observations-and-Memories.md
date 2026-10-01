@@ -35101,4 +35101,53 @@ dashboard contract without changing the measured language support boundary: the
 TinyGo 0.42.0 64 KiB URL-corruption failure and the production-driver/conformance
 gaps remain open in the language evidence and are not hidden by progress reporting.
 
+## §O-499 — TinyGo's Windows failure was two defects, and only one was in TinyGo
+
+The first native-Windows reproduction never reached TinyGo. `wit-bindgen-go
+0.7.0` invokes its WIT reader through an embedded WASI preopen; passing the
+absolute Windows path therefore produced `failed to find a pre-opened file
+descriptor`. Passing `wit` relative to the temporary working directory fixes the
+harness defect. WSL is not required by the probe or by the runtime. Native
+Windows still needs `wasm-opt`, which is now a pinned Binaryen 133 toolchain
+requirement and is installed by the Linux CI language-probe job as well.
+
+With the harness fixed, the 64 KiB failure reproduced on the repository's
+Windows host. Default precise GC, conservative GC, scheduler changes, and guest
+body-copy changes all failed the same vector. `-gc=leaking` passed all five
+vectors. Upstream TinyGo issue `#5742` describes the collector corruption class;
+draft PR `#4897` retains `cabi_realloc` pointers until `wasmexport` returns. The
+patch is not released, so QQQ's mitigation is explicit and scoped to its fresh
+Wasmtime Store per request; the Store's memory limit remains the bound. A
+long-lived reused guest must not adopt this flag without a reclamation design.
+
+The governance consequence is precise: the narrow Go probe is expected to pass
+with the mitigation, but `DRIVEN` remains Rust-only. A passing five-vector probe
+does not establish the Go production driver, full bindings, conformance suite,
+reference application, or standard-Go support. Those acceptance gaps remain
+visible in LANG-017..LANG-024 rather than being credited by the mitigation.
+
+## §O-500 - The finishing pass on the TinyGo slice paid down its own gate debt
+
+The uncommitted TinyGo/driver-scaffolding diff failed `cargo clippy` with four
+errors in `crates/qqq-run/src/build.rs`: three `doc_markdown` misses (`TinyGo`,
+`ComponentizeJS` without backticks) and one `too_many_lines` on `execute`
+(129/100). The fix followed the standing rule -- extract named functions
+(`step_failure`, `locate_produced`, `finish_build`) instead of `#[allow]` --
+and added six compiling doc examples for the new `ArtifactSpec` surface, which
+moved `check_api_examples.py` from 2110 outstanding over the 2105 allowance to
+2104 and conforming. Measured: `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` clean; `cargo test --workspace` with zero
+non-zero-failure lines; `examples/orders-api` 57 passed / 0 failed;
+`sync_docs.py --check` SYNC OK; graf refreshed to generation 32.
+
+CodeRabbit's independent review of the same diff returned 2 minor findings,
+both the same real defect: the extraction script dropped the backslash line
+continuations in three remediation strings, leaving runs of literal spaces in
+user-facing error text. The tests did not catch it -- they assert the one-step
+plan spelling, not the remediation wrapping -- which is exactly the review's
+structural value here. Fixed by restoring the continuation form and
+re-verifying `cargo fmt`, `cargo test -p qqq-run` (22 result lines, 0 failed),
+and `git diff --check`.
+
+
 *End of `QQQ-Observations-and-Memories.md`.*

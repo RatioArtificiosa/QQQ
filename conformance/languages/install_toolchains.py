@@ -16,6 +16,8 @@ import urllib.request
 ASSETS = {
     'tinygo': ('https://github.com/tinygo-org/tinygo/releases/download/v0.42.0/tinygo0.42.0.linux-amd64.tar.gz',
                'b87688fa2e19cee7d813cad7fd7dadb71dff3198e47125aba66ba4af5e490438'),
+    'binaryen': ('https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz',
+                 '2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489'),
     'wasi-sdk': ('https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz',
                  'b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4'),
     'wit-bindgen': ('https://github.com/bytecodealliance/wit-bindgen/releases/download/v0.62.0/wit-bindgen-0.62.0-x86_64-linux.tar.gz',

@@ -16,9 +16,11 @@ language support, capability parity, or the five reference applications.
   startup cost still prevent a first-class performance claim. Revisit after the
   production bindings, correctness suite, and startup work pass; no date or future
   milestone automatically promotes it.
-- **LANG-023:** **blocked-by-upstream-and-time**. The TinyGo failure below is a
-  reproducible candidate for upstream investigation, not proof of an upstream root
-  cause. No upstream issue or patch has been submitted by this task.
+- **LANG-023:** **blocked-by-upstream-and-time**. The TinyGo failure below is now
+  root-caused to TinyGo's wasip2 canonical-ABI allocation lifetime: upstream PR
+  `tinygo-org/tinygo#4897` retains `cabi_realloc` pointers until the exported call
+  returns, but remains an unmerged draft. QQQ carries a request-scoped mitigation;
+  no upstream contribution or future review is claimed complete.
 - **LANG-024:** **blocked-by-upstream-and-time**. Initial assessment is 2026-09-30;
   quarterly reassessment is due **2026-12-30**. Installing current standard Go is
   not evidence that QQQ's component ABI works on its runtime.
@@ -65,7 +67,7 @@ conformance, bindings, CLI, capability parity, or reference-app support.
 | Path | Component bytes | Observed result |
 |---|---:|---|
 | AssemblyScript 0.28.20 | 4,590 | 5/5 vectors passed |
-| TinyGo 0.42.0 + Go 1.27.1 | 589,873 | Known gap: 64 KiB echo fails |
+| TinyGo 0.42.0 + Go 1.27.1 | 589,873 (prior precise-GC artifact) | 5/5 with `-gc=leaking`; prior precise-GC 64 KiB failure retained as a negative repro |
 | componentize-py 0.25.1 | 18,313,826 | 5/5 vectors passed |
 | WASI SDK 34 C | 54,147 | 5/5 vectors passed |
 | WASI SDK 34 C++17 using C ABI bindings | 54,147 | 5/5 vectors passed |
@@ -133,26 +135,49 @@ Before comparison: add a production driver and full bindings, execute the comple
 conformance suite, then measure size, successful cold start and throughput with and
 without Weval. Wasmtime native-code caching is a separate layer from Weval.
 
-## Go / TinyGo: preserve the failing case
+## Go / TinyGo: root-caused canonical-ABI failure and bounded mitigation
 
 Use `wit-bindgen-go 0.7.0` and `go.bytecodealliance.org/cm 0.3.0`. The general
 `wit-bindgen 0.62.0 go` generator is a different path and is not substituted here.
 The runner adds the **pinned TinyGo distribution's WASI CLI imports** required by
 its runtime, alongside QQQ's unchanged HTTP contract.
 
-TinyGo uses the target's default **precise GC and asyncify scheduler**. It is not
-standard Go's runtime; stdlib, reflection, networking and scheduler behavior must
-be verified package by package. Guest GC still exists even though the host is Rust.
+TinyGo uses the target's **precise GC and asyncify scheduler** by default. It is
+not standard Go's runtime; stdlib, reflection, networking and scheduler behavior
+must be verified package by package. Guest GC still exists even though the host
+is Rust.
 
-The 64 KiB vector fails with `404` instead of `200`. A diagnostic probe showed a
-corrupted URL with method `post` intact; the smaller vectors succeed. Allocation
-or GC interaction during canonical ABI lowering is a **hypothesis**, not a proven
-root cause. Keep this reproducer before investigating the generator, TinyGo's
-`cabi_realloc`, and argument lifetime. Do not close M5 or disable GC to hide it.
+The original 64 KiB vector failed with `404` instead of `200`, while smaller
+vectors passed. The failure is now root-caused rather than merely suspected:
+TinyGo's host-lowered `cabi_realloc` buffers are held as raw pointers while the
+host constructs the exported call. TinyGo's precise and conservative collectors
+cannot see those raw pointers as live roots and may reclaim the buffers between
+large string/list allocations. The observed symptom is a corrupted URL with the
+method still intact. Upstream issue `tinygo-org/tinygo#5742` documents the GC
+corruption class, and draft PR `tinygo-org/tinygo#4897` retains the allocations
+until `wasmexport` returns. The upstream fix is not in TinyGo `0.42.0` or a
+released successor.
 
-Reproduce: `python tools/run_language_probes.py --language go`. The nonzero exit
-and report must be preserved. Quarterly standard-Go work must run the same suite,
-including the large payload; a compiler version check is insufficient.
+QQQ's measured mitigation is `tinygo build -gc=leaking`. `GuestApp::serve_one`
+creates a fresh Wasmtime `Store` for each request, so the leaked allocations die
+with that request's store and remain bounded by the existing store memory limit.
+This is a QQQ lifecycle mitigation, not a general TinyGo recommendation: it must
+not be copied to a long-lived reused guest process without an explicit memory
+reclamation design. The negative precise/conservative-GC reproduction remains
+valuable and must stay in the investigation record.
+
+The generator invocation passes `wit` relative to its working directory. This is
+required on native Windows because `wit-bindgen-go 0.7.0` reads through an
+embedded WASI preopen and cannot open the absolute Windows path. WSL is not a
+runtime or user prerequisite. Native Windows also needs Binaryen `wasm-opt` for
+TinyGo's final component lowering; the probe's pinned installer and driver
+diagnostics name that dependency explicitly.
+
+Reproduce the passing narrow probe with:
+`python tools/run_language_probes.py --language go`. Quarterly standard-Go work
+must run the same suite, including the large payload; a compiler version check is
+insufficient. Passing these five vectors does not close M5, establish full Go
+bindings, or enable the production CLI driver.
 
 ## Python: experimental, with the startup work sequenced
 
@@ -190,12 +215,13 @@ conformance and the ten-workload app. No native shared-library loading is used.
 
 ## Run locally and in CI
 
-Required: repository Rust toolchain, `wasm-tools 1.259.0`, Node 24.14.1, Go 1.27.1,
-Python 3.12+, and the compiler versions above. Linux x86_64 archive installation:
+Required: repository Rust toolchain, `wasm-tools 1.259.0`, Binaryen `wasm-opt` 133,
+Node 24.14.1, Go 1.27.1, Python 3.12+, and the compiler versions above. Linux x86_64
+archive installation:
 
 ```sh
 python conformance/languages/install_toolchains.py /absolute/new/tool-prefix
-# Add the three extracted compiler bin directories to PATH (see the CI job).
+# Add the TinyGo, Binaryen, WASI SDK and wit-bindgen bin directories to PATH (see the CI job).
 go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0
 pip install componentize-py==0.25.1
 npm ci --ignore-scripts --prefix examples/language-probes
@@ -213,12 +239,13 @@ published embedding imports it. No install scripts are run.
 The `language-probes` CI job builds all six paths, executes the real Rust host
 test, and uploads the results and generated matrix. The final successful rollout
 used GitHub Actions run `36789475802`; its artifact is the source of the tracked
-records above. The TinyGo probe remains **FAILED**; the governance gate accepts
-only its recorded diagnostic, with a compiled artifact, current source hashes,
-tool versions, owner and review date. Expired review dates produce reminders
-without changing pass/fail overnight. A new failure, missing compiler, stale
-result, missing report, vacuous test, or an unexpected success fails the gate for
-review.
+records above. The current Go policy expects the explicit `-gc=leaking`
+mitigation to pass all five vectors, while retaining the prior precise-GC result
+as a negative regression case. Every result still requires a compiled artifact,
+current source hashes, tool versions, owner and review date. Expired review dates
+produce reminders without changing pass/fail overnight. A new failure, missing
+compiler, stale result, missing report, vacuous test, or an unexpected result
+fails the gate for review.
 
 LANG-039/040 remain partial: this generates a measured **HTTP probe matrix** and
 checks all 40 obligations; the existing `conformance/suite.json` still owns the
@@ -227,9 +254,10 @@ WIT types does not prove the host implements each capability.
 
 ## Next implementation increments and acceptance gates
 
-1. **Resolve M5 blockers first.** Fix or isolate TinyGo's large-payload failure;
-   build AS bindings from a parsed WIT model instead of expanding handwritten ABI
-   layouts. Prove absent capabilities stay absent. Preserve negative reproducers.
+1. **Resolve M5 blockers first.** Keep the TinyGo mitigation bounded to QQQ's
+   fresh-store lifecycle and track the upstream fix; build AS bindings from a
+   parsed WIT model instead of expanding handwritten ABI layouts. Prove absent
+   capabilities stay absent. Preserve negative reproducers.
 2. **Production drivers and scaffolds.** Extend `build::toolchain_for`, `plan_pure`,
    `execute` and `new::source_files` together. Represent all build steps in dry-run
    and JSON output; pass argument arrays, preserve errors, atomically stage only

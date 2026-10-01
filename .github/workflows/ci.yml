@@ -2084,7 +2084,7 @@ jobs:
           cargo test -p qqq-host --test fuzz_corpus
 
   language-probes:
-    name: Measured language probes (known failures remain gaps)
+    name: Measured language probes (narrow evidence, not language support)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -2107,6 +2107,7 @@ jobs:
         run: |
           python conformance/languages/install_toolchains.py "$RUNNER_TEMP/language-tools"
           echo "$RUNNER_TEMP/language-tools/tinygo/tinygo/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/language-tools/binaryen/binaryen-version_133/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/language-tools/wasi-sdk/wasi-sdk-34.0-x86_64-linux/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/language-tools/wit-bindgen/wit-bindgen-0.62.0-x86_64-linux" >> "$GITHUB_PATH"
           go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.7.0

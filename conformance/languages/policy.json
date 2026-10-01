@@ -12,14 +12,13 @@
       "reason": "HTTP probe only; qqqai build driver, all-interface bindings and ten-workload reference app remain open."
     },
     "go": {
-      "expected_probe": "failed",
+      "expected_probe": "passed",
       "owner": "QQQ language maintainer",
       "review_by": "2026-10-30",
       "cli_driver": "gap",
       "capability_parity": "gap",
       "reference_application": "gap",
-      "reason": "TinyGo precise-GC probe corrupts request URL at 64 KiB body; four simpler vectors pass. Root cause needs upstream/toolchain investigation; M5 not met.",
-      "failure_contains": "/echo expected 65536 bytes"
+      "reason": "The five-vector probe passes with QQQ's explicit -gc=leaking mitigation and native relative-WIT invocation. TinyGo precise/conservative GC modes corrupt 64 KiB canonical-ABI input; upstream PR 4897 remains an unmerged draft. Production driver, full bindings, conformance and reference app remain open."
     },
     "python": {
       "expected_probe": "passed",

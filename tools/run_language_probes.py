@@ -96,7 +96,10 @@ def build(language, work):
     elif language == 'go':
         for name in ('main.go', 'go.mod', 'go.sum'):
             shutil.copyfile(SOURCE / 'go' / name, work / name)
-        run(['wit-bindgen-go', 'generate', wit, '--world', 'app', '--out', 'gen',
+        # Pass a path relative to the working directory. wit-bindgen-go executes
+        # its WIT reader through a WASI preopen; an absolute Windows path is not
+        # visible through that preopen and fails before TinyGo is reached.
+        run(['wit-bindgen-go', 'generate', Path('wit'), '--world', 'app', '--out', 'gen',
              '--package-root', 'example.com/probe/gen'], work)
         tinyroot = Path(run(['tinygo', 'env', 'TINYGOROOT'], work).strip())
         wasi = tinyroot / 'lib/wasi-cli/wit'
@@ -106,7 +109,14 @@ def build(language, work):
             shutil.copyfile(path, wit / 'deps/cli' / path.name)
         app = wit / 'app.wit'
         app.write_text(app.read_text(encoding='utf-8').replace('world app {', 'world app {\n include wasi:cli/imports@0.2.0;'), encoding='utf-8')
-        run(['tinygo', 'build', '-target=wasip2', '-wit-package', 'wit', '-wit-world', 'app', '-o', out, '.'], work)
+        # TinyGo 0.42.0's wasip2 cabi_realloc allocations are held as raw
+        # pointers while the host lowers an exported call. Reclaiming GC modes
+        # can collect those buffers between large list allocations (upstream
+        # fix: tinygo-org/tinygo#4897, still unmerged). QQQ creates a fresh
+        # Store per request, so leaking GC is bounded to one request and is the
+        # only tested-safe mode for this runtime boundary.
+        run(['tinygo', 'build', '-gc=leaking', '-target=wasip2', '-wit-package', 'wit',
+             '-wit-world', 'app', '-o', out, '.'], work)
     elif language in ('c', 'cpp'):
         run(['wit-bindgen', 'c', wit, '--world', 'app', '--out-dir', '.'], work)
         shutil.copytree(SOURCE / 'c', work / 'c')
@@ -137,7 +147,8 @@ def measure(language, destination):
            'environment': {'platform': sys.platform, 'machine': __import__('platform').machine()},
            'tool_versions': {}}
     versions = [['rustc', '--version'], ['wasm-tools', '--version']]
-    versions += {'go': [['go', 'version'], ['tinygo', 'version'], ['wit-bindgen-go', '--version']],
+    versions += {'go': [['go', 'version'], ['tinygo', 'version'], ['wit-bindgen-go', '--version'],
+                        ['wasm-opt', '--version']],
                  'python': [['componentize-py', '--version']],
                  'c': [['clang', '--version'], ['wit-bindgen', '--version']],
                  'cpp': [['clang++', '--version'], ['wit-bindgen', '--version']],

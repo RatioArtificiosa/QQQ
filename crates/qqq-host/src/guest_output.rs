@@ -1704,15 +1704,25 @@ mod tests {
             Arc::ptr_eq(first.budget(), second.budget()),
             "concurrent requests of one tenant must share one budget object"
         );
-        let retired = Arc::as_ptr(second.budget());
+        let retired = Arc::downgrade(second.budget());
+        first
+            .budget()
+            .reserve(512)
+            .expect("half the tenant budget must be reservable");
+        assert_eq!(first.budget().used(), 512);
         drop(first);
         drop(second);
-        let third = budgets.acquire("tenant-a");
         assert!(
-            !std::ptr::eq(Arc::as_ptr(third.budget()), retired),
+            retired.upgrade().is_none(),
+            "dropping the last guard must free the retired tenant budget"
+        );
+        assert_eq!(budgets.live("tenant-a"), 0);
+        let third = budgets.acquire("tenant-a");
+        assert_eq!(
+            third.budget().used(),
+            0,
             "after eviction the next request must start a fresh budget at zero"
         );
-        assert_eq!(third.budget().used(), 0);
     }
 
     /// **Two tenants never share a budget.**

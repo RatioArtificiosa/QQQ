@@ -162,6 +162,87 @@
       "profile": "ubuntu-latest",
       "samples": 3,
       "schema_version": 1
+    },
+    {
+      "budget_misses": [
+        "hello",
+        "json",
+        "multi",
+        "tailp99"
+      ],
+      "commit": "399752cfedf94c7734b9e6ae928ba40245d586d2",
+      "does_not_measure": [
+        "run on AMD EPYC 9V74 80-Core Processor by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+        "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+        "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+      ],
+      "environment": {
+        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "kernel": "6.17.0-1022-azure",
+        "memory_bytes": 16766414848,
+        "os": "linux x86_64",
+        "physical_cores": 4,
+        "toolchains": {
+          "qqqai": "0.0.0",
+          "rustc": "unknown"
+        }
+      },
+      "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+      "measured_budget_items": [
+        "PERF-002",
+        "PERF-010",
+        "PERF-011"
+      ],
+      "metrics": {
+        "hello": {
+          "median": 544389.0,
+          "metric": "p99_nanos",
+          "samples": [
+            453603.0,
+            544389.0,
+            558421.0
+          ]
+        },
+        "json": {
+          "median": 2001.977771858619,
+          "metric": "requests_per_second",
+          "samples": [
+            2404.9375821598073,
+            2001.977771858619,
+            1962.8761277221433
+          ]
+        },
+        "multi": {
+          "median": 16290.025657650716,
+          "metric": "requests_per_second",
+          "samples": [
+            15737.835456434206,
+            16427.221352561977,
+            16290.025657650716
+          ]
+        },
+        "tailp99": {
+          "median": 4796697.0,
+          "metric": "p99_nanos",
+          "samples": [
+            4958000.0,
+            4796697.0,
+            4777849.0
+          ]
+        }
+      },
+      "not_measured_budget_items": [
+        "PERF-003",
+        "PERF-004",
+        "PERF-007",
+        "PERF-008",
+        "PERF-009",
+        "PERF-012",
+        "PERF-013"
+      ],
+      "profile": "ubuntu-latest",
+      "samples": 3,
+      "schema_version": 1
     }
   ]
 }

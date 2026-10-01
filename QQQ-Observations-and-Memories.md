@@ -35006,7 +35006,8 @@ The first successful live job was GitHub Actions run
 `.github/perf/baseline.json`. A later `ubuntu-latest` run exposed a different,
 Intel Xeon host; its reviewed candidate is the second entry. The harness now
 selects only an exact stable runner identity (with the documented memory
-tolerance), so a third unseen host still fails closed and requires review.
+tolerance). A later runner-image migration exposed a third AMD identity, which
+also fails closed until its reviewed candidate is added.
 
 That candidate measures `PERF-002`, `PERF-010`, and `PERF-011` through `hello`, `json`,
 `multi`, and `tailp99`. Four rows miss the absolute §9.2 targets on the ordinary hosted
@@ -35040,5 +35041,36 @@ and the artifact passed the Windows-local parity checker. The measured Go
 64 KiB echo failure remains an explicit known gap; the five passing vectors in
 the other languages remain narrow HTTP-probe evidence, not full language
 conformance or production-driver support.
+
+## §O-495 — The governance snapshot must distinguish corrected probe evidence from full language support
+
+The post-rollout checklist/proposal audit found stale descriptions, not stale
+measurements: `LANG-015` and `LANG-025` still described the earlier Python and
+TypeScript link-rejection probes even though the explicit `http.server` grant
+now makes both narrow five-vector probes pass. Their checklist ticks remain
+scoped spike/decision documentation; the full bindings, templates, drivers,
+reference apps, capability matrix and conformance rows remain open. Proposal
+§6.10 now states that boundary next to its future parity commitment, and
+`docs/languages/phase3.md` names the successful CI artifact directly.
+
+The same audit refreshed the ignored local agent handbook: Graf generation 27
+contains 382 files, 16,269 nodes and 27,604 edges, and its read-only freshness
+check passes. Resolver-backed handbook claims pass with 353 observations,
+highest `§O-494`, 587 checklist items (267 done, 313 open), and 88 Python tools.
+No additional checklist item was honestly ticked by this audit; `PERF-003`–
+`PERF-013`, `DET-016`, the remaining language implementation/conformance rows,
+and the full parity publication remain explicitly open.
+
+## §O-496 — PERF-020 correctly rejected an unreviewed Ubuntu host profile
+
+The final evidence commit's first CI run, `36799704132`, went red only in
+PERF-020: `ubuntu-latest` moved to `AMD EPYC 9V74 80-Core Processor`, which is
+not either previously reviewed identity (`AMD EPYC 7763` or Intel Xeon 8573C).
+The candidate completed all three samples and wrote valid metrics (hello p99
+median 544,389 ns, JSON 2,001.98 RPS, multi 16,290.03 RPS, tail p99
+4,796,697 ns); the harness failed closed before comparing unlike hardware.
+The reviewed third entry is now recorded in `.github/perf/baseline.json`. This
+is a runner-profile onboarding event, not evidence of a product regression and
+not a reason to weaken the exact-identity rule.
 
 *End of `QQQ-Observations-and-Memories.md`.*

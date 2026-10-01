@@ -4185,7 +4185,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: `docs/languages/phase3.md` documents AssemblyScript’s distinct type system, standard library and runtime, absent Node/Bun compatibility, and the narrow WIT-digest-guarded HTTP adapter. The name does not claim full TypeScript.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-015** Evaluate and document the full-TypeScript-via-engine-in-Wasm path, with measurements.
-  → Done: Actual `tsc 5.9.3` → ComponentizeJS 0.23.0 probe measured in `docs/languages/evidence/typescript.json`: roughly 12 MB, with least-privilege linking rejected on unused `send`. Successful cold start and conformance are not claimed; the evaluated path stays experimental.
+  → Done: Actual `tsc 5.9.3` → ComponentizeJS 0.23.0 probe measured in `docs/languages/evidence/typescript.json`: roughly 12 MB, with the narrow five-vector HTTP probe passing under the explicit `http.server` grant. This is not a full TypeScript driver, binding, CLI, capability-parity or conformance result; successful production cold-start claims remain open and the evaluated path stays experimental.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-016** Resolve open question `OQ-002`: how we name and market this path.
   → Done: Decision taken 2026-09-30: **AssemblyScript (TypeScript-like)**, preserving manifest identifier `ts`. Full TypeScript is a separate experimental engine-in-Wasm path; `docs/languages/phase3.md` records the decision and evidence.
@@ -4216,7 +4216,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
 **Python (Tier B)**
 
 - [x] **LANG-025** Spike: CPython compiled to WASI, measured for size, cold start and correctness.
-  → Done: Completed the spike with a negative result: `tools/run_language_probes.py --language python` compiles CPython via componentize-py 0.25.1, measures roughly 18 MB and time to link rejection, and records zero executed vectors in `docs/languages/evidence/python.json`. Successful cold start is unavailable because least-privilege linking fails; this is not a Python support tick.
+  → Done: Completed the spike with a scoped positive result: `tools/run_language_probes.py --language python` compiles CPython via componentize-py 0.25.1, measures roughly 18 MB and successful execution of all five narrow HTTP vectors under the explicit `http.server` grant (`docs/languages/evidence/python.json`). This is not a Python binding, template, full-conformance, production-driver or first-class cold-start claim; startup/pooling and broader compatibility remain open.
   → §6.10 Language toolchains — one per target language
 - [ ] **LANG-026** Python bindings generated from `wit/` via `componentize-py` or equivalent.
   → §6.10 Language toolchains — one per target language

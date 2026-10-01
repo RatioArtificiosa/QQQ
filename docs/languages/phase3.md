@@ -211,13 +211,14 @@ zero npm audit findings. The preview2 shim is explicit because ComponentizeJS's
 published embedding imports it. No install scripts are run.
 
 The `language-probes` CI job builds all six paths, executes the real Rust host
-test, and uploads the results and generated matrix. The TinyGo probe remains
-**FAILED**; the governance gate accepts only its recorded diagnostic, with a
-compiled artifact, current source hashes, tool versions, owner and review date.
-Expired review dates produce reminders without changing pass/fail overnight.
-A new failure, missing compiler, stale result, missing report, vacuous test, or an
-unexpected success fails the gate for review. CI has been wired but **has not run
-remotely** in this task. Local equivalent probes and checker controls have run.
+test, and uploads the results and generated matrix. The final successful rollout
+used GitHub Actions run `36789475802`; its artifact is the source of the tracked
+records above. The TinyGo probe remains **FAILED**; the governance gate accepts
+only its recorded diagnostic, with a compiled artifact, current source hashes,
+tool versions, owner and review date. Expired review dates produce reminders
+without changing pass/fail overnight. A new failure, missing compiler, stale
+result, missing report, vacuous test, or an unexpected success fails the gate for
+review.
 
 LANG-039/040 remain partial: this generates a measured **HTTP probe matrix** and
 checks all 40 obligations; the existing `conformance/suite.json` still owns the

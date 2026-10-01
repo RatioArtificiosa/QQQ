@@ -1205,6 +1205,17 @@ The multi-language promise lives or dies here. Honest per-language status:
 
 **Why this matters for the product claim.** "Multi-language" is the hardest promise in this document and the one most likely to be quietly abandoned. The parity matrix in CI exists specifically so drift is *visible*.
 
+**Current measured status (2026-09-30).** The CI artifact in
+`docs/languages/evidence/` is a narrow five-vector HTTP probe, not the full
+language × capability conformance suite promised above. AssemblyScript, C,
+C++, Python and the experimental full-TypeScript engine path pass those five
+vectors under their explicit server grants; TinyGo still fails the 65,536-byte
+echo vector. Production drivers, generated bindings, project templates,
+reference applications and full cross-language conformance remain open
+checklist work. `docs/languages/phase3.md` and the generated evidence records
+are the current measured source of truth; this paragraph prevents the proposal's
+future parity commitment from being read as present support.
+
 → **Checklist:** `LANG-001` … `LANG-040`
 
 ---

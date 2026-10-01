@@ -35073,4 +35073,15 @@ The reviewed third entry is now recorded in `.github/perf/baseline.json`. This
 is a runner-profile onboarding event, not evidence of a product regression and
 not a reason to weaken the exact-identity rule.
 
+## §O-497 — Residual Python decision notes must match the corrected probe evidence
+
+The positive narrow Python probe was recorded in `LANG-025`, the proposal and
+the Phase 3 page, but three mirrored checklist notes still described the old
+link-rejection result: `LANG-031`, `LANG-032` and `OQ-003`. The probe now passes
+all five HTTP vectors under the explicit `http.server` grant. Those notes now
+preserve the honest experimental decision while naming the actual remaining
+limits: component size, startup measurement, bindings, correctness,
+conformance and broader capability coverage. No implementation item is promoted
+by this correction.
+
 *End of `QQQ-Observations-and-Memories.md`.*

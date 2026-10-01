@@ -4229,10 +4229,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **LANG-030** Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-031** Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement.
-  → Done: Decision taken 2026-09-30: **experimental**, based on the failed Python linking probe and measured size in `docs/languages/evidence/python.json`. First-class promotion requires a new evidence-backed decision after correctness/startup work.
+  → Done: Decision taken 2026-09-30: **experimental**. The current evidence is a narrow five-vector HTTP probe that passes under the explicit `http.server` grant, while the measured component size, unmeasured startup cost, missing production bindings and incomplete correctness/conformance work do not support a first-class claim. Promotion requires a new evidence-backed decision after that work.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-032** Document Python's honest limits (component size, startup, stdlib coverage).
-  → Done: `docs/languages/phase3.md` documents measured Python size, failed preparation, unverified stdlib/native extensions, stub-WASI limitations and the unimplemented `.pyc`/interpreter-pooling work. Time to failure is explicitly separated from successful cold start.
+  → Done: `docs/languages/phase3.md` documents the roughly 18 MB component, successful narrow HTTP execution under the explicit `http.server` grant, unverified stdlib/native extensions, stub-WASI limitations and the unimplemented `.pyc`/interpreter-pooling work. Startup remains unmeasured; the narrow probe is not a first-class support claim.
   → §6.10 Language toolchains — one per target language
 
 **C / C++ (Tier A)**
@@ -5580,7 +5580,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: Decision taken 2026-09-30: AssemblyScript (TypeScript-like); retain manifest `ts`; full TypeScript is a separate experimental path. See `docs/languages/phase3.md`.
   → §6.10 Language toolchains — one per target language
 - [x] **OQ-003** Decide whether Python is first-class or experimental, based on the M5 spike.
-  → Done: Decision taken 2026-09-30: Python is experimental based on the measured linking failure and component size; promotion requires new evidence. See `docs/languages/phase3.md`.
+  → Done: Decision taken 2026-09-30: Python is experimental because the current evidence is limited to a narrow HTTP probe that passes under the explicit `http.server` grant; component size, startup, bindings, correctness and full conformance remain open. Promotion requires new evidence. See `docs/languages/phase3.md`.
   → §6.10 Language toolchains — one per target language
 - [ ] **OQ-004** Decide whether Windows is first-class or best-effort.
   → §6.10 Language toolchains — one per target language

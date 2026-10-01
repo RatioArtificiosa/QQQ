@@ -623,9 +623,12 @@ async fn a_chunked_body_to_a_streaming_route_is_rejected_before_the_handler_runs
         "a refused request must not reach the handler"
     );
     let mut one = [0u8; 1];
-    assert_eq!(
-        client.read(&mut one).await.expect("read close"),
-        0,
+    // `close_immediately` documents the Windows measurement: closing a socket
+    // with unread request bytes still in flight produces RST instead of FIN,
+    // so a reset here is the same closed connection, not a missing one — and
+    // matches what `read_until_eof` above already accepts.
+    assert!(
+        matches!(client.read(&mut one).await, Ok(0) | Err(_)),
         "the rejection must close the connection so the unread body dies with it"
     );
 }
@@ -723,6 +726,99 @@ async fn a_truncated_chunked_body_to_a_streaming_route_is_rejected_without_waiti
         invocations.load(Ordering::SeqCst),
         0,
         "a refused request must not reach the handler"
+    );
+}
+
+/// **A chunked body under the drain cap receives its refusal intact.**
+///
+/// The refusal path drains pending bytes before closing, so a body that fits in
+/// the drain bound leaves nothing unread and the close is a FIN: the 400
+/// arrives whole and the final read is a clean EOF. Without the drain, straggler
+/// bytes unread at close turn the close into an RST, and the RST discards the
+/// 400 the client had not read yet — the failure the gate observed once on the
+/// truncated sibling of this test.
+#[tokio::test]
+async fn a_chunked_body_under_the_drain_cap_receives_its_refusal_intact() {
+    let (_tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server = Server::start(dispatch).await;
+
+    let body = vec![b'x'; 4096];
+    let mut client = server.open_chunked("/events", &[&body]).await;
+    // Let the race settle against the test: the server refuses at the head and
+    // closes within milliseconds either way, so by the time this read runs the
+    // connection is fully closed. Without the drain the close is an RST and the
+    // RST has already discarded the unread 400; with it the close is a FIN and
+    // the 400 waits in the client's buffer. A fast client would usually win
+    // either way, which is why this sleep is the instrument.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let got = read_until_eof(&mut client).await;
+
+    assert!(
+        got.contains("400"),
+        "a drained refusal must reach the client intact: {got:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the handler"
+    );
+    let mut one = [0u8; 1];
+    assert_eq!(
+        client.read(&mut one).await.expect("read close"),
+        0,
+        "a fully drained refusal must close cleanly, not reset"
+    );
+}
+
+/// **A chunked body past the drain cap is still refused without hanging.**
+///
+/// The drain is bounded, so most of this body is still unread at close and the
+/// RST may discard the 400 — which is why this test does not assert on it. What
+/// it pins is the rest of the contract: the handler never runs, the connection
+/// dies, and the refusal path does not hang consuming a body nobody asked for.
+#[tokio::test]
+async fn a_chunked_body_past_the_drain_cap_is_still_refused_promptly() {
+    let (_tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server = Server::start(dispatch).await;
+
+    let body = vec![b'x'; 262_144];
+    // Best-effort send: the server refuses at the head and may reset the
+    // connection while the flood is still arriving. A failed write here is the
+    // refusal arriving early, not a test failure — the assertions below pin
+    // the handler and the connection, which are the contract.
+    let mut client = TcpStream::connect(server.addr).await.expect("connect");
+    client
+        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write head");
+    for piece in body.chunks(8192) {
+        let header = format!("{:X}\r\n", piece.len());
+        if client.write_all(header.as_bytes()).await.is_err()
+            || client.write_all(piece).await.is_err()
+            || client.write_all(b"\r\n").await.is_err()
+        {
+            break;
+        }
+    }
+    let _ = client.write_all(b"0\r\n\r\n").await;
+    let _ = client.flush().await;
+    let _ = read_until_eof(&mut client).await;
+
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the handler"
+    );
+    let mut one = [0u8; 1];
+    assert!(
+        matches!(client.read(&mut one).await, Ok(0) | Err(_)),
+        "the refusal must close the connection so the unread body dies with it"
     );
 }
 

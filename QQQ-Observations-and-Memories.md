@@ -35164,6 +35164,53 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-507 - Tenant-bound docs describe the enforced composition, not the narrowed one
+
+The module docs in `guest_output.rs` still said a cross-request shared tenant
+budget was follow-up work, after four commits had built exactly that
+(`OutputBudget::parent`, `TenantOutputBudgets`, `TENANT_OUTPUT_BYTES`, wired
+through `GuestApp::serve_one`). A reader got the wrong model of the bound --
+the same class of defect as stating an unenforced invariant, in reverse.
+Rewritten to the composition that exists: per-instance budgets, one shared
+tenant ceiling for concurrent requests of a tenant, reset at last-guard-drop,
+sequential requests over time still unbounded like fuel and memory. No
+behavior change; doc-only.
+
+## §O-506 - A tenant refusal counts on the refused output too
+
+`OutputBudget::reserve` failing at the parent incremented only the tenant
+budget's breach counter, so `GuestOutput::breaches()` read 0 while
+`last_truncation()` reported a breach for the same write -- and the module
+docs promise every breach increments the host-read count. Reproduced with a
+failing assertion on `out_b.breaches()` in
+`two_outputs_share_one_tenant_ceiling` before fixing; `reserve` now also bumps
+the local counter on a parent refusal, so each counter counts the same refusal
+once (no double count within either). Tenant `breaches()` still 1, output
+`breaches()` now 1, event unchanged.
+
+## §O-505 - A reset is a close in the streaming-rejection test, and the drain
+delivers the refusal
+
+`reject_special_route_body` wrote the 400 and closed a socket that may still
+hold unread request bytes, so the kernel may send RST instead of FIN
+(`close_immediately` documents the Windows measurement) -- and the gate then
+observed the worse case live: the truncated-chunked test received an empty
+reset instead of the 400. The test's final close assertion also used
+`expect("read close")` and required `Ok(0)`, while the file's own
+`read_until_eof` helper already accepts `Ok(0) | Err(_)`; both were fixed.
+The durable fix is server-side: both body-rejection closes (`reject_body`
+and `reject_special_route_body`) now call the existing `drain_for_refusal`
+before writing, so pending bytes are consumed under its byte/deadline bound
+and the typed refusal survives to the client. Two regression tests pin it: a
+4 KiB chunked body asserts the intact 400 plus a strict clean EOF (the drain
+bound makes FIN deterministic), and a 256 KiB flood asserts handler-zero plus
+a dead connection without asserting on the 400 past the drain cap, where RST
+may still discard it -- alongside a best-effort sender, because the server may
+reset mid-flood. Honest limit: removing the drain does not fail the new tests
+deterministically on loopback (coalescing usually delivers FIN anyway); the
+gate's red run is the observed pre-fix failure of this class, and the tests
+pin FIN as required behavior for platforms where the race bites.
+
 ## §O-504 - Per-tenant output budgets, enforced after all
 
 §O-503 narrowed per-tenant budgets to a documented composition bound on the

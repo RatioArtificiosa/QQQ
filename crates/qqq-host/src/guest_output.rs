@@ -61,15 +61,19 @@
 //!
 //! The quota is per instance: [`host_wasi::context`](crate::host_wasi::context) builds
 //! fresh outputs for every store, and each request runs on its own store, so each
-//! request gets two fresh [`MAX_OUTPUT_BYTES`] budgets. A tenant's concurrent
-//! output is therefore bounded by that budget times the tenant's concurrent
-//! requests, and concurrent requests per tenant are capped by
+//! request gets two fresh [`MAX_OUTPUT_BYTES`] budgets. Where the request carries
+//! a tenant, its budgets additionally share one [`TenantOutputBudgets`] ceiling of
+//! [`TENANT_OUTPUT_BYTES`]: concurrent requests of one tenant draw on the same
+//! tenant budget through their [`TenantOutputGuard`], so a tenant's concurrent
+//! output is bounded by that ceiling rather than by budget times requests, and
+//! concurrent requests per tenant are capped by
 //! `qqq_serve::conn::ConnectionLedger` (`ServerConfig::connections_per_tenant`,
-//! overridable per tenant with `max_connections`). What this does not bound is
-//! sequential requests over time — each gets a fresh budget, exactly as each gets
-//! fresh fuel and memory — so long-term log volume remains an operator retention
-//! decision, and a cross-request shared tenant budget is recorded as follow-up
-//! work rather than smuggled in here.
+//! overridable per tenant with `max_connections`). The reset boundary is the last
+//! guard drop: while at least one request holds the tenant the ceiling persists,
+//! and when the last guard drops the entry is evicted, so the tenant's next
+//! request starts at zero. What this does not bound is sequential requests over
+//! time — each gets a fresh budget, exactly as each gets fresh fuel and memory —
+//! so long-term log volume remains an operator retention decision.
 //!
 //! # Why the write leaves the executor thread
 //!
@@ -303,6 +307,11 @@ impl OutputBudget {
         if let Some(parent) = self.parent.lock().ok().and_then(|p| p.clone()) {
             if let Err(refusal) = parent.reserve(bytes) {
                 self.unreserve(bytes);
+                // The host reads this output's own counter, and a tenant
+                // refusal is still a refused write on this output: without
+                // this, `breaches` would stay zero while `last_truncation`
+                // reports a breach for the same write.
+                self.breaches.fetch_add(1, Ordering::Relaxed);
                 return Err(refusal);
             }
         }
@@ -1775,6 +1784,11 @@ mod tests {
             guard_a.budget().breaches(),
             1,
             "the tenant budget must count the refusal"
+        );
+        assert_eq!(
+            out_b.breaches(),
+            1,
+            "the refused output must count the tenant refusal the host reads"
         );
         assert_eq!(
             out_b.last_truncation(),

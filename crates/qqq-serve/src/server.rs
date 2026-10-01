@@ -1125,7 +1125,12 @@ fn is_head(head: &RequestHead) -> bool {
 ///
 /// The connection closes because the framing offset is no longer knowable: the decoder
 /// stopped mid-body, so where the next request would begin is unknown.
+///
+/// The drain comes first: closing with the refused body unread makes the stack send
+/// RST instead of FIN, and the RST discards the typed refusal before the client reads
+/// it. `drain_for_refusal` documents the Windows measurement.
 async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+    drain_for_refusal(stream).await;
     let resp = response::error_response(
         &Error::new(
             ErrorCode::RequestBodyTooLarge,
@@ -1162,7 +1167,12 @@ fn special_route_has_body(head: &RequestHead) -> bool {
 /// Refuse an unbounded chunked special-route request before its handler or
 /// protocol transition runs. These routes have no HTTP request-body contract,
 /// and the unconsumed chunked body would bypass the absolute body cap.
+///
+/// The drain comes first: closing with the refused body unread makes the stack
+/// send RST instead of FIN, and the RST discards the typed refusal before the
+/// client reads it — a refused request the client never sees is not explicit.
 async fn reject_special_route_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+    drain_for_refusal(stream).await;
     let bytes = response::write_response(
         &response::from_error(&response::parse_error_response(
             "special routes do not accept an HTTP request body; send the body to an ordinary route",

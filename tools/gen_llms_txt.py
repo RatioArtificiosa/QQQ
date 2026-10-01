@@ -163,6 +163,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "both",
         "status",
     ),
+    (
+        "docs/milestone-dashboard.md",
+        "Generated per-area, per-phase and milestone-gate progress from the tracked checklist backlog.",
+        "both",
+        "status",
+    ),
     # --- The machine contracts --------------------------------------------
     (
         "docs/errors.md",

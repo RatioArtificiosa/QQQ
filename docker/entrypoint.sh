@@ -955,6 +955,10 @@ cmd_checks() {
     # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
     python3 tools/gen_backlog.py --check
     python3 tools/gen_backlog.py --self-test
+    # `PLAN-002`: the tracked dashboard is derived from the canonical backlog and milestone
+    # declaration; it must not become a second, hand-maintained progress ledger.
+    python3 tools/milestone_dashboard.py --check
+    python3 tools/milestone_dashboard.py --self-test
     # `PLAN-003`: the milestones against their declared criteria. `--report` exits 0; a release runs
     # `--milestone MX`, which does not.
     python3 tools/check_milestones.py --report

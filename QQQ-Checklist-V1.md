@@ -627,8 +627,9 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **PLAN-001** Convert this checklist into a machine-readable backlog (JSON/YAML) that CI reads.
   → §14.1 Milestones
   → Done: `tools/gen_backlog.py` + tracked `tools/backlog.json` -- **587 item(s) in 32 area(s)**, derived from `QQQ-Checklist-V1.md` and re-derived rather than copied: the parser imports `ITEM`/`AREA_ROW`/`PHASE_ROW`/`TOTAL_ITEMS` from `check_checklist_counts.py` instead of restating them, so the two cannot disagree. `--check` runs in **both** gates, which is what makes CI the reader; `--self-test` has **10 case(s)**, including anti-vacuity clauses for a missing `**Total: N items.**`, a missing phase Total row, an area in no phase, an undefined status and a total mismatch.
-- [ ] **PLAN-002** Build the milestone dashboard that reads backlog status and reports per-area and per-phase completion.
+- [x] **PLAN-002** Build the milestone dashboard that reads backlog status and reports per-area and per-phase completion.
   → §14.1 Milestones
+  → Done: `tools/milestone_dashboard.py` + tracked `docs/milestone-dashboard.md` -- validates the item-level backlog and its redundant area/phase aggregates, renders deterministic overall/phase/area completion with every non-done status visible, and reports executable milestone verdicts including external blockers. `--check` and `--self-test` run in both CI and the container gate; the self-test proves stale aggregates, unknown statuses, duplicate ids, and the external gate cannot pass silently.
 - [x] **PLAN-003** Define the milestone exit criteria as executable checks, not prose.
   → §14.1 Milestones
   → Done: `tools/check_milestones.py` + `tools/milestones.json` -- **12 milestone(s)**, each `{delivers, criteria[], external[]}`, every criterion id verified against the backlog. `--milestone MX` **exits non-zero** unless every criterion is `done` **and** `external` is empty, so the exit criteria are commands that fail rather than prose. `--report` exits 0. `--self-test` has **6 case(s)**, one of which is the case that matters: a satisfied criterion list with an outstanding external must **not** pass.

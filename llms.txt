@@ -19,6 +19,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (9 KB)
 - [docs/live-components-review.md](docs/live-components-review.md) — The independent review: findings first, the commands and exit codes behind every claim, what was verified rather than inherited, and what was not verified. (10 KB)
 - [docs/live-components-handoff.md](docs/live-components-handoff.md) — How to run and review the live-component foundation, with scope limits and merge gates. (8 KB)
+- [docs/milestone-dashboard.md](docs/milestone-dashboard.md) — Generated per-area, per-phase and milestone-gate progress from the tracked checklist backlog. (3 KB)
 - [docs/languages/evidence/matrix.md](docs/languages/evidence/matrix.md) — The generated parity matrix: each language against the HTTP probe vectors, with its gap owners and review dates. Generated from a CI job, so the numbers move with it. (816 B)
 
 ## The machine contracts (for an agent)

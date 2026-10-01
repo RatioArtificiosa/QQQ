@@ -122,6 +122,7 @@ asking rather than assuming.
 | [`unsafe-audit.md`](unsafe-audit.md) | The zero-`unsafe` result and how it is verified (`SEC-020`) |
 | [`stability.md`](stability.md) | The stability tier of every crate and the change-promise per surface (`ARCH-010`, `CON-017`) |
 | [`development-bridge.md`](development-bridge.md) | The Linux verification environment and its one-way rule |
+| [`milestone-dashboard.md`](milestone-dashboard.md) | **Generated** per-area, per-phase and milestone-gate progress from the tracked backlog (`PLAN-002`) |
 
 `docs/.env` holds local credentials and is **gitignored** — it is never committed and
 never referenced by a generated file.

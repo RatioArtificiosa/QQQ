@@ -35084,4 +35084,21 @@ limits: component size, startup measurement, bindings, correctness,
 conformance and broader capability coverage. No implementation item is promoted
 by this correction.
 
+## §O-498 — The milestone dashboard must derive progress from the tracked backlog
+
+`PLAN-002` is now implemented by `tools/milestone_dashboard.py` and the tracked
+`docs/milestone-dashboard.md`. The renderer validates item ids, statuses, totals and
+both redundant aggregate maps before it emits the overall, per-phase and per-area
+tables. Completion is deliberately `done / total`; partial and blocked work remain
+visible rather than being credited as progress. The milestone table reuses the
+declaration semantics from `tools/check_milestones.py`, so an external requirement
+stays `EXTERNAL` even when every repository-local criterion is satisfied.
+
+`--check` and `--self-test` run in both `.github/workflows/ci.yml` and
+`docker/entrypoint.sh`. The self-test mutates a status, aggregate counts, a status
+vocabulary entry and an id, and proves each mutation is observable. This closes the
+dashboard contract without changing the measured language support boundary: the
+TinyGo 0.42.0 64 KiB URL-corruption failure and the production-driver/conformance
+gaps remain open in the language evidence and are not hidden by progress reporting.
+
 *End of `QQQ-Observations-and-Memories.md`.*

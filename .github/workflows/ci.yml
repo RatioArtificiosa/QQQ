@@ -483,6 +483,14 @@ jobs:
       - name: Prove the backlog check catches drift and vacuity
         run: python tools/gen_backlog.py --self-test
 
+      # `PLAN-002`: the tracked dashboard is a presentation of the canonical backlog, not a
+      # second hand-maintained progress ledger. Its self-test proves aggregate drift, unknown
+      # statuses, duplicate ids and external milestone blockers remain observable.
+      - name: Verify the tracked milestone dashboard
+        run: python tools/milestone_dashboard.py --check
+      - name: Prove the milestone dashboard catches drift and vacuity
+        run: python tools/milestone_dashboard.py --self-test
+
       # `PLAN-003`: the Proposal states each milestone's deliverable in prose; `tools/milestones.json`
       # turns it into named items and this decides them. `--report` exits 0 by design -- most
       # milestones are not met. The executable form is `--milestone MX`, which a release invokes.

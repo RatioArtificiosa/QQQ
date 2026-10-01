@@ -334,6 +334,12 @@ impl FileWriter {
 /// to bound what a process crash can take with it — and the bound is stated
 /// here rather than discovered, because an unbounded buffer would convert the
 /// mode from "fewer syscalls" into "unbounded loss window".
+///
+/// ```
+/// use qqq_host::audit_sink::BUFFERED_CAPACITY;
+///
+/// assert_eq!(BUFFERED_CAPACITY, 64 * 1024);
+/// ```
 pub const BUFFERED_CAPACITY: usize = 64 * 1024;
 
 /// An open, append-only audit file.
@@ -431,6 +437,17 @@ impl AuditFile {
     /// Consuming rather than toggling, because a file that changed buffering
     /// mid-run would make the flush counters lie about which bytes took which
     /// path. The record count carries over untouched.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AuditFile, BUFFERED_CAPACITY};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-buffered-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let buffered = file.into_buffered(BUFFERED_CAPACITY);
+    /// assert_eq!(buffered.records(), 0);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     #[must_use]
     pub fn into_buffered(self, capacity: usize) -> Self {
         let Self {
@@ -516,6 +533,13 @@ impl AuditFile {
 /// Returned so the worker's counters can distinguish "three records, one
 /// flush" from "three records, three flushes" — which is the entire
 /// observable difference between the durability modes.
+///
+/// ```
+/// use qqq_host::audit_sink::BatchReport;
+///
+/// let report = BatchReport { records: 3, flushes: 1, fsyncs: 0 };
+/// assert_eq!((report.records, report.flushes, report.fsyncs), (3, 1, 0));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchReport {
     /// Records fully written.
@@ -531,6 +555,21 @@ pub struct BatchReport {
 /// The file's own count already covers the completed prefix, so the caller
 /// knows exactly which suffix never reached the disk: no record is counted
 /// as persisted unless its line is complete.
+///
+/// ```
+/// use qqq_host::audit_sink::{BatchFailure, SinkError};
+/// use std::path::PathBuf;
+///
+/// let failure = BatchFailure {
+///     error: SinkError::Io {
+///         path: PathBuf::from("audit.jsonl"),
+///         reason: "disk full".to_owned(),
+///     },
+///     completed: 2,
+/// };
+/// assert_eq!(failure.completed, 2);
+/// assert!(failure.error.to_string().contains("disk full"));
+/// ```
 #[derive(Debug)]
 pub struct BatchFailure {
     /// What the failed write reported.
@@ -551,6 +590,25 @@ impl AuditFile {
     /// # Errors
     ///
     /// [`BatchFailure`] carrying the [`SinkError::Io`] and the completed count.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AuditFile, Durability};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-batch-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let mut file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let report = file.append_batch(stream.records(), Durability::FlushPerRecord).expect("batch");
+    /// assert_eq!((report.records, report.flushes), (1, 1));
+    /// assert_eq!(file.records(), 1);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     pub fn append_batch(
         &mut self,
         batch: &[AuditRecord],
@@ -618,6 +676,33 @@ impl AuditFile {
     /// # Errors
     ///
     /// [`SinkError::Io`] when the final flush or sync fails.
+    ///
+    /// Buffered content reaches the disk here, not before: the batch goes in
+    /// through the buffer, the file reads back empty, and only this call
+    /// delivers the rows — read before the writer drops, so no destructor
+    /// flush can hide a missing shutdown flush.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AuditFile, BUFFERED_CAPACITY, Durability};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-shutdown-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let path = dir.join("audit.jsonl");
+    /// let mut file = AuditFile::open(&path, 0).expect("open").into_buffered(BUFFERED_CAPACITY);
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let report = file.append_batch(stream.records(), Durability::Buffered).expect("batch");
+    /// assert_eq!(report.records, 1);
+    /// assert!(std::fs::read_to_string(&path).expect("read").is_empty());
+    /// file.flush_for_shutdown(Durability::Buffered).expect("flush");
+    /// assert_eq!(std::fs::read_to_string(&path).expect("read").lines().count(), 1);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     pub fn flush_for_shutdown(&mut self, durability: Durability) -> Result<(), SinkError> {
         let io_error = |reason: String| SinkError::Io {
             path: self.path.clone(),
@@ -772,10 +857,23 @@ pub enum Durability {
     /// crash loses the tail, a clean shutdown loses nothing. Highest
     /// throughput, weakest promise — for deployments that keep the stream as
     /// the record and the file as a convenience copy.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::Durability;
+    ///
+    /// assert_ne!(Durability::Buffered, Durability::FlushPerRecord);
+    /// ```
     Buffered,
     /// Every record reaches the OS before the call returns: a process crash
     /// loses nothing. An OS or power loss can still take the OS-buffered tail
     /// — only `sync_all` bounds that, which is what the next mode buys.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::Durability;
+    ///
+    /// assert_eq!(Durability::default(), Durability::FlushPerRecord);
+    /// assert_ne!(Durability::FsyncPerBatch, Durability::Buffered);
+    /// ```
     #[default]
     FlushPerRecord,
     /// Write each batch, then flush and `sync_all` once per batch. Bounds OS
@@ -789,6 +887,12 @@ pub enum Durability {
 /// of them — at a few hundred bytes per JSON line this bounds queued memory
 /// near 200 KiB — small enough that a wedged worker converts to visible
 /// backpressure quickly rather than after gigabytes of silent queue.
+///
+/// ```
+/// use qqq_host::audit_sink::DEFAULT_APPEND_QUEUE_BOUND;
+///
+/// assert_eq!(DEFAULT_APPEND_QUEUE_BOUND, 1024);
+/// ```
 pub const DEFAULT_APPEND_QUEUE_BOUND: usize = 1024;
 
 /// How many records one disk pass writes.
@@ -797,9 +901,43 @@ pub const DEFAULT_APPEND_QUEUE_BOUND: usize = 1024;
 /// worker. Opportunistic, not timed: the worker writes whatever arrived, so a
 /// quiet server pays one pass per record exactly like the synchronous path did,
 /// and a busy one pays one pass per batch.
+///
+/// ```
+/// use qqq_host::audit_sink::DEFAULT_APPEND_BATCH;
+///
+/// assert_eq!(DEFAULT_APPEND_BATCH, 64);
+/// ```
 pub const DEFAULT_APPEND_BATCH: usize = 64;
 
 /// Wiring for [`AuditAppender::spawn`].
+///
+/// ```
+/// use qqq_host::audit_sink::{AppenderConfig, Durability};
+/// use std::time::Duration;
+///
+/// let config = AppenderConfig::default();
+/// assert_eq!(config.queue_bound, 1024);
+/// assert_eq!(config.batch_size, 64);
+/// assert_eq!(config.durability, Durability::FlushPerRecord);
+/// assert_eq!(config.persist_timeout, Duration::from_secs(30));
+/// assert_eq!(config.stall_timeout, Duration::from_secs(5));
+/// ```
+///
+/// A custom wiring keeps the defaults it does not name:
+///
+/// ```
+/// use qqq_host::audit_sink::AppenderConfig;
+/// use std::time::Duration;
+///
+/// let config = AppenderConfig {
+///     queue_bound: 16,
+///     stall_timeout: Duration::from_millis(50),
+///     ..AppenderConfig::default()
+/// };
+/// assert_eq!(config.queue_bound, 16);
+/// assert_eq!(config.stall_timeout, Duration::from_millis(50));
+/// assert_eq!(config.batch_size, AppenderConfig::default().batch_size);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct AppenderConfig {
     /// Records that may wait for the worker; producers block past this.
@@ -847,6 +985,13 @@ enum Work {
 }
 
 /// What the worker reports across a barrier.
+///
+/// ```
+/// use qqq_host::audit_sink::BarrierAck;
+///
+/// let ack = BarrierAck { persisted: 7 };
+/// assert_eq!(ack.persisted, 7);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BarrierAck {
     /// Records persisted when the barrier cleared.
@@ -858,6 +1003,17 @@ pub struct BarrierAck {
 /// Atomics, because producers read them without holding the worker's locks —
 /// and because a metric that needed the lock it measures would serialize the
 /// path it observes.
+///
+/// ```
+/// use qqq_host::audit_sink::AppenderStats;
+///
+/// let stats = AppenderStats::default();
+/// let snapshot = stats.snapshot();
+/// assert_eq!(snapshot.submitted, 0);
+/// assert_eq!(snapshot.persisted, 0);
+/// assert_eq!(snapshot.batches, 0);
+/// assert_eq!(snapshot.late_after_skip, 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct AppenderStats {
     /// Records handed to the worker.
@@ -891,6 +1047,16 @@ pub struct AppenderStats {
 }
 
 /// A point-in-time copy of [`AppenderStats`].
+///
+/// ```
+/// use qqq_host::audit_sink::AppenderStats;
+///
+/// let snapshot = AppenderStats::default().snapshot();
+/// assert_eq!(
+///     (snapshot.flushes, snapshot.fsyncs, snapshot.resent_skipped),
+///     (0, 0, 0)
+/// );
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppenderSnapshot {
     /// Records handed to the worker.
@@ -933,6 +1099,29 @@ impl AppenderStats {
 }
 
 /// Why a record could not be handed to the audit worker.
+///
+/// ```
+/// use qqq_host::audit_sink::AppendError;
+///
+/// assert_eq!(
+///     AppendError::WorkerGone.to_string(),
+///     "the audit append worker is gone"
+/// );
+/// assert!(
+///     AppendError::WorkerFailed { reason: "disk full".to_owned() }
+///         .to_string()
+///         .contains("disk full")
+/// );
+/// assert!(
+///     AppendError::WorkerTimeout { through: 41 }
+///         .to_string()
+///         .contains("41")
+/// );
+/// assert_ne!(
+///     format!("{:?}", AppendError::WorkerGone),
+///     format!("{:?}", AppendError::WorkerTimeout { through: 1 })
+/// );
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendError {
     /// The worker thread is gone (it panicked, which is a bug, not a disk
@@ -973,6 +1162,17 @@ impl std::fmt::Display for AppendError {
 impl std::error::Error for AppendError {}
 
 /// What [`AuditAppender::shutdown`] found when the worker stopped.
+///
+/// ```
+/// use qqq_host::audit_sink::{AppenderStats, ShutdownReport};
+///
+/// let report = ShutdownReport {
+///     stats: AppenderStats::default().snapshot(),
+///     drained_cleanly: true,
+/// };
+/// assert!(report.drained_cleanly);
+/// assert_eq!(report.stats.persisted, 0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownReport {
     /// The final counters.
@@ -1044,6 +1244,29 @@ impl AuditAppender {
     /// there, so a resumed file and a fresh stream agree on what "already held"
     /// means without a second counter that could drift.
     ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-spawn-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let path = dir.join("audit.jsonl");
+    /// let file = AuditFile::open(&path, 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// appender.append(&stream.records()[0]).expect("append");
+    /// let report = appender.shutdown();
+    /// assert!(report.drained_cleanly);
+    /// assert_eq!(report.stats.persisted, 1);
+    /// assert_eq!(std::fs::read_to_string(&path).expect("read").lines().count(), 1);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
+    ///
     /// # Panics
     ///
     /// When the worker thread cannot be spawned, which means the host cannot
@@ -1086,6 +1309,35 @@ impl AuditAppender {
     ///
     /// [`AppendError::WorkerGone`] when the worker thread died;
     /// [`AppendError::WorkerFailed`] when it stopped on a write error.
+    ///
+    /// A record handed off is a record the shutdown report accounts for:
+    /// append one row, shut down, and the report must show it persisted with
+    /// the file holding its line. Counter reads alone would prove nothing —
+    /// the worker updates them asynchronously — so this asserts the joined
+    /// report and the file, not an immediate counter.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-append-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let path = dir.join("audit.jsonl");
+    /// let file = AuditFile::open(&path, 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// appender.append(&stream.records()[0]).expect("append");
+    /// let report = appender.shutdown();
+    /// assert!(report.drained_cleanly);
+    /// assert_eq!(report.stats.persisted, 1);
+    /// assert_eq!(std::fs::read_to_string(&path).expect("read").lines().count(), 1);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     pub fn append(&self, record: &AuditRecord) -> Result<(), AppendError> {
         if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(AppendError::WorkerFailed {
@@ -1113,6 +1365,28 @@ impl AuditAppender {
     /// [`AppendError`] when the worker is gone or failed, or when `timeout`
     /// expires first — a bounded queue drains in bounded time, so tens of
     /// seconds without progress means the worker is dead, not slow.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use std::time::Duration;
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-persist-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let ack = appender.persist(stream.records(), Duration::from_secs(30)).expect("persist");
+    /// assert_eq!(ack.persisted, 1);
+    /// let report = appender.shutdown();
+    /// assert!(report.drained_cleanly);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     pub fn persist(
         &self,
         records: &[AuditRecord],
@@ -1146,6 +1420,18 @@ impl AuditAppender {
     }
 
     /// Read the worker's counters without stopping it.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-stats-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// assert_eq!(appender.stats().submitted, 0);
+    /// assert_eq!(appender.stats().late_after_skip, 0);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     #[must_use]
     pub fn stats(&self) -> AppenderSnapshot {
         self.stats.snapshot()
@@ -1157,6 +1443,17 @@ impl AuditAppender {
     /// persist tripwires are configuration: a test that the attach path
     /// derives them from the epoch deadline needs the values, not a 60-second
     /// timing run.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile, Durability};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-config-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// assert_eq!(appender.config().durability, Durability::FlushPerRecord);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     #[must_use]
     pub fn config(&self) -> AppenderConfig {
         self.config
@@ -1168,6 +1465,19 @@ impl AuditAppender {
     /// worker's blocking receive, and joining waits out the drain, so when this
     /// returns every submitted record is either in the file or counted in the
     /// report as unpersisted. A clean report has `persisted == submitted`.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-shutdown-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let report = appender.shutdown();
+    /// assert!(report.drained_cleanly);
+    /// assert_eq!(report.stats.submitted, 0);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     #[must_use]
     pub fn shutdown(mut self) -> ShutdownReport {
         drop(self.tx.take());
@@ -1189,6 +1499,27 @@ impl Drop for AuditAppender {
     /// blocking receive wakes, then wait out the drain. A server that exits
     /// with queued evidence loses it, and a best-effort join is strictly more
     /// evidence than a detached thread nobody waited for.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::{AuditStream, Outcome};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("qqq-drop-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir).expect("scratch");
+    /// let path = dir.join("audit.jsonl");
+    /// let file = AuditFile::open(&path, 0).expect("open");
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let mut stream = AuditStream::with_default_capacity();
+    /// let component = ComponentDigest::new("0011223344556677").expect("digest");
+    /// let grants = GrantDigest::new("aabbccdd").expect("digest");
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// appender.append(&stream.records()[0]).expect("append");
+    /// drop(appender);
+    /// assert_eq!(std::fs::read_to_string(&path).expect("read").lines().count(), 1);
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// ```
     fn drop(&mut self) {
         drop(self.tx.take());
         if let Some(worker) = self.worker.take() {

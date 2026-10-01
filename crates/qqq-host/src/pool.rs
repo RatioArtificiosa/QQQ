@@ -194,6 +194,15 @@ impl Pool {
     /// a release and the other after it sees both sides of the move. Any
     /// invariant over *both* counters must use this, not the two accessors.
     ///
+    /// ```
+    /// use qqq_host::pool::Pool;
+    ///
+    /// let pool = Pool::new(4);
+    /// pool.acquire(0.0).expect("a slot");
+    /// let (used, idle) = pool.snapshot();
+    /// assert_eq!((used, idle), (1, 0));
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if another thread poisoned the pool state mutex.

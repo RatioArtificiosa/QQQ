@@ -1224,7 +1224,7 @@ jobs:
       # Both numbers are read from the tool: `python tools/check_api_examples.py --allow 3000`
       # prints the table and the pair, and `--self-test` proves the counters behind them.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2105
+        run: python tools/check_api_examples.py --allow 2104
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

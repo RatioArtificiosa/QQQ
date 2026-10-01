@@ -35150,4 +35150,43 @@ re-verifying `cargo fmt`, `cargo test -p qqq-run` (22 result lines, 0 failed),
 and `git diff --check`.
 
 
+## §O-501 - Special-route body policy: chunked refused, declared capped, close ends it
+
+The `serve_special_route` ordering that the 09-29 audit flagged as a bypass now
+reads as one rule across three mechanisms: `refuse_before_reading` enforces the
+declared-length cap before dispatch on every route kind, `special_route_has_body`
+refuses any chunked body on a streaming, WebSocket, or preflight route with 400
+before the handler or the 101, and every special-route branch closes the
+connection so an unread declared body dies with it instead of becoming a second
+request. Five socket tests pin it: chunked complete, declared over cap (413),
+declared exactly at cap (streams), truncated chunked (prompt 400, no wait for the
+terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
+Fault injection (guard forced false) fails the chunked tests and leaves the 413
+test green, which is correct: the declared path never consults the guard.
+
+## §O-502 - Guest output leaves the executor through a pump, not inline
+
+`SanitisingWriter` wrote synchronously from `poll_write`, so a slow host stream
+could park an executor worker indefinitely — and the first fix attempt
+(`block_in_place`) would have panicked in production, because the serve path
+runs on a current-thread runtime. Each output now owns one writer task draining
+a FIFO queue, with every blocking sink call on the blocking pool via
+`spawn_blocking`, which is flavor-agnostic. Order is structural (one task, one
+queue); memory is bounded because every byte is quota-reserved before enqueue,
+so no full-queue wake-up protocol is needed. Each output keeps its 8 MiB
+lifetime quota shared across its writers; breach fails the write and increments
+a host-readable counter (`breaches()`), with bytes accepted readable via
+`bytes_written()`, and a recorded async failure surfaces on later calls.
+Proven: an unrelated request completing inside 200 ms on one worker while
+another output is gated (without the pump the worker freezes and the test
+hangs), byte-order under an 8-task barrier against a per-byte-locking sink
+with exact run counts, flush-drain markers, and quota-trip counting.
+Fault injection (pump bypassed, quota neutered, FIFO replaced with
+fire-and-forget tasks) fails the isolation, quota, and ordering tests.
+A cross-request shared per-tenant budget has no production seam — stores are
+built with `tenant: None` and tenancy is enforced at the connection ledger —
+so the tenant bound is stated as a composition (per-instance budget times the
+per-tenant connection ceiling) and the shared registry design is follow-up
+work, not smuggled scope.
+
 *End of `QQQ-Observations-and-Memories.md`.*

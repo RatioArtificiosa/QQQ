@@ -26,8 +26,10 @@ use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::server::{serve, Dispatch, Handler, ServerConfig};
-use qqq_serve::ws_conn::{Echo, WebSocketHandler};
+use qqq_serve::ws_conn::{Echo, WebSocketHandler, WsSender};
+use qqq_serve::ws_message::Message;
 use qqq_serve::{RequestHead, Response, RouteMatch};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A port nobody is using, for the reason `tests/socket.rs` documents.
 fn free_addr() -> SocketAddr {
@@ -652,4 +654,75 @@ async fn a_route_without_a_websocket_handler_uses_the_flat_one() {
     assert!(response.contains("200 OK"), "{response}");
     assert!(response.ends_with("flat"), "{response}");
     shutdown.signal();
+}
+
+// ---------------------------------------------------------------------------
+// A body-bearing upgrade is refused before the handshake (HTTP-LIMIT-001)
+// ---------------------------------------------------------------------------
+
+/// A handler that counts the messages it is given.
+///
+/// The server only drives `on_message` after the handshake completes, so a zero
+/// count on a refused upgrade is proof the WebSocket path never started — a
+/// claim about what happened, on the §O-279 counter, rather than an inference
+/// from the status line alone.
+struct CountingHandler {
+    messages: AtomicUsize,
+}
+
+impl WebSocketHandler for CountingHandler {
+    fn on_message<'a>(
+        &'a self,
+        _message: &'a Message,
+        _send: &'a mut WsSender<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.messages.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {})
+    }
+}
+
+/// **An upgrade carrying a chunked body is rejected before the 101.**
+///
+/// The upgrade and the body cannot both be honoured: answering `101` would put
+/// the connection into frame mode with request bytes still in flight, and
+/// reading the unbounded body first would pay exactly the cost the absolute cap
+/// exists to prevent. So the body check runs before the handshake, and the
+/// handler — which only exists past the handshake — never runs.
+#[tokio::test]
+async fn an_upgrade_with_a_chunked_body_is_rejected_before_the_handshake() {
+    let counting = Arc::new(CountingHandler {
+        messages: AtomicUsize::new(0),
+    });
+    let handler: Arc<dyn WebSocketHandler> = counting.clone();
+    let server = Server::start(handler).await;
+
+    let mut stream = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    // One literal, no line continuations: a `\` at end of line would strip the
+    // newline but keep nothing else, while a plain multi-line literal keeps the
+    // indentation as header whitespace — obs-fold, which the server may refuse
+    // with 400 before ever reading Transfer-Encoding. This test must prove the
+    // *body* check runs, so the head must be beyond suspicion.
+    let req = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .expect("write upgrade with body");
+    stream.flush().await.expect("flush");
+
+    let got = read_until(&mut stream, "400").await;
+    assert!(
+        got.contains("400"),
+        "a body-bearing upgrade must be refused: {got:?}"
+    );
+    assert!(
+        !got.contains("101"),
+        "the handshake must never complete on a refused upgrade: {got:?}"
+    );
+    assert_eq!(
+        counting.messages.load(Ordering::SeqCst),
+        0,
+        "the handler must not see a message from a refused upgrade"
+    );
 }

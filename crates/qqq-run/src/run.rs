@@ -1580,6 +1580,40 @@ mod tests {
         }
     }
 
+    /// The control for the refusal tests above: a log recorded by this build,
+    /// unedited, must be accepted as a source.
+    ///
+    /// Without this, the identity check could refuse everything — including the
+    /// replay it was written to admit — and every test above would still pass.
+    /// A gate that only refuses is a gate that is always shut.
+    #[test]
+    fn a_replay_with_matching_identity_is_accepted() {
+        let dir = temp_dir("replay-matching-identity");
+        let path = dir.join("one.replay");
+        let opts = RunOptions {
+            deterministic: true,
+            replay_log: Some(path.clone()),
+            ..RunOptions::default()
+        };
+        let (sink, _) = replay_endpoints(&opts, "sha256:9f2c").expect("a sink");
+        let sink = sink.expect("a sink");
+        sink.lock()
+            .expect("log")
+            .record("clock.wall", qqq_host::replay::ReplayValue::Clock(7))
+            .expect("room");
+        let text = sink.lock().expect("log").to_text();
+        std::fs::write(&path, text.as_bytes()).expect("write");
+
+        let replay_opts = RunOptions {
+            deterministic: true,
+            replay: Some(path),
+            ..RunOptions::default()
+        };
+        let (_, source) = replay_endpoints(&replay_opts, "sha256:9f2c")
+            .expect("a matching replay must be accepted");
+        assert!(source.is_some(), "the accepted log must become a source");
+    }
+
     /// A path that cannot be read is a failure, not a silent `None`.
     #[test]
     fn an_unreadable_replay_path_is_refused() {

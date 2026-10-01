@@ -56,12 +56,14 @@ wasmtime-wasi = { workspace = true }
 # The `unsafe`-free route was checked first: a hand-built `RawWaker` for a synchronous
 # poll would have avoided the trait, but the crate-level `forbid(unsafe_code)` rejects
 # it and `forbid` cannot be relaxed by an inner `allow`. The synchronous *behaviour* is
-# kept — `poll_write` escapes and writes in one step and never returns `Pending` — so
-# no executor is needed at runtime despite the async trait.
+# kept — `poll_write` escapes, enqueues, and reports in one step and never returns
+# `Pending` — but the bytes now reach the sink through a per-output writer task, so
+# the `rt` (spawn, blocking pool, runtime handle) and `sync` (channel, flush
+# notification) features are load-bearing in production, not test-only.
 #
 # Tokio was already a workspace dependency and already in `Cargo.lock` through the
 # dev-dependency below, so this promotes an existing pin rather than adding a crate.
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "rt", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

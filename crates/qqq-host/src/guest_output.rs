@@ -47,6 +47,52 @@
 //! prefix again. Without it a guest could hold one line open indefinitely, which turns
 //! a log file into one unreadable line and gives a collector nothing to parse.
 //!
+//! # The breach policy: fail the write, count the breach
+//!
+//! Each output (stdout, stderr) carries its own [`MAX_OUTPUT_BYTES`] lifetime quota,
+//! shared by every writer of that output so opening more streams cannot multiply it.
+//! A write past the quota fails with a quota-exhausted stream error to the guest and
+//! increments the breach count the host reads through [`GuestOutput::breaches`].
+//! Failing rather than truncating silently is deliberate: silent truncation rewrites
+//! the guest's observable behavior without telling either side, while an error is a
+//! fact both the guest and the host's accounting can see.
+//!
+//! # The tenant bound, stated as a composition
+//!
+//! The quota is per instance: [`host_wasi::context`](crate::host_wasi::context) builds
+//! fresh outputs for every store, and each request runs on its own store, so each
+//! request gets two fresh [`MAX_OUTPUT_BYTES`] budgets. A tenant's concurrent
+//! output is therefore bounded by that budget times the tenant's concurrent
+//! requests, and concurrent requests per tenant are capped by
+//! `qqq_serve::conn::ConnectionLedger` (`ServerConfig::connections_per_tenant`,
+//! overridable per tenant with `max_connections`). What this does not bound is
+//! sequential requests over time — each gets a fresh budget, exactly as each gets
+//! fresh fuel and memory — so long-term log volume remains an operator retention
+//! decision, and a cross-request shared tenant budget is recorded as follow-up
+//! work rather than smuggled in here.
+//!
+//! # Why the write leaves the executor thread
+//!
+//! `poll_write` runs on an executor worker, and the destination is a host stream:
+//! a slow pipe or terminal can block a synchronous write indefinitely, stalling
+//! every task queued behind that worker. So each output owns one writer task that
+//! drains a FIFO queue, and every blocking sink call runs on Tokio's blocking
+//! pool via `spawn_blocking` — which works on multi-thread runtimes and on the
+//! current-thread runtime the serve path builds, where `block_in_place` would
+//! panic. Order is structural: one task consumes one queue, so a guest's output
+//! cannot reorder against itself the way per-write spawned tasks could.
+//!
+//! The queue is unbounded, which is safe rather than sloppy: `reserve` accounts
+//! every byte against the quota *before* it is enqueued, so queued-but-unwritten
+//! bytes are already paid for and the total in flight per output cannot exceed
+//! [`MAX_OUTPUT_BYTES`]. A full-queue `Pending` state would add a wake-up
+//! protocol for a condition the quota already makes unreachable.
+//!
+//! Outside a Tokio runtime (unit tests driving `poll_write` directly) there is
+//! no executor to protect and no task to spawn, so the write runs inline on the
+//! calling thread. The two paths never mix in production: construction happens
+//! outside the runtime, and the first poll inside one starts the pump.
+//!
 //! # What this does and does not defend
 //!
 //! It defends **whole-line** readers, which is what an access log is: one record per
@@ -67,6 +113,7 @@
 //! captured buffer (tests), which is what makes the escaping testable **on the type
 //! production uses** rather than on a copy of it.
 
+use std::future::Future as _;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,6 +121,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tokio::io::AsyncWrite;
+use tokio::sync::{mpsc, oneshot};
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 
 /// The marker every line of a guest's standard output carries.
@@ -108,6 +156,12 @@ pub const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 struct OutputBudget {
     used: AtomicU64,
     limit: u64,
+    /// Writes refused for exceeding the quota.
+    ///
+    /// A sampling counter in the `metrics.rs` sense: nothing decides on it, so
+    /// `Relaxed` is the correct ordering. It is the host-visible half of the
+    /// breach policy — the guest sees a stream error, and the host reads this.
+    breaches: AtomicU64,
 }
 
 impl OutputBudget {
@@ -116,9 +170,11 @@ impl OutputBudget {
         let mut used = self.used.load(Ordering::Relaxed);
         loop {
             let Some(next) = used.checked_add(bytes) else {
+                self.breaches.fetch_add(1, Ordering::Relaxed);
                 return Err(io::Error::other("guest output quota exhausted"));
             };
             if next > self.limit {
+                self.breaches.fetch_add(1, Ordering::Relaxed);
                 return Err(io::Error::other("guest output quota exhausted"));
             }
             match self
@@ -303,6 +359,38 @@ impl Escaper {
     }
 }
 
+/// Work for one output's writer task, in guest order.
+enum PumpMsg {
+    /// Escaped bytes to append to the sink.
+    Bytes(Vec<u8>),
+    /// Flush the sink, then report completion through the channel.
+    Flush(oneshot::Sender<io::Result<()>>),
+}
+
+/// State shared by an output and all its writers.
+struct Shared {
+    sink: Arc<dyn GuestSink>,
+    budget: Arc<OutputBudget>,
+    /// The writer task's inbox, once one exists.
+    ///
+    /// `None` until the first poll inside a runtime spawns the pump; unit tests
+    /// driving `poll_write` outside any runtime never create one and write
+    /// inline instead.
+    pump: std::sync::Mutex<Option<mpsc::UnboundedSender<PumpMsg>>>,
+    /// The first asynchronous write failure, surfaced on later calls.
+    ///
+    /// A sink failure happens on the writer task, after `poll_write` already
+    /// reported success for those bytes. Swallowing it would make a dead log
+    /// look healthy; recording the first one and failing subsequent calls keeps
+    /// the failure visible without inventing a history the caller cannot use.
+    ///
+    /// Shared by `Arc` rather than held inline so the writer task can report
+    /// without holding the whole `Shared`: the task must not own a sender or
+    /// a `Shared`, or the inbox would never drain shut and the task would
+    /// never end.
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+}
+
 /// A guest's standard output or standard error, sanitised.
 ///
 /// Installed by `host_wasi::context` in place of `inherit_stdout`/`inherit_stderr`.
@@ -311,8 +399,7 @@ impl Escaper {
 #[derive(Clone)]
 pub struct GuestOutput {
     prefix: &'static str,
-    sink: Arc<dyn GuestSink>,
-    budget: Arc<OutputBudget>,
+    shared: Arc<Shared>,
 }
 
 impl std::fmt::Debug for GuestOutput {
@@ -351,10 +438,15 @@ impl GuestOutput {
     pub fn to_with_limit(prefix: &'static str, sink: impl GuestSink, limit: u64) -> Self {
         Self {
             prefix,
-            sink: Arc::new(sink),
-            budget: Arc::new(OutputBudget {
-                used: AtomicU64::new(0),
-                limit,
+            shared: Arc::new(Shared {
+                sink: Arc::new(sink),
+                budget: Arc::new(OutputBudget {
+                    used: AtomicU64::new(0),
+                    limit,
+                    breaches: AtomicU64::new(0),
+                }),
+                pump: std::sync::Mutex::new(None),
+                failure: Arc::new(std::sync::Mutex::new(None)),
             }),
         }
     }
@@ -370,9 +462,43 @@ impl GuestOutput {
     pub fn writer(&self) -> SanitisingWriter {
         SanitisingWriter {
             escaper: Escaper::new(self.prefix),
-            sink: Arc::clone(&self.sink),
-            budget: Arc::clone(&self.budget),
+            shared: Arc::clone(&self.shared),
+            flush_rx: None,
         }
+    }
+
+    /// Bytes accepted under the quota so far, across all writers of this output.
+    ///
+    /// ```
+    /// use std::sync::Mutex;
+    /// let output = qqq_host::guest_output::GuestOutput::to(
+    ///     qqq_host::guest_output::STDOUT_PREFIX,
+    ///     Mutex::new(Vec::new()),
+    /// );
+    /// assert_eq!(output.bytes_written(), 0);
+    /// ```
+    #[must_use]
+    pub fn bytes_written(&self) -> u64 {
+        self.shared.budget.used.load(Ordering::Relaxed)
+    }
+
+    /// Writes refused for exceeding the quota.
+    ///
+    /// The host-visible half of the breach policy: the guest observes a stream
+    /// error, and this count is what the host reports and meters. A writer that
+    /// never breached reads zero, so the count distinguishes clean runs.
+    ///
+    /// ```
+    /// use std::sync::Mutex;
+    /// let output = qqq_host::guest_output::GuestOutput::to(
+    ///     qqq_host::guest_output::STDOUT_PREFIX,
+    ///     Mutex::new(Vec::new()),
+    /// );
+    /// assert_eq!(output.breaches(), 0);
+    /// ```
+    #[must_use]
+    pub fn breaches(&self) -> u64 {
+        self.shared.budget.breaches.load(Ordering::Relaxed)
     }
 }
 
@@ -397,8 +523,9 @@ impl StdoutStream for GuestOutput {
 /// The `AsyncWrite` wasmtime-wasi writes a guest's output through.
 pub struct SanitisingWriter {
     escaper: Escaper,
-    sink: Arc<dyn GuestSink>,
-    budget: Arc<OutputBudget>,
+    shared: Arc<Shared>,
+    /// A flush marker already sent to the pump and not yet answered.
+    flush_rx: Option<oneshot::Receiver<io::Result<()>>>,
 }
 
 impl std::fmt::Debug for SanitisingWriter {
@@ -428,33 +555,192 @@ impl AsyncWrite for SanitisingWriter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if let Err(error) = this.budget.reserve(buf.len()) {
+        if let Err(error) = this.shared.budget.reserve(buf.len()) {
             return Poll::Ready(Err(error));
+        }
+        if let Some(failure) = stored_failure(&this.shared) {
+            return Poll::Ready(Err(io::Error::other(failure)));
         }
         let mut escaped = Vec::with_capacity(buf.len() + 16);
         let consumed = this.escaper.push(buf, &mut escaped);
-        Poll::Ready(this.sink.write_all_shared(&escaped).map(|()| consumed))
+        match ensure_pump(&this.shared) {
+            // Outside a runtime: write inline, exactly as before.
+            None => Poll::Ready(direct_write(&this.shared, &escaped).map(|()| consumed)),
+            Some(tx) => match tx.send(PumpMsg::Bytes(escaped)) {
+                Ok(()) => Poll::Ready(Ok(consumed)),
+                Err(_) => Poll::Ready(Err(pump_gone())),
+            },
+        }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(self.get_mut().sink.flush_shared())
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        // A flush must not report success over a recorded write failure: the
+        // bytes the marker stands behind may never have reached the sink, and
+        // the drain proof would then hide lost output behind an `Ok`.
+        if let Some(failure) = stored_failure(&this.shared) {
+            this.flush_rx = None;
+            return Poll::Ready(Err(io::Error::other(failure)));
+        }
+        // A marker already in flight: poll it rather than queueing a second one
+        // behind it, so flushes complete in the order they were requested.
+        if let Some(rx) = this.flush_rx.as_mut() {
+            return match Pin::new(rx).poll(cx) {
+                Poll::Ready(Ok(result)) => {
+                    this.flush_rx = None;
+                    Poll::Ready(result)
+                }
+                Poll::Ready(Err(_)) => {
+                    this.flush_rx = None;
+                    Poll::Ready(Err(pump_gone()))
+                }
+                Poll::Pending => Poll::Pending,
+            };
+        }
+        match ensure_pump(&this.shared) {
+            None => Poll::Ready(direct_flush(&this.shared)),
+            Some(tx) => {
+                let (done, rx) = oneshot::channel();
+                // Register interest in the answer in the same step that sends
+                // the marker, so no wake-up between the send and the first poll
+                // can be lost.
+                let mut rx = rx;
+                match tx.send(PumpMsg::Flush(done)) {
+                    Err(_) => Poll::Ready(Err(pump_gone())),
+                    Ok(()) => match Pin::new(&mut rx).poll(cx) {
+                        // The marker only proves the flush ran; a write the
+                        // pump already failed still has to surface here.
+                        Poll::Ready(Ok(Err(error))) => Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(Ok(()))) => match stored_failure(&this.shared) {
+                            Some(failure) => {
+                                this.flush_rx = None;
+                                Poll::Ready(Err(io::Error::other(failure)))
+                            }
+                            None => Poll::Ready(Ok(())),
+                        },
+                        Poll::Ready(Err(_)) => Poll::Ready(Err(pump_gone())),
+                        Poll::Pending => {
+                            this.flush_rx = Some(rx);
+                            Poll::Pending
+                        }
+                    },
+                }
+            }
+        }
     }
 
-    /// Flush the destination and **do not** emit a trailing newline.
-    ///
-    /// A closing newline would be host-authored bytes on the guest's line, and the
-    /// guest is what decides where its lines end. The escaper's `at_line_start` state
-    /// is dropped with the writer, which is correct: the next writer starts a new line
-    /// and prefixes it.
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(self.get_mut().sink.flush_shared())
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Shutdown is a flush: every byte accepted before it must reach the sink
+        // before the stream is closed. The marker stands behind them in the FIFO,
+        // so its answer proves the drain.
+        self.poll_flush(cx)
     }
+}
+
+/// The pump's inbox if one exists, spawning the writer task on first use.
+///
+/// Returns `None` outside a Tokio runtime, where there is no executor to spawn
+/// onto and no executor thread to protect — the caller writes inline instead.
+fn ensure_pump(shared: &Arc<Shared>) -> Option<mpsc::UnboundedSender<PumpMsg>> {
+    let mut guard = shared.pump.lock().ok()?;
+    if let Some(tx) = guard.as_ref() {
+        return Some(tx.clone());
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
+        return None;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    // Only what the task needs travels with it: the sink and the failure
+    // slot. Handing it the whole `Shared` would also hand it the inbox
+    // sender held inside `Shared`, and a sender that never drops keeps the
+    // task — and everything it holds — alive forever.
+    tokio::spawn(pump_loop(
+        rx,
+        Arc::clone(&shared.sink),
+        Arc::clone(&shared.failure),
+    ));
+    *guard = Some(tx.clone());
+    Some(tx)
+}
+
+/// The one task that touches an output's sink.
+///
+/// FIFO consumption is the ordering guarantee: bytes reach the sink in the order
+/// `poll_write` accepted them, which per-write spawned tasks could not promise.
+/// Every blocking call runs on the blocking pool, so neither the multi-thread
+/// nor the current-thread executor ever stalls on a slow sink. The task ends
+/// when the last sender is dropped — the output and its writers — after
+/// draining whatever is still queued.
+async fn pump_loop(
+    mut rx: mpsc::UnboundedReceiver<PumpMsg>,
+    sink: Arc<dyn GuestSink>,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            PumpMsg::Bytes(bytes) => {
+                let sink = Arc::clone(&sink);
+                let outcome =
+                    tokio::task::spawn_blocking(move || sink.write_all_shared(&bytes)).await;
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => record_failure(&failure, error.to_string()),
+                    Err(error) => {
+                        let message = format!("guest-output writer task failed: {error}");
+                        record_failure(&failure, message);
+                    }
+                }
+            }
+            PumpMsg::Flush(done) => {
+                let sink = Arc::clone(&sink);
+                let outcome = tokio::task::spawn_blocking(move || sink.flush_shared()).await;
+                let result = match outcome {
+                    Ok(result) => result,
+                    Err(error) => Err(io::Error::other(format!(
+                        "guest-output writer task failed: {error}"
+                    ))),
+                };
+                let _ = done.send(result);
+            }
+        }
+    }
+}
+
+/// Remember the first asynchronous failure; later calls surface it.
+fn record_failure(failure: &Arc<std::sync::Mutex<Option<String>>>, message: String) {
+    if let Ok(mut slot) = failure.lock() {
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+    }
+}
+
+/// The recorded failure, if any.
+fn stored_failure(shared: &Shared) -> Option<String> {
+    shared.failure.lock().ok()?.clone()
+}
+
+/// A write outside any runtime: straight to the sink on the calling thread.
+fn direct_write(shared: &Shared, bytes: &[u8]) -> io::Result<()> {
+    shared.sink.write_all_shared(bytes)
+}
+
+/// A flush outside any runtime.
+fn direct_flush(shared: &Shared) -> io::Result<()> {
+    shared.sink.flush_shared()
+}
+
+/// The pump is gone, so queued work will never complete.
+fn pump_gone() -> io::Error {
+    io::Error::other("the guest-output writer task is gone")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     /// A captured sink.
     ///
@@ -645,6 +931,19 @@ mod tests {
         ));
     }
 
+    /// One framed write through the real `AsyncWrite` path, for spawned tasks.
+    ///
+    /// `futures_write` below drives with a no-op waker outside a runtime, which a
+    /// `tokio::spawn`ed task cannot use. This is the same trait method on the same
+    /// type, awaited instead.
+    async fn framed_write(writer: &mut SanitisingWriter) {
+        use tokio::io::AsyncWriteExt as _;
+        writer
+            .write_all(b"stuck-payload")
+            .await
+            .expect("the released sink writes");
+    }
+
     /// Drive an `AsyncWrite` to completion with a no-op waker.
     ///
     /// `Waker::noop` is the standard library's own no-op waker, so this needs no
@@ -667,6 +966,376 @@ mod tests {
             Poll::Ready(Err(e)) => panic!("the guest write failed: {e}"),
             Poll::Pending => panic!("the writer must not return Pending"),
         }
+    }
+
+    #[test]
+    fn a_quota_breach_fails_the_write_and_counts_it_for_the_host() {
+        // The two halves of the breach policy: the guest observes a stream
+        // error, and the host observes a number. A breach the host cannot read
+        // is a policy nobody can meter.
+        let captured = captured();
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 5);
+        assert_eq!(output.breaches(), 0, "a fresh output has no breaches");
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"123"),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(output.bytes_written(), 3);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"456"),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!(output.breaches(), 1, "the refused write must be counted");
+        assert_eq!(
+            output.bytes_written(),
+            3,
+            "refused bytes must not consume the quota"
+        );
+    }
+
+    /// A sink that refuses its first write, then behaves.
+    ///
+    /// The split is the instrument: the failed bytes were already acknowledged
+    /// to the guest, while the later flush succeeds on its own. A flush that
+    /// reports `Ok` here proves the recorded failure was dropped on the floor.
+    struct FailOnceSink {
+        remaining_failures: AtomicUsize,
+        buf: std::sync::Mutex<Vec<u8>>,
+    }
+
+    impl GuestSink for FailOnceSink {
+        fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(io::Error::other("sink exploded"));
+            }
+            self.buf
+                .lock()
+                .expect("not poisoned")
+                .extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn flush_shared(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **A flush reports a write the pump already failed.**
+    ///
+    /// Acceptance precedes failure by design — `poll_write` cannot know the
+    /// future — so the flush marker is where the recorded failure has to
+    /// surface. FIFO order makes this deterministic: the marker stands behind
+    /// the failed bytes, so an answered flush proves they were processed.
+    #[tokio::test]
+    async fn a_flush_reports_a_write_the_pump_already_failed() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(FailOnceSink {
+            remaining_failures: AtomicUsize::new(1),
+            buf: std::sync::Mutex::new(Vec::new()),
+        });
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
+        let mut writer = output.writer();
+        writer
+            .write_all(b"lost")
+            .await
+            .expect("acceptance precedes the failure");
+        let error = writer
+            .flush()
+            .await
+            .expect_err("the flush must surface the recorded write failure");
+        assert!(
+            error.to_string().contains("sink exploded"),
+            "the flush must name the recorded failure: {error}"
+        );
+    }
+
+    /// **Dropping the output ends the pump task.**
+    ///
+    /// The task must hold no sender and no `Shared`: either one keeps the
+    /// inbox open, `recv` never returns `None`, and every request leaks a
+    /// task plus its sink and budget on a long-running server. The `Weak`
+    /// observes the task's own sink clone, so its death proves the task ended
+    /// rather than merely going quiet.
+    #[tokio::test]
+    async fn dropping_the_output_ends_the_pump_task() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let weak = Arc::downgrade(&sink);
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
+        // Start the pump: without a poll inside the runtime no task exists,
+        // and the assertion below would pass on an output that never pumps.
+        output.writer().write_all(b"hello").await.expect("write");
+        drop(sink);
+        drop(output);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pump task must end after the output is dropped");
+    }
+
+    /// A sink that blocks until the test releases it.
+    ///
+    /// `std` primitives rather than `tokio` ones on purpose: the writer task
+    /// calls a **synchronous** trait method from a blocking-pool thread, so the
+    /// gate must be waitable without an executor — awaiting a `tokio` mutex
+    /// there would need the very runtime the test is trying to prove stays
+    /// usable.
+    struct BlockingSink {
+        gate: std::sync::Mutex<bool>,
+        wake: std::sync::Condvar,
+        buf: std::sync::Mutex<Vec<u8>>,
+    }
+
+    impl BlockingSink {
+        fn new() -> Self {
+            Self {
+                gate: std::sync::Mutex::new(false),
+                wake: std::sync::Condvar::new(),
+                buf: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn release(&self) {
+            *self.gate.lock().expect("not poisoned") = true;
+            self.wake.notify_all();
+        }
+    }
+
+    impl GuestSink for BlockingSink {
+        fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            let mut open = self.gate.lock().expect("not poisoned");
+            while !*open {
+                open = self.wake.wait(open).expect("not poisoned");
+            }
+            self.buf
+                .lock()
+                .expect("not poisoned")
+                .extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn flush_shared(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **A blocked guest-output write does not stall an unrelated request.**
+    ///
+    /// The blocked bytes wait on a blocking-pool thread, never on an executor
+    /// worker, so the runtime schedules the other task on its one worker. A
+    /// writer that blocked the worker itself would freeze the second write
+    /// until the gate opened; the 200 ms bound below is generous to scheduling
+    /// jitter and tight against a freeze, which would wait the full gate
+    /// instead. Both writes run as spawned tasks: the test body itself runs on
+    /// the harness thread, which is not an executor worker at all, so driving
+    /// the unrelated write inline would prove nothing about the workers.
+    ///
+    /// The gate opens on every exit path through the guard below. Without it,
+    /// a failed assertion would leave the pump task parked on the gate while
+    /// the test runtime shuts down — and runtime shutdown waits for the
+    /// blocking pool, which waits for the gate: a hung test binary rather
+    /// than a red test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_blocked_sink_does_not_stall_an_unrelated_request() {
+        use tokio::io::AsyncWriteExt as _;
+
+        struct OpenOnDrop<'a> {
+            sink: &'a BlockingSink,
+        }
+        impl Drop for OpenOnDrop<'_> {
+            fn drop(&mut self) {
+                self.sink.release();
+            }
+        }
+
+        let blocked_sink = Arc::new(BlockingSink::new());
+        let _open = OpenOnDrop {
+            sink: &blocked_sink,
+        };
+        let blocked = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&blocked_sink));
+        let free = GuestOutput::to(STDOUT_PREFIX, captured());
+        let drain = blocked.clone();
+
+        let stuck_task = tokio::spawn(async move {
+            let mut stuck = blocked.writer();
+            framed_write(&mut stuck).await;
+        });
+        let free_task = tokio::spawn(async move {
+            let mut unblocked = free.writer();
+            unblocked
+                .write_all(b"unrelated")
+                .await
+                .expect("an unblocked sink writes");
+        });
+
+        // Let the stuck write reach the gate. Acceptance only enqueues, so the
+        // task itself is done quickly; what must still be parked is the pump's
+        // blocking call — proven by the sink staying empty, not by the task.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            blocked_sink.buf.lock().expect("not poisoned").is_empty(),
+            "gated bytes must wait in the queue, not reach the sink before release"
+        );
+
+        // The unrelated request proceeds while the first is still gated: the
+        // timeout runs with the gate closed, so only a genuinely unblocked
+        // worker can beat it.
+        tokio::time::timeout(Duration::from_millis(200), free_task)
+            .await
+            .expect("an unrelated request must complete while another output is blocked")
+            .expect("the writer task must not panic");
+
+        blocked_sink.release();
+        tokio::time::timeout(Duration::from_secs(5), stuck_task)
+            .await
+            .expect("the released write must finish")
+            .expect("the writer task must not panic");
+        // Drain before reading: the join proves the bytes were accepted, and
+        // only the flush marker proves they reached the sink.
+        drain
+            .writer()
+            .flush()
+            .await
+            .expect("a released sink flushes");
+        assert!(
+            blocked_sink
+                .buf
+                .lock()
+                .expect("not poisoned")
+                .starts_with(STDOUT_PREFIX.as_bytes()),
+            "the released write must still carry the marker"
+        );
+    }
+
+    /// A sink that locks per byte, like the process streams do.
+    ///
+    /// `impl Write for &Stdout` locks the global handle per `write` syscall, not
+    /// per `write_all` call — so one logical write is many critical sections.
+    /// `Mutex<Vec<u8>>` locks once per `write_all_shared` and would serialize
+    /// whole buffers by itself, which would let this test pass with the output
+    /// lock removed. This sink reproduces the process-stream shape: without the
+    /// output-level serialization lock, concurrent writers interleave mid-buffer.
+    struct BytewiseSink {
+        buf: std::sync::Mutex<Vec<u8>>,
+    }
+
+    impl GuestSink for BytewiseSink {
+        fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            for byte in bytes {
+                self.buf.lock().expect("not poisoned").push(*byte);
+            }
+            Ok(())
+        }
+
+        fn flush_shared(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Concurrent writers of one output keep each write's bytes contiguous.
+    ///
+    /// The serialization lock exists so two streams' escaped bytes cannot
+    /// interleave mid-line and detach a marker from its line. Eight tasks each
+    /// write one 64-byte payload of a distinct printable byte — printable so the
+    /// escaper passes it through unchanged and the assertion reads the sink
+    /// literally rather than through the escaping rule, which has its own tests.
+    /// Every payload must survive as one run.
+    ///
+    /// The barrier is what makes this a concurrency test rather than eight
+    /// sequential writes that happen to share a runtime: all tasks start their
+    /// write loops together, and each writes twenty times, so without the lock
+    /// the bytewise sink interleaves them with near certainty.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_keep_each_write_contiguous() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(BytewiseSink {
+            buf: std::sync::Mutex::new(Vec::new()),
+        });
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
+        let start = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for id in 0u8..8 {
+            let output = output.clone();
+            let start = Arc::clone(&start);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                let mut writer = output.writer();
+                for _ in 0..20 {
+                    writer
+                        .write_all(&[b'a' + id; 64])
+                        .await
+                        .expect("a memory sink writes");
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("writer tasks must not panic");
+        }
+        // Drain the pump before reading the sink: sends only enqueue, so the
+        // bytes may still be queued when the writers are done. The flush
+        // marker stands behind them in the FIFO, and its answer proves the
+        // drain rather than racing it.
+        output
+            .writer()
+            .flush()
+            .await
+            .expect("a memory sink flushes");
+        let bytes = sink.buf.lock().expect("not poisoned").clone();
+        let text = String::from_utf8(bytes).expect("the sink is all marker and payload ascii");
+        // Strip the eight markers: each writer emits exactly one, on its first
+        // write, because no payload contains a newline and no writer reaches
+        // the run bound. What remains is pure payload, so the run arithmetic
+        // below reads writes rather than markers.
+        let stripped: String = text.split(STDOUT_PREFIX).collect();
+        let payload = stripped.as_bytes();
+        assert_eq!(
+            payload.len(),
+            8 * 20 * 64,
+            "every payload byte must reach the sink: {}",
+            payload.len(),
+        );
+        for id in 0u8..8 {
+            // Counted with an explicit loop rather than `filter().count()`: the
+            // naive-bytecount lint is right that a crate does this faster, and a
+            // new dependency for one test assertion is the worse trade.
+            let mut found = 0usize;
+            for byte in payload {
+                if *byte == b'a' + id {
+                    found += 1;
+                }
+            }
+            assert!(
+                found == 20 * 64,
+                "payload {} must arrive whole, found {found}",
+                b'a' + id,
+            );
+        }
+        // Every maximal run is a whole number of writes: a mid-write
+        // interleave would split a 64-byte write into fragments whose lengths
+        // cannot all be multiples of 64.
+        let mut run = 1usize;
+        for pair in payload.windows(2) {
+            if pair[0] == pair[1] {
+                run += 1;
+            } else {
+                assert_eq!(run % 64, 0, "a fragmented write left a run of {run}");
+                run = 1;
+            }
+        }
+        assert_eq!(run % 64, 0, "a fragmented write left a tail run of {run}");
     }
 
     #[test]

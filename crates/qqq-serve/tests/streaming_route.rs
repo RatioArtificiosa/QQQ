@@ -39,6 +39,7 @@ use qqq_serve::stream::{StreamError, StreamWriter};
 use qqq_serve::{RequestHead, Response};
 
 use qqq_io::listener::{ListenAddr, Shutdown};
+use qqq_serve::limits::{Limits, TenantLimits};
 
 /// A port nobody is using, for the reason `tests/socket.rs` documents.
 fn free_addr() -> SocketAddr {
@@ -63,6 +64,32 @@ struct Server {
 }
 
 impl Server {
+    async fn start_with_limits(dispatch: Dispatch, limits: TenantLimits) -> Self {
+        let addr = free_addr();
+        let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
+        let shutdown = Shutdown::new();
+        let mut config = ServerConfig::for_addr(listen);
+        config.limits = Some(Arc::new(limits));
+        let local = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(
+                config,
+                table(),
+                dispatch,
+                local,
+                Logger::new(Format::Json, Level::Error),
+            )
+            .await
+            {
+                eprintln!("server stopped early: {}", e.render());
+            }
+        });
+
+        let server = Self { addr, shutdown };
+        server.wait_until_accepting().await;
+        server
+    }
+
     async fn start(dispatch: Dispatch) -> Self {
         let addr = free_addr();
         let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
@@ -113,6 +140,79 @@ impl Server {
         stream
     }
 
+    /// Connect, send one raw request, and read until the server closes or the
+    /// timeout expires.
+    ///
+    /// Rejections on special routes always close the connection, so reading to
+    /// EOF captures the complete response without depending on its length.
+    async fn request_raw(&self, raw: &str) -> String {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        stream
+            .write_all(raw.as_bytes())
+            .await
+            .expect("write request");
+        stream.flush().await.expect("flush");
+        read_until_eof(&mut stream).await
+    }
+
+    /// Connect and send a head with `Transfer-Encoding: chunked` followed by
+    /// complete chunks and the terminating zero-length chunk.
+    async fn open_chunked(&self, target: &str, chunks: &[&[u8]]) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let head = format!(
+            "GET {target} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        for chunk in chunks {
+            let header = format!("{:X}\r\n", chunk.len());
+            stream
+                .write_all(header.as_bytes())
+                .await
+                .expect("write size");
+            stream.write_all(chunk).await.expect("write chunk");
+            stream.write_all(b"\r\n").await.expect("write end");
+        }
+        stream
+            .write_all(b"0\r\n\r\n")
+            .await
+            .expect("write terminator");
+        stream.flush().await.expect("flush");
+        stream
+    }
+
+    /// Connect and send a chunked head followed by an incomplete chunk, with no
+    /// terminating zero-length chunk.
+    ///
+    /// The incompleteness is the instrument: a server that waits for the body
+    /// before deciding has nothing to wait on that will ever arrive, so a
+    /// rejection that still arrives is proof the decision was made at the head.
+    async fn open_chunked_truncated(&self, target: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let head = format!(
+            "GET {target} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        stream
+            .write_all(b"5\r\nhe")
+            .await
+            .expect("write partial chunk");
+        stream.flush().await.expect("flush");
+        stream
+    }
+
+    /// Connect, declare `body.len()` bytes, and send all of them.
+    async fn open_with_body(&self, target: &str, body: &[u8]) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let head = format!(
+            "GET {target} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        stream.write_all(body).await.expect("write body");
+        stream.flush().await.expect("flush");
+        stream
+    }
+
     /// Connect and send a request that **declares** `declared` body bytes, sending none.
     ///
     /// The declaration is the whole instrument. A server that reads the body before
@@ -151,6 +251,25 @@ async fn read_until(stream: &mut TcpStream, needle: &str) -> String {
                         break;
                     }
                 }
+            }
+        }
+    })
+    .await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Read until the server closes the connection or the timeout expires.
+///
+/// Rejections on special routes always close the connection, so reading to EOF
+/// captures the complete response without depending on its length.
+async fn read_until_eof(stream: &mut TcpStream) -> String {
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&chunk[..n]),
             }
         }
     })
@@ -463,5 +582,146 @@ async fn a_handler_that_fails_mid_body_truncates_rather_than_lies() {
     assert!(
         got.contains("200 OK"),
         "the status was already sent and cannot be revised: {got:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Body-bearing requests to special routes (HTTP-LIMIT-001)
+// ---------------------------------------------------------------------------
+
+/// **A chunked body to a streaming route is rejected before the handler runs.**
+///
+/// Special routes have no HTTP request-body contract: the streaming handler
+/// takes no body parameter and could not read one if it wanted to. An unbounded
+/// (chunked) body therefore cannot be boundedly decoded and discarded under the
+/// absolute cap, so the only unambiguous rule is refusal before dispatch. The
+/// chunks are fully sent, so a rejection cannot be explained as a truncated
+/// input: the server saw a complete chunked body and still refused it.
+#[tokio::test]
+async fn a_chunked_body_to_a_streaming_route_is_rejected_before_the_handler_runs() {
+    let (_tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open_chunked("/events", &[b"hello"]).await;
+    let got = read_until_eof(&mut client).await;
+
+    assert!(
+        got.contains("400"),
+        "a chunked body on a special route must be refused: {got:?}"
+    );
+    assert!(
+        !got.contains("data: first"),
+        "the stream must never start on a refused request: {got:?}"
+    );
+    // **The handler never ran**, on the §O-279 counter rather than the channel.
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the handler"
+    );
+    let mut one = [0u8; 1];
+    assert_eq!(
+        client.read(&mut one).await.expect("read close"),
+        0,
+        "the rejection must close the connection so the unread body dies with it"
+    );
+}
+
+/// **A declared body over the cap to a streaming route is refused with 413.**
+///
+/// The declared-length check in `refuse_before_reading` runs before special-route
+/// dispatch, so the cap holds on every route kind rather than only on ordinary
+/// ones. The body is deliberately **not** sent: a refusal that precedes reading
+/// must not depend on bytes that never arrive, and sending them would let a
+/// read-first-then-refuse implementation pass.
+#[tokio::test]
+async fn a_declared_body_over_the_cap_to_a_streaming_route_is_rejected_with_413() {
+    let (_tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server =
+        Server::start_with_limits(dispatch, TenantLimits::uniform(Limits::with_body(16))).await;
+
+    let got = server
+        .request_raw(
+            "GET /events HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+    assert!(
+        got.contains("413"),
+        "an over-cap declared body is 413: {got:?}"
+    );
+    assert!(
+        !got.contains("data: first"),
+        "the stream must never start on a refused request: {got:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the handler"
+    );
+}
+
+/// **A declared body exactly at the cap to a streaming route still streams.**
+///
+/// The boundary control for the test above: `<=` is the rule, so exactly the cap
+/// must dispatch. The body is fully sent and left unread by design — the streaming
+/// handler has no body parameter — and the connection closes with the stream, so
+/// the unread bytes cannot become a second request.
+#[tokio::test]
+async fn a_declared_body_at_the_cap_to_a_streaming_route_streams() {
+    let (tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server =
+        Server::start_with_limits(dispatch, TenantLimits::uniform(Limits::with_body(16))).await;
+
+    let body = vec![b'y'; 16];
+    let mut client = server.open_with_body("/events", &body).await;
+    let got = read_until(&mut client, "data: first").await;
+
+    assert!(
+        got.contains("data: first"),
+        "exactly the cap must still dispatch to the stream: {got:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "the allowed request must have invoked the handler exactly once"
+    );
+    let _ = tx.send(());
+}
+
+/// **A truncated chunked body to a streaming route is rejected without waiting.**
+///
+/// The incompleteness is the instrument: the terminating zero-length chunk never
+/// arrives, so a server that waited for the body before deciding would hang until
+/// the read timeout. A rejection that arrives promptly proves the decision was
+/// made at the head, where `Transfer-Encoding: chunked` is already known.
+#[tokio::test]
+async fn a_truncated_chunked_body_to_a_streaming_route_is_rejected_without_waiting() {
+    let (_tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let server = Server::start(dispatch).await;
+
+    let mut client = server.open_chunked_truncated("/events").await;
+    let got = read_until(&mut client, "400").await;
+
+    assert!(
+        got.contains("400"),
+        "even an incomplete chunked body on a special route must be refused, and promptly: {got:?}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the handler"
     );
 }

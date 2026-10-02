@@ -35164,6 +35164,23 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-528 - The Linux bridge is green with headroom to spare
+
+`docker compose run --rm linux checks` on the final tree exited 0 after
+2.5 hours (cold Linux target-dir build, not starvation): all 9 checkers,
+all self-test halves, corpus at rest, LF clean — including the new
+progress-agreement cases and `yoke-derive 0.8.4` compiling on Linux. The
+"assemblyscript: failed" line is a self-test proving failure detection,
+followed by its PASS. 209 one-minute `docker stats` samples: CPU mean
+9.9% with a 506% cold-build spike (~5 cores during parallel compilation),
+memory max 1.4GiB of the 8GiB limit (17.5%), mean 2.6% — no pressure, no
+throttle correlation with any outcome. Rule: prior "high levels" were
+build parallelism, and the numbers now say so; a resource anomaly is a
+measurement with a baseline, not a feeling. The cargo-suite environmental
+failures from the earlier bridge (container-global target dir) are
+outside `checks` scope and unchanged. → `docker/compose.yaml`,
+`tools/check_checklist_counts.py`, `.github/perf/baseline.json`.
+
 ## §O-527 - A vacuity guard with a race is a flake wearing armor
 
 The concurrent snapshot doctest failed on ubuntu CI with its own

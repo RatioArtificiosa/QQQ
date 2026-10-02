@@ -193,14 +193,68 @@ impl Pool {
     /// a sum the pool never held — an observer that reads one counter before
     /// a release and the other after it sees both sides of the move. Any
     /// invariant over *both* counters must use this, not the two accessors.
+    /// The example below is concurrent on purpose: a single-threaded caller
+    /// cannot exhibit the torn read this method exists to prevent, so a
+    /// single-threaded example would pass on a split implementation too.
     ///
     /// ```
     /// use qqq_host::pool::Pool;
+    /// use std::sync::{Arc, Barrier};
+    /// use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     ///
-    /// let pool = Pool::new(4);
-    /// pool.acquire(0.0).expect("a slot");
-    /// let (used, idle) = pool.snapshot();
-    /// assert_eq!((used, idle), (1, 0));
+    /// const CAPACITY: u64 = 4;
+    /// let pool = Arc::new(Pool::new(CAPACITY));
+    /// let go = Arc::new(Barrier::new(6));
+    /// let stop = Arc::new(AtomicBool::new(false));
+    /// let bad = Arc::new(AtomicU64::new(0));
+    /// let samples = Arc::new(AtomicU64::new(0));
+    /// // A sampler thread reads the joint counters while workers churn: with
+    /// // two separate reads it observes both sides of a transition and the
+    /// // invariant breaks; with one joint read it never does. The sample
+    /// // count is asserted because a sampler that never ran before the
+    /// // workers finished would pass vacuously.
+    /// let sampler = {
+    ///     let (pool, go, stop, bad, samples) = (
+    ///         Arc::clone(&pool),
+    ///         Arc::clone(&go),
+    ///         Arc::clone(&stop),
+    ///         Arc::clone(&bad),
+    ///         Arc::clone(&samples),
+    ///     );
+    ///     std::thread::spawn(move || {
+    ///         go.wait();
+    ///         while !stop.load(Ordering::Relaxed) {
+    ///             let (used, idle) = pool.snapshot();
+    ///             samples.fetch_add(1, Ordering::Relaxed);
+    ///             if used + idle > CAPACITY {
+    ///                 bad.fetch_add(1, Ordering::Relaxed);
+    ///             }
+    ///         }
+    ///     })
+    /// };
+    /// let mut handles = Vec::new();
+    /// for _ in 0..4 {
+    ///     let (pool, go) = (Arc::clone(&pool), Arc::clone(&go));
+    ///     handles.push(std::thread::spawn(move || {
+    ///         go.wait();
+    ///         for _ in 0..500 {
+    ///             if pool.acquire(1000.0).is_ok() {
+    ///                 pool.release();
+    ///             }
+    ///         }
+    ///     }));
+    /// }
+    /// go.wait();
+    /// for handle in handles {
+    ///     handle.join().expect("worker");
+    /// }
+    /// stop.store(true, Ordering::Relaxed);
+    /// sampler.join().expect("sampler");
+    /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
+    /// assert!(
+    ///     samples.load(Ordering::Relaxed) > 0,
+    ///     "the sampler must have observed churn, or the invariant was never tested"
+    /// );
     /// ```
     ///
     /// # Panics

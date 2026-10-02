@@ -210,6 +210,7 @@ impl Pool {
     /// let bad = Arc::new(AtomicU64::new(0));
     /// let samples = Arc::new(AtomicU64::new(0));
     /// let released = Arc::new(AtomicU64::new(0));
+    /// let overlapped = Arc::new(AtomicBool::new(false));
     /// let ops = Arc::new(AtomicU64::new(0));
     /// // A sampler thread reads the joint counters while workers churn: with
     /// // two separate reads it observes both sides of a transition and the
@@ -223,7 +224,7 @@ impl Pool {
     /// // the invariant is asserted on every one, and a split-atomic
     /// // implementation fails this test (proven by fault injection).
     /// let sampler = {
-    ///     let (pool, go, churn, stop, bad, samples, released, ops) = (
+    ///     let (pool, go, churn, stop, bad, samples, released, overlapped, ops) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
@@ -231,6 +232,7 @@ impl Pool {
     ///         Arc::clone(&bad),
     ///         Arc::clone(&samples),
     ///         Arc::clone(&released),
+    ///         Arc::clone(&overlapped),
     ///         Arc::clone(&ops),
     ///     );
     ///     std::thread::spawn(move || {
@@ -244,23 +246,27 @@ impl Pool {
     ///         // The progress proof: the first and last post-release reads
     ///         // bracket worker operations, so the test passes only if pool
     ///         // transitions overlapped the sampling window. Locals, not
-    ///         // shared state — only this thread touches them.
+    ///         // shared state — only this thread touches them. Once a later
+    ///         // read observes advanced operations, the overlap flag is set
+    ///         // and main may stop the test; without it the window stays
+    ///         // open, so the flag cannot be set without overlapped activity.
     ///         let mut first_ops: Option<u64> = None;
-    ///         let mut last_ops: u64 = 0;
     ///         while !stop.load(Ordering::Relaxed) {
     ///             let (used, idle) = pool.snapshot();
     ///             samples.fetch_add(1, Ordering::Relaxed);
     ///             released.fetch_add(1, Ordering::Relaxed);
     ///             let seen = ops.load(Ordering::Relaxed);
-    ///             if first_ops.is_none() {
+    ///             if let Some(first) = first_ops {
+    ///                 if seen > first {
+    ///                     overlapped.store(true, Ordering::Relaxed);
+    ///                 }
+    ///             } else {
     ///                 first_ops = Some(seen);
     ///             }
-    ///             last_ops = seen;
     ///             if used + idle > CAPACITY {
     ///                 bad.fetch_add(1, Ordering::Relaxed);
     ///             }
     ///         }
-    ///         (first_ops, last_ops)
     ///     })
     /// };
     /// let mut handles = Vec::new();
@@ -278,21 +284,25 @@ impl Pool {
     ///         while !stop.load(Ordering::Relaxed) {
     ///             if pool.acquire(1000.0).is_ok() {
     ///                 pool.release();
+    ///                 // Successful transitions only: a refused acquire is
+    ///                 // not pool activity, and counting it would let the
+    ///                 // overlap proof pass on contention without progress.
+    ///                 ops.fetch_add(1, Ordering::Relaxed);
     ///             }
-    ///             ops.fetch_add(1, Ordering::Relaxed);
     ///         }
     ///     }));
     /// }
     /// go.wait();
     /// // The overlap is structural, not scheduled: workers churn until the
-    /// // sampler has taken 100 reads past the release, so the test cannot
-    /// // pass without overlapped sampling — the vacuity the bare count had.
-    /// // The deadline fails the test instead of hanging it: a sampler that
-    /// // never reads again is itself the defect.
+    /// // sampler has taken 100 reads past the release AND observed worker
+    /// // progress inside the window, so the test cannot pass without
+    /// // overlapped sampling — the vacuity the bare count had. The deadline
+    /// // fails the test instead of hanging it: a sampler that never reads
+    /// // again is itself the defect.
     /// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    /// while released.load(Ordering::Relaxed) < 100 {
+    /// while released.load(Ordering::Relaxed) < 100 || !overlapped.load(Ordering::Relaxed) {
     ///     if std::time::Instant::now() > deadline {
-    ///         panic!("no post-release reads in 60s: sampler deadlock or starvation");
+    ///         panic!("no overlapped sampling in 60s: sampler deadlock or starvation");
     ///     }
     ///     std::thread::yield_now();
     /// }
@@ -300,7 +310,7 @@ impl Pool {
     /// for handle in handles {
     ///     handle.join().expect("worker");
     /// }
-    /// let (first_ops, last_ops) = sampler.join().expect("sampler");
+    /// sampler.join().expect("sampler");
     /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
     /// assert!(
     ///     samples.load(Ordering::Relaxed) > 0,
@@ -312,9 +322,9 @@ impl Pool {
     ///      the pre-release read proves the sampler ran, not that it overlapped churn"
     /// );
     /// assert!(
-    ///     last_ops > first_ops.unwrap_or(0),
-    ///     "worker operations must advance between the first and last post-release \
-    ///      reads, or no transition overlapped the sampling window"
+    ///     overlapped.load(Ordering::Relaxed),
+    ///     "a post-release read must observe advanced worker operations, or no \
+    ///      transition overlapped the sampling window"
     /// );
     /// ```
     ///

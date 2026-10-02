@@ -244,5 +244,87 @@
       "samples": 3,
       "schema_version": 1
     }
+,
+{
+  "budget_misses": [
+    "hello",
+    "json",
+    "multi",
+    "tailp99"
+  ],
+  "commit": "de908e7e16e61645a21f2d94289e96eabc432935",
+  "does_not_measure": [
+    "run on AMD EPYC 9V45 96-Core Processor by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+    "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+    "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+  ],
+  "environment": {
+    "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+    "kernel": "6.17.0-1022-azure",
+    "memory_bytes": 16766414848,
+    "os": "linux x86_64",
+    "physical_cores": 4,
+    "toolchains": {
+      "qqqai": "0.0.0",
+      "rustc": "unknown"
+    }
+  },
+  "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+  "measured_budget_items": [
+    "PERF-002",
+    "PERF-010",
+    "PERF-011"
+  ],
+  "metrics": {
+    "hello": {
+      "median": 335616.0,
+      "metric": "p99_nanos",
+      "samples": [
+        335616.0,
+        375366.0,
+        333132.0
+      ]
+    },
+    "json": {
+      "median": 2844.8813130167346,
+      "metric": "requests_per_second",
+      "samples": [
+        3425.9569340083613,
+        2844.8813130167346,
+        2810.349241481962
+      ]
+    },
+    "multi": {
+      "median": 21054.2732202939,
+      "metric": "requests_per_second",
+      "samples": [
+        21119.34708617212,
+        21054.2732202939,
+        20936.877918362752
+      ]
+    },
+    "tailp99": {
+      "median": 4074784.0,
+      "metric": "p99_nanos",
+      "samples": [
+        4168649.0,
+        4074784.0,
+        3769254.0
+      ]
+    }
+  },
+  "not_measured_budget_items": [
+    "PERF-003",
+    "PERF-004",
+    "PERF-007",
+    "PERF-008",
+    "PERF-009",
+    "PERF-012",
+    "PERF-013"
+  ],
+  "profile": "ubuntu-latest",
+  "samples": 3,
+  "schema_version": 1
+}
   ]
 }

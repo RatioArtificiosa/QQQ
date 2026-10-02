@@ -310,12 +310,17 @@ impl Pool {
     /// // its 100 progress-gated reads, and only then are the workers
     /// // stopped. No volume threshold, no second deadline — the sampler's
     /// // own loop carries both, so there is one place that decides when the
-    /// // window closes.
-    /// sampler.join().expect("sampler");
+    /// // window closes. The join result is saved, not expected inline: if
+    /// // the sampler panicked (a torn read), expecting here would unwind
+    /// // past the shutdown and leave the workers spinning until the harness
+    /// // times out — hiding the real failure behind a hang. Workers stop
+    /// // first, then the sampler's panic is reported.
+    /// let sampler_result = sampler.join();
     /// stop.store(true, Ordering::Relaxed);
     /// for handle in handles {
     ///     handle.join().expect("worker");
     /// }
+    /// sampler_result.expect("sampler");
     /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
     /// assert!(
     ///     samples.load(Ordering::Relaxed) > 0,

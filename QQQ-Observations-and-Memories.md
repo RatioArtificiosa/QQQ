@@ -35178,7 +35178,14 @@ samples occur while the workers are alive (main joins them before setting
 the stop flag) — that guarantees the reads happen, not that each one lands
 mid-transition, and the test needs no more: the joint-read invariant is
 asserted on every sample, so each one is evidence whether or not a worker
-was mid-acquire when it was taken. Same
+was mid-acquire when it was taken. A further review round asked for proof
+that a transition overlaps a read — that is unsatisfiable through a mutex
+by design: a correct lock makes intermediate states unobservable, so no
+passing test can exhibit one. The overlap evidence lives in the negative
+instead (split reads observe 9 torn states), and the positive test proves
+activity-bracketed consistency. Five review rounds strengthened this one
+doctest; the sixth asked for what the lock forbids. Knowing where the
+evidence chain ends is part of the work. Same
 treatment for the unit-test watcher, which shared the race. Proven with
 20/20 consecutive green runs plus the CI failure itself as the
 reproduction. Rule: an assertion about thread overlap must be enforced by

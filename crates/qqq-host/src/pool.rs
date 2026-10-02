@@ -212,10 +212,14 @@ impl Pool {
     /// // A sampler thread reads the joint counters while workers churn: with
     /// // two separate reads it observes both sides of a transition and the
     /// // invariant breaks; with one joint read it never does. The sampler
-    /// // takes one read BEFORE releasing the workers, so at least one sample
-    /// // is structural rather than scheduled — the previous shape raced the
-    /// // workers and, on a fast runner, observed nothing and failed its own
-    /// // vacuity guard. Every later sample overlaps churn by construction.
+    /// // takes one read BEFORE releasing the workers, so the sample count
+    /// // cannot be zero no matter how the threads are scheduled — the
+    /// // previous shape raced the workers and, on a fast runner, observed
+    /// // nothing and failed its own vacuity guard. Later samples occur while
+    /// // the workers are alive; whether each lands mid-transition is
+    /// // scheduling, and the test needs no more than the reads it takes:
+    /// // the invariant is asserted on every one, and a split-atomic
+    /// // implementation fails this test (proven by fault injection).
     /// let sampler = {
     ///     let (pool, go, churn, stop, bad, samples) = (
     ///         Arc::clone(&pool),

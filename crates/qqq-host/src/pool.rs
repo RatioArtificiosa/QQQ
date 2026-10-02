@@ -210,6 +210,7 @@ impl Pool {
     /// let bad = Arc::new(AtomicU64::new(0));
     /// let samples = Arc::new(AtomicU64::new(0));
     /// let released = Arc::new(AtomicU64::new(0));
+    /// let ops = Arc::new(AtomicU64::new(0));
     /// // A sampler thread reads the joint counters while workers churn: with
     /// // two separate reads it observes both sides of a transition and the
     /// // invariant breaks; with one joint read it never does. The sampler
@@ -222,7 +223,7 @@ impl Pool {
     /// // the invariant is asserted on every one, and a split-atomic
     /// // implementation fails this test (proven by fault injection).
     /// let sampler = {
-    ///     let (pool, go, churn, stop, bad, samples, released) = (
+    ///     let (pool, go, churn, stop, bad, samples, released, ops) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
@@ -230,6 +231,7 @@ impl Pool {
     ///         Arc::clone(&bad),
     ///         Arc::clone(&samples),
     ///         Arc::clone(&released),
+    ///         Arc::clone(&ops),
     ///     );
     ///     std::thread::spawn(move || {
     ///         go.wait();
@@ -239,23 +241,36 @@ impl Pool {
     ///             bad.fetch_add(1, Ordering::Relaxed);
     ///         }
     ///         churn.wait();
+    ///         // The progress proof: the first and last post-release reads
+    ///         // bracket worker operations, so the test passes only if pool
+    ///         // transitions overlapped the sampling window. Locals, not
+    ///         // shared state — only this thread touches them.
+    ///         let mut first_ops: Option<u64> = None;
+    ///         let mut last_ops: u64 = 0;
     ///         while !stop.load(Ordering::Relaxed) {
     ///             let (used, idle) = pool.snapshot();
     ///             samples.fetch_add(1, Ordering::Relaxed);
     ///             released.fetch_add(1, Ordering::Relaxed);
+    ///             let seen = ops.load(Ordering::Relaxed);
+    ///             if first_ops.is_none() {
+    ///                 first_ops = Some(seen);
+    ///             }
+    ///             last_ops = seen;
     ///             if used + idle > CAPACITY {
     ///                 bad.fetch_add(1, Ordering::Relaxed);
     ///             }
     ///         }
+    ///         (first_ops, last_ops)
     ///     })
     /// };
     /// let mut handles = Vec::new();
     /// for _ in 0..4 {
-    ///     let (pool, go, churn, stop) = (
+    ///     let (pool, go, churn, stop, ops) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
     ///         Arc::clone(&stop),
+    ///         Arc::clone(&ops),
     ///     );
     ///     handles.push(std::thread::spawn(move || {
     ///         go.wait();
@@ -264,6 +279,7 @@ impl Pool {
     ///             if pool.acquire(1000.0).is_ok() {
     ///                 pool.release();
     ///             }
+    ///             ops.fetch_add(1, Ordering::Relaxed);
     ///         }
     ///     }));
     /// }
@@ -284,7 +300,7 @@ impl Pool {
     /// for handle in handles {
     ///     handle.join().expect("worker");
     /// }
-    /// sampler.join().expect("sampler");
+    /// let (first_ops, last_ops) = sampler.join().expect("sampler");
     /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
     /// assert!(
     ///     samples.load(Ordering::Relaxed) > 0,
@@ -294,6 +310,11 @@ impl Pool {
     ///     released.load(Ordering::Relaxed) >= 100,
     ///     "at least 100 samples must come after the workers were released: \
     ///      the pre-release read proves the sampler ran, not that it overlapped churn"
+    /// );
+    /// assert!(
+    ///     last_ops > first_ops.unwrap_or(0),
+    ///     "worker operations must advance between the first and last post-release \
+    ///      reads, or no transition overlapped the sampling window"
     /// );
     /// ```
     ///

@@ -81,7 +81,7 @@ use std::borrow::Cow;
 ///
 /// let h = ReplayHeader {
 ///     artifact_digest: "sha256:9f2c".to_owned(),
-///     engine_version: "48.0.3".to_owned(),
+///     engine_version: "48.0.5".to_owned(),
 ///     target_triple: "x86_64-pc-windows-msvc".to_owned(),
 ///     deterministic: true,
 /// };
@@ -112,7 +112,7 @@ impl ReplayHeader {
     ///
     /// let a = ReplayHeader {
     ///     artifact_digest: "a".to_owned(),
-    ///     engine_version: "48.0.3".to_owned(),
+    ///     engine_version: "48.0.5".to_owned(),
     ///     target_triple: "test".to_owned(),
     ///     deterministic: true,
     /// };
@@ -275,7 +275,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// let mut log = ReplayLog::new(
 ///     ReplayHeader {
 ///         artifact_digest: "sha256:9f2c".to_owned(),
-///         engine_version: "48.0.3".to_owned(),
+///         engine_version: "48.0.5".to_owned(),
 ///         target_triple: "test".to_owned(),
 ///         deterministic: true,
 ///     },
@@ -349,7 +349,7 @@ impl ReplayRecord {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "a".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -766,7 +766,7 @@ fn parse_records(all: &[&str], body_start: usize) -> Result<Vec<ReplayRecord>, R
 /// let mut log = ReplayLog::new(
 ///     ReplayHeader {
 ///         artifact_digest: "sha256:9f2c".to_owned(),
-///         engine_version: "48.0.3".to_owned(),
+///         engine_version: "48.0.5".to_owned(),
 ///         target_triple: "test".to_owned(),
 ///         deterministic: true,
 ///     },
@@ -809,7 +809,7 @@ impl ReplayLog {
     /// let log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "a".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -850,7 +850,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -882,7 +882,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -902,7 +902,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -928,7 +928,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -950,13 +950,13 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
     ///     8,
     /// );
-    /// assert_eq!(log.header().engine_version, "48.0.3");
+    /// assert_eq!(log.header().engine_version, "48.0.5");
     /// ```
     #[must_use]
     pub const fn header(&self) -> &ReplayHeader {
@@ -970,7 +970,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -990,7 +990,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1015,7 +1015,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1064,7 +1064,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1133,7 +1133,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1222,7 +1222,7 @@ impl ReplayLog {
     /// let mut log = ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1232,7 +1232,7 @@ impl ReplayLog {
     /// let text = log.to_text();
     /// let back = ReplayLog::from_text(&text).expect("a log it wrote");
     /// assert_eq!(back.records().len(), 1);
-    /// assert_eq!(back.header().engine_version, "48.0.3");
+    /// assert_eq!(back.header().engine_version, "48.0.5");
     /// ```
     pub fn from_text(text: &str) -> Result<Self, ReplayError> {
         let all: Vec<&str> = text.lines().collect();
@@ -1506,7 +1506,7 @@ mod tests {
     fn header() -> ReplayHeader {
         ReplayHeader {
             artifact_digest: "sha256:9f2c".to_owned(),
-            engine_version: "48.0.3".to_owned(),
+            engine_version: "48.0.5".to_owned(),
             target_triple: "x86_64-pc-windows-msvc".to_owned(),
             deterministic: true,
         }

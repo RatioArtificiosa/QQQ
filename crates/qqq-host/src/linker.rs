@@ -543,7 +543,7 @@ impl StoreData {
     /// let log = Arc::new(Mutex::new(ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -581,7 +581,7 @@ impl StoreData {
     /// let log = Arc::new(Mutex::new(ReplayLog::new(
     ///     ReplayHeader {
     ///         artifact_digest: "sha256:9f2c".to_owned(),
-    ///         engine_version: "48.0.3".to_owned(),
+    ///         engine_version: "48.0.5".to_owned(),
     ///         target_triple: "test".to_owned(),
     ///         deterministic: true,
     ///     },
@@ -1740,7 +1740,7 @@ mod tests {
         std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
             crate::replay::ReplayHeader {
                 artifact_digest: "sha256:test".to_owned(),
-                engine_version: "48.0.3".to_owned(),
+                engine_version: "48.0.5".to_owned(),
                 target_triple: "test".to_owned(),
                 deterministic: true,
             },

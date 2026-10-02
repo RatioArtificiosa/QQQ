@@ -159,7 +159,7 @@ mechanism in this repository, not an intention:
 
 ### The current pin
 
-`wasmtime = "48"` in `[workspace.dependencies]`, resolved to **48.0.3** by
+`wasmtime = "48"` in `[workspace.dependencies]`, resolved to **48.0.5** by
 `Cargo.lock`, and mirrored by `qqq-host::config::ENGINE_VERSION`. **Two** anti-drift
 tests hold the pair together, and the second is the one that matters after a patch
 release: one asserts the constant against the workspace requirement (`48`), and one

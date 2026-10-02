@@ -341,7 +341,7 @@ impl StoreLimits {
 /// `wasmtime` does not re-export its version, so this is pinned alongside the
 /// workspace's `wasmtime` dependency and **verified by a test** that fails if
 /// the two drift. That test is the mechanism that keeps this constant honest.
-pub const ENGINE_VERSION: &str = "48.0.3";
+pub const ENGINE_VERSION: &str = "48.0.5";
 
 /// The `wasmtime` requirement declared in the workspace manifest.
 ///

@@ -35164,6 +35164,26 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-527 - A vacuity guard with a race is a flake wearing armor
+
+The concurrent snapshot doctest failed on ubuntu CI with its own
+assertion: "the sampler must have observed churn". The sampler raced the
+workers, and on a fast runner all 2,000 acquires finished before the
+sampler thread was scheduled once — zero samples, guard fires, red CI for
+a correct pool. The vacuity guard was right to exist (a sampler that never
+runs proves nothing) but wrong to depend on scheduling. The fix is a
+two-phase barrier: the sampler takes one joint read, THEN releases the
+workers, so the first sample is structural rather than scheduled. Later
+samples occur while the workers are alive (main joins them before setting
+the stop flag) — that guarantees the reads happen, not that each one lands
+mid-transition, and the test needs no more: the joint-read invariant is
+asserted on every sample, so each one is evidence whether or not a worker
+was mid-acquire when it was taken. Same
+treatment for the unit-test watcher, which shared the race. Proven with
+20/20 consecutive green runs plus the CI failure itself as the
+reproduction. Rule: an assertion about thread overlap must be enforced by
+synchronization, never observed by luck. → `crates/qqq-host/src/pool.rs`.
+
 ## §O-526 - The review caught a warning that arrived after shutdown
 
 The pre-commit review of the LOW round returned six findings (two

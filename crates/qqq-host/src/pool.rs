@@ -205,24 +205,34 @@ impl Pool {
     /// const CAPACITY: u64 = 4;
     /// let pool = Arc::new(Pool::new(CAPACITY));
     /// let go = Arc::new(Barrier::new(6));
+    /// let churn = Arc::new(Barrier::new(5));
     /// let stop = Arc::new(AtomicBool::new(false));
     /// let bad = Arc::new(AtomicU64::new(0));
     /// let samples = Arc::new(AtomicU64::new(0));
     /// // A sampler thread reads the joint counters while workers churn: with
     /// // two separate reads it observes both sides of a transition and the
-    /// // invariant breaks; with one joint read it never does. The sample
-    /// // count is asserted because a sampler that never ran before the
-    /// // workers finished would pass vacuously.
+    /// // invariant breaks; with one joint read it never does. The sampler
+    /// // takes one read BEFORE releasing the workers, so at least one sample
+    /// // is structural rather than scheduled — the previous shape raced the
+    /// // workers and, on a fast runner, observed nothing and failed its own
+    /// // vacuity guard. Every later sample overlaps churn by construction.
     /// let sampler = {
-    ///     let (pool, go, stop, bad, samples) = (
+    ///     let (pool, go, churn, stop, bad, samples) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
+    ///         Arc::clone(&churn),
     ///         Arc::clone(&stop),
     ///         Arc::clone(&bad),
     ///         Arc::clone(&samples),
     ///     );
     ///     std::thread::spawn(move || {
     ///         go.wait();
+    ///         let (used, idle) = pool.snapshot();
+    ///         samples.fetch_add(1, Ordering::Relaxed);
+    ///         if used + idle > CAPACITY {
+    ///             bad.fetch_add(1, Ordering::Relaxed);
+    ///         }
+    ///         churn.wait();
     ///         while !stop.load(Ordering::Relaxed) {
     ///             let (used, idle) = pool.snapshot();
     ///             samples.fetch_add(1, Ordering::Relaxed);
@@ -234,9 +244,10 @@ impl Pool {
     /// };
     /// let mut handles = Vec::new();
     /// for _ in 0..4 {
-    ///     let (pool, go) = (Arc::clone(&pool), Arc::clone(&go));
+    ///     let (pool, go, churn) = (Arc::clone(&pool), Arc::clone(&go), Arc::clone(&churn));
     ///     handles.push(std::thread::spawn(move || {
     ///         go.wait();
+    ///         churn.wait();
     ///         for _ in 0..500 {
     ///             if pool.acquire(1000.0).is_ok() {
     ///                 pool.release();
@@ -685,19 +696,34 @@ mod tests {
     #[test]
     fn concurrent_accounting_never_reports_an_impossible_state() {
         use std::sync::atomic::{AtomicBool, AtomicU64};
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
 
         const CAPACITY: u64 = 8;
         const THREADS: usize = 16;
         const ATTEMPTS: usize = 2000;
 
         let p = Arc::new(Pool::new(CAPACITY));
+        let go = Arc::new(Barrier::new(THREADS + 2));
+        let churn = Arc::new(Barrier::new(THREADS + 1));
         let done = Arc::new(AtomicBool::new(false));
         let sample_count = Arc::new(AtomicU64::new(0));
         let sampler_p = Arc::clone(&p);
         let sampler_done = Arc::clone(&done);
         let sampler_samples = Arc::clone(&sample_count);
+        let sampler_go = Arc::clone(&go);
+        let sampler_churn = Arc::clone(&churn);
         let watcher = std::thread::spawn(move || {
+            sampler_go.wait();
+            // The first sample precedes all churn, so the count below is
+            // structural: the previous shape raced the workers and could, on
+            // a fast runner, observe nothing while asserting coverage.
+            let (used, idle) = sampler_p.snapshot();
+            sampler_samples.fetch_add(1, Ordering::Relaxed);
+            assert!(
+                used + idle <= CAPACITY,
+                "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
+            );
+            sampler_churn.wait();
             while !sampler_done.load(Ordering::Relaxed) {
                 // One joint read: two separate accessor calls could straddle a
                 // transition and report a sum the pool never held, which would
@@ -716,7 +742,11 @@ mod tests {
         let mut handles = Vec::new();
         for t in 0..THREADS {
             let p = Arc::clone(&p);
+            let go = Arc::clone(&go);
+            let churn = Arc::clone(&churn);
             handles.push(std::thread::spawn(move || {
+                go.wait();
+                churn.wait();
                 for i in 0..ATTEMPTS {
                     if p.acquire(1000.0).is_ok() {
                         if (t + i) % 7 == 0 {
@@ -728,6 +758,9 @@ mod tests {
                 }
             }));
         }
+        // The eighteenth waiter: without it the barrier never releases and
+        // the test hangs rather than fails.
+        go.wait();
         for h in handles {
             h.join().expect("thread must not panic");
         }

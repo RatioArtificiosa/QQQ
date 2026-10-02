@@ -251,11 +251,16 @@ impl Pool {
     /// };
     /// let mut handles = Vec::new();
     /// for _ in 0..4 {
-    ///     let (pool, go, churn) = (Arc::clone(&pool), Arc::clone(&go), Arc::clone(&churn));
+    ///     let (pool, go, churn, stop) = (
+    ///         Arc::clone(&pool),
+    ///         Arc::clone(&go),
+    ///         Arc::clone(&churn),
+    ///         Arc::clone(&stop),
+    ///     );
     ///     handles.push(std::thread::spawn(move || {
     ///         go.wait();
     ///         churn.wait();
-    ///         for _ in 0..500 {
+    ///         while !stop.load(Ordering::Relaxed) {
     ///             if pool.acquire(1000.0).is_ok() {
     ///                 pool.release();
     ///             }
@@ -263,10 +268,22 @@ impl Pool {
     ///     }));
     /// }
     /// go.wait();
+    /// // The overlap is structural, not scheduled: workers churn until the
+    /// // sampler has taken 100 reads past the release, so the test cannot
+    /// // pass without overlapped sampling — the vacuity the bare count had.
+    /// // The deadline fails the test instead of hanging it: a sampler that
+    /// // never reads again is itself the defect.
+    /// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    /// while released.load(Ordering::Relaxed) < 100 {
+    ///     if std::time::Instant::now() > deadline {
+    ///         panic!("no post-release reads in 60s: sampler deadlock or starvation");
+    ///     }
+    ///     std::thread::yield_now();
+    /// }
+    /// stop.store(true, Ordering::Relaxed);
     /// for handle in handles {
     ///     handle.join().expect("worker");
     /// }
-    /// stop.store(true, Ordering::Relaxed);
     /// sampler.join().expect("sampler");
     /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
     /// assert!(
@@ -274,8 +291,8 @@ impl Pool {
     ///     "the sampler must have observed churn, or the invariant was never tested"
     /// );
     /// assert!(
-    ///     released.load(Ordering::Relaxed) > 0,
-    ///     "at least one sample must come after the workers were released: \
+    ///     released.load(Ordering::Relaxed) >= 100,
+    ///     "at least 100 samples must come after the workers were released: \
     ///      the pre-release read proves the sampler ran, not that it overlapped churn"
     /// );
     /// ```

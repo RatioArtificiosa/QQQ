@@ -209,6 +209,7 @@ impl Pool {
     /// let stop = Arc::new(AtomicBool::new(false));
     /// let bad = Arc::new(AtomicU64::new(0));
     /// let samples = Arc::new(AtomicU64::new(0));
+    /// let released = Arc::new(AtomicU64::new(0));
     /// // A sampler thread reads the joint counters while workers churn: with
     /// // two separate reads it observes both sides of a transition and the
     /// // invariant breaks; with one joint read it never does. The sampler
@@ -221,13 +222,14 @@ impl Pool {
     /// // the invariant is asserted on every one, and a split-atomic
     /// // implementation fails this test (proven by fault injection).
     /// let sampler = {
-    ///     let (pool, go, churn, stop, bad, samples) = (
+    ///     let (pool, go, churn, stop, bad, samples, released) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
     ///         Arc::clone(&stop),
     ///         Arc::clone(&bad),
     ///         Arc::clone(&samples),
+    ///         Arc::clone(&released),
     ///     );
     ///     std::thread::spawn(move || {
     ///         go.wait();
@@ -240,6 +242,7 @@ impl Pool {
     ///         while !stop.load(Ordering::Relaxed) {
     ///             let (used, idle) = pool.snapshot();
     ///             samples.fetch_add(1, Ordering::Relaxed);
+    ///             released.fetch_add(1, Ordering::Relaxed);
     ///             if used + idle > CAPACITY {
     ///                 bad.fetch_add(1, Ordering::Relaxed);
     ///             }
@@ -269,6 +272,11 @@ impl Pool {
     /// assert!(
     ///     samples.load(Ordering::Relaxed) > 0,
     ///     "the sampler must have observed churn, or the invariant was never tested"
+    /// );
+    /// assert!(
+    ///     released.load(Ordering::Relaxed) > 0,
+    ///     "at least one sample must come after the workers were released: \
+    ///      the pre-release read proves the sampler ran, not that it overlapped churn"
     /// );
     /// ```
     ///

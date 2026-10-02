@@ -570,27 +570,34 @@ impl GuestApp {
                 outcome_kind,
             );
 
-            // Hand this call's rows to the file worker **inside the same block**
-            // so the records persisted are the records appended. `audit_floor`
-            // was taken before the guest ran, so the slice covers the ambient
-            // rows recorded during the call plus the handle row just added —
+            // Hand this call's rows to the file worker, recorded and cloned
+            // under the stream lock and persisted after it is released. The
+            // release is structural, not NLL luck: the persist below blocks
+            // on the worker's barrier, and a worker waiting on a row whose
+            // producer waits on this lock would wedge both — the lock
+            // ordering the barrier design forbids. `audit_floor` was taken
+            // before the guest ran, so the slice covers the ambient rows
+            // recorded during the call plus the handle row just added —
             // sending only the handle row would drop the ambient rows, the
             // exact failure the old `persist_pending` docs record. Rows from
             // concurrent requests may ride along; the worker deduplicates by
             // sequence, so every row is persisted exactly once.
+            //
+            // The timeout comes from the attached appender, not the default:
+            // `attach_audit_file` derives it from the epoch deadline, and a
+            // call site that re-defaulted it would silently shorten the
+            // tripwire the attach chose.
+            let start = audit_floor.min(stream.records().len());
+            let rows = stream.records()[start..].to_vec();
+            drop(stream);
             if let (Some(appender), qqq_host::Append::Recorded(_)) =
                 (self.audit_appender.as_ref(), appended)
             {
-                let start = audit_floor.min(stream.records().len());
-                let rows = stream.records()[start..].to_vec();
                 // Waited, not fire-and-forget: the barrier keeps the
                 // synchronous path's promise that a returned request has its
                 // evidence durable, while the shared worker still batches
                 // concurrent requests into fewer disk passes.
-                if let Err(error) = appender.persist(
-                    &rows,
-                    qqq_host::audit_sink::AppenderConfig::default().persist_timeout,
-                ) {
+                if let Err(error) = appender.persist(&rows, appender.config().persist_timeout) {
                     eprintln!(
                         "error: {} capability audit records from sequence {} \
                          could not be persisted: {error}",
@@ -1000,6 +1007,13 @@ mod tests {
     }
 
     fn test_app() -> Option<GuestApp> {
+        test_app_with_capacity(1)
+    }
+
+    /// A test app with room for concurrent requests. The default builder
+    /// sizes the pool to one slot, so a concurrency test through it would
+    /// measure pool refusals rather than audit persistence.
+    fn test_app_with_capacity(workers: u32) -> Option<GuestApp> {
         let bytes = orders_api_component()?;
         // The same construction `serve::prepare` uses, so the test drives the shape production
         // drives. `LimitSet::from_manifest` needs a manifest, and building one here would test a
@@ -1019,12 +1033,13 @@ mod tests {
             max_open_handles: 64,
             max_subrequests: 16,
         };
-        GuestApp::new(
+        GuestApp::with_capacity(
             engine,
             &bytes,
             qqq_cap::resolve::GrantSet::empty(),
             limits,
             "127.0.0.1:8080",
+            workers,
         )
         .ok()
     }
@@ -1330,6 +1345,79 @@ mod tests {
             appender.config().persist_timeout,
             std::time::Duration::from_secs(50),
             "the persist tripwire stays ordered after the stall"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Concurrent requests persist without barrier deadlock or late loss.**
+    ///
+    /// The persist blocks on the worker's barrier, so whatever it holds while
+    /// waiting is a lock-ordering decision: holding the stream guard across
+    /// it would wedge against a worker waiting on a row whose producer waits
+    /// on that same guard. The persist therefore receives cloned rows after
+    /// an explicit `drop(stream)` — a structural fact (the signature takes a
+    /// slice, not the guard), not a convention. This test exercises the fixed
+    /// pattern under churn: four threads serving ten requests each through
+    /// one app must all persist without a single timeout, with every stream
+    /// row in the file and no late loss. The app carries eight pool slots so
+    /// a capacity refusal can never stand in for a served request — errors
+    /// are counted, and all forty requests must succeed, or the file/stream
+    /// agreement below would pass on requests that never ran.
+    #[test]
+    fn concurrent_requests_persist_without_barrier_deadlock() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let Some(app) = test_app_with_capacity(8) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("qqq-audit-conc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+        let mut app = app;
+        app.attach_audit_file(&path).expect("attach");
+        let app = Arc::new(app);
+        let served = Arc::new(AtomicU64::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let app = Arc::clone(&app);
+            let served = Arc::clone(&served);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..10 {
+                    let head = head(qqq_serve::Method::Get, "/orders");
+                    if app.handle_request(&head, None, "test-tenant").is_ok() {
+                        served.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert_eq!(
+            served.load(Ordering::Relaxed),
+            40,
+            "every request must be served, not refused by a full pool"
+        );
+        let stats = app.audit_appender.as_ref().expect("attached").stats();
+        assert_eq!(
+            stats.late_after_skip, 0,
+            "no row may arrive after a skip on a healthy run: {stats:?}"
+        );
+        assert_eq!(
+            stats.unpersisted_after_failure, 0,
+            "no row may be lost: {stats:?}"
+        );
+        let (stream_rows, _) = app.audit_snapshot();
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .lines()
+                .count(),
+            stream_rows.len(),
+            "every stream row must reach the file"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

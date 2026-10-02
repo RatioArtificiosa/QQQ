@@ -35164,6 +35164,29 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-516 - The full-scope review found five real defects, all fixed with red proofs
+
+The second review pass over the whole MEDIUM range returned one critical,
+three major, and one minor finding, and every one survived contact with the
+code. The critical one: the persist held the stream guard across the
+barrier wait, a lock-ordering wedge against a worker waiting on a row whose
+producer waits on that guard — fixed by cloning the rows under the lock and
+persisting after an explicit `drop`, plus a four-thread concurrency health
+test. The majors: the stall timer stamped on empty buffers (a stale stamp
+would skip a legitimate late row — now armed only while rows wait, with a
+deterministic three-case unit test on the extracted rule); duplicate
+in-flight rows recounted as submitted (overlapping floor slices send shared
+rows twice — now counted as skipped resends, proven by a resubmit test that
+fails without it); and the persist using the default timeout instead of the
+epoch-derived one the attach chose. The minor one tightened the CWD fixture
+with process-id isolation (the suggested HostEnv fake was rebutted: a fake
+never reads the directory, so it cannot prove independence from it). The
+doctest follow-ups from the prior round were also closed: the two vacuous
+examples now drive real flows, and the split-read snapshot fails the stress
+test 4/4. → `crates/qqq-host/src/audit_sink.rs`,
+`crates/qqq-run/src/guest_handler.rs`, `crates/qqq-cap/src/normalize.rs`,
+`crates/qqq-host/src/pool.rs`.
+
 ## §O-515 - The review caught what the tests could not see: slow rows, raw flushes, lazy fixtures
 
 The full-diff CodeRabbit review of the MEDIUM round returned four findings,

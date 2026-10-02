@@ -1594,24 +1594,7 @@ fn append_loop(
                         stats.persisted.load(Relaxed),
                     );
                 }
-                // A gap that outlives the stall timeout is a dead producer,
-                // not a slow one: skip the missing sequence loudly and let the
-                // frontier move on, or one death wedges every later row and
-                // every live barrier behind it.
-                let stalled = *worker
-                    .stalled_since
-                    .get_or_insert_with(std::time::Instant::now);
-                if stalled.elapsed() >= config.stall_timeout {
-                    if let Some(frontier) = worker.next {
-                        stats.unpersisted_after_failure.fetch_add(1, Relaxed);
-                        eprintln!(
-                            "error: audit sequence {frontier} never arrived; \
-                             skipping it as orphaned rather than wedging the log"
-                        );
-                        worker.next = Some(frontier + 1);
-                    }
-                    worker.stalled_since = None;
-                }
+                let _ = note_gap(&mut worker, stats, config.stall_timeout);
             }
             FrontierOutcome::Failed(failure) => {
                 fail_worker(
@@ -1656,6 +1639,47 @@ struct WorkerState {
     stalled_since: Option<std::time::Instant>,
 }
 
+/// Observe one frontier gap: arm the stall timer, or skip past a dead one.
+///
+/// Returns whether a sequence was skipped. The timer arms only while rows
+/// actually wait behind the gap — arming it on an empty buffer would measure
+/// idle time, and a later real gap would then skip instantly on a stale
+/// stamp, dropping a legitimate row that simply had not arrived yet. A gap
+/// that outlives `stall_timeout` is a dead producer, not a slow one: the
+/// missing sequence is counted loudly and the frontier moves on, or one
+/// death wedges every later row and every live barrier behind it.
+///
+/// Extracted so the arming rule is unit-testable without timing a whole
+/// worker: the three cases below (empty buffer, fresh gap, expired gap) are
+/// assertions on this function, not sleeps around a thread.
+fn note_gap(
+    worker: &mut WorkerState,
+    stats: &AppenderStats,
+    stall_timeout: std::time::Duration,
+) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if worker.pending.is_empty() {
+        worker.stalled_since = None;
+        return false;
+    }
+    let stalled = *worker
+        .stalled_since
+        .get_or_insert_with(std::time::Instant::now);
+    if stalled.elapsed() < stall_timeout {
+        return false;
+    }
+    if let Some(frontier) = worker.next {
+        stats.unpersisted_after_failure.fetch_add(1, Relaxed);
+        eprintln!(
+            "error: audit sequence {frontier} never arrived; \
+             skipping it as orphaned rather than wedging the log"
+        );
+        worker.next = Some(frontier + 1);
+    }
+    worker.stalled_since = None;
+    true
+}
+
 /// Sort one queue item into the reorder buffer or the barrier list.
 ///
 /// Rows at or below the file's spawn-time count, or below a frontier this
@@ -1672,12 +1696,13 @@ fn sort_work(work: Work, worker: &mut WorkerState, stats: &AppenderStats) {
     match work {
         Work::Record(record) => {
             // Below the written frontier the file already holds the row: a
-            // harmless duplicate. Between the written frontier and the expect
-            // frontier the row was skipped as orphaned and later arrived
-            // anyway — a distinct, loud loss, never a quiet resend — because
-            // with the stall timeout tied to the epoch deadline, arriving
-            // that late means the guest outlived its preemption backstop.
-            if record.sequence < worker.written {
+            // harmless duplicate. Already buffered but unwritten is the same
+            // shape one step earlier: overlapping floor slices send shared
+            // rows twice under concurrency, and counting both would inflate
+            // `submitted` past what the file can ever hold — so the shutdown
+            // report would fail clean runs. Duplicates are counted, never
+            // re-queued.
+            if record.sequence < worker.written || worker.pending.contains_key(&record.sequence) {
                 stats.resent_skipped.fetch_add(1, Relaxed);
             } else if record.sequence < worker.next.unwrap_or(worker.base + 1) {
                 stats.late_after_skip.fetch_add(1, Relaxed);
@@ -2261,6 +2286,93 @@ mod tests {
             4,
             "shutdown delivers what the run held back"
         );
+    }
+
+    /// **The stall timer arms only while rows actually wait.**
+    ///
+    /// Three deterministic cases on `note_gap`, no threads and no sleeps: an
+    /// empty buffer neither stamps nor skips; a fresh gap stamps without
+    /// skipping; an expired gap skips exactly once and advances the frontier.
+    /// The first case is the review finding — a stale stamp from an empty
+    /// buffer would skip a legitimate row the instant a later real gap
+    /// formed — so draining the buffer must clear the timer, asserted here
+    /// by emptying between calls.
+    #[test]
+    fn stall_timer_arms_only_while_rows_wait() {
+        use std::collections::BTreeMap;
+        use std::time::{Duration, Instant};
+        let stats = AppenderStats::default();
+        let mut worker = WorkerState {
+            pending: BTreeMap::new(),
+            next: Some(2),
+            batch: Vec::new(),
+            barriers: Vec::new(),
+            base: 0,
+            written: 2,
+            stalled_since: None,
+        };
+        assert!(
+            !note_gap(&mut worker, &stats, Duration::from_secs(60)),
+            "an empty buffer must neither stamp nor skip"
+        );
+        assert!(worker.stalled_since.is_none());
+
+        let records = chained_records(3, &["acme"]);
+        worker.pending.insert(3, records[2].clone());
+        assert!(
+            !note_gap(&mut worker, &stats, Duration::from_secs(60)),
+            "a fresh gap stamps without skipping"
+        );
+        assert!(worker.stalled_since.is_some());
+        assert_eq!(worker.next, Some(2));
+
+        worker.pending.clear();
+        assert!(
+            !note_gap(&mut worker, &stats, Duration::from_secs(60)),
+            "draining the buffer must clear a stale stamp, not skip on it"
+        );
+        assert!(worker.stalled_since.is_none());
+
+        worker.pending.insert(3, records[2].clone());
+        worker.stalled_since = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .expect("an hour ago is representable"),
+        );
+        assert!(
+            note_gap(&mut worker, &stats, Duration::from_millis(50)),
+            "an expired gap must skip"
+        );
+        assert_eq!(worker.next, Some(3));
+        assert_eq!(stats.snapshot().unpersisted_after_failure, 1);
+    }
+
+    /// **A resubmitted unwritten row counts once, not twice.**
+    ///
+    /// Overlapping floor slices send shared rows twice under concurrency, so
+    /// the worker sees duplicates of rows it has not written yet. Counting
+    /// both would inflate `submitted` past what the file can ever hold, and
+    /// the shutdown report would fail clean runs. Here row 3 arrives, is
+    /// resent while row 2 is still missing, then row 2 completes the run:
+    /// submitted counts three unique rows, the resend counts as skipped, and
+    /// the drain is clean.
+    #[test]
+    fn a_resubmitted_unwritten_row_counts_once() {
+        let scratch = Scratch::new("duplicate-inflight");
+        let path = scratch.file();
+        let records = chained_records(3, &["acme"]);
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(file, AppenderConfig::default());
+        appender.append(&records[0]).expect("row 1");
+        appender.append(&records[2]).expect("row 3, gap at 2");
+        appender.append(&records[2]).expect("resend of row 3");
+        appender.append(&records[1]).expect("row 2 fills the gap");
+        let report = appender.shutdown();
+        assert!(report.drained_cleanly, "{:?}", report.stats);
+        assert_eq!(report.stats.submitted, 3);
+        assert_eq!(report.stats.persisted, 3);
+        assert_eq!(report.stats.resent_skipped, 1);
+        assert_eq!(file_sequences(&path), vec![1, 2, 3]);
     }
 
     /// **Dropping the appender drains before returning.**    ///

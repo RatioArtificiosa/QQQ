@@ -1335,7 +1335,9 @@ mod tests {
         }
         let previous = std::env::current_dir().expect("a working directory");
         let _restore = RestoreCwd { previous };
-        let base = std::env::temp_dir().join("qqq-cwd-grant-proof");
+        // The process id keeps parallel runs and stale survivors from
+        // sharing — or inheriting — the same scratch directories.
+        let base = std::env::temp_dir().join(format!("qqq-cwd-grant-proof-{}", std::process::id()));
         let first = base.join("first");
         let second = base.join("second");
         std::fs::create_dir_all(&first).expect("scratch dir");

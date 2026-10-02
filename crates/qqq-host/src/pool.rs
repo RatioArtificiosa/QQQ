@@ -206,6 +206,7 @@ impl Pool {
     /// let pool = Arc::new(Pool::new(CAPACITY));
     /// let go = Arc::new(Barrier::new(6));
     /// let churn = Arc::new(Barrier::new(5));
+    /// let warmed = Arc::new(Barrier::new(5));
     /// let stop = Arc::new(AtomicBool::new(false));
     /// let bad = Arc::new(AtomicU64::new(0));
     /// let samples = Arc::new(AtomicU64::new(0));
@@ -224,11 +225,11 @@ impl Pool {
     /// // the invariant is asserted on every one, and a split-atomic
     /// // implementation fails this test (proven by fault injection).
     /// let sampler = {
-    ///     let (pool, go, churn, stop, bad, samples, released, overlapped, ops) = (
+    ///     let (pool, go, churn, warmed, bad, samples, released, overlapped, ops) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
-    ///         Arc::clone(&stop),
+    ///         Arc::clone(&warmed),
     ///         Arc::clone(&bad),
     ///         Arc::clone(&samples),
     ///         Arc::clone(&released),
@@ -243,26 +244,28 @@ impl Pool {
     ///             bad.fetch_add(1, Ordering::Relaxed);
     ///         }
     ///         churn.wait();
-    ///         // The progress proof: the first and last post-release reads
-    ///         // bracket worker operations, so the test passes only if pool
-    ///         // transitions overlapped the sampling window. Locals, not
-    ///         // shared state — only this thread touches them. Once a later
-    ///         // read observes advanced operations, the overlap flag is set
-    ///         // and main may stop the test; without it the window stays
-    ///         // open, so the flag cannot be set without overlapped activity.
-    ///         let mut first_ops: Option<u64> = None;
-    ///         while !stop.load(Ordering::Relaxed) {
+    ///         warmed.wait();
+    ///         // Every read below is preceded by a freshly-observed worker
+    ///         // transition: the sampler spins until `ops` advances past
+    ///         // what it saw, THEN reads. A test that only counted reads
+    ///         // could pass on a sampler that outran the workers (measured
+    ///         // on macos CI: 100 reads, zero worker ops); here a read
+    ///         // cannot happen without progress before it. The deadline
+    ///         // fails instead of hanging: stalled workers are the defect.
+    ///         let start = std::time::Instant::now();
+    ///         let limit = std::time::Duration::from_secs(60);
+    ///         for _ in 0..100 {
+    ///             let before = ops.load(Ordering::Relaxed);
+    ///             while ops.load(Ordering::Relaxed) == before {
+    ///                 if start.elapsed() > limit {
+    ///                     panic!("no worker progress in 60s: deadlock or starvation");
+    ///                 }
+    ///                 std::thread::yield_now();
+    ///             }
     ///             let (used, idle) = pool.snapshot();
     ///             samples.fetch_add(1, Ordering::Relaxed);
     ///             released.fetch_add(1, Ordering::Relaxed);
-    ///             let seen = ops.load(Ordering::Relaxed);
-    ///             if let Some(first) = first_ops {
-    ///                 if seen > first {
-    ///                     overlapped.store(true, Ordering::Relaxed);
-    ///                 }
-    ///             } else {
-    ///                 first_ops = Some(seen);
-    ///             }
+    ///             overlapped.store(true, Ordering::Relaxed);
     ///             if used + idle > CAPACITY {
     ///                 bad.fetch_add(1, Ordering::Relaxed);
     ///             }
@@ -271,16 +274,26 @@ impl Pool {
     /// };
     /// let mut handles = Vec::new();
     /// for _ in 0..4 {
-    ///     let (pool, go, churn, stop, ops) = (
+    ///     let (pool, go, churn, warmed, stop, ops) = (
     ///         Arc::clone(&pool),
     ///         Arc::clone(&go),
     ///         Arc::clone(&churn),
+    ///         Arc::clone(&warmed),
     ///         Arc::clone(&stop),
     ///         Arc::clone(&ops),
     ///     );
     ///     handles.push(std::thread::spawn(move || {
     ///         go.wait();
     ///         churn.wait();
+    ///         // One full transition before meeting the sampler: when all
+    ///         // four workers arrive at `warmed`, at least four transitions
+    ///         // have completed, so the sampler's progress waits below can
+    ///         // only observe forward movement, never a cold start.
+    ///         if pool.acquire(1000.0).is_ok() {
+    ///             pool.release();
+    ///             ops.fetch_add(1, Ordering::Relaxed);
+    ///         }
+    ///         warmed.wait();
     ///         while !stop.load(Ordering::Relaxed) {
     ///             if pool.acquire(1000.0).is_ok() {
     ///                 pool.release();
@@ -293,24 +306,16 @@ impl Pool {
     ///     }));
     /// }
     /// go.wait();
-    /// // The overlap is structural, not scheduled: workers churn until the
-    /// // sampler has taken 100 reads past the release AND observed worker
-    /// // progress inside the window, so the test cannot pass without
-    /// // overlapped sampling — the vacuity the bare count had. The deadline
-    /// // fails the test instead of hanging it: a sampler that never reads
-    /// // again is itself the defect.
-    /// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    /// while released.load(Ordering::Relaxed) < 100 || !overlapped.load(Ordering::Relaxed) {
-    ///     if std::time::Instant::now() > deadline {
-    ///         panic!("no overlapped sampling in 60s: sampler deadlock or starvation");
-    ///     }
-    ///     std::thread::yield_now();
-    /// }
+    /// // Main's only job is teardown ordering: the sampler terminates after
+    /// // its 100 progress-gated reads, and only then are the workers
+    /// // stopped. No volume threshold, no second deadline — the sampler's
+    /// // own loop carries both, so there is one place that decides when the
+    /// // window closes.
+    /// sampler.join().expect("sampler");
     /// stop.store(true, Ordering::Relaxed);
     /// for handle in handles {
     ///     handle.join().expect("worker");
     /// }
-    /// sampler.join().expect("sampler");
     /// assert_eq!(bad.load(Ordering::Relaxed), 0, "no joint read may break the invariant");
     /// assert!(
     ///     samples.load(Ordering::Relaxed) > 0,

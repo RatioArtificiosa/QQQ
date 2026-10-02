@@ -35189,6 +35189,55 @@ the check must accept. →
 `tools/check_wit_deprecated.py`,
 `tools/fault_inject_wit_deprecated.py`, `docs/deprecations.md`.
 
+## §O-531 — A green scheduled scan is a point sample; the per-commit gate is the detector
+
+The 13:06 UTC scheduled Advisories scan was green, and the local gate at
+~14:23 UTC failed `deny` on seven Wasmtime advisories dated 2026-10-02
+(RUSTSEC-2026-0321…0327, wasmtime/wasmtime-wasi 48.0.3, patch ≥48.0.4).
+The batch reached the RustSec mirror inside that 77-minute window — the
+first summary of the failure ("advisory-DB network fetch") was wrong, and
+reading the actual log lines instead of the remembered shape is what
+corrected it: every ID names a real crate in the resolve with a real
+patch bound. Triage (issue #4) found QQQ in the affected range for all
+seven — fuel accounting, WASI stdio/FS, GC, and the component model are
+all enabled surfaces — with a documented negative for RUSTSEC-2026-0320
+(`wasmtime-wasi-http` is not in the resolve). The response is the process
+step the document prescribes when a patch exists: `cargo update -p
+wasmtime -p wasmtime-wasi` to 48.0.5 (latest 48.x, major stays 48, no
+manifest change), `ENGINE_VERSION` 48.0.3 → 48.0.5 with every test and doc
+pin that tracks it, deny clean, full gate with the hostile-guest and fuzz
+suites. The lockfile-reading anti-drift test is the mechanism that makes
+a patch-level move loud instead of silent. Rule: a deny failure that
+names IDs is detection working, not a flake to rerun — and a scheduled
+green means nothing until the next commit's gate agrees. The step-7
+release (72 h, to 2026-10-05) stays open outside this goal's P9-excluded
+scope. Pre-commit CodeRabbit review (`crAC.log`, 11 files) returned one
+minor finding claiming 48.0.5 was unverified — rebutted without change:
+`Cargo.lock` resolves the line to 48.0.5 from the crates.io index (not
+hand-edited), gate51 compiled `wasmtime v48.0.5` and ran every suite
+green, `deny` reports advisories ok. → `Cargo.lock`, `crates/qqq-host/src/config.rs`,
+`docs/wasmtime-advisory-process.md`.
+
+## §O-530 - The final tree gets its own bridge, and the sampler must not truncate
+
+The first monitored bridge ran on `853ebdf`, but the goal's final SHA is
+`2e600b8` (the CON-015 commit), so the bridge ran again on the final tree:
+exit 0, all checkers green including the deprecation policy and the 19/19
+progress cases on Linux, gate parity holding (140 vs 120 invocations, 55
+checkers). 357 one-minute samples on the final run: CPU mean 9.5%, max 33%
+(no cold-build spike — the named Linux target volume was warm from the
+prior run, as designed); memory max 1.27GiB of 8GiB (15.8%), mean 3%.
+Normal, and flatter than the first run for an understood reason. Every
+FAILED-pattern line verified as a self-test negative with its OK; zero
+real failures to disposition. Two evidence-handling notes: the sampler
+script truncates its log on relaunch (header rewrite), so per-run
+judgements need per-run files or timestamp splits — and the stats log
+mixes containers, so analysis must filter to the `qqq` container (an idle
+`aifs-postgres` from another project shares the daemon). The cargo-suite
+environmental failures from the earlier bridge remain outside `checks`
+scope; the Rust suites ran green in CI on every pushed SHA instead. →
+`docker/compose.yaml`, `tools/check_wit_deprecated.py`.
+
 ## §O-528 - The Linux bridge is green with headroom to spare
 
 `docker compose run --rm linux checks` on the final tree exited 0 after

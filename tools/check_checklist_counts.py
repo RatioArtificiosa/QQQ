@@ -241,7 +241,7 @@ def progress_script() -> Path:
 
 
 def parse_progress_total(output: str) -> tuple[int, int] | None:
-    """Read the `TOTAL` row from progress output. `None` means unparseable.
+    r"""Read the `TOTAL` row from progress output. `None` means unparseable.
 
     A contradictory row (third column not equal to total minus done) is also
     `None`: accepting it would compare against numbers that disagree with

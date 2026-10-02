@@ -1828,8 +1828,21 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CON-014** Implement `qqqai inspect`'s static capability analysis from the import table.
   → Done: `qqqai inspect <artifact>` compiles the component (without instantiating it) and reads its import table, mapping each imported interface to the capability it requires. **Correction:** this was ticked when the claim was not yet true — the command accepted a path, discarded it, and reported the *manifest's* capabilities, so an artifact's import table was never read. Verified and fixed in `§O-038a`. The precise interface→capability mapping that makes the report correct is `§O-038b`/`§O-038c`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-015** Define the deprecation mechanics in WIT: `@deprecated` with a removal version.
+- [x] **CON-015** Define the deprecation mechanics in WIT: `@deprecated` with a removal version.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
+  → Done: `tools/check_wit_deprecated.py` enforces the annotation rules (parseable version,
+    `@since` ≤ deprecated ≤ package version, doc comment with the replacement, ledger row both
+    directions, NN-8 two-minor removal window) against `wit/` and `docs/deprecations.md`;
+    `tools/fault_inject_wit_deprecated.py` proves all six cases with restore verification;
+    the checker is wired into both `.github/workflows/ci.yml` and `docker/entrypoint.sh`
+    while the harness is CI-only under the existing `fault_inject_*.py` declaration, with
+    gate parity held.
+  → **Measured**: `DEPRECATION POLICY OK -- 0 deprecated item(s), ledger agrees in both
+    directions`; `ALL 7 WIT DEPRECATION FAULT INJECTIONS DETECTED` (6 violations + 1 positive
+    control, every injection verified parseable by `wasm-tools` before its detection counts,
+    which is itself enforced: the harness aborts when the toolchain is absent).
+    The toolchain's exact `@deprecated` shape (version-only; message and unknown attributes
+    rejected) was probed, not assumed — see `§O-529`.
 - [x] **CON-016** Implement the schema-drift CI check for the manifest, lockfile, CLI output and error catalogue.
   → Done: `tools/gen_schemas.py` + `tools/self_test_schemas.py`, with
     `schema/qqq-toml.schema.json`, `schema/qqq-lock.schema.json` and

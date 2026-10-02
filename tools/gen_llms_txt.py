@@ -169,6 +169,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "both",
         "status",
     ),
+    (
+        "docs/deprecations.md",
+        "The deprecation ledger: every `@deprecated` WIT item with its removal version and replacement.",
+        "both",
+        "status",
+    ),
     # --- The machine contracts --------------------------------------------
     (
         "docs/errors.md",

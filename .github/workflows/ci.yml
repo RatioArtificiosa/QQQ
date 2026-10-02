@@ -781,6 +781,7 @@ jobs:
       # NOT injected, because `wasm-tools` already rejects it and no parseable
       # file triggers our rule. The checker keeps the rule as defence in depth,
       # and the harness says so rather than implying it is exercised.
+
       # The `wit` job's half of the pair. **This is the step that was in the WRONG JOB**: `--snapshot`
       # ran in `xrefs` and `--verify` here, on a different runner, and CI failed every commit since with
       # `GATE TREE INCONCLUSIVE -- no snapshot`.
@@ -789,6 +790,14 @@ jobs:
 
       - name: Prove the versioning check detects a missing `@since`
         run: python tools/fault_inject_wit_since.py
+
+      # `CON-015` deprecation mechanics, inside the snapshot/verify bracket so
+      # a leftover is caught with everything else.
+      - name: Validate the WIT deprecation policy (CON-015)
+        run: python tools/check_wit_deprecated.py
+
+      - name: Prove the deprecation check detects violations
+        run: python tools/fault_inject_wit_deprecated.py
 
       # `CON-009`: every FALLIBLE host call returns a typed error rather than a
       # status code buried in a payload (§2.5, NN-5). The rule is about fallible

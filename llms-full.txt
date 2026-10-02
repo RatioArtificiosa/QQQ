@@ -1,6 +1,6 @@
 # QQQ — full documentation
 
-22 of the 43 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 21 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
+23 of the 44 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 21 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
 
 ---
 
@@ -1013,14 +1013,14 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 268 | 3 | 312 | 4 | 0 | 0 | 587 | 45.7% |
+| All checklist items | 269 | 3 | 311 | 4 | 0 | 0 | 587 | 45.8% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 49 | 0 | 30 | 0 | 0 | 0 | 79 | 62.0% |
-| P1 | M1 | 51 | 0 | 7 | 0 | 0 | 0 | 58 | 87.9% |
+| P1 | M1 | 52 | 0 | 6 | 0 | 0 | 0 | 58 | 89.7% |
 | P2 | M2 | 44 | 0 | 0 | 2 | 0 | 0 | 46 | 95.7% |
 | P3 | M3 | 31 | 0 | 6 | 0 | 0 | 0 | 37 | 83.8% |
 | P4 | M4 | 31 | 0 | 33 | 0 | 0 | 0 | 64 | 48.4% |
@@ -1041,7 +1041,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | LIC | 7 | 0 | 5 | 0 | 0 | 0 | 12 | 58.3% |
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
 | P1 | ARCH | 11 | 0 | 5 | 0 | 0 | 0 | 16 | 68.8% |
-| P1 | CON | 17 | 0 | 1 | 0 | 0 | 0 | 18 | 94.4% |
+| P1 | CON | 18 | 0 | 0 | 0 | 0 | 0 | 18 | 100.0% |
 | P1 | HOST | 23 | 0 | 1 | 0 | 0 | 0 | 24 | 95.8% |
 | P2 | CAP | 16 | 0 | 0 | 0 | 0 | 0 | 16 | 100.0% |
 | P2 | SEC | 28 | 0 | 0 | 2 | 0 | 0 | 30 | 93.3% |
@@ -1094,6 +1094,41 @@ merging; this draft is not a release or a claim that persistent agents are compl
 - A percentage is `done / total`; partial work is not silently credited as complete.
 - `OPEN` means checklist criteria remain. `EXTERNAL` means a repository-local checklist cannot close the gate by itself.
 - CI and the container gate run `--check` and `--self-test`; stale aggregates or stale Markdown fail both readers.
+
+---
+
+<!-- source: docs/deprecations.md -->
+
+## QQQ deprecation ledger
+
+Every `@deprecated` annotation in `wit/` has exactly one row here, and every
+row names a `@deprecated` annotation that exists. `tools/check_wit_deprecated.py`
+enforces both directions, so the ledger cannot drift from the interfaces and
+the interfaces cannot deprecate silently.
+
+### Format
+
+| Item | Deprecated in | Remove in | Replacement |
+|---|---|---|---|
+| `<namespace>:<package>.<interface>.<member>` | `X.Y.Z` | `X.Y+2+.Z` or later | what to use instead |
+
+Item shapes: a function or type is `<namespace>:<package>.<interface>.<member>`;
+a resource method adds its resource (`<namespace>:<package>.<interface>.<resource>.<method>`);
+a whole interface is `<namespace>:<package>.<interface>` and a whole resource is
+`<namespace>:<package>.<interface>.<resource>`.
+
+- **Item** names the deprecated member precisely enough to find it.
+- **Deprecated in** repeats the annotation's version (a mismatch is an error).
+- **Remove in** is at least two minor versions after deprecation within the
+  same major version (NN-8) — a new major version satisfies the window.
+- **Replacement** names the migration target. `none` is allowed only with a
+  reason appended (`none — the capability is withdrawn because ...`).
+
+### Entries
+
+| Item | Deprecated in | Remove in | Replacement |
+|---|---|---|---|
+| *(none — no interface item is currently deprecated)* | | | |
 
 ---
 

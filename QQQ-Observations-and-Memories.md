@@ -35164,6 +35164,31 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-529 - Deprecation mechanics: the toolchain decides the format
+
+`CON-015` asked for `@deprecated` with a removal version, and the first
+question was what the toolchain actually accepts: `@deprecated(version =
+...)` and nothing else inside the attribute — a message field is rejected,
+unknown attributes are rejected. The annotation must still pair with
+`@since` (a deprecation without an introduction version is undatable);
+the replacement lives in the doc comment. So the format was discovered,
+not designed: version in the annotation, replacement in the doc comment,
+removal version in a ledger both directions enforced. The checker's first
+run failed on its own ledger parsing (backticked keys, the format-example
+row) — the tool disagreed with its own fixture before any injection ran,
+which is precisely why the harness runs the pristine tree first. The
+positive control (a valid annotation the checker must PASS) is the case
+that keeps the rule honest: five detections and no pass would certify a
+checker that fails everything. Review then widened the coverage honestly:
+`@deprecated` on records/variants/methods parses too, so the checker tracks
+resource nesting (same-named methods in different resources map to distinct
+ledger keys) — and probing found the toolchain itself rejects `@deprecated`
+without `@since`, making that rule defence in depth, stated as such.
+Rule: define formats by probing the toolchain, and always include the case
+the check must accept. →
+`tools/check_wit_deprecated.py`,
+`tools/fault_inject_wit_deprecated.py`, `docs/deprecations.md`.
+
 ## §O-528 - The Linux bridge is green with headroom to spare
 
 `docker compose run --rm linux checks` on the final tree exited 0 after
@@ -35307,9 +35332,16 @@ different mark classes (`~`, `-`), different grouping (headings vs
 areas/phases). The fix is structural, not editorial: progress.py imports
 the checker's parser, and `check_checklist_counts.py --check-progress`
 fails on disagreement. It cannot run in CI (the script is untracked, absent
-there), so absence is a loud named skip rather than a pass — a step that
-passes where there is nothing to check certifies nothing. Handbook figures
-now carry their commit and a re-derive command. Rule: a source of truth
+there), so absence fails loudly rather than passing — a step that passes
+where there is nothing to check certifies nothing. Handbook figures
+now carry their commit and a re-derive command. Two process notes earned
+the hard way: `sync_docs --record` does not re-record `tools/backlog.json`
+(that is an explicit `gen_backlog.py --record`), every derived file must be
+regenerated after the LAST source edit in dependency order (checklist tick
+→ dashboard → llms-full → corpus), and the local `gate.ps1` does not run
+`gen_backlog --check`, `gen_llms_txt --check`, or
+`milestone_dashboard --check` — only `run_ci_checkers.py` reproduces the
+exact CI set, and it caught two drift failures the gate passed. Rule: a source of truth
 with two readers needs one parser; the second parser is the defect. →
 `tools/check_checklist_counts.py`, `.scratch/progress.py`,
 `docs/AGENT-HANDBOOK.md`.

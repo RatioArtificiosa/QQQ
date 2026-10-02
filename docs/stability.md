@@ -137,8 +137,8 @@ A promise with no check is a wish. Each row above names a mechanism:
 |---|---|
 | Crate tiers | `tools/check_tiers.py` (this document's own source), `tools/check_topology.py` |
 | WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, <!-- qqq:claim wit-files -->17<!-- /qqq:claim --> `.wit` files validating |
-| Ledger | <!-- qqq:claim checklist-done -->268<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->587<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->312<!-- /qqq:claim --> open (`check_doc_claims.py`) |
-| Register | <!-- qqq:claim observation-headings -->387<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->528<!-- /qqq:claim --> |
+| Ledger | <!-- qqq:claim checklist-done -->269<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->587<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->311<!-- /qqq:claim --> open (`check_doc_claims.py`) |
+| Register | <!-- qqq:claim observation-headings -->388<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->529<!-- /qqq:claim --> |
 | Manifest | `schema/qqq-toml.schema.json`, `tools/gen_schemas.py --check` |
 | Lockfile | `schema/qqq-lock.schema.json`, the same check |
 | CLI JSON | `schema/cli-envelope.schema.json`, the error catalogue's round-trip test |
@@ -149,9 +149,14 @@ A promise with no check is a wish. Each row above names a mechanism:
 
 Named rather than implied:
 
-- **`CON-015` is open**: the deprecation mechanics in WIT — a `@deprecated` annotation carrying a
-  removal version — are not defined. Until they are, the `stable` tier's "one minor release of
-  notice" is a convention rather than a mechanism.
+- **`CON-015` is defined**: the deprecation mechanics in WIT are
+  `@deprecated(version = X.Y.Z)` — version only, no message field (the
+  toolchain rejects anything else) — with the replacement named in the
+  item's doc comment and a row in `docs/deprecations.md` carrying the
+  removal version at least two minor versions later (NN-8).
+  `tools/check_wit_deprecated.py` enforces versions, doc presence, and the
+  ledger in both directions; `tools/fault_inject_wit_deprecated.py` proves
+  it with six injections including a positive control.
 - **Version `0.0.0`**: the workspace is pre-release, so these tiers describe the contract that
   comes into force at 1.0. Until then every crate is technically `beta`; the tier records the
   *intent* that has been reviewed, which is why it is worth stating before it is enforceable.

@@ -891,6 +891,11 @@ cmd_checks() {
     # `check_gate_parity.py` does not ask.
     python3 tools/check_wit.py --self-test
     python3 tools/check_wit_since.py
+    # `CON-015`: the deprecation mechanics, same invocation as CI so parity
+    # holds with no new declaration. The fault-inject harness stays CI-only
+    # under the existing `fault_inject_*.py` declaration (it mutates the tree;
+    # the bridge runs on a bind mount, where a leftover IS the defect).
+    python3 tools/check_wit_deprecated.py
     # `TEST-010`: the cross-language conformance fixture and the parity matrix. It requires each
     # obligation's checker to be invoked in BOTH gates, so it belongs in both -- and its own
     # `--self-test` injects nine faults, one per rule.
@@ -1208,7 +1213,11 @@ cmd_checks() {
 #                                       the pure self-test runs in both gates.
 #   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
 #                                          declaration — a cargo build of the whole workspace
-#   tools/fault_inject_*.py (8 cmds)       each recompiles a crate with a mutation applied;
+#   tools/fault_inject_*.py (9 cmds)       each recompiles a crate with a mutation applied;
+#                                          the WIT harnesses instead mutate `.wit` files
+#                                          (verified parseable) and restore them, which is
+#                                          equally unsafe against a bind-mounted working
+#                                          tree, hence the same declaration.
 #                                          they belong to CI's Rust jobs, and this file's
 #                                          `test` command already builds and runs the suite
 #   tools/check_fault_inject_restores.py  snapshots the tree before the fault injectors and

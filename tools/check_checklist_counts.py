@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -58,7 +59,7 @@ for _stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
 
-ITEM = re.compile(r"^- \[[ x~!-]\] \*\*([A-Z]+)-(\d{3})\*\*", re.MULTILINE)
+ITEM = re.compile(r"^- \[([ x~!-])\] \*\*([A-Z]+)-(\d{3})\*\*", re.MULTILINE)
 AREA_ROW = re.compile(r"^\| `([A-Z]+)` \| ([^|]+?) \| (\d+) \| ([^|]+?) \|$", re.MULTILINE)
 TOTAL_ITEMS = re.compile(r"^\*\*Total: (\d+) items\.\*\*$", re.MULTILINE)
 PHASE_ROW = re.compile(r"^\| \*{0,2}(P\d+) ([^|*]+?)\*{0,2} \| ([^|]+?) \| (\d+) \|$", re.MULTILINE)
@@ -68,8 +69,22 @@ PHASE_TOTAL = re.compile(r"^\| \*\*Total\*\* \| \| \*\*(\d+)\*\* \|$", re.MULTIL
 
 def counts_by_area(text: str) -> dict[str, int]:
     out: dict[str, int] = {}
-    for area, _num in ITEM.findall(text):
+    for _mark, area, _num in ITEM.findall(text):
         out[area] = out.get(area, 0) + 1
+    return out
+
+
+def done_by_area(text: str) -> dict[str, int]:
+    """Ticked items per area, from the same `ITEM` pattern as the totals.
+
+    `.scratch/progress.py` imports this rather than keeping its own regex:
+    two parsers of one ledger disagreed by three items (DOC-STALE-001), and
+    the release decision must never depend on which counter an agent ran.
+    """
+    out: dict[str, int] = {}
+    for mark, area, _num in ITEM.findall(text):
+        if mark == "x":
+            out[area] = out.get(area, 0) + 1
     return out
 
 
@@ -185,6 +200,9 @@ def main() -> int:
     if "--self-test" in sys.argv:
         return self_test()
 
+    if "--check-progress" in sys.argv:
+        return check_progress()
+
     text = CHECKLIST.read_text(encoding="utf-8")
 
     if "--fix" in sys.argv:
@@ -213,6 +231,118 @@ def main() -> int:
     print(
         f"CHECKLIST COUNTS OK -- {len(actual)} area(s), {sum(actual.values())} item(s), "
         f"§1 and §14 agree with the document"
+    )
+    return 0
+
+
+def progress_script() -> Path:
+    """The agent-facing progress reporter (untracked working file)."""
+    return ROOT / ".scratch" / "progress.py"
+
+
+def parse_progress_total(output: str) -> tuple[int, int] | None:
+    """Read the `TOTAL` row from progress output. `None` means unparseable.
+
+    A contradictory row (third column not equal to total minus done) is also
+    `None`: accepting it would compare against numbers that disagree with
+    themselves, and the comparison would pass while measuring nothing.
+    Only horizontal whitespace separates the fields: `\s` also matches a
+    newline, so a wrapped row would parse counts that were never on one line.
+    """
+    m = re.search(r"^TOTAL[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", output, re.MULTILINE)
+    if m is None:
+        return None
+    done, total, remaining = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    if remaining != total - done:
+        return None
+    return (done, total)
+
+
+def compare_counts(
+    done: int, total: int, ticked: int, actual: int
+) -> list[str]:
+    """The agreement rule, separated so the self-test can break it directly.
+
+    A checklist with no recognized items is refused even when both sides say
+    zero: an emptied or unparseable ledger agreeing with an empty report is
+    agreement about nothing, and a comparison that passes on nothing is the
+    vacuity this checker exists to catch elsewhere.
+    """
+    if actual == 0:
+        return [
+            "the checklist has no recognized items — the ledger is empty or "
+            "unparseable, and 0/0 agreement would certify nothing (DOC-STALE-001)"
+        ]
+    if total != actual or done != ticked:
+        return [
+            f"progress.py reports {done}/{total} but the checklist has "
+            f"{ticked}/{actual} — the two parsers disagree (DOC-STALE-001)"
+        ]
+    return []
+
+
+def compare_progress(done: int, total: int, problems: list[str]) -> list[str]:
+    """The agreement rule against the live ledger (see `compare_counts`)."""
+    out = list(problems)
+    text = CHECKLIST.read_text(encoding="utf-8")
+    actual = sum(counts_by_area(text).values())
+    ticked = sum(done_by_area(text).values())
+    return out + compare_counts(done, total, ticked, actual)
+
+
+def check_progress(script: Path | None = None, timeout: float = 120.0) -> int:
+    """Fail when the agent-facing progress script disagrees with this checker.
+
+    `.scratch/progress.py` is untracked, so CI checkouts do not have it —
+    that absence fails loudly here rather than passing, because this mode
+    never runs in CI (nothing wires it there): where it runs, the script
+    must exist, and a missing loop script means the measurement loop is
+    broken. A step that passes where there is nothing to check certifies
+    nothing (§O-228: the reason is named).
+    """
+    script = script if script is not None else progress_script()
+    if not script.is_file():
+        print(
+            "PROGRESS CHECK FAILED -- .scratch/progress.py is not in this "
+            "checkout (untracked agent script); the measurement loop it "
+            "belongs to is broken, and that absence is not agreement"
+        )
+        return 1
+    import subprocess
+
+    try:
+        run = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"PROGRESS CHECK FAILED -- progress.py exceeded the {timeout:g}s "
+            "deadline; a hung reporter must fail, not hang the gate"
+        )
+        return 1
+    if run.returncode != 0:
+        print(f"PROGRESS CHECK FAILED -- progress.py exited {run.returncode}:")
+        print((run.stdout + run.stderr)[-600:])
+        return 1
+    parsed = parse_progress_total(run.stdout)
+    if parsed is None:
+        print("PROGRESS CHECK FAILED -- no TOTAL row in progress.py output:")
+        print(run.stdout[-600:])
+        return 1
+    problems = compare_progress(parsed[0], parsed[1], [])
+    if problems:
+        for p in problems:
+            print(f"  DRIFT: {p}")
+        return 1
+    print(
+        f"PROGRESS AGREES -- progress.py reports {parsed[0]}/{parsed[1]}, "
+        "the checker agrees"
     )
     return 0
 
@@ -284,6 +414,71 @@ def self_test() -> int:
         "--fix repairs a broken total",
         not analyse(fix(broken)) and fix(broken) != broken,
     )
+
+    # 7. `--check-progress` must catch a disagreeing TOTAL. The comparison is
+    #    broken directly (numbers that do not match the real document), so
+    #    this case needs no scratch file and runs identically in CI.
+    case(
+        "a disagreeing progress TOTAL is caught",
+        len(compare_progress(1, 2, [])) == 1,
+    )
+    case(
+        "a done-only drift is caught with the total correct",
+        len(
+            compare_progress(
+                sum(done_by_area(real).values()) + 1,
+                sum(counts_by_area(real).values()),
+                [],
+            )
+        )
+        == 1,
+    )
+    case(
+        "an agreeing progress TOTAL passes",
+        compare_progress(sum(done_by_area(real).values()), sum(counts_by_area(real).values()), []) == [],
+    )
+    case(
+        "an empty ledger never agrees, even at 0/0",
+        len(compare_counts(0, 0, 0, 0)) == 1,
+    )
+
+    # 8. The TOTAL parser reads the row progress.py prints, and refuses garbage.
+    sample = "TOTAL                                                   268     587        319\n"
+    case("the TOTAL row parses", parse_progress_total(sample) == (268, 587))
+    case("a missing TOTAL row is refused", parse_progress_total("no totals here\n") is None)
+    case(
+        "a TOTAL row split across lines is refused",
+        parse_progress_total("TOTAL\n268 587 319\n") is None,
+    )
+    case(
+        "a contradictory TOTAL row is refused",
+        parse_progress_total("TOTAL                                                     1       2         999\n")
+        is None,
+    )
+
+    # 9. The live agreement: where the untracked script exists it must agree;
+    #    where it does not, the check fails loudly. A missing loop script in
+    #    an agent checkout means the measurement loop is broken, and a skip
+    #    that returns success would certify nothing (the vacuity the first
+    #    version of this case had: it asserted a constant `True`).
+    if progress_script().is_file():
+        case("live progress.py agrees with the checker", check_progress() == 0)
+    missing = ROOT / ".scratch" / "no-such-progress-script.py"
+    case(
+        "a missing progress script fails, not skips",
+        check_progress(missing) != 0,
+    )
+
+    # 10. A hung reporter must fail, not hang the gate. The deadline is
+    #     injectable so this case runs in about a second rather than two
+    #     minutes: a five-second sleeper against a one-second deadline.
+    with tempfile.TemporaryDirectory(prefix="progress-hang-") as tmp:
+        sleeper = Path(tmp) / "sleepy.py"
+        sleeper.write_text("import time\ntime.sleep(5)\n", encoding="utf-8", newline="\n")
+        case(
+            "a hung progress script fails on the deadline",
+            check_progress(sleeper, timeout=1.0) != 0,
+        )
 
     print()
     if failures:

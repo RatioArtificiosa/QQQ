@@ -35164,6 +35164,144 @@ terminator), and a body-bearing upgrade (400, no 101, handler counter zero).
 Fault injection (guard forced false) fails the chunked tests and leaves the 413
 test green, which is correct: the declared path never consults the guard.
 
+## §O-526 - The review caught a warning that arrived after shutdown
+
+The pre-commit review of the LOW round returned six findings (two
+duplicated), and the sharpest was real: the metrics warning lived only in
+the rendered report, which is built after `serve` returns — for a server,
+after shutdown. A warning the operator reads only when the process exits
+warns about nothing in time. The fix extracts one sentence function shared
+by a startup `eprintln` and the report, proven by an integration test that
+reads the warning in the spawned server's own output. The review also
+caught a vacuity in the new self-test (it asserted a constant `True`), a
+missing TOTAL-consistency check, and a `/tmp/..` that resolves to `/` —
+each reproduced red first. Rule: review findings about TIMING need a test
+on the timeline, not on the text. → `crates/qqq-run/src/serve.rs`,
+`crates/qqq-run/tests/metrics_endpoint.rs`,
+`crates/qqq-cap/src/normalize.rs`, `tools/check_checklist_counts.py`.
+
+## §O-525 - The earliest checklist sections hold no implementable slice
+
+Phase C surveyed P0 (51 open: founder, governance, marketing, legal — not
+agent work), P1 (7 open: lifecycle pipeline, shared memory, artifact model,
+composition, HOST-017, WIT deprecation — each project-scale or deferred),
+P2 (2 open, both `[!]` externally blocked audits), and P3 (6 open:
+HTTP/3, gRPC, ACME, TLS section, bindings generator, shared-memory policy —
+each project-scale). ARCH-007 looked tickable until the tiers checker noted
+two topology crates (qqq-fabric, qqq-registry) not built — ticking past that
+note would overclaim, so zero items ticked. Rule: a survey that finds
+nothing is still evidence, and recording it stops the next round
+re-surveying; an unticked item with a reason beats a tick with a wish. →
+`QQQ-Checklist-V1.md`.
+
+## §O-524 - A restore that does not bump mtime is a stale binary wearing green
+
+Two post-restore test runs failed on fixed source: `copy /y` of the backup
+did not advance the file mtime (body.rs still showed September 30), so
+cargo never recompiled and the injected binary ran again. The fix is
+procedural, not theoretical: after every restore, set the mtime explicitly
+and verify it, then confirm `Compiling <crate>` in the test log — a green
+run without a recompile after a restore proves nothing. This is the same
+class as the touch rule (§O-369 territory): the tool reported success and
+the filesystem disagreed. → `crates/qqq-serve/src/body.rs`,
+`crates/qqq-cap/src/normalize.rs`.
+
+## §O-523 - The stub test discriminates: only the allowlist case fails
+
+HTTP-CLIENT-001 stays a stub, and the NOTE is closed by proof, not prose:
+with `send` injected to return `Ok`, exactly
+`send_refuses_with_a_grant_and_no_allowlist_wired` fails while the grant and
+budget tests still pass — the three refusal layers are independent, and the
+test names which one broke. GRAF-PARSER-001 closed the same way: the real
+PowerShell parser reports zero errors on `bootstrap.ps1` while the graph
+holds zero facts from all three tool scripts, so the defect is placed on
+the correct side, and every freshness report now lists the blind files.
+Rule: a NOTE is dispositioned by placing the defect precisely, not by
+fixing around it. → `crates/qqq-host/src/host_http.rs`,
+`.scratch/graf_fresh.py`.
+
+## §O-522 - BODY-API-001 was closed; the proof was missing
+
+The fix (`InvalidReadSize`) and the regression test (position untouched,
+body unfinished) both predated the audit round — what was missing was the
+fault-injection proof that the test guards the property. Reintroducing the
+empty chunk fails the test at the `expect_err`, and the restored green was
+initially a lie (see §O-524) until the recompile was verified. Rule: prior
+rounds' tests are claims until red-proven; adopting them means proving
+them. → `crates/qqq-serve/src/body.rs`, `crates/qqq-serve/tests/body.rs`.
+
+## §O-521 - The metrics warning rides the startup report, not the schema
+
+METRICS-001's exposure is real (server path before routing, default off)
+but a separate admin listener is recorded-not-half-built, so the LOW-scale
+fix is a warning the operator cannot miss: `ServeOutput` carries the path
+and the render names it with the exposure stated. `inspect` was left alone
+— it has no warnings field and growing the schema for one warning is the
+wrong trade; `caps` already warns via its own field. The existing render
+test gained the absence assertion, because a warning that fires always is
+decoration. Rule: put the warning where the operator already looks, and
+pin its silence everywhere else. → `crates/qqq-run/src/serve.rs`.
+
+## §O-520 - The allowlist was wrong in both directions at once
+
+HOSTPAT-001's character test rejected the valid mapped literal
+`[::ffff:1.2.3.4]` (dots failed) while accepting garbage like `[12345::]`
+as a never-match — the parser disagreed with the standard in both
+directions. Parsing bracketed literals to `IpAddr`, storing canonical, and
+comparing as addresses fixes both: garbage refused at admission, valid
+forms admit, `[0:0:0:0:0:0:0:1]` agrees with `::1`, zones refused loudly
+rather than silently dropped. `original` is kept for diagnostics, because a
+canonicalized error message sends the operator hunting for text they never
+wrote. → `crates/qqq-cap/src/normalize.rs`.
+
+## §O-519 - Two parsers of one ledger disagreed by three items
+
+DOC-STALE-001 measured live: progress.py said 584 items, the checker 587 —
+different mark classes (`~`, `-`), different grouping (headings vs
+areas/phases). The fix is structural, not editorial: progress.py imports
+the checker's parser, and `check_checklist_counts.py --check-progress`
+fails on disagreement. It cannot run in CI (the script is untracked, absent
+there), so absence is a loud named skip rather than a pass — a step that
+passes where there is nothing to check certifies nothing. Handbook figures
+now carry their commit and a re-derive command. Rule: a source of truth
+with two readers needs one parser; the second parser is the defect. →
+`tools/check_checklist_counts.py`, `.scratch/progress.py`,
+`docs/AGENT-HANDBOOK.md`.
+
+## §O-518 - A root grant warns on `caps`: the warning must ride the live path
+
+`CAP-FS-002` asked for platform-root handling plus a high-risk warning in
+inspect/doctor output, and the containment half was already fixed (a `/`
+grant authorizes itself and its descendants). The warning half had a trap:
+`Normalized` — the type that owns the grants — has no production caller
+(graf confirms zero callers outside its own impl and tests), so a warning
+stored on it would be a control believed live that is not (§11 shape). The
+warning instead rides `caps`, whose `warnings` field already reaches the
+operator, computed lexically from the declared path via a shared named
+predicate `is_filesystem_root` (POSIX `/`, drive `X:/`, UNC `//host/share`
+with exactly two components). `inspect` was deliberately left alone: its
+output has no warnings field and growing the schema for one warning is the
+wrong trade. Rule: before adding a warning, trace the type to a surface the
+operator actually reads; a warning with no reader is documentation wearing a
+uniform. → `crates/qqq-cap/src/normalize.rs`,
+`crates/qqq-cap/src/lib.rs`, `crates/qqq-run/src/commands.rs`.
+
+## §O-517 - The perf gate refused a CPU it had never seen, correctly
+
+CI on the yanked-crate bump failed `PERF-020` twice with "no reviewed
+baseline matches profile `ubuntu-latest` and runner identity", while all
+thirteen other jobs passed. The run artifact proved fleet drift, not a
+regression: the runner was an AMD EPYC 9V45 with no reviewed baseline (the
+file held 7763, 8573C, and 9V74). A proc-macro version bump cannot change
+which hardware the fleet schedules, and rerunning the job cannot fix a
+missing entry — both attempts failed identically, which is itself evidence.
+The remedy is the project's own process: the harness wrote a complete
+candidate entry, it was reviewed (same misses and measured sets as its
+siblings, same order of magnitude, 3 samples, schema 1), and committed as
+the fourth entry. Rule: a gate that refuses to compare across hardware is
+working; the fix is a reviewed baseline, never a looser identity. →
+`.github/perf/baseline.json`, `tools/run_perf_regression.py`.
+
 ## §O-516 - The full-scope review found five real defects, all fixed with red proofs
 
 The second review pass over the whole MEDIUM range returned one critical,

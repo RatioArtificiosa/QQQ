@@ -62,7 +62,8 @@ pub use manifest::{
     EnvCapability, FsCapability, FsMode, HttpCapability, Manifest, ManifestError, Package,
 };
 pub use normalize::{
-    path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv, SecretRef,
+    is_filesystem_root, path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized,
+    RealEnv, SecretRef,
 };
 pub use policy::{
     glob_match, Binding, Compare, Expr, Field, Literal, Policy, PolicyError, RequirementOutcome,

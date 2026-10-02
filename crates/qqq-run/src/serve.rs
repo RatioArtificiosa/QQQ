@@ -219,6 +219,10 @@ pub struct ServeOutput {
     pub tls: bool,
     /// Whether a guest component was found and loaded.
     pub guest_loaded: bool,
+    /// The metrics path, when the operator exposed the registry on the
+    /// application listener — carried so the rendered report can warn that
+    /// the endpoint bypasses application route auth (METRICS-001).
+    pub metrics_path: Option<String>,
 }
 
 /// Read and validate `--trace-sample`'s value.
@@ -863,6 +867,15 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
     let routes = prepared.routes;
     let guest_loaded = prepared.guest_loaded;
 
+    // The warning must fire HERE, before the accept loop, not only in the
+    // rendered report: `ServeOutput` is built after `serve` returns, which
+    // for a server means after shutdown — a warning the operator reads only
+    // when the process exits warns about nothing in time. The same sentence
+    // the report carries, through the same function, so the two cannot drift.
+    if let Some(warning) = opts.metrics_path.as_deref().map(metrics_exposure_warning) {
+        eprintln!("{warning}");
+    }
+
     qqq_serve::serve(
         prepared.config,
         prepared.table,
@@ -887,6 +900,7 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
             .unwrap_or(opts.workers),
         tls: opts.tls,
         guest_loaded,
+        metrics_path: opts.metrics_path.clone(),
     })
 }
 
@@ -951,6 +965,25 @@ impl crate::output::CommandOutput for ServeOutput {
     }
 }
 
+/// The sentence warning that the metrics endpoint bypasses route auth.
+///
+/// One function for the startup `eprintln` and the rendered report, because
+/// two copies of a warning is how one of them goes stale — and a stale
+/// warning is worse than none, since the operator believes they were told.
+///
+/// ```rust
+/// # use qqq_run::serve::metrics_exposure_warning;
+/// let warning = metrics_exposure_warning("/internal/metrics");
+/// assert!(warning.contains("/internal/metrics"));
+/// ```
+#[must_use]
+pub fn metrics_exposure_warning(path: &str) -> String {
+    format!(
+        "WARNING: metrics exposed on the application listener at {path} — \
+         reachable by anyone with listener access, outside application route auth"
+    )
+}
+
 /// Render a serve result for a human.
 #[must_use]
 pub fn render(out: &ServeOutput) -> String {
@@ -976,6 +1009,14 @@ pub fn render(out: &ServeOutput) -> String {
     );
     if out.tls {
         s.push_str("  TLS: on\n");
+    }
+    // The endpoint is served on the application listener, before routing, so
+    // anyone who can reach the app can read tenant names and traffic volume
+    // (METRICS-001). The default is `None` (expose nothing); when the
+    // operator opts in, the startup report must say what that means, or the
+    // exposure is silent exactly when it matters.
+    if let Some(path) = &out.metrics_path {
+        let _ = writeln!(s, "  {}", metrics_exposure_warning(path));
     }
     s
 }
@@ -1144,6 +1185,7 @@ mod tests {
             workers: 4,
             tls: false,
             guest_loaded: true,
+            metrics_path: None,
         };
         let r = render(&out);
         assert!(r.contains("127.0.0.1:3000"), "{r}");
@@ -1154,6 +1196,10 @@ mod tests {
         );
         assert!(r.contains("guest: loaded"), "{r}");
         assert!(!r.contains("TLS"), "TLS must not appear when off: {r}");
+        assert!(
+            !r.contains("WARNING"),
+            "no metrics warning without an exposed endpoint: {r}"
+        );
     }
 
     #[test]
@@ -1164,11 +1210,50 @@ mod tests {
             workers: 1,
             tls: true,
             guest_loaded: false,
+            metrics_path: None,
         };
         let r = render(&out);
         assert!(r.contains("not built"), "{r}");
         assert!(r.contains("qqqai build"), "the fix must be named: {r}");
         assert!(r.contains("TLS: on"), "{r}");
+    }
+
+    /// **An exposed metrics endpoint warns at startup.** The endpoint is
+    /// served on the application listener before routing, so anyone who can
+    /// reach the app can read tenant names and traffic volume (METRICS-001).
+    /// The default exposes nothing; when the operator opts in, the report
+    /// must name the path and the exposure, or the one moment the operator
+    /// reads is silent about the riskiest flag they passed.
+    #[test]
+    fn an_exposed_metrics_endpoint_warns_in_the_startup_report() {
+        let out = ServeOutput {
+            listen: "127.0.0.1:3000".to_owned(),
+            routes: 1,
+            workers: 1,
+            tls: false,
+            guest_loaded: true,
+            metrics_path: Some("/metrics".to_owned()),
+        };
+        let r = render(&out);
+        assert!(
+            r.contains("/metrics"),
+            "the warning must name the path: {r}"
+        );
+        assert!(
+            r.contains("outside application route auth"),
+            "the warning must state the exposure: {r}"
+        );
+    }
+
+    /// **The warning sentence is one function.** The startup `eprintln` and
+    /// the rendered report share it; this pins the sentence both carry, so a
+    /// drift between "what serving prints" and "what the report prints" fails
+    /// here rather than reaching an operator as two different warnings.
+    #[test]
+    fn the_metrics_warning_sentence_is_shared() {
+        let w = metrics_exposure_warning("/internal/metrics");
+        assert!(w.contains("/internal/metrics"), "{w}");
+        assert!(w.contains("outside application route auth"), "{w}");
     }
 
     /// The **summary** line describes the number as a capacity, not as "workers".
@@ -1193,6 +1278,7 @@ mod tests {
             workers: 4,
             tls: false,
             guest_loaded: true,
+            metrics_path: None,
         };
         let line = crate::output::CommandOutput::summary(&out);
         assert!(

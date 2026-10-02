@@ -448,7 +448,30 @@ pub fn caps(loaded: &LoadedManifest, explain: bool) -> CapsOutput {
         } else {
             Vec::new()
         },
-        warnings: resolution.warnings.clone(),
+        warnings: {
+            // A filesystem-root grant authorizes the entire visible tree, so
+            // accepting one silently is how an operator believes a narrow
+            // grant is active while every descendant is authorized
+            // (CAP-FS-002). The check is lexical on the declared path — no
+            // filesystem access — and shares `is_filesystem_root` with the
+            // normalization contract, so the two cannot disagree on what
+            // counts as a root. It lives on `caps` rather than `inspect`
+            // because `InspectOutput` has no warnings field and growing the
+            // schema for a warning is the wrong trade; `caps` is the surface
+            // whose job is warning about grants.
+            let mut warnings = resolution.warnings.clone();
+            for entry in &loaded.manifest.capabilities.fs {
+                if qqq_cap::is_filesystem_root(&entry.path) {
+                    warnings.push(format!(
+                        "filesystem grant for `{}` covers a filesystem root — \
+                         every descendant is authorized; narrow it to the \
+                         smallest directory the guest needs",
+                        entry.path
+                    ));
+                }
+            }
+            warnings
+        },
     }
 }
 
@@ -1617,6 +1640,35 @@ mod tests {
             out.covert_channels.contains(&"crypto.random".to_owned()),
             "randomness is a covert channel and must be flagged: {:?}",
             out.covert_channels
+        );
+    }
+
+    /// **A root grant warns loudly.** A filesystem grant for `/` authorizes
+    /// the entire visible tree; accepting it silently is how an operator
+    /// believes a narrow grant is active while every descendant is
+    /// authorized (CAP-FS-002). The warning names the path and prescribes
+    /// narrowing, and a narrow grant must stay silent — a warning that fires
+    /// on every grant is decoration, not signal.
+    #[test]
+    fn caps_warns_on_a_filesystem_root_grant() {
+        const ROOT: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                            [[capabilities.fs]]\npath = \"/\"\nmode = \"read-only\"\n";
+        const NARROW: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                              [[capabilities.fs]]\npath = \"/var/lib/app\"\n\
+                              mode = \"read-only\"\n";
+        let out = caps(&loaded(ROOT), false);
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("`/`") && w.contains("narrow")),
+            "a `/` grant must warn and prescribe narrowing: {:?}",
+            out.warnings
+        );
+        let quiet = caps(&loaded(NARROW), false);
+        assert!(
+            !quiet.warnings.iter().any(|w| w.contains("filesystem root")),
+            "a narrow grant must not carry the root warning: {:?}",
+            quiet.warnings
         );
     }
 

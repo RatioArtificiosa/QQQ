@@ -202,6 +202,9 @@ impl NormalizeError {
 pub struct HostPattern {
     /// The lowercased host, or `*` for a bare wildcard.
     host: String,
+    /// Whether the host is a parsed IP literal (compared as an address, not
+    /// a string, so equivalent spellings agree).
+    is_ip_literal: bool,
     /// Whether the host begins with the `*.` wildcard.
     wildcard: bool,
     /// The required port, if the pattern specified one.
@@ -255,13 +258,29 @@ impl HostPattern {
         };
 
         let host_lower = host_part.to_ascii_lowercase();
-        // An IPv6 literal is recognised by containing a colon. It is stored
-        // verbatim (lowercased) and compared by exact equality, because there
-        // is no meaningful wildcard semantics for an address literal.
+        // An IPv6 literal is recognised by containing a colon. It is parsed
+        // with the standard library rather than a character allowlist, and
+        // stored in canonical form: the allowlist accepted garbage like
+        // `[12345::]` (five hex digits is not a group) as a pattern that
+        // simply never matched, and rejected valid mapped literals like
+        // `[::ffff:1.2.3.4]` (the dots failed the character test). Both
+        // directions are wrong in the same way — the parser disagrees with
+        // the standard — so both are fixed by parsing to `IpAddr`. Zone IDs
+        // (`%eth0`) are rejected: silently dropping the zone would match a
+        // different interface than the operator named.
         let is_ipv6 = host_lower.contains(':');
+        let literal_ip: Option<std::net::IpAddr> = if is_ipv6 {
+            Some(
+                host_lower
+                    .parse()
+                    .map_err(|_| format!("`{host_lower}` is not a valid IP literal"))?,
+            )
+        } else {
+            None
+        };
         let wildcard = !is_ipv6 && host_lower.starts_with("*.");
-        let bare = if is_ipv6 {
-            host_lower.clone()
+        let bare = if let Some(addr) = literal_ip {
+            addr.to_string()
         } else if wildcard {
             host_lower.trim_start_matches("*.").to_owned()
         } else if host_lower == "*" {
@@ -277,27 +296,16 @@ impl HostPattern {
         if bare.is_empty() {
             return Err("host part is empty".to_owned());
         }
-        // DNS names use a restricted alphabet; IPv6 literals use hex and
-        // colons. Validate each against its own rule rather than one loose rule
-        // that would accept neither correctly.
-        let chars_ok = if is_ipv6 {
-            bare.chars().all(|c| c.is_ascii_hexdigit() || c == ':')
-        } else {
-            bare.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-        };
-        if !chars_ok {
-            return Err(format!("host `{bare}` contains invalid characters"));
-        }
-        if is_ipv6 {
-            // `::1` and `::` legitimately begin with a colon — that is IPv6
-            // shorthand for a run of zero groups — so a leading colon is NOT
-            // an error. What is invalid is three or more consecutive colons,
-            // which no IPv6 form permits, or a lone colon.
-            if bare.contains(":::") || bare == ":" {
-                return Err(format!("`{bare}` is not a valid IPv6 literal"));
+        // DNS names use a restricted alphabet; IP literals already survived
+        // the standard parser, so each is validated against its own rule
+        // rather than one loose rule that would accept neither correctly.
+        if literal_ip.is_none() {
+            let chars_ok = bare
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+            if !chars_ok {
+                return Err(format!("host `{bare}` contains invalid characters"));
             }
-        } else {
             if bare.starts_with('.') || bare.ends_with('.') {
                 return Err("host must not begin or end with a dot".to_owned());
             }
@@ -307,7 +315,8 @@ impl HostPattern {
         }
 
         Ok(Self {
-            host: host_lower,
+            host: bare,
+            is_ip_literal: literal_ip.is_some(),
             wildcard,
             port,
             original,
@@ -323,6 +332,20 @@ impl HostPattern {
             }
         }
         let host = host.to_ascii_lowercase();
+        if self.is_ip_literal {
+            // Compared as addresses, not strings: the pattern is stored
+            // canonical, so `[0:0:0:0:0:0:0:1]` must agree with a runtime
+            // `::1`. Brackets are stripped defensively — callers pass bare
+            // hosts, but a bracketed one must not become a never-match. An
+            // unparseable candidate matches nothing, explicitly.
+            let bare = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(&host);
+            return bare
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|addr| addr.to_string() == self.host);
+        }
         if self.wildcard {
             // `*.example.com` -> suffix `.example.com`, and the host must have
             // at least one label *before* the suffix.
@@ -754,6 +777,91 @@ fn is_absolute_host_path(path: &str) -> bool {
             && normalized.as_bytes()[2] == b'/')
 }
 
+/// Whether a declared grant path is a filesystem root.
+///
+/// A root grant authorizes the entire visible filesystem, so accepting one
+/// silently is how an operator believes a narrow grant is active while every
+/// descendant is authorized. The three platform shapes are POSIX `/`, a
+/// Windows drive root (`C:/`, either separator), and a UNC share root
+/// (`//server/share`, exactly two components — deeper paths are ordinary
+/// directories *within* the share, not the share itself).
+///
+/// Extracted as a named predicate so the `caps` warning and any future
+/// admission rule test the same definition: two copies of "what counts as a
+/// root" is how one of them learns about UNC six months later than the other.
+///
+/// ```
+/// use qqq_cap::is_filesystem_root;
+///
+/// assert!(is_filesystem_root("/"));
+/// assert!(is_filesystem_root("C:/"));
+/// assert!(is_filesystem_root("//fileserver/share"));
+/// assert!(!is_filesystem_root("/var/lib/qqq"));
+/// assert!(!is_filesystem_root("//fileserver/share/qqq"));
+/// ```
+#[must_use]
+pub fn is_filesystem_root(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    // Split the anchor from the rest: `/`, `C:/`, or `//`. A `..` that climbs
+    // past the anchor clamps there — the host cannot resolve above its own
+    // root — so the collapse below pops only what the anchor does not own.
+    // Collapse is lexical (see the `caps` warning for why lexical is safe
+    // here and refused in enforcement): a false warning narrows a grant,
+    // while a false admission widens one.
+    if normalized == "/" {
+        return true;
+    }
+    if normalized.starts_with("///") {
+        // POSIX, never UNC: three or more leading slashes collapse to one,
+        // so `///tmp/..` is `/tmp/..` is `/`. Routing it to the share branch
+        // would count three components and miss the root entirely.
+        let rest = normalized.trim_start_matches('/');
+        return collapse_dotdot(rest.split('/'), 0).is_empty();
+    }
+    if normalized.starts_with("//") {
+        // UNC keeps server+share as ordinary components: exactly two is the
+        // share root, anything else is a directory (or nothing at all).
+        // The floor holds the anchor: `..` above the share clamps rather
+        // than removing it, erring toward the warning.
+        return collapse_dotdot(normalized.split('/'), 2).len() == 2;
+    }
+    let rest = if normalized.len() >= 3
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[2] == b'/'
+    {
+        &normalized[3..]
+    } else if let Some(stripped) = normalized.strip_prefix('/') {
+        stripped
+    } else {
+        return false;
+    };
+    // Empty afterwards means the declared text resolves to the anchor:
+    // `/tmp/..` is `/`, `C:/Windows/../..` is `C:/`.
+    collapse_dotdot(rest.split('/'), 0).is_empty()
+}
+
+/// Collapse `.` and `..` segments lexically, never popping below `floor`.
+///
+/// One function for every caller above, because two copies of a collapse is
+/// how one of them learns about clamping later than the other. A `..` with
+/// nothing left to pop is dropped: the caller split off the anchor first
+/// (or passes the share as the floor), so there is nowhere above it to
+/// climb to.
+fn collapse_dotdot<'a>(segments: impl Iterator<Item = &'a str>, floor: usize) -> Vec<&'a str> {
+    let mut collapsed: Vec<&'a str> = Vec::new();
+    for seg in segments {
+        if seg == ".." {
+            if collapsed.len() > floor {
+                collapsed.pop();
+            }
+        } else if !(seg.is_empty() || seg == ".") {
+            collapsed.push(seg);
+        }
+    }
+    collapsed
+}
+
 /// Trim, optionally lowercase, sort and deduplicate a string allowlist.
 ///
 /// DNS names are case-insensitive per RFC 4343 so they are normalized to
@@ -1052,6 +1160,43 @@ mod tests {
         assert!(HostPattern::parse("a:b:c").is_err());
     }
 
+    /// **Literals are parsed, not pattern-matched.** The old character
+    /// allowlist accepted `[12345::]` (five hex digits is not a group) as a
+    /// pattern that simply never matched, and rejected the valid mapped
+    /// literal `[::ffff:1.2.3.4]`. Parsing to `IpAddr` fixes both
+    /// directions: garbage is refused at admission, valid forms admit, and
+    /// equivalent spellings agree because both sides compare canonical.
+    #[test]
+    fn host_pattern_literals_follow_the_standard_parser() {
+        for bad in ["[12345::]", "[:::]", "[fe80::1%eth0]", "[:]"] {
+            assert!(
+                HostPattern::parse(bad).is_err(),
+                "`{bad}` is not a valid literal and must be refused at admission"
+            );
+        }
+        let mapped = HostPattern::parse("[::ffff:1.2.3.4]").unwrap();
+        assert!(mapped.matches("::ffff:1.2.3.4", 80));
+        let verbose = HostPattern::parse("[0:0:0:0:0:0:0:1]").unwrap();
+        assert!(
+            verbose.matches("::1", 80),
+            "equivalent spellings must agree; string equality would never-match"
+        );
+        assert!(!verbose.matches("::2", 80));
+        assert!(
+            verbose.matches("[::1]", 80),
+            "a bracketed candidate must not become a never-match"
+        );
+        assert!(
+            !verbose.matches("not-an-ip", 80),
+            "an unparseable candidate matches nothing, explicitly"
+        );
+        assert_eq!(
+            verbose.as_written(),
+            "[0:0:0:0:0:0:0:1]",
+            "diagnostics keep the original declaration, not the canonical form"
+        );
+    }
+
     // -- SecretRef ---------------------------------------------------------
 
     #[test]
@@ -1206,6 +1351,104 @@ mod tests {
         assert!(path_is_within("/etc/qqq/config", "/"));
         assert!(path_is_within("/", "/"));
         assert!(!path_is_within("relative/file", "/"));
+    }
+
+    /// **Platform roots contain their descendants.** The POSIX root was fixed
+    /// when a normalized `/` grant authorized itself but rejected every
+    /// descendant; drive and UNC roots take the component-prefix path, and
+    /// these tests pin that they keep working — a "simplification" that
+    /// special-cases only `/` would break them silently.
+    #[test]
+    fn path_containment_handles_drive_and_unc_roots() {
+        assert!(path_is_within("C:/Windows/Temp", "C:/"));
+        assert!(path_is_within("C:/", "C:/"));
+        assert!(!path_is_within("D:/other", "C:/"));
+        assert!(!path_is_within("C:/Windows-evil", "C:/Windows"));
+        assert!(path_is_within(
+            "//fileserver/share/qqq/data",
+            "//fileserver/share"
+        ));
+        assert!(path_is_within("//fileserver/share", "//fileserver/share"));
+        assert!(!path_is_within("//fileserver/other", "//fileserver/share"));
+        assert!(!path_is_within("//other/share/x", "//fileserver/share"));
+    }
+
+    /// **A root grant is recognizable lexically.** The `caps` warning and any
+    /// future admission rule share `is_filesystem_root`; these cases pin the
+    /// definition, including the UNC boundary (exactly two components — a
+    /// deeper path is a directory, not a root) and the near-misses a loose
+    /// check would accept.
+    #[test]
+    fn filesystem_root_recognition_covers_all_platforms() {
+        for root in [
+            "/",
+            "C:/",
+            "C:\\",
+            "d:/",
+            "//fileserver/share",
+            "\\\\fileserver\\share",
+        ] {
+            assert!(
+                is_filesystem_root(root),
+                "`{root}` is a filesystem root and must be recognized"
+            );
+        }
+        for not_root in [
+            "/var/lib/qqq",
+            "C:/Windows",
+            "//fileserver/share/qqq",
+            "relative/dir",
+            "C:",
+            "",
+        ] {
+            assert!(
+                !is_filesystem_root(not_root),
+                "`{not_root}` is not a root and must not warn"
+            );
+        }
+    }
+
+    /// **A declared path that resolves to a root warns.** `/tmp/..` is `/`
+    /// on the host, but the `caps` surface only ever sees the declared text
+    /// — no canonical path reaches it. The predicate collapses `.`/`..`
+    /// lexically for the warning (safe here: a false warning narrows),
+    /// while enforcement still refuses `..` outright.
+    #[test]
+    fn filesystem_root_recognition_sees_through_dotdot() {
+        for root in ["/tmp/..", "/var/lib/../../", "C:/Windows/../.."] {
+            assert!(
+                is_filesystem_root(root),
+                "`{root}` resolves to a root and must warn"
+            );
+        }
+        assert!(
+            !is_filesystem_root("/var/lib/qqq/../other"),
+            "a traversal that stays inside a directory is not a root"
+        );
+    }
+
+    /// **The anchor survives the collapse.** `..` above a UNC share cannot
+    /// remove the server or the share — the host clamps there — so the
+    /// predicate clamps too, erring toward the warning. And `///` is `/`
+    /// (POSIX: three or more slashes collapse to one), never a UNC path, so
+    /// it routes through the POSIX branch rather than the share branch.
+    #[test]
+    fn filesystem_root_recognition_keeps_the_unc_anchor() {
+        for root in [
+            "//server/share/dir/../..",
+            "//server/share/../..",
+            "///",
+            "///tmp/../..",
+        ] {
+            assert!(
+                is_filesystem_root(root),
+                "`{root}` resolves to a root and must warn"
+            );
+        }
+        assert!(
+            !is_filesystem_root("//server/share/qqq/../other"),
+            "a traversal that stays inside the share is not a root"
+        );
     }
 
     #[test]

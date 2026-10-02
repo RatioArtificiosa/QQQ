@@ -73,6 +73,32 @@ fn the_endpoint_serves_the_exposition() {
     );
 }
 
+/// **The exposure warns at startup, where the operator reads.**
+///
+/// The rendered report is built after `serve` returns — for a server, after
+/// shutdown — so a warning that lived only in the report would arrive too
+/// late to matter. The startup `eprintln` is the operator-facing path, and
+/// the server's own output rides in `served.text` beside the response.
+#[test]
+fn the_exposed_endpoint_warns_on_startup() {
+    let sandbox = Sandbox::new("metrics-warns");
+    let served = serve_and_request(
+        &sandbox,
+        MANIFEST,
+        &["--metrics-path", "/internal/metrics"],
+        "/internal/metrics",
+    );
+    assert!(
+        served.text.contains("WARNING: metrics exposed"),
+        "the startup output must warn: {}",
+        served.text.chars().take(400).collect::<String>()
+    );
+    assert!(
+        served.text.contains("/internal/metrics"),
+        "the warning must name the path"
+    );
+}
+
 /// **Nothing is exposed without the flag — the default is honest.**
 ///
 /// The registry holds **tenant names and traffic volume**; who may read that is the operator's

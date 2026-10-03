@@ -5608,8 +5608,25 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §6.10 Language toolchains — one per target language
 - [ ] **OQ-004** Decide whether Windows is first-class or best-effort.
   → §6.10 Language toolchains — one per target language
-- [ ] **OQ-005** Ratify the Wasm shared-memory and threads policy.
+- [x] **OQ-005** Ratify the Wasm shared-memory and threads policy.
   → §4.7 Concurrency model for guests
+  → Done: Decision taken 2026-10-03: ratify §4.7 as stated — async-single-threaded
+    is the default (`§D-006`, `ARCH-013` ADR); cooperative and shared-memory threads
+    are not in V1, tracked by `FUT-004`; enabling shared memory needs the manifest
+    opt-in (`ARCH-014`) plus the deterministic-mode rejection (`DET-012`) plus the
+    accounting model first, never a field alone. Correction recorded alongside the
+    ratification: the "not enabled" half currently rests on the absent manifest
+    spelling only — probed 2026-10-03 that both the default and deterministic engines
+    ACCEPT a shared-memory component (`wasm_threads` defaults on and is never
+    disabled; see `§O-537`). Engine-level disabling is an open prerequisite
+    (`DET-012`, `ARCH-014`), not a silent property. `ABI-016` (interface level)
+    stays open behind the same prerequisites.
+  → **Measured**: `proposal_historical_rejected_fields_still_fail` green
+    (`shared_memory` refused as unknown; dropping `deny_unknown_fields` fails
+    exactly that test, 253 filtered — `deny-red.log`, restored byte-identical,
+    `deny-green.log` with recompilation observed); probe `shared-probe.log`
+    `Ok` on both engines; `wasm_threads` default true confirmed in
+    `wasmtime` 48.0.5 `src/config.rs`.
 - [ ] **OQ-006** Decide whether to build the registry now or bootstrap on OCI.
   → §6.5 `qqq-pkg` — package manager and registry
 - [x] **OQ-007** Decide whether `wasi:http` is sufficient or a custom HTTP interface is required.

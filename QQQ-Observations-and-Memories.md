@@ -35322,6 +35322,31 @@ a ratchet is part of the ratchet; update it in the same commit or it is
 stale on arrival. → `crates/qqq-abi/src/registry.rs`,
 `crates/qqq-abi/src/wit.rs`, `tools/check_api_examples.py`.
 
+## §O-537 — A policy with one enforced half is half a policy; probe the other half before ratifying
+
+`OQ-005` asked to ratify the shared-memory policy, and the manifest half
+is enforced and pinned (`shared_memory` refused as unknown,
+`proposal_historical_rejected_fields_still_fail`). The engine half was an
+assumption: §4.7 says shared-memory threads are "not enabled in V1", but
+no `to_wasmtime_config` call disables them and `wasm_threads` defaults on
+in `wasmtime` 48. A throwaway probe (written, run once, deleted —
+`shared-probe.log`) compiled `(component (core module $m (memory 1 1
+shared)))` against both the default and deterministic engines: `Ok` on
+both. What this proves is narrow and stated narrowly: acceptance, not
+exploitability — shared memory without threads buys an attacker atomics
+without concurrency, and the accounting bypass is unmeasured either way.
+What it forbids is ratifying "not enabled" as a silent property: the
+`OQ-005` tick ratifies the direction and names engine-level disabling as
+an open prerequisite (`DET-012`, `ARCH-014`), with `ABI-016` behind the
+same gate. The enforcement that exists was re-proven red-first for the
+occasion (dropping `deny_unknown_fields` fails exactly the rejection
+test, 253 filtered — `deny-red.log`; byte-identical restore,
+`deny-green.log` with recompilation observed). Rule: ratification without
+a probe certifies the document, not the system — and when the probe
+contradicts the document, the correction ships inside the ratification,
+never as a footnote later. → `crates/qqq-host/src/config.rs`,
+`crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
+
 ## §O-535 — The final tree gets a third bridge, and the spike has a timestamp
 
 `docker compose run --rm linux checks` on `79aae2b` exited 0 after 3h04m

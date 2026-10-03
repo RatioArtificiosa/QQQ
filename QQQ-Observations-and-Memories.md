@@ -35273,7 +35273,12 @@ fresh. Repeated one round later on the doctest slice, second data point:
 the review-fix edited the checklist after `--record`, only the corpus was
 re-recorded, same drift, same CI catcher — the failure is not forgetting
 the order but verifying with the wrong set (`gate.ps1` sync instead of
-`run_ci_checkers.py`). → `.scratch/run_ci_checkers.py`,
+`run_ci_checkers.py`). Third occurrence on the `OQ-005` round, sharper:
+the order was right but the VERIFICATION point was wrong — `llms --check`
+ran green before the last dashboard write instead of after it, and CI
+failed on the drift. The rule is now mechanical: `gen_llms_txt` is the
+last writer before the gate, and its `--check` runs after every other
+record, with nothing writing in between. → `.scratch/run_ci_checkers.py`,
 `tools/gen_backlog.py`, `tools/backlog.json`.
 
 ## §O-534 — The release tool computes a version; it does not choose one

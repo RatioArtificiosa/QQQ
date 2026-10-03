@@ -3708,14 +3708,15 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [ ] **DX-015** Implement the CI check that every public API has a compiling example.
   → §12.3 The DX commitments (measurable, in CI)
   → **The check is built and wired; the standard is far from met, and the item stays open.**
-    Measured on 2026-09-25: **2,116 public declarations across the 11 crates, and 9 doctests
-    running** — 0.4% against §12.3's 100% target. Recording that plainly is the point:
+    Measured on 2026-10-03: **2,332 public declarations across the 11 crates, and 252 doctests
+    running** — 10.8% against §12.3's 100% target (up from 0.4% on 2026-09-25; the `qqq-abi`
+    batch of 2026-10-03 added 24). Recording that plainly is the point:
     `§O-219`'s shape is an item that looks done, and this one would look done if the check
     existed and nobody read its number.
   → `tools/check_api_examples.py` measures the surface and enforces a **ratchet**. `ci.yml` runs
-    it with `--allow 2107`, which is the visible distance to the target: a *regression* — an
+    it with `--allow 2080`, which is the visible distance to the target: a *regression* — an
     example lost — fails immediately, and the allowance is lowered as examples land. A check
-    demanding 2,107 new examples in one commit would be red forever, and a permanently red gate is
+    demanding 2,080 new examples in one commit would be red forever, and a permanently red gate is
     one people learn to skip.
   → The nine: `qqq-core` carries four (`PackageName` construction, a positioned rejection, why a
     trailing separator is its own error rather than a generic one, and `Version`'s one-directional
@@ -3746,8 +3747,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     made the measurement wrong: `pub const NAME` was missed because `const` sat in the modifier
     group rather than as a keyword, and a **closing** fence counted as an opening one, doubling
     every block. The first reported 1,937 items where the truth is 2,116.
-  → **What remains, stated so the next reader does not have to rediscover it.** 2,109 of 2,116
-    declarations have no example. `qqq-serve` alone has 676; `qqq-host` 461. The highest-value
+  → **What remains, stated so the next reader does not have to rediscover it.** 2,080 of 2,332
+    declarations have no example. `qqq-serve` alone holds 718 items with 28 fences; `qqq-host`
+    577 with 121. The highest-value
     next targets are the public entry points a Rust embedder calls first — `qqq-host`'s
     `PreparedComponent` / `Instance` / `Linker` construction and `qqq-cap`'s `GrantSet` — rather
     than working down each crate in file order, because an example on an internal helper teaches

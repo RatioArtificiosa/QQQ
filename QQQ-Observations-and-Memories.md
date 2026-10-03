@@ -35290,6 +35290,34 @@ them. Rule: automate the computation, never the declaration — a release tag
 is a promise about the future, and promises need an owner. →
 `tools/release.py`, `SECURITY.md`, `.github/workflows/release.yml`.
 
+## §O-536 — Ratchet progress is measured in examples, and each example gets two red proofs
+
+`DX-015` (every public API has a compiling example) stays open at 10.8%,
+but the ratchet moved: all of `qqq-abi` — 7 fences in `registry.rs`
+(construction, unlock query, table shape, path mapping, package lookup,
+grant-set wiring both directions) and 17 in `wit.rs` (every embedded
+source asserting its own package line, plus the sorted-registry and
+versioned-lookup rules) — taking cargo-run doctests 228 → 252 and the
+outstanding count 2104 → 2080, with `ci.yml --allow` lowered to match.
+Each new example carries two fault-injection proofs, not one: deleting
+the `wit_source` fence fails the checker at exactly 2081 over an 2080
+allowance (`abi-fence-red.log`, exit 1), and flipping the wall-clock
+assertion fails exactly that doctest with 23 filtered
+(`abi-assert-red.log`); both restores verified byte-identical by SHA-256
+with explicit mtime bumps, then green with recompilation observed
+(`abi-green.log`: 16 unit + 24 doc). The `DX-015` block's own stale
+figures (2026-09-25, `--allow 2107`) are updated to the rerun values; its
+"The nine" paragraph was already stale before this round (9 named against
+228 running) and is left untouched and named as such rather than quietly
+absorbed. Rule: a ratchet lowers only on counted examples, and an example
+counts only when its absence fails one gate and its corruption fails
+another. Post-commit review returned two minor findings, both valid: the
+`DX-015` "What remains" inventory still read 2,109-of-2,116 — fixed to the
+rerun 2,080-of-2,332 with per-crate fences. Rule: a prose inventory beside
+a ratchet is part of the ratchet; update it in the same commit or it is
+stale on arrival. → `crates/qqq-abi/src/registry.rs`,
+`crates/qqq-abi/src/wit.rs`, `tools/check_api_examples.py`.
+
 ## §O-535 — The final tree gets a third bridge, and the spike has a timestamp
 
 `docker compose run --rm linux checks` on `79aae2b` exited 0 after 3h04m

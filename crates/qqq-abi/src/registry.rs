@@ -25,6 +25,20 @@ use serde::{Deserialize, Serialize};
 
 /// One host interface: its versioned name, its capability mappings, and whether
 /// the host currently implements it.
+///
+/// ```rust
+/// use qqq_abi::registry::HostInterface;
+/// use qqq_cap::capability::Capability;
+///
+/// let i = HostInterface {
+///     name: "qqq:clock@1.0.0".to_owned(),
+///     unlocked_by: vec![Capability::ClockWall, Capability::ClockMonotonic],
+///     implemented: true,
+///     summary: "virtualised time".to_owned(),
+/// };
+/// assert!(i.is_unlocked_by(Capability::ClockWall));
+/// assert_eq!(i.to_string(), "qqq:clock@1.0.0 (implemented)");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInterface {
     /// The versioned WIT name, e.g. `qqq:crypto@1.0.0`.
@@ -45,6 +59,17 @@ pub struct HostInterface {
 
 impl HostInterface {
     /// Whether granting `c` unlocks this interface.
+    ///
+    /// ```rust
+    /// use qqq_abi::registry::{HostInterface, interfaces};
+    /// use qqq_cap::capability::Capability;
+    ///
+    /// let crypto = interfaces().into_iter()
+    ///     .find(|i| i.name == "qqq:crypto@1.0.0")
+    ///     .expect("registry lists crypto");
+    /// assert!(crypto.is_unlocked_by(Capability::CryptoHash));
+    /// assert!(!crypto.is_unlocked_by(Capability::SqlQuery));
+    /// ```
     #[must_use]
     pub fn is_unlocked_by(&self, c: Capability) -> bool {
         self.unlocked_by.contains(&c)
@@ -91,6 +116,18 @@ fn iface(name: &str, caps: &[Capability], implemented: bool, summary: &str) -> H
 /// When a host implementation lands, its flag flips to `true` — and the test
 /// that asserts no interface claims to be implemented until one is will need
 /// updating at the same moment, so the claim cannot rot.
+///
+/// ```rust
+/// use qqq_abi::registry::interfaces;
+///
+/// let table = interfaces();
+/// assert!(!table.is_empty());
+/// let names: Vec<&str> = table.iter().map(|i| i.name.as_str()).collect();
+/// let mut sorted = names.clone();
+/// sorted.sort_unstable();
+/// assert_eq!(names, sorted, "consumers rely on the sorted order");
+/// assert!(names.contains(&"qqq:clock@1.0.0"));
+/// ```
 #[must_use]
 pub fn interfaces() -> Vec<HostInterface> {
     let mut out = ambient_interfaces();
@@ -128,6 +165,21 @@ pub fn interfaces() -> Vec<HostInterface> {
 /// `None` means the package has a single interface and the package name is
 /// already exact, or that the capability is not yet mapped — both of which the
 /// caller reports as an unmapped import rather than guessing.
+///
+/// ```rust
+/// use qqq_abi::registry::interface_path_for;
+/// use qqq_cap::capability::Capability;
+///
+/// assert_eq!(
+///     interface_path_for(Capability::ClockWall),
+///     Some("qqq:clock/wall-clock")
+/// );
+/// assert_eq!(
+///     interface_path_for(Capability::HttpClient),
+///     Some("qqq:http/http")
+/// );
+/// assert_eq!(interface_path_for(Capability::FsRead), None);
+/// ```
 #[must_use]
 pub fn interface_path_for(c: Capability) -> Option<&'static str> {
     use Capability::{
@@ -293,12 +345,38 @@ fn io_interfaces() -> Vec<HostInterface> {
 /// Returns the **first** match in the sorted table. A capability that unlocks
 /// more than one interface would be a design error — a grant should map to one
 /// surface, so an auditor reading the manifest can predict the blast radius.
+///
+/// ```rust
+/// use qqq_abi::registry::interface_for;
+/// use qqq_cap::capability::Capability;
+///
+/// let i = interface_for(Capability::CryptoHash).expect("crypto.hash maps");
+/// assert_eq!(i.name, "qqq:crypto@1.0.0");
+/// ```
 #[must_use]
 pub fn interface_for(c: Capability) -> Option<HostInterface> {
     interfaces().into_iter().find(|i| i.is_unlocked_by(c))
 }
 
 /// The interfaces a grant set unlocks, sorted.
+///
+/// ```rust
+/// use qqq_abi::registry::required_interfaces;
+/// use qqq_cap::manifest::Manifest;
+/// use qqq_cap::resolve::GrantSet;
+///
+/// let m = Manifest::parse(
+///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+///      [capabilities.crypto]\nhash = [\"sha256\"]\n",
+/// )
+/// .unwrap();
+/// let names: Vec<String> = required_interfaces(&GrantSet::from_manifest(&m))
+///     .into_iter()
+///     .map(|i| i.name)
+///     .collect();
+/// assert!(names.contains(&"qqq:crypto@1.0.0".to_owned()));
+/// assert!(!names.contains(&"qqq:sql@1.0.0".to_owned()));
+/// ```
 #[must_use]
 pub fn required_interfaces(grants: &qqq_cap::resolve::GrantSet) -> Vec<HostInterface> {
     let granted = grants.capabilities();
@@ -316,6 +394,22 @@ pub fn required_interfaces(grants: &qqq_cap::resolve::GrantSet) -> Vec<HostInter
 /// Callers use this to fail at **instantiation** with a clear `QQQ-6004`
 /// naming the capability, rather than at first call with an opaque linker
 /// error.
+///
+/// ```rust
+/// use qqq_abi::registry::unimplemented_capabilities;
+/// use qqq_cap::capability::Capability;
+/// use qqq_cap::manifest::Manifest;
+/// use qqq_cap::resolve::GrantSet;
+///
+/// assert!(unimplemented_capabilities(&GrantSet::empty()).is_empty());
+/// let m = Manifest::parse(
+///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+///      [capabilities.crypto]\nhash = [\"sha256\"]\n",
+/// )
+/// .unwrap();
+/// let missing = unimplemented_capabilities(&GrantSet::from_manifest(&m));
+/// assert!(missing.contains(&Capability::CryptoHash));
+/// ```
 #[must_use]
 pub fn unimplemented_capabilities(grants: &qqq_cap::resolve::GrantSet) -> Vec<Capability> {
     let table = interfaces();

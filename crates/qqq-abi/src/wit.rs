@@ -25,21 +25,57 @@
 //! See Proposal §6.3 and Checklist `ABI-001` … `ABI-016`, `CON-011`.
 
 /// The `qqq:crypto` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::CRYPTO_WIT;
+///
+/// assert!(CRYPTO_WIT.contains("package qqq:crypto@1.0.0;"));
+/// ```
 pub const CRYPTO_WIT: &str = include_str!("../../../wit/qqq-crypto.wit");
 
 /// The `qqq:clock` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::CLOCK_WIT;
+///
+/// assert!(CLOCK_WIT.contains("package qqq:clock@1.0.0;"));
+/// ```
 pub const CLOCK_WIT: &str = include_str!("../../../wit/qqq-clock.wit");
 
 /// The `qqq:log` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::LOG_WIT;
+///
+/// assert!(LOG_WIT.contains("package qqq:log@1.0.0;"));
+/// ```
 pub const LOG_WIT: &str = include_str!("../../../wit/qqq-log.wit");
 
 /// The `qqq:secrets` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::SECRETS_WIT;
+///
+/// assert!(SECRETS_WIT.contains("package qqq:secrets@1.0.0;"));
+/// ```
 pub const SECRETS_WIT: &str = include_str!("../../../wit/qqq-secrets.wit");
 
 /// The `qqq:http` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::HTTP_WIT;
+///
+/// assert!(HTTP_WIT.contains("package qqq:http@1.0.0;"));
+/// ```
 pub const HTTP_WIT: &str = include_str!("../../../wit/qqq-http.wit");
 
 /// The `qqq:fs` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::FS_WIT;
+///
+/// assert!(FS_WIT.contains("package qqq:fs@1.0.0;"));
+/// ```
 pub const FS_WIT: &str = include_str!("../../../wit/qqq-fs.wit");
 
 /// The `qqq:ai` interface source.
@@ -47,30 +83,84 @@ pub const FS_WIT: &str = include_str!("../../../wit/qqq-fs.wit");
 /// Authored now, implemented later (`FUT-007`) — see the file's own header for
 /// why, and `registry::interfaces` for the `implemented: false` flag that keeps
 /// the claim honest.
+///
+/// ```rust
+/// use qqq_abi::wit::AI_WIT;
+///
+/// assert!(AI_WIT.contains("package qqq:ai@1.0.0;"));
+/// ```
 pub const AI_WIT: &str = include_str!("../../../wit/qqq-ai.wit");
 
 /// The `qqq:sql` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::SQL_WIT;
+///
+/// assert!(SQL_WIT.contains("package qqq:sql@1.0.0;"));
+/// ```
 pub const SQL_WIT: &str = include_str!("../../../wit/qqq-sql.wit");
 
 /// The `qqq:kv` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::KV_WIT;
+///
+/// assert!(KV_WIT.contains("package qqq:kv@1.0.0;"));
+/// ```
 pub const KV_WIT: &str = include_str!("../../../wit/qqq-kv.wit");
 
 /// The `qqq:queue` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::QUEUE_WIT;
+///
+/// assert!(QUEUE_WIT.contains("package qqq:queue@1.0.0;"));
+/// ```
 pub const QUEUE_WIT: &str = include_str!("../../../wit/qqq-queue.wit");
 
 /// The `qqq:dns` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::DNS_WIT;
+///
+/// assert!(DNS_WIT.contains("package qqq:dns@1.0.0;"));
+/// ```
 pub const DNS_WIT: &str = include_str!("../../../wit/qqq-dns.wit");
 
 /// The `qqq:env` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::ENV_WIT;
+///
+/// assert!(ENV_WIT.contains("package qqq:env@1.0.0;"));
+/// ```
 pub const ENV_WIT: &str = include_str!("../../../wit/qqq-env.wit");
 
 /// The `qqq:trace` interface source.
+///
+/// ```rust
+/// use qqq_abi::wit::TRACE_WIT;
+///
+/// assert!(TRACE_WIT.contains("package qqq:trace@1.0.0;"));
+/// ```
 pub const TRACE_WIT: &str = include_str!("../../../wit/qqq-trace.wit");
 
 /// The `qqq:test` interface source: assertions and capability assertions (`ABI-011`).
+///
+/// ```rust
+/// use qqq_abi::wit::TEST_WIT;
+///
+/// assert!(TEST_WIT.contains("package qqq:test@1.0.0;"));
+/// ```
 pub const TEST_WIT: &str = include_str!("../../../wit/qqq-test.wit");
 
 /// The `qqq:agent` interface source: self-description and progress (`ABI-012`).
+///
+/// ```rust
+/// use qqq_abi::wit::AGENT_WIT;
+///
+/// assert!(AGENT_WIT.contains("package qqq:agent@1.0.0;"));
+/// ```
 pub const AGENT_WIT: &str = include_str!("../../../wit/qqq-agent.wit");
 
 /// Every interface this crate defines, in a stable order.
@@ -88,6 +178,17 @@ pub const AGENT_WIT: &str = include_str!("../../../wit/qqq-agent.wit");
 /// nothing else reports the difference. That drift happened once — two files were
 /// authored, validated and documented while remaining invisible to the runtime — which
 /// is why the check exists rather than a convention.
+///
+/// ```rust
+/// use qqq_abi::wit::ALL_WIT;
+///
+/// assert!(!ALL_WIT.is_empty());
+/// let names: Vec<&str> = ALL_WIT.iter().map(|(n, _)| *n).collect();
+/// let mut sorted = names.clone();
+/// sorted.sort_unstable();
+/// assert_eq!(names, sorted, "gaps hide in unsorted registries");
+/// assert!(names.contains(&"qqq:clock@1.0.0"));
+/// ```
 pub const ALL_WIT: &[(&str, &str)] = &[
     ("qqq:agent@1.0.0", AGENT_WIT),
     ("qqq:ai@1.0.0", AI_WIT),
@@ -107,6 +208,15 @@ pub const ALL_WIT: &[(&str, &str)] = &[
 ];
 
 /// Look up an interface's WIT source by its versioned name.
+///
+/// ```rust
+/// use qqq_abi::wit::wit_source;
+///
+/// let src = wit_source("qqq:clock@1.0.0").expect("clock is embedded");
+/// assert!(src.contains("package qqq:clock@1.0.0;"));
+/// assert!(wit_source("qqq:nope@1.0.0").is_none());
+/// assert!(wit_source("clock").is_none(), "names are versioned");
+/// ```
 #[must_use]
 pub fn wit_source(name: &str) -> Option<&'static str> {
     ALL_WIT.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)

@@ -35278,7 +35278,12 @@ the order was right but the VERIFICATION point was wrong — `llms --check`
 ran green before the last dashboard write instead of after it, and CI
 failed on the drift. The rule is now mechanical: `gen_llms_txt` is the
 last writer before the gate, and its `--check` runs after every other
-record, with nothing writing in between. → `.scratch/run_ci_checkers.py`,
+record, with nothing writing in between. Fourth occurrence on the
+`DET-012` round proves the weaker form of the rule does not hold: the
+standalone `milestone_dashboard.py --record` (for the tick counts) ran
+after a green `llms --check` and only the dashboard was re-verified —
+never run a single derived-figure record alone; always the full
+`sync_docs --record`, then every `--check`. → `.scratch/run_ci_checkers.py`,
 `tools/gen_backlog.py`, `tools/backlog.json`.
 
 ## §O-534 — The release tool computes a version; it does not choose one

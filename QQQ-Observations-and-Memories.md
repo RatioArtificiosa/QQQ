@@ -35299,6 +35299,23 @@ them. Rule: automate the computation, never the declaration — a release tag
 is a promise about the future, and promises need an owner. →
 `tools/release.py`, `SECURITY.md`, `.github/workflows/release.yml`.
 
+## §O-538 — A file you never `git add` rides the tree unreviewed and CI-blind
+
+The `HOSTPAT-001` IPv4 arm and its two tests sat UNCOMMITTED in the working
+tree across four commits, five gates, three reviews, and three green CIs:
+every `git add` named files explicitly and the new file never made the
+list, and every `git status` was skimmed for the expected names rather
+than read for the unexpected one. The gates all tested the code (it was in
+the tree), so local green meant something — but no review ever saw it and
+no CI job ever ran it, which are the two controls that make a commit more
+than a local build. Caught only when a later round's `git status` finally
+showed the single `M` line. The code itself was correct (its red proofs
+predate the discovery), which is exactly why the failure mode is
+dangerous: correctness masked a complete absence of independent scrutiny.
+Rule: `git status` is read for what you did NOT intend — any line outside
+the plan stops the commit — and review checklists name the files under
+review so an omission is visible as an absence. → `crates/qqq-cap/src/normalize.rs`.
+
 ## §O-536 — Ratchet progress is measured in examples, and each example gets two red proofs
 
 `DX-015` (every public API has a compiling example) stays open at 10.8%,

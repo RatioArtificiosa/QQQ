@@ -275,6 +275,22 @@ impl HostPattern {
                     .parse()
                     .map_err(|_| format!("`{host_lower}` is not a valid IP literal"))?,
             )
+        } else if host_lower.contains('.')
+            && host_lower.chars().all(|c| c.is_ascii_digit() || c == '.')
+        {
+            // An unbracketed dotted quad is an IPv4 literal attempt, not a
+            // hostname: `999.1.1.1` sailed through the hostname alphabet as a
+            // pattern that could never match — the audit's malformed-IPv4
+            // case. Anything shaped like one must parse as one, and is stored
+            // canonical so matching compares addresses, not spellings.
+            Some(
+                host_lower
+                    .parse::<std::net::Ipv4Addr>()
+                    .map(std::net::IpAddr::V4)
+                    .map_err(|_| {
+                        format!("`{host_lower}` looks like an IPv4 literal but does not parse")
+                    })?,
+            )
         } else {
             None
         };
@@ -1195,6 +1211,59 @@ mod tests {
             "[0:0:0:0:0:0:0:1]",
             "diagnostics keep the original declaration, not the canonical form"
         );
+    }
+
+    /// **Malformed IPv4-looking patterns are refused; valid ones canonicalize.**
+    ///
+    /// Audit `HOSTPAT-001` named malformed-IPv4 tests explicitly. Before the
+    /// dotted-quad rule, `999.1.1.1` passed the hostname alphabet as a pattern
+    /// that could never match — the same never-match defect as `[12345::]`,
+    /// one proposal section over. Anything shaped like an IPv4 literal must
+    /// now parse as one, and a valid one is stored canonical so matching
+    /// compares addresses: `matches` parses the candidate to `IpAddr` too.
+    #[test]
+    fn host_pattern_refuses_malformed_ipv4_and_canonicalizes_valid() {
+        for bad in [
+            "999.1.1.1",
+            "256.0.0.1",
+            "1.2.3.4.5",
+            "1.2.3",
+            "1.2.3.4.5.6",
+            "...",
+        ] {
+            assert!(
+                HostPattern::parse(bad).is_err(),
+                "`{bad}` is shaped like IPv4 but does not parse, and must be refused"
+            );
+        }
+        let p = HostPattern::parse("1.2.3.4").unwrap();
+        assert!(p.matches("1.2.3.4", 80));
+        assert!(!p.matches("1.2.3.5", 80));
+        assert_eq!(
+            p.as_written(),
+            "1.2.3.4",
+            "diagnostics keep the original declaration"
+        );
+        let with_port = HostPattern::parse("10.0.0.1:443").unwrap();
+        assert_eq!(with_port.port(), Some(443));
+        assert!(with_port.matches("10.0.0.1", 443));
+        assert!(!with_port.matches("10.0.0.1", 80));
+    }
+
+    /// **Unicode hostnames are refused, and pinned as refused.**
+    ///
+    /// The hostname alphabet is ASCII alphanumerics plus `.`, `-`, `_` — there
+    /// is no IDNA/UTS-46 processing anywhere in this crate, so accepting
+    /// `münchen.de` would admit a pattern whose matching is undefined. The
+    /// audit named Unicode tests explicitly; this is the pin.
+    #[test]
+    fn host_pattern_refuses_unicode_hostnames() {
+        for bad in ["münchen.de", "例え.jp", "münchen.de:443"] {
+            assert!(
+                HostPattern::parse(bad).is_err(),
+                "`{bad}` is outside the hostname alphabet and must be refused"
+            );
+        }
     }
 
     // -- SecretRef ---------------------------------------------------------

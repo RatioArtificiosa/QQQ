@@ -35369,6 +35369,23 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-540 — A probe that returns Ok twice is a test waiting for its flag
+
+`§O-537`'s throwaway probe compiled a shared-memory component `Ok` on both
+engines and was deleted. `DET-012` closes the loop it opened: the probe's
+WAT string moved verbatim into `deterministic_mode_rejects_shared_memory`,
+which asserts the deterministic engine now refuses it while the default
+still accepts — so the probe's red baseline (Ok/Ok) and the test's green
+(Err/Ok) are the same artifact measured before and after one config line,
+`c.wasm_threads(false)` confined to the deterministic arm. Dropping the
+line fails exactly that test with 517 filtered, restoring the probe's
+original answer and proving the test is wired to the flag rather than to
+anything incidental. Production behavior is untouched by construction:
+the default preset never enters the arm. Rule: when a probe finds the gap,
+promote its exact bytes into the regression test — a retyped approximation
+can pass for a different reason, but the same bytes cannot. →
+`crates/qqq-host/src/config.rs`, `QQQ-Checklist-V1.md` (`DET-012`).
+
 ## §O-539 — The current HEAD gets its own bridge, and the burst repeats its timestamp
 
 `docker compose run --rm linux checks` on `14cb7ca` exited 0 after 2h54m

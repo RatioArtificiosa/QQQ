@@ -5151,8 +5151,18 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-011** Implement network-timing recording for replay.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-012** Implement deterministic-mode rejection of shared memory.
+- [x] **DET-012** Implement deterministic-mode rejection of shared memory.
   → §10.5 Determinism — the feature nobody else has
+  → Done: `EngineConfig::to_wasmtime_config` sets `wasm_threads(false)` in the
+    deterministic arm only (`crates/qqq-host/src/config.rs`); the default engine
+    keeps upstream's default-on, so production behavior is untouched and replay-grade
+    runs cannot admit what they cannot reproduce. Probed before implementing
+    (`§O-537`): the same shared-memory component compiled `Ok` on both engines.
+  → **Measured**: `config::tests::deterministic_mode_rejects_shared_memory`
+    green (deterministic `Err` naming threads/shared, default `Ok`); dropping the
+    flag fails exactly that test with 517 filtered (`det012-red.log`); restored
+    byte-identical by SHA-256, config suite 19/19 green with recompilation
+    observed (`det012-restore.log`).
 - [ ] **DET-013** Implement deterministic compilation pinning by artifact digest and compiler version.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-014** Publish the determinism documentation with use cases and non-use-cases.

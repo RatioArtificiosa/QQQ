@@ -117,6 +117,16 @@ impl EngineConfig {
             // Relaxed-SIMD fusion is explicitly disallowed in deterministic
             // mode: it permits re-association that changes results.
             c.wasm_relaxed_simd(false);
+            // Shared memory is refused in deterministic mode (`DET-012`): a
+            // shared linear memory is visible to every holder at once, which
+            // defeats per-instance memory accounting, and atomics on it are
+            // outside the fuel-and-epoch determinism story. Upstream leaves
+            // `wasm_threads` on by default and QQQ never disables it outside
+            // this arm, so a shared-memory component compiles under the
+            // default engine and fails here — that asymmetry is the point:
+            // the default path is untouched while replay-grade runs cannot
+            // admit what they cannot reproduce.
+            c.wasm_threads(false);
         } else {
             // Relaxed SIMD is a Tier 1 proposal and a genuine performance win
             // for the JSON and parsing hot paths (§9.4). It is only excluded
@@ -489,6 +499,42 @@ mod tests {
                 .expect("config must be valid for this Wasmtime version");
             wasmtime::Engine::new(&wc).expect("engine must construct");
         }
+    }
+
+    /// **`DET-012`: deterministic mode refuses shared memory.**
+    ///
+    /// Upstream's `wasm_threads` defaults on and the default engine keeps it,
+    /// so a shared-memory component compiles there — probed, `Ok` on both
+    /// engines before the flag (`§O-537`). The deterministic engine must not
+    /// admit what replay cannot reproduce, so the same bytes fail here. The
+    /// asymmetry is asserted both ways: default acceptance documents that the
+    /// refusal is the deterministic preset's doing, not a broken fixture.
+    #[test]
+    fn deterministic_mode_rejects_shared_memory() {
+        const SHARED: &str = "(component (core module $m (memory 1 1 shared)))";
+        let det = wasmtime::Engine::new(
+            &EngineConfig::deterministic()
+                .to_wasmtime_config()
+                .expect("deterministic config builds"),
+        )
+        .expect("deterministic engine builds");
+        let err = wasmtime::component::Component::new(&det, SHARED)
+            .expect_err("shared memory must not compile in deterministic mode");
+        let text = format!("{err:#}").to_ascii_lowercase();
+        assert!(
+            text.contains("shared") || text.contains("thread"),
+            "the refusal must name its cause, not fail opaquely: {err:#}"
+        );
+        let default_engine = wasmtime::Engine::new(
+            &EngineConfig::default()
+                .to_wasmtime_config()
+                .expect("default config builds"),
+        )
+        .expect("default engine builds");
+        assert!(
+            wasmtime::component::Component::new(&default_engine, SHARED).is_ok(),
+            "the default path is untouched: refusal is deterministic-only"
+        );
     }
 
     /// Determinism knobs must actually change the configuration, otherwise

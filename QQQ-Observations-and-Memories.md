@@ -35290,6 +35290,30 @@ them. Rule: automate the computation, never the declaration — a release tag
 is a promise about the future, and promises need an owner. →
 `tools/release.py`, `SECURITY.md`, `.github/workflows/release.yml`.
 
+## §O-535 — The final tree gets a third bridge, and the spike has a timestamp
+
+`docker compose run --rm linux checks` on `79aae2b` exited 0 after 3h04m
+(`bridge5.log`): every checker and self-test half green on Linux,
+including `DEPRECATION POLICY OK` and `PROGRESS AGREES -- 271/587` —
+Linux independently confirms the ticked counts. All 38 `FAIL`-pattern
+lines dispositioned individually: 8 `SCHEMA CONFORMANCE FAILED` (each
+followed by its caught/restored pair, suite ends 21/21), 2 `PROGRESS CHECK
+FAILED` (each followed by its `OK ... fails` case, suite ends 19/19 with
+the live agreement above), 28 `must FAIL, got FAIL` / `-> FAIL` lines each
+carrying an `OK`. Zero real failures; the 5 known cargo-suite
+environmental failures remain outside `checks` scope as before.
+178 one-minute `docker stats` samples (`docker-stats5.log`, idle
+`aifs-postgres` rows filtered): CPU mean 19.1%, max 790.6% in exactly 2
+samples at 23:25–23:26, mid-run — a rebuild phase (the log shows a
+restore-build step), not the opening build; memory mean 315MiB, max
+2.6GiB of 8GiB (32.5%). Judgement NORMAL: higher than bridge4's flat
+9.5%/33% (warm target then) for the understood reason that this run
+compiled, but inside limits throughout with no outcome correlation —
+every suite green, exit 0. Rule: a spike is located by timestamp before it
+is judged; "high CPU" without a when is a feeling, and the when here
+points at compilation, whose evidence is in the log head. →
+`docker/compose.yaml`, `bridge5.log`, `docker-stats5.log`.
+
 ## §O-530 - The final tree gets its own bridge, and the sampler must not truncate
 
 The first monitored bridge ran on `853ebdf`, but the goal's final SHA is

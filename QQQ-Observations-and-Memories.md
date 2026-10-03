@@ -35374,6 +35374,29 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-541 — The final tree gets its bridge, and this time there is no burst at all
+
+`docker compose run --rm linux checks` on `46222c5` exited 0 after ~2h51m
+(`bridge7.log`) — required, not routine: the tree moved past bridge6 with
+the `DET-012` engine change, which alters what the deterministic preset
+compiles. Every checker and self-test half green, all 38 `FAIL`-pattern
+lines the same known self-test negatives as the prior bridges (8
+schema-conformance with caught/restored pairs, 2 progress with `OK` cases,
+28 must-FAIL/arrow-FAIL with `OK`), including the `assemblyscript: failed`
+probe negative with its `PASS` line. Zero real failures.
+167 one-minute samples (`docker-stats7.log`, idle `opengeo-pg-verify` rows
+filtered): CPU mean 9.3%, max 25.5%, zero samples over 200% — the flattest
+of the four final-tree bridges (bridge4 9.5%/33%, bridge6 12.6%/359%,
+bridge5 19.1%/790%); memory mean 242MiB, max 1.3GiB of 8GiB (16.3%).
+Judgement NORMAL: warm target (clippy 1.74s, no downloads), inside limits
+throughout, no outcome correlation. Also recorded: a first bridge7 attempt
+died with the Docker daemon mid-run and was restarted from scratch — a
+partial bridge proves nothing, so the partial is preserved as
+`bridge7-aborted.log` and only the complete run counts as the verdict.
+Rule: a verdict needs a complete run; an interrupted run's log is evidence
+of the interruption, not of anything about the tree. →
+`docker/compose.yaml`, `bridge7.log`, `docker-stats7.log`.
+
 ## §O-540 — A probe that returns Ok twice is a test waiting for its flag
 
 `§O-537`'s throwaway probe compiled a shared-memory component `Ok` on both

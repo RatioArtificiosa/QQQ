@@ -35369,6 +35369,28 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-539 — The current HEAD gets its own bridge, and the burst repeats its timestamp
+
+`docker compose run --rm linux checks` on `14cb7ca` exited 0 after 2h54m
+(`bridge6.log`) — required, not routine: the tree moved six commits past
+bridge5, including new production code (the IPv4 arm) that had never run
+on Linux. Every checker and self-test half green, all 38 `FAIL`-pattern
+lines the same known self-test negatives as bridge5 (8 schema-conformance
+with caught/restored pairs, 2 progress with `OK` cases, 28
+must-FAIL/arrow-FAIL with `OK`), including the `assemblyscript: failed`
+probe negative with its `PASS` line. Zero real failures.
+168 one-minute samples (`docker-stats6.log`, idle `aifs-postgres` rows
+filtered): CPU mean 12.6%, max 359.3% in exactly one sample at 07:55,
+~2h05m in — the same mid-run rebuild signature as bridge5's 23:25 burst,
+flatter in magnitude because the target volume was warm (log head shows
+`Checking`, no downloads); memory mean 249MiB, max 1.3GiB of 8GiB
+(16.3%). Judgement NORMAL, third run in a row: inside limits throughout,
+understood cause, no outcome correlation. Rule: the comparison set for a
+bridge is the previous bridges, not an absolute threshold — 12.6% mean
+sits between bridge4's 9.5% (warm) and bridge5's 19.1% (cold), exactly
+where a warm run with new code should sit. → `docker/compose.yaml`,
+`bridge6.log`, `docker-stats6.log`.
+
 ## §O-535 — The final tree gets a third bridge, and the spike has a timestamp
 
 `docker compose run --rm linux checks` on `79aae2b` exited 0 after 3h04m

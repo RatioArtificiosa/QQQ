@@ -35269,7 +35269,11 @@ re-recording the dashboard AFTER `sync_docs --record` stale-dated
 `llms-full.txt` (it embeds the corpus), caught by `gen_llms_txt.py --check`
 in the reproduction — derived figures regenerate in dependency order
 (checklist, then backlog, then dashboard, then the index), never assumed
-fresh. → `.scratch/run_ci_checkers.py`,
+fresh. Repeated one round later on the doctest slice, second data point:
+the review-fix edited the checklist after `--record`, only the corpus was
+re-recorded, same drift, same CI catcher — the failure is not forgetting
+the order but verifying with the wrong set (`gate.ps1` sync instead of
+`run_ci_checkers.py`). → `.scratch/run_ci_checkers.py`,
 `tools/gen_backlog.py`, `tools/backlog.json`.
 
 ## §O-534 — The release tool computes a version; it does not choose one

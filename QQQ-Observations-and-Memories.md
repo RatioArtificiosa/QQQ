@@ -35248,6 +35248,30 @@ one-minor promise. Rule: when correcting stale prose, remove the superseded quan
 rather than hedging around it. → `QQQ-Checklist-V1.md`, `GOVERNANCE.md`,
 `tools/check_done_lines.py`.
 
+## §O-533 — A green local gate is evidence about the set it ran, not about the tree
+
+The amended slice commit passed the full local gate and failed CI's
+Cross-reference job on `gen_backlog.py --check`: "the checklist changed
+and the backlog was not re-recorded". The tier-sentence fix added one
+checklist line after the last `sync_docs --record`, shifting every later
+item's line number, and `tools/backlog.json` records line numbers — so the
+backlog went stale. The local gate stayed green because `gate.ps1`'s sync
+step runs only `sync_docs.py --check` (9 checkers) while CI runs ~100
+individual checker commands including `gen_backlog --check`. The remedy
+already existed: `.scratch/run_ci_checkers.py` reproduces CI's exact
+command set from `ci.yml`, built after this same gap cost sixteen red runs
+— and this round skipped it anyway. The tool only works inside the loop,
+not in the drawer. Rule: after ANY checklist edit, re-record derived
+figures, run the CI reproduction locally, and only then the gate; and when
+CI fails on a green gate, the first suspect is the set difference, read
+from the actual failed log. Second-order effect in the same round:
+re-recording the dashboard AFTER `sync_docs --record` stale-dated
+`llms-full.txt` (it embeds the corpus), caught by `gen_llms_txt.py --check`
+in the reproduction — derived figures regenerate in dependency order
+(checklist, then backlog, then dashboard, then the index), never assumed
+fresh. → `.scratch/run_ci_checkers.py`,
+`tools/gen_backlog.py`, `tools/backlog.json`.
+
 ## §O-530 - The final tree gets its own bridge, and the sampler must not truncate
 
 The first monitored bridge ran on `853ebdf`, but the goal's final SHA is

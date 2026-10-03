@@ -4846,6 +4846,15 @@ the fast *automatic* channel and the upstream watch is a *human* channel, and bo
 are needed. A process that claimed the automated scan was sufficient would be
 quietly wrong for exactly the class of advisory that matters most.
 
+### Wasmtime advisory feed
+
+One row per upstream batch: what it was, what QQQ did, and where the evidence
+lives. The process is `docs/wasmtime-advisory-process.md`.
+
+| Date | Advisory | QQQ response |
+|---|---|---|
+| 2026-10-02 | RUSTSEC-2026-0321…0327 against `wasmtime`/`wasmtime-wasi` 48.0.3 (patch ≥48.0.4; RUSTSEC-2026-0320 documented negative — `wasmtime-wasi-http` is not in the resolve) | Triaged in issue #4: in the affected range (component model, fuel, epoch, pooling, WASI p2 all enabled). Patched to 48.0.5 on `main`, full gate green, CI success. Release tag pending a maintainer version decision and the release signing key; process clock runs to 2026-10-05. |
+
 ### Our commitments
 
 | Severity | Acknowledgement | Assessment | Patch target |

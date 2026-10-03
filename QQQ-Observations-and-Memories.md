@@ -35272,6 +35272,24 @@ in the reproduction — derived figures regenerate in dependency order
 fresh. → `.scratch/run_ci_checkers.py`,
 `tools/gen_backlog.py`, `tools/backlog.json`.
 
+## §O-534 — The release tool computes a version; it does not choose one
+
+Closing the advisory's release step asked for a tag, and `tools/release.py`
+computes the next version deterministically — `1.0.0`, from 684 untagged
+commits with breaking changes against a `0.0.0` manifest. Taking that number
+would declare QQQ 1.0 to close an incident ticket, contradicting the tree's
+own "every crate is technically beta" while the signing key that makes a
+release real is absent (the workflow refuses by design, and no secret is
+configured). The tool answers "what would the version be"; "should this
+commit BE that version" is a product decision, and no incident clock
+transfers it to whoever is on call. What shipped instead is everything
+inside agent authority: the patch green on `main`, the `SECURITY.md`
+advisory-feed entry, and the two named maintainer-owned blockers (version
+decision, `QQQ_RELEASE_KEY`) with the 2026-10-05 clock written next to
+them. Rule: automate the computation, never the declaration — a release tag
+is a promise about the future, and promises need an owner. →
+`tools/release.py`, `SECURITY.md`, `.github/workflows/release.yml`.
+
 ## §O-530 - The final tree gets its own bridge, and the sampler must not truncate
 
 The first monitored bridge ran on `853ebdf`, but the goal's final SHA is

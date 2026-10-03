@@ -35218,6 +35218,36 @@ hand-edited), gate51 compiled `wasmtime v48.0.5` and ran every suite
 green, `deny` reports advisories ok. → `Cargo.lock`, `crates/qqq-host/src/config.rs`,
 `docs/wasmtime-advisory-process.md`.
 
+## §O-532 — A tick whose evidence already ships is a recording act, and the tick still needs its own proof
+
+`GOV-005` (deprecation policy) and `OQ-012` (the window decision) were
+substance-complete the moment `CON-015` shipped — the ledger, the NN-8
+two-minor rule, and the both-gates enforcement all exist — but nothing
+said so, and two live sentences still claimed `CON-015` was open while
+`GOVERNANCE.md` pointed at "the open decision `OQ-012`". The bounded slice
+ticks both with `Done`/`Measured` lines quoting rerun checker output,
+corrects the three stale pointers, and proves the tick control itself:
+with `GOV-005`'s `Done` block stripped, `check_done_lines.py` fails naming
+only `GOV-005` (exit 1, `done-red.log`); restored byte-identical
+(SHA-256 equal, mtime explicitly bumped per §O-524), it passes (exit 0,
+`done-green.log`) — while `OQ-012` keeps its evidence throughout, so the
+red names exactly the injected defect. Two process notes: drafting the
+`GOV-005` block duplicated its `→ §2.8` pointer line, the precise defect
+class check [1] exists for — caught here by reading the diff before the
+checker ran, which is the review the checker backstops rather than
+replaces. And the stale prose had no checker at all (`check_doc_claims`
+reads only `qqq:claim` markers), so its correction is verified by reading,
+stated as such, never as checker coverage. Rule: ticking is a claim that
+names its evidence and its rerun date; a tick that only points at another
+item's evidence is a pointer, and pointers rot — which is what the three
+stale lines just demonstrated. Post-commit review (`crAE.log`, 6 files) returned one
+minor finding, valid on inspection: the corrected tier sentence kept the old "one minor
+release of notice" phrase beside the enforced two-minor window, reading as a competing
+minimum. Fixed by naming the NN-8 two minors as the operative window containing the
+one-minor promise. Rule: when correcting stale prose, remove the superseded quantity
+rather than hedging around it. → `QQQ-Checklist-V1.md`, `GOVERNANCE.md`,
+`tools/check_done_lines.py`.
+
 ## §O-530 - The final tree gets its own bridge, and the sampler must not truncate
 
 The first monitored bridge ran on `853ebdf`, but the goal's final SHA is

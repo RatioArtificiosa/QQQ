@@ -600,8 +600,15 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
 - [ ] **GOV-004** Define the RFC process for changes to `PRINCIPLES.md` and to published anchors.
   → §0.5 Identifier and anchor discipline
-- [ ] **GOV-005** Publish the deprecation policy with a minimum window (open question `OQ-012`).
+- [x] **GOV-005** Publish the deprecation policy with a minimum window (open question `OQ-012`).
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
+  → Done: `docs/deprecations.md` — the ledger format, the NN-8 two-minor minimum
+    window, and the replacement rule — enforced in both directions by
+    `tools/check_wit_deprecated.py`, wired into `.github/workflows/ci.yml` and
+    `docker/entrypoint.sh`. The window decision itself is `OQ-012`, ticked alongside.
+  → **Measured**: `DEPRECATION POLICY OK -- 0 deprecated item(s), ledger agrees in
+    both directions`; `ALL 7 WIT DEPRECATION FAULT INJECTIONS DETECTED` (re-verified
+    2026-10-02 after the 48.0.5 engine move).
 - [x] **GOV-006** Publish the security-response policy with target response and patch times.
   → Done: `SECURITY.md` — acknowledgement, assessment and patch targets by severity.
   → §7.2 Adversary model
@@ -1049,8 +1056,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → **Stated plainly:** the workspace is `0.0.0`, so these tiers describe the contract that comes
     into force at 1.0. Until then every crate is technically beta; the tier records the reviewed
     intent, which is why it is worth stating before it is enforceable. `CON-015` (deprecation
-    mechanics) remains open, so `stable`'s "one minor release of notice" is a convention rather
-    than a mechanism.
+    mechanics) is ticked and enforced, so `stable`'s notice period is a mechanism: the operative
+    window is the NN-8 two minors (`OQ-012`), which contains the "one minor release" promise
+    rather than competing with it.
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
   → **Partial, and the item stays open because 13 of the fifteen steps are not done.** What
@@ -1945,7 +1953,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     the manifest and lockfile by their published JSON Schemas via `gen_schemas.py --check`, and the
     error codes by the catalogue's round-trip test.
   → **What is not covered, named rather than implied:** `CON-015` (deprecation mechanics in WIT)
-    is open, so the `stable` tier's notice period is a convention rather than a mechanism; the
+    is ticked and enforced, so the `stable` tier's notice period is a mechanism; the
     workspace is `0.0.0`, so every tier describes intent that becomes enforceable at 1.0; and
     `qqq-registry` and `qqq-fabric` have no tier because they are not built in this repository.
 - [x] **CON-018** Implement the "no hidden global state" architecture test across all host interfaces.
@@ -5615,8 +5623,16 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.1 The three signals, plus one unique to QQQ
 - [ ] **OQ-011** Decide whether `qqq:ai` ships inside the V1 line or moves to V2.
   → §6.9 `qqq:ai` — local inference as a capability
-- [ ] **OQ-012** Decide the deprecation window: two minor versions, or a fixed time period.
+- [x] **OQ-012** Decide the deprecation window: two minor versions, or a fixed time period.
   → §2.8 NN-8 — Ecosystem Integrity and Long-Term Stewardship
+  → Done: Decision taken 2026-10-02: two minor versions, not a fixed time period.
+    The window is `Remove in` at least two minors after deprecation within the same
+    major version (`docs/deprecations.md`), enforced by `tools/check_wit_deprecated.py`
+    in both gates; a new major version satisfies the window. This ratifies the rule
+    the Proposal's §2.8 already states rather than inventing one.
+  → **Measured**: `DEPRECATION POLICY OK -- 0 deprecated item(s), ledger agrees in
+    both directions`; `ALL 7 WIT DEPRECATION FAULT INJECTIONS DETECTED` (same runs
+    as the `CON-015` tick, re-verified 2026-10-02 after the 48.0.5 engine move).
 
 ### AI — Inference capability (staged behind `OQ-011`)
 

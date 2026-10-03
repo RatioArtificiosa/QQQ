@@ -63,7 +63,7 @@ SemVer is a promise, not a convention.
 | Error codes | Never reused, never renumbered, never repurposed |
 | Rust APIs | Per crate stability tier (§4.3 of the proposal); `stable` crates follow SemVer |
 
-**Deprecation window:** two minor versions minimum, or the fixed period set by the open decision `OQ-012` — whichever is longer. Every deprecation ships with a machine-readable migration entry, so an agent can perform the migration autonomously.
+**Deprecation window:** two minor versions minimum, per the decided `OQ-012` (two minor versions, not a fixed period). Every deprecation ships with a machine-readable migration entry, so an agent can perform the migration autonomously.
 
 ## 6. Releases
 

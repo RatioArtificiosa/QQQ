@@ -2244,6 +2244,12 @@ fn add_cap_options(
             "--dry-run" => {}
             other => {
                 if TAKES_VALUE.contains(&other) {
+                    // A value-taking flag at the very end, with nothing after
+                    // it, is a missing value rather than a flag to skip over:
+                    // skipping would accept `add-cap --cap` as complete.
+                    if args.get(i + 1).is_none() {
+                        return Err(missing_value(other));
+                    }
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
@@ -4251,6 +4257,16 @@ mod tests {
         )
         .expect_err("unknown flag must fail");
         assert!(err.to_string().contains("--frobnicate"));
+    }
+
+    #[test]
+    fn add_cap_options_rejects_a_dangling_value_flag() {
+        // A value-taking flag with nothing after it is a missing value, not
+        // a flag to skip over: skipping would accept `add-cap --cap` as a
+        // complete invocation.
+        let err =
+            add_cap_options(&["--cap".to_owned()], false).expect_err("dangling --cap must fail");
+        assert!(err.to_string().contains("--cap"));
     }
 
     #[test]

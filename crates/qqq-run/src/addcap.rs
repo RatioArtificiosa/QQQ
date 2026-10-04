@@ -324,6 +324,16 @@ pub fn add_cap(manifest_path: &Path, opts: &AddCapOptions) -> Result<AddCapOutpu
     updated.push_str("# added by `qqqai add-cap`\n");
     updated.push_str(&stanza);
 
+    // Validated before the dry-run branch, not inside it: a rehearsal that
+    // reports success for an edit that would not parse is a lie about the
+    // write path, and the whole point of `--dry-run` is predicting it.
+    Manifest::parse(&updated).map_err(|e| {
+        Error::new(
+            ErrorCode::ManifestSchemaViolation,
+            format!("the edit would produce an invalid manifest: {e}"),
+        )
+    })?;
+
     let out = AddCapOutput {
         action: "add-cap".to_owned(),
         table: opts.table.clone(),
@@ -332,15 +342,6 @@ pub fn add_cap(manifest_path: &Path, opts: &AddCapOptions) -> Result<AddCapOutpu
         dry_run: opts.dry_run,
     };
     if !opts.dry_run {
-        // Validate before writing, mirroring `deps::write_atomically`'s
-        // guarantee through the public `write_manifest`: a result that does
-        // not parse never replaces a file that does.
-        Manifest::parse(&updated).map_err(|e| {
-            Error::new(
-                ErrorCode::ManifestSchemaViolation,
-                format!("the edit would produce an invalid manifest: {e}"),
-            )
-        })?;
         crate::deps::write_manifest(manifest_path, &updated)?;
     }
     Ok(out)

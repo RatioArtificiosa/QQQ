@@ -35430,7 +35430,12 @@ and only the compiler's `E0603` said so. The e2e through the built binary (JSON 
 byte-preserving append, dry-run writing nothing) is the proof the unit
 tests cannot give: parse→dispatch→file actually composed. Rule: for CLI
 surface, let the exhaustiveness machinery fail first and implement to
-green; never hand-track a registry the tree already tracks. →
+green; never hand-track a registry the tree already tracks. Post-commit
+review returned two findings, both valid and both fixed with tests: dry
+runs skipped result validation (a rehearsal must predict the write path,
+so the parse moved ahead of the branch), and a dangling value-flag was
+silently skipped (now a missing-value error, with `--manifest` covered
+beside `--cap` because they share the `TAKES_VALUE` path). →
 `crates/qqq-run/src/addcap.rs`, `crates/qqq-run/src/main.rs`,
 `crates/qqq-run/src/output.rs`, `QQQ-Checklist-V1.md` (`DX-019`).
 

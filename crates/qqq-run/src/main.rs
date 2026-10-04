@@ -4267,6 +4267,18 @@ mod tests {
         let err =
             add_cap_options(&["--cap".to_owned()], false).expect_err("dangling --cap must fail");
         assert!(err.to_string().contains("--cap"));
+        // Same branch, different flag: a dangling `--manifest` is the same
+        // defect through the shared `TAKES_VALUE` path.
+        let err = add_cap_options(
+            &[
+                "--cap".to_owned(),
+                "clock".to_owned(),
+                "--manifest".to_owned(),
+            ],
+            false,
+        )
+        .expect_err("dangling --manifest must fail");
+        assert!(err.to_string().contains("--manifest"));
     }
 
     #[test]

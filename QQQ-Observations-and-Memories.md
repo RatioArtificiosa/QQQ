@@ -35283,7 +35283,11 @@ record, with nothing writing in between. Fourth occurrence on the
 standalone `milestone_dashboard.py --record` (for the tick counts) ran
 after a green `llms --check` and only the dashboard was re-verified —
 never run a single derived-figure record alone; always the full
-`sync_docs --record`, then every `--check`. → `.scratch/run_ci_checkers.py`,
+`sync_docs --record`, then every `--check`. Fifth occurrence, newest
+mechanism: the verdict itself was truncated away — `Select-Object -Last 1`
+showed `OK llms.txt` (a per-file line) while the `DRIFT` verdict sat one
+line above unseen, locally and silently. Capture full check output, never
+the tail alone. → `.scratch/run_ci_checkers.py`,
 `tools/gen_backlog.py`, `tools/backlog.json`.
 
 ## §O-534 — The release tool computes a version; it does not choose one

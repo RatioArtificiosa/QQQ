@@ -28,6 +28,8 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod addcap;
+pub use addcap::{add_cap, stanza_for, AddCapOptions, AddCapOutput};
 pub mod audit;
 pub use audit::{AuditOutput, FindingOutput};
 pub mod aot;

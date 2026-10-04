@@ -3801,8 +3801,22 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §6.6 `qqq-run` — CLI and dev server
 - [ ] **DX-018** Implement the progressive-disclosure documentation tiers (Solo, Team, Fleet).
   → §2.7 NN-7 — Progressive Power, Safe Defaults
-- [ ] **DX-019** Implement `qqqai add-cap` writing the correct manifest stanza.
+- [x] **DX-019** Implement `qqqai add-cap` writing the correct manifest stanza.
   → §5.3 The manifest — `qqq.toml`
+  → Done: `qqqai add-cap --cap <table>` (`crates/qqq-run/src/addcap.rs`,
+    `CommandName::AddCap`) appends the minimal stanza for one of the six
+    capability tables, refuses unknown tables and duplicates without touching
+    the file, validates by re-parsing through the shared atomic write, and
+    supports `--dry-run`; `fs` additionally requires `--path` (must exist)
+    and `--mode`. Tables land with safe defaults (flags off, lists empty),
+    granting nothing until values are filled in — the command adds the
+    spelling, the operator adds the grant.
+  → **Measured**: 12 unit/integration tests + 4 CLI parse tests + 5 doctests
+    green (`cargo test -p qqq-run`, full lib 569/569); fault injection
+    (misspelled table) fails exactly the 2 stanza tests with 557 filtered;
+    `API EXAMPLES OK -- 2080 outstanding` (5 new decls, 5 new fences —
+    ratchet unmoved); `qqqai add-cap --cap dns` verified end to end through
+    the built binary (JSON envelope + byte-preserving append).
 - [ ] **DX-020** Implement the ten-minute script as an automated, CI-run acceptance test.
   → §12.1 The first ten minutes (a spec, not a wish)
 

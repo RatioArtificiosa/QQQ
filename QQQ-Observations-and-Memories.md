@@ -35414,6 +35414,26 @@ promote its exact bytes into the regression test — a retyped approximation
 can pass for a different reason, but the same bytes cannot. →
 `crates/qqq-host/src/config.rs`, `QQQ-Checklist-V1.md` (`DET-012`).
 
+## §O-542 — A new command is a checklist of checklists, and the tree keeps every one of them
+
+`DX-019` (`qqqai add-cap`) touched every registry the CLI maintains —
+`CommandName`, `all()`, spelling, summary, mutating flag, help group,
+dispatch, flags, JSON shape, described schema — and each registry caught
+its omission by failing: the schema match would not compile, the help test
+names the missing command, the brevity test counts the added line, the
+api-examples ratchet counted the new `pub mod`. The work was following the
+failures, not remembering the list. Two lessons with teeth: the ratchet
+counts `pub mod` as a declaration, so a new module owes a fifth example
+(the module tour doctest); and a reported-successful edit must be re-read in
+the file before building on it — one refactor edit did not take effect
+and only the compiler's `E0603` said so. The e2e through the built binary (JSON envelope,
+byte-preserving append, dry-run writing nothing) is the proof the unit
+tests cannot give: parse→dispatch→file actually composed. Rule: for CLI
+surface, let the exhaustiveness machinery fail first and implement to
+green; never hand-track a registry the tree already tracks. →
+`crates/qqq-run/src/addcap.rs`, `crates/qqq-run/src/main.rs`,
+`crates/qqq-run/src/output.rs`, `QQQ-Checklist-V1.md` (`DX-019`).
+
 ## §O-539 — The current HEAD gets its own bridge, and the burst repeats its timestamp
 
 `docker compose run --rm linux checks` on `14cb7ca` exited 0 after 2h54m

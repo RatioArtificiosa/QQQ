@@ -52,6 +52,8 @@ pub enum CommandName {
     Init,
     /// Add a dependency.
     Add,
+    /// Add a capability stanza to `qqq.toml`.
+    AddCap,
     /// Remove a dependency.
     Remove,
     /// Resolve and fetch dependencies.
@@ -120,6 +122,7 @@ impl CommandName {
             Self::New,
             Self::Init,
             Self::Add,
+            Self::AddCap,
             Self::Remove,
             Self::Install,
             Self::Update,
@@ -155,6 +158,7 @@ impl CommandName {
             Self::New => "new",
             Self::Init => "init",
             Self::Add => "add",
+            Self::AddCap => "add-cap",
             Self::Remove => "remove",
             Self::Install => "install",
             Self::Update => "update",
@@ -192,6 +196,7 @@ impl CommandName {
             Self::New => "Scaffold a new QQQ project with a manifest and a starter source file",
             Self::Init => "Add QQQ to an existing directory without overwriting files",
             Self::Add => "Add a dependency to qqq.toml and resolve it",
+            Self::AddCap => "Append a capability stanza to qqq.toml",
             Self::Remove => "Remove a dependency from qqq.toml",
             Self::Install => "Resolve, fetch and verify all dependencies",
             Self::Update => "Update dependencies within their semver ranges",
@@ -232,6 +237,7 @@ impl CommandName {
             Self::New
                 | Self::Init
                 | Self::Add
+                | Self::AddCap
                 | Self::Remove
                 | Self::Install
                 | Self::Update
@@ -844,6 +850,23 @@ static SCHEMA_FOR_OPENAPI: std::sync::LazyLock<serde_json::Value> =
         })
     });
 
+/// The `add-cap` payload: what was appended, where, and whether it was a rehearsal.
+/// Described rather than permissive for the same reason as `OpenAPI`: the shape
+/// is settled, and joining the permissive group would say otherwise.
+static SCHEMA_FOR_ADDCAP: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string"},
+            "table": {"type": "string"},
+            "manifest": {"type": "string"},
+            "stanza": {"type": "string"},
+            "dry_run": {"type": "boolean"}
+        },
+        "required": ["action", "table", "manifest", "stanza", "dry_run"]
+    })
+});
+
 /// The WIT interface names, for §8.3's `wit` section.
 ///
 /// Read from the registry in `qqq-abi` rather than listed here, because a hand-written list
@@ -947,6 +970,7 @@ pub fn command_schemas() -> Vec<CommandSchema> {
             // both. Joining the permissive group would say "we have not decided" about a shape
             // that is decided.
             CommandName::Openapi => SCHEMA_FOR_OPENAPI.clone(),
+            CommandName::AddCap => SCHEMA_FOR_ADDCAP.clone(),
         }
     }
 

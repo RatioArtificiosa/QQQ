@@ -293,6 +293,7 @@ const HELP_GROUPS: [(&str, &[CommandName]); 4] = [
             CommandName::New,
             CommandName::Init,
             CommandName::Add,
+            CommandName::AddCap,
             CommandName::Remove,
             CommandName::Install,
             CommandName::Update,
@@ -664,6 +665,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
         CommandName::Fmt => dispatch_style(name, args, &mut out, qqq_run::style::StyleVerb::Format),
         CommandName::Lint => dispatch_style(name, args, &mut out, qqq_run::style::StyleVerb::Lint),
         CommandName::Add => dispatch_add(name, args, &mut out),
+        CommandName::AddCap => dispatch_add_cap(name, args, flags, &mut out),
         CommandName::Remove => dispatch_remove(name, args, &mut out),
         CommandName::Install => dispatch_install(name, args, flags, &mut out),
         CommandName::Update => dispatch_update(name, args, flags, &mut out),
@@ -2203,6 +2205,104 @@ fn dispatch_add(name: CommandName, args: &[String], out: &mut Output<std::io::St
 
     with_manifest(name, out, args, |loaded| {
         qqq_run::deps::add(&loaded.path, table, &parsed.edit)
+    })
+}
+
+/// Decode `qqqai add-cap`'s flags: `--cap` (required), `--path` and `--mode`
+/// (`fs` only), `--dry-run`, `--manifest`.
+fn add_cap_options(
+    args: &[String],
+    dry_run: bool,
+) -> Result<qqq_run::addcap::AddCapOptions, qqq_core::Error> {
+    // `--manifest` takes a value consumed by `with_manifest`, not here — it is
+    // tracked only to skip the value rather than read it as the table.
+    const TAKES_VALUE: [&str; 4] = ["--manifest", "--cap", "--path", "--mode"];
+
+    let mut table: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut mode: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--cap" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                table = Some(v.clone());
+                i += 1;
+            }
+            "--path" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                path = Some(v.clone());
+                i += 1;
+            }
+            "--mode" => {
+                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                mode = Some(v.clone());
+                i += 1;
+            }
+            "--dry-run" => {}
+            other => {
+                if TAKES_VALUE.contains(&other) {
+                    i += 1;
+                } else if other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unknown flag `{other}` for `add-cap`"),
+                    )
+                    .with_remediation(
+                        "`add-cap` accepts --cap, --path, --mode, --dry-run and --manifest",
+                    ));
+                } else {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("unexpected argument `{other}` for `add-cap`"),
+                    )
+                    .with_remediation(
+                        "pass the table with --cap, for example: qqqai add-cap --cap clock",
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let Some(table) = table else {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`add-cap` needs a capability table",
+        )
+        .with_remediation(format!(
+            "for example: {} add-cap --cap clock",
+            qqq_core::BINARY_NAME
+        )));
+    };
+
+    Ok(qqq_run::addcap::AddCapOptions {
+        table,
+        path,
+        mode,
+        dry_run,
+    })
+}
+
+/// Dispatch `qqqai add-cap`.
+fn dispatch_add_cap(
+    name: CommandName,
+    args: &[String],
+    flags: GlobalFlags,
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let opts = match add_cap_options(args, flags.dry_run()) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    with_manifest(name, out, args, |loaded| {
+        qqq_run::addcap::add_cap(&loaded.path, &opts)
     })
 }
 
@@ -4119,6 +4219,46 @@ mod tests {
             }
             other => panic!("expected a command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_add_cap_action() {
+        let inv = action_of(&["add-cap", "--cap", "clock"]);
+        match inv {
+            Action::Command { name, args } => {
+                assert_eq!(name, CommandName::AddCap);
+                assert_eq!(args, vec!["--cap", "clock"]);
+            }
+            other => panic!("expected a command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_cap_options_requires_cap() {
+        let err = add_cap_options(&[], false).expect_err("missing --cap must fail");
+        assert!(err.to_string().contains("capability table"));
+    }
+
+    #[test]
+    fn add_cap_options_rejects_unknown_flags() {
+        let err = add_cap_options(
+            &[
+                "--cap".to_owned(),
+                "clock".to_owned(),
+                "--frobnicate".to_owned(),
+            ],
+            false,
+        )
+        .expect_err("unknown flag must fail");
+        assert!(err.to_string().contains("--frobnicate"));
+    }
+
+    #[test]
+    fn add_cap_options_carries_dry_run() {
+        let opts = add_cap_options(&["--cap".to_owned(), "dns".to_owned()], true)
+            .expect("valid flags must parse");
+        assert_eq!(opts.table, "dns");
+        assert!(opts.dry_run);
     }
 
     /// Global flags are recognised **anywhere** on the command line, including

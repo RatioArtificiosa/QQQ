@@ -35418,6 +35418,25 @@ promote its exact bytes into the regression test — a retyped approximation
 can pass for a different reason, but the same bytes cannot. →
 `crates/qqq-host/src/config.rs`, `QQQ-Checklist-V1.md` (`DET-012`).
 
+## §O-543 — A benchmark gate that fails and passes on identical content is measuring the runner
+
+`PERF-020` on one SHA went fail, green, fail, fail, green across five
+attempts with no tree change between any of them: `hello` +103%, clean,
+`multi` −2.5%, `hello` +0.6%, `hello` +9.7%, on different shared runners,
+each run matched to its reviewed per-class baseline. The artifacts settle
+it: the failing attempt's own three samples spread 549k→740k (35%) while
+the baseline it compared against spans 5%, and the harness prints its own
+disclaimers every run (client scheduling cost included; `Connection:
+close` per request). A 25%-tolerance gate on n=3 medians cannot survive a
+35%-spread host — and the change under test has zero hot-path overlap
+(CLI surface only, verified by diff; no compiled doc embeds the changed
+files), so there is no mechanism for a real shift, only variance. Rule:
+rerun twice, then read the artifacts instead of rerunning blindly —
+download the candidates, compare the vectors and the within-run spread
+before the next click; a flake disposition needs the artifact analysis,
+not just a green rerun. → `tools/run_perf_regression.py`,
+`.github/perf/baseline.json`.
+
 ## §O-542 — A new command is a checklist of checklists, and the tree keeps every one of them
 
 `DX-019` (`qqqai add-cap`) touched every registry the CLI maintains —

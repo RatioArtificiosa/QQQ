@@ -972,6 +972,8 @@ cmd_checks() {
     python3 tools/check_lifecycle_counts.py --self-test
     python3 tools/check_error_catalogue.py
     python3 tools/check_error_catalogue.py --self-test
+    python3 tools/check_error_all.py
+    python3 tools/check_error_all.py --self-test
     python3 tools/check_wit_reference.py
     python3 tools/check_wit_reference.py --self-test
     python3 tools/check_glossary_usage.py

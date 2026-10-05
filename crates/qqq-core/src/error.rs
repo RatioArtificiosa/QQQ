@@ -237,6 +237,18 @@ pub enum ErrorCode {
     /// **Remediation:** raise `limits.max_subrequests` if the fan-out is
     /// intended, or fix the guest's loop if it is not.
     SubrequestLimitExceeded = 3008,
+    /// The guest's response failed validation: an illegal status, a poisoned
+    /// header, or a breached size cap.
+    ///
+    /// **Distinct from [`Self::GuestTrap`] on purpose.** A trap means the
+    /// guest crashed mid-execution; this code means the guest *finished* and
+    /// handed back bytes the server refuses to write — a smuggling attempt or
+    /// a serializer bug, never an execution fault. The response is replaced
+    /// with a host-rendered 502, and the original bytes never reach the wire.
+    ///
+    /// **Remediation:** this is a guest bug — fix the status, headers, or
+    /// sizes the guest returned.
+    GuestResponseRefused = 3009,
 
     // -- 4xxx: capability denials --------------------------------------------
     /// The requested capability is not granted by any configuration layer.
@@ -457,6 +469,7 @@ impl ErrorCode {
             Self::GuestPanic,
             Self::GuestOutOfBounds,
             Self::SubrequestLimitExceeded,
+            Self::GuestResponseRefused,
             Self::CapabilityOutOfScope,
             Self::CapabilityWideningRefused,
             Self::CapabilityDenied,
@@ -468,6 +481,7 @@ impl ErrorCode {
             Self::VersionUnsatisfiable,
             Self::DependencyCapabilityEscalation,
             Self::StoreCorrupted,
+            Self::DependencyNotFound,
             Self::InstancePoolExhausted,
             Self::ListenerBindFailed,
             Self::ComponentLoadFailed,

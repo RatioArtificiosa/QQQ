@@ -242,6 +242,16 @@ logs and issue trackers reference them indefinitely.
 { "code": "QQQ-3008" }
 ```
 
+### `QQQ-3009` — `GuestResponseRefused`
+
+**Cause.** The guest's response failed validation: an illegal status, a poisoned header, or a breached size cap.
+
+**Remediation.** This is a guest bug — fix the status, headers, or sizes the guest returned.
+
+```json
+{ "code": "QQQ-3009" }
+```
+
 ## Runtime execution
 
 ### `QQQ-4001` — `CapabilityOutOfScope`

@@ -35459,6 +35459,22 @@ run them all locally; the second red push is the tax on the first
 assumption. → `docs/agent-cookbook.md`, `docs/errors.md`,
 `llms-full.txt`, `tools/check_agent_cookbook.py`.
 
+## §O-550 — Every release re-baselines every CPU class it meets
+
+The fourth `PERF-020` "no reviewed baseline" red is the version-bump
+interaction the process predicts: the runner identity includes the
+`qqqai` version, so 0.1.1 retired all five 0.0.0 baselines at once, and
+the fleet then re-deals CPU classes at random — `7763/0.1.1` was
+recorded first (green on one push), `9V74/0.1.1` surfaced on the next.
+The candidate deltas rule out a real regression before anything is
+recorded: same-CPU medians within −14%/+13%/+0%/−1% of the 0.0.0 entry
+with candidate samples inside the old spreads, tight within-run spread,
+commit == HEAD, 3 samples, same misses and measured sets. The rule this
+instance adds: after a version bump, EVERY new CPU class fails once
+before it passes — budget for up to N reds per release where N is the
+fleet size, and treat each recording as routine (deltas checked,
+candidate committed) rather than an incident. → `.github/perf/baseline.json`.
+
 ## §O-544 — A lint can be half-wrong, and least-privilege still needs the write bit
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

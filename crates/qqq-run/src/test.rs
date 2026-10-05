@@ -597,7 +597,7 @@ fn run_once(workdir: &Path, test: &DiscoveredTest) -> (bool, String) {
 ///
 /// The first version listed the prefixes it knew about — `Compiling`,
 /// `Finished`, `Running` — which worked locally and **failed on CI**. Under
-/// `cargo test --verbose`, which CI runs, cargo emits `Fresh <crate> v0.0.0
+/// `cargo test --verbose`, which CI runs, cargo emits `Fresh <crate> v0.1.1
 /// (...)` and a `Finished ... in 0.47s` line that the nested invocation had not
 /// produced locally, because nothing was fresh. The determinism check then
 /// reported a divergence in lines that measure the *build*, not the test.
@@ -1637,7 +1637,7 @@ benches::throughput: benchmark
     #[test]
     fn verbose_cargo_bookkeeping_is_ignored() {
         let verbose = concat!(
-            "       Fresh qqq-run v0.0.0 (E:\\QQQ\\crates\\qqq-run)\n",
+            "       Fresh qqq-run v0.1.1 (E:\\QQQ\\crates\\qqq-run)\n",
             "    Finished `test` profile [optimized + debuginfo] target(s) in 0.47s\n",
             "     Running unittests src/lib.rs (target/debug/deps/app-1.exe)\n",
             "\n",
@@ -1755,7 +1755,7 @@ benches::throughput: benchmark
     /// starts with one is not.
     #[test]
     fn the_verb_match_requires_a_word_boundary() {
-        assert!(is_runner_bookkeeping("Fresh qqq-run v0.0.0"));
+        assert!(is_runner_bookkeeping("Fresh qqq-run v0.1.1"));
         assert!(is_runner_bookkeeping("Finished `test` profile"));
         // `Freshly` is not the verb `Fresh`.
         assert!(!is_runner_bookkeeping(

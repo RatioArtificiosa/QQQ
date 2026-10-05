@@ -16,7 +16,7 @@ categories = ["wasm", "development-tools"]
 workspace = true
 
 [dependencies]
-qqq-core = { path = "../qqq-core", version = "0.0.0" }
+qqq-core = { path = "../qqq-core", version = "0.1.1" }
 # The same `gimli` major version Wasmtime 48 already resolves, so adding this
 # crate does not pull a second copy of the DWARF stack into the build. A
 # different major would duplicate it silently — the kind of dependency growth

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.1 - 2026-10-05
+
+### Security
+
+- **deps**: Wasmtime 48.0.3 to 48.0.5 for RUSTSEC-2026-0321 through RUSTSEC-2026-0327
+  (`ENGINE_VERSION` 48.0.3 to 48.0.5; `wasmtime-wasi-http` documented negative,
+  not in the resolve) — triaged in issue #4, patched in `37c3636`
+- **deps**: yanked transitive `yoke-derive` 0.8.3 to 0.8.4 (`Cargo.lock` only,
+  Wasmtime stays at 48) — triaged in issue #3, patched in `de908e7`
+
 ## v0.1.0 - 2026-09-24
 
 ### Added

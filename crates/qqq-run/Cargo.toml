@@ -20,12 +20,12 @@ name = "qqqai"
 path = "src/main.rs"
 
 [dependencies]
-qqq-core = { path = "../qqq-core", version = "0.0.0" }
-qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
-qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
+qqq-core = { path = "../qqq-core", version = "0.1.1" }
+qqq-cap = { path = "../qqq-cap", version = "0.1.1" }
+qqq-pkg = { path = "../qqq-pkg", version = "0.1.1" }
 sha2 = { workspace = true }
-qqq-host = { path = "../qqq-host", version = "0.0.0" }
-qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
+qqq-host = { path = "../qqq-host", version = "0.1.1" }
+qqq-abi = { path = "../qqq-abi", version = "0.1.1" }
 # The edge that makes `[server]` reachable.
 #
 # `qqq-cap` models the manifest's route table and `qqq-serve` owns the router, and
@@ -34,13 +34,13 @@ qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
 # `tools/check_topology.py` rejects it. `qqq-run` is above both, which makes it the
 # only place in this workspace where a manifest can be turned into a router -- and the
 # right place, because converting intent into a running server is orchestration.
-qqq-serve = { path = "../qqq-serve", version = "0.0.0" }
+qqq-serve = { path = "../qqq-serve", version = "0.1.1" }
 # The transport primitives `qqqai serve` binds with: `ListenAddr` and `Shutdown`.
 #
 # `qqq-serve` does not re-export them, so the CLI needs its own edge. The direction
 # is legal: `qqq-io` is position 4 in §4.3's order and `qqq-run` is position 7, so
 # the edge points downward.
-qqq-io = { path = "../qqq-io", version = "0.0.0" }
+qqq-io = { path = "../qqq-io", version = "0.1.1" }
 # The benchmark harness (`CLI-013`). `qqq-bench` sits at position 1 in §4.3's
 # order, immediately above `qqq-core`, so an edge from `qqq-run` is downward and
 # legal.
@@ -53,8 +53,8 @@ qqq-io = { path = "../qqq-io", version = "0.0.0" }
 # *command* in `qqq-run` and the *measurement* in `qqq-bench` leaves the harness
 # usable without a CLI, which is what `§9.1` means when it requires the benchmark
 # harness be open source and independently runnable.
-qqq-bench = { path = "../qqq-bench", version = "0.0.0" }
-qqq-debug = { path = "../qqq-debug", version = "0.0.0" }
+qqq-bench = { path = "../qqq-bench", version = "0.1.1" }
+qqq-debug = { path = "../qqq-debug", version = "0.1.1" }
 # The detached trap report path (`HOST-009`).
 #
 # `qqq-host` builds a trap's frames two ways and only one was ever wired: while an
@@ -99,5 +99,5 @@ wasmtime = { workspace = true }
 serde_json = { workspace = true }
 # The `verify` tests sign with the project's own signer rather than embedding a `.sig`
 # fixture, so the pair cannot drift: a stored blob would be a second copy of the format.
-qqq-pkg = { path = "../qqq-pkg", version = "0.0.0" }
+qqq-pkg = { path = "../qqq-pkg", version = "0.1.1" }
 ed25519-dalek = { workspace = true }

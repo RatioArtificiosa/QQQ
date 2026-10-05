@@ -16,7 +16,7 @@ categories = ["wasm", "development-tools"]
 workspace = true
 
 [dependencies]
-qqq-core = { path = "../qqq-core", version = "0.0.0" }
+qqq-core = { path = "../qqq-core", version = "0.1.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

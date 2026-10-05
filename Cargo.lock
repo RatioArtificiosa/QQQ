@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-abi"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "qqq-cap",
  "serde",
@@ -1457,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-bench"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-cap"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "qqq-core",
  "serde",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-core"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-debug"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "gimli",
  "qqq-core",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-host"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-io"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "qqq-core",
  "tokio",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-pkg"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "qqq-core",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-run"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "qqq-abi",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-serve"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "qqq-core",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "qqq-sys"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "landlock",
  "libc",

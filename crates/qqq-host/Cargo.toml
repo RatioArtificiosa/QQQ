@@ -16,9 +16,9 @@ categories = ["wasm", "development-tools"]
 workspace = true
 
 [dependencies]
-qqq-core = { path = "../qqq-core", version = "0.0.0" }
-qqq-cap = { path = "../qqq-cap", version = "0.0.0" }
-qqq-abi = { path = "../qqq-abi", version = "0.0.0" }
+qqq-core = { path = "../qqq-core", version = "0.1.1" }
+qqq-cap = { path = "../qqq-cap", version = "0.1.1" }
+qqq-abi = { path = "../qqq-abi", version = "0.1.1" }
 wasmtime = { workspace = true }
 # The WASI host implementation (`HOST-017`).
 #

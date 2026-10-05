@@ -1053,7 +1053,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     **fault injections** (flipping `qqq-pkg` to `stable`, and deleting a `# Tier:` line) each
     fail with the specific message and restore byte-for-byte from SHA-256. Wired into `ci.yml`
     and `docker/entrypoint.sh`.
-  → **Stated plainly:** the workspace is `0.0.0`, so these tiers describe the contract that comes
+  → **Stated plainly:** the workspace is `0.1.1`, so these tiers describe the contract that comes
     into force at 1.0. Until then every crate is technically beta; the tier records the reviewed
     intent, which is why it is worth stating before it is enforceable. `CON-015` (deprecation
     mechanics) is ticked and enforced, so `stable`'s notice period is a mechanism: the operative
@@ -1954,7 +1954,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     error codes by the catalogue's round-trip test.
   → **What is not covered, named rather than implied:** `CON-015` (deprecation mechanics in WIT)
     is ticked and enforced, so the `stable` tier's notice period is a mechanism; the
-    workspace is `0.0.0`, so every tier describes intent that becomes enforceable at 1.0; and
+    workspace is `0.1.1`, so every tier describes intent that becomes enforceable at 1.0; and
     `qqq-registry` and `qqq-fabric` have no tier because they are not built in this repository.
 - [x] **CON-018** Implement the "no hidden global state" architecture test across all host interfaces.
   → Done: `tools/check_no_ambient.py` enforces §2.5's rule across the runtime

@@ -608,7 +608,7 @@ impl GuestApp {
             }
         }
 
-        Ok(to_served(&outcome?))
+        to_served(&outcome?)
     }
 
     /// Create an instance for `request`, call the guest, and return its answer.
@@ -878,31 +878,153 @@ impl GuestApp {
     }
 }
 
+/// Maximum guest response headers: 128.
+///
+/// Mirrors the request side's count discipline at twice the request cap — a
+/// guest builds responses programmatically, so legitimate use clusters higher
+/// than hand-written requests, but unbounded is how a compromised guest turns
+/// the serializer into an allocator.
+const MAX_RESPONSE_HEADERS: usize = 128;
+
+/// Maximum bytes of one guest response header (name plus value).
+///
+/// Mirrors the 8 KiB request-side line cap: a header that does not fit in the
+/// same budget going out as coming in is either a bug or an exfiltration
+/// attempt chunked across headers.
+const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
+
+/// Whether a status code has meaning on the wire: `100`–`599`.
+///
+/// Anything else — `99`, `600`, let alone wider integers — has no reason
+/// phrase and no defined client behavior. Serializing it anyway would emit a
+/// status line no client can interpret.
+#[must_use]
+pub fn is_valid_guest_status(status: u16) -> bool {
+    (100..=599).contains(&status)
+}
+
+/// Whether a header is the serializer's to write, never the guest's.
+///
+/// `Content-Length`, `Connection`, and `Transfer-Encoding` define the
+/// framing, and `write_response` skips them when present — so a guest setting
+/// them is either confused or attempting to desynchronize the stream. Either
+/// way the answer is refusal, not silent dropping: dropping would hide the
+/// attempt from everyone reading the audit trail.
+#[must_use]
+pub fn is_host_controlled_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+}
+
+/// Escape a guest header value for the wire.
+///
+/// Trims OWS, then percent-encodes `%` first and `\r`/`\n` after — so `%0D`
+/// in input becomes `%250D` rather than decoding back into a split. The
+/// result never contains a raw CR or LF, which is the property that matters:
+/// a value that cannot terminate its own line cannot inject the next one.
+///
+/// ```rust
+/// use qqq_run::guest_handler::escape_header_value;
+///
+/// assert_eq!(escape_header_value("a\r\nEvil: x"), "a%0D%0AEvil: x");
+/// assert_eq!(escape_header_value("%0D"), "%250D");
+/// assert_eq!(escape_header_value("  padded  "), "padded");
+/// ```
+#[must_use]
+pub fn escape_header_value(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut out = String::with_capacity(trimmed.len());
+    for c in trimmed.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Convert a guest's response into the one the server writes.
 ///
-/// # Why a non-UTF-8 header value is refused rather than lossily converted
+/// # Why refusal replaces silent repair here
 ///
-/// The guest's header value is `list<u8>`; the server's is a `String`. A lossy
-/// conversion would replace invalid bytes with `U+FFFD`, producing a **valid**
-/// response carrying a header the guest never sent — a silent corruption. So a
-/// value that is not UTF-8 is dropped, and the reason is recorded here rather
-/// than in a comment nobody reads: a header the guest sent and the client did not
-/// receive is a fact worth knowing, and the alternative is worse.
-#[must_use]
-pub fn to_served(response: &abi::Response) -> Response {
-    Response {
-        status: response.status,
-        headers: response
-            .headers
-            .iter()
-            .filter_map(|h| {
-                std::str::from_utf8(&h.value)
-                    .ok()
-                    .map(|v| (h.name.clone(), v.to_owned()))
-            })
-            .collect(),
-        body: response.body.clone(),
+/// An earlier version dropped non-UTF-8 header *values* (kept: a lossy
+/// conversion would emit a header the guest never sent). `F-02` extends the
+/// same principle to the whole response: a status with no wire meaning, a
+/// framing header the serializer owns, or an oversized header set fails the
+/// conversion, and the caller renders its 502 instead. Nothing guest-controlled
+/// reaches serialization unvalidated — the serializer writes what it is
+/// given, so this boundary is the only place the check can live.
+///
+/// # Errors
+///
+/// `QQQ-3009` when the status, a header, or the sizes fail validation. The
+/// file (and its tests) that define the wire contract live in `qqq-serve`;
+/// this function enforces the guest side of it.
+pub fn to_served(response: &abi::Response) -> std::result::Result<Response, Error> {
+    if !is_valid_guest_status(response.status) {
+        return Err(Error::new(
+            ErrorCode::GuestResponseRefused,
+            format!(
+                "guest status {} has no meaning on the wire (100-599 only)",
+                response.status
+            ),
+        ));
     }
+    if response.headers.len() > MAX_RESPONSE_HEADERS {
+        return Err(Error::new(
+            ErrorCode::GuestResponseRefused,
+            format!(
+                "guest sent {} headers, over the {MAX_RESPONSE_HEADERS} cap",
+                response.headers.len()
+            ),
+        ));
+    }
+    let mut headers = Vec::with_capacity(response.headers.len());
+    for h in &response.headers {
+        // Non-UTF-8 values keep the historical drop: a lossy conversion would
+        // emit U+FFFD, producing a valid response carrying a header the guest
+        // never sent — a silent corruption. Pinned by
+        // `a_non_utf8_header_is_dropped_rather_than_corrupted`; F-02 deliberately
+        // does not change it, because dropping a single header is fail-safe
+        // while refusing the whole response over one bad value would turn a
+        // logging header into a denial of service on the happy path.
+        let Ok(value) = std::str::from_utf8(&h.value) else {
+            continue;
+        };
+        // Names are trimmed here, unlike on the parse path: parsing must not
+        // repair (`Host : x` hides smuggling), but emitting normalizes — the
+        // wire always carries the trimmed form either way, so nothing is
+        // hidden from anyone reading the response.
+        let name = h.name.trim();
+        if !qqq_serve::http1::is_valid_header_name(name) {
+            return Err(Error::new(
+                ErrorCode::GuestResponseRefused,
+                format!("guest header name `{name}` is not a valid token"),
+            ));
+        }
+        if is_host_controlled_header(name) {
+            return Err(Error::new(
+                ErrorCode::GuestResponseRefused,
+                format!("guest must not set host-controlled header `{name}`"),
+            ));
+        }
+        let value = escape_header_value(value.trim());
+        if name.len() + value.len() > MAX_RESPONSE_HEADER_BYTES {
+            return Err(Error::new(
+                ErrorCode::GuestResponseRefused,
+                format!("guest header `{name}` exceeds {MAX_RESPONSE_HEADER_BYTES} bytes"),
+            ));
+        }
+        headers.push((name.to_owned(), value));
+    }
+    Ok(Response {
+        status: response.status,
+        headers,
+        body: response.body.clone(),
+    })
 }
 
 /// The response for a failed guest call.
@@ -1541,7 +1663,7 @@ mod tests {
             }],
             body: b"created".to_vec(),
         };
-        let served = to_served(&guest);
+        let served = to_served(&guest).expect("valid guest response converts");
         assert_eq!(served.status, 201);
         assert_eq!(served.headers.len(), 1);
         assert_eq!(served.headers[0].0, "Location");
@@ -1567,7 +1689,7 @@ mod tests {
             ],
             body: Vec::new(),
         };
-        let served = to_served(&guest);
+        let served = to_served(&guest).expect("other headers still convert");
         assert_eq!(
             served.headers.len(),
             1,
@@ -1591,8 +1713,153 @@ mod tests {
             }],
             body: Vec::new(),
         };
-        let served = to_served(&guest);
+        let served = to_served(&guest).expect("valid UTF-8 still converts");
         assert_eq!(served.headers.len(), 1);
         assert_eq!(served.headers[0].1, "café");
+    }
+
+    fn guest_response(status: u16, headers: Vec<(&str, &[u8])>) -> abi::Response {
+        abi::Response {
+            status,
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| abi::Header {
+                    name: name.to_owned(),
+                    value: value.to_vec(),
+                })
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    /// **Guest statuses outside 100–599 are refused, not serialized.**
+    ///
+    /// Audit `F-02`: a status the wire has no meaning for (99, 600, let alone
+    /// 99999) must never reach the serializer — there is no reason phrase for
+    /// it and no client behavior defined. Refusal here becomes the 502 the
+    /// caller already renders for failed guests.
+    #[test]
+    fn f02_invalid_status_is_refused() {
+        for status in [0, 99, 600, 999] {
+            let err = to_served(&guest_response(status, vec![]))
+                .expect_err(&format!("status {status} must be refused"));
+            assert!(
+                matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
+                "wrong code: {err:?}"
+            );
+        }
+        for status in [100, 200, 201, 404, 500, 599] {
+            let served = to_served(&guest_response(status, vec![]))
+                .unwrap_or_else(|e| panic!("status {status} must convert: {e:?}"));
+            assert_eq!(served.status, status);
+        }
+    }
+
+    /// **Host-controlled framing headers from a guest are refused.**
+    ///
+    /// `Content-Length`, `Connection`, and `Transfer-Encoding` are the
+    /// serializer's to write (it skips them when present); a guest setting
+    /// them is either confused or attempting to desynchronize the stream.
+    /// Refusing the whole response fails closed where silently dropping would
+    /// hide the attempt.
+    #[test]
+    fn f02_host_controlled_headers_are_refused() {
+        for name in ["Content-Length", "connection", "TRANSFER-ENCODING"] {
+            let err = to_served(&guest_response(200, vec![(name, b"0")]))
+                .expect_err(&format!("{name} from a guest must be refused"));
+            assert!(
+                matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
+                "wrong code: {err:?}"
+            );
+        }
+        // Ordinary headers are unaffected.
+        let served = to_served(&guest_response(200, vec![("Content-Type", b"text/plain")]))
+            .expect("ordinary header converts");
+        assert_eq!(served.headers[0].0, "Content-Type");
+    }
+
+    /// **Oversized header sets are refused before serialization.**
+    ///
+    /// 129 headers where 128 are allowed, and a single value over 8 KiB:
+    /// both must fail with the response refusal, because the serializer
+    /// writes what it is given without further checks.
+    #[test]
+    fn f02_oversized_headers_are_refused() {
+        let many: Vec<(String, Vec<u8>)> = (0..129)
+            .map(|i| (format!("x-pad-{i}"), b"v".to_vec()))
+            .collect();
+        let guest = abi::Response {
+            status: 200,
+            headers: many
+                .into_iter()
+                .map(|(name, value)| abi::Header { name, value })
+                .collect(),
+            body: Vec::new(),
+        };
+        to_served(&guest).expect_err("129 headers must be refused");
+        let big_value = vec![b'v'; 8193];
+        let big = guest_response(200, vec![("x-big", &big_value)]);
+        to_served(&big).expect_err("over-long value must be refused");
+    }
+
+    /// **CR and LF in values are escaped, never emitted raw.**
+    ///
+    /// A `value` containing `\r\nEvil: x` would split the response on the
+    /// wire. Percent-encoding (with `%` itself encoded first, so `%0D` in
+    /// input becomes `%250D` rather than a smuggled decode) keeps the
+    /// response intact: no raw CR or LF may survive in any emitted header.
+    #[test]
+    fn f02_crlf_in_values_is_escaped_not_emitted() {
+        let served = to_served(&guest_response(200, vec![("x-note", b"a\r\nEvil: x")]))
+            .expect("CRLF value converts with escaping");
+        assert_eq!(served.headers[0].1, "a%0D%0AEvil: x");
+        for (_, value) in &served.headers {
+            assert!(
+                !value.contains('\r') && !value.contains('\n'),
+                "raw CR/LF must never survive: {value:?}"
+            );
+        }
+        // `%0D` in input double-encodes: it must not decode back.
+        let served =
+            to_served(&guest_response(200, vec![("x-note", b"%0D")])).expect("percent converts");
+        assert_eq!(served.headers[0].1, "%250D");
+    }
+
+    /// **A poisoned guest response becomes a clean 502 carrying none of the poison.**
+    ///
+    /// End to end at the conversion boundary: `to_served` refuses, the
+    /// failure path renders 502, and the wire bytes contain neither the evil
+    /// header nor the illegal status. Zero guest bytes are written before
+    /// validation because validation happens before serialization.
+    #[test]
+    fn f02_malicious_guest_becomes_a_clean_502() {
+        use qqq_serve::http1::Version;
+        use qqq_serve::response::write_response;
+        let guest = abi::Response {
+            status: 99,
+            headers: vec![abi::Header {
+                name: "x-evil".to_owned(),
+                value: b"a\r\nInjected: yes".to_vec(),
+            }],
+            body: b"poison-body".to_vec(),
+        };
+        let err = to_served(&guest).expect_err("poisoned response must fail");
+        let failure = failure_response(&err);
+        assert_eq!(failure.status, 502);
+        let wire = String::from_utf8(write_response(&failure, Version::Http11, false, false))
+            .expect("error responses are valid UTF-8");
+        assert!(wire.starts_with("HTTP/1.1 502 "), "{wire}");
+        assert!(
+            !wire.contains("x-evil"),
+            "guest header must not reach the wire"
+        );
+        assert!(
+            !wire.contains("poison-body"),
+            "guest body must not reach the wire"
+        );
+        assert!(
+            !wire.contains("HTTP/1.1 99"),
+            "guest status must not become the response status"
+        );
     }
 }

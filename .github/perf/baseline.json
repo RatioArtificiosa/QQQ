@@ -571,5 +571,87 @@
    "samples": 3,
    "schema_version": 1
   }
+,
+  {
+   "budget_misses": [
+    "hello",
+    "json",
+    "multi",
+    "tailp99"
+   ],
+   "commit": "531c8ec200d955317b20b84746d905934716846a",
+   "does_not_measure": [
+    "run on AMD EPYC 9V74 80-Core Processor by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+    "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+    "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+   ],
+   "environment": {
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "kernel": "6.17.0-1022-azure",
+    "memory_bytes": 16766414848,
+    "os": "linux x86_64",
+    "physical_cores": 4,
+    "toolchains": {
+     "qqqai": "0.1.1",
+     "rustc": "unknown"
+    }
+   },
+   "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+   "measured_budget_items": [
+    "PERF-002",
+    "PERF-010",
+    "PERF-011"
+   ],
+   "metrics": {
+    "hello": {
+     "median": 469046.0,
+     "metric": "p99_nanos",
+     "samples": [
+      405120.0,
+      469046.0,
+      489707.0
+     ]
+    },
+    "json": {
+     "median": 2258.3335707124206,
+     "metric": "requests_per_second",
+     "samples": [
+      2431.602093878338,
+      2258.3335707124206,
+      2158.6144990688595
+     ]
+    },
+    "multi": {
+     "median": 16299.623192035964,
+     "metric": "requests_per_second",
+     "samples": [
+      15821.716992659278,
+      16534.778633116493,
+      16299.623192035964
+     ]
+    },
+    "tailp99": {
+     "median": 4746230.0,
+     "metric": "p99_nanos",
+     "samples": [
+      4796686.0,
+      4742824.0,
+      4746230.0
+     ]
+    }
+   },
+   "not_measured_budget_items": [
+    "PERF-003",
+    "PERF-004",
+    "PERF-007",
+    "PERF-008",
+    "PERF-009",
+    "PERF-012",
+    "PERF-013"
+   ],
+   "profile": "ubuntu-latest",
+   "samples": 3,
+   "schema_version": 1
+  }
   ]
 }

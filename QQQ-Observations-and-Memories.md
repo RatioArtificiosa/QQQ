@@ -35378,6 +35378,155 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-545 — The socket test caught the wiring bug the unit tests could not see
+
+`F-05`'s `head_end_from` was correct and its split test green, but the
+server-loop cursor computed the resume point from the POST-extend buffer
+length instead of the pre-extend frontier — skipping exactly the starts a
+full head arriving in one read needs, so the loop missed its own
+terminator and the peer "vanished". The unit tests could not see it: they
+test the function, and the bug was in the CALLER's arithmetic. The socket
+dribble test through `read_head` failed immediately, the raw-socket
+isolation proved bytes flow fine, and counting the 64-byte head by hand
+showed the skipped range. The fault-injection round then re-proved it in
+reverse (post-extend resume → exactly the socket test red, 706 filtered).
+Rule: for resume/cursor logic, the unit test proves the function and only
+a real-path test proves the wiring — and when the real-path test fails,
+count the bytes by hand before theorizing about the runtime. →
+`crates/qqq-serve/src/server.rs`, `crates/qqq-serve/src/http1.rs`.
+
+## §O-546 — Strictness has a direction: parse-side refusal, emit-side normalization
+
+`F-04` removes name-trimming (a space before the colon repaired into
+validity) while `F-02` keeps value-trimming on emit — and both are right,
+because the directions differ. Parsing must not repair: a repaired name
+hides smuggling. Emitting normalizes: the wire carries the trimmed form
+either way, so nothing is hidden from anyone reading the response. The
+temptation is one rule for both ("always trim" / "never trim"); the rule
+is per-direction, stated at each site. Same round's corollary: an
+over-long name is echoed only when it is a valid token (log-safe by
+construction) and blind otherwise — usability where it is safe, silence
+where it is attacker text. → `crates/qqq-serve/src/http1.rs`,
+`crates/qqq-run/src/guest_handler.rs`.
+
+## §O-547 — A red test that names the wrong property is a passing test for the wrong code
+
+The first `F-05` dribble test summed caller-side windows and asserted a
+linear bound — then passed with the resume logic disabled, because the sum
+never depended on the implementation. A test that passes on broken code is
+the fixture-that-cannot-fail shape (§4): deleted and replaced with the
+socket test that failed on the real cursor bug within minutes. The audit
+asked for a linear-work test; what it needed was a split-across-reads
+test, and the honest move was recording the substitution instead of
+keeping a green decoration. Rule: after writing a performance-flavored
+test, disable the optimization and watch it fail — if it stays green, the
+test measures the harness, not the code. →
+`crates/qqq-serve/src/server.rs`.
+
+
+## §O-548 — An escaper that names two bytes escapes two bytes
+
+The `F-02` value escaper handled `\r` and `\n` — and passed NUL and DEL
+straight through to the wire, because the match had exactly the arms the
+author thought of rather than the class the threat needs. Review caught
+what tests did not: every test used CR/LF, so the suite was green around
+a hole shaped exactly like an untested variant. The fix matches the
+class (`is_ascii_control` minus tab) with a NUL/DEL test pinning it, plus
+a doctest. Rule: an escaping function matches on character CLASSES with
+explicit exceptions, never on an enumerated pair — and its tests name one
+member from each class, including the ones that feel absurd. →
+`crates/qqq-run/src/guest_handler.rs`.
+
+## §O-549 — A new error code is a chain, not a line
+
+Adding `GuestResponseRefused = 3009` to the enum without walking the
+registry failed CI on two consecutive pushes, each red revealing the next
+link: first `check_error_catalogue` (`docs/errors.md` regen), whose
+staleness also deadened the catalogue self-test's negative case and failed
+the line-endings job as a cascade — one stale file, two red jobs. Then
+`check_agent_cookbook` (the new code needs a cookbook classification with
+its counts and prose updated to match) and `gen_llms_txt --check`
+(`llms-full.txt` drift) — checks the local gate never ran, because they
+live in the Rust/WIT CI jobs rather than the handbook's gate list. The
+mistake was treating "add a variant" as one file plus docs; the registry
+is catalogue → cookbook → llms → corpus digests, and every link has a
+checker with a different name. Caught by reading each red log down to its
+`FATAL`/`FAIL` line instead of assuming the next failure equals the last.
+Remedy: the local gate now runs the cookbook and llms checks alongside
+the catalogue one. Rule: when one source edit derives N artifacts, list
+the deriving checkers FIRST — from the CI config, not from memory — and
+run them all locally; the second red push is the tax on the first
+assumption. → `docs/agent-cookbook.md`, `docs/errors.md`,
+`llms-full.txt`, `tools/check_agent_cookbook.py`.
+
+## §O-550 — Every release re-baselines every CPU class it meets
+
+The fourth `PERF-020` "no reviewed baseline" red is the version-bump
+interaction the process predicts: the runner identity includes the
+`qqqai` version, so 0.1.1 retired all five 0.0.0 baselines at once, and
+the fleet then re-deals CPU classes at random — `7763/0.1.1` was
+recorded first (green on one push), `9V74/0.1.1` surfaced on the next.
+The candidate deltas rule out a real regression before anything is
+recorded: same-CPU medians within −14%/+13%/+0%/−1% of the 0.0.0 entry
+with candidate samples inside the old spreads, tight within-run spread,
+commit == HEAD, 3 samples, same misses and measured sets. The rule this
+instance adds: after a version bump, EVERY new CPU class fails once
+before it passes — budget for up to N reds per release where N is the
+fleet size, and treat each recording as routine (deltas checked,
+candidate committed) rather than an incident. → `.github/perf/baseline.json`.
+
+## §O-551 — The bridge run is a distribution, not a number
+
+`bridge8` on the final tree (`cfc7b9b`, `qqqdev checks`, exit 0 after
+~2h55m) records 169 one-minute samples: CPU mean 10.4% with stdev 4.2%,
+p90 11.0%, max 55.5% on 2 samples, zero over 100%; memory max 1.38GiB
+of 8GiB. Judged NORMAL against bridge7 (9.3%/25.5%/1.3GiB) rather than
+against the max alone — a max without its distribution proves nothing,
+and the p90 says the 55.5% is a build-parallelism blip, not a second
+regime. All 64 `FAIL`-pattern lines dispositioned as intentional
+self-test negatives (52 `SELF-TEST PASSED`, 0 failed; every real-failure
+signature hunted and absent), which is fewer than bridge7's 73 in the
+same shape — the comparison that matters is shape parity, not count
+equality, since new checkers add new negatives. The idle `opengeo`
+companion (171 samples, 0.0% CPU) is filtered by container name, not by
+value — excluding by value would hide a runaway under the threshold.
+Rule: normality is mean-plus-distribution against the closest prior run
+plus consumer identity plus outcome correlation; any one of the three
+missing and the verdict is "unjudged", not "normal". →
+`F:\QQQ-AUDIT\evidence-goal-2026-10-03\bridge\bridge8-fail-dispositions.txt`.
+
+## §O-552 — A "minimum that works" established by reasoning alone is a guess
+
+`§O-544` first prescribed `actions: write` for cache SAVE and artifact
+UPLOAD on pure mechanism reasoning — and a reviewer asked for the failing
+run that proves bare read fails. There was none, so run 37349688975
+executed both workflows with the scope stripped: every cache SAVE
+post-step and every artifact upload still succeeded. The prescription was
+backwards; bare `contents: read` is the measured minimum and the run ID
+is the citation, now recorded in both workflow comments. The general rule
+survives its own author: any least-privilege claim without a run ID is a
+guess with a comment, and review was right to demand the experiment
+instead of accepting the reasoning. Cost of the proof: one ~25-minute CI
+run on a disposable tip, both workflows' save/upload steps green. →
+`.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`.
+
+## §O-553 — The registry had a fourth link nobody guarded
+
+`QQQ-3009` shipped with catalogue, cookbook, llms, and doctests green —
+and `from_number(3009)` returned `None`, because `ErrorCode::all()`, the
+list the runtime actually reads, was never part of any checker's
+comparison. The same gap had already swallowed `DependencyNotFound`
+(5007, raised in `deps.rs`, asserted in tests, invisible to `parse`)
+long before this goal. Every existing error test iterates `all()`, so
+none of them could see a variant missing from it — the loop bounds were
+the defect. Fixed both entries plus a new `tools/check_error_all.py`
+(variant-set versus `all()`-set, fault-injected self-test, wired into CI,
+bridge, and the line-endings enumeration) so the next code cannot repeat
+it. Rule: when a registry has N representations, the check that matters
+compares the RUNTIME's list against the SOURCE's list. Documents agreeing
+with each other is consensus; code agreeing with documents is correctness. →
+`crates/qqq-core/src/error.rs`, `tools/check_error_all.py`.
+
 ## §O-544 — A lint can be half-wrong, and so can a permissions argument
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

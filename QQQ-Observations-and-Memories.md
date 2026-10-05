@@ -35437,6 +35437,28 @@ explicit exceptions, never on an enumerated pair — and its tests name one
 member from each class, including the ones that feel absurd. →
 `crates/qqq-run/src/guest_handler.rs`.
 
+## §O-549 — A new error code is a chain, not a line
+
+Adding `GuestResponseRefused = 3009` to the enum without walking the
+registry failed CI on two consecutive pushes, each red revealing the next
+link: first `check_error_catalogue` (`docs/errors.md` regen), whose
+staleness also deadened the catalogue self-test's negative case and failed
+the line-endings job as a cascade — one stale file, two red jobs. Then
+`check_agent_cookbook` (the new code needs a cookbook classification with
+its counts and prose updated to match) and `gen_llms_txt --check`
+(`llms-full.txt` drift) — checks the local gate never ran, because they
+live in the Rust/WIT CI jobs rather than the handbook's gate list. The
+mistake was treating "add a variant" as one file plus docs; the registry
+is catalogue → cookbook → llms → corpus digests, and every link has a
+checker with a different name. Caught by reading each red log down to its
+`FATAL`/`FAIL` line instead of assuming the next failure equals the last.
+Remedy: the local gate now runs the cookbook and llms checks alongside
+the catalogue one. Rule: when one source edit derives N artifacts, list
+the deriving checkers FIRST — from the CI config, not from memory — and
+run them all locally; the second red push is the tax on the first
+assumption. → `docs/agent-cookbook.md`, `docs/errors.md`,
+`llms-full.txt`, `tools/check_agent_cookbook.py`.
+
 ## §O-544 — A lint can be half-wrong, and least-privilege still needs the write bit
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

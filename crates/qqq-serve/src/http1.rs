@@ -456,10 +456,43 @@ impl RequestHead {
 /// handled without guessing.
 #[must_use]
 pub fn head_end(input: &[u8]) -> Option<usize> {
-    input
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
+    head_end_from(input, 0)
+}
+
+/// Where the head ends at or after `from`, as an offset just past the
+/// terminating `\r\n\r\n` — or `None` if the bytes so far do not terminate.
+///
+/// This is the entry point a server loop calls as more bytes arrive: `from`
+/// is how much is already known-scanned, so a terminator split across reads
+/// costs a bounded re-examination instead of a full rescan. The caller keeps
+/// at least the last 3 bytes unscanned (`from = scanned.saturating_sub(3)`),
+/// because a `\r\n\r\n` straddling the old boundary starts up to 3 bytes
+/// before it. Scanning itself is one `memchr` pass for `\r` with a 4-byte
+/// window check at each hit — linear in the unexamined suffix, never in the
+/// whole head.
+///
+/// ```rust
+/// use qqq_serve::http1::{head_end, head_end_from};
+///
+/// let head = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+/// let end = head_end(head).unwrap();
+/// // A first read ending mid-terminator resumes safely:
+/// assert_eq!(head_end_from(head, end.saturating_sub(5)), Some(end));
+/// // Nothing scanned past the terminator is ever required of the caller.
+/// assert_eq!(head_end_from(b"GET / HTTP/1.1\r\n", 0), None);
+/// ```
+#[must_use]
+pub fn head_end_from(input: &[u8], from: usize) -> Option<usize> {
+    let from = from.min(input.len());
+    let mut search = from;
+    while let Some(rel) = memchr::memchr(b'\r', &input[search..]) {
+        let i = search + rel;
+        if input[i..].starts_with(b"\r\n\r\n") {
+            return Some(i + 4);
+        }
+        search = i + 1;
+    }
+    None
 }
 
 /// Parse an HTTP/1.1 request head.

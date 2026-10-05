@@ -147,6 +147,13 @@ sha1 = "0.10"
 # no resolution. Used for the same handshake value.
 base64 = "0.22"
 
+# Byte scanning for the HTTP/1.1 head parser (`F-05`). Already in the lockfile
+# transitively, so this adds no resolution. `memchr` is the standard answer to
+# "find this byte fast" — a hand-rolled u64-word scanner would duplicate a solved
+# problem, and inline assembly would need per-architecture maintenance for a gain
+# nobody measured.
+memchr = "2"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

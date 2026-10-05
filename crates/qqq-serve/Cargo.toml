@@ -38,6 +38,7 @@ rustls.workspace = true
 # identifier a client certificate has — a common name is chosen by the client
 # and is not unique across issuers.
 sha2.workspace = true
+memchr.workspace = true
 # WebSocket handshake only (`SRV-009`). See the workspace manifest for why SHA-1 is
 # correct there and not a mistake.
 sha1.workspace = true

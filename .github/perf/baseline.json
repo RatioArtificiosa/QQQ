@@ -407,6 +407,87 @@
   "profile": "ubuntu-latest",
   "samples": 3,
   "schema_version": 1
+},
+{
+  "budget_misses": [
+    "hello",
+    "json",
+    "multi",
+    "tailp99"
+  ],
+  "commit": "70ac18c7d9d33cf5510738ccddad7e5d9e0c372e",
+  "does_not_measure": [
+    "run on AMD EPYC 7763 64-Core Processor by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+    "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+    "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+  ],
+  "environment": {
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "kernel": "6.17.0-1022-azure",
+    "memory_bytes": 16766414848,
+    "os": "linux x86_64",
+    "physical_cores": 4,
+    "toolchains": {
+      "qqqai": "0.1.1",
+      "rustc": "unknown"
+    }
+  },
+  "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+  "measured_budget_items": [
+    "PERF-002",
+    "PERF-010",
+    "PERF-011"
+  ],
+  "metrics": {
+    "hello": {
+      "median": 591986.0,
+      "metric": "p99_nanos",
+      "samples": [
+        574893.0,
+        591986.0,
+        609439.0
+      ]
+    },
+    "json": {
+      "median": 1671.1945133434072,
+      "metric": "requests_per_second",
+      "samples": [
+        1829.561214915917,
+        1671.1945133434072,
+        1640.0345582177983
+      ]
+    },
+    "multi": {
+      "median": 11305.423163795498,
+      "metric": "requests_per_second",
+      "samples": [
+        10814.558578854503,
+        11346.005978244713,
+        11305.423163795498
+      ]
+    },
+    "tailp99": {
+      "median": 6949870.0,
+      "metric": "p99_nanos",
+      "samples": [
+        6993736.0,
+        6949870.0,
+        6636822.0
+      ]
+    }
+  },
+  "not_measured_budget_items": [
+    "PERF-003",
+    "PERF-004",
+    "PERF-007",
+    "PERF-008",
+    "PERF-009",
+    "PERF-012",
+    "PERF-013"
+  ],
+  "profile": "ubuntu-latest",
+  "samples": 3,
+  "schema_version": 1
 }
   ]
 }

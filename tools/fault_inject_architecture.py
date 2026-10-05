@@ -40,6 +40,23 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def _workspace_version():
+    """The workspace package version, so injected manifests resolve.
+
+    Hardcoding the version here broke the harness the day the workspace moved
+    off 0.0.0: the injected edge failed to resolve and the topology violation
+    was never tested (MISSED for the wrong reason — an unresolvable injection
+    proves nothing about the check, per the module docstring above).
+    """
+    import re
+
+    text = (ROOT / 'Cargo.toml').read_text(encoding='utf-8')
+    m = re.search(r'^\[workspace\.package\]\s*\nversion\s*=\s*"([^"]+)"', text, re.M)
+    if not m:
+        raise SystemExit('cannot find [workspace.package] version in Cargo.toml')
+    return m.group(1)
+
 def derive_topology_injection():
     """Pick an upward, acyclic edge to inject into `crates/qqq-cap/Cargo.toml`.
 
@@ -158,7 +175,7 @@ def derive_topology_injection():
                 'topology (upward dependency)',
                 Path(f'crates/{source}/Cargo.toml'),
                 '[dependencies]',
-                f'[dependencies]\n{target} = {{ path = "../{target}", version = "0.0.0" }}',
+                f'[dependencies]\n{target} = {{ path = "../{target}", version = "{_workspace_version()}" }}',
                 'no_crate_depends_on_a_crate_above_it',
                 f'depends on `{target}`',
             )

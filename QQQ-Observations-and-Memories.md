@@ -35378,6 +35378,51 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-545 — The socket test caught the wiring bug the unit tests could not see
+
+`F-05`'s `head_end_from` was correct and its split test green, but the
+server-loop cursor computed the resume point from the POST-extend buffer
+length instead of the pre-extend frontier — skipping exactly the starts a
+full head arriving in one read needs, so the loop missed its own
+terminator and the peer "vanished". The unit tests could not see it: they
+test the function, and the bug was in the CALLER's arithmetic. The socket
+dribble test through `read_head` failed immediately, the raw-socket
+isolation proved bytes flow fine, and counting the 64-byte head by hand
+showed the skipped range. The fault-injection round then re-proved it in
+reverse (post-extend resume → exactly the socket test red, 706 filtered).
+Rule: for resume/cursor logic, the unit test proves the function and only
+a real-path test proves the wiring — and when the real-path test fails,
+count the bytes by hand before theorizing about the runtime. →
+`crates/qqq-serve/src/server.rs`, `crates/qqq-serve/src/http1.rs`.
+
+## §O-546 — Strictness has a direction: parse-side refusal, emit-side normalization
+
+`F-04` removes name-trimming (a space before the colon repaired into
+validity) while `F-02` keeps value-trimming on emit — and both are right,
+because the directions differ. Parsing must not repair: a repaired name
+hides smuggling. Emitting normalizes: the wire carries the trimmed form
+either way, so nothing is hidden from anyone reading the response. The
+temptation is one rule for both ("always trim" / "never trim"); the rule
+is per-direction, stated at each site. Same round's corollary: an
+over-long name is echoed only when it is a valid token (log-safe by
+construction) and blind otherwise — usability where it is safe, silence
+where it is attacker text. → `crates/qqq-serve/src/http1.rs`,
+`crates/qqq-run/src/guest_handler.rs`.
+
+## §O-547 — A red test that names the wrong property is a passing test for the wrong code
+
+The first `F-05` dribble test summed caller-side windows and asserted a
+linear bound — then passed with the resume logic disabled, because the sum
+never depended on the implementation. A test that passes on broken code is
+the fixture-that-cannot-fail shape (§4): deleted and replaced with the
+socket test that failed on the real cursor bug within minutes. The audit
+asked for a linear-work test; what it needed was a split-across-reads
+test, and the honest move was recording the substitution instead of
+keeping a green decoration. Rule: after writing a performance-flavored
+test, disable the optimization and watch it fail — if it stays green, the
+test measures the harness, not the code. →
+`crates/qqq-serve/src/server.rs`.
+
 ## §O-544 — A lint can be half-wrong, and least-privilege still needs the write bit
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use
@@ -35398,7 +35443,16 @@ the bare block was wrong; the next CI run is the proof. Also recorded:
 collision), and `while_let_on_iterator` (dead name on rustc 1.98) were each
 dropped from the warn set with measured reasons instead of fixed or
 force-fit — deferral with evidence beats silent omission and noisy
-compliance alike. → `.github/workflows/ci.yml`,
+compliance alike. Postscript, same round, two CI-only failures on the Wave-0
+push, both fixed without touching production code: the architecture
+fault-injection harness hardcoded `version = "0.0.0"` in its injected edge,
+so the version bump made the injection unresolvable (MISSED for the wrong
+reason — an unresolvable injection proves nothing about the check); it now
+reads the workspace version. And `PERF-020` failed on runner identity
+because the identity includes the `qqqai` version — every release
+re-baselines by design — so a reviewed entry for the new identity was
+recorded from the CI candidate with deltas checked. →
+`.github/workflows/ci.yml`,
 `.github/workflows/fuzz.yml`, `Cargo.toml`,
 `crates/qqq-run/src/trap_report.rs`.
 

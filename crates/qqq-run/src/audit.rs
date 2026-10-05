@@ -768,7 +768,6 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qqq_core::ErrorCode;
 
     fn loaded(src: &str) -> LoadedManifest {
         let manifest = qqq_cap::manifest::Manifest::parse(src).expect("test manifest");

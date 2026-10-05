@@ -35378,6 +35378,30 @@ contradicts the document, the correction ships inside the ratification,
 never as a footnote later. → `crates/qqq-host/src/config.rs`,
 `crates/qqq-cap/src/manifest.rs`, `QQQ-Checklist-V1.md` (`OQ-005`).
 
+## §O-544 — A lint can be half-wrong, and least-privilege still needs the write bit
+
+Two Wave-0 lessons. First, `redundant_imports` flagged `use
+qqq_core::{Error, ErrorCode};` as redundant and it was half-right: `Error`
+resolves through the `super::*` glob, `ErrorCode` does not (the parent only
+ever names it fully-qualified), so deleting the whole line broke the build
+with six `E0433`s and the fix keeps exactly the load-bearing name. A lint
+finding is a suspect, not a verdict — the compiler is the judge, and the
+re-verdict here is that glob visibility follows the parent's imports, not
+its fully-qualified mentions. Second, the `permissions: contents: read`
+block from the audit is NOT sufficient as written: cache SAVE and artifact
+UPLOAD authenticate against the Actions API, and unspecified scopes default
+to none, so the honest least-privilege is `contents: read` plus `actions:
+write`, with the reason in the comment — least privilege means the minimum
+that works, not the minimum that parses. The audit's "zero-risk" claim for
+the bare block was wrong; the next CI run is the proof. Also recorded:
+`unused_qualifications` (170+ sites), `nonstandard_style` (group/priority
+collision), and `while_let_on_iterator` (dead name on rustc 1.98) were each
+dropped from the warn set with measured reasons instead of fixed or
+force-fit — deferral with evidence beats silent omission and noisy
+compliance alike. → `.github/workflows/ci.yml`,
+`.github/workflows/fuzz.yml`, `Cargo.toml`,
+`crates/qqq-run/src/trap_report.rs`.
+
 ## §O-541 — The final tree gets its bridge, and this time there is no burst at all
 
 `docker compose run --rm linux checks` on `46222c5` exited 0 after ~2h51m

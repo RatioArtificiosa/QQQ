@@ -258,9 +258,9 @@ pub fn resolve_error(err: &Error, map: &SourceMap) -> ResolvedBacktrace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qqq_core::{Error, ErrorCode};
+    use qqq_core::ErrorCode;
     use qqq_debug::source_map::LineEntry;
-    use qqq_debug::{FrameLocation, SourceMap};
+    use qqq_debug::FrameLocation;
 
     fn entry(address: u64, file: &str, line: u32) -> LineEntry {
         LineEntry {

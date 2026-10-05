@@ -50,6 +50,21 @@ env:
   # that surfaces as a nondeterministic test failure weeks later.
   RUST_BACKTRACE: 1
 
+# Least privilege under which this workflow still runs: `contents: read` for
+# checkout, plus `actions: write` because the crash-artifact upload
+# authenticates against the Actions API (with only `contents: read` it fails
+# closed — unspecified scopes default to none). See ci.yml for the full
+# reasoning.
+permissions:
+  contents: read
+  actions: write
+
+# A newer dispatch cancels the older run on the same ref, so nightly
+# overlapping a manual run does not burn two runners fuzzing the same tree.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})

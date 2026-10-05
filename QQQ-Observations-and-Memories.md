@@ -35475,6 +35475,26 @@ before it passes — budget for up to N reds per release where N is the
 fleet size, and treat each recording as routine (deltas checked,
 candidate committed) rather than an incident. → `.github/perf/baseline.json`.
 
+## §O-551 — The bridge run is a distribution, not a number
+
+`bridge8` on the final tree (`cfc7b9b`, `qqqdev checks`, exit 0 after
+~2h55m) records 169 one-minute samples: CPU mean 10.4% with stdev 4.2%,
+p90 11.0%, max 55.5% on 2 samples, zero over 100%; memory max 1.38GiB
+of 8GiB. Judged NORMAL against bridge7 (9.3%/25.5%/1.3GiB) rather than
+against the max alone — a max without its distribution proves nothing,
+and the p90 says the 55.5% is a build-parallelism blip, not a second
+regime. All 64 `FAIL`-pattern lines dispositioned as intentional
+self-test negatives (52 `SELF-TEST PASSED`, 0 failed; every real-failure
+signature hunted and absent), which is fewer than bridge7's 73 in the
+same shape — the comparison that matters is shape parity, not count
+equality, since new checkers add new negatives. The idle `opengeo`
+companion (171 samples, 0.0% CPU) is filtered by container name, not by
+value — excluding by value would hide a runaway under the threshold.
+Rule: normality is mean-plus-distribution against the closest prior run
+plus consumer identity plus outcome correlation; any one of the three
+missing and the verdict is "unjudged", not "normal". →
+`F:\QQQ-AUDIT\evidence-goal-2026-10-03\bridge\bridge8-fail-dispositions.txt`.
+
 ## §O-544 — A lint can be half-wrong, and least-privilege still needs the write bit
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

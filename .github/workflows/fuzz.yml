@@ -50,6 +50,20 @@ env:
   # that surfaces as a nondeterministic test failure weeks later.
   RUST_BACKTRACE: 1
 
+# Least privilege under which this workflow still runs: bare
+# `contents: read` — measured on ci.yml (run 37349688975: cache SAVE and all
+# artifact uploads succeed without `actions: write`; the traffic
+# authenticates outside the `GITHUB_TOKEN` scopes). See ci.yml.
+permissions:
+  contents: read
+  actions: write
+
+# A newer dispatch cancels the older run on the same ref, so nightly
+# overlapping a manual run does not burn two runners fuzzing the same tree.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})

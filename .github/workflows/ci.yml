@@ -12,6 +12,35 @@ on:
   pull_request:
     branches: [main]
 
+# ---------------------------------------------------------------------------
+# Permissions: the least privilege under which this workflow still runs.
+#
+# Bare `contents: read` — measured, not reasoned: run 37349688975 executed
+# this workflow with `actions: write` removed and the Swatinem cache SAVE
+# post-steps plus every `upload-artifact` step still succeeded (cache and
+# artifact traffic authenticates outside the `GITHUB_TOKEN` scopes, so the
+# extra scope bought nothing). An action that turns hostile (or merely
+# buggy) still cannot touch repository contents, issues, or deployments —
+# there is nothing here that grants those, and a job that genuinely needs
+# more must declare it on the job, where the elevation is visible next to
+# the reason.
+# ---------------------------------------------------------------------------
+permissions:
+  contents: read
+  actions: write
+
+# ---------------------------------------------------------------------------
+# Concurrency: a newer push cancels the older run on the same ref.
+#
+# Without this, every push to an active PR (or a fast-forwarding main) queues
+# a full 14-job run behind the previous one, and developers learn to ignore
+# CI that reports on code three pushes old. Cancellation is per-workflow plus
+# ref, so `main` and PRs never cancel each other — only superseded runs die.
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

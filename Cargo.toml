@@ -175,6 +175,25 @@ lto = "fat"
 unsafe_code = "forbid"
 missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
+# F-18 warn set (Wave 0): style and hygiene lints that must stay advisory until
+# Wave 6 promotes them to deny. Each fires only on code a human should look at.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
+# `nonstandard_style` is deliberately NOT listed: as a lint group it collides
+# with per-lint priorities in the manifest table, and its members
+# (non-snake-case et al.) already warn by compiler default — listing it would
+# add noise, not signal. (Measured 2026-10-05: the group entry itself was the
+# only warning it ever produced.)
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+# `unused_qualifications` is deliberately NOT in the Wave-0 set: it fires on
+# 170+ existing sites (measured 2026-10-05), and fixing them all here would turn
+# a hygiene commit into a tree-wide rewrite. It belongs to the Wave-6 cleanup
+# pass that promotes lints to deny one crate at a time.
+redundant_imports = "warn"
+# `while_let_on_iterator` is deliberately NOT listed: the name is deprecated
+# and effectless on this toolchain (rustc 1.98.1 warns that it "may not have
+# an effect"), and guessing its replacement risks an unknown-lint failure on
+# MSRV 1.97. Wave 6 resolves the right name against the then-current toolchain.
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -183,3 +202,9 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+# F-18 warn set (Wave 0): rustdoc link hygiene. Broken intra-doc links rot
+# silently into dead documentation; warning now, deny in Wave 6.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"

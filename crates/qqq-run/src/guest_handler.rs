@@ -899,6 +899,15 @@ const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
 /// Anything else — `99`, `600`, let alone wider integers — has no reason
 /// phrase and no defined client behavior. Serializing it anyway would emit a
 /// status line no client can interpret.
+///
+/// ```rust
+/// use qqq_run::guest_handler::is_valid_guest_status;
+///
+/// assert!(is_valid_guest_status(200));
+/// assert!(is_valid_guest_status(599));
+/// assert!(!is_valid_guest_status(99));
+/// assert!(!is_valid_guest_status(600));
+/// ```
 #[must_use]
 pub fn is_valid_guest_status(status: u16) -> bool {
     (100..=599).contains(&status)
@@ -911,6 +920,14 @@ pub fn is_valid_guest_status(status: u16) -> bool {
 /// them is either confused or attempting to desynchronize the stream. Either
 /// way the answer is refusal, not silent dropping: dropping would hide the
 /// attempt from everyone reading the audit trail.
+///
+/// ```rust
+/// use qqq_run::guest_handler::is_host_controlled_header;
+///
+/// assert!(is_host_controlled_header("content-length"));
+/// assert!(is_host_controlled_header("Connection"));
+/// assert!(!is_host_controlled_header("x-tenant"));
+/// ```
 #[must_use]
 pub fn is_host_controlled_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("content-length")

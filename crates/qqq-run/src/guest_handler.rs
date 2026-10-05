@@ -442,6 +442,9 @@ impl GuestApp {
     /// * The instance could not be created (a grant or limit problem).
     /// * The method cannot be expressed to a guest (`guest_bridge::to_guest`).
     /// * The guest trapped, or returned a value that is not a response.
+    /// * The guest answered but the answer failed boundary validation —
+    ///   `QQQ-3009` from [`to_served`], rendered as 502 by the caller and
+    ///   recorded as a `Failed` (not `Granted`) audit row.
     pub fn handle_request(
         &self,
         head: &RequestHead,
@@ -508,6 +511,13 @@ impl GuestApp {
         let outcome = self.serve_one(&request, tenant);
         drop(permit);
 
+        // Settled **before** the audit row, so the row states the outcome the
+        // caller acts on: a guest answer the boundary refuses (`QQQ-3009`) is
+        // a `Failed` exercise of the authority, not a `Granted` one. Settling
+        // after the row recorded such answers as granted while the caller
+        // rendered their 502.
+        let (converted, outcome_kind) = self.settle(outcome);
+
         // --- §4.4 step 15: AUDIT APPEND ---------------------------------------
         //
         // The record is written **after** the guest call and **before** the response leaves,
@@ -541,19 +551,13 @@ impl GuestApp {
         // call-time re-check refused an instance that was built with the capability present, which
         // is a different and much more alarming event.
         //
-        // `Outcome::Granted` when the app is granted `HttpServer` and the guest answered,
-        // `Outcome::Failed` when it is granted and the call did not succeed. A `Failed` row is the
-        // honest one for a trap or a boundary rejection: the authority was exercised and the
-        // operation did not succeed, which is a different remediation from adding a grant.
+        // `Outcome::Granted` when the app is granted `HttpServer` and the converted
+        // answer succeeded, `Outcome::Failed` when it is granted and the call did not
+        // succeed. The row reads the **settled** result (`settle` converts with
+        // `to_served` before the row), so a `Failed` row is the honest one for a trap or a boundary
+        // rejection: the authority was exercised and the operation did not succeed,
+        // which is a different remediation from adding a grant.
         {
-            let serves = self
-                .grants
-                .grants(qqq_cap::capability::Capability::HttpServer);
-            let outcome_kind = match (serves, outcome.is_ok()) {
-                (false, _) => qqq_host::Outcome::Attempted,
-                (true, true) => qqq_host::Outcome::Granted,
-                (true, false) => qqq_host::Outcome::Failed,
-            };
             let mut stream = self
                 .audit
                 .lock()
@@ -609,7 +613,24 @@ impl GuestApp {
             }
         }
 
-        to_served(&outcome?)
+        converted
+    }
+
+    /// Convert a guest answer and classify the audit row for it.
+    ///
+    /// The two steps [`Self::handle_request`] performs between the guest call
+    /// and the audit block, extracted so tests can drive a `to_served`-rejected
+    /// answer through the real ordering without a guest that misbehaves on
+    /// demand. Conversion precedes classification: a boundary refusal
+    /// (`QQQ-3009`) classifies as `Failed`, and the grant check decides before
+    /// either, because an ungranted call is an attempt however it ended.
+    fn settle(&self, outcome: Result<abi::Response>) -> (Result<Response>, qqq_host::Outcome) {
+        let converted: Result<Response> = outcome.and_then(|raw| to_served(&raw));
+        let serves = self
+            .grants
+            .grants(qqq_cap::capability::Capability::HttpServer);
+        let kind = audit_outcome(serves, converted.is_ok());
+        (converted, kind)
     }
 
     /// Create an instance for `request`, call the guest, and return its answer.
@@ -975,6 +996,24 @@ pub fn escape_header_value(value: &str) -> String {
     out
 }
 
+/// Derive the audit [`Outcome`](qqq_host::Outcome) from the grant state and the
+/// **converted** result.
+///
+/// `handle_request` converts the guest answer with [`to_served`] *before* it
+/// records the row, so a boundary rejection (`QQQ-3009`) lands as `Failed`:
+/// the authority was exercised and the operation did not succeed. Deriving
+/// from the raw guest result instead recorded such answers as `Granted`
+/// while the caller rendered their 502 — the mismatch the `Failed` variant
+/// exists to prevent. A missing grant decides before anything else, because
+/// an ungranted call is an attempt however it ended.
+fn audit_outcome(serves_http: bool, converted_ok: bool) -> qqq_host::Outcome {
+    match (serves_http, converted_ok) {
+        (false, _) => qqq_host::Outcome::Attempted,
+        (true, true) => qqq_host::Outcome::Granted,
+        (true, false) => qqq_host::Outcome::Failed,
+    }
+}
+
 /// Convert a guest's response into the one the server writes.
 ///
 /// # Why refusal replaces silent repair here
@@ -1162,13 +1201,29 @@ mod tests {
     }
 
     fn test_app() -> Option<GuestApp> {
-        test_app_with_capacity(1)
+        test_app_with_capacity(1, qqq_cap::resolve::GrantSet::empty())
+    }
+
+    /// A test app granted `HttpServer`, for tests that assert on the granted
+    /// outcome arms (`Granted`/`Failed`) rather than the ungranted one. The
+    /// manifest is the sole layer permitted to grant, so the test declares
+    /// the capability the same way production does.
+    fn granted_test_app() -> Option<GuestApp> {
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("a minimal manifest parses");
+        test_app_with_capacity(1, qqq_cap::resolve::GrantSet::from_manifest(&manifest))
     }
 
     /// A test app with room for concurrent requests. The default builder
     /// sizes the pool to one slot, so a concurrency test through it would
     /// measure pool refusals rather than audit persistence.
-    fn test_app_with_capacity(workers: u32) -> Option<GuestApp> {
+    fn test_app_with_capacity(
+        workers: u32,
+        grants: qqq_cap::resolve::GrantSet,
+    ) -> Option<GuestApp> {
         let bytes = orders_api_component()?;
         // The same construction `serve::prepare` uses, so the test drives the shape production
         // drives. `LimitSet::from_manifest` needs a manifest, and building one here would test a
@@ -1188,15 +1243,7 @@ mod tests {
             max_open_handles: 64,
             max_subrequests: 16,
         };
-        GuestApp::with_capacity(
-            engine,
-            &bytes,
-            qqq_cap::resolve::GrantSet::empty(),
-            limits,
-            "127.0.0.1:8080",
-            workers,
-        )
-        .ok()
+        GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
     }
 
     /// A request head, built the way `qqq-serve`'s parser builds one.
@@ -1523,7 +1570,7 @@ mod tests {
     fn concurrent_requests_persist_without_barrier_deadlock() {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
-        let Some(app) = test_app_with_capacity(8) else {
+        let Some(app) = test_app_with_capacity(8, qqq_cap::resolve::GrantSet::empty()) else {
             return;
         };
         let dir = std::env::temp_dir().join(format!("qqq-audit-conc-{}", std::process::id()));
@@ -1919,6 +1966,79 @@ mod tests {
         assert!(
             !wire.contains("HTTP/1.1 99"),
             "guest status must not become the response status"
+        );
+    }
+
+    /// **A boundary rejection audits as `Failed`, never `Granted`.**
+    ///
+    /// Independent review of the F-02 walk caught the ordering defect this
+    /// pins: `handle_request` derived the audit outcome from the raw guest
+    /// result and converted with `to_served` afterwards, so a response the
+    /// boundary refuses (illegal status, host-controlled header, breached
+    /// cap) was recorded as `Granted` while the caller rendered its 502.
+    /// The conversion now precedes the audit row. This test drives a
+    /// `to_served`-rejected answer through the real convert-then-classify
+    /// seam (`settle`, the exact step `handle_request` runs before the row)
+    /// on a granted app and asserts the row kind is `Failed` — alongside
+    /// the three neighbouring cases, so the mapping cannot drift one arm
+    /// at a time.
+    #[test]
+    fn f02_boundary_rejection_audits_as_failed() {
+        let Some(granted) = granted_test_app() else {
+            return;
+        };
+        let poisoned = abi::Response {
+            status: 99,
+            headers: vec![abi::Header {
+                name: "Content-Length".to_owned(),
+                value: b"0".to_vec(),
+            }],
+            body: b"poison-body".to_vec(),
+        };
+        let (converted, kind) = granted.settle(Ok(poisoned));
+        assert!(
+            converted.is_err(),
+            "the poisoned answer must still fail conversion"
+        );
+        assert_eq!(
+            kind,
+            qqq_host::Outcome::Failed,
+            "a refused answer on a granted app audits as a failed exercise"
+        );
+
+        let valid = || abi::Response {
+            status: 200,
+            headers: vec![],
+            body: b"ok".to_vec(),
+        };
+        let (converted, kind) = granted.settle(Ok(valid()));
+        assert!(converted.is_ok(), "the valid answer must convert");
+        assert_eq!(
+            kind,
+            qqq_host::Outcome::Granted,
+            "a served answer audits as the authority exercised to success"
+        );
+
+        let (converted, kind) = granted.settle(Err(Error::new(
+            ErrorCode::GuestResponseRefused,
+            "trap stand-in",
+        )));
+        assert!(converted.is_err(), "a failed call stays failed");
+        assert_eq!(
+            kind,
+            qqq_host::Outcome::Failed,
+            "a trapped call on a granted app audits as failed"
+        );
+
+        let Some(ungranted) = test_app() else {
+            return;
+        };
+        let (converted, kind) = ungranted.settle(Ok(valid()));
+        assert!(converted.is_ok(), "conversion does not depend on grants");
+        assert_eq!(
+            kind,
+            qqq_host::Outcome::Attempted,
+            "no grant means an attempt, however the call ended"
         );
     }
 }

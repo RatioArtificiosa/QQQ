@@ -32,6 +32,7 @@
 //! So the authority is configured at construction and used for every request.
 //! That is the same choice a reverse proxy makes, and for the same reason.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use qqq_cap::resolve::GrantSet;
@@ -919,10 +920,13 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 
 /// Escape a guest header value for the wire.
 ///
-/// Trims OWS, then percent-encodes `%` first and `\r`/`\n` after — so `%0D`
-/// in input becomes `%250D` rather than decoding back into a split. The
-/// result never contains a raw CR or LF, which is the property that matters:
-/// a value that cannot terminate its own line cannot inject the next one.
+/// Trims OWS, then percent-encodes `%` first and every ASCII control except
+/// tab after — so `%0D` in input becomes `%250D` rather than decoding back
+/// into a split, and NUL or DEL cannot ride through where only `\r` and `\n`
+/// were expected. Tab passes through: it is legal field whitespace, and the
+/// trim already removed it from the edges. The result never contains a raw
+/// control byte, which is the property that matters: a value that cannot
+/// terminate its own line cannot inject the next one.
 ///
 /// ```rust
 /// use qqq_run::guest_handler::escape_header_value;
@@ -930,6 +934,7 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("a\r\nEvil: x"), "a%0D%0AEvil: x");
 /// assert_eq!(escape_header_value("%0D"), "%250D");
 /// assert_eq!(escape_header_value("  padded  "), "padded");
+/// assert_eq!(escape_header_value("nul\x00del\x7f"), "nul%00del%7F");
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {
@@ -940,6 +945,9 @@ pub fn escape_header_value(value: &str) -> String {
             '%' => out.push_str("%25"),
             '\r' => out.push_str("%0D"),
             '\n' => out.push_str("%0A"),
+            c if c.is_ascii_control() => {
+                let _ = write!(out, "%{c:02X}", c = c as u8);
+            }
             _ => out.push(c),
         }
     }
@@ -1823,6 +1831,16 @@ mod tests {
         let served =
             to_served(&guest_response(200, vec![("x-note", b"%0D")])).expect("percent converts");
         assert_eq!(served.headers[0].1, "%250D");
+        // NUL and DEL take the same path: no ASCII control except tab survives.
+        let served = to_served(&guest_response(200, vec![("x-note", b"a\x00b\x7f")]))
+            .expect("controls convert");
+        assert_eq!(served.headers[0].1, "a%00b%7F");
+        for (_, value) in &served.headers {
+            assert!(
+                !value.chars().any(|c| c.is_ascii_control() && c != '\t'),
+                "no control byte except tab may survive: {value:?}"
+            );
+        }
     }
 
     /// **A poisoned guest response becomes a clean 502 carrying none of the poison.**

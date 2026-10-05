@@ -35409,6 +35409,19 @@ construction) and blind otherwise — usability where it is safe, silence
 where it is attacker text. → `crates/qqq-serve/src/http1.rs`,
 `crates/qqq-run/src/guest_handler.rs`.
 
+## §O-548 — An escaper that names two bytes escapes two bytes
+
+The `F-02` value escaper handled `\r` and `\n` — and passed NUL and DEL
+straight through to the wire, because the match had exactly the arms the
+author thought of rather than the class the threat needs. Review caught
+what tests did not: every test used CR/LF, so the suite was green around
+a hole shaped exactly like an untested variant. The fix matches the
+class (`is_ascii_control` minus tab) with a NUL/DEL test pinning it, plus
+a doctest. Rule: an escaping function matches on character CLASSES with
+explicit exceptions, never on an enumerated pair — and its tests name one
+member from each class, including the ones that feel absurd. →
+`crates/qqq-run/src/guest_handler.rs`.
+
 ## §O-547 — A red test that names the wrong property is a passing test for the wrong code
 
 The first `F-05` dribble test summed caller-side windows and asserted a

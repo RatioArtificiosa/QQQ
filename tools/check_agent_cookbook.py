@@ -135,7 +135,7 @@ def catalogue_names() -> dict[str, str]:
 
 
 # The enum DECLARATION names every variant, so it cannot count as a use. Without this exclusion the
-# variant predicate would match all 44 codes and certify nothing -- the same defect in the other
+# variant predicate would match all 45 codes and certify nothing -- the same defect in the other
 # direction, which is why the exclusion is asserted rather than assumed.
 DECLARATION = ROOT / "crates" / "qqq-core" / "src" / "error.rs"
 
@@ -416,7 +416,7 @@ def self_test() -> int:
         broken = classify(d, k, t, s)
         cases.append((name, bool(broken), broken[0] if broken else "NO PROBLEM RAISED"))
 
-    cases.append(("the catalogue is non-empty", len(declared) == 44, f"{len(declared)}"))
+    cases.append(("the catalogue is non-empty", len(declared) == 45, f"{len(declared)}"))
     cases.append(("every declared code is classified", all(c in kinds for c in declared), ""))
 
     # --- each mutation must produce a problem, and the real tree must not ---------------------
@@ -473,7 +473,7 @@ def self_test() -> int:
         ("the summary table's rows are self-consistent", not summary_row_problems(good_page), "")
     )
     # Change the declared count and leave the list alone, which is the defect exactly.
-    broken_page = good_page.replace("| `src` | **29** |", "| `src` | **28** |", 1)
+    broken_page = good_page.replace("| `src` | **30** |", "| `src` | **29** |", 1)
     cases.append(
         (
             "a row claiming a count it does not list is reported",

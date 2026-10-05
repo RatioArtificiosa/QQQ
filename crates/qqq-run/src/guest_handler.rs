@@ -945,6 +945,10 @@ pub fn escape_header_value(value: &str) -> String {
             '%' => out.push_str("%25"),
             '\r' => out.push_str("%0D"),
             '\n' => out.push_str("%0A"),
+            // Tab passes through: it is legal field whitespace, and the trim
+            // above already removed it from the edges. This arm must precede
+            // the control guard below — `\t` IS an ASCII control.
+            '\t' => out.push('\t'),
             c if c.is_ascii_control() => {
                 let _ = write!(out, "%{c:02X}", c = c as u8);
             }

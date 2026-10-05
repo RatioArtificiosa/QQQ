@@ -1557,6 +1557,7 @@ name = "qqq-serve"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
+ "memchr",
  "qqq-core",
  "qqq-host",
  "qqq-io",

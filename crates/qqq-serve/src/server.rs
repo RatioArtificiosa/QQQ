@@ -2555,9 +2555,16 @@ async fn read_head(
     config: &ConnectionConfig,
 ) -> std::result::Result<RequestHead, ReadOutcome> {
     let mut header_started: Option<Instant> = None;
+    // How much of `buf` is already known-scanned for the head terminator.
+    // Each loop iteration appends fresh bytes and resumes the scan here rather
+    // than from zero, so a slow sender dripping one byte at a time costs
+    // linear total work, not quadratic. Kept 3 bytes behind the frontier on
+    // every miss: a `\r\n\r\n` straddling the old boundary starts up to 3
+    // bytes before it.
+    let mut scanned = 0usize;
 
     loop {
-        if let Some(end) = http1::head_end(buf) {
+        if let Some(end) = http1::head_end_from(buf, scanned) {
             return match http1::parse_head(&buf[..end]) {
                 Ok((head, _consumed)) => {
                     // Keep the remainder: it is the start of the body and must
@@ -2607,6 +2614,13 @@ async fn read_head(
             Ok(0) | Err(_) => return Err(ReadOutcome::ClientClosed),
             Ok(n) => {
                 header_started.get_or_insert(Instant::now());
+                // Resume BEFORE the old frontier, not the new one: a
+                // terminator starting in the last 3 bytes of the previously
+                // scanned region may only complete now. Computing this from
+                // the post-extend length skips exactly those starts — a
+                // full head arriving in one read would miss its own
+                // terminator, which is what the socket test caught.
+                scanned = buf.len().saturating_sub(3);
                 buf.extend_from_slice(&chunk[..n]);
                 // The head ceiling is enforced by the *parser*, not here: it is
                 // the parser that knows the limit and that a body may legally
@@ -2978,5 +2992,52 @@ mod tests {
         request.content_length = None;
         request.chunked = true;
         assert!(special_route_has_body(&request));
+    }
+
+    /// **A head dribbled one byte at a time still parses — through the real read path.**
+    ///
+    /// Audit `F-05`: the server loop used to rescan the whole buffer on every
+    /// read, so a slow sender cost quadratic work; `read_head` now resumes
+    /// from its `scanned` cursor via `head_end_from`. This test drives that
+    /// path for real — a loopback peer writing one byte per tick — and
+    /// requires the identical head. Correctness under dribble is the property
+    /// that matters here (`§O-125`): a terminator split across reads must be
+    /// found, whenever the bytes arrive. (The linearity itself follows from
+    /// the single-pass-from-offset construction, reviewable in a dozen lines;
+    /// a byte-counting unit test would only re-measure the test's own window
+    /// variables, so this test deliberately does not claim to measure work.)
+    #[tokio::test]
+    async fn f05_dribbled_reads_find_the_terminated_head() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let addr = listener.local_addr().expect("bound address known");
+        let head: &[u8] =
+            b"POST /orders HTTP/1.1\r\nHost: example.com\r\nContent-Length: 42\r\n\r\n";
+
+        let writer = tokio::spawn(async move {
+            let mut peer = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("loopback connects");
+            for byte in head {
+                tokio::io::AsyncWriteExt::write_all(&mut peer, &[*byte])
+                    .await
+                    .expect("byte writes");
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+
+        let (mut stream, _) = listener.accept().await.expect("peer arrives");
+        let mut buf = Vec::new();
+        let parsed = read_head(&mut stream, &mut buf, &ConnectionConfig::default()).await;
+        writer.await.expect("writer finishes");
+        let request = match parsed {
+            Ok(request) => request,
+            Err(ReadOutcome::ClientClosed) => panic!("dribbled head parses: peer vanished"),
+            Err(ReadOutcome::HeaderTimeout) => panic!("dribbled head parses: timed out"),
+            Err(ReadOutcome::BadRequest(e)) => panic!("dribbled head parses: {e}"),
+        };
+        assert_eq!(request.target, "/orders");
+        assert_eq!(request.host(), Some("example.com"));
     }
 }

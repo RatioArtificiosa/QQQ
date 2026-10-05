@@ -184,6 +184,28 @@ pub enum ParseError {
         /// The value as sent.
         value: String,
     },
+    /// A header line began with whitespace: an obs-fold continuation.
+    ///
+    /// **A smuggling signature.** A proxy that does not fold sees two headers
+    /// where unfolding sees one. Unfolding trusts the proxy to agree, so the
+    /// only safe answer is refusal.
+    ObsFoldedHeader,
+    /// `Transfer-Encoding` appeared more than once.
+    ///
+    /// Also smuggling: which occurrence defines the framing is exactly what
+    /// two implementations can disagree about.
+    DuplicateTransferEncoding,
+    /// `Host` appeared more than once.
+    ///
+    /// Virtual-host routing on the first while a proxy routes on the last (or
+    /// the reverse) sends the request to the wrong application.
+    DuplicateHost,
+    /// The head is not valid UTF-8.
+    ///
+    /// The parser used to decode lossily, turning `\xff` into U+FFFD — a
+    /// *different string than the client sent* sailing through validation.
+    /// Strict decoding refuses the bytes instead.
+    InvalidUtf8,
     /// The declared body exceeded the configured cap.
     BodyTooLarge {
         /// The declared size.
@@ -236,6 +258,10 @@ impl ParseError {
                 | Self::HeaderTooLong { .. }
                 | Self::ConflictingFraming
                 | Self::DuplicateContentLength
+                | Self::ObsFoldedHeader
+                | Self::DuplicateTransferEncoding
+                | Self::DuplicateHost
+                | Self::InvalidUtf8
         )
     }
 
@@ -319,6 +345,16 @@ impl fmt::Display for ParseError {
             Self::UnsupportedTransferEncoding { value } => {
                 write!(f, "unsupported Transfer-Encoding `{value}`")
             }
+            Self::ObsFoldedHeader => {
+                f.write_str("obsolete line folding is not accepted; repeat the header instead")
+            }
+            Self::DuplicateTransferEncoding => {
+                f.write_str("Transfer-Encoding appears more than once, which is ambiguous framing")
+            }
+            Self::DuplicateHost => {
+                f.write_str("Host appears more than once, so routing is ambiguous")
+            }
+            Self::InvalidUtf8 => f.write_str("the request head is not valid UTF-8"),
         }
     }
 }
@@ -456,10 +492,43 @@ impl RequestHead {
 /// handled without guessing.
 #[must_use]
 pub fn head_end(input: &[u8]) -> Option<usize> {
-    input
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
+    head_end_from(input, 0)
+}
+
+/// Where the head ends at or after `from`, as an offset just past the
+/// terminating `\r\n\r\n` — or `None` if the bytes so far do not terminate.
+///
+/// This is the entry point a server loop calls as more bytes arrive: `from`
+/// is how much is already known-scanned, so a terminator split across reads
+/// costs a bounded re-examination instead of a full rescan. The caller keeps
+/// at least the last 3 bytes unscanned (`from = scanned.saturating_sub(3)`),
+/// because a `\r\n\r\n` straddling the old boundary starts up to 3 bytes
+/// before it. Scanning itself is one `memchr` pass for `\r` with a 4-byte
+/// window check at each hit — linear in the unexamined suffix, never in the
+/// whole head.
+///
+/// ```rust
+/// use qqq_serve::http1::{head_end, head_end_from};
+///
+/// let head = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+/// let end = head_end(head).unwrap();
+/// // A first read ending mid-terminator resumes safely:
+/// assert_eq!(head_end_from(head, end.saturating_sub(5)), Some(end));
+/// // Nothing scanned past the terminator is ever required of the caller.
+/// assert_eq!(head_end_from(b"GET / HTTP/1.1\r\n", 0), None);
+/// ```
+#[must_use]
+pub fn head_end_from(input: &[u8], from: usize) -> Option<usize> {
+    let from = from.min(input.len());
+    let mut search = from;
+    while let Some(rel) = memchr::memchr(b'\r', &input[search..]) {
+        let i = search + rel;
+        if input[i..].starts_with(b"\r\n\r\n") {
+            return Some(i + 4);
+        }
+        search = i + 1;
+    }
+    None
 }
 
 /// Parse an HTTP/1.1 request head.
@@ -484,29 +553,105 @@ pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), Par
     // The head is everything up to and including the final CRLF CRLF, minus the
     // terminator itself.
     let head = &input[..end - 4];
-    // Latin-1 rather than UTF-8: HTTP header values are octets, and a client is
-    // permitted to send bytes that are not valid UTF-8. Decoding lossily keeps
-    // such a request parseable instead of rejecting it for an encoding rule
-    // HTTP does not impose. The *validation* below is what rejects genuinely
-    // dangerous bytes.
-    let text = String::from_utf8_lossy(head);
+
+    // Strict UTF-8: `from_utf8`, never lossy. The old decoder turned invalid
+    // bytes into U+FFFD — a *different string than the client sent* sailing
+    // through validation. Non-UTF-8 bytes are refused as `InvalidUtf8`;
+    // control bytes are refused per line below, where the error can name the
+    // line they poisoned.
+    let text = std::str::from_utf8(head).map_err(|_| ParseError::InvalidUtf8)?;
     let mut lines = text.split("\r\n");
 
     // -- the request line -------------------------------------------------
     let request_line = lines.next().unwrap_or("");
+    if has_control_bytes(request_line) {
+        return Err(ParseError::BadRequestLine {
+            detail: "control byte in the request line".to_owned(),
+        });
+    }
     let (method, target, version) = parse_request_line(request_line)?;
+    // Non-ASCII targets are refused even though some servers accept them: a
+    // percent-encoded target carries the same resource in pure ASCII, so raw
+    // UTF-8 in the target is either a client bug or normalization games
+    // against a downstream that decodes differently.
+    if !target.is_ascii() {
+        return Err(ParseError::BadRequestLine {
+            detail: "non-ASCII request target".to_owned(),
+        });
+    }
 
     // -- the headers ------------------------------------------------------
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut content_length: Option<u64> = None;
-    let mut chunked = false;
+    // Extracted so `parse_head` stays reviewable: one function finds the
+    // request line, another owns every header rule.
+    let parsed = parse_header_block(lines)?;
+
+    Ok((
+        RequestHead {
+            method,
+            target,
+            version,
+            headers: parsed.headers,
+            content_length: parsed.content_length,
+            chunked: parsed.chunked,
+        },
+        end,
+    ))
+}
+
+/// ASCII control bytes have no business in a head line: NUL, DEL, and the
+/// C0 controls except tab are never valid in a request line or a field,
+/// and `\r`/`\n` cannot appear inside a line by construction. Tab survives
+/// here because field values strip it as OWS; a tab anywhere else fails
+/// the token or separator rules with its own error.
+fn has_control_bytes(line: &str) -> bool {
+    line.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f)
+}
+
+/// Parse the header block: every header rule lives here, so `parse_head`
+/// never grows past review size no matter how many rules accumulate.
+///
+/// Returns the stored headers, the single `Content-Length`, and whether the
+/// body is chunked. Every refusal below is fail-closed: an ambiguous header
+/// is an error, never a guess.
+/// The parsed header block: stored headers, the single Content-Length, and
+/// whether the body is chunked. A struct rather than a tuple so callers read
+/// field names instead of positions.
+struct ParsedHeaders {
+    headers: Vec<(String, String)>,
+    content_length: Option<u64>,
+    chunked: bool,
+}
+
+fn parse_header_block<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> std::result::Result<ParsedHeaders, ParseError> {
+    let mut out = ParsedHeaders {
+        headers: Vec::new(),
+        content_length: None,
+        chunked: false,
+    };
+    let mut seen_host = false;
+    let mut seen_transfer_encoding = false;
 
     for line in lines {
-        if headers.len() >= MAX_HEADERS {
+        if out.headers.len() >= MAX_HEADERS {
             return Err(ParseError::TooManyHeaders { limit: MAX_HEADERS });
         }
+        if has_control_bytes(line) {
+            return Err(ParseError::InvalidHeaderName {
+                name: String::new(),
+            });
+        }
         if line.len() > MAX_HEADER_BYTES {
-            let name = line.split(':').next().unwrap_or("<unknown>").to_owned();
+            // Named when the name is usable, blind otherwise: a valid token
+            // name is log-safe and tells the operator which header to
+            // shorten, but the name half of an unparseable line is
+            // attacker-controlled text of arbitrary length — echoing it
+            // means echoing it into logs.
+            let name = match line.split_once(':') {
+                Some((candidate, _)) if is_valid_header_name(candidate) => candidate.to_owned(),
+                _ => String::new(),
+            };
             return Err(ParseError::HeaderTooLong {
                 name,
                 bytes: line.len(),
@@ -519,7 +664,21 @@ pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), Par
                 .ok_or_else(|| ParseError::MalformedHeader {
                     line: truncate(line, 64),
                 })?;
-        let name = raw_name.trim();
+        // No trimming on the name, ever: `Host : x` (space before the colon)
+        // and obs-fold continuations (` folded: yes`, starting with
+        // whitespace) both fail the token rule below instead of being
+        // repaired into validity. RFC 9112 §5.1 allows no whitespace between
+        // the field name and the colon, and unfolding trusts every proxy on
+        // the path to agree — the safe answer is refusal.
+        if raw_name.is_empty() {
+            return Err(ParseError::InvalidHeaderName {
+                name: String::new(),
+            });
+        }
+        if line.starts_with([' ', '\t']) {
+            return Err(ParseError::ObsFoldedHeader);
+        }
+        let name = raw_name;
         if !is_valid_header_name(name) {
             return Err(ParseError::InvalidHeaderName {
                 name: truncate(name, 64),
@@ -532,7 +691,7 @@ pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), Par
 
         // -- framing headers, validated rather than trusted ---------------
         if name.eq_ignore_ascii_case("content-length") {
-            if content_length.is_some() {
+            if out.content_length.is_some() {
                 // Two lengths is a smuggling signature: a proxy may honour the
                 // first and the origin the second.
                 return Err(ParseError::DuplicateContentLength);
@@ -548,40 +707,43 @@ pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), Par
                     limit: MAX_REQUEST_BYTES,
                 });
             }
-            content_length = Some(n);
+            out.content_length = Some(n);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if seen_transfer_encoding {
+                // Two TE headers let a proxy honour one occurrence and the
+                // origin the other — the same disagreement as two lengths.
+                return Err(ParseError::DuplicateTransferEncoding);
+            }
+            seen_transfer_encoding = true;
             // Only `chunked` is supported. Anything else — and `chunked` in a
             // list — is refused rather than guessed at.
             if value.eq_ignore_ascii_case("chunked") {
-                chunked = true;
+                out.chunked = true;
             } else {
                 return Err(ParseError::UnsupportedTransferEncoding {
                     value: truncate(value, 64),
                 });
             }
+        } else if name.eq_ignore_ascii_case("host") {
+            if seen_host {
+                // Two Hosts let virtual-host routing disagree with a proxy
+                // about which application receives the request.
+                return Err(ParseError::DuplicateHost);
+            }
+            seen_host = true;
         }
 
-        headers.push((name.to_owned(), value.to_owned()));
+        out.headers.push((name.to_owned(), value.to_owned()));
     }
 
     // **The smuggling check.** A request with both framing headers is refused
     // outright: which one wins is precisely what two implementations disagree
     // about, and that disagreement is the attack.
-    if chunked && content_length.is_some() {
+    if out.chunked && out.content_length.is_some() {
         return Err(ParseError::ConflictingFraming);
     }
 
-    Ok((
-        RequestHead {
-            method,
-            target,
-            version,
-            headers,
-            content_length,
-            chunked,
-        },
-        end,
-    ))
+    Ok(out)
 }
 
 /// Parse the request line into its three parts.
@@ -689,12 +851,167 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// **Every split position parses identically, including inside the terminator.**
+    ///
+    /// Audit `F-05`: the head scanner used to restart from byte zero on every
+    /// read, so a terminator split across reads cost a full rescan — and any
+    /// resume offset other than `end - 3` risks missing a `\r\n\r\n` that
+    /// straddles the boundary. This test feeds a head cut at every position
+    /// (including inside `\r\n\r\n` itself) through the from-offset entry
+    /// point and requires the same offset every time.
+    #[test]
+    fn f05_head_end_from_matches_head_end_for_every_split() {
+        let head = b"POST /orders HTTP/1.1\r\nHost: example.com\r\nContent-Length: 42\r\n\r\n";
+        let expected = head_end(head).expect("the whole head terminates");
+        for split in 0..head.len() {
+            // Simulate a first read that ended at `split`: everything before
+            // it is already scanned, so the resume offset is `split`
+            // saturated down by the 3-byte straddle overlap.
+            let from = split.saturating_sub(3);
+            let found = head_end_from(head, from)
+                .unwrap_or_else(|| panic!("terminator lost at split {split}"));
+            assert_eq!(found, expected, "split at {split} (resume {from})");
+        }
+    }
+
     fn parse(s: &str) -> std::result::Result<RequestHead, ParseError> {
         parse_head(s.as_bytes()).map(|(h, _)| h)
     }
 
     fn ok(s: &str) -> RequestHead {
         parse(s).unwrap_or_else(|e| panic!("`{s}` should parse: {e}"))
+    }
+
+    /// **Malformed heads are refused, each for its own named reason.**
+    ///
+    /// Audit `F-04`: every row below is a shape the old parser accepted (or
+    /// accepted after silently repairing) that a proxy may read differently —
+    /// and that disagreement is request smuggling. The table pins the refusal
+    /// and the reason; adding a row for a new shape without its refusal fails
+    /// compilation, because the expected error variant will not exist.
+    #[test]
+    fn f04_rejects_malformed_heads() {
+        // Obs-fold: a continuation line is a second header to a proxy that
+        // does not fold, and one header to us. Refuse, never unfold.
+        let e = parse("GET / HTTP/1.1\r\nHost: x\r\n folded: yes\r\n\r\n")
+            .expect_err("obs-fold must be refused");
+        assert!(matches!(e, ParseError::ObsFoldedHeader), "{e:?}");
+        // Duplicate framing headers: two authorities, two possible bodies.
+        let e = parse(
+            "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .expect_err("duplicate TE must be refused");
+        assert!(matches!(e, ParseError::DuplicateTransferEncoding), "{e:?}");
+        let e = parse("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")
+            .expect_err("duplicate Host must be refused");
+        assert!(matches!(e, ParseError::DuplicateHost), "{e:?}");
+        // Non-digit and bad-list framing values.
+        let e = parse("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 12x\r\n\r\n")
+            .expect_err("non-digit length must be refused");
+        assert!(
+            matches!(e, ParseError::InvalidContentLength { .. }),
+            "{e:?}"
+        );
+        let e = parse("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\n\r\n")
+            .expect_err("encoding list must be refused");
+        assert!(
+            matches!(e, ParseError::UnsupportedTransferEncoding { .. }),
+            "{e:?}"
+        );
+        // Request-line shapes: version typo, garbage target, whitespace where
+        // separators belong, empty parts, a TAB separator, a non-ASCII target.
+        for bad in [
+            "GET / HTTP/1.2\r\nHost: x\r\n\r\n",
+            "GET example.com HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET  / HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET / HTTP/1.1 \r\nHost: x\r\n\r\n",
+            "GET\t/\tHTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET /caf\u{e9} HTTP/1.1\r\nHost: x\r\n\r\n",
+        ] {
+            parse(bad).expect_err(&format!("must be refused: {bad:?}"));
+        }
+        // A header name with whitespace is refused as written — never trimmed
+        // into validity. `Host : x` has a space before the colon; `X Bad: v`
+        // has one inside.
+        for bad in [
+            "GET / HTTP/1.1\r\nHost : x\r\n\r\n",
+            "GET / HTTP/1.1\r\nX Bad: v\r\n\r\n",
+        ] {
+            let e = parse(bad).expect_err(&format!("must be refused: {bad:?}"));
+            assert!(matches!(e, ParseError::InvalidHeaderName { .. }), "{e:?}");
+        }
+        // A line with no colon is not a header.
+        let e = parse("GET / HTTP/1.1\r\nNoColonHere\r\n\r\n")
+            .expect_err("colonless line must be refused");
+        assert!(matches!(e, ParseError::MalformedHeader { .. }), "{e:?}");
+    }
+
+    /// **An unusable over-long line is refused blind.**
+    ///
+    /// A valid token name is echoed so the operator knows what to shorten
+    /// (see `an_oversized_header_is_refused`), but the name half of a line
+    /// that is not even a header is attacker-controlled text — echoed into
+    /// the error means echoed into logs. Over-long with a space where the
+    /// name should be: refused, unnamed.
+    #[test]
+    fn f04_blinds_an_unusable_over_long_name() {
+        let big = "x".repeat(MAX_HEADER_BYTES);
+        let req = format!("GET / HTTP/1.1\r\nX Bad: {big}\r\n\r\n");
+        let e = parse(&req).expect_err("over-long unusable line must fail");
+        match &e {
+            ParseError::HeaderTooLong { name, .. } => assert_eq!(name, ""),
+            other => panic!("expected HeaderTooLong, got {other:?}"),
+        }
+    }
+
+    /// **Invalid UTF-8 is refused, not repaired.**
+    ///
+    /// The old parser decoded lossily, so `\xff` became U+FFFD and sailed
+    /// through validation as a different string than the client sent. Strict
+    /// decoding refuses the bytes instead.
+    #[test]
+    fn f04_rejects_invalid_utf8() {
+        let mut raw = b"GET / HTTP/1.1\r\nX-Bin: ".to_vec();
+        raw.extend_from_slice(&[0xff, 0xfe]);
+        raw.extend_from_slice(b"\r\n\r\n");
+        let e = parse_head(&raw).expect_err("invalid UTF-8 must be refused");
+        assert!(matches!(e, ParseError::InvalidUtf8), "{e:?}");
+    }
+
+    /// **Valid heads still parse, including the shapes strictness must not break.**
+    ///
+    /// Case-insensitive names, `chunked` alone, 9-character names, empty
+    /// values, and exact-boundary caps all survive the strict parser. If a
+    /// hardening change breaks any row here, the hardening is wrong, not the
+    /// row: these are legitimate clients.
+    #[test]
+    fn f04_still_accepts_valid_heads() {
+        use std::fmt::Write as _;
+
+        let h = ok("GET / HTTP/1.1\r\nhOsT: Example.COM\r\n\r\n");
+        assert_eq!(h.host(), Some("Example.COM"));
+        let h = ok("POST /o HTTP/1.1\r\nHost: x\r\ncOnTeNt-LeNgTh: 3\r\n\r\n");
+        assert_eq!(h.content_length, Some(3));
+        let h = ok("POST /o HTTP/1.1\r\nHost: x\r\ntRansfer-ENCoding: chunked\r\n\r\n");
+        assert!(h.chunked);
+        let h = ok("GET / HTTP/1.1\r\n123456789: v\r\nHost: x\r\n\r\n");
+        assert_eq!(h.header("123456789"), Some("v"));
+        let h = ok("GET / HTTP/1.1\r\nX-Empty:\r\nHost: x\r\n\r\n");
+        assert_eq!(h.header("x-empty"), Some(""));
+        // Boundary caps: exactly MAX_HEADERS headers parse; one more does not.
+        let mut many = String::from("GET / HTTP/1.1\r\n");
+        for i in 0..MAX_HEADERS {
+            let _ = write!(many, "X-Pad-{i}: v\r\n");
+        }
+        many.push_str("\r\n");
+        assert!(parse(&many).is_ok());
+        let mut too_many = String::from("GET / HTTP/1.1\r\n");
+        for i in 0..=MAX_HEADERS {
+            let _ = write!(too_many, "X-Pad-{i}: v\r\n");
+        }
+        too_many.push_str("\r\n");
+        let e = parse(&too_many).expect_err("over the header count must fail");
+        assert!(matches!(e, ParseError::TooManyHeaders { .. }), "{e:?}");
     }
 
     // -- the happy path ----------------------------------------------------

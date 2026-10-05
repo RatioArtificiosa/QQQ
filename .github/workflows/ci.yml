@@ -26,7 +26,6 @@ on:
 # ---------------------------------------------------------------------------
 permissions:
   contents: read
-  actions: write
 
 # ---------------------------------------------------------------------------
 # Concurrency: a newer push cancels the older run on the same ref.

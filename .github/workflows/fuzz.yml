@@ -57,7 +57,6 @@ env:
 # reasoning.
 permissions:
   contents: read
-  actions: write
 
 # A newer dispatch cancels the older run on the same ref, so nightly
 # overlapping a manual run does not burn two runners fuzzing the same tree.

@@ -3309,17 +3309,17 @@ python tools/check_agent_cookbook.py --self-test # proves the checker fires
 |---|---|---|
 | **`cli`** | A command reproduces it | the checker **runs** the reproducer and asserts the code comes back |
 | **`test`** | A test reproduces it | the checker asserts the code is named in a file under `crates/*/tests/` |
-| **`src`** | The code is **raised** in `src`, and **no test reproduces it** | the checker asserts it is named in a non-test `.rs` file and in **no** test |
+| **`src`** | The code is **raised** in `src`, and **no integration test** reproduces it | the checker asserts it is named in a non-test `.rs` file and in **no** file under `crates/*/tests/` |
 | **`unreachable`** | Nothing in the tree names it at all | the checker asserts the **variant** is named nowhere outside the enum declaration |
 
 The last two are the reason this page exists. A cookbook with only the first two would have silently
-omitted **28 of the 43 codes**, and an agent that read `docs/errors.md` would have no way to tell which
-of the 43 it could ever see.
+omitted **30 of the 45 codes**, and an agent that read `docs/errors.md` would have no way to tell which
+of the 45 it could ever see.
 
 **`unreachable` is now empty, and that is the honest result rather than a disappointment.** Every one
 of the 45 codes has a construction site. What the corrected measurement does say — and it is the claim
-that survives — is that **only five can be reached from a shell**, and that **30 have no test
-reproducing them**.
+that survives — is that **only five can be reached from a shell**, and that **30 have no
+integration-test reproducer**.
 
 #### Measured, by kind
 
@@ -3481,8 +3481,8 @@ place — and if it should not, the work is to remove it from the catalogue, whi
 **This is the finding the cookbook was written to produce.** The catalogue is complete by its own
 checker — *"45 code(s), every one with a cause and a remediation"* — and completeness of
 **documentation** is not completeness of **behaviour**. What survives the correction is the size of
-the gap that is real: **40 of 45 codes cannot be reached from a shell, and 30 have no test
-reproducing them**, so a regression in any of those is invisible.
+the gap that is real: **40 of 45 codes cannot be reached from a shell, and 30 have no
+integration-test reproducer**, so a regression in any of those is invisible.
 
 ---
 

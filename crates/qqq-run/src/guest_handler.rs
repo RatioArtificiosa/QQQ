@@ -2041,4 +2041,76 @@ mod tests {
             "no grant means an attempt, however the call ended"
         );
     }
+
+    /// A hostile guest answering outside the protocol gets a 502 and a
+    /// `Failed` row — through the real request path, not the seam.
+    ///
+    /// The `settle` test above pins the convert-then-classify mapping, but
+    /// the defect lived in `handle_request`'s ordering (the row read the raw
+    /// answer), so only a request through `handle_request` with the audit
+    /// block executing proves the row. The hostile fixture answers status
+    /// 99: `to_served` refuses it, the caller renders 502, and the recorded
+    /// row must read `Failed` — a guest that answers outside the protocol
+    /// is exercising the authority and failing, never succeeding quietly.
+    #[test]
+    fn f02_hostile_answer_audits_as_failed_on_the_request_path() {
+        let source = include_str!("../tests/fixtures/hostile-response.wat");
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("a minimal manifest parses");
+        let cfg = qqq_host::config::EngineConfig::default();
+        let wasmtime_cfg = cfg.to_wasmtime_config().expect("engine config");
+        let engine = wasmtime::Engine::new(&wasmtime_cfg).expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        // The fixture is compiled in (`include_str!`), so a build failure
+        // here is a real failure, never a missing artifact: `expect`, not
+        // an early return. (The orders-component builders return early
+        // because that artifact lives outside the repo and may be absent;
+        // this one cannot be.)
+        let mut app = GuestApp::with_capacity(
+            engine,
+            source.as_bytes(),
+            qqq_cap::resolve::GrantSet::from_manifest(&manifest),
+            limits,
+            "127.0.0.1:8080",
+            1,
+        )
+        .expect("the hostile fixture must build");
+        let dir = std::env::temp_dir().join(format!("qqq-audit-hostile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+        app.attach_audit_file(&path).expect("attach");
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Get, "/orders"),
+            None,
+            "test-tenant",
+        );
+        let err = outcome.expect_err("the hostile answer must fail the request");
+        assert!(
+            matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
+            "wrong code: {err:?}"
+        );
+        assert_eq!(
+            failure_response(&err).status,
+            502,
+            "the hostile answer must render 502"
+        );
+        let (rows, _) = app.audit_snapshot();
+        assert_eq!(rows.len(), 1, "one request writes exactly one row");
+        assert_eq!(
+            rows[0].outcome,
+            qqq_host::Outcome::Failed,
+            "a boundary-refused answer audits as a failed exercise"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

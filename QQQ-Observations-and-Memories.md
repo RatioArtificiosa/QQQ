@@ -35527,6 +35527,36 @@ compares the RUNTIME's list against the SOURCE's list. Documents agreeing
 with each other is consensus; code agreeing with documents is correctness. →
 `crates/qqq-core/src/error.rs`, `tools/check_error_all.py`.
 
+## §O-554 — A poisoned lock turns one caught panic into a total outage
+
+`F-21`: under `panic = "abort"` a poisoned mutex is unobservable, so
+`.lock().expect("not poisoned")` read as harmless documentation — six such
+sites in `pool.rs`, three in the tenant budget registry, plus asserts in
+`release`/`discard` reachable from `RequestPermit::drop`. Once release
+builds unwind (`F-01`), a panic that unwinds while holding the pool lock
+poisons it — a panic in `serve_one` alone does NOT poison anything, only a
+panic inside a lock's critical section does — and every later acquire,
+release, and guard-drop panics on the poisoned lock; a `Drop` panicking
+mid-unwind aborts the process. The fix is `lock_recover()` for locks whose
+critical sections are panic-free integer/map work (with the rule written
+at each lock's declaration), saturating counters with a loud-but-infallible
+diagnostic where `Drop` reachability forbids even an assert (`eprintln!`
+itself panics on a closed stderr, so the write is fallible and its error
+swallowed — review caught that), and a returned startup error for the
+audit worker spawn. With the asserts gone, `RequestPermit::drop` cannot
+poison anything either: the only remaining poison source is a panic inside
+a critical section, and every critical section is panic-free by
+construction. The guard half carries its own
+lesson: the new checker's `Drop`-span matcher shipped with two defects (a
+missing `MULTILINE` flag and joined-text line numbers pointing at the
+wrong lines) that made it agree with everything — its own fault-injected
+self-test caught both before the checker ever ran in CI. A checker whose
+self-test cannot fail is the same shape as the defect it guards. →
+`crates/qqq-core/src/sync.rs`, `crates/qqq-host/src/pool.rs`,
+`crates/qqq-host/src/guest_output.rs`,
+`crates/qqq-host/src/audit_sink.rs`,
+`tools/check_no_poison_expect.py`.
+
 ## §O-544 — A lint can be half-wrong, and so can a permissions argument
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

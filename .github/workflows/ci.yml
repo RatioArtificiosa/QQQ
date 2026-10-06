@@ -175,6 +175,7 @@ jobs:
         run: |
           python tools/check_error_catalogue.py --self-test
           python tools/check_error_all.py --self-test
+          python tools/check_no_poison_expect.py --self-test
           python tools/check_glossary.py --self-test
           python tools/check_reconciliation.py --self-test
           python tools/check_wit_reference.py --self-test
@@ -333,6 +334,15 @@ jobs:
         run: python tools/check_error_all.py
       - name: Prove the all-list check catches a missing variant
         run: python tools/check_error_all.py --self-test
+
+      # `F-21`. A poisoned mutex wedges every later `.lock().expect()` —
+      # including inside `Drop`, where a panic during unwinding aborts the
+      # process. Production locks recover (`lock_recover()`) or fail closed;
+      # `Drop` bodies never panic.
+      - name: Validate no poison-fragile locks or panicking Drops
+        run: python tools/check_no_poison_expect.py
+      - name: Prove the poison check catches an expect and a Drop panic
+        run: python tools/check_no_poison_expect.py --self-test
 
       # `DOC-017`. The WIT is the published artifact; a hand-written reference is a
       # second copy of an interface that already exists, and when they disagree the

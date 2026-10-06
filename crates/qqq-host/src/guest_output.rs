@@ -125,6 +125,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use qqq_core::sync::LockRecover;
+
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, oneshot};
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
@@ -374,6 +376,17 @@ pub struct TenantOutputBudgets {
 #[derive(Debug)]
 struct TenantBudgetsInner {
     limit: u64,
+    /// # Lock rule (`F-21`): recover, never panic
+    ///
+    /// Every critical section on this mutex is panic-free map and integer
+    /// work (`entry`/`or_insert_with` on fresh keys, `+= 1`,
+    /// `saturating_sub`, `remove`): either the whole transition ran or none
+    /// of it did, so a recovered guard holds a consistent registry. All
+    /// acquisitions use `lock_recover()` (including the `live()` observer: a
+    /// reading is an observation, never a decision that must fail closed). A
+    /// recovered map may be missing an entry whose insert raced the panic — `acquire` re-establishes it via
+    /// `or_insert_with`, and the guard's `Drop` tolerates a missing entry by
+    /// doing nothing, which is exactly the evicted-at-zero state.
     state: std::sync::Mutex<std::collections::HashMap<String, TenantEntry>>,
 }
 
@@ -419,18 +432,12 @@ impl TenantOutputBudgets {
     /// assert_eq!(guard.tenant(), "tenant-a");
     /// ```
     ///
-    /// # Panics
-    ///
-    /// When the registry lock is poisoned — which means another thread panicked
-    /// while acquiring, and proceeding with a possibly half-inserted entry
-    /// would account one tenant's bytes to another.
+    /// A poisoned lock recovers rather than panics (see the lock rule on the
+    /// registry). `or_insert_with` re-establishes an entry whose insert raced
+    /// a panic, so recovery converges rather than accumulating damage.
     #[must_use]
     pub fn acquire(&self, tenant: &str) -> TenantOutputGuard {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("tenant output budgets are not poisoned");
+        let mut state = self.inner.state.lock_recover();
         let entry = state
             .entry(tenant.to_owned())
             .or_insert_with(|| TenantEntry {
@@ -463,10 +470,9 @@ impl TenantOutputBudgets {
     pub fn live(&self, tenant: &str) -> u64 {
         self.inner
             .state
-            .lock()
-            .ok()
-            .and_then(|state| state.get(tenant).map(|entry| entry.live))
-            .unwrap_or(0)
+            .lock_recover()
+            .get(tenant)
+            .map_or(0, |entry| entry.live)
     }
 }
 
@@ -490,11 +496,7 @@ pub struct TenantOutputGuard {
 
 impl Clone for TenantOutputGuard {
     fn clone(&self) -> Self {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("tenant output budgets are not poisoned");
+        let mut state = self.inner.state.lock_recover();
         // Created by `acquire`, so the entry exists; a missing entry would
         // mean an eviction raced a counted guard, which the locking forbids.
         if let Some(entry) = state.get_mut(&self.tenant) {
@@ -509,12 +511,12 @@ impl Clone for TenantOutputGuard {
 }
 
 impl Drop for TenantOutputGuard {
+    /// Panic-free by construction (`F-21`): the lock recovers rather than
+    /// panicking, the entry lookup tolerates a missing entry, and the counter
+    /// saturates. A `Drop` that panics during unwinding aborts the process
+    /// even after `F-01` — this one cannot.
     fn drop(&mut self) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("tenant output budgets are not poisoned");
+        let mut state = self.inner.state.lock_recover();
         if let Some(entry) = state.get_mut(&self.tenant) {
             entry.live = entry.live.saturating_sub(1);
             if entry.live == 0 {
@@ -1302,6 +1304,38 @@ mod tests {
 
     /// A line that would be a host access record, byte for byte.
     const FORGED_RECORD: &str = r#"{"ts":"2026-01-01T00:00:00Z","method":"DELETE","path":"/admin","status":200,"tenant":"other"}"#;
+
+    /// **F-21: dropping a guard after poison must not panic.**
+    ///
+    /// Written first and failing first: on the old `.lock().expect("tenant
+    /// output budgets are not poisoned")` code the `drop` below panics — and
+    /// a `Drop` that panics during unwinding aborts the process even after
+    /// F-01, which is the double-panic hazard. The `is_poisoned` assertion is
+    /// the anti-vacuity pin: without it the test could pass with no poison.
+    #[test]
+    fn f21_tenant_guard_drop_does_not_panic_after_poison() {
+        use std::sync::Arc;
+        let budgets = Arc::new(TenantOutputBudgets::new(64));
+        let guard = budgets.acquire("tenant-a");
+        let poisoner = Arc::clone(&budgets);
+        let _ = std::thread::spawn(move || {
+            // Test-only: hold the registry lock across a panic to poison it
+            // on purpose (the tests module sees the private field, so no
+            // accessor widens the API for fault injection).
+            let _held = poisoner.inner.state.lock().expect("test setup: unpoisoned");
+            panic!("poison the tenant budgets lock on purpose");
+        })
+        .join();
+        assert!(
+            budgets.inner.state.is_poisoned(),
+            "the fixture must really poison the lock, or this test proves nothing"
+        );
+        drop(guard);
+        // The registry keeps working: a fresh acquire re-establishes the entry
+        // (the recovered map is empty after the drop evicted it).
+        let _again = budgets.acquire("tenant-a");
+        assert_eq!(budgets.live("tenant-a"), 1);
+    }
 
     #[test]
     fn a_guest_line_cannot_impersonate_an_access_record() {

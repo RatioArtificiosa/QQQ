@@ -48,6 +48,7 @@
 
 pub mod error;
 pub mod ids;
+pub mod sync;
 
 pub use error::{Error, ErrorClass, ErrorCode, Result};
 pub use ids::{

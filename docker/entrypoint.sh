@@ -974,6 +974,8 @@ cmd_checks() {
     python3 tools/check_error_catalogue.py --self-test
     python3 tools/check_error_all.py
     python3 tools/check_error_all.py --self-test
+    python3 tools/check_no_poison_expect.py
+    python3 tools/check_no_poison_expect.py --self-test
     python3 tools/check_wit_reference.py
     python3 tools/check_wit_reference.py --self-test
     python3 tools/check_glossary_usage.py

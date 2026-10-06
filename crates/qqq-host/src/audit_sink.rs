@@ -1254,7 +1254,7 @@ impl AuditAppender {
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let path = dir.join("audit.jsonl");
     /// let file = AuditFile::open(&path, 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
@@ -1267,14 +1267,13 @@ impl AuditAppender {
     /// let _ = std::fs::remove_dir_all(&dir);
     /// ```
     ///
-    /// # Panics
+    /// # Errors
     ///
     /// When the worker thread cannot be spawned, which means the host cannot
-    /// create threads — a broken process, not a full disk. The `expect` names
-    /// it so the panic message states the condition instead of unwrapping
-    /// silently.
-    #[must_use]
-    pub fn spawn(mut file: AuditFile, config: AppenderConfig) -> Self {
+    /// create threads — a broken process, not a full disk. Returned, never
+    /// panicked (`F-21`): a startup failure must fail the startup carrying
+    /// the reason, not abort the process from inside a constructor.
+    pub fn spawn(mut file: AuditFile, config: AppenderConfig) -> Result<Self, std::io::Error> {
         if config.durability == Durability::Buffered {
             file = file.into_buffered(BUFFERED_CAPACITY);
         }
@@ -1287,15 +1286,14 @@ impl AuditAppender {
             .name("qqq-audit-append".to_owned())
             .spawn(move || {
                 append_loop(&rx, &mut file, &worker_stats, &worker_failed, &config);
-            })
-            .expect("audit append worker must spawn");
-        Self {
+            })?;
+        Ok(Self {
             tx: Some(tx),
             stats,
             worker: Some(worker),
             failed,
             config,
-        }
+        })
     }
 
     /// Hand one record to the worker, waiting if the queue is full.
@@ -1326,7 +1324,7 @@ impl AuditAppender {
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let path = dir.join("audit.jsonl");
     /// let file = AuditFile::open(&path, 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
@@ -1376,7 +1374,7 @@ impl AuditAppender {
     /// let dir = std::env::temp_dir().join(format!("qqq-persist-doc-{}", std::process::id()));
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
@@ -1427,7 +1425,7 @@ impl AuditAppender {
     /// let dir = std::env::temp_dir().join(format!("qqq-stats-doc-{}", std::process::id()));
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// assert_eq!(appender.stats().submitted, 0);
     /// assert_eq!(appender.stats().late_after_skip, 0);
     /// let _ = std::fs::remove_dir_all(&dir);
@@ -1450,7 +1448,7 @@ impl AuditAppender {
     /// let dir = std::env::temp_dir().join(format!("qqq-config-doc-{}", std::process::id()));
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// assert_eq!(appender.config().durability, Durability::FlushPerRecord);
     /// let _ = std::fs::remove_dir_all(&dir);
     /// ```
@@ -1472,7 +1470,7 @@ impl AuditAppender {
     /// let dir = std::env::temp_dir().join(format!("qqq-shutdown-doc-{}", std::process::id()));
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// let report = appender.shutdown();
     /// assert!(report.drained_cleanly);
     /// assert_eq!(report.stats.submitted, 0);
@@ -1510,7 +1508,7 @@ impl Drop for AuditAppender {
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let path = dir.join("audit.jsonl");
     /// let file = AuditFile::open(&path, 0).expect("open");
-    /// let appender = AuditAppender::spawn(file, AppenderConfig::default());
+    /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
@@ -2049,7 +2047,8 @@ mod tests {
                 durability: Durability::Buffered,
                 ..AppenderConfig::default()
             },
-        );
+        )
+        .expect("spawn");
 
         let mut handles = Vec::new();
         let shared = std::sync::Arc::new(appender);
@@ -2119,7 +2118,8 @@ mod tests {
                 durability: Durability::Buffered,
                 ..AppenderConfig::default()
             },
-        );
+        )
+        .expect("spawn");
         let mut handles = Vec::new();
         let shared = std::sync::Arc::new(appender);
         for worker in 0..8 {
@@ -2169,7 +2169,8 @@ mod tests {
                     durability,
                     ..AppenderConfig::default()
                 },
-            );
+            )
+            .expect("spawn");
             for record in &records {
                 appender.append(record).expect("append");
             }
@@ -2224,7 +2225,8 @@ mod tests {
                 stall_timeout: std::time::Duration::from_millis(50),
                 ..AppenderConfig::default()
             },
-        );
+        )
+        .expect("spawn");
         for record in records.iter().filter(|record| record.sequence != 3) {
             appender.append(record).expect("append");
         }
@@ -2266,7 +2268,8 @@ mod tests {
                 durability: Durability::Buffered,
                 ..AppenderConfig::default()
             },
-        );
+        )
+        .expect("spawn");
         for record in &records {
             appender.append(record).expect("append");
         }
@@ -2362,7 +2365,7 @@ mod tests {
         let path = scratch.file();
         let records = chained_records(3, &["acme"]);
         let file = AuditFile::open(&path, 0).expect("open");
-        let appender = AuditAppender::spawn(file, AppenderConfig::default());
+        let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
         appender.append(&records[0]).expect("row 1");
         appender.append(&records[2]).expect("row 3, gap at 2");
         appender.append(&records[2]).expect("resend of row 3");
@@ -2388,7 +2391,7 @@ mod tests {
         let records = chained_records(COUNT, &["acme"]);
         {
             let file = AuditFile::open(&path, 0).expect("open");
-            let appender = AuditAppender::spawn(file, AppenderConfig::default());
+            let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
             for record in &records {
                 appender.append(record).expect("append");
             }
@@ -2476,7 +2479,8 @@ mod tests {
                     durability,
                     ..AppenderConfig::default()
                 },
-            );
+            )
+            .expect("spawn");
             let started = std::time::Instant::now();
             for record in &records {
                 appender.append(record).expect("append");

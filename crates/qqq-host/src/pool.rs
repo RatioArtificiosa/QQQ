@@ -37,6 +37,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use qqq_core::sync::LockRecover;
 use qqq_core::{Error, ErrorCode, Result};
 
 use crate::metrics::Metrics;
@@ -126,6 +127,16 @@ pub struct Pool {
     /// Counts that must change as one transaction. Independent atomics briefly
     /// made `in_use + idle > capacity` visible between reservation and
     /// idle-dequeue, so metrics could report an impossible state under load.
+    ///
+    /// # Lock rule (`F-21`): recover, never panic
+    ///
+    /// Every critical section on this mutex is panic-free integer arithmetic
+    /// (`+= 1`, `-= 1`, comparisons) with the metrics calls placed *after*
+    /// the guard drops — so a recovered guard necessarily holds consistent
+    /// values: either the whole transition ran or none of it did. All six
+    /// acquisitions use `lock_recover()`; a poisoned lock degrades to the
+    /// values the panicking holder left, which the saturating counters keep
+    /// inside the capacity invariant.
     state: Mutex<PoolState>,
     /// Set when the host begins shutting down.
     draining: AtomicU64,
@@ -163,28 +174,22 @@ impl Pool {
 
     /// Slots currently checked out — at most one live instance per slot.
     ///
-    /// # Panics
-    ///
-    /// Panics if another thread poisoned the pool state mutex. A poisoned
-    /// state cannot safely produce an occupancy value.
+    /// A poisoned lock recovers rather than panics (see the lock rule on the
+    /// `state` field): an occupancy reading is an observation, never a
+    /// decision point that must fail closed.
     #[must_use]
     pub fn in_use(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("pool state is not poisoned")
-            .in_use
+        self.state.lock_recover().in_use
     }
 
     /// Free slots, available for the next acquisition. A free slot is
     /// accounting, not a waiting guest: V1 creates the instance after
     /// acquiring, so this count never implies a reusable instance exists.
     ///
-    /// # Panics
-    ///
-    /// Panics if another thread poisoned the pool state mutex.
+    /// A poisoned lock recovers rather than panics, like [`Pool::in_use`].
     #[must_use]
     pub fn idle(&self) -> u64 {
-        self.state.lock().expect("pool state is not poisoned").idle
+        self.state.lock_recover().idle
     }
 
     /// `in_use` and `idle` read under one lock acquisition.
@@ -338,12 +343,10 @@ impl Pool {
     /// );
     /// ```
     ///
-    /// # Panics
-    ///
-    /// Panics if another thread poisoned the pool state mutex.
+    /// A poisoned lock recovers rather than panics, like the accessors above.
     #[must_use]
     pub fn snapshot(&self) -> (u64, u64) {
-        let state = self.state.lock().expect("pool state is not poisoned");
+        let state = self.state.lock_recover();
         (state.in_use, state.idle)
     }
 
@@ -423,10 +426,9 @@ impl Pool {
     /// Returns `QQQ-6001` with `reason`, `capacity` and (when retryable)
     /// `retry-after` in its context.
     ///
-    /// # Panics
-    ///
-    /// Panics if another thread poisoned the pool state mutex. A poisoned
-    /// state cannot safely make a capacity decision.
+    /// A poisoned lock recovers rather than panics (see the lock rule on the
+    /// `state` field): the capacity check runs against the recovered values,
+    /// which the saturating counters keep inside the invariant.
     pub fn acquire(&self, completed_per_second: f64) -> Result<Acquired> {
         if self.is_draining() {
             self.metrics.note_saturation();
@@ -436,7 +438,7 @@ impl Pool {
         // Reservation and idle dequeue are one state transition. This is a
         // concurrency gate; the caller still creates an instance when the slot
         // is fresh because V1 has no reset-safe instance store.
-        let mut state = self.state.lock().expect("pool state is not poisoned");
+        let mut state = self.state.lock_recover();
         if state.in_use >= self.capacity {
             drop(state);
             self.metrics.note_saturation();
@@ -461,19 +463,27 @@ impl Pool {
     /// The caller has established that the instance did not trap. This is the
     /// **only** path that puts a slot back into the free list.
     ///
-    /// # Panics
-    ///
-    /// Panics if called without a matching successful [`Pool::acquire`], because
-    /// releasing an instance that was never acquired would push `in_use` below
-    /// zero when it wraps and let the pool hand out more than its capacity —
-    /// which is precisely the guarantee the pool exists to provide.
+    /// A call with nothing checked out saturates instead of panicking: this
+    /// runs in `RequestPermit::drop`, and a `Drop` that panics during
+    /// unwinding aborts the process even after `F-01`. The loud-but-infallible
+    /// diagnostic keeps the host logic bug visible without killing the server
+    /// (`eprintln!` would reintroduce the abort on a closed stderr), and the
+    /// saturating counters keep the capacity invariant intact.
     pub fn release(&self) -> ReleaseOutcome {
-        let mut state = self.state.lock().expect("pool state is not poisoned");
-        let previous = state.in_use;
-        assert!(
-            previous > 0,
-            "Pool::release called with no instance checked out; this is a QQQ bug"
-        );
+        let mut state = self.state.lock_recover();
+        if state.in_use == 0 {
+            // Loud but infallible: `eprintln!` panics when stderr is closed,
+            // which would reintroduce the double-panic abort this saturation
+            // exists to prevent. A failed write is swallowed — the counts
+            // below stay valid either way.
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "qqq: BUG: Pool::release called with no instance checked out; saturating"
+                ),
+            );
+            return ReleaseOutcome::SlotFreed;
+        }
         state.in_use -= 1;
         state.idle += 1;
         drop(state);
@@ -487,16 +497,19 @@ impl Pool {
     /// whole point. `HOST-010` and §4.4 step 14 require a trapped instance to be
     /// dropped, and the metric is what makes the drop rate observable.
     ///
-    /// # Panics
-    ///
-    /// As [`Pool::release`].
+    /// Saturates like [`Pool::release`] for the same `Drop`-safety reason.
     pub fn discard(&self) -> ReleaseOutcome {
-        let mut state = self.state.lock().expect("pool state is not poisoned");
-        let previous = state.in_use;
-        assert!(
-            previous > 0,
-            "Pool::discard called with no instance checked out; this is a QQQ bug"
-        );
+        let mut state = self.state.lock_recover();
+        if state.in_use == 0 {
+            // Loud but infallible, as in [`Pool::release`].
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "qqq: BUG: Pool::discard called with no instance checked out; saturating"
+                ),
+            );
+            return ReleaseOutcome::Discarded;
+        }
         state.in_use -= 1;
         drop(state);
         self.metrics.note_discarded();
@@ -545,6 +558,57 @@ impl Acquired {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **F-21: a poisoned state lock does not wedge the pool.**
+    ///
+    /// Written first and failing first: on the old `.lock().expect("pool
+    /// state is not poisoned")` code the `acquire` below panics, which is the
+    /// outage F-21 exists to prevent (one caught panic wedging every later
+    /// request). The `is_poisoned` assertion is the anti-vacuity pin: without
+    /// it the test could pass with no poison at all.
+    #[test]
+    fn f21_pool_survives_a_poisoned_state_lock() {
+        use std::sync::Arc;
+        let pool = Arc::new(Pool::new(2));
+        let poisoner = Arc::clone(&pool);
+        let _ = std::thread::spawn(move || {
+            // Test-only: hold the state lock across a panic to poison it on
+            // purpose. Production code must never do this — every critical
+            // section is panic-free integer arithmetic, which is what makes
+            // `lock_recover()` sound. The tests module sees the private
+            // field, so no accessor widens the API for fault injection.
+            let _held = poisoner.state.lock().expect("test setup: unpoisoned");
+            panic!("poison the pool state lock on purpose");
+        })
+        .join();
+        assert!(
+            pool.state.is_poisoned(),
+            "the fixture must really poison the lock, or this test proves nothing"
+        );
+        pool.acquire(0.0)
+            .expect("capacity still available after poison");
+        pool.release();
+        let (in_use, idle) = pool.snapshot();
+        assert_eq!((in_use, idle), (0, 1), "accounting continues after poison");
+    }
+
+    /// **F-21: releasing without acquiring cannot panic.**
+    ///
+    /// `RequestPermit::drop` calls `release()`, and a `Drop` that panics
+    /// during unwinding aborts the process even after F-01. The old
+    /// `assert!(previous > 0)` turned a host logic bug into exactly that
+    /// abort; the saturating behaviour documents the fail-safe contract
+    /// instead: counts stay valid, the bug stays loud through the log line,
+    /// the process stays up. Same for `discard()`.
+    #[test]
+    fn f21_release_without_acquire_does_not_panic() {
+        let pool = Pool::new(1);
+        assert_eq!(pool.release(), ReleaseOutcome::SlotFreed);
+        assert_eq!(pool.in_use(), 0, "counts saturate at zero, never wrap");
+        let pool = Pool::new(1);
+        assert_eq!(pool.discard(), ReleaseOutcome::Discarded);
+        assert_eq!(pool.in_use(), 0, "counts saturate at zero, never wrap");
+    }
 
     #[test]
     fn a_pool_hands_out_up_to_its_capacity() {

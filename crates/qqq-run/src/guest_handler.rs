@@ -774,7 +774,13 @@ impl GuestApp {
                 persist_timeout: stall_timeout + std::time::Duration::from_secs(30),
                 ..qqq_host::audit_sink::AppenderConfig::default()
             },
-        );
+        )
+        .map_err(|e| {
+            Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
+                "the host could not start its audit worker thread; the process cannot create \
+                 threads",
+            )
+        })?;
 
         self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
         self.audit_appender = Some(Arc::new(appender));
@@ -1476,7 +1482,8 @@ mod tests {
         let appender = qqq_host::audit_sink::AuditAppender::spawn(
             file,
             qqq_host::audit_sink::AppenderConfig::default(),
-        );
+        )
+        .expect("spawn");
         let rows = stream.records().to_vec();
         let ack = appender
             .persist(&rows, Duration::from_secs(30))

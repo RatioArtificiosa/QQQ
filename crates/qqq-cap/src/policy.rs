@@ -1857,7 +1857,13 @@ fn parse_or(text: &str, source: &str, line: usize, depth: u8) -> Result<Expr, Po
     let parts = split_top_level(text, "or");
     if parts.len() > 1 {
         let mut it = parts.into_iter();
-        let mut acc = parse_and(it.next().unwrap(), source, line, depth + 1)?;
+        let mut acc = parse_and(
+            it.next()
+                .expect("parts holds at least two elements, so the first next() is Some"),
+            source,
+            line,
+            depth + 1,
+        )?;
         for part in it {
             let rhs = parse_and(part, source, line, depth + 1)?;
             acc = Expr::Or(Box::new(acc), Box::new(rhs));
@@ -1878,7 +1884,13 @@ fn parse_and(text: &str, source: &str, line: usize, depth: u8) -> Result<Expr, P
     let parts = split_top_level(text, "and");
     if parts.len() > 1 {
         let mut it = parts.into_iter();
-        let mut acc = parse_unary(it.next().unwrap(), source, line, depth + 1)?;
+        let mut acc = parse_unary(
+            it.next()
+                .expect("parts holds at least two elements, so the first next() is Some"),
+            source,
+            line,
+            depth + 1,
+        )?;
         for part in it {
             let rhs = parse_unary(part, source, line, depth + 1)?;
             acc = Expr::And(Box::new(acc), Box::new(rhs));

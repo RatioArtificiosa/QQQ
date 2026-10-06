@@ -1,3 +1,5 @@
+//! SPDX-License-Identifier: Apache-2.0
+//!
 //! F-01: the release profile must keep unwinding so the HOST-011 panic guard works.
 use std::fs;
 

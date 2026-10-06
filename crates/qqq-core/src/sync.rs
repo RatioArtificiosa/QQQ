@@ -39,6 +39,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// Implemented for `std::sync::Mutex<T>` directly so call sites read as the
 /// rule: `lock_recover()` where recovery is sound, an explicit fail-closed
 /// error where it is not. See the module docs for which locks qualify.
+///
+/// ```
+/// use qqq_core::sync::LockRecover;
+///
+/// let lock = std::sync::Mutex::new(String::new());
+/// lock.lock_recover().push_str("recovered");
+/// assert_eq!(*lock.lock_recover(), "recovered");
+/// ```
 pub trait LockRecover<T> {
     /// Lock, recovering the guard when a previous holder panicked.
     ///

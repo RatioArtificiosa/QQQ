@@ -15,6 +15,14 @@ categories = ["wasm", "development-tools"]
 [lints]
 workspace = true
 
+[features]
+# F-01 release-profile probe: exposes the `probe_panic_guard` entry point so
+# the `panic_probe` example can call the real guard wrapper. Non-default so
+# the probe surface stays out of the default API (and the api-examples
+# ratchet); CI runs the probe with `--features release-panic-probe`
+# explicitly after the release build.
+release-panic-probe = []
+
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.1.1" }
 qqq-cap = { path = "../qqq-cap", version = "0.1.1" }
@@ -72,6 +80,9 @@ getrandom = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# F-01 policy test reads the workspace manifest as TOML; pinned at the
+# workspace so the test parses with the same version the repo resolves.
+toml = { workspace = true }
 # The async execution path (`HOST-015`, `HOST-016`) is tested against a real
 # runtime, because `call_async` and `epoch_deadline_async_yield_and_update` only
 # have meaning inside one — a test that drove them without a reactor would be

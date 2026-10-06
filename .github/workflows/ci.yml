@@ -176,6 +176,7 @@ jobs:
           python tools/check_error_catalogue.py --self-test
           python tools/check_error_all.py --self-test
           python tools/check_no_poison_expect.py --self-test
+          python tools/check_panic_strategy.py --self-test
           python tools/check_glossary.py --self-test
           python tools/check_reconciliation.py --self-test
           python tools/check_wit_reference.py --self-test
@@ -343,6 +344,14 @@ jobs:
         run: python tools/check_no_poison_expect.py
       - name: Prove the poison check catches an expect and a Drop panic
         run: python tools/check_no_poison_expect.py --self-test
+
+      # `F-01`. `catch_unwind` is dead code under `panic = "abort"`, and
+      # Cargo always unwinds test harnesses — so no test can observe the
+      # shipped strategy. This fails CI the moment the abort line returns.
+      - name: Validate no release-class profile aborts on panic
+        run: python tools/check_panic_strategy.py
+      - name: Prove the panic-strategy check catches an abort line
+        run: python tools/check_panic_strategy.py --self-test
 
       # `DOC-017`. The WIT is the published artifact; a hand-written reference is a
       # second copy of an interface that already exists, and when they disagree the
@@ -956,7 +965,9 @@ jobs:
     # 45 min, from a measured 5.2 ubuntu / 6.5 macos / 9.8 windows on run 36296671757. There was
     # **no `timeout-minutes` anywhere in this workflow**, so a hang burned
     # GitHub's 360-minute default instead of failing fast (`§O-355`).
-    timeout-minutes: 45
+    # 60 min: the release-profile probe links wasmtime in release (cold on
+    # Windows/macOS shared runners), on top of the measured debug runs.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -1493,6 +1504,18 @@ jobs:
       # tree grew, or whether the scanner was looking elsewhere all along.
       - name: unsafe audit document matches the tree (SEC-020)
         run: python tools/audit_unsafe.py --check-doc
+
+      # `F-01` — the release profile must keep unwinding so the HOST-011 panic
+      # guard works. Cargo always unwinds test harnesses regardless of the
+      # profile, so no test can observe the shipped strategy; this example is
+      # the instrument that sees the release build as it ships. It runs here,
+      # in the three-OS matrix, because the panic strategy is per-target
+      # codegen and a Linux-only proof would answer the other two platforms
+      # with silence. Prints SURVIVED and exits 0; under `panic = "abort"`
+      # the process dies first with no output.
+      - name: F-01 release-profile panic probe prints SURVIVED
+        timeout-minutes: 30
+        run: cargo run --release -p qqq-host --example panic_probe --features release-panic-probe
 
   # ---------------------------------------------------------------------------
   # MSRV: does the workspace actually build on the version Cargo.toml promises?

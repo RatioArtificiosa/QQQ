@@ -35557,6 +35557,30 @@ self-test cannot fail is the same shape as the defect it guards. →
 `crates/qqq-host/src/audit_sink.rs`,
 `tools/check_no_poison_expect.py`.
 
+## §O-555 — Tests cannot see the shipped panic strategy, so something else must
+
+`F-01`: Cargo builds every test harness with unwinding no matter what
+`[profile.release]` says, so the suite passed for years while the shipped
+binary aborted on the first host panic — the HOST-011 guard and the
+`JoinError` recovery were dead code no test could observe. The fix deletes
+the abort line, routes failed requests through `Pool::discard()` (a tainted
+permit, since only clean completions hand slots back), and fail-stops the
+epoch ticker and audit worker with `AbortOnPanic`. The proof has three
+legs because no single one reaches: a TOML policy test (fails on the
+line's return), a release-profile probe example printing SURVIVED (the only
+instrument that sees the shipped codegen — it aborted with 0xc0000409
+before the fix), and a panic-strategy checker as the second line of
+defence. The probe needed a `release-panic-probe` feature plus a crate-root
+re-export to be visible — a missing re-export cost an hour of compelling
+but wrong theories (stale rlibs, fingerprint ghosts) before the E0425 was
+read literally. Rule: when the build system is a suspect, read the error;
+when tests cannot observe a property, name the instrument that can and run
+it where it ships. →
+`Cargo.toml`, `crates/qqq-host/src/guard.rs`,
+`crates/qqq-run/src/guest_handler.rs`,
+`crates/qqq-host/examples/panic_probe.rs`,
+`tools/check_panic_strategy.py`.
+
 ## §O-544 — A lint can be half-wrong, and so can a permissions argument
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use

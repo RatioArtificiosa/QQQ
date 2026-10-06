@@ -19,9 +19,12 @@
 //! 2. The panic can leave the store's borrow state inconsistent, so a
 //!    `RefCell`-style borrow panic follows the first one and the log has two
 //!    unrelated-looking failures.
-//! 3. With `panic = "abort"` — which `Cargo.toml` sets for the **release**
-//!    profile — the process dies. One guest triggering one bug in one host
-//!    function takes down every tenant on the host.
+//! 3. With `panic = "abort"` — which `Cargo.toml` set for the **release**
+//!    profile before `F-01` removed it — the process died. One guest
+//!    triggering one bug in one host function takes down every tenant on
+//!    the host. The release profile now unwinds (the default), so this
+//!    guard is live in the shipped binary; the `panic_probe` example and
+//!    the release-probe CI step prove it on every push.
 //!
 //! That third point is the one that makes this a security boundary. A guest
 //! that can find a panicking host function gets a deny-of-service against the
@@ -208,6 +211,79 @@ where
     }
 }
 
+/// Aborts the whole process if the owning thread unwinds.
+///
+/// Use ONLY for infrastructure threads whose death would silently disable a
+/// safety mechanism (the epoch ticker, the audit append worker). A dead
+/// ticker stops epoch increments, so wall-clock deadlines never fire and
+/// only fuel bounds CPU; a dead audit worker stops evidence. Request threads
+/// must NOT use this: their panics are contained by [`guard`] into traps.
+/// No `unsafe` needed: [`std::thread::panicking`] reports whether the current
+/// thread is unwinding, and [`std::process::abort`] stops fail-stop.
+///
+/// `#[doc(hidden)]`: infrastructure detail, not host API. The only
+/// cross-crate user is the epoch ticker in `qqq-run`, which cannot see a
+/// `pub(crate)` item.
+///
+/// ```
+/// use qqq_host::guard::AbortOnPanic;
+///
+/// {
+///     let _fail_stop = AbortOnPanic::new("example-ticker");
+///     // Calm scope: dropping outside a panic does nothing.
+/// }
+/// ```
+#[doc(hidden)]
+pub struct AbortOnPanic(&'static str);
+
+impl AbortOnPanic {
+    /// Name the thread the guard watches, for the fail-stop log line.
+    ///
+    /// ```
+    /// use qqq_host::guard::AbortOnPanic;
+    ///
+    /// let _fail_stop = AbortOnPanic::new("example-worker");
+    /// ```
+    #[must_use]
+    pub fn new(thread_name: &'static str) -> Self {
+        Self(thread_name)
+    }
+}
+
+impl Drop for AbortOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "qqq: infrastructure thread '{}' panicked; aborting (fail-stop)",
+                self.0
+            );
+            std::process::abort();
+        }
+    }
+}
+
+/// F-01 probe entry: call the same guard wrapper `linker.rs` uses, with a
+/// closure that panics; true only if the guard converts it to a report.
+///
+/// `#[doc(hidden)]` and feature-gated (`release-panic-probe`) so the probe
+/// surface stays out of the default API: the `panic_probe` example is the
+/// only caller, and CI runs it with the feature explicitly.
+///
+/// ```
+/// # #[cfg(feature = "release-panic-probe")] {
+/// assert!(qqq_host::probe_panic_guard());
+/// # }
+/// ```
+#[cfg(feature = "release-panic-probe")]
+#[doc(hidden)]
+#[must_use]
+pub fn probe_panic_guard() -> bool {
+    guard_reporting("probe", || -> wasmtime::Result<u32> {
+        panic!("deliberate F-01 probe panic")
+    })
+    .is_err()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +394,49 @@ mod tests {
     fn a_panic_is_never_a_success() {
         let result: wasmtime::Result<u32> = guard("f", || panic!("boom"));
         assert!(result.is_err(), "a panic must never look like a result");
+    }
+
+    /// **F-01: the fail-stop guard is inert on the calm path.**
+    ///
+    /// `abort()` cannot be asserted in-process (it would kill the test
+    /// runner), so this pins the other half: a guard dropped outside a panic
+    /// does nothing and the process survives. The aborting half is covered
+    /// by code review of the four-line `Drop` plus the release-profile probe,
+    /// which would die if the guard misbehaved around a real unwind.
+    #[test]
+    fn f01_abort_on_panic_guard_is_inert_when_not_panicking() {
+        let _guard = AbortOnPanic::new("test-thread");
+        // Dropping at end of scope must NOT abort the test process.
+    }
+
+    /// **F-01: the fail-stop guard aborts through a real unwind.**
+    ///
+    /// A child process of the test binary itself (same argv, plus an env
+    /// marker) constructs the guard and panics through it; the parent
+    /// asserts abnormal termination. Spawning the test binary — not a shell
+    /// script — keeps the proof inside the
+    /// suite: no external runner, no ambient tool. The marker env var keeps
+    /// the child on the panicking path only; without it the test is the
+    /// ordinary inert case above.
+    #[test]
+    fn f01_abort_on_panic_guard_aborts_during_unwind() {
+        const MARKER: &str = "QQQ_ABORT_ON_PANIC_PROBE";
+        if std::env::var_os(MARKER).is_some() {
+            let _guard = AbortOnPanic::new("probe-child");
+            panic!("deliberate F-01 child panic through the guard");
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let status = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg("guard::tests::f01_abort_on_panic_guard_aborts_during_unwind")
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .status()
+            .expect("child process spawns");
+        assert!(
+            !status.success(),
+            "a guard dropped during unwinding must abort the child, not return it"
+        );
     }
 
     /// **The control.** Without the guard the same closure unwinds — which is

@@ -492,7 +492,7 @@ impl GuestApp {
         // `run` both return `Result`, and a slot leaked on failure would shrink the
         // capacity monotonically — a server that gets slower the more it errors is a
         // worse failure than the error itself.
-        let permit = RequestPermit(&self.pool);
+        let permit = RequestPermit::clean(&self.pool);
         // Floor index for the persist below: every row this request adds —
         // ambient rows during the guest call and the handle row after it —
         // lands at or after this length. The persist sends `records[floor..]`;
@@ -509,7 +509,6 @@ impl GuestApp {
             .records()
             .len();
         let outcome = self.serve_one(&request, tenant);
-        drop(permit);
 
         // Settled **before** the audit row, so the row states the outcome the
         // caller acts on: a guest answer the boundary refuses (`QQQ-3009`) is
@@ -517,6 +516,18 @@ impl GuestApp {
         // after the row recorded such answers as granted while the caller
         // rendered their 502.
         let (converted, outcome_kind) = self.settle(outcome);
+
+        // The slot follows the SETTLED outcome, not the raw one (`F-01`,
+        // review): a boundary-refused answer (illegal status, host-controlled
+        // header, breached cap) means the instance produced protocol-violating
+        // output, so its slot is discarded like a trap's — only a converted,
+        // servable answer hands its slot back. V1 builds a fresh instance per
+        // request regardless, so `slot_reused` describes accounting, never a
+        // reused instance.
+        if converted.is_err() {
+            permit.taint();
+        }
+        drop(permit);
 
         // --- §4.4 step 15: AUDIT APPEND ---------------------------------------
         //
@@ -1116,10 +1127,39 @@ pub(crate) fn failure_response(e: &Error) -> Response {
 }
 
 // Release capacity during unwinding too; successful responses and traps share this guard.
-struct RequestPermit<'a>(&'a Pool);
+struct RequestPermit<'a> {
+    pool: &'a Pool,
+    /// Set when the request failed: a store that trapped, panicked, or
+    /// errored is dropped, never returned to the idle list (`F-01`, `F-11`).
+    /// V1 builds a fresh instance per request, so only clean completions
+    /// hand their slot back; anything else goes through `discard()`.
+    tainted: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> RequestPermit<'a> {
+    fn clean(pool: &'a Pool) -> Self {
+        Self {
+            pool,
+            tainted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Mark the guarded request as failed before the guard drops.
+    fn taint(&self) {
+        self.tainted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl Drop for RequestPermit<'_> {
     fn drop(&mut self) {
-        self.0.release();
+        // Panic-free by construction (`F-21`): both paths saturate rather
+        // than assert, and the diagnostic write swallows its own errors.
+        if self.tainted.load(std::sync::atomic::Ordering::Relaxed) {
+            self.pool.discard();
+        } else {
+            self.pool.release();
+        }
     }
 }
 
@@ -1144,6 +1184,12 @@ impl EpochTicker {
         let thread = std::thread::Builder::new()
             .name("qqq-epochs".into())
             .spawn(move || {
+                // Fail-stop first (`F-01`): a dead ticker silently disables
+                // wall-clock deadlines, leaving only fuel to bound CPU. A
+                // panic here aborts the process rather than parking the
+                // safety mechanism. Request threads must NOT use this guard —
+                // their panics are contained into traps by `guard`.
+                let _fail_stop = qqq_host::guard::AbortOnPanic::new("qqq-epochs");
                 let started = std::time::Instant::now();
                 let mut emitted = 0;
                 while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2049,19 +2095,14 @@ mod tests {
         );
     }
 
-    /// A hostile guest answering outside the protocol gets a 502 and a
-    /// `Failed` row — through the real request path, not the seam.
-    ///
-    /// The `settle` test above pins the convert-then-classify mapping, but
-    /// the defect lived in `handle_request`'s ordering (the row read the raw
-    /// answer), so only a request through `handle_request` with the audit
-    /// block executing proves the row. The hostile fixture answers status
-    /// 99: `to_served` refuses it, the caller renders 502, and the recorded
-    /// row must read `Failed` — a guest that answers outside the protocol
-    /// is exercising the authority and failing, never succeeding quietly.
-    #[test]
-    fn f02_hostile_answer_audits_as_failed_on_the_request_path() {
-        let source = include_str!("../tests/fixtures/hostile-response.wat");
+    /// A granted app serving a caller-supplied WAT guest, for request-path
+    /// tests that need the guest to misbehave (hostile answers, traps).
+    /// The fixture is compiled in (`include_str!` at the call site), so a
+    /// build failure here is a real failure, never a missing artifact:
+    /// `expect`, not an early return. (The orders-component builders return
+    /// early because that artifact lives outside the repo and may be absent;
+    /// these fixtures cannot be.)
+    fn granted_app_for_wat(source: &str) -> GuestApp {
         let manifest = qqq_cap::Manifest::parse(
             "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
              [capabilities.http]\nserver = true\n",
@@ -2077,12 +2118,7 @@ mod tests {
             max_open_handles: 64,
             max_subrequests: 16,
         };
-        // The fixture is compiled in (`include_str!`), so a build failure
-        // here is a real failure, never a missing artifact: `expect`, not
-        // an early return. (The orders-component builders return early
-        // because that artifact lives outside the repo and may be absent;
-        // this one cannot be.)
-        let mut app = GuestApp::with_capacity(
+        GuestApp::with_capacity(
             engine,
             source.as_bytes(),
             qqq_cap::resolve::GrantSet::from_manifest(&manifest),
@@ -2090,7 +2126,23 @@ mod tests {
             "127.0.0.1:8080",
             1,
         )
-        .expect("the hostile fixture must build");
+        .expect("the WAT fixture must build")
+    }
+
+    /// A hostile guest answering outside the protocol gets a 502 and a
+    /// `Failed` row — through the real request path, not the seam.
+    ///
+    /// The `settle` test above pins the convert-then-classify mapping, but
+    /// the defect lived in `handle_request`'s ordering (the row read the raw
+    /// answer), so only a request through `handle_request` with the audit
+    /// block executing proves the row. The hostile fixture answers status
+    /// 99: `to_served` refuses it, the caller renders 502, and the recorded
+    /// row must read `Failed` — a guest that answers outside the protocol
+    /// is exercising the authority and failing, never succeeding quietly.
+    #[test]
+    fn f02_hostile_answer_audits_as_failed_on_the_request_path() {
+        let source = include_str!("../tests/fixtures/hostile-response.wat");
+        let mut app = granted_app_for_wat(source);
         let dir = std::env::temp_dir().join(format!("qqq-audit-hostile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
@@ -2117,6 +2169,46 @@ mod tests {
             rows[0].outcome,
             qqq_host::Outcome::Failed,
             "a boundary-refused answer audits as a failed exercise"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F-01: a trapped request discards its slot through the request path.**
+    ///
+    /// V1 builds a fresh instance per request, so only clean completions hand
+    /// their pool slot back: any error from `serve_one` taints the permit and
+    /// the slot goes through `Pool::discard()`, never to idle. The trapping
+    /// guest (`trap.wat`: `unreachable` in the handler) fails the request;
+    /// the test then proves the routing three ways — the discarded metric
+    /// moves, idle stays zero (no slot returned), and the audit row reads
+    /// `Failed`. A slot that returned to idle after a trap would let a later
+    /// acquire report a reusable slot for a store that no longer exists.
+    #[test]
+    fn f01_trapped_request_discards_its_slot() {
+        let source = include_str!("../tests/fixtures/trap.wat");
+        let mut app = granted_app_for_wat(source);
+        let dir = std::env::temp_dir().join(format!("qqq-audit-trap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("audit.jsonl");
+        app.attach_audit_file(&path).expect("attach");
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Get, "/orders"),
+            None,
+            "test-tenant",
+        );
+        assert!(outcome.is_err(), "the trapping guest must fail the request");
+        assert_eq!(
+            app.pool.metrics().discarded(),
+            1,
+            "exactly one discard: the trapped slot, routed through discard()"
+        );
+        assert_eq!(app.pool.idle(), 0, "no slot returns to idle after a trap");
+        let (rows, _) = app.audit_snapshot();
+        assert_eq!(
+            rows[0].outcome,
+            qqq_host::Outcome::Failed,
+            "a trapped request audits as a failed exercise"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -158,7 +158,11 @@ memchr = "2"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# No `panic` setting: the default is `unwind`, which is what makes the
+# HOST-011 `catch_unwind` guard and the handler `JoinError` recovery live in
+# the shipped binary (`F-01`). `panic = "abort"` here previously made both
+# dead code that only tests could see, because Cargo always unwinds test
+# harnesses regardless of this setting.
 strip = "debuginfo"
 
 # The dev profile is tuned for iteration speed, not runtime speed.

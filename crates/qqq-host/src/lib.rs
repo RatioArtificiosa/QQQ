@@ -140,6 +140,9 @@ pub use config::{
     aot_cache_key, build_engine, build_pooling, target_triple, EngineConfig,
     StoreLimits as LimitSet,
 };
+#[cfg(feature = "release-panic-probe")]
+#[doc(hidden)]
+pub use guard::probe_panic_guard;
 pub use guard::{guard, guard_reporting, PanicReport};
 pub use guest_output::{
     Escaper, GuestOutput, GuestSink, SanitisingWriter, MAX_ESCAPED_RUN, STDERR_PREFIX,

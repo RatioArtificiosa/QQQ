@@ -1285,6 +1285,12 @@ impl AuditAppender {
         let worker = std::thread::Builder::new()
             .name("qqq-audit-append".to_owned())
             .spawn(move || {
+                // Fail-stop first (`F-01`): a dead append worker stops
+                // evidence silently — later appends would fail fast, but rows
+                // already acknowledged as queued would never land. A panic
+                // here aborts the process rather than parking the worker.
+                // Request threads must NOT use this guard.
+                let _fail_stop = crate::guard::AbortOnPanic::new("qqq-audit-append");
                 append_loop(&rx, &mut file, &worker_stats, &worker_failed, &config);
             })?;
         Ok(Self {

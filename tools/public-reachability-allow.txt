@@ -28,7 +28,6 @@
 
 crates/qqq-cap/src/resolve.rs  apply_all  unreviewed  applies every resolved rule
 crates/qqq-core/src/ids.rs  into_string  unreviewed  converts an id to its owned string form
-crates/qqq-host/src/call.rs  call_handler_raw  published-api  the raw variant of `call_handler`, which is used
 crates/qqq-host/src/instance.rs  fuel_remaining  unreviewed  reads the instance's remaining fuel
 crates/qqq-host/src/instance.rs  wasm_instance  unreviewed  borrows the underlying wasmtime instance
 crates/qqq-host/src/instance.rs  run_async_measured  published-api  `Instance::run_async` plus a measurement

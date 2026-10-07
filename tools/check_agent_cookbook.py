@@ -473,7 +473,22 @@ def self_test() -> int:
         ("the summary table's rows are self-consistent", not summary_row_problems(good_page), "")
     )
     # Change the declared count and leave the list alone, which is the defect exactly.
-    broken_page = good_page.replace("| `src` | **30** |", "| `src` | **29** |", 1)
+    # The mutation is computed from the live count, not hardcoded: a hardcoded
+    # `30 -> 29` rotted the moment a reclassification moved the row (F-10 moved
+    # QQQ-2005 to `test`, so no `**30**` remained to mutate and the broken page
+    # equalled the good one). A self-test coupled to page state passes until
+    # the page legitimately changes, then fails exactly when nothing is wrong.
+    # Increment, not decrement: at a zero count a decrement produces `-1`,
+    # which the summary parser (digits only) skips instead of flagging — the
+    # same vacuous pass one level down (`CodeRabbit` on the F-10 follow-up).
+    src_count = re.search(r"\| `src` \| \*\*(\d+)\*\* \|", good_page)
+    if src_count is None:  # pragma: no cover - the page always has the row
+        raise SystemExit("FATAL: no `src` summary row to mutate; the page moved")
+    broken_page = good_page.replace(
+        f"| `src` | **{src_count.group(1)}** |",
+        f"| `src` | **{int(src_count.group(1)) + 1}** |",
+        1,
+    )
     cases.append(
         (
             "a row claiming a count it does not list is reported",

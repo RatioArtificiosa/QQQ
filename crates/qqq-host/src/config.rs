@@ -154,6 +154,21 @@ impl EngineConfig {
     }
 }
 
+/// Max memories per component instance (`F-08`).
+///
+/// Single source of truth shared with the store limiter (`instance.rs`):
+/// the pooling allocator and the per-store `StoreLimits` must agree, or one
+/// of them admits what the other refuses.
+pub const MAX_MEMORIES_PER_COMPONENT: u32 = 8;
+
+/// Max table elements per table (`F-08`).
+///
+/// Wasmtime's pooling default (20,000), used for both the pooling allocator
+/// and the per-store limiter so pooled and `OnDemand` stores trap at the same
+/// size. Tables that outgrow it trap via `TrappingLimiter` instead of
+/// returning -1 to the guest.
+pub const MAX_TABLE_ELEMENTS: u32 = 20_000;
+
 /// Build the pooling-allocator configuration from manifest limits.
 ///
 /// # Why the pool size is derived rather than guessed
@@ -198,8 +213,13 @@ pub fn build_pooling(
     p.total_tables(instances.max(1));
     // A component needs at least one memory and one table per instance; a
     // little headroom covers composed components with several core modules.
-    p.max_memories_per_component(8);
+    p.max_memories_per_component(MAX_MEMORIES_PER_COMPONENT);
     p.max_tables_per_component(8);
+    // Set explicitly even though it equals Wasmtime's default (verified in
+    // the pinned source): inheriting an upstream default silently would let a
+    // future Wasmtime change diverge the pool slot from the store limiter
+    // without touching this file (CodeRabbit on F-08).
+    p.table_elements(MAX_TABLE_ELEMENTS as usize);
 
     // Bound the linear memory size so the reservation is predictable rather
     // than "whatever the guest grows to". This is the enforcement point for

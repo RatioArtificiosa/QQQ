@@ -28,6 +28,9 @@ qqq-core = { path = "../qqq-core", version = "0.1.1" }
 qqq-cap = { path = "../qqq-cap", version = "0.1.1" }
 qqq-abi = { path = "../qqq-abi", version = "0.1.1" }
 wasmtime = { workspace = true }
+# Static component inspection (initial memory sums, load-time shape).
+# Same version Wasmtime resolves, so no duplicate crate enters the build.
+wasmparser = { workspace = true }
 # The WASI host implementation (`HOST-017`).
 #
 # # Why this is not optional
@@ -83,6 +86,13 @@ serde_json = { workspace = true }
 # F-01 policy test reads the workspace manifest as TOML; pinned at the
 # workspace so the test parses with the same version the repo resolves.
 toml = { workspace = true }
+# F-08/F-10: WAT text to component bytes for memory-shape tests. Production
+# never sees WAT (real artifacts are binary), but every in-tree guest
+# fixture is written as WAT and `PreparedComponent::compile` accepts it via
+# Wasmtime's own `wat` feature — so a test that needs the BYTES (initial
+# memory sums, load-time shape) must convert explicitly. Test-only: the
+# shipped binary links no WAT toolchain.
+wat = "1"
 # The async execution path (`HOST-015`, `HOST-016`) is tested against a real
 # runtime, because `call_async` and `epoch_deadline_async_yield_and_update` only
 # have meaning inside one — a test that drove them without a reactor would be

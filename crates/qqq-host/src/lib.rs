@@ -85,6 +85,10 @@ pub mod boundary;
 /// `invoke` resolves *which* function to call; this performs the call, converting
 /// between the typed ABI and the dynamic `Val` form Wasmtime wants.
 pub mod call;
+/// Static component shape inspection: initial memory sums for the aggregate
+/// limiter (`F-08`), load-time shape validation (`F-10`). Crate-internal:
+/// the numbers feed admission and instantiation, not the public API.
+pub(crate) mod component_shape;
 pub mod config;
 pub mod guard;
 /// Sanitising sinks for guest stdout and stderr.

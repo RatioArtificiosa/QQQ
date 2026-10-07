@@ -35581,6 +35581,28 @@ it where it ships. →
 `crates/qqq-host/examples/panic_probe.rs`,
 `tools/check_panic_strategy.py`.
 
+## §O-556 — Initial allocation bypasses the limiter, so the aggregate must be pre-charged
+
+`F-08`: Wasmtime never calls `memory_growing` for initial allocation —
+proven, not assumed, when the two-memory real-instance test failed on the
+fixed code (32 pages admitted against a 24-page ceiling with the aggregate
+counter in place). The limiter only sees growths, so a sum that starts at
+zero misses every declared minimum. The fix measures initial sizes
+statically (`wasmparser`, pinned to Wasmtime's own copy) at compile time
+and pre-charges the counter before instantiation; growths add deltas on
+top. Two traps in one round: the test first failed on WAT text (the
+limiter reads component BYTES — passing text would measure nothing, a
+`wat`-to-binary conversion in the test fixed it), then on a hand-written
+canon lift missing its result type (copied from the benign fixture verbatim
+the second time). And the multi-memory disable branch died on contact with
+reality: the F-08 test itself needs two memories, so disabling removes the
+aggregate proof's real-instance half — keep enabled, aggregate accounting,
+decision recorded with its reason instead of its hope. →
+`crates/qqq-host/src/component_shape.rs`,
+`crates/qqq-host/src/linker.rs`,
+`crates/qqq-host/src/instance.rs`,
+`crates/qqq-host/tests/f08_memory_ceiling.rs`.
+
 ## §O-544 — A lint can be half-wrong, and so can a permissions argument
 
 Two Wave-0 lessons. First, `redundant_imports` flagged `use
@@ -36278,5 +36300,13 @@ built with `tenant: None` and tenancy is enforced at the connection ledger —
 so the tenant bound is stated as a composition (per-instance budget times the
 per-tenant connection ceiling) and the shared registry design is follow-up
 work, not smuggled scope.
+
+## §O-557 — A premise "proven" by a twice-broken fixture is still a guess: Wasmtime reports initial allocation, so the pre-charge double-counted
+
+`F-08`: §O-556 concluded Wasmtime never calls `memory_growing` for initial allocation and built a compile-time pre-charge on that premise. The premise was false for Wasmtime 48.0.5 OnDemand: initial allocation arrives as `memory_growing(current = 0)`, so pre-charge plus callback measured every initial byte twice — a legal 16-page component was refused against a 24-page ceiling with the total reading exactly 32 pages. The mistake: the bypass reading came from a test that had already failed for two fixture reasons (WAT text handed where bytes were read, measuring nothing; a canon lift missing its result type), and the semantic conclusion was never isolated from the fixture confounds. It was caught by a discriminating test written for the opposite direction: `f08_legal_initial_allocation_instantiates` passes if and only if each initial byte is charged exactly once, paired with an assert that the static sum measures exactly 16 pages — which passed, proving the walk right and the callback semantic wrong as assumed. Same round, second double-count of the same shape: `Parser::parse_all` already descends into nested modules via its internal sub-parser stack, so the manual `unchecked_range` recursion counted every nested memory twice (a 3-page fixture measured 6); the recursion was deleted, leaving one flat pass. The remedy removed the pre-charge entirely — the delta callbacks are the single enforcement — and fixed what the pre-charge had been masking: limiter refusals at instantiation surfaced as `ComponentLoadFailed` with a missing-import remediation, and pool-slot refusals at compile as `InvalidComponentArtifact` with a re-target-toolchain remediation. Both now report `MemoryLimitExceeded` with the memory remediation on positive-signal patterns (the limiter's own `aggregate` message; `pooling allocator` plus `memory`). Multi-memory stays ON, recorded: the disable probe is green (528 lib + all `qqq-host` suites and 57 orders-api tests with the flag off) but structurally unable to detect future-toolchain needs, proposal §4.5 assumes availability, and the callback machinery enforces every initial byte either way — disabling would remove the feature while keeping the machinery. Generalisable rule: when a test has failed for N fixture reasons, the N+1th conclusion about runtime semantics needs its own discriminating test that passes if and only if the semantic holds — a red test proves the test fails, not why. → `crates/qqq-host/src/instance.rs`, `crates/qqq-host/src/linker.rs`, `crates/qqq-host/src/component_shape.rs`, `crates/qqq-host/tests/f08_memory_ceiling.rs`.
+
+## §O-558 — CodeRabbit on F-08: two fixes taken, two rebuttals held, and value-identical hardening cannot be red-proven
+
+`F-08`: three review runs — the first died mid-review on a dropped WebSocket after three minor findings, the second died in setup with none, the third completed (12 reviewed files; the two NEW files were absent as untracked and fall to the post-commit `--committed` review). Taken: declared-maximum table growth returns `-1` instead of trapping the guest for its own bound (reproduced red first — and the red incidentally exposed the old message blaming the operator ceiling for a declared-max refusal); the pool sets `table_elements` from the shared constant rather than silently inheriting the upstream default. Rebutted with reasons: `unwrap_or(0)` on the static sum stays, because the disagreement case (Wasmtime-valid but wasmparser-unparseable bytes) is untestable by construction and refusing there converts a measurement aid into a denial of service while the runtime callbacks enforce regardless; the api-examples allowance moves 2080→2085 because the delta is exactly the five new items and the repo's own history moves the ratchet with justification. Generalisable rule: a value-identical change (the pool default already verified as 20,000 in the pinned Wasmtime source) cannot have a failing test — a test passing before and after is the fixture-that-cannot-fail — so verify it in the vendored source and keep the suite green instead of performing redness. → `crates/qqq-host/src/linker.rs`, `crates/qqq-host/src/config.rs`, `crates/qqq-host/src/instance.rs`, `.github/workflows/ci.yml`.
 
 *End of `QQQ-Observations-and-Memories.md`.*

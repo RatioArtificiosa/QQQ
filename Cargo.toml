@@ -83,6 +83,10 @@ keywords = ["webassembly", "runtime", "wasm", "component-model", "wasmtime"]
 categories = ["wasm", "development-tools", "network-programming"]
 
 [workspace.dependencies]
+# Component byte inspection (initial memory sums for the aggregate limiter,
+# load-time shape validation). Pinned to the copy Wasmtime 48 already resolves
+# (`wit-component` chain) so no second `wasmparser` enters the build.
+wasmparser = "0.254"
 # The execution engine. Pinned deliberately — see Proposal §D-003 and RISK-003.
 # Implements: HOST-020, PLAN-012
 wasmtime = "48"

@@ -759,7 +759,21 @@ pub struct TrappingLimiter {
     inner: StoreLimits,
     /// The QQQ ceiling, in bytes, for the trap message.
     memory_ceiling: usize,
+    /// Bytes held across all memories of the store. Memories never shrink,
+    /// so this only increases; it is charged by delta (`desired - current`)
+    /// on every admitted growth and never decremented — there is no failure
+    /// path that needs a refund, because a refused growth never ran.
+    memory_total: usize,
+    /// Max table elements per table. Wasmtime's pooling default is 20,000;
+    /// the same number here keeps both modes consistent.
+    table_element_ceiling: u32,
 }
+
+/// Default table-element ceiling: Wasmtime's pooling default, so pooled and
+/// `OnDemand` stores trap at the same size. Derived from the shared constant
+/// (single source of truth lives in `config.rs`) rather than a second
+/// literal, so the two cannot drift (`CodeRabbit` on F-08).
+pub const DEFAULT_TABLE_ELEMENT_CEILING: u32 = crate::config::MAX_TABLE_ELEMENTS;
 
 impl TrappingLimiter {
     /// Build a limiter that traps at `memory_ceiling` bytes per memory.
@@ -768,7 +782,42 @@ impl TrappingLimiter {
         Self {
             inner,
             memory_ceiling,
+            memory_total: 0,
+            table_element_ceiling: DEFAULT_TABLE_ELEMENT_CEILING,
         }
+    }
+
+    /// Cap table elements per table, returning the limiter so `new()` callers
+    /// keep their shape. Tables that outgrow the ceiling trap instead of
+    /// returning -1 to the guest.
+    #[must_use]
+    pub const fn with_table_element_ceiling(mut self, ceiling: u32) -> Self {
+        self.table_element_ceiling = ceiling;
+        self
+    }
+
+    /// The trap for an aggregate overrun. Same `QQQ-` code and message style
+    /// as the per-memory path: the classifier reads "memory" + "exceed" and
+    /// reports `MemoryLimitExceeded`, and the message states the total.
+    fn memory_limit_error(&self, new_total: usize) -> wasmtime::Error {
+        wasmtime::Error::msg(format!(
+            "memory limit exceeded: aggregate {} bytes would pass the \
+             {}-byte ceiling",
+            new_total, self.memory_ceiling
+        ))
+    }
+
+    /// The trap for table overrun. Deliberately free of the words "memory",
+    /// "fuel", "epoch", and "unreachable": the trap classifier maps on those
+    /// substrings, and a table message containing any of them would report
+    /// the wrong code. There is no table-specific `QQQ-` code, so this
+    /// surfaces as `GuestTrap` with a message that attributes the table.
+    fn table_limit_error(&self, desired: usize) -> wasmtime::Error {
+        wasmtime::Error::msg(format!(
+            "table element ceiling exceeded: growing to {desired} elements \
+             would pass the {}-element ceiling",
+            self.table_element_ceiling
+        ))
     }
 }
 
@@ -784,14 +833,25 @@ impl wasmtime::ResourceLimiter for TrappingLimiter {
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        if desired > self.memory_ceiling {
-            return Err(wasmtime::Error::msg(format!(
-                "memory limit exceeded: growing to {desired} bytes would pass the \
-                 {}-byte limit (currently {current} bytes)",
-                self.memory_ceiling
-            )));
+        // Aggregate first: with multi-memory enabled the guest can hold N
+        // memories each under the per-memory ceiling, so the per-memory check
+        // alone admits N × ceiling. Only the delta is charged — `desired`
+        // would double-count every growth after the first — and the total is
+        // only stored when the growth is actually admitted below: a refused
+        // growth never ran, so there is nothing to refund.
+        let delta = desired.saturating_sub(current);
+        let new_total = self.memory_total.saturating_add(delta);
+        if new_total > self.memory_ceiling {
+            return Err(self.memory_limit_error(new_total));
         }
-        self.inner.memory_growing(current, desired, maximum)
+        if desired > self.memory_ceiling {
+            return Err(self.memory_limit_error(new_total));
+        }
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if allowed {
+            self.memory_total = new_total;
+        }
+        Ok(allowed)
     }
 
     fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
@@ -804,7 +864,25 @@ impl wasmtime::ResourceLimiter for TrappingLimiter {
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        self.inner.table_growing(current, desired, maximum)
+        // Trap like memory growth: the old delegation answered `Ok(false)`,
+        // which Wasmtime surfaces as a -1 the guest may ignore — a silent
+        // failure on a limit the operator set. The operator ceiling is
+        // checked first so a growth past BOTH bounds still traps.
+        if desired > usize::try_from(self.table_element_ceiling).unwrap_or(usize::MAX) {
+            return Err(self.table_limit_error(desired));
+        }
+        // The table's own declared maximum belongs to the guest: exceeding it
+        // is an ordinary guest-level failure and -1 is the specified signal,
+        // not an operator-limit event (CodeRabbit on F-08, reproduced by
+        // `f08_table_growth_past_declared_maximum_returns_minus_one`).
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+        let allowed = self.inner.table_growing(current, desired, maximum)?;
+        if !allowed {
+            return Err(self.table_limit_error(desired));
+        }
+        Ok(true)
     }
 
     fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
@@ -1190,6 +1268,88 @@ pub fn recheck(data: &StoreData, capability: Capability) -> Option<qqq_core::Err
 mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
+    use wasmtime::ResourceLimiter;
+
+    /// **F-08: the ceiling is aggregate across memories, not per memory.**
+    ///
+    /// Written first and failing first: on the old per-memory check the
+    /// second `memory_growing` returns `Ok`, because 1 MiB is under the
+    /// 1.5 MiB ceiling — while the instance holds 2 MiB in total. A guest
+    /// with 8 memories could hold 8x the ceiling while every per-memory
+    /// check passes.
+    #[test]
+    fn f08_aggregate_memory_ceiling_across_memories() {
+        const MIB: usize = 1024 * 1024;
+        let mut limiter = TrappingLimiter::new(StoreLimits::default(), 3 * MIB / 2);
+        assert!(
+            limiter.memory_growing(0, MIB, None).unwrap(),
+            "first memory: 1 MiB under the 1.5 MiB ceiling"
+        );
+        assert!(
+            limiter.memory_growing(0, MIB, None).is_err(),
+            "second memory must be refused: 2 MiB aggregate exceeds the 1.5 MiB ceiling"
+        );
+    }
+
+    /// **F-08: growth of an existing memory counts only its delta.**
+    ///
+    /// Charging `desired` instead of `desired - current` would double-count
+    /// every growth after the first and refuse legal guests. Initial
+    /// allocation arrives here as `memory_growing(current = 0)`, so the delta
+    /// form charges it exactly once with no pre-charge — proven by
+    /// `f08_legal_initial_allocation_instantiates`, which failed while a
+    /// pre-charge design measured every initial byte twice (§O-557).
+    #[test]
+    fn f08_growth_of_an_existing_memory_counts_only_the_delta() {
+        const KIB: usize = 1024;
+        let mut limiter = TrappingLimiter::new(StoreLimits::default(), 1000 * KIB);
+        assert!(limiter.memory_growing(0, 400 * KIB, None).unwrap());
+        assert!(limiter.memory_growing(400 * KIB, 800 * KIB, None).unwrap());
+        assert!(
+            limiter.memory_growing(0, 300 * KIB, None).is_err(),
+            "+300 KiB on top of 800 KiB exceeds the 1000 KiB ceiling"
+        );
+    }
+
+    /// **F-08: table growth failure traps instead of returning -1.**
+    ///
+    /// The old delegation answered `Ok(false)`, which Wasmtime surfaces as a
+    /// `-1` return the guest may ignore — a silent failure on a limit the
+    /// operator set. Like memory, table growth beyond the ceiling is an error.
+    #[test]
+    fn f08_table_growth_failure_traps_instead_of_returning_minus_one() {
+        let mut limiter = TrappingLimiter::new(StoreLimits::default(), usize::MAX)
+            .with_table_element_ceiling(1000);
+        assert!(limiter.table_growing(0, 500, None).unwrap());
+        assert!(
+            limiter.table_growing(500, 100_000, None).is_err(),
+            "table growth past the ceiling must trap, never return -1"
+        );
+    }
+
+    /// **F-08: table growth past the table's own declared maximum returns
+    /// -1; past the operator ceiling it traps.**
+    ///
+    /// The two bounds belong to different owners. The declared maximum is the
+    /// guest's own statement: exceeding it is an ordinary guest-level failure
+    /// and `-1` is the specified signal. The element ceiling is the
+    /// operator's limit: exceeding it traps, because a silent `-1` on a limit
+    /// the operator set lets a hostile guest spin without ever tripping an
+    /// alarm. The ceiling check runs first so a growth past BOTH still traps
+    /// — the safe direction.
+    #[test]
+    fn f08_table_growth_past_declared_maximum_returns_minus_one() {
+        let mut limiter = TrappingLimiter::new(StoreLimits::default(), usize::MAX)
+            .with_table_element_ceiling(1000);
+        assert!(
+            !limiter.table_growing(0, 500, Some(100)).unwrap(),
+            "past the table's declared maximum but under the ceiling: -1, not a trap"
+        );
+        assert!(
+            limiter.table_growing(0, 500, None).unwrap(),
+            "same growth with no declared maximum: admitted"
+        );
+    }
 
     /// A minimal well-formed manifest: `[package]` requires both `name` and
     /// `version`, and a bare `name = "..."` is rejected with `MissingField`.

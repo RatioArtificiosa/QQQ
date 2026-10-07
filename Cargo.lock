@@ -1508,8 +1508,10 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]

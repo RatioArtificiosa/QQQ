@@ -62,6 +62,14 @@ pub struct PreparedComponent {
     digest: String,
     /// Creation time, for load-latency metrics.
     compiled_at: Instant,
+    /// Sum of initial linear-memory sizes across the component's core modules
+    /// (`F-08`/`F-10`): measured once here because compilation already holds
+    /// the bytes. Not used by the instantiation path — Wasmtime reports
+    /// initial allocation through `memory_growing(current = 0)`, so a
+    /// pre-charge here would double-count (see §O-557). This feeds F-10's
+    /// load-time shape validation, which must refuse oversized components
+    /// before admission rather than under load.
+    initial_memory_bytes: u64,
 }
 
 impl std::fmt::Debug for PreparedComponent {
@@ -127,11 +135,31 @@ impl PreparedComponent {
     /// ```
     pub fn compile(engine: &wasmtime::Engine, bytes: &[u8]) -> Result<Self> {
         let component = Component::new(engine, bytes).map_err(|e| {
+            let cause = format!("{e:#}");
+            // **A pool slot that cannot fit the component's declared memory is
+            // a memory-limit refusal, not a malformed artifact.** Under the
+            // pooling allocator Wasmtime validates the declared initial sizes
+            // against the slot at compile time, so an over-ceiling component
+            // fails here — before the store limiter ever runs — with a cause
+            // naming the pool. Without this branch the operator is told to
+            // re-target their toolchain for a defect in the memory budget.
+            // Positive signals only (§O-282): both fragments come from
+            // Wasmtime's fit message ("module memory does not fit in pooling
+            // allocator requirements: ..."), and a table-fit refusal carries
+            // "table", not "memory".
+            if cause.contains("pooling allocator") && cause.contains("memory") {
+                return Error::new(
+                    ErrorCode::MemoryLimitExceeded,
+                    "the component's declared memory does not fit its pool slot",
+                )
+                .with_cause(cause)
+                .with_remediation("lower the component's initial memory or raise `limits.memory`");
+            }
             Error::new(
                 ErrorCode::InvalidComponentArtifact,
                 "the artifact is not a valid WebAssembly component",
             )
-            .with_cause(format!("{e:#}"))
+            .with_cause(cause)
             .with_remediation(
                 "confirm the toolchain targets the component model \
                  (`wasm32-wasip2` or later), not a core module",
@@ -142,7 +170,22 @@ impl PreparedComponent {
             component,
             digest: digest_of(bytes),
             compiled_at: Instant::now(),
+            initial_memory_bytes: crate::component_shape::initial_memory_bytes(bytes).unwrap_or(0),
         })
+    }
+
+    /// Initial linear-memory bytes declared by the component (`F-08`/`F-10`).
+    ///
+    /// Computed at compile time from the artifact bytes. A parse failure
+    /// here is treated as zero rather than an error: `Component::new` above
+    /// already validated the bytes, so an unparseable-by-`wasmparser` input
+    /// at this point would be a parser disagreement, and refusing to serve on
+    /// it would turn a measurement aid into a denial of service. The runtime
+    /// growth callbacks remain the enforcement for everything allocated
+    /// after instantiation; F-10's load-time validation consumes this number.
+    #[must_use]
+    pub fn initial_memory_bytes(&self) -> u64 {
+        self.initial_memory_bytes
     }
 
     /// The content digest of the source bytes.
@@ -1253,6 +1296,11 @@ impl ReadyStore {
             .memory_size(usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX))
             .instances(MAX_INNER_INSTANCES)
             .tables(16)
+            // Same numbers as the pooling allocator (`F-08`): the per-store
+            // limiter and the pool must agree, or one admits what the other
+            // refuses. Shared constants in `config.rs`, not literals here.
+            .memories(crate::config::MAX_MEMORIES_PER_COMPONENT as usize)
+            .table_elements(crate::config::MAX_TABLE_ELEMENTS as usize)
             .build();
         store.data_mut().set_limits(wasm_limits.clone(), limits);
         // **The limiter is the *trapping* one, and that is the whole point.**
@@ -1380,6 +1428,25 @@ fn instantiation_error(
     // linker error silently reclassified every linking failure as a trap -- `§O-282`'s class, where a
     // guard is only as narrow as its pattern and a negative pattern is the widest one there is.
     let cause = format!("{e:#}");
+    // **A limiter refusal is a memory-limit refusal, not a link failure.**
+    //
+    // When initial allocation exceeds the ceiling, `TrappingLimiter` fails
+    // instantiation before any guest code executes, so there is no wasm
+    // backtrace — and without the branch below the failure falls into the
+    // missing-import remediation, sending the operator to `qqq.toml` for a
+    // defect in the memory budget. The match is a positive signal (§O-282):
+    // the exact prefix `TrappingLimiter::memory_limit_error` emits, which no
+    // other Wasmtime error carries.
+    if cause.contains("memory limit exceeded: aggregate") {
+        return Error::new(
+            ErrorCode::MemoryLimitExceeded,
+            "the component's initial memory exceeds its ceiling",
+        )
+        .with_context("component", prepared.digest().to_owned())
+        .with_context("granted", grants.to_string())
+        .with_cause(cause)
+        .with_remediation("lower the component's initial memory or raise `limits.memory`");
+    }
     let remediation = if cause.contains("wasm backtrace") {
         "the component linked and then trapped while instantiating, so its imports were provided \
          and this is not a grant to add; the cause above names the function and the reason"

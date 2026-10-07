@@ -3318,7 +3318,7 @@ of the 45 it could ever see.
 
 **`unreachable` is now empty, and that is the honest result rather than a disappointment.** Every one
 of the 45 codes has a construction site. What the corrected measurement does say — and it is the claim
-that survives — is that **only five can be reached from a shell**, and that **30 have no
+that survives — is that **only five can be reached from a shell**, and that **29 have no
 integration-test reproducer**.
 
 #### Measured, by kind
@@ -3326,8 +3326,8 @@ integration-test reproducer**.
 | Kind | Count | Codes |
 |---|---|---|
 | `cli` | **5** | `1001`, `2001`, `2002`, `6004`, `7001` |
-| `test` | **10** | `3001`, `3002`, `3003`, `3004`, `3006`, `3007`, `3008`, `4003`, `6002`, `6003` |
-| `src` | **30** | `1002`, `1003`, `1004`, `1005`, `2003`, `2004`, `2005`, `2006`, `2007`, `3005`, `3009`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `6008`, `7002`, `7003`, `7004` |
+| `test` | **11** | `2005`, `3001`, `3002`, `3003`, `3004`, `3006`, `3007`, `3008`, `4003`, `6002`, `6003` |
+| `src` | **29** | `1002`, `1003`, `1004`, `1005`, `2003`, `2004`, `2006`, `2007`, `3005`, `3009`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `6008`, `7002`, `7003`, `7004` |
 | `unreachable` | **0** | *(none)* |
 
 **Only 5 of 45 codes can be reproduced from the command line.** The other 40 need a Rust test, a
@@ -3398,11 +3398,12 @@ qqqai build --nonsense-flag    # -> QQQ-7001
 
 ### The `test` reproducers
 
-Ten codes are reproduced by the permanent suite rather than by a command. The checker asserts the
+Eleven codes are reproduced by the permanent suite rather than by a command. The checker asserts the
 **file** exists and names the code; run it with the code as a filter to watch it happen.
 
 | Code | Test file |
 |---|---|
+| `QQQ-2005` `LimitOutOfRange` | `crates/qqq-host/tests/f10_pool_admission.rs` |
 | `QQQ-3001` `MemoryLimitExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
 | `QQQ-3002` `FuelExhausted` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs`, `crates/qqq-host/tests/subrequest_limits.rs` |
 | `QQQ-3003` `EpochDeadlineExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
@@ -3418,7 +3419,7 @@ Ten codes are reproduced by the permanent suite rather than by a command. The ch
 
 ### The `src`-only codes
 
-**Thirty codes are raised by the code and reproduced by no integration test.** They are not unreachable — a
+**Twenty-nine codes are raised by the code and reproduced by no integration test.** They are not unreachable — a
 guest that trips them gets one — but nothing under `crates/*/tests/` proves the path works, so a regression in
 any of them is invisible to the integration suite. (`QQQ-3009` is the partial exception: its refusal paths are
 covered by the `f02_*` unit tests inside `crates/qqq-run/src/guest_handler.rs`, which is why it still counts as
@@ -3433,7 +3434,6 @@ covered by the `f02_*` unit tests inside `crates/qqq-run/src/guest_handler.rs`, 
 | `QQQ-1005` | `NonReproducibleBuild` |
 | `QQQ-2003` | `SecretUnresolvable` |
 | `QQQ-2004` | `CapabilityPathInvalid` |
-| `QQQ-2005` | `LimitOutOfRange` |
 | `QQQ-2006` | `RequiresFabric` |
 | `QQQ-2007` | `CapabilitySyntaxInvalid` |
 | `QQQ-3005` | `InvalidResourceHandle` |

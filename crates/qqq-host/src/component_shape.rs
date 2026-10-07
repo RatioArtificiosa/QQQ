@@ -48,6 +48,121 @@ pub(crate) fn initial_memory_bytes(bytes: &[u8]) -> Result<u64, String> {
     Ok(total)
 }
 
+/// Countable shape of a component: how many memories, tables, and core
+/// modules it declares (`F-10`).
+///
+/// Memories and tables are summed across every nested core module (one flat
+/// `parse_all` pass, same descent as above); core modules are counted by
+/// section. Module count is the static proxy for instantiated core
+/// instances: a module instantiated twice counts once here, so the pool's
+/// `total_core_instances` (instances × 64) still carries the runtime
+/// multiplicity — this cap only refuses pathologically composed artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ComponentCounts {
+    pub memories: u32,
+    pub tables: u32,
+    pub core_modules: u32,
+}
+
+pub(crate) fn component_counts(bytes: &[u8]) -> Result<ComponentCounts, String> {
+    let mut counts = ComponentCounts {
+        memories: 0,
+        tables: 0,
+        core_modules: 0,
+    };
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = payload.map_err(|e| format!("component bytes do not parse: {e}"))?;
+        match payload {
+            Payload::MemorySection(reader) => {
+                for memory in reader {
+                    memory.map_err(|e| format!("memory section does not parse: {e}"))?;
+                    counts.memories = counts.memories.saturating_add(1);
+                }
+            }
+            Payload::TableSection(reader) => {
+                for table in reader {
+                    table.map_err(|e| format!("table section does not parse: {e}"))?;
+                    counts.tables = counts.tables.saturating_add(1);
+                }
+            }
+            Payload::ModuleSection { .. } => {
+                counts.core_modules = counts.core_modules.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
+/// Per-component caps: the most memories, tables, and core modules one
+/// component may declare (`F-10`).
+///
+/// Split from [`crate::config::PoolShape`] deliberately: the pool shape also
+/// carries instance counts and byte ceilings, which load-time validation of a
+/// single artifact must not depend on. The shape derives these caps from the
+/// same shared constants, so the two agree by construction rather than by
+/// review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShapeCaps {
+    pub memories: u32,
+    pub tables: u32,
+    pub core_modules: u32,
+}
+
+impl ShapeCaps {
+    /// The caps from the shared constants: what the pool enforces per
+    /// instance is what load-time validation refuses past.
+    pub(crate) fn maximum() -> Self {
+        Self {
+            memories: crate::config::MAX_MEMORIES_PER_COMPONENT,
+            tables: crate::config::MAX_TABLES_PER_COMPONENT,
+            core_modules: u32::try_from(crate::instance::MAX_INNER_INSTANCES).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// Refuse a component whose shape exceeds the per-instance caps.
+///
+/// Load-time validation: a 9-memory component against an 8-memory cap is
+/// refused HERE, at deploy, rather than as an instantiation error under
+/// load.
+///
+/// Unparseable-by-`wasmparser` bytes are NOT refused: `Component::new`
+/// already validated them, so at this point they are either a parser
+/// disagreement (refusing would turn a measurement aid into a denial of
+/// service) or WAT text, which Wasmtime's `wat` feature accepts and the test
+/// suite passes throughout. Production artifacts are binary; the runtime
+/// limiters remain the enforcement for everything instantiation admits.
+/// This is the same fail-open-with-backstop as `initial_memory_bytes`'
+/// zero-on-unparseable, and for the same reason.
+///
+/// Returns the message for the refusal; the caller attaches the code
+/// (`LimitOutOfRange`) and the remediation.
+pub(crate) fn validate_shape(bytes: &[u8], caps: &ShapeCaps) -> Result<(), String> {
+    let Ok(counts) = component_counts(bytes) else {
+        return Ok(());
+    };
+    if counts.memories > caps.memories {
+        return Err(format!(
+            "component declares {} memories, more than the {} per-instance maximum",
+            counts.memories, caps.memories
+        ));
+    }
+    if counts.tables > caps.tables {
+        return Err(format!(
+            "component declares {} tables, more than the {} per-instance maximum",
+            counts.tables, caps.tables
+        ));
+    }
+    if counts.core_modules > caps.core_modules {
+        return Err(format!(
+            "component declares {} core modules, more than the {} per-instance maximum",
+            counts.core_modules, caps.core_modules
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

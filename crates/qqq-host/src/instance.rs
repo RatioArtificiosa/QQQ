@@ -166,6 +166,26 @@ impl PreparedComponent {
             )
         })?;
 
+        // Load-time shape validation (`F-10`): a component declaring more
+        // memories, tables, or core modules than the pool allows per instance
+        // is refused HERE, at deploy, with a limit code — not as an
+        // instantiation error under load. The caps are the shared per-instance
+        // maxima, so this and the pool cannot disagree.
+        if let Err(reason) = crate::component_shape::validate_shape(
+            bytes,
+            &crate::component_shape::ShapeCaps::maximum(),
+        ) {
+            return Err(Error::new(
+                ErrorCode::LimitOutOfRange,
+                "the component's shape exceeds the per-instance limits",
+            )
+            .with_cause(reason)
+            .with_remediation(
+                "rebuild the component with fewer memories, tables, or core \
+                 modules; the per-component maxima are fixed",
+            ));
+        }
+
         Ok(Self {
             component,
             digest: digest_of(bytes),

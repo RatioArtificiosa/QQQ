@@ -223,6 +223,37 @@ pub fn preload(
     for item in items {
         let began = Instant::now();
 
+        // Load-time shape validation (`F-10`): an artifact declaring more
+        // memories, tables, or core modules than the pool allows per instance
+        // is refused HERE, at deploy, with a limit code — not as an
+        // instantiation error under load. Under pooling the allocator would
+        // refuse it at precompile below anyway; under OnDemand this is the
+        // only load-time check. The caps are the shared per-instance maxima,
+        // so this and the pool cannot disagree.
+        if let Err(reason) = crate::component_shape::validate_shape(
+            &item.bytes,
+            &crate::component_shape::ShapeCaps::maximum(),
+        ) {
+            outcomes.push((
+                item.name.clone(),
+                PreloadOutcome::Failed {
+                    error: Box::new(
+                        Error::new(
+                            ErrorCode::LimitOutOfRange,
+                            format!("`{}` exceeds the per-instance shape limits", item.name),
+                        )
+                        .with_cause(reason)
+                        .with_context("digest", item.digest.clone())
+                        .with_remediation(
+                            "rebuild the component with fewer memories, tables, \
+                             or core modules; the per-component maxima are fixed",
+                        ),
+                    ),
+                },
+            ));
+            continue;
+        }
+
         // Compilation. `precompile_component` validates as well as compiles, so a
         // malformed artifact is caught HERE rather than at first use -- which is
         // the entire point of preloading.
@@ -297,6 +328,7 @@ mod tests {
             memory_budget_bytes: 4 * 1024 * 1024 * 1024,
             max_instances: 8,
             resident_bytes: 0,
+            max_virtual_reservation_bytes: u64::MAX,
         }
     }
 
@@ -429,6 +461,7 @@ mod tests {
             memory_budget_bytes: 64 * 1024 * 1024,
             max_instances: 8,
             resident_bytes: 128 * 1024 * 1024,
+            max_virtual_reservation_bytes: u64::MAX,
         };
 
         let err = preload(

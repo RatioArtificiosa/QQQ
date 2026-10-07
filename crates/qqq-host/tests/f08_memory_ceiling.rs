@@ -189,6 +189,7 @@ fn f08_pooling_mode_refuses_over_ceiling_at_compile() {
         memory_budget_bytes: 4 * 1024 * 1024 * 1024,
         max_instances: 16,
         resident_bytes: 0,
+        max_virtual_reservation_bytes: u64::MAX,
     };
     let (engine, _) = build_engine(&manifest, &EngineConfig::default(), &roomy)
         .expect("a 1.5 MiB manifest on a roomy host must be admitted");

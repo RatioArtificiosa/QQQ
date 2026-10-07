@@ -99,13 +99,21 @@ impl EngineConfig {
         // consumes no fuel).
         c.epoch_interruption(true);
 
+        // -- Async stacks -------------------------------------------------
+        // Pinned explicitly even though it equals Wasmtime's default (2 MiB,
+        // verified in the pinned source): admission's RSS math counts this
+        // exact number per instance, so inheriting an upstream default
+        // silently would let a future Wasmtime move diverge the reservation
+        // from the enforcement without touching this file.
+        c.async_stack_size(usize::try_from(ASYNC_STACK_BYTES).unwrap_or(usize::MAX));
+
         // -- Memory -----------------------------------------------------
         // Multiple memories are needed by composed components; the proposal's
         // §4.5 ABI discussion assumes they are available.
         c.wasm_multi_memory(true);
         // Guard pages make out-of-bounds accesses trap rather than corrupt,
         // which is the sandbox's primary memory-safety mechanism.
-        c.memory_guard_size(2 * 1024 * 1024 * 1024);
+        c.memory_guard_size(MEMORY_GUARD_BYTES);
 
         // -- Determinism ------------------------------------------------
         if self.deterministic {
@@ -161,6 +169,173 @@ impl EngineConfig {
 /// of them admits what the other refuses.
 pub const MAX_MEMORIES_PER_COMPONENT: u32 = 8;
 
+/// Max tables per component instance (`F-10`).
+///
+/// Single source of truth shared by the pooling allocator and load-time
+/// shape validation. Note the store's `.tables(16)` in `instance.rs` is a
+/// *different* (wider, older) bound the pool never agreed with; this constant
+/// is what the pool enforces and what load-time validation refuses past, so
+/// those two agree by construction. Narrowing the store-level 16 is a
+/// behaviour change no finding asks for, so it stays.
+pub const MAX_TABLES_PER_COMPONENT: u32 = 8;
+
+/// Async stack bytes per instance (`F-10`).
+///
+/// Wasmtime's engine default, verified in the pinned source
+/// (`async_stack_size: 2 << 20`, "by default this option is 2 MiB"). Set
+/// explicitly in `to_wasmtime_config` and read here by admission, so the
+/// reservation and the enforcement agree even if the upstream default ever
+/// moves.
+pub const ASYNC_STACK_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Table bytes per element (`F-10`).
+///
+/// A table element is a funcref: pointer-sized, 8 bytes on 64-bit. On 32-bit
+/// hosts this over-reserves twofold — the safe direction — and three-OS CI
+/// keeps the arithmetic honest on both widths.
+pub const TABLE_BYTES_PER_ELEMENT: u64 = 8;
+
+/// Per-instance metadata estimate, in bytes (`F-10`).
+///
+/// Wasmtime's per-instance bookkeeping (instance struct, defined-tables
+/// array, ancillary maps) has no stable published size, so admission cannot
+/// measure it — but ignoring it admits exactly the overcommit the estimate
+/// exists to prevent. 64 KiB is an unmeasured upper bound, stated as one:
+/// it errs toward refusing, and §9.1's methodology is the named route to
+/// replacing it with a measurement.
+pub const INSTANCE_METADATA_ESTIMATE_BYTES: u64 = 64 * 1024;
+
+/// Memory guard bytes per slot (`F-10`).
+///
+/// Must equal the `memory_guard_size` set in `to_wasmtime_config`: the guard
+/// regions dominate the virtual-address reservation, so admission's virtual
+/// math and the engine configuration read the same number.
+pub const MEMORY_GUARD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The pool shape one component needs, shared by the allocator and admission
+/// (`F-10`).
+///
+/// Before this struct the two paths each derived their own numbers from the
+/// manifest: the pool reserved one memory slot per instance while components
+/// could hold eight, and admission charged the host's instance ceiling while
+/// promising the manifest's number. Both disagreements failed under load —
+/// the exact failure admission exists to prevent. One struct, computed once
+/// from the manifest and the host config, read by both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolShape {
+    /// What the manifest asked for, before the host ceiling applies.
+    pub requested_instances: u32,
+    /// What is actually reserved and admitted: `min(requested, host)`.
+    pub instances: u32,
+    /// Memories per instance: `MAX_MEMORIES_PER_COMPONENT` — multi-memory
+    /// stays on per the F-08 decision, so the pool reserves for the max.
+    pub memories_per_instance: u32,
+    /// Tables per instance: `MAX_TABLES_PER_COMPONENT`.
+    pub tables_per_instance: u32,
+    /// Core instances per instance: `MAX_INNER_INSTANCES` — the audit's
+    /// default unless a smaller bound is proven at load, and none is.
+    pub core_instances_per_instance: u32,
+    /// Aggregate memory ceiling per instance in bytes (post-F-08: the total,
+    /// not per memory).
+    pub memory_ceiling_bytes: u64,
+    /// Table elements per table: `MAX_TABLE_ELEMENTS`.
+    pub table_elements: u32,
+}
+
+impl PoolShape {
+    /// Compute the shape from the manifest and the host configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QQQ-2005` when `limits.memory` does not parse — the same
+    /// error `build_pooling` used to return, from the same parse, so callers
+    /// see no change but the message now names the shape.
+    pub fn from_manifest(manifest: &Limits, cfg: &EngineConfig) -> Result<Self> {
+        let memory_bytes = ByteSize::parse(&manifest.memory).map_err(|reason| {
+            Error::new(
+                ErrorCode::LimitOutOfRange,
+                format!("limits.memory is not a valid size: {reason}"),
+            )
+            .with_context("value", manifest.memory.clone())
+            .with_remediation(
+                "set `limits.memory` to a size such as \"128MiB\", \"1GiB\" or \"65536\"",
+            )
+        })?;
+        Ok(Self {
+            requested_instances: manifest.max_instances,
+            instances: manifest.max_instances.min(cfg.max_instances),
+            memories_per_instance: MAX_MEMORIES_PER_COMPONENT,
+            tables_per_instance: MAX_TABLES_PER_COMPONENT,
+            core_instances_per_instance: u32::try_from(crate::instance::MAX_INNER_INSTANCES)
+                .unwrap_or(u32::MAX),
+            memory_ceiling_bytes: memory_bytes.as_bytes(),
+            table_elements: MAX_TABLE_ELEMENTS,
+        })
+    }
+
+    /// Pool-wide memory slots: instances times memories each, saturating.
+    ///
+    /// `saturating_mul` throughout these totals: a manifest declaring absurd
+    /// counts must not wrap into a small reservation that passes admission —
+    /// the unsafe direction.
+    #[must_use]
+    pub fn total_memories(&self) -> u32 {
+        self.instances.saturating_mul(self.memories_per_instance)
+    }
+
+    /// Pool-wide table slots, saturating.
+    #[must_use]
+    pub fn total_tables(&self) -> u32 {
+        self.instances.saturating_mul(self.tables_per_instance)
+    }
+
+    /// Pool-wide core-instance slots, saturating.
+    #[must_use]
+    pub fn total_core_instances(&self) -> u32 {
+        self.instances
+            .saturating_mul(self.core_instances_per_instance)
+    }
+
+    /// Resident (RSS) bound per instance: the aggregate memory ceiling plus
+    /// the async stack, every table at full size, and the metadata estimate.
+    ///
+    /// Every table counts, not one: the shape allows `tables_per_instance`
+    /// tables each of `table_elements` entries, and counting a single table
+    /// under-reserves sevenfold at the default shape — the unsafe direction
+    /// (`CodeRabbit` on F-10, reproduced by
+    /// `f10_rss_bound_counts_every_table_per_instance`).
+    ///
+    /// This is the number admission reserves per instance. It exceeds the
+    /// bare ceiling deliberately: the ceiling is what the guest may *hold*,
+    /// this is what the host must *have*.
+    #[must_use]
+    pub fn rss_per_instance_bytes(&self) -> u64 {
+        let tables = u64::from(self.tables_per_instance)
+            .saturating_mul(u64::from(self.table_elements))
+            .saturating_mul(TABLE_BYTES_PER_ELEMENT);
+        self.memory_ceiling_bytes
+            .saturating_add(ASYNC_STACK_BYTES)
+            .saturating_add(tables)
+            .saturating_add(INSTANCE_METADATA_ESTIMATE_BYTES)
+    }
+
+    /// Total RSS reservation: instances times the per-instance bound.
+    #[must_use]
+    pub fn reserved_rss_bytes(&self) -> u64 {
+        u64::from(self.instances).saturating_mul(self.rss_per_instance_bytes())
+    }
+
+    /// Total virtual-address reservation: every memory slot reserves its
+    /// maximum size plus its guard regions. Address space, not RSS — but a
+    /// container that cannot map it fails at startup, so admission compares
+    /// it against the configured virtual cap.
+    #[must_use]
+    pub fn virtual_reservation_bytes(&self) -> u64 {
+        let per_slot = self.memory_ceiling_bytes.saturating_add(MEMORY_GUARD_BYTES);
+        u64::from(self.total_memories()).saturating_mul(per_slot)
+    }
+}
+
 /// Max table elements per table (`F-08`).
 ///
 /// Wasmtime's pooling default (20,000), used for both the pooling allocator
@@ -169,12 +344,12 @@ pub const MAX_MEMORIES_PER_COMPONENT: u32 = 8;
 /// returning -1 to the guest.
 pub const MAX_TABLE_ELEMENTS: u32 = 20_000;
 
-/// Build the pooling-allocator configuration from manifest limits.
+/// Build the pooling-allocator configuration from the pool shape.
 ///
 /// # Why the pool size is derived rather than guessed
 ///
-/// The pool is sized from `limits.max_instances` and `limits.memory`. Getting
-/// this wrong is a real failure mode in both directions:
+/// The pool is sized from the shape's instance count and per-instance maxima.
+/// Getting this wrong is a real failure mode in both directions:
 ///
 /// * **Too small** — the host sheds load with `QQQ-6001` while the machine is
 ///   idle. Under-provisioning is invisible until traffic arrives.
@@ -182,55 +357,53 @@ pub const MAX_TABLE_ELEMENTS: u32 = 20_000;
 ///   Over-provisioning is worse, because it fails at *startup* with an
 ///   allocation error rather than degrading gracefully under load.
 ///
-/// So the pool is sized to the manifest's declared ceiling, and the host
+/// So the pool is sized to the shape admission already approved, and the host
 /// refuses to start if that reservation is implausible.
 ///
 /// # Errors
 ///
-/// Returns `QQQ-2005` when the manifest's limits are outside the range the
-/// pooling allocator can serve.
-pub fn build_pooling(
-    limits: &Limits,
-    cfg: &EngineConfig,
-) -> Result<wasmtime::PoolingAllocationConfig> {
+/// Returns `QQQ-2005` when the shape is outside the range the pooling
+/// allocator can serve. (The manifest parse that used to fail here moved to
+/// [`PoolShape::from_manifest`]; this constructor keeps the error for the
+/// allocator's own rejections.)
+pub fn build_pooling(shape: &PoolShape) -> Result<wasmtime::PoolingAllocationConfig> {
     let mut p = wasmtime::PoolingAllocationConfig::default();
 
-    let memory_bytes = ByteSize::parse(&limits.memory).map_err(|reason| {
-        Error::new(
-            ErrorCode::LimitOutOfRange,
-            format!("limits.memory is not a valid size: {reason}"),
-        )
-        .with_context("value", limits.memory.clone())
-        .with_remediation("set `limits.memory` to a size such as \"128MiB\", \"1GiB\" or \"65536\"")
-    })?;
+    let instances = shape.instances;
 
-    // The total instance count across the host is bounded by the smaller of
-    // the manifest's per-worker ceiling and the host-wide ceiling, so a
-    // mis-set manifest cannot over-reserve the whole machine.
-    let instances = limits.max_instances.min(cfg.max_instances);
-
-    p.total_memories(instances.max(1));
-    p.total_tables(instances.max(1));
-    // A component needs at least one memory and one table per instance; a
-    // little headroom covers composed components with several core modules.
-    p.max_memories_per_component(MAX_MEMORIES_PER_COMPONENT);
-    p.max_tables_per_component(8);
-    // Set explicitly even though it equals Wasmtime's default (verified in
-    // the pinned source): inheriting an upstream default silently would let a
-    // future Wasmtime change diverge the pool slot from the store limiter
-    // without touching this file (CodeRabbit on F-08).
-    p.table_elements(MAX_TABLE_ELEMENTS as usize);
+    // Every pool-wide total derives from the shape (F-10): the pool and
+    // admission read the same multiplications, so one cannot admit what the
+    // other cannot host. Method names verified against the pinned Wasmtime
+    // 48 source, not memory.
+    p.total_component_instances(instances.max(1));
+    p.total_core_instances(shape.total_core_instances().max(1));
+    p.total_memories(shape.total_memories().max(1));
+    p.total_tables(shape.total_tables().max(1));
+    p.max_memories_per_component(shape.memories_per_instance);
+    p.max_tables_per_component(shape.tables_per_instance);
+    // The pool ALSO caps memories and tables per core MODULE (verified in
+    // the pinned source: `memory_pool.rs` refuses past
+    // `max_memories_per_module`, default 1). A single core module holding two
+    // memories — the ordinary multi-memory shape — dies at compile without
+    // this, however generous the per-component caps above are. Each module
+    // may spend the component's whole budget; the per-component caps still
+    // bound the total. The audit's setter list missed these two; the
+    // concurrency test caught it.
+    p.max_memories_per_module(shape.memories_per_instance);
+    p.max_tables_per_module(shape.tables_per_instance);
+    p.max_core_instances_per_component(shape.core_instances_per_instance);
+    p.table_elements(shape.table_elements as usize);
 
     // Bound the linear memory size so the reservation is predictable rather
     // than "whatever the guest grows to". This is the enforcement point for
-    // `limits.memory`: Wasmtime's StoreLimits also enforces it per store, but
+    // the ceiling: Wasmtime's StoreLimits also enforces it per store, but
     // the pool must reserve for the worst case up front.
     //
     // `max_memory_size` takes a `usize`. On a 32-bit host a 64-bit memory
     // limit cannot be represented, so we clamp to the address space rather
     // than silently truncating — truncation would reserve a *smaller* pool
     // than the manifest asked for, which is the unsafe direction.
-    let pool_memory = usize::try_from(memory_bytes.as_bytes()).unwrap_or(usize::MAX);
+    let pool_memory = usize::try_from(shape.memory_ceiling_bytes).unwrap_or(usize::MAX);
     p.max_memory_size(pool_memory);
 
     p.total_stacks(instances.max(1));
@@ -279,13 +452,15 @@ pub fn build_engine(
     capacity: &crate::admission::HostCapacity,
 ) -> Result<(wasmtime::Engine, crate::admission::Admitted)> {
     let store_limits = StoreLimits::from_manifest(limits)?;
+    // One shape, computed once, read by both admission and the pool (F-10).
+    let shape = PoolShape::from_manifest(limits, engine_config)?;
 
     // Admission BEFORE anything is reserved or constructed.
-    let admitted = crate::admission::admit(&store_limits, capacity)?;
+    let admitted = crate::admission::admit(&store_limits, &shape, capacity)?;
 
     let mut config = engine_config.to_wasmtime_config()?;
     if engine_config.pooling {
-        let pooling = build_pooling(limits, engine_config)?;
+        let pooling = build_pooling(&shape)?;
         config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
     }
 
@@ -591,7 +766,8 @@ mod tests {
     fn pooling_config_reserves_for_the_declared_ceiling() {
         let cfg = EngineConfig::default();
         // Must not error for a sane manifest.
-        let p = build_pooling(&limits(), &cfg);
+        let shape = PoolShape::from_manifest(&limits(), &cfg).expect("sane manifest");
+        let p = build_pooling(&shape);
         assert!(p.is_ok(), "pooling config must build: {:?}", p.err());
     }
 
@@ -621,6 +797,7 @@ mod tests {
             memory_budget_bytes: 64 * 1024 * 1024,
             max_instances: 8,
             resident_bytes: 128 * 1024 * 1024,
+            max_virtual_reservation_bytes: u64::MAX,
         };
         assert_eq!(
             starved.available_bytes(),
@@ -662,9 +839,14 @@ mod tests {
             memory_budget_bytes: 4 * 1024 * 1024 * 1024,
             max_instances: 16,
             resident_bytes: 0,
+            max_virtual_reservation_bytes: u64::MAX,
         };
 
-        let (engine, admitted) = build_engine(&limits(), &EngineConfig::default(), &roomy)
+        // The manifest must ask within the host ceiling: admission refuses
+        // over-host requests (F-10) rather than clamping them.
+        let mut manifest = limits();
+        manifest.max_instances = 16;
+        let (engine, admitted) = build_engine(&manifest, &EngineConfig::default(), &roomy)
             .expect("a modest component on a roomy host must build");
 
         // **The engine is proved usable, not merely constructed.** Wasmtime 48
@@ -685,11 +867,15 @@ mod tests {
             "precompilation must produce a cwasm artifact"
         );
 
-        // And the reservation is the manifest's number times the instance
-        // ceiling, not a placeholder.
+        // And the reservation is the manifest's RSS bound times the admitted
+        // count, not a placeholder: per instance 128 MiB memory + 2 MiB async
+        // stack + 8 tables of 20,000×8 B + 64 KiB metadata estimate.
         assert_eq!(admitted.per_instance_bytes, 128 * 1024 * 1024);
         assert_eq!(admitted.instances, 16);
-        assert_eq!(admitted.reserved_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(
+            admitted.reserved_bytes,
+            16 * (128 * 1024 * 1024 + 2 * 1024 * 1024 + 8 * 20_000 * 8 + 64 * 1024)
+        );
     }
 
     /// A minimal valid component, for proving an engine actually works.
@@ -720,10 +906,14 @@ mod tests {
             memory_budget_bytes: 4 * 1024 * 1024 * 1024,
             max_instances: 4,
             resident_bytes: 0,
+            max_virtual_reservation_bytes: u64::MAX,
         };
 
+        // Within the host ceiling, or admission (not the engine) refuses.
+        let mut manifest = limits();
+        manifest.max_instances = 4;
         let (pooled, _) =
-            build_engine(&limits(), &EngineConfig::default(), &roomy).expect("pooled engine");
+            build_engine(&manifest, &EngineConfig::default(), &roomy).expect("pooled engine");
         assert!(
             pooled.precompile_component(TINY_COMPONENT).is_ok(),
             "the pooled engine must compile a component"
@@ -738,7 +928,7 @@ mod tests {
             ..EngineConfig::default()
         };
         let (on_demand, _) =
-            build_engine(&limits(), &on_demand_cfg, &roomy).expect("on-demand engine");
+            build_engine(&manifest, &on_demand_cfg, &roomy).expect("on-demand engine");
         assert!(
             on_demand.precompile_component(TINY_COMPONENT).is_ok(),
             "`pooling = false` must reach the engine, not be ignored by the join"
@@ -755,16 +945,65 @@ mod tests {
             max_instances: 50,
             ..EngineConfig::default()
         };
-        // Should still build: the effective count is min(100_000, 50).
-        assert!(build_pooling(&l, &cfg).is_ok());
+        // The shape carries the effective count: min(100_000, 50).
+        let shape = PoolShape::from_manifest(&l, &cfg).expect("shape must build");
+        assert_eq!(shape.requested_instances, 100_000);
+        assert_eq!(shape.instances, 50);
+        assert!(build_pooling(&shape).is_ok());
     }
 
     #[test]
     fn pooling_rejects_an_unparsable_memory_value() {
         let mut l = limits();
         l.memory = "enormous".to_owned();
-        let e = build_pooling(&l, &EngineConfig::default()).unwrap_err();
+        let e = PoolShape::from_manifest(&l, &EngineConfig::default()).unwrap_err();
         assert_eq!(e.code, ErrorCode::LimitOutOfRange);
+    }
+
+    /// **F-10: one shape feeds the pool and admission, so the two agree.**
+    ///
+    /// Written first and failing first: no `PoolShape` exists yet, so this
+    /// does not compile — which is the red. The totals multiply the
+    /// per-instance counts (a composed component holds one memory per core
+    /// module), saturating rather than wrapping on absurd inputs.
+    #[test]
+    fn f10_pool_shape_totals_multiply_by_per_instance_counts() {
+        let s = PoolShape {
+            requested_instances: 10,
+            instances: 10,
+            memories_per_instance: 2,
+            tables_per_instance: 1,
+            core_instances_per_instance: 4,
+            memory_ceiling_bytes: 1 << 20,
+            table_elements: 1000,
+        };
+        assert_eq!(s.total_memories(), 20);
+        assert_eq!(s.total_tables(), 10);
+        assert_eq!(s.total_core_instances(), 40);
+    }
+
+    /// **F-10: the RSS bound counts every table, not one.**
+    ///
+    /// `CodeRabbit` on F-10, reproduced red first: the first version multiplied
+    /// `table_elements` by the byte width once, while the shape allows
+    /// `tables_per_instance` tables — undercounting the table bound sevenfold
+    /// at the default shape, in the unsafe (admits-more-than-fits)
+    /// direction.
+    #[test]
+    fn f10_rss_bound_counts_every_table_per_instance() {
+        let s = PoolShape {
+            requested_instances: 4,
+            instances: 4,
+            memories_per_instance: 1,
+            tables_per_instance: 2,
+            core_instances_per_instance: 1,
+            memory_ceiling_bytes: 1 << 20,
+            table_elements: 1000,
+        };
+        assert_eq!(
+            s.rss_per_instance_bytes(),
+            (1 << 20) + 2 * 1024 * 1024 + 2 * 1000 * 8 + 64 * 1024
+        );
     }
 
     // -- AOT cache key -----------------------------------------------------

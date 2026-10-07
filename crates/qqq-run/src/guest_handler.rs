@@ -2170,6 +2170,15 @@ mod tests {
             qqq_host::Outcome::Failed,
             "a boundary-refused answer audits as a failed exercise"
         );
+        // F-11: the settled rule routes boundary refusals through `discard()`
+        // like traps — the instance produced protocol-violating output, so no
+        // slot returns to idle.
+        assert_eq!(
+            app.pool.metrics().discarded(),
+            1,
+            "the boundary-refused slot is discarded, not released"
+        );
+        assert_eq!(app.pool.idle(), 0, "no slot returns to idle on failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2211,5 +2220,92 @@ mod tests {
             "a trapped request audits as a failed exercise"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F-11: a healthy request releases its slot through the request path.**
+    ///
+    /// The mirror of the trap test: `live-http.wat` answers inside the
+    /// protocol, the request succeeds, and the slot goes through
+    /// `Pool::release()` — released counts one, the slot returns to idle,
+    /// and nothing is discarded. Together the three request-path tests pin
+    /// the routing for every outcome class: trap, boundary refusal, success.
+    #[test]
+    fn f11_healthy_request_releases_its_slot() {
+        let source = include_str!("../tests/fixtures/live-http.wat");
+        let app = granted_app_for_wat(source);
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Get, "/orders"),
+            None,
+            "test-tenant",
+        );
+        assert!(outcome.is_ok(), "the healthy guest must serve: {outcome:?}");
+        assert_eq!(
+            app.pool.metrics().released(),
+            1,
+            "exactly one release: the healthy slot, handed back"
+        );
+        assert_eq!(
+            app.pool.metrics().discarded(),
+            0,
+            "nothing discarded on the success path"
+        );
+        assert_eq!(app.pool.idle(), 1, "the slot returns to idle on success");
+    }
+
+    /// **F-11: a marked permit counts as a discard, never a release.**
+    ///
+    /// The unit half of the routing proof: `taint()` (the `mark_discard`
+    /// outcome flag under its established name) routes `Drop` to
+    /// `Pool::discard()`. The acquire first is load-bearing, not setup: a
+    /// permit dropped with nothing checked out takes the saturating path,
+    /// and a test that never acquires would pass while proving nothing about
+    /// routing. The invariant holds throughout: `in_use + idle <= capacity`.
+    #[test]
+    fn f11_marked_permit_counts_as_discard() {
+        let pool = qqq_host::Pool::new(4);
+        pool.acquire(0.0).expect("capacity");
+        let permit = RequestPermit::clean(&pool);
+        permit.taint();
+        drop(permit);
+        assert_eq!(
+            pool.metrics().discarded(),
+            1,
+            "one discard, routed by the mark"
+        );
+        assert_eq!(
+            pool.metrics().released(),
+            0,
+            "no release on the marked path"
+        );
+        let (in_use, idle) = pool.snapshot();
+        assert_eq!((in_use, idle), (0, 0), "a discard returns no slot to idle");
+        assert!(
+            in_use + idle <= 4,
+            "the capacity invariant holds after discard"
+        );
+    }
+
+    /// **F-11: an unmarked permit counts as a release.**
+    ///
+    /// The mirror image: a clean completion hands its slot back. Same
+    /// acquire-first discipline, same invariant.
+    #[test]
+    fn f11_unmarked_permit_counts_as_release() {
+        let pool = qqq_host::Pool::new(4);
+        pool.acquire(0.0).expect("capacity");
+        let permit = RequestPermit::clean(&pool);
+        drop(permit);
+        assert_eq!(
+            pool.metrics().released(),
+            1,
+            "one release on the clean path"
+        );
+        assert_eq!(pool.metrics().discarded(), 0, "no discard without the mark");
+        let (in_use, idle) = pool.snapshot();
+        assert_eq!((in_use, idle), (0, 1), "a release returns the slot to idle");
+        assert!(
+            in_use + idle <= 4,
+            "the capacity invariant holds after release"
+        );
     }
 }

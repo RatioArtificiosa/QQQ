@@ -176,6 +176,12 @@ impl Response {
 // Writing
 // ---------------------------------------------------------------------------
 
+/// Bodies at or above this size are written separately from the head
+/// (`F-24`): appending megabytes to the head buffer doubles transient memory
+/// for no framing benefit. Below it the single-buffer [`write_response`]
+/// path is kept — one `write_all`, and usually faster.
+pub const SPLIT_THRESHOLD: usize = 4 * 1024;
+
 /// Write a response into a buffer.
 ///
 /// # Why the body is attached here rather than streamed
@@ -205,6 +211,34 @@ pub fn write_response(
     keep_alive: bool,
     head_request: bool,
 ) -> Vec<u8> {
+    let mut bytes = write_response_head(resp, version, keep_alive);
+    // The headers are complete; the body is withheld for a HEAD. `content_length`
+    // in the head was taken from the real body, so the client is told the
+    // representation's size while receiving none of it -- which is exactly what
+    // `RFC 9110` §9.3.2 specifies, and what lets a client use a HEAD to decide
+    // whether a GET is worth making. The reserve is exact (small bodies only —
+    // see [`SPLIT_THRESHOLD`]), so the append never reallocates nor overruns.
+    if !head_request {
+        let body = response_body_for_wire(resp, head_request);
+        bytes.reserve(body.len());
+        bytes.extend_from_slice(body);
+    }
+    bytes
+}
+
+/// Write only the head: status line, headers, framing, terminator (`F-24`).
+///
+/// Byte-identical to the prefix [`write_response`] emits: the body for the
+/// wire is [`response_body_for_wire`], written separately by callers serving
+/// bodies at or above [`SPLIT_THRESHOLD`]. Sharing the builder (rather than
+/// a second implementation) is what keeps the two paths from drifting.
+///
+/// Takes no `head_request` flag: the head never varies with it (the
+/// `Content-Length` always describes the real body, and no body bytes are
+/// emitted here either way) — the flag lives only where bodies are decided,
+/// [`response_body_for_wire`] and [`write_response`].
+#[must_use]
+pub fn write_response_head(resp: &Response, version: Version, keep_alive: bool) -> Vec<u8> {
     // The body is measured, not the declared header, so a caller cannot
     // desynchronise the stream by setting a `Content-Length` that disagrees
     // with what it passes in.
@@ -220,9 +254,12 @@ pub fn write_response(
     // whether to fetch is actively misleading. Measured: this returned
     // `Content-Length: 0` for `/healthz`, whose GET reports `2`.
     let content_length = body.len();
-    let emit_body = !head_request;
 
-    let mut out = String::with_capacity(128 + resp.headers.len() * 32 + body.len());
+    // Sized for the head alone: the body (if any) is appended by the caller
+    // (`write_response`) or written separately (the split path). Sizing with
+    // the body length here would briefly hold megabytes in the head buffer
+    // on exactly the path that exists to avoid that (`CodeRabbit` on F-03).
+    let mut out = String::with_capacity(128 + resp.headers.len() * 32);
     // `write!` into a String cannot fail, so the result is intentionally
     // ignored rather than unwrapped — the alternative is a panic path for an
     // operation that has none.
@@ -258,15 +295,21 @@ pub fn write_response(
     }
     out.push_str("\r\n");
 
-    let mut bytes = out.into_bytes();
-    // The headers are complete; the body is withheld for a HEAD. `content_length` above
-    // was taken from the real body, so the client is told the representation's size while
-    // receiving none of it -- which is exactly what `RFC 9110` §9.3.2 specifies, and what
-    // lets a client use a HEAD to decide whether a GET is worth making.
-    if emit_body {
-        bytes.extend_from_slice(body);
+    out.into_bytes()
+}
+
+/// The body bytes as written on the wire (`F-24`).
+///
+/// Empty when the status forbids a body or the request was a HEAD — the same
+/// suppression [`write_response`] applies, so `head + body` always equals the
+/// single-buffer output.
+#[must_use]
+pub fn response_body_for_wire(resp: &Response, head_request: bool) -> &[u8] {
+    if forbids_body(resp.status) || head_request {
+        &[]
+    } else {
+        &resp.body
     }
-    bytes
 }
 
 /// The head of a response whose body is written afterwards, in pieces.
@@ -900,6 +943,92 @@ mod tests {
     }
 
     // -- headers -----------------------------------------------------------
+
+    /// **F-24: the split path is byte-identical to the single-buffer path.**
+    ///
+    /// A 1 MiB body through `write_response_head` + `response_body_for_wire`,
+    /// concatenated, must equal `write_response` byte for byte — across
+    /// versions, keep-alive settings, and HEAD suppression. The existing wire
+    /// tests pin the single-buffer output; this pins the split output to it,
+    /// so the server's vectored writes cannot drift the framing.
+    #[test]
+    fn f24_split_write_is_byte_identical_to_single_buffer() {
+        let mut r = Response::status(200);
+        r.set_header("Content-Type", "application/octet-stream");
+        r.set_header("X-Ref", "f24");
+        r.body = vec![0xA5; 1024 * 1024];
+        for (version, keep_alive, head_request) in [
+            (Version::Http11, true, false),
+            (Version::Http11, false, false),
+            (Version::Http10, true, false),
+            (Version::Http11, true, true),
+            (Version::Http11, false, true),
+        ] {
+            let single = write_response(&r, version, keep_alive, head_request);
+            let mut split = write_response_head(&r, version, keep_alive);
+            split.extend_from_slice(response_body_for_wire(&r, head_request));
+            assert_eq!(
+                split, single,
+                "split must equal single-buffer for {version:?}/{keep_alive}/{head_request}"
+            );
+        }
+    }
+
+    /// **F-24: the split head is a small buffer, whatever the body.**
+    ///
+    /// `CodeRabbit` on F-03/F-24: sizing the head `String` with the body
+    /// length (and reserving it) briefly holds megabytes in the head buffer
+    /// on exactly the path that exists to avoid that. A 1 MiB response head
+    /// must stay under 4 KiB in length and capacity alike.
+    #[test]
+    fn f24_split_head_stays_small_for_large_bodies() {
+        let mut r = Response::status(200);
+        r.set_header("Content-Type", "application/octet-stream");
+        r.body = vec![0xA5; 1024 * 1024];
+        let head = write_response_head(&r, Version::Http11, true);
+        assert!(head.len() < 4096, "head must be small: {}", head.len());
+        assert!(
+            head.capacity() < 4096,
+            "head capacity must be small: {}",
+            head.capacity()
+        );
+    }
+
+    /// **F-24: serialiser micro-benchmark, 4 KiB / 64 KiB / 2 MiB.**
+    ///
+    /// Ignored like the other harnesses: machine-sensitive, run explicitly
+    /// (`cargo test -p qqq-serve --lib f24_serialise_benchmark -- --ignored
+    /// --nocapture`). Reports median single-buffer serialisation latency per
+    /// size over 20 iterations — the copy the split path removes for large
+    /// bodies. No time assertions (a loaded machine is not a regression);
+    /// byte-identity is asserted by the test above.
+    #[test]
+    #[ignore = "benchmark: machine-sensitive, run explicitly"]
+    fn f24_serialise_benchmark() {
+        for (label, size) in [
+            ("4KiB", 4 * 1024),
+            ("64KiB", 64 * 1024),
+            ("2MiB", 2 * 1024 * 1024),
+        ] {
+            let mut r = Response::status(200);
+            r.set_header("Content-Type", "application/octet-stream");
+            r.body = vec![0xA5; size];
+            let mut samples = Vec::with_capacity(20);
+            for _ in 0..20 {
+                let start = std::time::Instant::now();
+                let bytes = write_response(&r, Version::Http11, true, false);
+                // The body round-trips through the measured path: a benchmark
+                // timing nothing would still report numbers.
+                assert_eq!(&bytes[bytes.len() - size..], &r.body[..]);
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            eprintln!(
+                "BENCH serialise-{label}: median {:.3} ms over 20",
+                samples[10]
+            );
+        }
+    }
 
     #[test]
     fn caller_headers_are_emitted_in_order() {

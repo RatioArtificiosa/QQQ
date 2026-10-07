@@ -85,6 +85,29 @@ pub struct GuestApp {
     authority: String,
     /// Bounds how many requests may hold an instance at once.
     pool: Arc<Pool>,
+    /// Bounds host heap held for request and response bodies (`F-03`).
+    ///
+    /// Permits are bytes; 256 MiB total across the app. Admission's RSS math
+    /// bounds what guests may hold, but the host heap that carries bodies in
+    /// flight — request bytes read before the guest runs, the lifted
+    /// response after — is outside every Wasmtime limiter. When the budget is
+    /// exhausted the request is shed with 503 + `Retry-After`, never queued:
+    /// an unbounded queue is how a slow consumer turns heap pressure into an
+    /// OOM kill. Shared across replacements like the pool, for the same
+    /// reason: a rotation must not double the budget.
+    ///
+    /// # Window boundary, stated exactly
+    ///
+    /// The permits cover the guest-processing window (entry through return).
+    /// The socket-write window after return holds the bounded response under
+    /// connection backpressure — unchanged from the pre-semaphore baseline,
+    /// whose transient the split writes reduced. Carrying a permit to the
+    /// socket would cross the `Handler` boundary (`live.dispatch` →
+    /// `Dispatch::flat` → `server.write_flat_response`) with signature churn
+    /// across three crates for the last mile of an optional item; that is
+    /// server write-backpressure work, named as follow-up, not smuggled in
+    /// here.
+    buffer_budget: Arc<tokio::sync::Semaphore>,
     /// The per-tenant output budgets for this app's requests.
     ///
     /// One registry per app, matching the pool: each deployed component bounds
@@ -303,6 +326,9 @@ impl GuestApp {
             // refuses `--workers 0`, so this is a second line of defence rather than
             // the check.
             pool: Arc::new(Pool::new(u64::from(workers))),
+            // One budget per app, matching the pool: the heap that carries
+            // bodies is per deployed component like its instance slots.
+            buffer_budget: Arc::new(tokio::sync::Semaphore::new(BUFFER_BUDGET_BYTES)),
             // One registry per app, matching the pool: tenants are not global
             // identities here, so each deployed component bounds its own tenants,
             // exactly as each bounds its own instance slots.
@@ -352,6 +378,7 @@ impl GuestApp {
         )?;
         next.validate_interface()?;
         next.pool = Arc::clone(&self.pool);
+        next.buffer_budget = Arc::clone(&self.buffer_budget);
         next.audit = Arc::clone(&self.audit);
         next.audit_appender.clone_from(&self.audit_appender);
         // The tenant budgets roll with the replacement, like the pool and the
@@ -482,6 +509,23 @@ impl GuestApp {
         // process in debug builds, which is where every test runs. The field is now read for the
         // one thing it is true of, and the absence of reuse is stated where a reader looks for it
         // — in `serve_one`'s own doc, next to the `Instance::create` that makes it so.
+        // --- The buffer budget ------------------------------------------------
+        //
+        // Host heap for this request's body, held across the guest call: the
+        // request bytes are already in heap here, and the lifted response
+        // will join them. `try_acquire` never waits — an exhausted budget
+        // sheds with 503 + `Retry-After` rather than queueing, because a
+        // queue of large bodies is the OOM this budget exists to prevent.
+        // Released on every exit path by the guards' drops. This runs BEFORE
+        // the pool gate below so a shed request consumes no slot: the reverse
+        // order leaked `in_use` on every shed (the permit that would release
+        // the slot is only created afterwards).
+        let request_len =
+            u32::try_from(request.body.as_ref().map_or(0, Vec::len)).unwrap_or(u32::MAX);
+        let Ok(_request_permit) = self.buffer_budget.try_acquire_many(request_len) else {
+            return Ok(buffer_overload(&self.pool, self.completion_rate));
+        };
+
         let acquired = self.pool.acquire(self.completion_rate)?;
         debug_assert!(
             acquired.capacity >= 1,
@@ -508,7 +552,32 @@ impl GuestApp {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .records()
             .len();
-        let outcome = self.serve_one(&request, tenant);
+        let outcome = self.serve_one(request, tenant);
+
+        // The response body joins the heap here: budget it too, or a flood
+        // of large answers bypasses the entry check above. On exhaustion the
+        // lifted response is dropped and the request shed with 503 — but
+        // through `settle` below, not around it: the guest already ran, so
+        // the shed is a `Failed` exercise with an audit row, while the slot
+        // is released (the instance did nothing wrong — only served what did
+        // not fit). An early return here would skip the row, the taint
+        // bookkeeping, and the persist.
+        let mut shed = None;
+        let (outcome, _response_permit) = match outcome {
+            Ok(response) => {
+                let response_len = u32::try_from(response.body.len()).unwrap_or(u32::MAX);
+                if let Ok(permit) = self.buffer_budget.try_acquire_many(response_len) {
+                    (Ok(response), Some(permit))
+                } else {
+                    shed = Some(buffer_overload(&self.pool, self.completion_rate));
+                    (
+                        Err(buffer_overload_error(&self.pool, self.completion_rate)),
+                        None,
+                    )
+                }
+            }
+            Err(error) => (Err(error), None),
+        };
 
         // Settled **before** the audit row, so the row states the outcome the
         // caller acts on: a guest answer the boundary refuses (`QQQ-3009`) is
@@ -521,10 +590,13 @@ impl GuestApp {
         // review): a boundary-refused answer (illegal status, host-controlled
         // header, breached cap) means the instance produced protocol-violating
         // output, so its slot is discarded like a trap's — only a converted,
-        // servable answer hands its slot back. V1 builds a fresh instance per
-        // request regardless, so `slot_reused` describes accounting, never a
-        // reused instance.
-        if converted.is_err() {
+        // servable answer hands its slot back. A shed response is the
+        // exception that proves the shape: it converts to `Err` for the
+        // `Failed` row below, but the permit stays untainted (the instance
+        // behaved; the host is full), so the slot is released. V1 builds a
+        // fresh instance per request regardless, so `slot_reused` describes
+        // accounting, never a reused instance.
+        if converted.is_err() && shed.is_none() {
             permit.taint();
         }
         drop(permit);
@@ -624,7 +696,13 @@ impl GuestApp {
             }
         }
 
-        converted
+        // A shed response replaces the (failed) conversion: the bookkeeping
+        // above ran on the error, but the client gets the 503 that names the
+        // real condition rather than a 502 that would blame the guest.
+        match shed {
+            Some(response) => Ok(response),
+            None => converted,
+        }
     }
 
     /// Convert a guest answer and classify the audit row for it.
@@ -636,7 +714,8 @@ impl GuestApp {
     /// (`QQQ-3009`) classifies as `Failed`, and the grant check decides before
     /// either, because an ungranted call is an attempt however it ended.
     fn settle(&self, outcome: Result<abi::Response>) -> (Result<Response>, qqq_host::Outcome) {
-        let converted: Result<Response> = outcome.and_then(|raw| to_served(&raw));
+        let converted: Result<Response> =
+            outcome.and_then(|raw| to_served(raw, self.response_body_cap()));
         let serves = self
             .grants
             .grants(qqq_cap::capability::Capability::HttpServer);
@@ -644,12 +723,27 @@ impl GuestApp {
         (converted, kind)
     }
 
+    /// The effective guest-response body cap: the smaller of the response
+    /// constant and the instance's memory ceiling (`F-03`, `F-10`).
+    ///
+    /// One number, never two: the constant bounds responses below the
+    /// ceiling, and the ceiling binds deployments with small memories. A
+    /// body larger than either is refused by [`to_served`] before anything
+    /// downstream can buffer it.
+    fn response_body_cap(&self) -> u64 {
+        MAX_GUEST_RESPONSE_BODY_BYTES.min(self.limits.memory_bytes)
+    }
+
     /// Create an instance for `request`, call the guest, and return its answer.
     ///
     /// Extracted so [`Self::handle_request`] can hold the pool slot across exactly this
     /// work with one release site rather than one per early return — the ordering rule
     /// `§O-184` records for `serve_special_route` and `drain_body`.
-    fn serve_one(&self, request: &abi::Request, tenant: &str) -> Result<abi::Response> {
+    ///
+    /// Takes the request BY VALUE (`F-03`): the typed call lowers it with bulk
+    /// copies, and a borrow here would force the caller to clone the body to
+    /// satisfy the move — the exact copy this phase exists to remove.
+    fn serve_one(&self, request: abi::Request, tenant: &str) -> Result<abi::Response> {
         // Built per request because the handle is cheap (an `Arc` clone and two digests that are
         // already owned) and because the store is per instance. The stream behind it is shared, so
         // a per-capability row and this request's row land in one chain.
@@ -925,6 +1019,25 @@ impl GuestApp {
 /// the serializer into an allocator.
 const MAX_RESPONSE_HEADERS: usize = 128;
 
+/// Host-heap budget for bodies in flight, in bytes (`F-03`).
+///
+/// Sized so a full 2 MiB request plus a full 8 MiB response cap still leaves
+/// headroom for dozens of concurrent small requests: exhaustion means an
+/// actual flood of large bodies, not one big one.
+const BUFFER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// Maximum guest response body in bytes: 8 MiB.
+///
+/// The post-lift bound on what a guest may return. The effective cap is the
+/// smaller of this and the instance's memory ceiling (F-10's bound: a
+/// response larger than the instance's total memory cannot exist), computed
+/// by [`GuestApp::response_body_cap`]. A manifest field was considered and
+/// refused: `max_response_bytes` is a historically rejected manifest field
+/// (DOC-SCHEMA-001 pins its rejection), and resurrecting it here would trade
+/// a two-line const for schema, validation, and cookbook churn with no new
+/// information — the ceiling already configures the bound per deployment.
+const MAX_GUEST_RESPONSE_BODY_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Maximum bytes of one guest response header (name plus value).
 ///
 /// Mirrors the 8 KiB request-side line cap: a header that does not fit in the
@@ -1033,6 +1146,12 @@ fn audit_outcome(serves_http: bool, converted_ok: bool) -> qqq_host::Outcome {
 
 /// Convert a guest's response into the one the server writes.
 ///
+/// Takes the response BY VALUE (`F-24`): the body and header strings are
+/// moved, not cloned — the caller already owns them, so a second copy is
+/// pure waste on the hot path. The `body_cap_bytes` bound is enforced here,
+/// immediately after lifting, so an over-cap body is refused before any
+/// downstream code can buffer it again.
+///
 /// # Why refusal replaces silent repair here
 ///
 /// An earlier version dropped non-UTF-8 header *values* (kept: a lossy
@@ -1048,7 +1167,10 @@ fn audit_outcome(serves_http: bool, converted_ok: bool) -> qqq_host::Outcome {
 /// `QQQ-3009` when the status, a header, or the sizes fail validation. The
 /// file (and its tests) that define the wire contract live in `qqq-serve`;
 /// this function enforces the guest side of it.
-pub fn to_served(response: &abi::Response) -> std::result::Result<Response, Error> {
+pub fn to_served(
+    response: abi::Response,
+    body_cap_bytes: u64,
+) -> std::result::Result<Response, Error> {
     if !is_valid_guest_status(response.status) {
         return Err(Error::new(
             ErrorCode::GuestResponseRefused,
@@ -1109,10 +1231,23 @@ pub fn to_served(response: &abi::Response) -> std::result::Result<Response, Erro
         }
         headers.push((name.to_owned(), value));
     }
+    // The body cap is checked after the headers so a response that violates
+    // both reports the headers first — matching the order the checks are
+    // documented in, and keeping every existing header-first test green.
+    // The comparison is against the caller's bound (the smaller of the
+    // response constant and the instance ceiling), not a second number.
+    let body_len = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+    if body_len > body_cap_bytes {
+        return Err(Error::new(
+            ErrorCode::GuestResponseRefused,
+            format!("guest body {body_len} bytes exceeds the {body_cap_bytes}-byte cap"),
+        )
+        .with_remediation("return a smaller body, or raise the instance memory ceiling"));
+    }
     Ok(Response {
         status: response.status,
         headers,
-        body: response.body.clone(),
+        body: response.body,
     })
 }
 
@@ -1124,6 +1259,37 @@ pub(crate) fn failure_response(e: &Error) -> Response {
     let mut r = Response::text(502, format!("the application failed: {}", e.message));
     r.set_header("X-QQQ-Error", &format!("{:?}", e.code));
     r
+}
+
+/// The error for a request shed by the buffer budget (`F-03`).
+///
+/// `HostResourceExhausted` with the pool's `Retry-After` estimate, so the
+/// existing overload mapping renders 503. Built separately from the response
+/// because the shed path feeds this error into `settle` for the `Failed`
+/// row while the client gets the 503 response.
+fn buffer_overload_error(pool: &Pool, completion_rate: f64) -> Error {
+    Error::new(
+        ErrorCode::HostResourceExhausted,
+        "host buffer budget exhausted: too many large bodies in flight",
+    )
+    .with_context(
+        "retry-after",
+        pool.retry_after_seconds(completion_rate).to_string(),
+    )
+    .with_remediation("retry the request; reduce concurrent large uploads")
+}
+
+/// The response for a request shed by the buffer budget (`F-03`).
+///
+/// A 503 with `Retry-After`, built through the same error-to-response
+/// mapping as every other overload (`error_response` + `from_error`) rather
+/// than hand-rolled, so the status, retry header, and generic body match the
+/// pool-exhausted shape exactly. Returned as `Ok` (a served shedding
+/// response), not `Err`: the request was valid, the host is full, and the
+/// failure path renders 502, which would misreport capacity as a guest bug.
+fn buffer_overload(pool: &Pool, completion_rate: f64) -> Response {
+    let error = buffer_overload_error(pool, completion_rate);
+    qqq_serve::response::from_error(&qqq_serve::response::error_response(&error, false))
 }
 
 // Release capacity during unwinding too; successful responses and traps share this guard.
@@ -1796,7 +1962,8 @@ mod tests {
             }],
             body: b"created".to_vec(),
         };
-        let served = to_served(&guest).expect("valid guest response converts");
+        let served =
+            to_served(guest, MAX_GUEST_RESPONSE_BODY_BYTES).expect("valid guest response converts");
         assert_eq!(served.status, 201);
         assert_eq!(served.headers.len(), 1);
         assert_eq!(served.headers[0].0, "Location");
@@ -1822,7 +1989,8 @@ mod tests {
             ],
             body: Vec::new(),
         };
-        let served = to_served(&guest).expect("other headers still convert");
+        let served =
+            to_served(guest, MAX_GUEST_RESPONSE_BODY_BYTES).expect("other headers still convert");
         assert_eq!(
             served.headers.len(),
             1,
@@ -1846,7 +2014,8 @@ mod tests {
             }],
             body: Vec::new(),
         };
-        let served = to_served(&guest).expect("valid UTF-8 still converts");
+        let served =
+            to_served(guest, MAX_GUEST_RESPONSE_BODY_BYTES).expect("valid UTF-8 still converts");
         assert_eq!(served.headers.len(), 1);
         assert_eq!(served.headers[0].1, "café");
     }
@@ -1874,16 +2043,22 @@ mod tests {
     #[test]
     fn f02_invalid_status_is_refused() {
         for status in [0, 99, 600, 999] {
-            let err = to_served(&guest_response(status, vec![]))
-                .expect_err(&format!("status {status} must be refused"));
+            let err = to_served(
+                guest_response(status, vec![]),
+                MAX_GUEST_RESPONSE_BODY_BYTES,
+            )
+            .expect_err(&format!("status {status} must be refused"));
             assert!(
                 matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
                 "wrong code: {err:?}"
             );
         }
         for status in [100, 200, 201, 404, 500, 599] {
-            let served = to_served(&guest_response(status, vec![]))
-                .unwrap_or_else(|e| panic!("status {status} must convert: {e:?}"));
+            let served = to_served(
+                guest_response(status, vec![]),
+                MAX_GUEST_RESPONSE_BODY_BYTES,
+            )
+            .unwrap_or_else(|e| panic!("status {status} must convert: {e:?}"));
             assert_eq!(served.status, status);
         }
     }
@@ -1898,16 +2073,22 @@ mod tests {
     #[test]
     fn f02_host_controlled_headers_are_refused() {
         for name in ["Content-Length", "connection", "TRANSFER-ENCODING"] {
-            let err = to_served(&guest_response(200, vec![(name, b"0")]))
-                .expect_err(&format!("{name} from a guest must be refused"));
+            let err = to_served(
+                guest_response(200, vec![(name, b"0")]),
+                MAX_GUEST_RESPONSE_BODY_BYTES,
+            )
+            .expect_err(&format!("{name} from a guest must be refused"));
             assert!(
                 matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
                 "wrong code: {err:?}"
             );
         }
         // Ordinary headers are unaffected.
-        let served = to_served(&guest_response(200, vec![("Content-Type", b"text/plain")]))
-            .expect("ordinary header converts");
+        let served = to_served(
+            guest_response(200, vec![("Content-Type", b"text/plain")]),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+        )
+        .expect("ordinary header converts");
         assert_eq!(served.headers[0].0, "Content-Type");
     }
 
@@ -1919,8 +2100,11 @@ mod tests {
     /// the framing header — the drop is for values, never for names.
     #[test]
     fn f02_host_controlled_name_with_bad_value_is_refused() {
-        let err = to_served(&guest_response(200, vec![("Content-Length", b"\xff\xfe")]))
-            .expect_err("host-controlled name with bad value must be refused, not dropped");
+        let err = to_served(
+            guest_response(200, vec![("Content-Length", b"\xff\xfe")]),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+        )
+        .expect_err("host-controlled name with bad value must be refused, not dropped");
         assert!(
             matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
             "wrong code: {err:?}"
@@ -1945,10 +2129,10 @@ mod tests {
                 .collect(),
             body: Vec::new(),
         };
-        to_served(&guest).expect_err("129 headers must be refused");
+        to_served(guest, MAX_GUEST_RESPONSE_BODY_BYTES).expect_err("129 headers must be refused");
         let big_value = vec![b'v'; 8193];
         let big = guest_response(200, vec![("x-big", &big_value)]);
-        to_served(&big).expect_err("over-long value must be refused");
+        to_served(big, MAX_GUEST_RESPONSE_BODY_BYTES).expect_err("over-long value must be refused");
     }
 
     /// **CR and LF in values are escaped, never emitted raw.**
@@ -1959,8 +2143,11 @@ mod tests {
     /// response intact: no raw CR or LF may survive in any emitted header.
     #[test]
     fn f02_crlf_in_values_is_escaped_not_emitted() {
-        let served = to_served(&guest_response(200, vec![("x-note", b"a\r\nEvil: x")]))
-            .expect("CRLF value converts with escaping");
+        let served = to_served(
+            guest_response(200, vec![("x-note", b"a\r\nEvil: x")]),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+        )
+        .expect("CRLF value converts with escaping");
         assert_eq!(served.headers[0].1, "a%0D%0AEvil: x");
         for (_, value) in &served.headers {
             assert!(
@@ -1969,12 +2156,18 @@ mod tests {
             );
         }
         // `%0D` in input double-encodes: it must not decode back.
-        let served =
-            to_served(&guest_response(200, vec![("x-note", b"%0D")])).expect("percent converts");
+        let served = to_served(
+            guest_response(200, vec![("x-note", b"%0D")]),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+        )
+        .expect("percent converts");
         assert_eq!(served.headers[0].1, "%250D");
         // NUL and DEL take the same path: no ASCII control except tab survives.
-        let served = to_served(&guest_response(200, vec![("x-note", b"a\x00b\x7f")]))
-            .expect("controls convert");
+        let served = to_served(
+            guest_response(200, vec![("x-note", b"a\x00b\x7f")]),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+        )
+        .expect("controls convert");
         assert_eq!(served.headers[0].1, "a%00b%7F");
         for (_, value) in &served.headers {
             assert!(
@@ -2002,7 +2195,8 @@ mod tests {
             }],
             body: b"poison-body".to_vec(),
         };
-        let err = to_served(&guest).expect_err("poisoned response must fail");
+        let err = to_served(guest, MAX_GUEST_RESPONSE_BODY_BYTES)
+            .expect_err("poisoned response must fail");
         let failure = failure_response(&err);
         assert_eq!(failure.status, 502);
         let wire = String::from_utf8(write_response(&failure, Version::Http11, false, false))
@@ -2250,6 +2444,246 @@ mod tests {
             "nothing discarded on the success path"
         );
         assert_eq!(app.pool.idle(), 1, "the slot returns to idle on success");
+    }
+
+    /// **F-03/F-24: the echo guest returns every body byte-identical.**
+    ///
+    /// The safety net for the marshalling refactor, green BEFORE the typed
+    /// switch and required green after: `echo-http.wat` copies the request
+    /// body into the response through guest memory, so any asymmetry between
+    /// the dynamic `Val::U8` path and the typed bulk-copy path — a dropped
+    /// byte, a truncation, an off-by-one in the option lifting — fails here.
+    /// Absent echoes as empty (the response shape carries a list, not an
+    /// option, so there is no absent to preserve); everything present must
+    /// round-trip exactly, up to the 2 MiB ingress cap.
+    #[test]
+    fn f03_echo_guest_returns_bodies_byte_identical() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        for body in [
+            None,
+            Some(Vec::new()),
+            Some(vec![0xAB]),
+            Some(vec![0x55; 64 * 1024]),
+            Some(vec![0xA5; 2 * 1024 * 1024]),
+        ] {
+            let app = granted_app_for_wat(source);
+            let expected = body.clone().unwrap_or_default();
+            let outcome =
+                app.handle_request(&head(qqq_serve::Method::Post, "/echo"), body, "test-tenant");
+            let response = outcome.expect("echo must serve");
+            assert_eq!(
+                response.body,
+                expected,
+                "echo of {} bytes must be byte-identical",
+                expected.len()
+            );
+        }
+    }
+
+    /// **F-03/F-24: marshalling benchmark, 1 KiB / 64 KiB / 2 MiB through the
+    /// echo guest.**
+    ///
+    /// Ignored by default like the `qqq-bench` harnesses: tens of seconds and
+    /// machine-sensitive. Run explicitly: `cargo test -p qqq-run --lib
+    /// f03_marshal_benchmark -- --ignored --nocapture`. Reports median
+    /// `handle_request` latency per size over 10 iterations on one reused app
+    /// (engine build amortized, per-request cost isolated). It lives here
+    /// rather than in `qqq-bench` because that crate cannot depend on
+    /// `qqq-host` (PERF-005) and this measures the production path, not the
+    /// raw mechanism. Pair with process-peak sampling for RSS (see the F-03
+    /// commit message for the before/after numbers and method).
+    #[test]
+    #[ignore = "benchmark: seconds per size, machine-sensitive, run explicitly"]
+    fn f03_marshal_benchmark() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        for (label, size) in [
+            ("1KiB", 1024usize),
+            ("64KiB", 64 * 1024),
+            ("2MiB", 2 * 1024 * 1024),
+        ] {
+            let app = granted_app_for_wat(source);
+            let body = vec![0xA5; size];
+            // Warmup off the clock: pool slot, engine caches, allocator.
+            for _ in 0..2 {
+                let _ = app.handle_request(
+                    &head(qqq_serve::Method::Post, "/echo"),
+                    Some(body.clone()),
+                    "test-tenant",
+                );
+            }
+            let mut samples = Vec::with_capacity(10);
+            for _ in 0..10 {
+                let start = std::time::Instant::now();
+                let outcome = app.handle_request(
+                    &head(qqq_serve::Method::Post, "/echo"),
+                    Some(body.clone()),
+                    "test-tenant",
+                );
+                let response = outcome.expect("echo must serve");
+                assert_eq!(response.body.len(), size);
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            eprintln!("BENCH {label}: median {:.2} ms over 10", samples[5]);
+        }
+    }
+
+    /// **F-03: a body over the cap is refused; exactly the cap serves.**
+    ///
+    /// Written first and failing first: `to_served` takes no cap today, so
+    /// this does not compile — which is the red. The cap travels as a
+    /// parameter (the effective bound is `min` of the response constant and
+    /// the instance's memory ceiling, computed by the caller), so the
+    /// boundary is unit-testable without a 9 MiB guest. The code is the
+    /// response-side `GuestResponseRefused`, the same as the other shape
+    /// refusals — one code for "the guest answered outside the contract".
+    #[test]
+    fn f03_response_body_over_cap_is_refused_at_cap_is_served() {
+        let big = abi::Response {
+            status: 200,
+            headers: vec![],
+            body: vec![0xA5; 101],
+        };
+        let err = to_served(big, 100).expect_err("101 bytes against a 100 cap must fail");
+        assert_eq!(err.code, qqq_core::ErrorCode::GuestResponseRefused);
+        let exact = abi::Response {
+            status: 200,
+            headers: vec![],
+            body: vec![0xA5; 100],
+        };
+        let served = to_served(exact, 100).expect("exactly the cap must serve");
+        assert_eq!(served.body.len(), 100);
+    }
+
+    /// **F-03: an exhausted buffer budget sheds with 503 + `Retry-After`.**
+    ///
+    /// Written first and failing first: no semaphore exists yet, so neither
+    /// the field access nor the 503 compiles — which is the red. Holding the
+    /// whole budget leaves no byte for the request; the shed response must
+    /// carry 503 and a `Retry-After` header, never 502 (which would misreport
+    /// capacity as a guest bug) and never a wait (queues turn heap pressure
+    /// into OOM).
+    #[test]
+    fn f03_buffer_budget_exhaustion_sheds_with_503() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        let app = granted_app_for_wat(source);
+        let full = u32::try_from(BUFFER_BUDGET_BYTES).expect("256 MiB fits");
+        let _held = app
+            .buffer_budget
+            .try_acquire_many(full)
+            .expect("a fresh budget acquires in full");
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Post, "/echo"),
+            Some(vec![0xA5; 1024]),
+            "test-tenant",
+        );
+        let response = outcome.expect("shedding still serves a response");
+        assert_eq!(
+            response.status, 503,
+            "exhaustion must shed, not fail: {response:?}"
+        );
+        assert!(
+            response.header("Retry-After").is_some(),
+            "the shed response must tell the client when to retry"
+        );
+        // The shed happens before any pool slot is taken (budget gate runs
+        // first), so nothing leaks: `in_use` stays zero.
+        assert_eq!(
+            app.pool.in_use(),
+            0,
+            "a shed request must not consume a pool slot"
+        );
+    }
+
+    /// **F-03: the budget returns when the request completes.**
+    ///
+    /// Both permits (request body at entry, response body after lifting) are
+    /// held by guards dropped at every exit path: after one echo the full
+    /// budget acquires again. A leak here would shrink the budget
+    /// monotonically — a server that gets slower the more it serves.
+    #[test]
+    fn f03_buffer_budget_returns_after_request() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        let app = granted_app_for_wat(source);
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Post, "/echo"),
+            Some(vec![0xA5; 1024]),
+            "test-tenant",
+        );
+        assert!(outcome.is_ok(), "echo must serve: {outcome:?}");
+        let full = u32::try_from(BUFFER_BUDGET_BYTES).expect("256 MiB fits");
+        assert!(
+            app.buffer_budget.try_acquire_many(full).is_ok(),
+            "the whole budget must come back when the request completes"
+        );
+    }
+
+    /// **F-03: an over-cap body is refused through the request path.**
+    ///
+    /// The integration half of the cap: a 9 MiB echo against the 8 MiB
+    /// response constant (under the 64 MiB instance ceiling, so the ceiling
+    /// is not what fires) fails with the response-side refusal, while the
+    /// unit test above pins the exact-cap boundary without a 9 MiB guest.
+    /// The guest runs fine — it is the host that declines to serve what
+    /// does not fit the bound.
+    #[test]
+    fn f03_over_cap_body_is_refused_on_the_request_path() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        let app = granted_app_for_wat(source);
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Post, "/echo"),
+            Some(vec![0xA5; 9 * 1024 * 1024]),
+            "test-tenant",
+        );
+        let err = outcome.expect_err("9 MiB against an 8 MiB cap must fail");
+        assert_eq!(
+            err.code,
+            qqq_core::ErrorCode::GuestResponseRefused,
+            "the cap refusal must carry the response code: {err:?}"
+        );
+    }
+
+    /// **F-03: a shed response is still audited, and its slot is released.**
+    ///
+    /// The response-budget twin of the entry test: room for the 1 KiB
+    /// request but not its 1 KiB echo, so the guest runs and its answer is
+    /// dropped. The shed flows through `settle` (a `Failed` row — the
+    /// authority was exercised) while the client gets the 503, and the permit
+    /// stays untainted (the instance did nothing wrong) so the slot is
+    /// released, not discarded.
+    #[test]
+    fn f03_shed_response_audits_failed_and_releases() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        let app = granted_app_for_wat(source);
+        let full = u32::try_from(BUFFER_BUDGET_BYTES).expect("256 MiB fits");
+        // Leave 1536 bytes: the 1 KiB request fits, its 1 KiB echo does not.
+        let _held = app
+            .buffer_budget
+            .try_acquire_many(full - 1536)
+            .expect("partial hold must succeed");
+        let outcome = app.handle_request(
+            &head(qqq_serve::Method::Post, "/echo"),
+            Some(vec![0xA5; 1024]),
+            "test-tenant",
+        );
+        let response = outcome.expect("shedding still serves a response");
+        assert_eq!(response.status, 503, "exhaustion must shed: {response:?}");
+        assert_eq!(
+            app.pool.metrics().released(),
+            1,
+            "the blameless slot comes back"
+        );
+        assert_eq!(
+            app.pool.metrics().discarded(),
+            0,
+            "nothing trapped, nothing discarded"
+        );
+        let (rows, _) = app.audit_snapshot();
+        assert_eq!(
+            rows[0].outcome,
+            qqq_host::Outcome::Failed,
+            "a shed answer audits as a failed exercise"
+        );
     }
 
     /// **F-11: a marked permit counts as a discard, never a release.**

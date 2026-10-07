@@ -133,8 +133,9 @@ pub use http1::{
 };
 pub use response::{
     error_response, forbids_body, from_error, method_not_allowed, not_found, parse_error_response,
-    reason_phrase, retry_after_value, write_chunk, write_last_chunk, write_response,
-    write_stream_head, ErrorResponse, Failure, Response, CHUNK_MAX,
+    reason_phrase, response_body_for_wire, retry_after_value, write_chunk, write_last_chunk,
+    write_response, write_response_head, write_stream_head, ErrorResponse, Failure, Response,
+    CHUNK_MAX, SPLIT_THRESHOLD,
 };
 pub use route::{
     Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,

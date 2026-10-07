@@ -1028,8 +1028,24 @@ async fn write_flat_response(
     response: &Response,
 ) -> Option<Served> {
     let keep_alive = conn.will_keep_alive(false);
-    let bytes = response::write_response(response, head.version, keep_alive, is_head(head));
-    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+    // Bodies at or above `SPLIT_THRESHOLD` go out as head + body in two
+    // writes (`F-24`): appending megabytes to the head buffer doubles
+    // transient memory for no framing benefit. Below it the single-buffer
+    // path is kept — one `write_all`, and usually faster. Error and control
+    // responses never reach this branch with large bodies; they use the
+    // single-buffer call sites below.
+    let head_request = is_head(head);
+    let body = response::response_body_for_wire(response, head_request);
+    let writes_ok = if body.len() >= response::SPLIT_THRESHOLD {
+        let head_bytes = response::write_response_head(response, head.version, keep_alive);
+        stream.write_all(&head_bytes).await.is_ok()
+            && stream.write_all(body).await.is_ok()
+            && stream.flush().await.is_ok()
+    } else {
+        let bytes = response::write_response(response, head.version, keep_alive, head_request);
+        stream.write_all(&bytes).await.is_ok() && stream.flush().await.is_ok()
+    };
+    if !writes_ok {
         // A write failure is the client's problem, not the server's: it disconnected
         // before reading the response.
         return Some(Served::ClientClosed);

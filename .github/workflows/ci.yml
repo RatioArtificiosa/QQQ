@@ -1311,8 +1311,15 @@ jobs:
       # `MEMORY_GUARD_BYTES`) — measured 2085 -> 2098, the delta exactly the
       # new declarations. Same reasoning: the struct is covered by unit tests
       # asserting its arithmetic, and consts gain nothing from doctests.
+      #
+      # # And why it went UP, to 2101
+      #
+      # F-24 adds three: `write_response_head`, `response_body_for_wire`,
+      # and `SPLIT_THRESHOLD` — measured 2098 -> 2101, the delta exactly the
+      # new declarations. Same reasoning: the split is covered by the
+      # byte-identity reference test, not by prose examples.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2098
+        run: python tools/check_api_examples.py --allow 2101
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

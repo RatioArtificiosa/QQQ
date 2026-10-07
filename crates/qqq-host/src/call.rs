@@ -5,27 +5,24 @@
 //! # What this adds to `invoke`
 //!
 //! [`crate::invoke`] resolves *which* function to call. This module performs the
-//! call: it converts an [`abi::Request`] into the dynamic [`Val`] shape Wasmtime
-//! wants, calls the guest, and converts the result back.
+//! call: it sends an [`abi::Request`] through the typed API Wasmtime wants,
+//! calls the guest, and reads the answer back.
 //!
-//! # Why the dynamic `Val` form rather than `Func::typed`
+//! # Why the typed API on the hot path, and the dynamic `Val` form kept
 //!
-//! `Func::typed::<Params, Return>` needs the guest's signature as a Rust type at
-//! compile time. That works when the WIT is known at build time, but it makes the
-//! host's own compilation depend on the guest's interface — and the point of the
-//! export-index lookup in `invoke` is that a guest can be replaced without
-//! recompiling the host.
-//!
-//! The dynamic form also **fails honestly**: `Func::call` type-checks the `Val`s
-//! against the component's actual signature and reports the mismatch, rather than
-//! silently reinterpreting a field. Since a wrong ABI is the failure this whole
-//! area exists to prevent, a runtime check that names the problem is worth more
-//! than a compile-time check that cannot see the guest.
+//! The HTTP interface is known at host build time — `validate_interface`
+//! proves the exact same types — so the dynamic form's per-byte `Val::U8`
+//! allocation (48 bytes per payload byte, measured) is pure overhead on the
+//! request path. The dynamic form survives for diagnostics
+//! ([`call_handler_raw`]) and its shape tests, where its honest type-checking
+//! (a runtime check that names the problem rather than silently
+//! reinterpreting a field) is worth more than speed, and where a 64 KiB cap
+//! per byte list keeps inspection from becoming amplification.
 //!
 //! # The shape of the call, measured
 //!
 //! The guest's `handle: func(req: request) -> result<response, http-error>` has one
-//! parameter and one result, so the `Val`s are:
+//! parameter and one result. The dynamic diagnostic form builds:
 //!
 //! ```text
 //!   params[0]  = Val::Record([("method", Val::Enum("get")), ("url", Val::String(..)), …])
@@ -56,43 +53,59 @@ use crate::linker::StoreData;
 /// the wire — the opposite of the `enum` case, where the order *is* the encoding.
 /// The field **names** are what must match, and a typo is reported by Wasmtime's
 /// type check at the call site rather than silently misread.
-#[must_use]
-pub fn encode_request(req: &abi::Request) -> Val {
-    Val::Record(vec![
+///
+/// # Diagnostic-only, capped at 64 KiB per byte list
+///
+/// The production path calls through [`call_handler`] with the typed API and
+/// never builds these `Val`s. This encoder serves the diagnostic path
+/// ([`call_handler_raw`]) and its own shape tests only, so any byte list
+/// over 64 KiB is refused before the 48-bytes-per-byte amplification can
+/// run: diagnostics must not become the denial of service the production
+/// path just stopped being.
+///
+/// # Errors
+///
+/// `QQQ-2005` when a header value or the body exceeds 64 KiB.
+pub fn encode_request(req: &abi::Request) -> Result<Val> {
+    const DIAGNOSTIC_CAP: usize = 64 * 1024;
+    fn capped_list(bytes: &[u8], what: &str) -> Result<Val> {
+        if bytes.len() > DIAGNOSTIC_CAP {
+            return Err(Error::new(
+                ErrorCode::LimitOutOfRange,
+                format!("diagnostic encode refuses {what} over 64 KiB"),
+            )
+            .with_remediation(
+                "the typed production path has no such cap; the dynamic \
+                 diagnostic path exists for inspection, not bulk transfer",
+            ));
+        }
+        Ok(Val::List(bytes.iter().copied().map(Val::U8).collect()))
+    }
+    let mut headers = Vec::with_capacity(req.headers.len());
+    for h in &req.headers {
+        headers.push(Val::Record(vec![
+            ("name".to_owned(), Val::String(h.name.clone())),
+            ("value".to_owned(), capped_list(&h.value, "a header value")?),
+        ]));
+    }
+    Ok(Val::Record(vec![
         (
             "method".to_owned(),
             Val::Enum(req.method.as_wit_str().to_owned()),
         ),
         ("url".to_owned(), Val::String(req.url.clone())),
-        (
-            "headers".to_owned(),
-            Val::List(
-                req.headers
-                    .iter()
-                    .map(|h| {
-                        Val::Record(vec![
-                            ("name".to_owned(), Val::String(h.name.clone())),
-                            (
-                                "value".to_owned(),
-                                Val::List(h.value.iter().copied().map(Val::U8).collect()),
-                            ),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
+        ("headers".to_owned(), Val::List(headers)),
         (
             "body".to_owned(),
             // `option<list<u8>>`. `Val::Option(None)` and `Val::Option(Some(empty))`
             // are different values, which is the distinction `guest_bridge`
             // preserves from the HTTP side.
-            Val::Option(
-                req.body
-                    .as_ref()
-                    .map(|b| Box::new(Val::List(b.iter().copied().map(Val::U8).collect()))),
-            ),
+            Val::Option(match &req.body {
+                None => None,
+                Some(b) => Some(Box::new(capped_list(b, "a request body")?)),
+            }),
         ),
-    ])
+    ]))
 }
 
 /// Why a guest's returned value could not be read as a response.
@@ -318,42 +331,57 @@ fn kind_of(value: &Val) -> &'static str {
 /// Call the guest's handler with a request.
 ///
 /// The composition of everything else in this area: `invoke` resolved the export,
-/// `abi` gave the types, [`encode_request`] builds the parameter, and this
-/// performs the call and reads the answer.
+/// `abi` gave the types, and this performs the call and reads the answer.
+///
+/// # Typed hot path, dynamic diagnostics
+///
+/// The HTTP interface is known at host build time — `validate_interface`
+/// proves the exact same types — so the request travels by value through
+/// the typed API and Wasmtime lowers and lifts the byte lists with bulk
+/// copies (~1x host memory) instead of one 48-byte `Val` per payload byte.
+/// The dynamic `Val` form survives only for the diagnostic path
+/// ([`call_handler_raw`]) and its shape tests. Errors map through the
+/// identical constructor as before, so trap and mismatch codes are unchanged
+/// by construction: `typed()` failures and call failures both report through
+/// [`signature_mismatch`], and a guest refusal reports through
+/// [`DecodeFailure::GuestRefused`] exactly as [`decode_response`] does.
 ///
 /// # Errors
 ///
 /// * A trap, or fuel/epoch exhaustion, from the guest's execution.
-/// * [`DecodeFailure`] when the returned value is not a response.
+/// * A guest refusal, as [`DecodeFailure::GuestRefused`].
 /// * `QQQ-6004` when the guest's signature does not match what was sent — which is
-///   what turns a field-name typo in [`encode_request`] into a *reported* error
+///   what turns a field-name typo into a *reported* error
 ///   rather than a silent misread.
 pub fn call_handler(
     store: &mut Store<StoreData>,
     wasm: &wasmtime::component::Instance,
     handle: &HandlerHandle,
-    request: &abi::Request,
+    request: abi::Request,
 ) -> Result<abi::Response> {
     let func = handle.func(store, wasm)?;
 
-    let params = [encode_request(request)];
-    // One result slot for `func(req) -> result<response, http-error>`.
-    let mut results = [Val::Bool(false)];
-
-    func.call(&mut *store, &params, &mut results)
+    let typed = func
+        .typed::<(abi::Request,), (std::result::Result<abi::Response, abi::HttpError>,)>(
+            &mut *store,
+        )
         .map_err(|e| signature_mismatch(handle, &e))?;
-
-    decode_response(&results[0], handle.component())
+    let (result,) = typed
+        .call(&mut *store, (request,))
+        .map_err(|e| signature_mismatch(handle, &e))?;
+    result.map_err(|e| DecodeFailure::GuestRefused(e).to_error(handle.component()))
 }
 
 /// Call the handler and return the raw result value.
 ///
 /// For a caller that wants to inspect what the guest actually returned — a future
 /// `qqqai run` showing the value when a decode fails, and the tests here.
+/// Diagnostic-only: byte lists over 64 KiB are refused before the `Val`
+/// amplification (see [`encode_request`]).
 ///
 /// # Errors
 ///
-/// A trap, or a signature mismatch as [`call_handler`].
+/// A trap, a signature mismatch as [`call_handler`], or an over-cap byte list.
 pub fn call_handler_raw(
     store: &mut Store<StoreData>,
     wasm: &wasmtime::component::Instance,
@@ -361,7 +389,7 @@ pub fn call_handler_raw(
     request: &abi::Request,
 ) -> Result<Val> {
     let func = handle.func(store, wasm)?;
-    let params = [encode_request(request)];
+    let params = [encode_request(request)?];
     let mut results = [Val::Bool(false)];
     func.call(&mut *store, &params, &mut results)
         .map_err(|e| signature_mismatch(handle, &e))?;
@@ -392,6 +420,21 @@ mod tests {
     // which is why this import is here and not at the top of the file.
     use crate::abi::Method;
 
+    /// **F-03: `Val` is orders of magnitude wider than one byte.**
+    ///
+    /// This documents why `list<u8>` must never be marshalled as
+    /// `Vec<Val::U8>` on the production path: every payload byte becomes a
+    /// separately allocated enum value sized for the largest variant. The
+    /// number below is what the 2 MiB request ceiling multiplies into tens
+    /// of MiB of transient host heap.
+    #[test]
+    fn f03_val_is_much_wider_than_one_byte() {
+        assert!(
+            std::mem::size_of::<wasmtime::component::Val>() >= 16,
+            "Val shrank: re-evaluate whether the dynamic path is still the amplification it was"
+        );
+    }
+
     fn a_request() -> abi::Request {
         abi::Request {
             method: Method::Post,
@@ -409,7 +452,8 @@ mod tests {
         // The record lowers by NAME, so these strings are the contract. A typo is
         // caught by Wasmtime's type check rather than silently misread -- but it is
         // still a typo, and this makes it visible here instead.
-        let Val::Record(fields) = encode_request(&a_request()) else {
+        let Val::Record(fields) = encode_request(&a_request()).expect("small request encodes")
+        else {
             panic!("a request must encode as a record");
         };
         let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -422,7 +466,7 @@ mod tests {
         // this far, or it is lost at the last step.
         let mut absent = a_request();
         absent.body = None;
-        let Val::Record(f) = encode_request(&absent) else {
+        let Val::Record(f) = encode_request(&absent).expect("encodes") else {
             panic!("record")
         };
         let body = &f.iter().find(|(n, _)| n == "body").expect("body").1;
@@ -430,7 +474,7 @@ mod tests {
 
         let mut empty = a_request();
         empty.body = Some(Vec::new());
-        let Val::Record(f) = encode_request(&empty) else {
+        let Val::Record(f) = encode_request(&empty).expect("encodes") else {
             panic!("record")
         };
         let body = &f.iter().find(|(n, _)| n == "body").expect("body").1;
@@ -442,7 +486,7 @@ mod tests {
 
     #[test]
     fn each_header_encodes_as_a_named_record_with_byte_values() {
-        let Val::Record(f) = encode_request(&a_request()) else {
+        let Val::Record(f) = encode_request(&a_request()).expect("encodes") else {
             panic!("record")
         };
         let headers = &f.iter().find(|(n, _)| n == "headers").expect("headers").1;
@@ -458,6 +502,31 @@ mod tests {
         // The value is a list of bytes, not a string.
         let value = &h.iter().find(|(n, _)| n == "value").expect("value").1;
         assert!(matches!(value, Val::List(_)), "got {value:?}");
+    }
+
+    /// **F-03: the diagnostic encoder refuses byte lists over 64 KiB.**
+    ///
+    /// The cap that keeps inspection from becoming amplification. A 65 KiB
+    /// body and a 65 KiB header value are each refused; exactly 64 KiB
+    /// encodes. The production typed path has no such cap.
+    #[test]
+    fn f03_diagnostic_encode_refuses_byte_lists_over_64_kib() {
+        let mut big_body = a_request();
+        big_body.body = Some(vec![0xA5; 65 * 1024]);
+        let err = encode_request(&big_body).expect_err("65 KiB body must be refused");
+        assert_eq!(err.code, ErrorCode::LimitOutOfRange);
+
+        let mut big_header = a_request();
+        big_header.headers[0].value = vec![0xA5; 65 * 1024];
+        let err = encode_request(&big_header).expect_err("65 KiB header must be refused");
+        assert_eq!(err.code, ErrorCode::LimitOutOfRange);
+
+        let mut exact = a_request();
+        exact.body = Some(vec![0xA5; 64 * 1024]);
+        assert!(
+            encode_request(&exact).is_ok(),
+            "exactly 64 KiB must still encode"
+        );
     }
 
     #[test]

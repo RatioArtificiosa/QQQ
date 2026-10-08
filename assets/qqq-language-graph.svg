@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 600" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="600" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="120" x2="1600" y2="120"/><line x1="0" y1="240" x2="1600" y2="240"/>
+    <line x1="0" y1="360" x2="1600" y2="360"/><line x1="0" y1="480" x2="1600" y2="480"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <g fill="#F5F7FA">
+      <text x="190" y="70">Rust</text><text x="490" y="70">TypeScript</text><text x="800" y="70">Go</text>
+      <text x="1080" y="70">Python</text><text x="1390" y="70">C / C++</text>
+    </g>
+    <g stroke="#8B5CF6" stroke-width="2">
+      <line x1="190" y1="90" x2="190" y2="150"/><line x1="490" y1="90" x2="490" y2="150"/>
+      <line x1="800" y1="90" x2="800" y2="150"/><line x1="1080" y1="90" x2="1080" y2="150"/>
+      <line x1="1390" y1="90" x2="1390" y2="150"/>
+    </g>
+    <rect x="150" y="150" width="1300" height="90" fill="none" stroke="#8B5CF6" stroke-width="3"/>
+    <text x="800" y="207" fill="#F5F7FA" font-size="32">QQQ COMPONENT GRAPH</text>
+    <text x="800" y="300" fill="#94A3B8" font-size="22">LANGUAGE to WASM COMPONENT to WIT / COMPONENT MODEL to QQQ</text>
+    <line x1="800" y1="240" x2="800" y2="330" stroke="#8B5CF6" stroke-width="2"/>
+    <polygon points="800,342 790,324 810,324" fill="#8B5CF6"/>
+    <rect x="550" y="342" width="500" height="80" fill="none" stroke="#0077FF" stroke-width="2"/>
+    <text x="800" y="393" fill="#F5F7FA" font-size="30">CAPABILITY HOST</text>
+    <line x1="800" y1="422" x2="800" y2="470" stroke="#0077FF" stroke-width="2"/>
+    <polygon points="800,482 790,464 810,464" fill="#0077FF"/>
+    <rect x="580" y="482" width="440" height="70" fill="none" stroke="#00E676" stroke-width="2"/>
+    <text x="800" y="528" fill="#F5F7FA" font-size="30">EXECUTION</text>
+  </g>
+</svg>

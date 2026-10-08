@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 700" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="700" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="140" x2="1600" y2="140"/><line x1="0" y1="280" x2="1600" y2="280"/>
+    <line x1="0" y1="420" x2="1600" y2="420"/><line x1="0" y1="560" x2="1600" y2="560"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <rect x="600" y="30" width="400" height="70" fill="none" stroke="#FFB020" stroke-width="2"/>
+    <text x="800" y="76" fill="#F5F7FA">UNTRUSTED COMPONENT</text>
+    <line x1="800" y1="100" x2="800" y2="150" stroke="#FFB020" stroke-width="2"/>
+    <polygon points="800,162 790,144 810,144" fill="#FFB020"/>
+    <rect x="450" y="162" width="700" height="180" fill="none" stroke="#0077FF" stroke-width="3"/>
+    <text x="800" y="225" fill="#F5F7FA" font-size="40">QQQ</text>
+    <text x="800" y="275" fill="#00D9FF" font-size="24">capability boundary</text>
+    <g font-size="24">
+      <line x1="500" y1="342" x2="500" y2="420" stroke="#0077FF" stroke-width="2"/>
+      <line x1="700" y1="342" x2="700" y2="420" stroke="#0077FF" stroke-width="2"/>
+      <line x1="900" y1="342" x2="900" y2="420" stroke="#0077FF" stroke-width="2"/>
+      <line x1="1100" y1="342" x2="1100" y2="420" stroke="#FF3B4E" stroke-width="2"/>
+      <polygon points="500,432 490,414 510,414" fill="#0077FF"/>
+      <polygon points="700,432 690,414 710,414" fill="#0077FF"/>
+      <polygon points="900,432 890,414 910,414" fill="#0077FF"/>
+      <text x="1100" y="470" fill="#FF3B4E" font-size="44">X</text>
+      <rect x="410" y="490" width="180" height="70" fill="none" stroke="#0077FF" stroke-width="2"/>
+      <text x="500" y="535" fill="#F5F7FA">FILE</text>
+      <rect x="610" y="490" width="180" height="70" fill="none" stroke="#0077FF" stroke-width="2"/>
+      <text x="700" y="535" fill="#F5F7FA">HTTP</text>
+      <rect x="810" y="490" width="180" height="70" fill="none" stroke="#0077FF" stroke-width="2"/>
+      <text x="900" y="535" fill="#F5F7FA">CRYPTO</text>
+      <rect x="1010" y="490" width="180" height="70" fill="none" stroke="#FF3B4E" stroke-width="2"/>
+      <text x="1100" y="535" fill="#F5F7FA">SQL</text>
+      <text x="500" y="615" fill="#00E676">ALLOW</text>
+      <text x="700" y="615" fill="#00E676">ALLOW</text>
+      <text x="900" y="615" fill="#00E676">ALLOW</text>
+      <text x="1100" y="615" fill="#FF3B4E">DENY</text>
+      <text x="800" y="665" fill="#94A3B8" font-size="22">guest side above the wall, host side below it</text>
+    </g>
+  </g>
+</svg>

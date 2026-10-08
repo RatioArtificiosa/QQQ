@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 600" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="600" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="100" x2="1600" y2="100"/><line x1="0" y1="200" x2="1600" y2="200"/>
+    <line x1="0" y1="300" x2="1600" y2="300"/><line x1="0" y1="400" x2="1600" y2="400"/>
+    <line x1="0" y1="500" x2="1600" y2="500"/>
+    <line x1="200" y1="0" x2="200" y2="600"/><line x1="500" y1="0" x2="500" y2="600"/>
+    <line x1="800" y1="0" x2="800" y2="600"/><line x1="1100" y1="0" x2="1100" y2="600"/>
+    <line x1="1400" y1="0" x2="1400" y2="600"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <rect x="80" y="60" width="220" height="64" fill="none" stroke="#94A3B8" stroke-width="2"/>
+    <text x="190" y="103" fill="#F5F7FA">HUMAN</text>
+    <text x="190" y="170" fill="#94A3B8">CODE</text>
+    <line x1="190" y1="180" x2="190" y2="220" stroke="#94A3B8" stroke-width="2"/>
+    <polygon points="190,232 180,214 200,214" fill="#94A3B8"/>
+    <rect x="80" y="250" width="220" height="64" fill="none" stroke="#8B5CF6" stroke-width="2"/>
+    <text x="190" y="293" fill="#F5F7FA">AI AGENT</text>
+    <text x="460" y="293" fill="#94A3B8">GENERATED SOFTWARE</text>
+    <line x1="460" y1="258" x2="460" y2="200" stroke="#8B5CF6" stroke-width="2"/>
+    <polygon points="460,188 450,206 470,206" fill="#8B5CF6"/>
+    <rect x="520" y="140" width="280" height="80" fill="none" stroke="#00D9FF" stroke-width="2"/>
+    <text x="660" y="190" fill="#F5F7FA">WEBASSEMBLY</text>
+    <line x1="380" y1="180" x2="505" y2="180" stroke="#00D9FF" stroke-width="2"/>
+    <polygon points="517,180 499,170 499,190" fill="#00D9FF"/>
+    <rect x="880" y="120" width="220" height="120" fill="none" stroke="#0077FF" stroke-width="3"/>
+    <text x="990" y="190" fill="#F5F7FA" font-size="40">QQQ</text>
+    <line x1="800" y1="180" x2="865" y2="180" stroke="#0077FF" stroke-width="2"/>
+    <polygon points="877,180 859,170 859,190" fill="#0077FF"/>
+    <g font-size="22">
+      <rect x="1160" y="60" width="280" height="64" fill="none" stroke="#0077FF" stroke-width="2"/>
+      <text x="1300" y="101" fill="#F5F7FA">CAPABILITY</text>
+      <rect x="1160" y="150" width="280" height="64" fill="none" stroke="#0077FF" stroke-width="2"/>
+      <text x="1300" y="191" fill="#F5F7FA">LIMITS</text>
+      <rect x="1160" y="240" width="280" height="64" fill="none" stroke="#00D9FF" stroke-width="2"/>
+      <text x="1300" y="281" fill="#F5F7FA">TELEMETRY</text>
+      <line x1="1100" y1="150" x2="1160" y2="110" stroke="#0077FF" stroke-width="2"/>
+      <line x1="1100" y1="180" x2="1160" y2="182" stroke="#0077FF" stroke-width="2"/>
+      <line x1="1100" y1="210" x2="1160" y2="262" stroke="#00D9FF" stroke-width="2"/>
+      <rect x="1160" y="380" width="280" height="80" fill="none" stroke="#00E676" stroke-width="2"/>
+      <text x="1300" y="430" fill="#F5F7FA">EXECUTION</text>
+      <line x1="1300" y1="304" x2="1300" y2="365" stroke="#00E676" stroke-width="2"/>
+      <polygon points="1300,377 1290,359 1310,359" fill="#00E676"/>
+    </g>
+    <text x="660" y="420" fill="#94A3B8" font-size="22">component boundary</text>
+    <text x="990" y="420" fill="#94A3B8" font-size="22">explicit authority</text>
+  </g>
+</svg>

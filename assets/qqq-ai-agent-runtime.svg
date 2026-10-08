@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 550" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="550" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="110" x2="1600" y2="110"/><line x1="0" y1="220" x2="1600" y2="220"/>
+    <line x1="0" y1="330" x2="1600" y2="330"/><line x1="0" y1="440" x2="1600" y2="440"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <rect x="120" y="60" width="260" height="70" fill="none" stroke="#94A3B8" stroke-width="2"/>
+    <text x="250" y="106" fill="#F5F7FA">HUMAN</text>
+    <line x1="250" y1="130" x2="250" y2="180" stroke="#94A3B8" stroke-width="2"/>
+    <polygon points="250,192 240,174 260,174" fill="#94A3B8"/>
+    <rect x="120" y="192" width="260" height="70" fill="none" stroke="#94A3B8" stroke-width="2"/>
+    <text x="250" y="238" fill="#F5F7FA">SOURCE CODE</text>
+    <rect x="620" y="60" width="300" height="70" fill="none" stroke="#8B5CF6" stroke-width="2"/>
+    <text x="770" y="106" fill="#F5F7FA">AI AGENT</text>
+    <g font-size="23" fill="#F5F7FA">
+      <text x="770" y="180">generates</text><text x="770" y="225">modifies</text>
+      <text x="770" y="270">downloads</text><text x="770" y="315">executes</text>
+      <text x="770" y="360">calls tools</text><text x="770" y="405">accesses resources</text>
+    </g>
+    <line x1="770" y1="130" x2="770" y2="150" stroke="#8B5CF6" stroke-width="2"/>
+    <line x1="540" y1="236" x2="1050" y2="236" stroke="#8B5CF6" stroke-width="2"/>
+    <polygon points="1062,236 1044,226 1044,246" fill="#8B5CF6"/>
+    <rect x="1050" y="166" width="330" height="140" fill="none" stroke="#0077FF" stroke-width="3"/>
+    <text x="1215" y="226" fill="#F5F7FA" font-size="40">QQQ</text>
+    <text x="1215" y="269" fill="#00D9FF" font-size="22">execution boundary</text>
+    <text x="800" y="490" fill="#94A3B8" font-size="24">agents generate, modify, download, execute, connect - the boundary holds</text>
+  </g>
+</svg>

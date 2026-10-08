@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 600" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="600" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="100" x2="1600" y2="100"/><line x1="0" y1="200" x2="1600" y2="200"/>
+    <line x1="0" y1="300" x2="1600" y2="300"/><line x1="0" y1="400" x2="1600" y2="400"/>
+    <line x1="0" y1="500" x2="1600" y2="500"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <rect x="560" y="30" width="480" height="60" fill="none" stroke="#FFB020" stroke-width="2"/>
+    <text x="800" y="70" fill="#FFB020">STATUS: IN PROGRESS</text>
+    <g fill="#F5F7FA">
+      <text x="800" y="150">SOURCE</text>
+      <text x="800" y="230">BUILD / VALIDATE</text>
+      <text x="800" y="310">PREPARED ARTIFACT</text>
+      <text x="800" y="390">CONTENT-ADDRESSED CACHE</text>
+      <text x="800" y="470">IMMUTABLE GENERATION to REQUEST LEASE to EXECUTION</text>
+    </g>
+    <g stroke="#0077FF" stroke-width="2">
+      <line x1="800" y1="160" x2="800" y2="205"/><line x1="800" y1="240" x2="800" y2="285"/>
+      <line x1="800" y1="320" x2="800" y2="365"/><line x1="800" y1="400" x2="800" y2="445"/>
+    </g>
+    <text x="800" y="545" fill="#94A3B8" font-size="22">compilation leaves the request path; leases pin one generation</text>
+  </g>
+</svg>

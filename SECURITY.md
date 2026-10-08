@@ -4,7 +4,7 @@
 
 **Do not open a public issue.**
 
-Use GitHub's private vulnerability reporting on this repository, or email the maintainers directly. If neither is available to you, open a minimal public issue that says only *"I have a security report, please contact me"* with no technical detail, and we will reach out.
+Use GitHub's private vulnerability reporting on this repository, or email the maintainers directly. If neither is available to you, open a minimal public issue that says only *"I have a security report, please contact me"* with no technical detail, and I will reach out.
 
 Please include:
 
@@ -13,7 +13,7 @@ Please include:
 - The version, target triple, and platform
 - Whether you intend to disclose publicly, and on what timeline
 
-## What we consider a security bug
+## What I consider a security bug
 
 QQQ's core promise is that **a guest has no authority the manifest did not grant it**. Anything that breaks that promise is a security bug, including:
 
@@ -35,10 +35,10 @@ is expanded, with what to do instead, in
 your threat model.
 
 - **A malicious host administrator.** If you control the host process, you control everything. True of every runtime.
-- **Side-channel attacks between tenants** (cache timing, Spectre-class). Wasmtime has mitigations and research continues; QQQ does not currently claim side-channel isolation. If you find a *practical, cross-tenant* side channel we will still want to hear about it.
+- **Side-channel attacks between tenants** (cache timing, Spectre-class). Wasmtime has mitigations and research continues; QQQ does not currently claim side-channel isolation. If you find a *practical, cross-tenant* side channel I will still want to hear about it.
 - **Physical access** to the machine.
 - **Volumetric denial of service** beyond what rate limiting and autoscaling can absorb.
-- **Bugs in Wasmtime itself.** Report those upstream: <https://github.com/bytecodealliance/wasmtime/security/policy>. Tell us too, and we will ship the patched engine within our 72-hour target.
+- **Bugs in Wasmtime itself.** Report those upstream: <https://github.com/bytecodealliance/wasmtime/security/policy>. Tell me too, and I will ship the patched engine within my 72-hour target.
 
 ## Wasmtime advisories: the 72-hour target, and how it is kept
 
@@ -46,7 +46,7 @@ QQQ's sandbox **is** Wasmtime's, so a Wasmtime vulnerability is the one class of
 issue that no amount of QQQ-side correctness can mitigate — a guest that escapes
 the sandbox is out of it regardless of what its manifest granted.
 
-`R-04` in `QQQ-Proposal-V1.md` §15 commits us to shipping the patched engine
+`R-04` in `QQQ-Proposal-V1.md` §15 commits me to shipping the patched engine
 within **72 hours** of a patched upstream release existing. The full process —
 what the clock measures, the four detection channels, the per-step deadlines, and
 exactly which checks verify each claim — is in
@@ -79,7 +79,7 @@ lives. The process is `docs/wasmtime-advisory-process.md`.
 |---|---|---|
 | 2026-10-02 | RUSTSEC-2026-0321…0327 against `wasmtime`/`wasmtime-wasi` 48.0.3 (patch ≥48.0.4; RUSTSEC-2026-0320 documented negative — `wasmtime-wasi-http` is not in the resolve) | Triaged in issue #4: in the affected range (component model, fuel, epoch, pooling, WASI p2 all enabled). Patched to 48.0.5 on `main`, full gate green, CI success. Release tag pending a maintainer version decision and the release signing key; process clock runs to 2026-10-05. |
 
-## Our commitments
+## My commitments
 
 | Severity | Acknowledgement | Assessment | Patch target |
 |---|---|---|---|
@@ -88,7 +88,7 @@ lives. The process is `docs/wasmtime-advisory-process.md`.
 | Medium | 5 days | 14 days | Next minor release |
 | Low | 10 days | 30 days | Next release |
 
-We will credit you in the advisory unless you prefer otherwise. We will not pursue legal action against good-faith research, and we ask that you give us a reasonable window before public disclosure.
+I will credit you in the advisory unless you prefer otherwise. I will not pursue legal action against good-faith research, and I ask that you give me a reasonable window before public disclosure.
 
 ## Supported versions
 

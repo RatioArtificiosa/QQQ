@@ -1,9 +1,9 @@
 # Code of Conduct
 
-## Our commitment
+## My commitment
 
 This project welcomes contributors regardless of experience level, identity, or
-which language they think in. We are committed to a working environment where
+which language they think in. I am committed to a working environment where
 technical disagreement is sharp and personal contempt is absent.
 
 ## The standard, stated concretely

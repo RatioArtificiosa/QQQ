@@ -9,13 +9,13 @@ Thank you for considering it. This document is short on ceremony and specific ab
 | Document | Why |
 |---|---|
 | [`PRINCIPLES.md`](PRINCIPLES.md) | The eight non-negotiables. Every change is checked against them. |
-| [`QQQ-Proposal-V1.md`](QQQ-Proposal-V1.md) | What we are building and why. |
+| [`QQQ-Proposal-V1.md`](QQQ-Proposal-V1.md) | What I am building and why. |
 | [`QQQ-Checklist-V1.md`](QQQ-Checklist-V1.md) | The work breakdown. Find the item you are implementing. |
 | [`QQQ-Observations-and-Memories.md`](QQQ-Observations-and-Memories.md) | Decisions already made, and mistakes already made. **Read this before proposing a change to something that looks wrong — it may have been deliberate.** |
 
 ---
 
-## The words we use: runtime vs framework
+## The words I use: runtime vs framework
 
 **QQQ is a runtime.** The word "framework" describes only the app-facing layer built *on* the
 runtime, and reaching for it in the wrong place is a positioning defect rather than a style

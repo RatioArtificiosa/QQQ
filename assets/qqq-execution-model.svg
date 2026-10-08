@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 700" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+  <rect width="1600" height="700" fill="#05070B"/>
+  <g stroke="#111827" stroke-width="1">
+    <line x1="0" y1="100" x2="1600" y2="100"/><line x1="0" y1="200" x2="1600" y2="200"/>
+    <line x1="0" y1="300" x2="1600" y2="300"/><line x1="0" y1="400" x2="1600" y2="400"/>
+    <line x1="0" y1="500" x2="1600" y2="500"/><line x1="0" y1="600" x2="1600" y2="600"/>
+  </g>
+  <g font-size="26" text-anchor="middle">
+    <text x="400" y="60" fill="#94A3B8">NODE / BUN</text>
+    <text x="1200" y="60" fill="#0077FF">QQQ</text>
+    <g fill="#F5F7FA">
+      <text x="400" y="140">Application</text>
+      <text x="400" y="220">Language runtime</text>
+      <text x="400" y="300">Process</text>
+      <text x="400" y="380">OS boundary</text>
+      <text x="1200" y="140">Component</text>
+      <text x="1200" y="220">WebAssembly</text>
+      <text x="1200" y="300">Capability boundary</text>
+      <text x="1200" y="380">Rust host</text>
+      <text x="1200" y="460">OS</text>
+    </g>
+    <g stroke="#94A3B8" stroke-width="2">
+      <line x1="400" y1="155" x2="400" y2="195"/><line x1="400" y1="235" x2="400" y2="275"/>
+      <line x1="400" y1="315" x2="400" y2="355"/>
+    </g>
+    <g stroke="#0077FF" stroke-width="2">
+      <line x1="1200" y1="155" x2="1200" y2="195"/><line x1="1200" y1="235" x2="1200" y2="275"/>
+      <line x1="1200" y1="315" x2="1200" y2="355"/><line x1="1200" y1="395" x2="1200" y2="435"/>
+    </g>
+    <line x1="800" y1="40" x2="800" y2="660" stroke="#1E293B" stroke-width="2"/>
+    <text x="800" y="640" fill="#94A3B8" font-size="24">QQQ starts from a different execution boundary</text>
+  </g>
+</svg>

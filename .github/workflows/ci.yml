@@ -1226,6 +1226,26 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p qqq-run --all-features --test lang005_reference_app -- --ignored
 
+      # `F-09` -- the audit record survives real load and a real kill.
+      #
+      # # Why ignored tests in their own step rather than in the suite above
+      #
+      # Because they build a guest and drive 200,000 requests through a live
+      # server: minutes, and the default suite must stay runnable everywhere
+      # without a guest toolchain (the LANG-001 note above). `qqqai build`
+      # is the tests' own prerequisite, and the `wasm-tools` install above
+      # covers it.
+      #
+      # # Why the budget is 30 minutes
+      #
+      # The guest builds from cold on CI, 200,000 loopback requests share
+      # runners with unknown neighbours (`§O-543`'s scheduling luck applies
+      # to throughput too), and a hang must fail the step by name rather
+      # than the job in six hours (`§O-355`).
+      - name: the audit record survives load and kills (F-09)
+        timeout-minutes: 30
+        run: cargo test -p qqq-run --all-features --test audit_load -- --ignored
+
       # `DX-004`. §12.2 fixes five parts to every error message, and the two existing
       # checks cover the *catalogue* (every code has a cause and a remediation line) and the
       # *schema* (`error.docs_url` exists). Neither reads a message a user receives, so a
@@ -1341,8 +1361,19 @@ jobs:
       # consts, `SinkLane`, `InFlight`, `SinkLane::spawn`) and four compiling
       # doctests that all run — measured 2106 -> 2109. Same reasoning: the lane
       # is covered by the coalescing/ordering/fairness tests, not by prose.
+      #
+      # # And why it went UP, to 2117
+      #
+      # F-09 adds the audit-durability surface (`ChainKey`,
+      # `compute_chain_v2`, `new_ring`, `with_chain_key`,
+      # `resume_or_start_ring`, `is_failed`, `attach_audit_file_with_key`,
+      # `set_audit_failure_policy`, the drops/quarantine getters, the ring
+      # capacity const, and the new record fields) with three compiling
+      # doctests that all run (`ChainKey::from_hex`, `new_ring`,
+      # `with_chain_key`) — measured 2109 -> 2117. Same reasoning: the rest
+      # is covered by the red-first F-09 tests, not by prose.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2109
+        run: python tools/check_api_examples.py --allow 2117
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

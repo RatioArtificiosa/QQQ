@@ -179,6 +179,13 @@ pub struct Loaded {
     /// loader refused it as corruption. A crash, a restart and one request produced an evidence file
     /// that could never be read again.
     pub complete_bytes: u64,
+    /// Where the torn tail was quarantined, when there was one.
+    ///
+    /// The bytes are evidence about the crash, so deletion is not an
+    /// option: they move to `<log>.partial-<unix_ms>` with the log's own
+    /// permissions before any truncation, and the caller warns loudly.
+    /// `None` when the file ended cleanly.
+    pub quarantined_to: Option<PathBuf>,
 }
 
 /// Read and verify an audit file.
@@ -204,6 +211,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
                 records: Vec::new(),
                 dropped_partial_line: false,
                 complete_bytes: 0,
+                quarantined_to: None,
             })
         }
         Err(e) => {
@@ -232,31 +240,29 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
         }
         match AuditRecord::from_json(&line) {
             Ok(record) => {
+                // A last line that parses but lacks its closing brace is a
+                // torn v2 tail, not a v1 row: the cut removed the `v` and
+                // `timestamp_unix_ms` keys the strict rule looks for, so the
+                // row misreads as v1 with a v2 digest. A complete record
+                // always ends with `}`, so a parseable line that does not
+                // is torn when last, corruption otherwise.
+                if !line.trim_end().ends_with('}') {
+                    if is_last_line(path, i)? {
+                        dropped_partial_line = true;
+                        break;
+                    }
+                    return Err(SinkError::Malformed {
+                        line: i + 1,
+                        reason: "a non-final line is not a complete record".to_owned(),
+                    });
+                }
                 records.push(record);
                 complete_bytes = offset;
             }
             Err(reason) => {
                 // A truncated FINAL line is a crash, not corruption. It is dropped and reported;
                 // anything else is refused, because an append-only file cannot explain it.
-                let is_last = {
-                    let mut probe =
-                        BufReader::new(File::open(path).map_err(|e| SinkError::Io {
-                            path: path.to_path_buf(),
-                            reason: e.to_string(),
-                        })?);
-                    let mut buf = String::new();
-                    let mut n = 0;
-                    while probe.read_line(&mut buf).map_err(|e| SinkError::Io {
-                        path: path.to_path_buf(),
-                        reason: e.to_string(),
-                    })? > 0
-                    {
-                        n += 1;
-                        buf.clear();
-                    }
-                    i + 1 == n
-                };
-                if is_last && !line.trim_end().ends_with('}') {
+                if is_last_line(path, i)? && !line.trim_end().ends_with('}') {
                     dropped_partial_line = true;
                     break;
                 }
@@ -272,7 +278,32 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
         records,
         dropped_partial_line,
         complete_bytes,
+        quarantined_to: None,
     })
+}
+
+/// Whether file line `i` (0-based) is the last line of the file.
+///
+/// The probe re-reads rather than trusting the iterator because the
+/// torn-tail decision hinges on it: calling a corrupt middle line
+/// "last" would quarantine evidence, and calling a torn tail
+/// "corrupt" would refuse a restart over a crash.
+fn is_last_line(path: &Path, i: usize) -> Result<bool, SinkError> {
+    let mut probe = BufReader::new(File::open(path).map_err(|e| SinkError::Io {
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?);
+    let mut buf = String::new();
+    let mut n = 0;
+    while probe.read_line(&mut buf).map_err(|e| SinkError::Io {
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })? > 0
+    {
+        n += 1;
+        buf.clear();
+    }
+    Ok(i + 1 == n)
 }
 
 /// How the bytes reach the OS: directly, or through a userspace buffer.
@@ -390,6 +421,16 @@ impl AuditFile {
     ///
     /// [`SinkError::Io`] when the file cannot be opened or created.
     ///
+    /// # Permissions
+    ///
+    /// The file is created `0600` and missing parents `0700` on Unix: an
+    /// evidence file readable by every local user is not evidence. On
+    /// Windows the OS has no mode bits, so confidentiality depends on the
+    /// parent directory ACL — point the log at a directory under the
+    /// service profile, or one whose inherited ACLs admit only the
+    /// service account, and the code documents this instead of pretending
+    /// a mode was set.
+    ///
     /// # Example
     ///
     /// The parent directory is created when it is missing, so an operator can point `--audit-log`
@@ -411,20 +452,26 @@ impl AuditFile {
     pub fn open(path: &Path, already: usize) -> Result<Self, SinkError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| SinkError::Io {
+                create_dir_restricted(parent).map_err(|e| SinkError::Io {
                     path: path.to_path_buf(),
                     reason: format!("its directory could not be created: {e}"),
                 })?;
             }
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| SinkError::Io {
-                path: path.to_path_buf(),
-                reason: e.to_string(),
-            })?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(path).map_err(|e| SinkError::Io {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        // Mode is set at creation above; an existing file keeps whatever it
+        // has, because silently re-chmodding an operator's file would fight
+        // an explicit wider choice they made on purpose.
         Ok(Self {
             path: path.to_path_buf(),
             writer: FileWriter::Direct(file),
@@ -773,6 +820,31 @@ impl AuditFile {
     }
 }
 
+/// Create a directory and every missing parent with owner-only access.
+///
+/// Unix: `0700` on each level this call creates, so an evidence directory
+/// is never world-readable by inheritance. Pre-existing ancestors are
+/// deliberately left alone: re-chmodding directories the operator did
+/// not ask about (up to and including shared roots) would be a wider
+/// blast radius than the log's confidentiality justifies. Windows: the
+/// platform has no mode bits — `create_dir_all` under the service
+/// profile inherits that profile's ACL, which is the documented
+/// posture; this function states the intent in one place rather than
+/// scattering `#[cfg]` at every call site.
+fn create_dir_restricted(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
 /// Load a file and resume the stream it holds, or start a fresh one.
 ///
 /// # Errors
@@ -816,32 +888,127 @@ impl AuditFile {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// ```
 pub fn resume_or_start(path: &Path, capacity: usize) -> Result<(AuditStream, Loaded), SinkError> {
-    let loaded = load(path)?;
-
-    // **A fragment is removed from the FILE, not only from the stream** -- finding #24. Resuming means
-    // *"continue the chain this file holds"*, and a file whose last line is half a record cannot be
-    // continued: `AuditFile` opens `append`, so the next record would be written onto the fragment, and
-    // the combined line would be neither valid JSON nor last -- which makes the loader refuse the whole
-    // file as corruption. **An append-only log that refuses to be re-read after a crash has failed at
-    // its one job.**
-    if loaded.dropped_partial_line {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .map_err(|e| SinkError::Io {
-                path: path.to_path_buf(),
-                reason: format!("the half-written final record could not be removed: {e}"),
-            })?;
-        file.set_len(loaded.complete_bytes)
-            .map_err(|e| SinkError::Io {
-                path: path.to_path_buf(),
-                reason: format!("the half-written final record could not be removed: {e}"),
-            })?;
-    }
+    let mut loaded = load(path)?;
+    quarantine_and_truncate(path, &mut loaded)?;
 
     let stream = AuditStream::resume(loaded.records.clone(), capacity)
         .map_err(|reason| SinkError::NotAStream { reason })?;
     Ok((stream, loaded))
+}
+
+/// Load a file and resume it as a sink-backed ring, or start a fresh one.
+///
+/// The F-09 attach path: the file holds the full history while memory
+/// keeps a query window, so `Append::Full` cannot occur. The optional
+/// chain key is attached to the resumed stream, so restored rows and new
+/// rows verify under one key.
+///
+/// # Errors
+///
+/// Any [`SinkError`] from [`load`], the quarantine write, the truncation,
+/// or a broken chain over the retained window.
+pub fn resume_or_start_ring(
+    path: &Path,
+    ring_capacity: usize,
+    key: Option<crate::audit::ChainKey>,
+) -> Result<(AuditStream, Loaded), SinkError> {
+    let mut loaded = load(path)?;
+    quarantine_and_truncate(path, &mut loaded)?;
+
+    let mut stream = AuditStream::resume_ring(loaded.records.clone(), ring_capacity)
+        .map_err(|reason| SinkError::NotAStream { reason })?;
+    if let Some(chain_key) = key {
+        stream = stream.with_chain_key(chain_key);
+    }
+    Ok((stream, loaded))
+}
+
+/// Quarantine a torn tail and truncate the file past it, when [`load`]
+/// found one. Shared by both resume paths so the two cannot disagree
+/// about what "restore" means.
+///
+/// Truncation is load-bearing, not cleanup (finding #24): `AuditFile`
+/// opens append, so the next record would land on the fragment and the
+/// combined line would be neither valid JSON nor last — the loader
+/// would refuse the whole file as corruption, and a log that cannot be
+/// re-read after a crash has failed at its one job.
+fn quarantine_and_truncate(path: &Path, loaded: &mut Loaded) -> Result<(), SinkError> {
+    if !loaded.dropped_partial_line {
+        return Ok(());
+    }
+    let tail = read_tail(path, loaded.complete_bytes)?;
+    let quarantine = quarantine_path(path);
+    write_quarantine(&quarantine, &tail).map_err(|e| SinkError::Io {
+        path: quarantine.clone(),
+        reason: format!("the torn tail could not be quarantined: {e}"),
+    })?;
+    loaded.quarantined_to = Some(quarantine);
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| SinkError::Io {
+            path: path.to_path_buf(),
+            reason: format!("the half-written final record could not be removed: {e}"),
+        })?;
+    file.set_len(loaded.complete_bytes)
+        .map_err(|e| SinkError::Io {
+            path: path.to_path_buf(),
+            reason: format!("the half-written final record could not be removed: {e}"),
+        })?;
+    Ok(())
+}
+
+/// The quarantine path for a torn tail: the log path with a millisecond
+/// timestamp suffix, so two crashes never collide on one name.
+fn quarantine_path(path: &Path) -> PathBuf {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".partial-{ms}"));
+    PathBuf::from(name)
+}
+
+/// Read every byte from `offset` to end-of-file.
+fn read_tail(path: &Path, offset: u64) -> Result<Vec<u8>, SinkError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).map_err(|e| SinkError::Io {
+        path: path.to_path_buf(),
+        reason: format!("the torn tail could not be read: {e}"),
+    })?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| SinkError::Io {
+            path: path.to_path_buf(),
+            reason: format!("the torn tail could not be read: {e}"),
+        })?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).map_err(|e| SinkError::Io {
+        path: path.to_path_buf(),
+        reason: format!("the torn tail could not be read: {e}"),
+    })?;
+    Ok(tail)
+}
+
+/// Write quarantine bytes with the log's own permissions.
+///
+/// Unix: `0600`, matching [`AuditFile::open`]. Other platforms: the file
+/// inherits the directory ACL, same posture as the log itself.
+fn write_quarantine(path: &Path, tail: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        opts.open(path)?.write_all(tail)
+    }
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(tail)
+    }
 }
 
 /// How durably one batch reaches the file before the worker takes more.
@@ -850,7 +1017,9 @@ pub fn resume_or_start(path: &Path, capacity: usize) -> Result<(AuditStream, Loa
 /// distinctions a raw [`File`] cannot keep: every `write` already reaches the
 /// OS, so `flush` is a passthrough and only [`File::sync_all`] — or a real
 /// userspace buffer — changes the guarantee. Crash evidence is only evidence
-/// if it survives the crash, so the default is [`Durability::FlushPerRecord`].
+/// if it survives the crash, so the default is [`Durability::FsyncPerBatch`]:
+/// group commit amortises the sync over the batch, which is what makes the
+/// safe default affordable enough to be the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Durability {
     /// Rows accumulate in a [`BUFFERED_CAPACITY`] userspace buffer; a process
@@ -871,13 +1040,21 @@ pub enum Durability {
     /// ```
     /// use qqq_host::audit_sink::Durability;
     ///
-    /// assert_eq!(Durability::default(), Durability::FlushPerRecord);
+    /// assert_ne!(Durability::FlushPerRecord, Durability::FsyncPerBatch);
     /// assert_ne!(Durability::FsyncPerBatch, Durability::Buffered);
     /// ```
-    #[default]
     FlushPerRecord,
     /// Write each batch, then flush and `sync_all` once per batch. Bounds OS
     /// and power loss to the current batch, at one sync per batch.
+    ///
+    /// The default: acknowledged records must survive more than the process.
+    ///
+    /// ```
+    /// use qqq_host::audit_sink::Durability;
+    ///
+    /// assert_eq!(Durability::default(), Durability::FsyncPerBatch);
+    /// ```
+    #[default]
     FsyncPerBatch,
 }
 
@@ -918,7 +1095,7 @@ pub const DEFAULT_APPEND_BATCH: usize = 64;
 /// let config = AppenderConfig::default();
 /// assert_eq!(config.queue_bound, 1024);
 /// assert_eq!(config.batch_size, 64);
-/// assert_eq!(config.durability, Durability::FlushPerRecord);
+/// assert_eq!(config.durability, Durability::FsyncPerBatch);
 /// assert_eq!(config.persist_timeout, Duration::from_secs(30));
 /// assert_eq!(config.stall_timeout, Duration::from_secs(5));
 /// ```
@@ -1184,6 +1361,35 @@ pub struct ShutdownReport {
     pub drained_cleanly: bool,
 }
 
+/// What a request does when its evidence cannot be made durable.
+///
+/// The default is [`Self::FailClosed`] whenever a persistent sink is
+/// configured: a served request whose row never lands is a hole in the
+/// evidence shaped exactly like a request that never happened, and the
+/// server must refuse rather than mint those. `FailOpenWithAlarm` keeps
+/// serving while counting every drop loudly — for deployments whose
+/// availability beats their auditability, stated as a choice rather
+/// than drifted into.
+///
+/// ```
+/// use qqq_host::audit_sink::AuditFailurePolicy;
+///
+/// assert_eq!(AuditFailurePolicy::default(), AuditFailurePolicy::FailClosed);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuditFailurePolicy {
+    /// Persist failure (or a dead worker) refuses the request with 503
+    /// before the guest runs when detected up front, or after it when
+    /// detected at the barrier — either way the client retries rather
+    /// than receiving an undocumented answer.
+    #[default]
+    FailClosed,
+    /// Keep serving; count each dropped persist and log every drop.
+    /// The alarm is the point: silent drops are what this policy exists
+    /// to forbid.
+    FailOpenWithAlarm,
+}
+
 /// The file's persist path: one bounded queue, one writing thread.
 ///
 /// # Why a thread rather than a bigger lock
@@ -1441,6 +1647,25 @@ impl AuditAppender {
         self.stats.snapshot()
     }
 
+    /// Whether the worker can still persist: false once a batch failed to
+    /// write or the thread is gone.
+    ///
+    /// The `FailClosed` pre-flight reads this before running the guest, so a
+    /// dead persist path refuses with 503 instead of executing a request
+    /// whose evidence could never land. The join handle answers liveness:
+    /// a returned worker thread is finished whether it failed or drained,
+    /// and a missing one means shutdown already ran.
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        match &self.worker {
+            Some(worker) => worker.is_finished(),
+            None => true,
+        }
+    }
+
     /// The wiring this appender was spawned with, for tests and diagnostics.
     ///
     /// Exposed rather than asserted through behaviour because the stall and
@@ -1455,7 +1680,7 @@ impl AuditAppender {
     /// std::fs::create_dir_all(&dir).expect("scratch");
     /// let file = AuditFile::open(&dir.join("audit.jsonl"), 0).expect("open");
     /// let appender = AuditAppender::spawn(file, AppenderConfig::default()).expect("spawn");
-    /// assert_eq!(appender.config().durability, Durability::FlushPerRecord);
+    /// assert_eq!(appender.config().durability, Durability::FsyncPerBatch);
     /// let _ = std::fs::remove_dir_all(&dir);
     /// ```
     #[must_use]
@@ -2001,17 +2226,48 @@ mod tests {
         // Records are hex ASCII, so a byte cut cannot split a code point.
         let torn = raw[..raw.len() - 10].to_owned();
         assert!(!torn.trim_end().ends_with('}'));
+        // The quarantine must hold exactly the fragment: everything past
+        // the two whole lines, which is what the file could not explain.
+        let mut whole = String::new();
+        for line in raw.lines().take(2) {
+            whole.push_str(line);
+            whole.push('\n');
+        }
+        let fragment = torn[whole.len()..].to_owned();
         std::fs::write(&path, &torn).expect("torn write");
         let _ = resume_or_start(&path, 1024).expect("resume");
         let entries: Vec<_> = std::fs::read_dir(scratch.0.clone())
             .expect("readdir")
             .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
             .collect();
+        let quarantined = entries.iter().find(|name| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with("audit.jsonl.partial-"))
+        });
         assert!(
-            entries.iter().any(|name| name
-                .to_str()
-                .is_some_and(|name| name.starts_with("audit.jsonl.partial-"))),
+            quarantined.is_some(),
             "the torn tail must be quarantined, not deleted: {entries:?}"
+        );
+        // The quarantine holds the torn bytes themselves, and the file is
+        // whole again: evidence about the crash, plus a file that reads.
+        let quarantine_bytes = std::fs::read(
+            scratch
+                .0
+                .join(quarantined.expect("found above").to_str().expect("utf-8")),
+        )
+        .expect("quarantine reads");
+        assert_eq!(
+            String::from_utf8(quarantine_bytes).expect("ascii"),
+            fragment,
+            "quarantine preserves the bytes, not a summary of them"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .lines()
+                .count(),
+            2,
+            "the file holds the two whole rows"
         );
     }
 

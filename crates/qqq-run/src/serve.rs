@@ -125,6 +125,14 @@ pub struct ServeOptions {
     /// chain-broken file refuses the start rather than being absorbed — see
     /// `GuestApp::attach_audit_file`.
     pub audit_log: Option<String>,
+    /// `--audit-hmac-key-file <path>` - the v2 chain key, as 64 hex characters.
+    ///
+    /// A file, never a flag value or an environment variable: a secret on a
+    /// command line is visible in the process table, and §2.5 forbids
+    /// environment reads — the same shape as `--redact-from` for the same
+    /// reason. `None` chains without HMAC (corruption-evident, not
+    /// tamper-evident), and the attach says so loudly.
+    pub audit_hmac_key_file: Option<String>,
     /// `--redact-from <path>` — a `NAME=value` file of secret values to redact from every line.
     ///
     /// `None` redacts nothing, which is the honest default: the values are not available to the
@@ -192,6 +200,7 @@ impl Default for ServeOptions {
             config: None,
             accept_limit: None,
             audit_log: None,
+            audit_hmac_key_file: None,
             redact_from: None,
             log_format: None,
             metrics_path: None,
@@ -325,6 +334,40 @@ fn log_format_of(args: &[String], i: usize) -> Result<String> {
     Ok(v)
 }
 
+/// Read and validate `--audit-log`'s value.
+///
+/// # Errors
+///
+/// A usage error naming the flag when the value is empty.
+fn audit_log_of(args: &[String], i: usize) -> Result<String> {
+    let v = value_of(args, i, "--audit-log")?;
+    if v.is_empty() {
+        return Err(usage("`--audit-log` needs a path").with_remediation(
+            "pass the file the capability-use record is appended to, for example \
+             `--audit-log /var/log/qqq/audit.jsonl`",
+        ));
+    }
+    Ok(v)
+}
+
+/// Read and validate `--audit-hmac-key-file`'s value.
+///
+/// # Errors
+///
+/// A usage error naming the flag when the value is empty.
+fn audit_hmac_key_file_of(args: &[String], i: usize) -> Result<String> {
+    let v = value_of(args, i, "--audit-hmac-key-file")?;
+    if v.is_empty() {
+        return Err(
+            usage("`--audit-hmac-key-file` needs a path").with_remediation(
+                "pass a file holding 64 hex characters, for example \
+             `--audit-hmac-key-file /etc/qqq/audit.key`",
+            ),
+        );
+    }
+    Ok(v)
+}
+
 /// Parse `qqqai serve`'s arguments.
 ///
 /// # Errors
@@ -387,14 +430,11 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                 i += 2;
             }
             "--audit-log" => {
-                let v = value_of(args, i, "--audit-log")?;
-                if v.is_empty() {
-                    return Err(usage("`--audit-log` needs a path").with_remediation(
-                        "pass the file the capability-use record is appended to, for example \
-                         `--audit-log /var/log/qqq/audit.jsonl`",
-                    ));
-                }
-                opts.audit_log = Some(v);
+                opts.audit_log = Some(audit_log_of(args, i)?);
+                i += 2;
+            }
+            "--audit-hmac-key-file" => {
+                opts.audit_hmac_key_file = Some(audit_hmac_key_file_of(args, i)?);
                 i += 2;
             }
             "--accept-limit" => {
@@ -764,7 +804,32 @@ fn build_dispatch(
     // discovered its evidence file was unusable would have already produced records it cannot
     // keep.
     if let Some(path) = &opts.audit_log {
-        app.attach_audit_file(std::path::Path::new(path))?;
+        // The chain key travels by file, never by flag value: a secret on a
+        // command line is visible in the process table. Absent means unkeyed
+        // rows, and the attach says so loudly.
+        let key = match &opts.audit_hmac_key_file {
+            Some(key_path) => {
+                let hex = std::fs::read_to_string(key_path).map_err(|e| {
+                    usage(format!(
+                        "`--audit-hmac-key-file {key_path}` could not be read: {e}"
+                    ))
+                    .with_remediation(
+                        "point it at a file holding 64 hex characters, or remove the flag \
+                         for an unkeyed chain",
+                    )
+                })?;
+                Some(
+                    qqq_host::audit::ChainKey::from_hex(hex.trim()).map_err(|e| {
+                        usage(format!(
+                            "`--audit-hmac-key-file {key_path}` is unusable: {e}"
+                        ))
+                        .with_remediation("the file must hold exactly 64 hex characters")
+                    })?,
+                )
+            }
+            None => None,
+        };
+        app.attach_audit_file_with_key(std::path::Path::new(path), key)?;
     }
 
     let capacity = app.capacity();

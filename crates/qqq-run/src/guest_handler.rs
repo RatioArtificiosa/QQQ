@@ -152,6 +152,25 @@ pub struct GuestApp {
     /// the default durability still flushes per record, so the crash promise
     /// the synchronous path gave is kept, not traded away.
     audit_appender: Option<Arc<qqq_host::audit_sink::AuditAppender>>,
+    /// What a request does when its evidence cannot be made durable (`F-09`).
+    ///
+    /// `FailClosed` by default whenever a sink is configured: a served
+    /// request whose row never lands is a hole shaped exactly like a
+    /// request that never happened. Carried on the app (not the appender)
+    /// because the pre-flight check runs before any worker contact, and
+    /// because a replacement must inherit the operator's choice with the
+    /// stream (`replacement` clones it below).
+    audit_policy: qqq_host::audit_sink::AuditFailurePolicy,
+    /// Rows dropped under `FailOpenWithAlarm`, and restores that found a
+    /// torn tail (`F-09`).
+    ///
+    /// Atomics with getters, matching the `AppenderStats` precedent: the
+    /// counts are asserted in-tree, and every occurrence also logs, so an
+    /// operator learns of a drop from the log line and audits the total
+    /// from the counter. Prometheus surfacing for these two is follow-up
+    /// work, named here rather than smuggled into dispatch signatures.
+    audit_drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    audit_quarantines: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The component's identity, as the audit record states it — `OBS-002`.
     ///
     /// Computed **once**, at construction, because `ComponentDigest::new` validates that the
@@ -347,6 +366,9 @@ impl GuestApp {
                 qqq_host::AuditStream::with_default_capacity(),
             )),
             audit_appender: None,
+            audit_policy: qqq_host::audit_sink::AuditFailurePolicy::FailClosed,
+            audit_drops: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            audit_quarantines: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             // Computed above, before `grants` is moved into this struct.
             component_digest,
             grant_digest,
@@ -387,6 +409,9 @@ impl GuestApp {
         next.buffer_budget = Arc::clone(&self.buffer_budget);
         next.audit = Arc::clone(&self.audit);
         next.audit_appender.clone_from(&self.audit_appender);
+        next.audit_policy = self.audit_policy;
+        next.audit_drops = std::sync::Arc::clone(&self.audit_drops);
+        next.audit_quarantines = std::sync::Arc::clone(&self.audit_quarantines);
         // The tenant budgets roll with the replacement, like the pool and the
         // audit stream: a rotation must not double a tenant's ceiling by
         // accident, and must not forgive an over-budget tenant either.
@@ -543,22 +568,40 @@ impl GuestApp {
         // capacity monotonically — a server that gets slower the more it errors is a
         // worse failure than the error itself.
         let permit = RequestPermit::clean(&self.pool);
-        // Floor index for the persist below: every row this request adds —
-        // ambient rows during the guest call and the handle row after it —
-        // lands at or after this length. The persist sends `records[floor..]`;
-        // rows from concurrent requests may ride along, and the worker
-        // deduplicates by sequence, so over-sending is safe while
-        // under-sending (which would drop evidence) is impossible as long as
-        // the stream only grows — which it does, since a full stream refuses
-        // rather than truncates. Taken and released here, never held across
-        // the guest call.
-        let audit_floor = self
-            .audit
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .records()
-            .len();
-        let outcome = self.serve_one(request, tenant);
+        // This request's audit rows live in its own handle, buffered
+        // unsequenced until the commit below — never sliced out of the
+        // shared stream, so a persist set holds exactly this request's
+        // rows regardless of concurrency (`F-09`: the old floor-slice
+        // copied every row appended since the request started, growing
+        // with concurrency and interleaving other requests' rows).
+        let audit_handle = qqq_host::audit::AuditHandle::new(
+            std::sync::Arc::clone(&self.audit),
+            self.component_digest.clone(),
+            self.grant_digest.clone(),
+            None,
+        );
+        // FailClosed pre-flight (`F-09`): a dead persist path refuses
+        // BEFORE the guest runs, so no request executes that its evidence
+        // could never cover. FailOpenWithAlarm counts the refusal loudly
+        // and serves anyway — the operator chose availability over
+        // auditability, in one visible call.
+        if let Some(appender) = self.audit_appender.as_ref() {
+            if appender.is_failed() {
+                match self.audit_policy {
+                    qqq_host::audit_sink::AuditFailurePolicy::FailClosed => {
+                        return Ok(audit_unavailable(
+                            &self.pool,
+                            self.completion_rate,
+                            "the audit worker cannot persist",
+                        ));
+                    }
+                    qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm => {
+                        self.note_audit_drop("pre-flight: worker already failed");
+                    }
+                }
+            }
+        }
+        let outcome = self.serve_one(request, tenant, &audit_handle);
 
         // The response body joins the heap here: budget it too, or a flood
         // of large answers bypasses the entry check above. On exhaustion the
@@ -647,57 +690,43 @@ impl GuestApp {
         // rejection: the authority was exercised and the operation did not succeed,
         // which is a different remediation from adding a grant.
         {
-            let mut stream = self
-                .audit
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // The `Append` result is deliberately ignored here and cannot be silently lost:
-            // `Append::Full` increments the stream's own `refused` counter, which the audit
-            // report reads. A capacity that is reached is therefore visible in the report
-            // rather than in a log line nobody reads.
-            let appended = stream.record(
-                None,
-                &self.component_digest,
-                &self.grant_digest,
+            // The handle row joins the buffered ambient rows, and the commit
+            // assigns every sequence under ONE lock hold: the returned set
+            // is exactly this request's rows, in commit order. No floor
+            // index, no shared slice, no concurrent rows riding along.
+            audit_handle.record(
                 qqq_cap::capability::Capability::HttpServer,
                 "handle_request",
                 outcome_kind,
             );
+            let rows = audit_handle.commit();
 
-            // Hand this call's rows to the file worker, recorded and cloned
-            // under the stream lock and persisted after it is released. The
-            // release is structural, not NLL luck: the persist below blocks
-            // on the worker's barrier, and a worker waiting on a row whose
-            // producer waits on this lock would wedge both — the lock
-            // ordering the barrier design forbids. `audit_floor` was taken
-            // before the guest ran, so the slice covers the ambient rows
-            // recorded during the call plus the handle row just added —
-            // sending only the handle row would drop the ambient rows, the
-            // exact failure the old `persist_pending` docs record. Rows from
-            // concurrent requests may ride along; the worker deduplicates by
-            // sequence, so every row is persisted exactly once.
-            //
-            // The timeout comes from the attached appender, not the default:
-            // `attach_audit_file` derives it from the epoch deadline, and a
-            // call site that re-defaulted it would silently shorten the
-            // tripwire the attach chose.
-            let start = audit_floor.min(stream.records().len());
-            let rows = stream.records()[start..].to_vec();
-            drop(stream);
-            if let (Some(appender), qqq_host::Append::Recorded(_)) =
-                (self.audit_appender.as_ref(), appended)
-            {
+            if let Some(appender) = self.audit_appender.as_ref() {
                 // Waited, not fire-and-forget: the barrier keeps the
                 // synchronous path's promise that a returned request has its
                 // evidence durable, while the shared worker still batches
                 // concurrent requests into fewer disk passes.
+                //
+                // The timeout comes from the attached appender, not the default:
+                // `attach_audit_file` derives it from the epoch deadline, and a
+                // call site that re-defaulted it would silently shorten the
+                // tripwire the attach chose.
                 if let Err(error) = appender.persist(&rows, appender.config().persist_timeout) {
-                    eprintln!(
-                        "error: {} capability audit records from sequence {} \
-                         could not be persisted: {error}",
-                        rows.len(),
-                        rows.first().map_or(0, |row| row.sequence),
-                    );
+                    match self.audit_policy {
+                        qqq_host::audit_sink::AuditFailurePolicy::FailClosed => {
+                            return Ok(audit_unavailable(
+                                &self.pool,
+                                self.completion_rate,
+                                &error.to_string(),
+                            ));
+                        }
+                        qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm => {
+                            self.note_audit_drop(&format!(
+                                "persist of {} records failed: {error}",
+                                rows.len()
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -749,16 +778,18 @@ impl GuestApp {
     /// Takes the request BY VALUE (`F-03`): the typed call lowers it with bulk
     /// copies, and a borrow here would force the caller to clone the body to
     /// satisfy the move — the exact copy this phase exists to remove.
-    fn serve_one(&self, request: abi::Request, tenant: &str) -> Result<abi::Response> {
-        // Built per request because the handle is cheap (an `Arc` clone and two digests that are
-        // already owned) and because the store is per instance. The stream behind it is shared, so
-        // a per-capability row and this request's row land in one chain.
-        let handle = qqq_host::audit::AuditHandle::new(
-            std::sync::Arc::clone(&self.audit),
-            self.component_digest.clone(),
-            self.grant_digest.clone(),
-            None,
-        );
+    fn serve_one(
+        &self,
+        request: abi::Request,
+        tenant: &str,
+        audit: &qqq_host::audit::AuditHandle,
+    ) -> Result<abi::Response> {
+        // The handle arrives from `handle_request`, which keeps its own
+        // copy for the commit: rows buffer request-locally either way, and
+        // the store behind the instance sees the same chain through the
+        // shared stream. Cloned, not rebuilt, so the commit sees every row
+        // the guest call recorded.
+        let handle = audit.clone();
         // Held for exactly this request: dropping it at the end releases the
         // tenant entry when no request of this tenant remains, which is the
         // reset boundary. The budget outlives concurrent requests through the
@@ -836,9 +867,31 @@ impl GuestApp {
     /// # }
     /// ```
     pub fn attach_audit_file(&mut self, path: &std::path::Path) -> Result<()> {
-        let (stream, loaded) = qqq_host::audit_sink::resume_or_start(
+        self.attach_audit_file_with_key(path, None)
+    }
+
+    /// Attach a file sink with an explicit v2 chain key (`F-09`).
+    ///
+    /// The key comes from the operator as a file (`--audit-hmac-key-file`
+    /// in `serve`): rows are HMAC-SHA-256 chained and unforgable without
+    /// it. Without a key the chain is plain SHA-256 — corruption-evident,
+    /// not tamper-evident — and the attach says so loudly rather than
+    /// letting the deployment believe it has a guarantee it does not.
+    ///
+    /// # Errors
+    ///
+    /// The same unwritable-path and broken-history refusals as
+    /// [`Self::attach_audit_file`].
+    pub fn attach_audit_file_with_key(
+        &mut self,
+        path: &std::path::Path,
+        key: Option<qqq_host::audit::ChainKey>,
+    ) -> Result<()> {
+        let keyed = key.is_some();
+        let (stream, loaded) = qqq_host::audit_sink::resume_or_start_ring(
             path,
-            qqq_host::audit::DEFAULT_CAPACITY,
+            qqq_host::audit::DEFAULT_RING_CAPACITY,
+            key,
         )
         .map_err(|e| {
             Error::new(ErrorCode::InternalInvariantViolated, e.to_string()).with_remediation(
@@ -851,10 +904,29 @@ impl GuestApp {
         // here rather than swallowed: the records alone cannot state it, and an operator reading
         // the record later has no other way to learn it.
         if loaded.dropped_partial_line {
+            self.audit_quarantines
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             eprintln!(
-                "warning: the audit file {} ended mid-record; the incomplete line was dropped. \
-                 The process that wrote it did not shut down cleanly.",
-                path.display()
+                "warning: the audit file {} ended mid-record; the torn tail was quarantined to {} \
+                 before truncation. The process that wrote it did not shut down cleanly.",
+                path.display(),
+                loaded
+                    .quarantined_to
+                    .as_ref()
+                    .map_or("<unknown>".to_owned(), |p| p.display().to_string()),
+            );
+        }
+
+        // No key, no tamper evidence: the chain still detects accidents, but
+        // anyone with write access to the file can recompute it. Said loudly
+        // at the one moment the operator can still act on it, not buried in
+        // a document they read after the breach.
+        if !keyed {
+            eprintln!(
+                "warning: the audit log {} is chained without an HMAC key; rows are \
+                 tamper-evident against accidents, not attackers. Pass \
+                 `--audit-hmac-key-file` with 64 hex characters to key the chain.",
+                path.display(),
             );
         }
 
@@ -896,6 +968,46 @@ impl GuestApp {
         self.audit = std::sync::Arc::new(std::sync::Mutex::new(stream));
         self.audit_appender = Some(Arc::new(appender));
         Ok(())
+    }
+
+    /// Choose what a request does when its evidence cannot persist (`F-09`).
+    ///
+    /// `FailClosed` is already the default; this exists for the operator
+    /// who has decided availability beats auditability and wants that
+    /// decision visible in one call rather than inferred from silence.
+    pub fn set_audit_failure_policy(&mut self, policy: qqq_host::audit_sink::AuditFailurePolicy) {
+        self.audit_policy = policy;
+    }
+
+    /// Rows dropped under `FailOpenWithAlarm`.
+    ///
+    /// Every drop also logs, so the counter audits the total while the
+    /// log line carries the instance. A counter nobody reads is a wish;
+    /// the `FailOpen` test below reads this one.
+    #[must_use]
+    pub fn audit_drops(&self) -> u64 {
+        self.audit_drops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Restores that quarantined a torn tail.
+    ///
+    /// Bumped wherever the warning above fires, so the count and the log
+    /// agree and neither can drift from the other unnoticed.
+    #[must_use]
+    pub fn audit_quarantines(&self) -> u64 {
+        self.audit_quarantines
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Count one alarm drop and say so out loud.
+    ///
+    /// The counter audits the total while the log line carries the
+    /// instance: neither alone is the alarm, and the two are bumped
+    /// together so they cannot disagree.
+    fn note_audit_drop(&self, detail: &str) {
+        self.audit_drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("error: audit evidence dropped ({detail})");
     }
 
     /// Requests currently holding an instance.
@@ -1298,6 +1410,35 @@ fn buffer_overload(pool: &Pool, completion_rate: f64) -> Response {
     qqq_serve::response::from_error(&qqq_serve::response::error_response(&error, false))
 }
 
+/// The error for a request refused because its evidence could not persist
+/// (`F-09`, `FailClosed`).
+///
+/// `HostResourceExhausted` like the shed path: the guest did nothing wrong,
+/// the host cannot keep its evidence promise, and the client must retry
+/// rather than receive an answer that was never recorded.
+fn audit_persist_error(pool: &Pool, completion_rate: f64, detail: &str) -> Error {
+    Error::new(
+        ErrorCode::HostResourceExhausted,
+        format!("audit evidence could not be persisted: {detail}"),
+    )
+    .with_context(
+        "retry-after",
+        pool.retry_after_seconds(completion_rate).to_string(),
+    )
+    .with_remediation(
+        "retry the request; page the operator if 503s persist — the audit sink is down",
+    )
+}
+
+/// The 503 for a `FailClosed` audit refusal, shaped exactly like the shed
+/// 503: same error-to-response mapping, same `Retry-After`, returned as
+/// `Ok` for the same reason (the request was valid; reporting capacity
+/// as a guest bug would be the 502 misreport).
+fn audit_unavailable(pool: &Pool, completion_rate: f64, detail: &str) -> Response {
+    let error = audit_persist_error(pool, completion_rate, detail);
+    qqq_serve::response::from_error(&qqq_serve::response::error_response(&error, false))
+}
+
 // Release capacity during unwinding too; successful responses and traps share this guard.
 struct RequestPermit<'a> {
     pool: &'a Pool,
@@ -1470,50 +1611,84 @@ mod tests {
         GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
     }
 
-    /// **F-09 defect proof: a full audit stream does not stop the server.**
+    /// **F-09: a dead sink refuses with 503 and never runs the guest.**
     ///
-    /// After 65,536 rows the stream refuses, the handler ignores
-    /// `Append::Full` (a counter nobody pages on), and the request is
-    /// served normally — the trail ends mid-load and nobody is told.
-    /// F-09 makes sink-backed streams rings and adds `FailClosed` 503s;
-    /// this scenario is replaced then by the unwritable-sink test,
-    /// because a ring never fills.
+    /// `/dev/full` fails every write with `ENOSPC`, deterministically —
+    /// the disk-died-mid-run case without staging a dying disk. The first
+    /// request's persist fails after the guest ran (`FailClosed` turns the
+    /// response into 503); the worker is now failed, so the second
+    /// request is refused by the pre-flight with the guest unexecuted,
+    /// proven by the stream holding no new rows. Unix-only: there is no
+    /// always-failing device on Windows.
+    #[cfg(unix)]
     #[test]
-    fn f09_full_audit_stream_still_serves() {
-        let Some(app) = test_app() else {
+    fn f09_fail_closed_returns_503_without_running_the_guest() {
+        let Some(mut app) = test_app() else {
             return;
         };
-        {
-            let mut stream = app
-                .audit
+        app.attach_audit_file(std::path::Path::new("/dev/full"))
+            .expect("attach opens the device");
+        let first = app
+            .handle_request(
+                &head(qqq_serve::Method::Get, "/orders"),
+                None,
+                "test-tenant",
+            )
+            .expect("well-formed");
+        assert_eq!(
+            first.status, 503,
+            "an unpersistable request must 503, not serve over a hole"
+        );
+        let held = {
+            app.audit
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let component =
-                qqq_host::tenant::ComponentDigest::new("0011223344556677").expect("digest");
-            let grants = qqq_host::tenant::GrantDigest::new("aabbccdd").expect("digest");
-            for _ in 0..65_536 {
-                let _ = stream.record(
-                    None,
-                    &component,
-                    &grants,
-                    qqq_cap::capability::Capability::FsRead,
-                    "handle_request",
-                    qqq_host::Outcome::Granted,
-                );
-            }
-            assert_eq!(stream.len(), 65_536);
-        }
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        };
+        let second = app
+            .handle_request(
+                &head(qqq_serve::Method::Get, "/orders"),
+                None,
+                "test-tenant",
+            )
+            .expect("well-formed");
+        assert_eq!(second.status, 503, "the dead worker refuses up front");
+        assert_eq!(
+            app.audit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            held,
+            "the refused request ran no guest and recorded no rows"
+        );
+    }
+
+    /// **F-09: FailOpenWithAlarm serves and counts every drop.**
+    ///
+    /// Same dead device, but the operator chose availability: the
+    /// request serves, each drop logs, and the counter audits the total.
+    #[cfg(unix)]
+    #[test]
+    fn f09_fail_open_serves_and_counts_every_drop() {
+        let Some(mut app) = test_app() else {
+            return;
+        };
+        app.set_audit_failure_policy(qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm);
+        app.attach_audit_file(std::path::Path::new("/dev/full"))
+            .expect("attach opens the device");
         let response = app
             .handle_request(
                 &head(qqq_serve::Method::Get, "/orders"),
                 None,
                 "test-tenant",
             )
-            .expect("the request itself is well-formed");
-        assert_eq!(
+            .expect("well-formed");
+        assert_ne!(
             response.status, 503,
-            "a dead audit trail must refuse with 503, not serve over a silent record"
+            "FailOpen serves through a dead sink: {}",
+            response.status
         );
+        assert_eq!(app.audit_drops(), 1, "the drop is counted, not wished");
     }
 
     /// A request head, built the way `qqq-serve`'s parser builds one.
@@ -1673,15 +1848,39 @@ mod tests {
                 "replaying a served record must be accepted"
             );
         }
-        let replayed = replay.records();
-        assert_eq!(replayed.len(), records.len());
-        for (i, (served, again)) in records.iter().zip(replayed).enumerate() {
+        // **Verify each served row's chain from its own fields**, not by
+        // re-appending: re-recording assigns a fresh timestamp, so a
+        // re-recorded chain can never equal the served one (`F-09`
+        // timestamps are part of the digest). The claim under test is that
+        // the chain is a function of the row's contents — recomputing from
+        // the observed fields must reproduce it exactly — plus the link
+        // check, which an empty-stream verify would pass trivially
+        // (`§O-293`).
+        for (i, served) in records.iter().enumerate() {
+            let recomputed = qqq_host::AuditRecord::compute_chain_v2(&served.fields(), None);
             assert_eq!(
-                served.chain, again.chain,
+                served.chain, recomputed,
                 "record {i}: the chain the served path produced must be reproducible from the \
                  record's own fields -- otherwise the chain is not a function of its contents"
             );
         }
+        let mut replay = qqq_host::AuditStream::with_default_capacity();
+        for record in &records {
+            let append = replay.record(
+                record.tenant.as_ref(),
+                &record.component,
+                &record.grants,
+                record.capability,
+                record.function,
+                record.outcome,
+            );
+            assert!(
+                matches!(append, qqq_host::Append::Recorded(_)),
+                "replaying a served record must be accepted"
+            );
+        }
+        let replayed = replay.records();
+        assert_eq!(replayed.len(), records.len());
         assert!(
             replay.verify_chain().is_ok(),
             "the replayed chain must verify: {replay:?}",

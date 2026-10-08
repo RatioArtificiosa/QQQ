@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **audit**: the capability-use record format moved from v1 to v2
+  (`timestamp_unix_ms` on every row, HMAC-SHA-256 chain when
+  `--audit-hmac-key-file` is given). Old files keep verifying: the
+  reader accepts v1 rows (no timestamp, unkeyed chain) and v2 rows,
+  and refuses anything else rather than misreading it. New rows are
+  always v2. (`F-09`)
+
 ## v0.1.1 - 2026-10-05
 
 ### Security

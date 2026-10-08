@@ -913,7 +913,7 @@ pub fn require(
         } else {
             Outcome::Denied
         };
-        let _ = audit.record(c, function, outcome);
+        audit.record(c, function, outcome);
     }
     if granted {
         Ok(())
@@ -998,6 +998,20 @@ mod tests {
         assert!(require(&data, Capability::CryptoHash, "hash_data").is_ok());
         // Denied: it does not allow sql.query.
         assert!(require(&data, Capability::SqlQuery, "hash_data").is_err());
+
+        // Rows buffer request-locally until the commit: the seam test drives
+        // the same order the served path does (consult, then commit once),
+        // so the assertion reads committed rows, not a buffer.
+        let committed = data
+            .audit
+            .as_ref()
+            .expect("store carries a handle")
+            .commit();
+        assert_eq!(
+            committed.len(),
+            2,
+            "one row per consultation, granted or not"
+        );
 
         let s = stream.lock().expect("lock");
         let records = s.records();

@@ -114,6 +114,14 @@ use crate::tenant::{ComponentDigest, GrantDigest};
 /// durable storage on demand without a streaming protocol.
 pub const DEFAULT_CAPACITY: usize = 65_536;
 
+/// How many records a sink-backed stream keeps in memory (`F-09`).
+///
+/// The file is the source of truth, so memory keeps only a query window:
+/// large enough for in-process reads, small enough that a burst cannot
+/// turn the window into the heap-exhaustion vector the bound exists to
+/// prevent.
+pub const DEFAULT_RING_CAPACITY: usize = 4_096;
+
 /// The most recent record in the chain, as a digest.
 ///
 /// # Why the empty chain has a defined hash rather than `None`
@@ -248,6 +256,62 @@ pub struct AuditRecord {
     pub previous: String,
     /// This record's digest: `SHA-256` over every field above, in order.
     pub chain: String,
+    /// Milliseconds since the Unix epoch when the row was committed.
+    ///
+    /// `0` on v1 records, which predate timestamps. Covered by the chain
+    /// only at v2: a v1 digest cannot commit to a value that did not exist
+    /// when it was computed, and changing the v1 field set would break
+    /// every old file.
+    pub timestamp_unix_ms: u64,
+    /// The record format version: `1` (no timestamp, unkeyed chain) or `2`
+    /// (timestamped, HMAC when the stream holds a key).
+    ///
+    /// The verifier dispatches on this value, so a v2 binary still reads
+    /// the v1 fixture — and a v1-only reader refuses v2 rows rather than
+    /// misreading them.
+    pub v: u8,
+}
+
+/// The operator-supplied key for the v2 audit chain (`F-09`).
+///
+/// HMAC-SHA-256 over the record fields, keyed from outside the log
+/// directory (environment or secret store at attach time): anyone with
+/// write access to the file alone can no longer forge a row and recompute
+/// the chain. Without a key the v2 chain is plain SHA-256 — tamper-evident
+/// against accidents, not attackers — and the attach path says so loudly.
+/// Fixed test keys only, never production keys, including in tests.
+#[derive(Debug, Clone)]
+pub struct ChainKey([u8; 32]);
+
+impl ChainKey {
+    /// Parse 64 lowercase hex characters into a key.
+    ///
+    /// # Errors
+    ///
+    /// Anything else: wrong length, non-hex, or uppercase (canonical form
+    /// only, so two spellings of one key cannot drift apart in config).
+    ///
+    /// ```
+    /// use qqq_host::audit::ChainKey;
+    ///
+    /// assert!(ChainKey::from_hex(&"ab".repeat(32)).is_ok());
+    /// assert!(ChainKey::from_hex("too short").is_err());
+    /// ```
+    pub fn from_hex(hex: &str) -> Result<Self, String> {
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("an audit chain key is 64 hexadecimal characters (32 bytes)".to_owned());
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let text = std::str::from_utf8(chunk).map_err(|_| "non-UTF-8 key".to_owned())?;
+            bytes[i] = u8::from_str_radix(text, 16).map_err(|_| "non-hex key".to_owned())?;
+        }
+        Ok(Self(bytes))
+    }
 }
 
 /// The fields a record's digest covers, as one named value.
@@ -278,6 +342,10 @@ pub struct AuditFields<'a> {
     pub outcome: Outcome,
     /// The digest of the preceding record.
     pub previous: &'a str,
+    /// Milliseconds since the Unix epoch. Covered by the chain at v2 only;
+    /// [`AuditRecord::compute_chain`] (v1) ignores it, because the v1 field
+    /// set is frozen by every file already written.
+    pub timestamp_unix_ms: u64,
 }
 
 impl AuditRecord {
@@ -293,6 +361,7 @@ impl AuditRecord {
             function: self.function,
             outcome: self.outcome,
             previous: &self.previous,
+            timestamp_unix_ms: self.timestamp_unix_ms,
         }
     }
 }
@@ -330,6 +399,33 @@ impl AuditRecord {
         hex(&h.finalize())
     }
 
+    /// Compute the v2 digest: the v1 field set plus the timestamp, keyed.
+    ///
+    /// With a [`ChainKey`] this is HMAC-SHA-256, so a row cannot be forged
+    /// without the key; without one it is plain SHA-256 over the same
+    /// encoding — tamper-evident against accidents, not attackers, and the
+    /// attach path says which of the two a deployment has. Either way the
+    /// length-prefixed encoding stays injective, and the timestamp is the
+    /// last field fed, so a v1 digest can never equal a v2 digest of the
+    /// same row.
+    #[must_use]
+    pub fn compute_chain_v2(fields: &AuditFields<'_>, key: Option<&ChainKey>) -> String {
+        let mut message = Vec::new();
+        field_bytes(&mut message, &fields.sequence.to_string());
+        field_bytes(&mut message, fields.tenant.map_or("", TenantId::as_str));
+        field_bytes(&mut message, fields.component.as_str());
+        field_bytes(&mut message, fields.grants.as_str());
+        field_bytes(&mut message, fields.capability.name());
+        field_bytes(&mut message, fields.function);
+        field_bytes(&mut message, fields.outcome.as_str());
+        field_bytes(&mut message, fields.previous);
+        field_bytes(&mut message, &fields.timestamp_unix_ms.to_string());
+        match key {
+            Some(chain_key) => hex(&hmac_sha256(&chain_key.0, &message)),
+            None => hex(&Sha256::digest(&message)),
+        }
+    }
+
     /// Render one record as a JSON object.
     ///
     /// # Why hand-written rather than `serde`
@@ -347,7 +443,8 @@ impl AuditRecord {
         format!(
             "{{\"sequence\":{},\"tenant\":{},\"component\":\"{}\",\
              \"grants\":\"{}\",\"capability\":\"{}\",\"function\":\"{}\",\
-             \"outcome\":\"{}\",\"previous\":\"{}\",\"chain\":\"{}\"}}",
+             \"outcome\":\"{}\",\"previous\":\"{}\",\"chain\":\"{}\",\
+             \"timestamp_unix_ms\":{},\"v\":{}}}",
             self.sequence,
             tenant,
             self.component.as_str(),
@@ -357,6 +454,8 @@ impl AuditRecord {
             self.outcome.as_str(),
             self.previous,
             self.chain,
+            self.timestamp_unix_ms,
+            self.v,
         )
     }
 }
@@ -536,6 +635,36 @@ impl AuditRecord {
         let chain = json_string_field(json, "chain")
             .ok_or_else(|| "an audit record must carry its `chain` digest".to_owned())?;
 
+        // The version dispatch: absent `v` is a v1 record, which also lacks
+        // `timestamp_unix_ms` and reads it as zero. A present `v` must be a
+        // version this binary verifies (1 or 2); anything else is refused
+        // rather than read under the wrong field set. A v2 record without
+        // its timestamp is malformed, not v1 — and a row carrying a
+        // timestamp but no version is a torn write, not a v1 row: genuine
+        // v1 rows have neither key, so the combination can only be a tail
+        // cut between the two fields, and reading it as v1 would pass a
+        // corrupt row to chain verification instead of quarantining it.
+        let v = json_u64_field(json, "v").unwrap_or(1);
+        if v != 1 && v != 2 {
+            return Err(format!(
+                "`v` {v} is not a record version this build verifies; refusing rather than \
+                 reading the row under the wrong field set"
+            ));
+        }
+        if v == 1 && json.contains("\"timestamp_unix_ms\":") {
+            return Err(
+                "a row with `timestamp_unix_ms` but no `v` is a torn write, not a v1 row; \
+                 refusing rather than verifying it under the wrong field set"
+                    .to_owned(),
+            );
+        }
+        let timestamp_unix_ms = if v == 1 {
+            0
+        } else {
+            json_u64_field(json, "timestamp_unix_ms")
+                .ok_or_else(|| "a v2 audit record must carry `timestamp_unix_ms`".to_owned())?
+        };
+
         Ok(Self {
             sequence,
             tenant,
@@ -546,6 +675,8 @@ impl AuditRecord {
             outcome,
             previous,
             chain,
+            timestamp_unix_ms,
+            v: u8::try_from(v).map_err(|_| "record version out of range".to_owned())?,
         })
     }
 }
@@ -554,6 +685,52 @@ impl AuditRecord {
 fn field(h: &mut Sha256, value: &str) {
     h.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     h.update(value.as_bytes());
+}
+
+/// Append one length-prefixed field to a canonical message buffer.
+///
+/// The same encoding [`field`] feeds the hasher, so keyed and unkeyed v2
+/// rows differ only in the key, never in the field layout a verifier
+/// must agree on.
+fn field_bytes(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+
+/// HMAC-SHA-256 over raw bytes, per FIPS 198.
+///
+/// A key longer than the 64-byte block is hashed first; a shorter one is
+/// zero-padded — the two cases the RFC 4231 vectors below pin. Built from
+/// the pinned `sha2` rather than the `hmac` crate: the crate's key API
+/// returns a `Result` that is infallible for HMAC, and an `expect` on an
+/// infallible path is exactly what `F-21` removed everywhere else.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(xor_block(&block, 0x36));
+    inner.update(message);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(xor_block(&block, 0x5c));
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+/// One HMAC pad block over the full 64-byte key block, per FIPS 198.
+///
+/// Pinned by the RFC 4231 vectors in the tests, which fail if either pad
+/// is wrong.
+fn xor_block(block: &[u8; 64], pad: u8) -> [u8; 64] {
+    let mut padded = [pad; 64];
+    for (i, byte) in block.iter().enumerate() {
+        padded[i] ^= byte;
+    }
+    padded
 }
 
 /// Lowercase hex of a digest.
@@ -697,6 +874,31 @@ pub struct AuditHandle {
     component: ComponentDigest,
     grants: GrantDigest,
     tenant: Option<TenantId>,
+    /// This request's rows, unsequenced until [`Self::commit`].
+    ///
+    /// Buffered rather than appended so one request's persist is exactly
+    /// its own rows: the old floor-slice copied every row appended since
+    /// the request started — including concurrent requests' rows, growing
+    /// with concurrency — while under-sending was impossible only because
+    /// the stream never shrank. Shared because the handle is cloned into
+    /// the per-request options while the request path keeps its own copy
+    /// for the commit.
+    pending: std::sync::Arc<std::sync::Mutex<Vec<PendingRow>>>,
+}
+
+/// One capability use before it has a sequence number or a chain link.
+///
+/// Sequencing happens once, in [`AuditHandle::commit`], under a single
+/// lock hold: the global order is the commit order, and a row is never
+/// half-written.
+#[derive(Debug, Clone)]
+struct PendingRow {
+    tenant: Option<TenantId>,
+    component: ComponentDigest,
+    grants: GrantDigest,
+    capability: Capability,
+    function: &'static str,
+    outcome: Outcome,
 }
 
 impl AuditHandle {
@@ -731,43 +933,136 @@ impl AuditHandle {
             component,
             grants,
             tenant,
+            pending: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
-    /// Append one capability use.
+    /// Buffer one capability use for this request.
     ///
-    /// Returns the [`Append`] result so a caller can tell a recorded row from a refused one. It is
-    /// **not** `#[must_use]`: a host function that has already decided to proceed must not fail
-    /// because the record could not be written, and `Append::Full` increments the stream's own
-    /// `refused` counter, so a full stream is visible in the report rather than only here.
-    /// # Why this is `pub(crate)`
+    /// Sequencing is deferred to [`Self::commit`]: the row joins the
+    /// chain once, in commit order, under one lock hold — never
+    /// half-written, never sliced out of a shared buffer with other
+    /// requests' rows. Returns nothing: the sequence does not exist
+    /// until the commit assigns it, and inventing one here would be the
+    /// lie the old floor-slice told.
+    /// # Who may call this
     ///
-    /// Because the only caller is [`crate::ambient::require`], in this crate. A caller outside it
-    /// would be recording a capability it *guessed at* rather than one it consulted, which is
-    /// exactly the defect `OBS-001` closed — so the visibility is the guard as well as a way to
-    /// stop publishing a method nobody should use (`§O-298`).
-    pub(crate) fn record(
-        &self,
-        capability: Capability,
-        function: &'static str,
-        outcome: Outcome,
-    ) -> Append {
+    /// The served request path (buffering) and [`crate::ambient::require`]
+    /// (the seam that observes the capability use). A caller recording a
+    /// capability it guessed at rather than one it consulted repeats the
+    /// defect `OBS-001` closed — so the documented caller set is the
+    /// guard, not just the visibility.
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditHandle, AuditStream};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::Outcome;
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let stream = Arc::new(Mutex::new(AuditStream::with_default_capacity()));
+    /// let handle = AuditHandle::new(
+    ///     Arc::clone(&stream),
+    ///     ComponentDigest::new("0011223344556677").expect("digest"),
+    ///     GrantDigest::new("aabbccdd").expect("digest"),
+    ///     None,
+    /// );
+    /// handle.record(Capability::FsRead, "handle_request", Outcome::Granted);
+    /// assert_eq!(stream.lock().expect("lock").len(), 0, "buffering writes nothing yet");
+    /// let rows = handle.commit();
+    /// assert_eq!(rows.len(), 1, "the commit assigns the sequence");
+    /// assert_eq!(rows[0].sequence, 1);
+    /// ```
+    pub fn record(&self, capability: Capability, function: &'static str, outcome: Outcome) {
         debug_assert!(
             RECORDED_FUNCTIONS.contains(&function),
             "`{function}` is not in RECORDED_FUNCTIONS; add it there and to the round-trip test"
         );
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.push(PendingRow {
+            tenant: self.tenant.clone(),
+            component: self.component.clone(),
+            grants: self.grants.clone(),
+            capability,
+            function,
+            outcome,
+        });
+    }
+
+    /// Commit this request's buffered rows in one locked operation.
+    ///
+    /// Returns the committed rows with their sequences, in commit order —
+    /// exactly what the caller persists, so a persist set can never hold
+    /// another request's rows or miss one of its own. A bounded stream
+    /// that is full drops the overflow loudly (the refused counter, as
+    /// before); a ring never drops.
+    ///
+    /// # Who may call this
+    ///
+    /// The holder of the handle: each request commits its own rows once.
+    /// A second commit finds the buffer empty and returns nothing — commit
+    /// drains, so rows cannot be committed twice.
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditHandle, AuditStream};
+    /// use qqq_host::tenant::{ComponentDigest, GrantDigest};
+    /// use qqq_cap::capability::Capability;
+    /// use qqq_host::audit::Outcome;
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let stream = Arc::new(Mutex::new(AuditStream::with_default_capacity()));
+    /// let handle = AuditHandle::new(
+    ///     Arc::clone(&stream),
+    ///     ComponentDigest::new("0011223344556677").expect("digest"),
+    ///     GrantDigest::new("aabbccdd").expect("digest"),
+    ///     None,
+    /// );
+    /// handle.record(Capability::FsRead, "handle_request", Outcome::Granted);
+    /// let rows = handle.commit();
+    /// assert_eq!(rows.len(), 1);
+    /// assert!(handle.commit().is_empty(), "a second commit finds nothing");
+    /// ```
+    pub fn commit(&self) -> Vec<AuditRecord> {
+        let rows: Vec<PendingRow> = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *pending)
+        };
+        if rows.is_empty() {
+            return Vec::new();
+        }
         let mut stream = self
             .stream
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        stream.record(
-            self.tenant.as_ref(),
-            &self.component,
-            &self.grants,
-            capability,
-            function,
-            outcome,
-        )
+        let mut committed = Vec::with_capacity(rows.len());
+        for row in rows {
+            match stream.record(
+                row.tenant.as_ref(),
+                &row.component,
+                &row.grants,
+                row.capability,
+                row.function,
+                row.outcome,
+            ) {
+                Append::Recorded(_) => {
+                    if let Some(last) = stream.records().last() {
+                        committed.push(last.clone());
+                    }
+                }
+                Append::Full => {
+                    // Bounded stream, counted loudly inside `record`.
+                    // The row is dropped here rather than half-chained:
+                    // a sequence gap is visible, a forged link is not.
+                }
+            }
+        }
+        committed
     }
 
     /// Read every recorded capability use, for a caller with a reason to look.
@@ -797,9 +1092,39 @@ impl AuditHandle {
 #[derive(Debug)]
 pub struct AuditStream {
     capacity: usize,
+    /// Sink-backed streams evict the oldest row instead of refusing: the
+    /// file is the source of truth and memory keeps only a query window.
+    /// Pure-memory streams refuse at capacity and stay auditable as
+    /// "not evidence".
+    ring: bool,
     records: Vec<AuditRecord>,
     counters: AppendCounters,
     head: String,
+    /// The next sequence number to assign: one past the highest assigned,
+    /// across evictions and resumes — never the in-memory length, which a
+    /// turned-over ring or a resumed file would restart at the wrong place.
+    next: u64,
+    /// The digest the oldest retained record must chain from. Genesis for
+    /// a fresh or fully-resumed stream; the evicted row's chain once a
+    /// ring has turned over — without it the first retained row could
+    /// never verify.
+    base: String,
+    /// The v2 chain key, when the operator supplied one. `None` writes
+    /// unkeyed v2 rows (timestamps, plain hash); v1 rows verify without
+    /// any key either way.
+    key: Option<ChainKey>,
+}
+
+/// Milliseconds since the Unix epoch, saturating on clock error.
+///
+/// A clock before 1970 or an unreadable one must not stall evidence: the
+/// row carries a wrong-but-present timestamp rather than no row, and the
+/// chain still commits to whatever value was written.
+fn now_unix_ms() -> u64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 impl AuditStream {
@@ -823,10 +1148,54 @@ impl AuditStream {
         }
         Ok(Self {
             capacity,
+            ring: false,
             records: Vec::new(),
             counters: AppendCounters::default(),
             head: genesis_digest(),
+            base: genesis_digest(),
+            next: 1,
+            key: None,
         })
+    }
+
+    /// A sink-backed stream: at capacity the oldest row is evicted instead
+    /// of the append refused, so `Append::Full` cannot occur and the file
+    /// stays the source of truth while memory keeps a query window.
+    ///
+    /// # Errors
+    ///
+    /// The same zero-capacity refusal as [`Self::new`]: a ring of nothing
+    /// evicts everything, which is refusal with extra steps.
+    ///
+    /// ```
+    /// use qqq_host::audit::AuditStream;
+    ///
+    /// assert!(AuditStream::new_ring(0).is_err(), "a ring of nothing refuses");
+    /// assert!(AuditStream::new_ring(8).is_ok());
+    /// ```
+    pub fn new_ring(capacity: usize) -> Result<Self, String> {
+        let mut stream = Self::new(capacity)?;
+        stream.ring = true;
+        Ok(stream)
+    }
+
+    /// Attach the v2 chain key this stream writes with.
+    ///
+    /// Builder rather than a constructor argument because every existing
+    /// call site constructs unkeyed streams, and the key is an operator
+    /// decision that arrives separately from the capacity one.
+    ///
+    /// ```
+    /// use qqq_host::audit::{AuditStream, ChainKey};
+    ///
+    /// let key = ChainKey::from_hex(&"07".repeat(32)).expect("canonical hex");
+    /// let keyed = AuditStream::with_default_capacity().with_chain_key(key);
+    /// assert!(keyed.verify_chain().is_ok(), "an empty stream verifies either way");
+    /// ```
+    #[must_use]
+    pub fn with_chain_key(mut self, key: ChainKey) -> Self {
+        self.key = Some(key);
+        self
     }
 
     /// A stream at the default capacity.
@@ -895,14 +1264,72 @@ impl AuditStream {
             .last()
             .map_or_else(genesis_digest, |r| r.chain.clone());
         let recorded = u64::try_from(records.len()).unwrap_or(u64::MAX);
+        let next = recorded + 1;
         let stream = Self {
             capacity,
+            ring: false,
             records,
             counters: AppendCounters {
                 recorded,
                 refused: 0,
             },
             head,
+            base: genesis_digest(),
+            next,
+            key: None,
+        };
+        if let Err((sequence, reason)) = stream.verify_chain() {
+            return Err(format!(
+                "refusing to resume a broken chain: record {sequence} does not verify -- {reason}"
+            ));
+        }
+        Ok(stream)
+    }
+
+    /// Resume keeping only the newest `capacity` rows, for sink-backed rings.
+    ///
+    /// The file holds the full history; memory keeps a query window. The
+    /// base becomes the chain of the last evicted row (genesis when nothing
+    /// was evicted), so the retained window still verifies. Rows older than
+    /// the window are an operator rotation decision the file already made
+    /// by existing — not something this call absorbs silently.
+    ///
+    /// # Errors
+    ///
+    /// The same broken-chain refusal as [`Self::resume`], checked over the
+    /// retained window.
+    pub(crate) fn resume_ring(records: Vec<AuditRecord>, capacity: usize) -> Result<Self, String> {
+        if capacity == 0 {
+            return Err(
+                "an audit stream must hold at least one record; a zero-capacity stream refuses \
+                 every append while reporting itself healthy"
+                    .to_owned(),
+            );
+        }
+        let evicted = records.len().saturating_sub(capacity);
+        let base = if evicted == 0 {
+            genesis_digest()
+        } else {
+            records
+                .get(evicted - 1)
+                .map_or_else(genesis_digest, |r| r.chain.clone())
+        };
+        let kept: Vec<AuditRecord> = records.into_iter().skip(evicted).collect();
+        let head = kept.last().map_or_else(genesis_digest, |r| r.chain.clone());
+        let recorded = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+        let next = kept.last().map_or(1, |r| r.sequence.saturating_add(1));
+        let stream = Self {
+            capacity,
+            ring: true,
+            records: kept,
+            counters: AppendCounters {
+                recorded,
+                refused: 0,
+            },
+            head,
+            base,
+            next,
+            key: None,
         };
         if let Err((sequence, reason)) = stream.verify_chain() {
             return Err(format!(
@@ -914,8 +1341,10 @@ impl AuditStream {
 
     /// Record one capability use.
     ///
-    /// Returns [`Append::Full`] when the capacity is reached; see the module
-    /// docs for why refusing beats overwriting.
+    /// Returns [`Append::Full`] when a bounded stream is at capacity; a
+    /// ring stream evicts the oldest row instead and never refuses — see
+    /// the module docs for why refusing beats overwriting, and why the
+    /// sink-backed exception exists.
     pub fn record(
         &mut self,
         tenant: Option<&TenantId>,
@@ -926,20 +1355,31 @@ impl AuditStream {
         outcome: Outcome,
     ) -> Append {
         if self.records.len() >= self.capacity {
-            self.counters.refused += 1;
-            return Append::Full;
+            if self.ring {
+                let evicted = self.records.remove(0);
+                self.base.clone_from(&evicted.chain);
+            } else {
+                self.counters.refused += 1;
+                return Append::Full;
+            }
         }
-        let sequence = self.records.len() as u64 + 1;
-        let chain = AuditRecord::compute_chain(&AuditFields {
-            sequence,
-            tenant,
-            component,
-            grants,
-            capability,
-            function,
-            outcome,
-            previous: &self.head,
-        });
+        let sequence = self.next;
+        self.next += 1;
+        let timestamp_unix_ms = now_unix_ms();
+        let chain = AuditRecord::compute_chain_v2(
+            &AuditFields {
+                sequence,
+                tenant,
+                component,
+                grants,
+                capability,
+                function,
+                outcome,
+                previous: &self.head,
+                timestamp_unix_ms,
+            },
+            self.key.as_ref(),
+        );
         self.records.push(AuditRecord {
             sequence,
             tenant: tenant.cloned(),
@@ -950,6 +1390,8 @@ impl AuditStream {
             outcome,
             previous: self.head.clone(),
             chain: chain.clone(),
+            timestamp_unix_ms,
+            v: 2,
         });
         self.head = chain;
         self.counters.recorded += 1;
@@ -1003,11 +1445,18 @@ impl AuditStream {
     /// link to its predecessor, or a digest that does not match the record's
     /// own fields.
     ///
+    /// # Version dispatch and the base
+    ///
+    /// Each row verifies under its own `v`: v1 rows hash the frozen v1 field
+    /// set without a key, v2 rows hash with timestamp and the stream's key.
+    /// The first retained row chains from [`Self::base`] rather than always
+    /// from genesis, so a turned-over ring still verifies its window.
+    ///
     /// # Errors
     ///
     /// Returns `(sequence, reason)` for the first record that fails.
     pub fn verify_chain(&self) -> Result<(), (u64, String)> {
-        let mut expected_previous = genesis_digest();
+        let mut expected_previous = self.base.clone();
         for record in &self.records {
             if record.previous != expected_previous {
                 return Err((
@@ -1019,7 +1468,19 @@ impl AuditStream {
                     ),
                 ));
             }
-            let recomputed = AuditRecord::compute_chain(&record.fields());
+            let recomputed = match record.v {
+                1 => AuditRecord::compute_chain(&record.fields()),
+                2 => AuditRecord::compute_chain_v2(&record.fields(), self.key.as_ref()),
+                other => {
+                    return Err((
+                        record.sequence,
+                        format!(
+                            "record {} declares version {other}, which this build does not verify",
+                            record.sequence
+                        ),
+                    ));
+                }
+            };
             if recomputed != record.chain {
                 return Err((
                     record.sequence,
@@ -1332,6 +1793,7 @@ mod tests {
             function,
             outcome,
             previous,
+            timestamp_unix_ms: 0,
         })
     }
 
@@ -1346,6 +1808,7 @@ mod tests {
             function: "read",
             outcome: Outcome::Granted,
             previous,
+            timestamp_unix_ms: 0,
         }
     }
 
@@ -1361,6 +1824,26 @@ mod tests {
             "read",
             outcome,
         )
+    }
+
+    /// A scratch directory removed on drop, so a failing test leaves nothing
+    /// behind. Declared at module level because items after statements
+    /// confuse readers about what exists when.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("qqq-f09-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     // -- Construction -----------------------------------------------------
@@ -1544,6 +2027,7 @@ mod tests {
             function: "read",
             outcome: Outcome::Granted,
             previous: &genesis_digest(),
+            timestamp_unix_ms: 0,
         });
         let other_tenant = tenant("globex");
         let other_component = ComponentDigest::new("ffeeddcc").expect("digest");
@@ -1563,6 +2047,7 @@ mod tests {
                     function: "read",
                     outcome: Outcome::Granted,
                     previous: &genesis,
+                    timestamp_unix_ms: 0,
                 }
             }),
             // tenant
@@ -1663,6 +2148,7 @@ mod tests {
                 function: "read",
                 outcome: Outcome::Granted,
                 previous: "p",
+                timestamp_unix_ms: 0,
             })
         };
         let a = split("ab", "c");
@@ -2012,15 +2498,15 @@ mod tests {
         assert_eq!(s.capacity(), DEFAULT_CAPACITY);
     }
 
-    /// **F-09 defect proof: a full stream stops the evidence record.**
+    /// **F-09 retained contract: a bounded pure-memory stream still refuses.**
     ///
-    /// The audit trail ends after `capacity` rows while the server keeps
-    /// serving — with ~2 rows per request that is minutes under load, and
-    /// the only trace is a counter. F-09 replaces refusal with a
-    /// sink-backed ring; this test is rewritten then (a bounded
-    /// pure-memory stream keeps refusing, and keeps this shape).
+    /// The defect was that *every* stream refused — including the
+    /// sink-backed one, whose file is the source of truth. Sink-backed
+    /// streams are rings now (`new_ring`, never `Full`); a bounded
+    /// pure-memory stream keeps refusing past capacity, loudly counted,
+    /// and documents itself as not evidence.
     #[test]
-    fn f09_full_stream_stops_the_record() {
+    fn f09_bounded_stream_refuses_past_capacity() {
         let mut stream = stream(8);
         for i in 0..10u64 {
             let appended = stream.record(
@@ -2031,21 +2517,103 @@ mod tests {
                 "handle_request",
                 Outcome::Granted,
             );
-            assert!(
-                matches!(appended, Append::Recorded(_)),
-                "record {i} was refused past capacity: the trail ends here"
-            );
+            if i < 8 {
+                assert!(
+                    matches!(appended, Append::Recorded(_)),
+                    "record {i} must fit"
+                );
+            } else {
+                assert_eq!(
+                    appended,
+                    Append::Full,
+                    "a bounded stream refuses past capacity rather than overwriting"
+                );
+            }
         }
+        assert!(stream.counters().has_gaps());
     }
 
-    /// **F-09 defect proof: records carry no time.**
+    /// **F-09: a sink-backed ring never refuses, and the file stays truth.**
     ///
-    /// A row without a timestamp cannot be correlated with anything else.
-    /// F-09 adds `timestamp_unix_ms` covered by the chain; this assertion
-    /// becomes the tamper-detection test then.
+    /// 70,000 rows through a ring of 8: every append recorded, the file
+    /// holding every row in order, the chain verifying over the file, and
+    /// the in-memory window holding exactly the last 8 with contiguous
+    /// sequences.
+    #[test]
+    fn f09_sink_backed_stream_never_refuses_after_capacity() {
+        let dir = TempDir::new("ring");
+        let path = dir.0.join("audit.jsonl");
+        let mut stream = AuditStream::new_ring(8).expect("ring");
+        let mut file = crate::audit_sink::AuditFile::open(&path, 0).expect("open");
+        for i in 0..70_000u64 {
+            let appended = stream.record(
+                None,
+                &component(),
+                &grants(),
+                Capability::FsRead,
+                "handle_request",
+                Outcome::Granted,
+            );
+            assert!(
+                matches!(appended, Append::Recorded(_)),
+                "record {i} was refused by a sink-backed stream"
+            );
+            let rows = stream.records();
+            file.append(&rows[rows.len() - 1]).expect("file append");
+        }
+        drop(file);
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .lines()
+                .count(),
+            70_000,
+            "the file holds every row"
+        );
+        let (resumed, _) =
+            crate::audit_sink::resume_or_start(&path, 70_000).expect("resume verifies");
+        assert!(resumed.verify_chain().is_ok());
+        assert_eq!(stream.len(), 8, "memory keeps only the window");
+        let first = stream.records()[0].sequence;
+        assert_eq!(first, 69_993, "sequences stay global across eviction");
+        assert!(stream.verify_chain().is_ok(), "the window verifies");
+    }
+
+    /// **F-09: v1 records still verify after the format change.**
+    ///
+    /// The fixture was written by the pre-change binary and committed
+    /// before the format moved: if this fails, the v2 work broke the
+    /// promise that old evidence keeps reading.
+    #[test]
+    fn f09_v1_records_still_verify() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("audit-v1.jsonl");
+        let text = std::fs::read_to_string(&path).expect("v1 fixture");
+        let mut records = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record =
+                AuditRecord::from_json(line).unwrap_or_else(|e| panic!("v1 line {i}: {e}"));
+            assert_eq!(record.v, 1, "the fixture is v1");
+            records.push(record);
+        }
+        assert_eq!(records.len(), 10, "the fixture holds ten rows");
+        let stream = AuditStream::resume(records, 1024).expect("v1 resumes");
+        assert!(stream.verify_chain().is_ok());
+    }
+
+    /// **F-09: records carry timestamps, and the chain covers them.**
+    ///
+    /// The timestamp is within tolerance of now, and editing it in the
+    /// persisted line breaks verification — a row whose time can be
+    /// rewritten without detection cannot be correlated with anything.
     #[test]
     fn f09_records_carry_timestamps_covered_by_the_chain() {
-        let mut stream = stream(8);
+        let mut stream = AuditStream::new_ring(8).expect("ring");
         let _ = stream.record(
             None,
             &component(),
@@ -2054,65 +2622,116 @@ mod tests {
             "handle_request",
             Outcome::Granted,
         );
-        let json = stream.records()[0].to_json();
+        let row = &stream.records()[0];
+        assert_eq!(row.v, 2);
+        let now = now_unix_ms();
         assert!(
-            json.contains("\"timestamp_unix_ms\":"),
-            "the row carries no timestamp: {json}"
+            row.timestamp_unix_ms <= now && now - row.timestamp_unix_ms < 5_000,
+            "timestamp {} is not within 5 s of now {now}",
+            row.timestamp_unix_ms
+        );
+        let mut tampered = row.to_json();
+        let needle = format!("\"timestamp_unix_ms\":{}", row.timestamp_unix_ms);
+        tampered = tampered.replace(&needle, "\"timestamp_unix_ms\":1");
+        assert_ne!(tampered, row.to_json());
+        let parsed = AuditRecord::from_json(&tampered).expect("still parses");
+        assert!(
+            AuditStream::resume(vec![parsed], 8).is_err(),
+            "an edited timestamp must break the chain"
         );
     }
 
-    /// **F-09 fixture generator: freeze the v1 record format before it changes.**
+    /// **F-09: HMAC-SHA-256 matches the RFC 4231 vectors.**
     ///
-    /// Run explicitly (`cargo test -p qqq-host --lib f09_generate_v1_fixture
-    /// -- --ignored --exact --nocapture`): writes ten records through the
-    /// CURRENT `to_json` to `crates/qqq-host/tests/fixtures/audit-v1.jsonl`
-    /// (`.jsonl`, because `*.log` is gitignored and the fixture must be
-    /// committed). Ignored by default so no routine run rewrites it; the committed file
-    /// is the format the v2 verifier must still accept. Deleted once F-09
-    /// lands — its job is done and a stale generator would write v2 over
-    /// the v1 it exists to protect.
+    /// The construction is built from the pinned `sha2` rather than a
+    /// crate, so the vectors are the proof: case 1 (short key, short
+    /// data) and case 2 (short key, longer data).
     #[test]
-    #[ignore = "explicit fixture generation only; never part of a green run"]
-    fn f09_generate_v1_fixture() {
-        let mut stream = AuditStream::with_default_capacity();
-        let outcomes = [
-            Outcome::Granted,
-            Outcome::Failed,
-            Outcome::Denied,
-            Outcome::Attempted,
-        ];
-        for i in 0..10u64 {
-            let tenant = if i % 2 == 0 {
-                Some(tenant("acme"))
-            } else {
-                None
-            };
-            let appended = stream.record(
-                tenant.as_ref(),
-                &component(),
-                &grants(),
-                Capability::FsRead,
-                "handle_request",
-                outcomes[usize::try_from(i).expect("small") % outcomes.len()],
-            );
-            assert_eq!(appended, Append::Recorded(i + 1));
-        }
-        assert!(stream.verify_chain().is_ok());
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures");
-        std::fs::create_dir_all(&dir).expect("fixture dir");
-        let path = dir.join("audit-v1.jsonl");
-        let mut out = String::new();
-        for record in stream.records() {
-            out.push_str(&record.to_json());
-            out.push('\n');
-        }
-        std::fs::write(&path, &out).expect("fixture write");
-        println!(
-            "wrote {} records to {}",
-            stream.records().len(),
-            path.display()
+    fn f09_hmac_matches_rfc_4231_vectors() {
+        // Case 1: key 20 x 0x0b, data "Hi There".
+        assert_eq!(
+            hex(&hmac_sha256(&[0x0bu8; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
+        // Case 2: key "Jefe", data "what do ya want for nothing?".
+        assert_eq!(
+            hex(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // The chain keys participate: same fields under two keys differ,
+        // and determinism holds under one key.
+        let fields = AuditFields {
+            sequence: 1,
+            tenant: None,
+            component: &COMPONENT,
+            grants: &GRANTS,
+            capability: Capability::FsRead,
+            function: "read",
+            outcome: Outcome::Granted,
+            previous: &genesis_digest(),
+            timestamp_unix_ms: 0,
+        };
+        let key1 = ChainKey([0x0bu8; 32]);
+        let key2 = ChainKey([0x07u8; 32]);
+        let keyed = AuditRecord::compute_chain_v2(&fields, Some(&key1));
+        assert_ne!(
+            keyed,
+            AuditRecord::compute_chain_v2(&fields, None),
+            "the key must participate in the digest"
+        );
+        assert_eq!(keyed, AuditRecord::compute_chain_v2(&fields, Some(&key1)));
+        assert_ne!(
+            keyed,
+            AuditRecord::compute_chain_v2(&fields, Some(&key2)),
+            "a row chained under another key does not verify here"
+        );
+    }
+
+    /// **F-09: chain keys parse canonically or not at all.**
+    #[test]
+    fn f09_chain_key_parses_canonical_hex_only() {
+        assert!(ChainKey::from_hex(&"ab".repeat(32)).is_ok());
+        assert!(
+            ChainKey::from_hex(&"AB".repeat(32)).is_err(),
+            "uppercase rejected"
+        );
+        assert!(ChainKey::from_hex("abcd").is_err(), "short rejected");
+        assert!(
+            ChainKey::from_hex(&"zz".repeat(32)).is_err(),
+            "non-hex rejected"
+        );
+    }
+
+    /// **F-09: one handle commits exactly its own rows.**
+    ///
+    /// Two handles interleave records on one stream; each commit returns
+    /// only its own rows, in order, with contiguous global sequences —
+    /// the property the floor-slice could never give.
+    #[test]
+    fn f09_request_rows_are_committed_per_request() {
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            AuditStream::new_ring(64).expect("ring"),
+        ));
+        let first = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
+        let second = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
+        first.record(Capability::FsRead, "handle_request", Outcome::Granted);
+        second.record(Capability::FsWrite, "handle_request", Outcome::Granted);
+        first.record(Capability::FsRead, "handle_request", Outcome::Failed);
+        let a = first.commit();
+        let b = second.commit();
+        assert_eq!(a.len(), 2, "first handle commits its two rows");
+        assert_eq!(b.len(), 1, "second handle commits its one row");
+        assert!(
+            a.iter().all(|row| row.capability == Capability::FsRead),
+            "no row from the other handle rides along"
+        );
+        assert_eq!(b[0].capability, Capability::FsWrite);
+        assert_eq!(
+            a[0].sequence + 1,
+            a[1].sequence,
+            "own rows keep commit order"
+        );
+        let guard = stream.lock().expect("lock");
+        assert!(guard.verify_chain().is_ok());
     }
 }

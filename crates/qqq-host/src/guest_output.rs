@@ -779,7 +779,19 @@ impl Escaper {
                     self.since_break += 2;
                 }
                 0x00..=0x1f | 0x7f => {
-                    sink.push(format!("\\x{byte:02x}").as_bytes());
+                    // Stack-assembled, never formatted: `format!` here would
+                    // heap-allocate per control byte in both the probe and the
+                    // real write — bounded scratch, but gratuitous on the path
+                    // whose whole point is allocation discipline. Lowercase hex
+                    // matches the previous `{:02x}` output byte for byte.
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    let escaped = [
+                        b'\\',
+                        b'x',
+                        HEX[usize::from(byte >> 4)],
+                        HEX[usize::from(byte & 0x0f)],
+                    ];
+                    sink.push(&escaped);
                     self.since_break += 4;
                 }
                 _ => {
@@ -2199,6 +2211,19 @@ mod tests {
             escaper.run(&input, &mut out);
             assert_eq!(predicted, out.len(), "seed {seed}");
         }
+    }
+
+    /// **F-07: control escapes are lowercase hex, stack-built.**
+    ///
+    /// Pins the exact bytes of the `\xNN` arm after the `format!` removal:
+    /// any case or width change breaks this rather than drifting silently
+    /// into the log stream.
+    #[test]
+    fn f07_control_escapes_are_lowercase_hex() {
+        assert_eq!(
+            escape(STDOUT_PREFIX, &[0x01, 0x7f]),
+            format!("{STDOUT_PREFIX}\\x01\\x7f")
+        );
     }
 
     /// **F-07: an empty queue admits one oversized message.**

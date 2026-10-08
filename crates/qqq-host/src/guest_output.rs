@@ -49,13 +49,14 @@
 //!
 //! # The breach policy: fail the write, count the breach
 //!
-//! Each output (stdout, stderr) carries its own [`MAX_OUTPUT_BYTES`] lifetime quota,
-//! shared by every writer of that output so opening more streams cannot multiply it.
-//! A write past the quota fails with a quota-exhausted stream error to the guest and
-//! increments the breach count the host reads through [`GuestOutput::breaches`].
-//! Failing rather than truncating silently is deliberate: silent truncation rewrites
-//! the guest's observable behavior without telling either side, while an error is a
-//! fact both the guest and the host's accounting can see.
+//! Each output (stdout, stderr) carries its own [`MAX_OUTPUT_BYTES`] lifetime quota
+//! in escaped bytes, shared by every writer of that output so opening more
+//! streams cannot multiply it. A write past the quota fails with a
+//! quota-exhausted stream error to the guest and increments the breach count
+//! the host reads through [`GuestOutput::breaches`]. Failing rather than
+//! truncating silently is deliberate: silent truncation rewrites the guest's
+//! observable behavior without telling either side, while an error is a fact
+//! both the guest and the host's accounting can see.
 //!
 //! # The tenant bound, stated as a composition
 //!
@@ -121,7 +122,7 @@
 use std::future::Future as _;
 use std::io::{self, Write};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -151,8 +152,10 @@ pub const STDERR_PREFIX: &str = "qqq-guest stderr | ";
 /// until the guest exits.
 pub const MAX_ESCAPED_RUN: usize = 4096;
 
-/// Maximum guest-written bytes accepted by one stdout or stderr destination.
+/// Maximum guest-emitted bytes accepted by one stdout or stderr destination.
 ///
+/// Escaped bytes, prefix included: the quota is charged on what reaches the
+/// sink, so a newline flood or control-byte spray cannot multiply past it.
 /// `MAX_ESCAPED_RUN` bounds one physical line, not the lifetime of a process.
 /// Without a total budget a guest can still fill a host log indefinitely by
 /// emitting many short lines. The budget is shared by all writers obtained from
@@ -174,6 +177,24 @@ pub const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 /// assert_eq!(PUMP_QUEUE_MSGS, 64);
 /// ```
 pub const PUMP_QUEUE_MSGS: usize = 64;
+
+/// How many escaped bytes wait across one output's pump queue before writers park.
+///
+/// The message bound above caps how many turns the executor may run ahead; this
+/// caps how much memory that head-start may hold. Without it the bound is
+/// `64 * (largest message)`, and the largest message is whatever the stream
+/// adapter hands `poll_write` in one call — an upstream detail, not a bound.
+/// A full byte queue parks the writer exactly like a full message queue, with
+/// one exception: an empty queue admits a single oversized message, since
+/// parking it would wait for a drain that can never start. The worst case is
+/// therefore the limit plus one message.
+///
+/// ```
+/// use qqq_host::guest_output::PUMP_QUEUE_BYTES;
+///
+/// assert_eq!(PUMP_QUEUE_BYTES, 1024 * 1024);
+/// ```
+pub const PUMP_QUEUE_BYTES: usize = 1024 * 1024;
 
 /// Default lifetime output budget shared by one tenant's requests on one app.
 ///
@@ -643,6 +664,36 @@ impl<W: GuestSink + ?Sized> GuestSink for Arc<W> {
     }
 }
 
+/// A destination for the escaping rule: counting or collecting.
+///
+/// One implementation of the loop serves both the quota probe and the real
+/// write, so the two can never disagree about a byte's escaped size. Private:
+/// the only sink production needs is the byte buffer below.
+trait EscapeSink {
+    /// Accept escaped output bytes.
+    fn push(&mut self, bytes: &[u8]);
+}
+
+/// A sink that counts escaped bytes without storing them.
+///
+/// The quota probe: measures what a write would cost before anything is
+/// reserved or allocated. A throwaway `Vec` here would allocate up to 20x the
+/// input before the quota check — the amplification this module exists to
+/// remove — so the probe must never materialise the output.
+struct CountSink(usize);
+
+impl EscapeSink for CountSink {
+    fn push(&mut self, bytes: &[u8]) {
+        self.0 += bytes.len();
+    }
+}
+
+impl EscapeSink for Vec<u8> {
+    fn push(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
 /// The escaping rule, as a pure state machine.
 ///
 /// # Why this is separate from the writer
@@ -675,9 +726,19 @@ impl Escaper {
     /// transformation is byte-for-byte, so an `AsyncWrite` caller can report a full
     /// write and the guest never sees a short write it would have to retry.
     pub fn push(&mut self, bytes: &[u8], out: &mut Vec<u8>) -> usize {
+        self.run(bytes, out)
+    }
+
+    /// Append `bytes`, escaped, to any sink, returning input bytes consumed.
+    ///
+    /// The single implementation behind both [`Escaper::push`] and
+    /// [`Escaper::escaped_len`]: the quota probe and the real write run the
+    /// same loop over the same state, so a reservation computed from the probe
+    /// always covers the write that follows it.
+    fn run<S: EscapeSink>(&mut self, bytes: &[u8], sink: &mut S) -> usize {
         for &byte in bytes {
             if self.at_line_start {
-                out.extend_from_slice(self.prefix.as_bytes());
+                sink.push(self.prefix.as_bytes());
                 self.at_line_start = false;
             }
             match byte {
@@ -692,36 +753,66 @@ impl Escaper {
                 // **and** a break, doubling the line count and mangling the app's
                 // output for no security gain — the forged record still appears, just
                 // as `qqq-guest stdout | {"ts":...}` instead of on a line by itself.
-                b'\n' => self.break_line(out),
+                b'\n' => self.break_line(sink),
                 // Everything else in C0, plus DEL, is escaped. `\r` because it is a line
                 // terminator to some readers; `\x1b` because an escape sequence can
                 // rewrite what a terminal shows for the host's own records; the rest
                 // because a total rule is auditable and a list of dangerous bytes is a
                 // claim that goes stale.
-                b'\r' => out.extend_from_slice(b"\\r"),
-                b'\t' => out.extend_from_slice(b"\\t"),
+                //
+                // The run bound counts OUTPUT bytes (the arm's emission), so the
+                // longest physical line the sink can see is bounded no matter how
+                // expansively one input byte encodes. The fixed prefix is excluded:
+                // it is host-chosen and constant, not guest-controlled.
+                b'\r' => {
+                    sink.push(b"\\r");
+                    self.since_break += 2;
+                }
+                b'\t' => {
+                    sink.push(b"\\t");
+                    self.since_break += 2;
+                }
                 // So a guest cannot emit a literal `\n` and have a reader mistake it for
                 // a break the host inserted.
-                b'\\' => out.extend_from_slice(b"\\\\"),
-                0x00..=0x1f | 0x7f => {
-                    out.extend_from_slice(format!("\\x{byte:02x}").as_bytes());
+                b'\\' => {
+                    sink.push(b"\\\\");
+                    self.since_break += 2;
                 }
-                _ => out.push(byte),
+                0x00..=0x1f | 0x7f => {
+                    sink.push(format!("\\x{byte:02x}").as_bytes());
+                    self.since_break += 4;
+                }
+                _ => {
+                    sink.push(&[byte]);
+                    self.since_break += 1;
+                }
             }
-            self.since_break += 1;
             if self.since_break >= MAX_ESCAPED_RUN {
-                self.break_line(out);
+                self.break_line(sink);
             }
         }
         bytes.len()
+    }
+
+    /// How many sink bytes `bytes` would produce from the current state.
+    ///
+    /// Pure: runs the escaping loop on a clone, so a refused write can be
+    /// costed without advancing the real escaper (see `poll_write`). The clone
+    /// is a three-word state struct, and the probe sink counts without
+    /// allocating — never a throwaway output buffer.
+    fn escaped_len(&self, bytes: &[u8]) -> usize {
+        let mut probe = self.clone();
+        let mut count = CountSink(0);
+        probe.run(bytes, &mut count);
+        count.0
     }
 
     /// End the current physical line and require the prefix on the next one.
     ///
     /// Also called when the run bound is reached, which is why the prefix is re-armed
     /// here rather than only on `\n`: the two are the same event to a line reader.
-    fn break_line(&mut self, out: &mut Vec<u8>) {
-        out.push(b'\n');
+    fn break_line<S: EscapeSink>(&mut self, sink: &mut S) {
+        sink.push(b"\n");
         self.at_line_start = true;
         self.since_break = 0;
     }
@@ -759,7 +850,7 @@ enum PumpMsg {
 pub struct TruncationEvent {
     /// Which stream breached, as its marker — [`STDOUT_PREFIX`] or [`STDERR_PREFIX`].
     pub stream: &'static str,
-    /// How many bytes the refused write asked for.
+    /// How many escaped bytes the refused write asked for.
     pub requested_bytes: u64,
     /// The quota that refused it.
     pub limit: u64,
@@ -799,6 +890,13 @@ struct Shared {
     /// further receive guaranteed to wake them. Spurious wakes are harmless;
     /// every woken writer rechecks the queue before proceeding.
     queue_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
+    /// Escaped bytes accepted but not yet taken by the pump.
+    ///
+    /// Incremented when a message is queued, decremented when the pump takes
+    /// it: the difference between queued and drained, which is what
+    /// [`PUMP_QUEUE_BYTES`] bounds. A plain counter rather than RAII for now —
+    /// F-12's lane drain adopts it into the `InFlight` guard.
+    in_flight: Arc<AtomicUsize>,
     /// The most recent quota breach, for [`GuestOutput::last_truncation`].
     last_truncation: std::sync::Mutex<Option<TruncationEvent>>,
 }
@@ -857,6 +955,7 @@ impl GuestOutput {
                 pump: std::sync::Mutex::new(None),
                 failure: Arc::new(std::sync::Mutex::new(None)),
                 queue_wakers: Arc::new(std::sync::Mutex::new(Vec::new())),
+                in_flight: Arc::new(AtomicUsize::new(0)),
                 last_truncation: std::sync::Mutex::new(None),
             }),
         }
@@ -1008,12 +1107,22 @@ impl AsyncWrite for SanitisingWriter {
         // escaper is stateful, and re-running it on retry would advance the
         // line marker and the run bound twice for one write.
         if this.pending.is_none() {
-            if let Err(refusal) = this.shared.budget.reserve(buf.len()) {
-                record_truncation(&this.shared, buf.len(), refusal);
+            // Reserve the ESCAPED size, probed without mutating the escaper:
+            // the sink receives escaped bytes, so input-length charging lets a
+            // newline flood deliver 20x its budget. Allocation happens only
+            // after the reservation succeeds, sized exactly to the probe.
+            let need = this.escaper.escaped_len(buf);
+            if let Err(refusal) = this.shared.budget.reserve(need) {
+                record_truncation(&this.shared, need, refusal);
                 return Poll::Ready(Err(io::Error::other("guest output quota exhausted")));
             }
-            let mut escaped = Vec::with_capacity(buf.len() + 16);
+            let mut escaped = Vec::with_capacity(need);
             let consumed = this.escaper.push(buf, &mut escaped);
+            debug_assert_eq!(
+                escaped.len(),
+                need,
+                "the probe and the write run the same loop over the same state"
+            );
             this.pending = Some((consumed, escaped));
         }
         let (consumed, escaped) = this.pending.take().expect("just stored");
@@ -1112,12 +1221,18 @@ impl AsyncWrite for SanitisingWriter {
 
 /// Try one send; hand the message back when the queue is full.
 ///
-/// A full queue stores the caller's waker alongside the other parked writers;
-/// the writer task wakes them all after its next receive, when a slot has
-/// definitely freed. The recheck after storing closes the race where space
-/// frees first. The message comes back so the caller holds it for the retry
-/// instead of rebuilding stateful work. A poisoned waker slot fails rather
-/// than parking forever unwoken.
+/// Full means either bound: [`PUMP_QUEUE_MSGS`] messages or [`PUMP_QUEUE_BYTES`]
+/// queued-but-undrained bytes. A full queue stores the caller's waker and returns
+/// the message for the retry; the writer task wakes parked writers after its next
+/// receive, when space has definitely freed. The recheck after storing closes the
+/// race where space frees first. A poisoned waker slot fails rather than parking
+/// forever unwoken.
+///
+/// The byte count moves only here and in the pump loop: incremented on a queued
+/// send, decremented when the pump takes the message. A send that never queues
+/// (parked, refused, or racing a closed channel) changes nothing. The check is
+/// check-then-act like the message bound, so concurrent writers may overshoot
+/// softly; a single writer is exact, which is what the byte-bound test proves.
 fn try_send_or_park(
     tx: &mpsc::Sender<PumpMsg>,
     shared: &Shared,
@@ -1125,25 +1240,81 @@ fn try_send_or_park(
     msg: PumpMsg,
 ) -> Result<Option<PumpMsg>, io::Error> {
     use mpsc::error::TrySendError;
-    match tx.try_send(msg) {
-        Ok(()) => Ok(None),
-        Err(TrySendError::Closed(_)) => Err(pump_gone()),
-        Err(TrySendError::Full(msg)) => {
-            {
-                let mut parked = shared
-                    .queue_wakers
-                    .lock()
-                    .map_err(|_| io::Error::other("the guest-output queue wakers are poisoned"))?;
-                parked.push(cx.waker().clone());
-            }
-            match tx.try_send(msg) {
-                Ok(()) => Ok(None),
-                Err(TrySendError::Closed(_)) => Err(pump_gone()),
-                // Every parked waker is woken after the task's next receive,
-                // so parking here always resolves.
-                Err(TrySendError::Full(msg)) => Ok(Some(msg)),
+    let bytes = match &msg {
+        PumpMsg::Bytes(body) => body.len(),
+        PumpMsg::Flush(_) => 0,
+    };
+    if byte_full(shared, bytes) {
+        // An empty queue admits one message of any size: parking it waits for
+        // a drain that can never start, because the pump only receives what
+        // writers send. The bound is therefore the limit plus one message —
+        // and a single oversized write can neither hang nor multiply, since
+        // the next write parks against the bytes it left queued.
+        let empty = shared.in_flight.load(Ordering::Relaxed) == 0;
+        if !empty {
+            push_waker(shared, cx)?;
+            // A freed message slot does not imply freed bytes (a flush marker, or
+            // a small message, may have been the take), so the byte condition is
+            // rechecked rather than trusted from the send below. Still full means
+            // hold for the retry; freed means fall through to the message path.
+            if byte_full(shared, bytes) {
+                return Ok(Some(msg));
             }
         }
+    }
+    match tx.try_send(msg) {
+        Ok(()) => {
+            shared.in_flight.fetch_add(bytes, Ordering::Relaxed);
+            Ok(None)
+        }
+        Err(TrySendError::Closed(_)) => Err(pump_gone()),
+        Err(TrySendError::Full(msg)) => park_for_space(tx, shared, cx, msg, bytes),
+    }
+}
+
+/// Whether `bytes` more would exceed the queued-bytes bound.
+fn byte_full(shared: &Shared, bytes: usize) -> bool {
+    shared
+        .in_flight
+        .load(Ordering::Relaxed)
+        .saturating_add(bytes)
+        > PUMP_QUEUE_BYTES
+}
+
+/// Store the caller's waker, failing on a poisoned slot.
+fn push_waker(shared: &Shared, cx: &mut Context<'_>) -> io::Result<()> {
+    let mut parked = shared
+        .queue_wakers
+        .lock()
+        .map_err(|_| io::Error::other("the guest-output queue wakers are poisoned"))?;
+    parked.push(cx.waker().clone());
+    Ok(())
+}
+
+/// Store the caller's waker and recheck the message bound, handing the message
+/// back if still full.
+///
+/// The message-count path only: the byte path rechecks its own condition
+/// above (a freed slot is not freed bytes). `bytes` is the message's measured
+/// size: a recheck send that succeeds queues exactly those bytes.
+fn park_for_space(
+    tx: &mpsc::Sender<PumpMsg>,
+    shared: &Shared,
+    cx: &mut Context<'_>,
+    msg: PumpMsg,
+    bytes: usize,
+) -> Result<Option<PumpMsg>, io::Error> {
+    use mpsc::error::TrySendError;
+    push_waker(shared, cx)?;
+    match tx.try_send(msg) {
+        Ok(()) => {
+            shared.in_flight.fetch_add(bytes, Ordering::Relaxed);
+            Ok(None)
+        }
+        Err(TrySendError::Closed(_)) => Err(pump_gone()),
+        // Every parked waker is woken after the task's next receive,
+        // so parking here always resolves.
+        Err(TrySendError::Full(msg)) => Ok(Some(msg)),
     }
 }
 
@@ -1169,6 +1340,7 @@ fn ensure_pump(shared: &Arc<Shared>) -> Option<mpsc::Sender<PumpMsg>> {
         Arc::clone(&shared.sink),
         Arc::clone(&shared.failure),
         Arc::clone(&shared.queue_wakers),
+        Arc::clone(&shared.in_flight),
     ));
     *guard = Some(tx.clone());
     Some(tx)
@@ -1187,8 +1359,22 @@ async fn pump_loop(
     sink: Arc<dyn GuestSink>,
     failure: Arc<std::sync::Mutex<Option<String>>>,
     queue_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
+    in_flight: Arc<AtomicUsize>,
 ) {
     while let Some(msg) = rx.recv().await {
+        // The bytes leave the queue before anyone is woken: a woken writer
+        // rechecks the counter, and a wake against the pre-take count re-parks
+        // it — after the last take no further take will ever wake it again.
+        // Saturating: the counter is purely internal, and a release must never
+        // be able to panic the pump task on an accounting surprise.
+        match &msg {
+            PumpMsg::Bytes(body) => {
+                let _ = in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(body.len()))
+                });
+            }
+            PumpMsg::Flush(_) => {}
+        }
         // A slot just freed: wake every parked writer. Each rechecks the
         // queue on waking, so wakes that arrive too late are harmless and no
         // writer waits on a waker overwritten by another.
@@ -1276,7 +1462,6 @@ fn pump_gone() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1486,7 +1671,8 @@ mod tests {
     #[test]
     fn guest_output_enforces_one_shared_total_quota_across_writers() {
         let captured = captured();
-        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 5);
+        // Escaped bytes: "123" costs the 19-byte prefix plus 3 (22 total).
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 25);
         let mut first = output.writer();
         let mut second = output.writer();
         let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -1546,7 +1732,7 @@ mod tests {
         // error, and the host observes a number. A breach the host cannot read
         // is a policy nobody can meter.
         let captured = captured();
-        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 5);
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 25);
         assert_eq!(output.breaches(), 0, "a fresh output has no breaches");
         let mut writer = output.writer();
         let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -1555,23 +1741,26 @@ mod tests {
             Pin::new(&mut writer).poll_write(&mut cx, b"123"),
             Poll::Ready(Ok(3))
         ));
-        assert_eq!(output.bytes_written(), 3);
+        assert_eq!(output.bytes_written(), 22);
+        // A fresh writer: each writer starts at a line start, so the second
+        // write carries the prefix too (22 escaped bytes, 44 total > 25).
+        let mut second = output.writer();
         assert!(matches!(
-            Pin::new(&mut writer).poll_write(&mut cx, b"456"),
+            Pin::new(&mut second).poll_write(&mut cx, b"456"),
             Poll::Ready(Err(_))
         ));
         assert_eq!(output.breaches(), 1, "the refused write must be counted");
         assert_eq!(
             output.bytes_written(),
-            3,
+            22,
             "refused bytes must not consume the quota"
         );
         assert_eq!(
             output.last_truncation(),
             Some(TruncationEvent {
                 stream: STDOUT_PREFIX,
-                requested_bytes: 3,
-                limit: 5,
+                requested_bytes: 22,
+                limit: 25,
                 total_breaches: 1,
             }),
             "the breach must be recorded as a structured event"
@@ -1792,7 +1981,8 @@ mod tests {
     /// a structured event naming the tenant ceiling rather than its own.
     #[test]
     fn two_outputs_share_one_tenant_ceiling() {
-        let budgets = TenantOutputBudgets::new(10);
+        // Escaped bytes: each 6-byte write costs the 19-byte prefix plus 6 (25).
+        let budgets = TenantOutputBudgets::new(30);
         let guard_a = budgets.acquire("tenant-a");
         let guard_b = budgets.acquire("tenant-a");
         let out_a = GuestOutput::to_with_limit(STDOUT_PREFIX, captured(), u64::MAX);
@@ -1812,7 +2002,7 @@ mod tests {
                 Pin::new(&mut w2).poll_write(&mut cx, b"789012"),
                 Poll::Ready(Err(_))
             ),
-            "twelve bytes against a ten-byte tenant ceiling must refuse"
+            "fifty escaped bytes against a thirty-byte tenant ceiling must refuse"
         );
         assert_eq!(
             guard_a.budget().breaches(),
@@ -1828,12 +2018,266 @@ mod tests {
             out_b.last_truncation(),
             Some(TruncationEvent {
                 stream: STDOUT_PREFIX,
-                requested_bytes: 6,
-                limit: 10,
+                requested_bytes: 25,
+                limit: 30,
                 total_breaches: 1,
             }),
             "the event must name the tenant ceiling that tripped"
         );
+    }
+
+    /// **F-07 red-first: escaped-size charging.**
+    ///
+    /// Each `b"\n"` input byte costs the
+    /// 19-byte prefix plus the newline itself (20 escaped bytes), so a limit of
+    /// 100 escaped bytes admits exactly 5 of 10 newline writes. On the old
+    /// input-byte charging all 10 pass.
+    #[test]
+    fn f07_newline_flood_is_charged_at_escaped_size() {
+        let captured = captured();
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 100);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut accepted = 0;
+        for _ in 0..10 {
+            if matches!(
+                Pin::new(&mut writer).poll_write(&mut cx, b"\n"),
+                Poll::Ready(Ok(_))
+            ) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 5, "100 / 20 = 5 newline writes may succeed");
+    }
+
+    /// **F-07 red-first: control bytes cost 4 escaped bytes each.** 19-byte prefix
+    /// plus 30 control bytes at 4 each is 139 escaped bytes against a limit of
+    /// 100, so the write must fail. On input-byte charging (30 bytes) it passes.
+    #[test]
+    fn f07_control_bytes_are_charged_at_four_bytes_each() {
+        let captured = captured();
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured, 100);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(
+                Pin::new(&mut writer).poll_write(&mut cx, &[0x01u8; 30]),
+                Poll::Ready(Err(_))
+            ),
+            "19 + 30*4 = 139 escaped bytes must exceed the 100-byte limit"
+        );
+    }
+
+    /// **F-07 red-first: a refused write must not advance the escaper.** After one
+    /// short line and a refused flood, continuing the same line must not emit
+    /// a second prefix — the state is exactly as the refusal found it.
+    #[test]
+    fn f07_refused_write_does_not_advance_escaper_state() {
+        let captured = captured();
+        // "qqq-guest stdout | ab" is 21 escaped bytes; the flood below is refused.
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured.clone(), 25);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"ab"),
+            Poll::Ready(Ok(_))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"\n\n\n\n\n"),
+            Poll::Ready(Err(_))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"cd"),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            text(&captured).matches(STDOUT_PREFIX).count(),
+            1,
+            "the refused write must not have armed a second prefix"
+        );
+    }
+
+    /// **F-07: the pump queue is byte-bounded, not just message-bounded.**
+    ///
+    /// Against a stalled sink, 256 KiB printable writes (≈1:1 escaped) must
+    /// park once queued bytes pass [`PUMP_QUEUE_BYTES`] — long before the
+    /// 64-message bound could trip. After release every byte must still drain
+    /// in order: parking delays writes, it never drops them.
+    #[tokio::test]
+    async fn f07_slow_sink_queue_is_byte_bounded() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let blocked_sink = Arc::new(BlockingSink::new());
+        let _open = OpenOnDrop {
+            sink: &blocked_sink,
+        };
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&blocked_sink));
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let chunk = vec![b'y'; 256 * 1024];
+        let mut queued = 0;
+        for _ in 0..64 {
+            match Pin::new(&mut writer).poll_write(&mut cx, &chunk) {
+                Poll::Ready(Ok(_)) => queued += 1,
+                Poll::Pending => break,
+                Poll::Ready(Err(error)) => panic!("the quota must not trip first: {error}"),
+            }
+        }
+        assert!(
+            queued < 8,
+            "the byte bound must park by ~4 messages of 256 KiB, not the 64-message bound; queued {queued}"
+        );
+        assert!(
+            queued >= 3,
+            "several large messages must still queue before the bound bites; queued {queued}"
+        );
+        blocked_sink.release();
+        output
+            .writer()
+            .flush()
+            .await
+            .expect("a released sink drains");
+        let bytes = blocked_sink.buf.lock().expect("not poisoned").clone();
+        // Count payload bytes, not total length: 256 KiB runs trip the
+        // 4096-byte run bound, so forced breaks and their prefixes add bytes
+        // beyond the arithmetic above. The payload is all `y`; markers and
+        // breaks contain none, so the count is exact.
+        // Counted with an explicit loop: the naive-bytecount lint is right
+        // that a crate does this faster, and a new dependency for one test
+        // assertion is the worse trade.
+        let mut payload = 0usize;
+        for byte in &bytes {
+            if *byte == b'y' {
+                payload += 1;
+            }
+        }
+        assert_eq!(
+            payload,
+            queued * chunk.len(),
+            "every queued payload byte must drain after release"
+        );
+        assert!(
+            bytes.starts_with(STDOUT_PREFIX.as_bytes()),
+            "the drained bytes must still carry the marker"
+        );
+    }
+
+    /// **F-07: the probe predicts the write, byte for byte.**
+    ///
+    /// Two thousand deterministic pseudo-random inputs (full byte range, so
+    /// newlines, prefixes-in-waiting, and control runs all occur) across two
+    /// starting states: `escaped_len` must equal the length the real `run`
+    /// produces from the same state. Any disagreement is a quota bypass in
+    /// one direction or a false refusal in the other. No external RNG crate:
+    /// a 64-bit LCG is deterministic per seed and sufficient for coverage.
+    #[test]
+    fn f07_escaped_len_equals_actual_output_length() {
+        fn pseudo_random_bytes(seed: u64, max_len: usize) -> Vec<u8> {
+            const MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+            const INCREMENT: u64 = 1_442_695_040_888_963_407;
+            let mut state = seed.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT);
+            let len = 1 + usize::try_from(seed % 300).expect("a remainder under 300 fits");
+            let len = len.min(max_len).max(1);
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT);
+                    u8::try_from((state >> 33) & 0xff).expect("masked to one byte")
+                })
+                .collect()
+        }
+        for seed in 0..2000u64 {
+            let input = pseudo_random_bytes(seed, 300);
+            let mut escaper = Escaper::new(STDOUT_PREFIX);
+            if seed % 2 == 1 {
+                // Mid-line state with a partial run, so the probe is tested
+                // somewhere other than a fresh line.
+                let mut discard = Vec::new();
+                escaper.push(b"pre", &mut discard);
+            }
+            let predicted = escaper.escaped_len(&input);
+            let mut out = Vec::new();
+            escaper.run(&input, &mut out);
+            assert_eq!(predicted, out.len(), "seed {seed}");
+        }
+    }
+
+    /// **F-07: an empty queue admits one oversized message.**
+    ///
+    /// A single write larger than [`PUMP_QUEUE_BYTES`] with nothing queued must
+    /// still queue: parking it waits for a drain that can never start, because
+    /// the pump only receives what writers send. The bound is therefore the
+    /// limit plus one message, never a hang.
+    #[tokio::test]
+    async fn f07_empty_queue_admits_one_oversized_message() {
+        let captured = captured();
+        let output = GuestOutput::to(STDOUT_PREFIX, captured);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let big = vec![b'z'; 2 * 1024 * 1024];
+        assert!(
+            matches!(
+                Pin::new(&mut writer).poll_write(&mut cx, &big),
+                Poll::Ready(Ok(_))
+            ),
+            "an empty queue must admit one oversized message rather than park it forever"
+        );
+    }
+
+    /// **F-07: a parked writer wakes after bytes free, not after slots.**
+    ///
+    /// The pump must decrement the byte counter BEFORE waking parked writers:
+    /// a wake against a stale count re-parks, and after the last take no
+    /// further take will ever wake the writer again — stranded with space
+    /// available. The spawned writer below completes with no test-side
+    /// re-polling if and only if the wake fires on the updated count.
+    #[tokio::test]
+    async fn f07_parked_writer_wakes_after_bytes_free() {
+        use tokio::io::AsyncWriteExt as _;
+        use tokio::sync::oneshot;
+
+        let blocked_sink = Arc::new(BlockingSink::new());
+        let _open = OpenOnDrop {
+            sink: &blocked_sink,
+        };
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&blocked_sink));
+        // Three 256 KiB writes (786,451 queued bytes, zero takes: the
+        // current-thread runtime cannot preempt the fill loop).
+        let mut first = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let chunk = vec![b'y'; 256 * 1024];
+        for _ in 0..3 {
+            assert!(matches!(
+                Pin::new(&mut first).poll_write(&mut cx, &chunk),
+                Poll::Ready(Ok(_))
+            ));
+        }
+        // A 1 MiB write fits only once the queue is fully drained, so it
+        // parks through every take and proves the final wake by completing.
+        let parked = output.clone();
+        let (done, wait) = oneshot::channel();
+        let parked_task = tokio::spawn(async move {
+            let mut writer = parked.writer();
+            writer
+                .write_all(&vec![b'w'; 1024 * 1024])
+                .await
+                .expect("the parked write must complete after the drain");
+            let _ = done.send(());
+        });
+        // Let the spawned writer poll and park while the counter is still
+        // high: the test must prove the FINAL wake, which needs the writer
+        // parked across the last take rather than arriving after the drain.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        blocked_sink.release();
+        output
+            .writer()
+            .flush()
+            .await
+            .expect("a released sink drains");
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the parked writer must wake after the bytes free, with no re-poll")
+            .expect("the spawned task must not be dropped");
+        parked_task.await.expect("writer tasks must not panic");
     }
 
     /// A sink that blocks until the test releases it.

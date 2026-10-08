@@ -1318,8 +1318,16 @@ jobs:
       # and `SPLIT_THRESHOLD` — measured 2098 -> 2101, the delta exactly the
       # new declarations. Same reasoning: the split is covered by the
       # byte-identity reference test, not by prose examples.
+      #
+      # # And why it went UP, to 2103
+      #
+      # The Linux-bridge hermeticity fix adds two: `rust_artifact_path_in`
+      # and `locate_artifact_with_root` — measured 2101 -> 2103, the delta
+      # exactly the new declarations. Same reasoning: both are covered by the
+      # hermetic discovery tests that run green with CARGO_TARGET_DIR set,
+      # not by prose examples.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2101
+        run: python tools/check_api_examples.py --allow 2103
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

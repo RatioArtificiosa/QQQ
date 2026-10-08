@@ -200,6 +200,30 @@ pub fn locate_artifact(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Pat
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
+    locate_artifact_with_root(loaded, opts, &crate::build::target_root(&project_dir))
+}
+
+/// The lookup above, with the Cargo target root passed in so tests stay hermetic.
+///
+/// # Why the split exists
+///
+/// The target root honours `CARGO_TARGET_DIR`, which is correct in production
+/// but makes any test that goes through `locate_artifact` depend on the ambient
+/// environment. Tests pass their own temp dir here instead.
+///
+/// # Errors
+///
+/// `QQQ-1002` when no artifact is found, naming every path tried.
+pub fn locate_artifact_with_root(
+    loaded: &LoadedManifest,
+    opts: &RunOptions,
+    target_root: &Path,
+) -> Result<PathBuf> {
+    let project_dir = loaded
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = &opts.artifact {
@@ -207,14 +231,14 @@ pub fn locate_artifact(loaded: &LoadedManifest, opts: &RunOptions) -> Result<Pat
     } else {
         let name = loaded.name();
         candidates.push(component_path(&project_dir, name));
-        candidates.push(crate::build::rust_artifact_path(
-            &project_dir,
+        candidates.push(crate::build::rust_artifact_path_in(
+            target_root,
             "release",
             &loaded.manifest.build.target,
             name,
         ));
-        candidates.push(crate::build::rust_artifact_path(
-            &project_dir,
+        candidates.push(crate::build::rust_artifact_path_in(
+            target_root,
             "debug",
             &loaded.manifest.build.target,
             name,
@@ -1115,7 +1139,7 @@ mod tests {
     fn a_missing_artifact_lists_every_path_tried() {
         let dir = temp_dir("missing-artifact");
         let l = loaded(DENY_ALL, &dir);
-        let e = locate_artifact(&l, &RunOptions::default()).unwrap_err();
+        let e = locate_artifact_with_root(&l, &RunOptions::default(), &dir).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidComponentArtifact);
         // `cause` is a chain, outermost first; the paths we tried are one entry.
         let cause = e.cause.join("\n");
@@ -1140,12 +1164,15 @@ mod tests {
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"\0asm\x01\0\0\0").unwrap();
 
-        let cargo = crate::build::rust_artifact_path(&dir, "release", "wasm32-wasip2", "app");
+        let cargo = crate::build::rust_artifact_path_in(&dir, "release", "wasm32-wasip2", "app");
         std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
         std::fs::write(&cargo, b"\0asm\x01\0\0\0").unwrap();
 
         let l = loaded(DENY_ALL, &dir);
-        assert_eq!(locate_artifact(&l, &RunOptions::default()).unwrap(), staged);
+        assert_eq!(
+            locate_artifact_with_root(&l, &RunOptions::default(), &dir).unwrap(),
+            staged
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1154,12 +1181,15 @@ mod tests {
     #[test]
     fn the_cargo_output_is_used_when_nothing_is_staged() {
         let dir = temp_dir("fallback-cargo");
-        let cargo = crate::build::rust_artifact_path(&dir, "release", "wasm32-wasip2", "app");
+        let cargo = crate::build::rust_artifact_path_in(&dir, "release", "wasm32-wasip2", "app");
         std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
         std::fs::write(&cargo, b"\0asm\x01\0\0\0").unwrap();
 
         let l = loaded(DENY_ALL, &dir);
-        assert_eq!(locate_artifact(&l, &RunOptions::default()).unwrap(), cargo);
+        assert_eq!(
+            locate_artifact_with_root(&l, &RunOptions::default(), &dir).unwrap(),
+            cargo
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

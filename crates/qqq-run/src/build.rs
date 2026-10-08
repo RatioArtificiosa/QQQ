@@ -1097,7 +1097,30 @@ fn rust_args(profile: &str, target: &str) -> Vec<String> {
 /// Where a Rust build puts the `.wasm` it produced.
 #[must_use]
 pub fn rust_artifact_path(project_dir: &Path, profile: &str, target: &str, name: &str) -> PathBuf {
-    target_root(project_dir)
+    rust_artifact_path_in(&target_root(project_dir), profile, target, name)
+}
+
+/// The path above, with the target root passed in so tests stay hermetic.
+///
+/// # Why the split exists
+///
+/// `rust_artifact_path` honours `CARGO_TARGET_DIR` through `target_root`, which
+/// is correct in production (cargo really does write elsewhere) but makes any
+/// test that goes through it depend on the ambient environment — the Linux
+/// bridge sets the variable globally and every temp-dir fixture then resolved
+/// to one shared directory. Tests use this with their own temp dir instead.
+///
+/// # Errors
+///
+/// This function itself never fails; it only computes a path.
+#[must_use]
+pub fn rust_artifact_path_in(
+    target_root: &Path,
+    profile: &str,
+    target: &str,
+    name: &str,
+) -> PathBuf {
+    target_root
         .join(target)
         .join(profile)
         .join(format!("{name}.wasm"))
@@ -1119,7 +1142,7 @@ pub fn rust_artifact_path(project_dir: &Path, profile: &str, target: &str, name:
 ///
 /// The build succeeded and the error said it had not. **A relative value is relative to the working
 /// directory the child cargo inherited**, which for `qqqai build` is the project directory.
-fn target_root(project_dir: &Path) -> PathBuf {
+pub(crate) fn target_root(project_dir: &Path) -> PathBuf {
     target_root_for(project_dir, std::env::var_os("CARGO_TARGET_DIR").as_deref())
 }
 
@@ -1179,8 +1202,19 @@ pub fn find_artifact(
     target: &str,
     package: &str,
 ) -> Option<PathBuf> {
-    let dir = artifact_dir(project_dir, profile, target);
+    find_artifact_in(&artifact_dir(project_dir, profile, target), package)
+}
 
+/// The matching half of [`find_artifact`], against an explicit directory.
+///
+/// Split out so tests exercise the matching without the environment: the
+/// router above honors `CARGO_TARGET_DIR`, which in containers points every
+/// project dir at one shared target root — and a test that builds fixtures
+/// through the router then shares a directory with every other test using
+/// it (plus stale build output), failing on contents it never created.
+/// Production keeps routing through [`find_artifact`]; the env routing
+/// itself is pinned by the `target_root_for` unit tests.
+fn find_artifact_in(dir: &Path, package: &str) -> Option<PathBuf> {
     // 1. Cargo's default: hyphens become underscores.
     let underscored = dir.join(format!("{}.wasm", package.replace('-', "_")));
     if underscored.is_file() {
@@ -1194,7 +1228,7 @@ pub fn find_artifact(
     }
 
     // 3. A renamed lib target, but only when the answer is unambiguous.
-    let candidates = list_wasm_paths(&dir);
+    let candidates = list_wasm_paths(dir);
     match candidates.len() {
         1 => candidates.into_iter().next(),
         _ => None,
@@ -2330,13 +2364,22 @@ mod tests {
     // reported "the build succeeded but <name>.wasm was not produced" for every
     // scaffolded project.
 
-    /// Make a directory with the given `.wasm` files in it.
+    /// Make a directory with the given `.wasm` files in it, returning the
+    /// directory itself.
+    ///
+    /// Flat and explicit, never routed through [`artifact_dir`]: that
+    /// function honors `CARGO_TARGET_DIR`, which in containers points every
+    /// project dir at one shared target root — and a test that builds
+    /// fixtures through it shares a directory with every other test using
+    /// it (plus stale build output in the persistent volume), failing on
+    /// contents it never created. The matching logic under test reads only
+    /// the directory it is handed, so flat fixtures prove the same thing.
+    /// The env routing itself is pinned separately by the `target_root_for`
+    /// unit tests.
     fn build_dir(tag: &str, files: &[&str]) -> PathBuf {
         let dir = temp_dir(tag);
-        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
-        std::fs::create_dir_all(&out).expect("create artifact dir");
         for f in files {
-            std::fs::write(out.join(f), b"\0asm\x0d\0\x01\0").expect("write artifact");
+            std::fs::write(dir.join(f), b"\0asm\x0d\0\x01\0").expect("write artifact");
         }
         dir
     }
@@ -2345,55 +2388,55 @@ mod tests {
     /// underscored artifact.
     #[test]
     fn a_hyphenated_package_finds_its_underscored_artifact() {
-        let dir = build_dir("hyphen", &["orders_api.wasm"]);
-        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        let out = build_dir("hyphen", &["orders_api.wasm"]);
+        let found = find_artifact_in(&out, "orders-api");
         assert_eq!(
             found.map(|p| p.file_name().unwrap().to_string_lossy().into_owned()),
             Some("orders_api.wasm".to_owned()),
             "`orders-api` must find `orders_api.wasm`"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
     fn an_underscored_package_finds_its_artifact() {
-        let dir = build_dir("plain", &["app.wasm"]);
-        assert!(find_artifact(&dir, "release", "wasm32-wasip2", "app").is_some());
-        let _ = std::fs::remove_dir_all(&dir);
+        let out = build_dir("plain", &["app.wasm"]);
+        assert!(find_artifact_in(&out, "app").is_some());
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// An explicit `[lib] name` equal to the package name still resolves.
     #[test]
     fn a_literal_name_is_found_when_no_underscored_one_exists() {
-        let dir = build_dir("literal", &["orders-api.wasm"]);
-        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        let out = build_dir("literal", &["orders-api.wasm"]);
+        let found = find_artifact_in(&out, "orders-api");
         assert!(found.is_some(), "the literal crate name must be tried");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// A renamed lib target is found when it is the only candidate.
     #[test]
     fn a_single_unexpected_artifact_is_accepted() {
-        let dir = build_dir("renamed", &["something_else.wasm"]);
-        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api");
+        let out = build_dir("renamed", &["something_else.wasm"]);
+        let found = find_artifact_in(&out, "orders-api");
         assert!(
             found.is_some(),
             "an unambiguous single artifact must be used"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// **Ambiguity must not be guessed at.** With two candidates, neither of
     /// which matches, picking one silently would ship the wrong code.
     #[test]
     fn ambiguity_resolves_to_nothing_rather_than_a_guess() {
-        let dir = build_dir("ambiguous", &["alpha.wasm", "beta.wasm"]);
+        let out = build_dir("ambiguous", &["alpha.wasm", "beta.wasm"]);
         assert_eq!(
-            find_artifact(&dir, "release", "wasm32-wasip2", "orders-api"),
+            find_artifact_in(&out, "orders-api"),
             None,
             "two candidates and no match must not produce a guess"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// A preference case: when both the underscored and an unrelated artifact
@@ -2401,54 +2444,47 @@ mod tests {
     /// expected name is present.
     #[test]
     fn the_expected_name_wins_over_other_artifacts() {
-        let dir = build_dir("prefer", &["orders_api.wasm", "unrelated.wasm"]);
-        let found = find_artifact(&dir, "release", "wasm32-wasip2", "orders-api")
-            .expect("the expected name must be found");
+        let out = build_dir("prefer", &["orders_api.wasm", "unrelated.wasm"]);
+        let found = find_artifact_in(&out, "orders-api").expect("the expected name must be found");
         assert_eq!(
             found.file_name().unwrap().to_string_lossy(),
             "orders_api.wasm"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// `deps/` must not be searched: it holds a copy of every dependency's
     /// artifact, so including it would make "the only artifact" never true.
     #[test]
     fn dependency_artifacts_are_not_candidates() {
-        let dir = temp_dir("deps");
-        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
+        let out = build_dir("deps-empty", &[]);
         std::fs::create_dir_all(out.join("deps")).expect("create deps");
         std::fs::write(out.join("deps").join("serde.wasm"), b"\0asm\x0d\0\x01\0").unwrap();
         assert_eq!(
-            find_artifact(&dir, "release", "wasm32-wasip2", "app"),
+            find_artifact_in(&out, "app"),
             None,
             "a `.wasm` under deps/ must not be mistaken for the build output"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
     fn a_missing_directory_lists_no_files_and_does_not_panic() {
-        let dir = temp_dir("absent");
-        let missing = artifact_dir(&dir, "release", "wasm32-wasip2");
+        let missing = temp_dir("absent").join("no-such-subdir");
         assert!(list_wasm_files(&missing).is_empty());
-        assert_eq!(find_artifact(&dir, "release", "wasm32-wasip2", "app"), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(find_artifact_in(&missing, "app"), None);
     }
 
     /// The listing must name only `.wasm` files, so the error message can tell
     /// the user what it actually found.
     #[test]
     fn the_listing_reports_only_wasm_files() {
-        let dir = temp_dir("listing");
-        let out = artifact_dir(&dir, "release", "wasm32-wasip2");
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::write(out.join("a.wasm"), b"x").unwrap();
+        let out = build_dir("listing", &["a.wasm"]);
         std::fs::write(out.join("b.txt"), b"x").unwrap();
         std::fs::write(out.join("c.rlib"), b"x").unwrap();
         let listed = list_wasm_files(&out);
         assert_eq!(listed, vec!["a.wasm".to_owned()], "got {listed:?}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     // -- staged path --------------------------------------------------------

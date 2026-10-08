@@ -1475,7 +1475,7 @@ mod tests {
     /// After 65,536 rows the stream refuses, the handler ignores
     /// `Append::Full` (a counter nobody pages on), and the request is
     /// served normally — the trail ends mid-load and nobody is told.
-    /// F-09 makes sink-backed streams rings and adds FailClosed 503s;
+    /// F-09 makes sink-backed streams rings and adds `FailClosed` 503s;
     /// this scenario is replaced then by the unwritable-sink test,
     /// because a ring never fills.
     #[test]

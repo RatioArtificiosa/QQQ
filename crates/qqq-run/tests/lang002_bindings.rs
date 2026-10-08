@@ -254,6 +254,13 @@ fn build(dir: &Path) -> std::process::Output {
     Command::new("cargo")
         .args(["build", "--release", "--target", "wasm32-wasip2"])
         .current_dir(dir)
+        // The probe's own target dir, not the ambient one.
+        //
+        // The assertion below reads the artifact back from `dir/target/...`. With a
+        // globally set `CARGO_TARGET_DIR` (the Linux bridge), cargo writes to the shared
+        // root instead and the read fails — measured red with a decoy target dir. Same
+        // per-child mechanism as the serve-spawn isolations (`§O-574`, `§O-575`).
+        .env("CARGO_TARGET_DIR", dir.join("target"))
         .output()
         .expect("`cargo` must be runnable")
 }

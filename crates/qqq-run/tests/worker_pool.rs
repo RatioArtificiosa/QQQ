@@ -157,6 +157,17 @@ fn start_once(sandbox: &Sandbox, workers: u32) -> Option<Server> {
             &workers.to_string(),
         ])
         .current_dir(&sandbox.path)
+        // The sandbox's own target dir, not the ambient one.
+        //
+        // `serve` locates the component through the Cargo target dir, which honors
+        // `CARGO_TARGET_DIR`. The Linux bridge sets it globally at a shared root where
+        // the gate itself builds same-named guests: the lookup then finds a foreign
+        // artifact instead of the fixture `place_component` put under
+        // `sandbox/target/...`, the child dies on it, and both tests fail (bridge15).
+        // Pointing the child at the sandbox root makes `artifact_dir` resolve to the
+        // placed fixture in every environment. Same mechanism as `serve_policy.rs` and
+        // `cli.rs`'s `target_dir_for`; per-child env needs no process-global mutation.
+        .env("CARGO_TARGET_DIR", sandbox.path.join("target"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -300,6 +311,9 @@ fn reported_capacity_once(sandbox: &Sandbox, workers: u32) -> Option<String> {
             &REQUESTS.to_string(),
         ])
         .current_dir(&sandbox.path)
+        // The sandbox's own target dir: see `start_once` — without it the child
+        // resolves the ambient `CARGO_TARGET_DIR` and loads a foreign artifact.
+        .env("CARGO_TARGET_DIR", sandbox.path.join("target"))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

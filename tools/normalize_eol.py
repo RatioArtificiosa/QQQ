@@ -170,7 +170,15 @@ def classify_eol_line(line: str) -> str | None:
     if path.endswith(".gitattributes"):
         return None
     fields = meta.split()
-    if not fields:
+    # A record is not just an index verdict: the worktree and attr fields
+    # prove the report is complete. A truncated record (`i/lf` alone) must
+    # not pass as clean — it proves nothing was examined.
+    if (
+        len(fields) < 3
+        or not fields[0].startswith("i/")
+        or not fields[1].startswith("w/")
+        or not fields[2].startswith("attr/")
+    ):
         raise ValueError(f"malformed git ls-files --eol line: {line!r}")
     index_eol = fields[0]
     # `i/lf` is correct. `i/none` means Git tracks no EOL state. `i/-text`
@@ -187,14 +195,23 @@ def findings_in_lines(lines: list[str]) -> list[str]:
     Raises `RuntimeError` on an empty report: a successful command with no
     entries means the parser and the source disagree about the format, and
     returning "no findings" would certify a tree that was never examined.
+    Also raises when no record names a checkable blob: a report containing
+    only the exempt `.gitattributes` line examines nothing, and a checker
+    that finds nothing to check must fail rather than pass.
     """
     if not lines:
         raise RuntimeError("git ls-files --eol returned no entries")
     bad: list[str] = []
+    checked = 0
     for line in lines:
         finding = classify_eol_line(line)
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and not parts[1].endswith(".gitattributes"):
+            checked += 1
         if finding is not None:
             bad.append(finding)
+    if checked == 0:
+        raise RuntimeError("git ls-files --eol named no checkable blob")
     return bad
 
 
@@ -496,6 +513,24 @@ def self_test() -> int:
                 lambda: findings_in_lines([]),
             ),
             "no entries means the parser and the source disagree",
+        )
+        expect(
+            "a truncated record raises instead of passing as clean",
+            _raises(
+                "malformed",
+                lambda: classify_eol_line("i/lf\tREADME.md"),
+            ),
+            "an index verdict without worktree and attr fields proves nothing",
+        )
+        expect(
+            "a report naming only the exempt file raises",
+            _raises(
+                "no checkable blob",
+                lambda: findings_in_lines(
+                    ["i/lf w/lf attr/text eol=lf\t.gitattributes"]
+                ),
+            ),
+            "examining nothing must fail, not pass",
         )
 
     print()

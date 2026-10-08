@@ -2011,4 +2011,108 @@ mod tests {
         let s = AuditStream::with_default_capacity();
         assert_eq!(s.capacity(), DEFAULT_CAPACITY);
     }
+
+    /// **F-09 defect proof: a full stream stops the evidence record.**
+    ///
+    /// The audit trail ends after `capacity` rows while the server keeps
+    /// serving — with ~2 rows per request that is minutes under load, and
+    /// the only trace is a counter. F-09 replaces refusal with a
+    /// sink-backed ring; this test is rewritten then (a bounded
+    /// pure-memory stream keeps refusing, and keeps this shape).
+    #[test]
+    fn f09_full_stream_stops_the_record() {
+        let mut stream = stream(8);
+        for i in 0..10u64 {
+            let appended = stream.record(
+                None,
+                &component(),
+                &grants(),
+                Capability::FsRead,
+                "handle_request",
+                Outcome::Granted,
+            );
+            assert!(
+                matches!(appended, Append::Recorded(_)),
+                "record {i} was refused past capacity: the trail ends here"
+            );
+        }
+    }
+
+    /// **F-09 defect proof: records carry no time.**
+    ///
+    /// A row without a timestamp cannot be correlated with anything else.
+    /// F-09 adds `timestamp_unix_ms` covered by the chain; this assertion
+    /// becomes the tamper-detection test then.
+    #[test]
+    fn f09_records_carry_timestamps_covered_by_the_chain() {
+        let mut stream = stream(8);
+        let _ = stream.record(
+            None,
+            &component(),
+            &grants(),
+            Capability::FsRead,
+            "handle_request",
+            Outcome::Granted,
+        );
+        let json = stream.records()[0].to_json();
+        assert!(
+            json.contains("\"timestamp_unix_ms\":"),
+            "the row carries no timestamp: {json}"
+        );
+    }
+
+    /// **F-09 fixture generator: freeze the v1 record format before it changes.**
+    ///
+    /// Run explicitly (`cargo test -p qqq-host --lib f09_generate_v1_fixture
+    /// -- --ignored --exact --nocapture`): writes ten records through the
+    /// CURRENT `to_json` to `crates/qqq-host/tests/fixtures/audit-v1.jsonl`
+    /// (`.jsonl`, because `*.log` is gitignored and the fixture must be
+    /// committed). Ignored by default so no routine run rewrites it; the committed file
+    /// is the format the v2 verifier must still accept. Deleted once F-09
+    /// lands — its job is done and a stale generator would write v2 over
+    /// the v1 it exists to protect.
+    #[test]
+    #[ignore = "explicit fixture generation only; never part of a green run"]
+    fn f09_generate_v1_fixture() {
+        let mut stream = AuditStream::with_default_capacity();
+        let outcomes = [
+            Outcome::Granted,
+            Outcome::Failed,
+            Outcome::Denied,
+            Outcome::Attempted,
+        ];
+        for i in 0..10u64 {
+            let tenant = if i % 2 == 0 {
+                Some(tenant("acme"))
+            } else {
+                None
+            };
+            let appended = stream.record(
+                tenant.as_ref(),
+                &component(),
+                &grants(),
+                Capability::FsRead,
+                "handle_request",
+                outcomes[usize::try_from(i).expect("small") % outcomes.len()],
+            );
+            assert_eq!(appended, Append::Recorded(i + 1));
+        }
+        assert!(stream.verify_chain().is_ok());
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures");
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("audit-v1.jsonl");
+        let mut out = String::new();
+        for record in stream.records() {
+            out.push_str(&record.to_json());
+            out.push('\n');
+        }
+        std::fs::write(&path, &out).expect("fixture write");
+        println!(
+            "wrote {} records to {}",
+            stream.records().len(),
+            path.display()
+        );
+    }
 }

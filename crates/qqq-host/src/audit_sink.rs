@@ -1953,6 +1953,68 @@ mod tests {
         );
     }
 
+    /// **F-09 defect proof: the durability default is a flush, not an fsync.**
+    ///
+    /// An OS crash or power loss can lose acknowledged records, which
+    /// contradicts the "evidence" claim. F-09 makes `FsyncPerBatch` the
+    /// default (group commit amortises the cost).
+    #[test]
+    fn f09_default_durability_is_fsync_per_batch() {
+        assert_eq!(Durability::default(), Durability::FsyncPerBatch);
+    }
+
+    /// **F-09 defect proof: the log file inherits process-default permissions.**
+    ///
+    /// Typically world-readable under the usual umask. F-09 creates the
+    /// file `0600` and its directory `0700` on Unix (with the Windows ACL
+    /// position documented).
+    #[cfg(unix)]
+    #[test]
+    fn f09_log_file_mode_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("mode");
+        let path = scratch.file();
+        let _file = AuditFile::open(&path, 0).expect("open");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the evidence file must not be world-readable");
+    }
+
+    /// **F-09 defect proof: recovery deletes the torn tail.**
+    ///
+    /// A partial last line is cut off with `set_len` and no copy is kept.
+    /// F-09 quarantines it to `<log>.partial-<unix_ms>` with a warning and
+    /// a metric before truncating.
+    #[test]
+    fn f09_partial_tail_is_quarantined_not_deleted() {
+        let scratch = Scratch::new("quarantine");
+        let path = scratch.file();
+        let mut stream = AuditStream::with_default_capacity();
+        append(&mut stream, Outcome::Granted);
+        append(&mut stream, Outcome::Denied);
+        append(&mut stream, Outcome::Failed);
+        let mut raw = String::new();
+        for record in stream.records() {
+            raw.push_str(&record.to_json());
+            raw.push('\n');
+        }
+        // Tear the tail: chop the last line short of its closing brace.
+        // Records are hex ASCII, so a byte cut cannot split a code point.
+        let torn = raw[..raw.len() - 10].to_owned();
+        assert!(!torn.trim_end().ends_with('}'));
+        std::fs::write(&path, &torn).expect("torn write");
+        let _ = resume_or_start(&path, 1024).expect("resume");
+        let entries: Vec<_> = std::fs::read_dir(scratch.0.clone())
+            .expect("readdir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect();
+        assert!(
+            entries.iter().any(|name| name
+                .to_str()
+                .is_some_and(|name| name.starts_with("audit.jsonl.partial-"))),
+            "the torn tail must be quarantined, not deleted: {entries:?}"
+        );
+    }
+
     /// **A record written to the file reads back byte-identical.**
     ///
     /// The writer and the reader are both hand-written, so this is the test that keeps them

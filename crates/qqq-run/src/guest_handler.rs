@@ -1470,6 +1470,52 @@ mod tests {
         GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
     }
 
+    /// **F-09 defect proof: a full audit stream does not stop the server.**
+    ///
+    /// After 65,536 rows the stream refuses, the handler ignores
+    /// `Append::Full` (a counter nobody pages on), and the request is
+    /// served normally — the trail ends mid-load and nobody is told.
+    /// F-09 makes sink-backed streams rings and adds FailClosed 503s;
+    /// this scenario is replaced then by the unwritable-sink test,
+    /// because a ring never fills.
+    #[test]
+    fn f09_full_audit_stream_still_serves() {
+        let Some(app) = test_app() else {
+            return;
+        };
+        {
+            let mut stream = app
+                .audit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let component =
+                qqq_host::tenant::ComponentDigest::new("0011223344556677").expect("digest");
+            let grants = qqq_host::tenant::GrantDigest::new("aabbccdd").expect("digest");
+            for _ in 0..65_536 {
+                let _ = stream.record(
+                    None,
+                    &component,
+                    &grants,
+                    qqq_cap::capability::Capability::FsRead,
+                    "handle_request",
+                    qqq_host::Outcome::Granted,
+                );
+            }
+            assert_eq!(stream.len(), 65_536);
+        }
+        let response = app
+            .handle_request(
+                &head(qqq_serve::Method::Get, "/orders"),
+                None,
+                "test-tenant",
+            )
+            .expect("the request itself is well-formed");
+        assert_eq!(
+            response.status, 503,
+            "a dead audit trail must refuse with 503, not serve over a silent record"
+        );
+    }
+
     /// A request head, built the way `qqq-serve`'s parser builds one.
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {
         qqq_serve::RequestHead {

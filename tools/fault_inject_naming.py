@@ -49,7 +49,13 @@ INJECTIONS = [
     ),
     (
         'document teaches `qqq new`',
-        Path('README.md'),
+        # The proposal, not the README: since the presence redesign the
+        # README teaches no `qqqai new` quickstart (it points at
+        # `cargo run -p qqq-run -- --help`), so the old README needle is
+        # legitimately gone — not moved, removed with the section that
+        # held it. The proposal teaches `qqqai new` in several places and
+        # is scanned by the same test, so the fault class is unchanged.
+        Path('QQQ-Proposal-V1.md'),
         'qqqai new',
         'qqq new',
         'the_documents_never_teach_a_bare_qqq_command',
@@ -112,8 +118,9 @@ def main() -> int:
             backup = Path(tmp) / full.name
             shutil.copy(full, backup)
             try:
-                # `qqqai new` appears many times in README; replacing only the
-                # first is enough and keeps the diff legible.
+                # The needle may appear many times in the host document;
+                # replacing only the first is enough and keeps the diff
+                # legible.
                 io.open(full, 'w', encoding='utf-8', newline='').write(
                     original.replace(needle, replacement, 1)
                 )

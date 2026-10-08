@@ -168,8 +168,8 @@ jobs:
         run: |
           echo "core.autocrlf=$(git config --get core.autocrlf || echo '(unset)')"
           echo "--- tracked end-of-line state (must be i/lf) ---"
-          git ls-files --eol | grep -v '\.gitattributes' | awk '$1 != "i/lf" && $1 != "i/none" { print "NOT LF: " $0; bad=1 } END { exit bad ? 1 : 0 }'
-          echo "every tracked file is i/lf or i/none"
+          git ls-files --eol | grep -v '\.gitattributes' | awk '$1 != "i/lf" && $1 != "i/none" && $1 != "i/-text" { print "NOT LF: " $0; bad=1 } END { exit bad ? 1 : 0 }'
+          echo "every tracked file is i/lf, i/none, or git-binary (i/-text)"
 
       - name: Prove the self-tests do not leave the tree with the wrong endings
         run: |

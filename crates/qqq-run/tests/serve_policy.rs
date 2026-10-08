@@ -132,6 +132,17 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
             .current_dir(&dir.path)
             .env("HOME", &dir.path)
             .env("USERPROFILE", &dir.path)
+            // A sandbox-local target dir, so the child never resolves an ambient artifact.
+            //
+            // `serve` locates the project's component through the Cargo target dir, which
+            // honors `CARGO_TARGET_DIR`. The Linux bridge sets it globally at a shared root
+            // where the gate itself builds a same-named guest (`app.wasm`): the sandbox project
+            // is unbuilt by design, yet the child loaded the foreign artifact, died with
+            // `QQQ-3004`, and all eleven tests in this file failed with "never bound a port"
+            // (bridge14). Pointing the child at an empty dir restores the intended "unbuilt"
+            // lookup in every environment. Same mechanism as `cli.rs`'s `target_dir_for`, and
+            // setting it per-child needs no process-global mutation.
+            .env("CARGO_TARGET_DIR", dir.path.join(".cargo-target"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -629,6 +640,9 @@ fn config_serves_the_manifest_it_names() {
         .current_dir(&s.path)
         .env("HOME", &s.path)
         .env("USERPROFILE", &s.path)
+        // Sandbox-local target dir: see `start` — without it the child resolves the
+        // ambient `CARGO_TARGET_DIR` and loads a foreign same-named artifact.
+        .env("CARGO_TARGET_DIR", s.path.join(".cargo-target"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

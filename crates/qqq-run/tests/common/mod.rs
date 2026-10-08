@@ -73,6 +73,19 @@ impl Sandbox {
         std::fs::write(&target, content).expect("write");
         target
     }
+
+    /// A target dir the sandbox owns, for children that resolve artifacts through
+    /// `CARGO_TARGET_DIR`.
+    ///
+    /// The directory is intentionally left uncreated and empty: the sandbox project is
+    /// unbuilt by design, and an empty lookup must resolve to "no component". Inheriting
+    /// the ambient variable lets a same-named artifact from a shared target root satisfy
+    /// the lookup instead, and the child then serves (or dies on) a foreign guest —
+    /// measured on the Linux bridge, where the gate's own `app.wasm` killed every
+    /// `serve_policy` spawn. Same mechanism as `cli.rs`'s `target_dir_for`.
+    pub fn target_dir(&self) -> PathBuf {
+        self.0.join(".cargo-target")
+    }
 }
 
 impl Drop for Sandbox {
@@ -200,6 +213,9 @@ fn attempt_once(sandbox: &Sandbox, manifest: &str, extra: &[&str], target: &str)
             "8",
         ])
         .args(extra)
+        // Sandbox-local target dir: `Sandbox::target_dir` explains why the ambient one
+        // must not leak into the child.
+        .env("CARGO_TARGET_DIR", sandbox.target_dir())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -254,6 +270,9 @@ pub fn run_refused(sandbox: &Sandbox, manifest: &str, extra: &[&str]) -> String 
             "8",
         ])
         .args(extra)
+        // Sandbox-local target dir: `Sandbox::target_dir` explains why the ambient one
+        // must not leak into the child.
+        .env("CARGO_TARGET_DIR", sandbox.target_dir())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

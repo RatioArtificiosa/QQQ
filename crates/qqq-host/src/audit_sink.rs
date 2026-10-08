@@ -915,11 +915,8 @@ pub fn resume_or_start_ring(
     let mut loaded = load(path)?;
     quarantine_and_truncate(path, &mut loaded)?;
 
-    let mut stream = AuditStream::resume_ring(loaded.records.clone(), ring_capacity)
+    let stream = AuditStream::resume_ring_with_key(loaded.records.clone(), ring_capacity, key)
         .map_err(|reason| SinkError::NotAStream { reason })?;
-    if let Some(chain_key) = key {
-        stream = stream.with_chain_key(chain_key);
-    }
     Ok((stream, loaded))
 }
 

@@ -275,13 +275,25 @@ pub struct AuditRecord {
 /// The operator-supplied key for the v2 audit chain (`F-09`).
 ///
 /// HMAC-SHA-256 over the record fields, keyed from outside the log
-/// directory (environment or secret store at attach time): anyone with
-/// write access to the file alone can no longer forge a row and recompute
-/// the chain. Without a key the v2 chain is plain SHA-256 — tamper-evident
-/// against accidents, not attackers — and the attach path says so loudly.
-/// Fixed test keys only, never production keys, including in tests.
-#[derive(Debug, Clone)]
+/// directory (a key file at attach time): anyone with write access to
+/// the file alone can no longer forge a row and recompute the chain.
+/// Without a key the v2 chain is plain SHA-256 — tamper-evident
+/// against accidents, not attackers — and the attach path says so
+/// loudly. Fixed test keys only, never production keys, including in
+/// tests.
+///
+/// [`Debug`] is manual and redacted: the derived form would print the
+/// key bytes, and through `AuditStream`'s derived `Debug` they would
+/// reach any log line, panic message, or snapshot that formats a
+/// stream. Key material must never print.
+#[derive(Clone)]
 pub struct ChainKey([u8; 32]);
+
+impl std::fmt::Debug for ChainKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChainKey(redacted)")
+    }
+}
 
 impl ChainKey {
     /// Parse 64 lowercase hex characters into a key.
@@ -1086,6 +1098,22 @@ impl AuditHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(stream.records())
     }
+
+    /// The capabilities this request has used but not yet committed.
+    ///
+    /// Mid-request queries (`assert-caps-only`) run before the commit, so
+    /// reading only the stream would answer over an empty set — the
+    /// vacuous pass the assertion interface exists to prevent. This
+    /// exposes the buffered rows without draining them: the commit still
+    /// owns sequencing, and a second read sees the same rows until it runs.
+    pub(crate) fn pending_capabilities(&self) -> Vec<Capability> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|row| row.capability)
+            .collect()
+    }
 }
 
 /// An append-only, hash-chained record of capability use — `CAP-015`.
@@ -1294,11 +1322,19 @@ impl AuditStream {
     /// the window are an operator rotation decision the file already made
     /// by existing — not something this call absorbs silently.
     ///
+    /// The key must arrive here, not after: verification runs inside this
+    /// call, and keyed rows verified unkeyed fail — so a key applied
+    /// afterwards would refuse every keyed restart it was meant to open.
+    ///
     /// # Errors
     ///
     /// The same broken-chain refusal as [`Self::resume`], checked over the
-    /// retained window.
-    pub(crate) fn resume_ring(records: Vec<AuditRecord>, capacity: usize) -> Result<Self, String> {
+    /// retained window, under the given key.
+    pub(crate) fn resume_ring_with_key(
+        records: Vec<AuditRecord>,
+        capacity: usize,
+        key: Option<ChainKey>,
+    ) -> Result<Self, String> {
         if capacity == 0 {
             return Err(
                 "an audit stream must hold at least one record; a zero-capacity stream refuses \
@@ -1329,7 +1365,7 @@ impl AuditStream {
             head,
             base,
             next,
-            key: None,
+            key,
         };
         if let Err((sequence, reason)) = stream.verify_chain() {
             return Err(format!(
@@ -2699,6 +2735,69 @@ mod tests {
         assert!(
             ChainKey::from_hex(&"zz".repeat(32)).is_err(),
             "non-hex rejected"
+        );
+    }
+
+    /// **F-09 review: buffered rows are visible to capability queries.**
+    ///
+    /// `assert-caps-only` runs mid-request, before the commit: rows that
+    /// only the stream sees would make the assertion pass vacuously over
+    /// an empty set. The handle exposes what it holds without draining.
+    #[test]
+    fn f09_buffered_rows_are_visible_to_capability_queries() {
+        let stream =
+            std::sync::Arc::new(std::sync::Mutex::new(AuditStream::with_default_capacity()));
+        let handle = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
+        handle.record(Capability::FsRead, "handle_request", Outcome::Granted);
+        let mut seen = Vec::new();
+        handle.with_records(|records| {
+            seen.extend(records.iter().map(|row| row.capability));
+        });
+        seen.extend(handle.pending_capabilities());
+        assert!(
+            seen.contains(&Capability::FsRead),
+            "a buffered row must be visible pre-commit: {seen:?}"
+        );
+    }
+
+    /// **F-09 review: a resumed keyed stream verifies under its key.**
+    ///
+    /// Keying after verification would refuse every keyed restart: the
+    /// rows were HMAC-chained, but the verifier runs unkeyed. The key
+    /// must be in place before the first check.
+    #[test]
+    fn f09_keyed_resume_verifies_under_its_key() {
+        let key = ChainKey::from_hex(&"cd".repeat(32)).expect("key");
+        let mut stream = AuditStream::new_ring(8)
+            .expect("ring")
+            .with_chain_key(key.clone());
+        stream.record(
+            None,
+            &component(),
+            &grants(),
+            Capability::FsRead,
+            "handle_request",
+            Outcome::Granted,
+        );
+        let rows = stream.records().to_vec();
+        let resumed = AuditStream::resume_ring_with_key(rows, 8, Some(key)).expect("resume");
+        assert!(resumed.verify_chain().is_ok());
+    }
+
+    /// **F-09 review: key material never prints.**
+    ///
+    /// `ChainKey` feeds every row's digest; a `{:?}` in a log line, a
+    /// panic message, or a snapshot would ship the secret to whoever
+    /// reads the logs. The `Debug` impl states the type and nothing else —
+    /// asserted by exact equality, because a substring check for the hex
+    /// spelling passes against the derived decimal rendering (`[239, 239,
+    /// ...]`) and would certify a leak it cannot see.
+    #[test]
+    fn f09_chain_key_debug_is_redacted() {
+        let rendered = format!("{:?}", ChainKey::from_hex(&"ef".repeat(32)).expect("key"));
+        assert_eq!(
+            rendered, "ChainKey(redacted)",
+            "key bytes must not appear in Debug output in any base"
         );
     }
 

@@ -536,12 +536,17 @@ fn recorded_outside(
     allowed: &[Capability],
 ) -> Result<Vec<Capability>, AssertionError> {
     let handle = stream_of(store.data().audit.as_ref())?;
-    let mut out = Vec::new();
+    let mut attempted = Vec::new();
     handle.with_records(|records| {
-        let attempted: Vec<Capability> = records.iter().map(|r| r.capability).collect();
-        out = unaccounted(allowed, &attempted);
+        attempted.extend(records.iter().map(|r| r.capability));
     });
-    Ok(out)
+    // Plus the rows buffered but not yet committed: the assertion runs
+    // mid-request, and reading only committed rows would pass vacuously
+    // over an empty set whenever the guest asks before the commit.
+    // Unioned before the filter, so a capability in both sets is still
+    // reported once.
+    attempted.extend(handle.pending_capabilities());
+    Ok(unaccounted(allowed, &attempted))
 }
 
 /// The audit stream a capability query reads, or the error for its absence.

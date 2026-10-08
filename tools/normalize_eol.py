@@ -149,6 +149,9 @@ def classify_eol_line(line: str) -> str | None:
     """The committed-blob verdict for one `git ls-files --eol` line.
 
     Returns the `path (index-eol)` finding, or `None` when the line is clean.
+    Raises `ValueError` on a line that is not a report record at all:
+    silently skipping a format break would pass vacuously, and a gate that
+    cannot fail is worse than a gate that fails loudly.
 
     # Why `i/-text` (binary) is clean
 
@@ -162,17 +165,37 @@ def classify_eol_line(line: str) -> str | None:
     # Format: `i/<index-eol> w/<worktree-eol> attr/<attrs>\t<path>`
     parts = line.split("\t", 1)
     if len(parts) != 2:
-        return None
+        raise ValueError(f"malformed git ls-files --eol line: {line!r}")
     meta, path = parts[0], parts[1]
     if path.endswith(".gitattributes"):
         return None
-    index_eol = meta.split()[0] if meta.split() else ""
+    fields = meta.split()
+    if not fields:
+        raise ValueError(f"malformed git ls-files --eol line: {line!r}")
+    index_eol = fields[0]
     # `i/lf` is correct. `i/none` means Git tracks no EOL state. `i/-text`
     # means Git treats the blob as binary: no conversion, no defect.
     # `i/mixed` or `i/crlf` means the blob is wrong.
-    if index_eol and index_eol not in ("i/lf", "i/none", "i/-text"):
+    if index_eol not in ("i/lf", "i/none", "i/-text"):
         return f"{path} ({index_eol})"
     return None
+
+
+def findings_in_lines(lines: list[str]) -> list[str]:
+    """The committed-blob findings for parsed `--eol` report lines.
+
+    Raises `RuntimeError` on an empty report: a successful command with no
+    entries means the parser and the source disagree about the format, and
+    returning "no findings" would certify a tree that was never examined.
+    """
+    if not lines:
+        raise RuntimeError("git ls-files --eol returned no entries")
+    bad: list[str] = []
+    for line in lines:
+        finding = classify_eol_line(line)
+        if finding is not None:
+            bad.append(finding)
+    return bad
 
 
 def index_eol_report() -> list[str]:
@@ -201,12 +224,7 @@ def index_eol_report() -> list[str]:
     out = subprocess.run(
         ["git", "ls-files", "--eol"],
         cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
-    bad: list[str] = []
-    for line in out.stdout.splitlines():
-        finding = classify_eol_line(line)
-        if finding is not None:
-            bad.append(finding)
-    return bad
+    return findings_in_lines(out.stdout.splitlines())
 
 
 def main() -> int:
@@ -418,39 +436,66 @@ def self_test() -> int:
         # hero JPEG because `git ls-files --eol` reports `i/-text` for a blob
         # Git will never convert. These cases drive `classify_eol_line` on
         # fabricated report lines so the distinction is pinned without a repo.
-        from normalize_eol import classify_eol_line as _classify
+        # The function under test is already defined in this module: calling
+        # it directly, rather than importing the module by name (which would
+        # test a second copy, or fail outside the script directory).
+
+        def _raises(marker: str, fn) -> bool:
+            try:
+                fn()
+            except (ValueError, RuntimeError) as exc:
+                return marker in str(exc)
+            except Exception:
+                return False
+            return False
 
         expect(
             "an i/-text (binary) line is not a finding",
-            _classify("i/-text w/-text attr/-text\tassets/qqq-hero.jpg") is None,
+            classify_eol_line("i/-text w/-text attr/-text\tassets/qqq-hero.jpg") is None,
             "a JPEG's 0D0A bytes are image data, not line endings",
         )
         expect(
             "an i/lf line is not a finding",
-            _classify("i/lf w/lf attr/text eol=lf\tREADME.md") is None,
+            classify_eol_line("i/lf w/lf attr/text eol=lf\tREADME.md") is None,
             "LF is the correct committed state",
         )
         expect(
             "an i/none line is not a finding",
-            _classify("i/none w/none attr/-text\tarchive.zip") is None,
+            classify_eol_line("i/none w/none attr/-text\tarchive.zip") is None,
             "no EOL state means no defect",
         )
         expect(
             "an i/crlf line is a finding",
-            _classify("i/crlf w/crlf attr/text eol=lf\tprobe.sh")
+            classify_eol_line("i/crlf w/crlf attr/text eol=lf\tprobe.sh")
             == "probe.sh (i/crlf)",
             "a CRLF committed blob is the real defect",
         )
         expect(
             "an i/mixed line is a finding",
-            _classify("i/mixed w/mixed attr/text eol=lf\tprobe.sh")
+            classify_eol_line("i/mixed w/mixed attr/text eol=lf\tprobe.sh")
             == "probe.sh (i/mixed)",
             "a mixed committed blob is the real defect",
         )
         expect(
             ".gitattributes itself is never a finding",
-            _classify("i/crlf w/crlf attr/text\t.gitattributes") is None,
+            classify_eol_line("i/crlf w/crlf attr/text\t.gitattributes") is None,
             "the rules file is exempt by design",
+        )
+        expect(
+            "a line that is not a record raises instead of passing silently",
+            _raises(
+                "malformed",
+                lambda: classify_eol_line("this is not an eol report line"),
+            ),
+            "a format break must fail loudly, never certify silently",
+        )
+        expect(
+            "an empty report raises instead of certifying an unexamined tree",
+            _raises(
+                "no entries",
+                lambda: findings_in_lines([]),
+            ),
+            "no entries means the parser and the source disagree",
         )
 
     print()

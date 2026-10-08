@@ -1334,8 +1334,15 @@ jobs:
       # `TenantOutputBudgets::set_meter` (covered by the metered-refusal test,
       # not prose), plus `Metrics::output_refusals` with a compiling doctest —
       # measured 2103 -> 2106, the delta exactly the three uncovered items.
+      #
+      # # And why it went UP, to 2109
+      #
+      # F-12 adds six public declarations to the new `sink_lane` module (three
+      # consts, `SinkLane`, `InFlight`, `SinkLane::spawn`) and four compiling
+      # doctests that all run — measured 2106 -> 2109. Same reasoning: the lane
+      # is covered by the coalescing/ordering/fairness tests, not by prose.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2106
+        run: python tools/check_api_examples.py --allow 2109
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

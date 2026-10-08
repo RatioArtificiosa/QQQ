@@ -80,24 +80,28 @@
 //!
 //! `poll_write` runs on an executor worker, and the destination is a host stream:
 //! a slow pipe or terminal can block a synchronous write indefinitely, stalling
-//! every task queued behind that worker. So each output owns one writer task that
-//! drains a FIFO queue, and every blocking sink call runs on Tokio's blocking
-//! pool via `spawn_blocking` — which works on multi-thread runtimes and on the
-//! current-thread runtime the serve path builds, where `block_in_place` would
-//! panic. Order is structural: one task consumes one queue, so a guest's output
-//! cannot reorder against itself the way per-write spawned tasks could.
+//! every task queued behind that worker. So each physical sink owns one writer
+//! thread — a [`crate::sink_lane::SinkLane`] — draining a FIFO queue shared by
+//! every output on that sink, and no guest-output write ever touches Tokio's
+//! blocking pool (which also runs guest handlers: sharing it once froze
+//! requests behind a stalled log). Order is structural: one thread consumes
+//! one queue, so a guest's output cannot reorder against itself the way
+//! per-write spawned tasks could.
 //!
 //! The queue is bounded, and a full queue parks the *guest*, not the executor:
-//! once [`PUMP_QUEUE_MSGS`] messages wait, the next `poll_write` stores the
-//! caller's waker and returns `Pending`; the writer task wakes it after its
-//! next receive. Two bounds share the work: the byte quota
-//! ([`MAX_OUTPUT_BYTES`]) caps how much a guest may emit in total, and the
-//! message bound caps how far ahead of a slow sink the executor may run.
+//! past [`crate::sink_lane::LANE_QUEUE_MSGS`] messages — or past the
+//! per-output in-flight byte cap — the next `poll_write` stores the caller's
+//! waker and returns `Pending`; the lane wakes it after its next completed
+//! write. Three bounds share the work: the byte quota
+//! ([`MAX_OUTPUT_BYTES`]) caps how much a guest may emit in total, the lane
+//! queue caps how many messages may wait, and the in-flight caps bound
+//! undrained bytes per output and per tenant.
 //!
 //! Outside a Tokio runtime (unit tests driving `poll_write` directly) there is
-//! no executor to protect and no task to spawn, so the write runs inline on the
-//! calling thread. The two paths never mix in production: construction happens
-//! outside the runtime, and the first poll inside one starts the pump.
+//! no executor to protect and no lane traffic to join, so the write runs
+//! inline on the calling thread. The two paths never mix in production:
+//! construction happens outside the runtime, and the first poll inside one
+//! takes the lane.
 //!
 //! # What this does and does not defend
 //!
@@ -122,14 +126,14 @@
 use std::future::Future as _;
 use std::io::{self, Write};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use qqq_core::sync::LockRecover;
 
 use tokio::io::AsyncWrite;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 
 /// The marker every line of a guest's standard output carries.
@@ -161,40 +165,6 @@ pub const MAX_ESCAPED_RUN: usize = 4096;
 /// emitting many short lines. The budget is shared by all writers obtained from
 /// one `GuestOutput`, so opening multiple WASI streams cannot multiply it.
 pub const MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
-
-/// How many messages wait in one output's pump queue before writers park.
-///
-/// Sixty-four small writes, or fewer large ones once the byte quota bites
-/// first: the quota bounds *how much* may wait, this bounds *how many turns*
-/// the executor may run ahead of a slow sink. A full queue returns `Pending`
-/// with the caller's waker stored, and the writer task wakes it after its next
-/// receive — backpressure with no lost wake-up, because a recheck after storing
-/// closes the race where space frees first.
-///
-/// ```
-/// use qqq_host::guest_output::PUMP_QUEUE_MSGS;
-///
-/// assert_eq!(PUMP_QUEUE_MSGS, 64);
-/// ```
-pub const PUMP_QUEUE_MSGS: usize = 64;
-
-/// How many escaped bytes wait across one output's pump queue before writers park.
-///
-/// The message bound above caps how many turns the executor may run ahead; this
-/// caps how much memory that head-start may hold. Without it the bound is
-/// `64 * (largest message)`, and the largest message is whatever the stream
-/// adapter hands `poll_write` in one call — an upstream detail, not a bound.
-/// A full byte queue parks the writer exactly like a full message queue, with
-/// one exception: an empty queue admits a single oversized message, since
-/// parking it would wait for a drain that can never start. The worst case is
-/// therefore the limit plus one message.
-///
-/// ```
-/// use qqq_host::guest_output::PUMP_QUEUE_BYTES;
-///
-/// assert_eq!(PUMP_QUEUE_BYTES, 1024 * 1024);
-/// ```
-pub const PUMP_QUEUE_BYTES: usize = 1024 * 1024;
 
 /// Default lifetime output budget shared by one tenant's requests on one app.
 ///
@@ -229,6 +199,13 @@ pub const TENANT_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct OutputBudget {
     used: AtomicU64,
+    /// Escaped bytes accepted but not yet drained to the sink.
+    ///
+    /// Distinct from `used`: the lifetime counter bounds what a request may
+    /// ever emit, this bounds what is still queued. `InFlight` values add on
+    /// construction and subtract on drop; direct (runtime-less) writes never
+    /// touch it, because nothing they emit waits anywhere.
+    in_flight: AtomicU64,
     limit: u64,
     /// Writes refused for exceeding the quota.
     ///
@@ -264,6 +241,7 @@ impl OutputBudget {
     pub fn new(limit: u64) -> Self {
         Self {
             used: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
             limit,
             breaches: AtomicU64::new(0),
             parent: std::sync::Mutex::new(None),
@@ -390,6 +368,56 @@ impl OutputBudget {
             }
         }
     }
+
+    /// Hold `bytes` of in-flight space here and in the tenant parent, if any.
+    ///
+    /// The lane admission half of backpressure: the lifetime `reserve` bounds
+    /// what a request may ever emit, this bounds what is still undrained.
+    /// Each side admits when its own counter is empty (an empty queue takes
+    /// one message of any size — parking it would wait for a drain that can
+    /// never start) and refuses past its cap otherwise: the per-output
+    /// fairness cap here, the tenant ceiling on the parent. A parent refusal
+    /// releases this budget's hold, so a failed admission leaves no trace.
+    /// Check-then-act like the queue bound, so concurrent writers may
+    /// overshoot softly; a single writer is exact, which is what the fairness
+    /// test proves.
+    pub(crate) fn reserve_in_flight(&self, bytes: u64) -> bool {
+        if !admit_in_flight(
+            self.in_flight.load(Ordering::Relaxed),
+            crate::sink_lane::OUTPUT_IN_FLIGHT_BYTES as u64,
+            bytes,
+        ) {
+            return false;
+        }
+        self.in_flight.fetch_add(bytes, Ordering::Relaxed);
+        let parent = self.parent.lock().ok().and_then(|p| p.clone());
+        if let Some(parent) = parent {
+            if !admit_in_flight(
+                parent.in_flight.load(Ordering::Relaxed),
+                parent.limit,
+                bytes,
+            ) {
+                sub_saturating(&self.in_flight, bytes);
+                return false;
+            }
+            parent.in_flight.fetch_add(bytes, Ordering::Relaxed);
+        }
+        true
+    }
+
+    /// Release in-flight bytes a drain (or an abandoned message) frees.
+    ///
+    /// Saturating: a release must never panic or wrap on an accounting
+    /// surprise. Called with the same amount `reserve_in_flight` held — the
+    /// `InFlight` guard carries it, so the pairing cannot drift apart.
+    pub(crate) fn release_in_flight(&self, bytes: u64) {
+        sub_saturating(&self.in_flight, bytes);
+        if let Ok(parent) = self.parent.lock() {
+            if let Some(parent) = parent.as_ref() {
+                sub_saturating(&parent.in_flight, bytes);
+            }
+        }
+    }
 }
 
 /// A per-output budget returns its consumed bytes when its request ends.
@@ -418,11 +446,7 @@ impl Drop for OutputBudget {
         }
         if let Ok(parent) = self.parent.lock() {
             if let Some(parent) = parent.as_ref() {
-                let _ = parent
-                    .used
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some(current.saturating_sub(used))
-                    });
+                sub_saturating(&parent.used, used);
             }
         }
     }
@@ -925,14 +949,6 @@ impl Escaper {
     }
 }
 
-/// Work for one output's writer task, in guest order.
-enum PumpMsg {
-    /// Escaped bytes to append to the sink.
-    Bytes(Vec<u8>),
-    /// Flush the sink, then report completion through the channel.
-    Flush(oneshot::Sender<io::Result<()>>),
-}
-
 /// The most recent quota breach on one output, in full.
 ///
 /// The guest observes a stream error; the counter from [`GuestOutput::breaches`]
@@ -969,41 +985,26 @@ pub struct TruncationEvent {
 struct Shared {
     /// Which stream this output is, for breach reports.
     stream: &'static str,
+    /// The destination, also held by the lane for the actual writes.
+    ///
+    /// Kept here for the runtime-less inline path, which writes on the
+    /// calling thread exactly as before lanes existed.
     sink: Arc<dyn GuestSink>,
     budget: Arc<OutputBudget>,
-    /// The writer task's inbox, once one exists.
-    ///
-    /// `None` until the first poll inside a runtime spawns the pump; unit tests
-    /// driving `poll_write` outside any runtime never create one and write
-    /// inline instead.
-    pump: std::sync::Mutex<Option<mpsc::Sender<PumpMsg>>>,
+    /// The lane this output enqueues to.
+    lane: Arc<crate::sink_lane::SinkLane>,
     /// The first asynchronous write failure, surfaced on later calls.
     ///
-    /// A sink failure happens on the writer task, after `poll_write` already
+    /// A sink failure happens on the lane thread, after `poll_write` already
     /// reported success for those bytes. Swallowing it would make a dead log
     /// look healthy; recording the first one and failing subsequent calls keeps
     /// the failure visible without inventing a history the caller cannot use.
     ///
-    /// Shared by `Arc` rather than held inline so the writer task can report
-    /// without holding the whole `Shared`: the task must not own a sender or
-    /// a `Shared`, or the inbox would never drain shut and the task would
+    /// Shared by `Arc` rather than held inline so the lane thread can report
+    /// without holding the whole `Shared`: the thread must not own a sender or
+    /// a `Shared`, or the inbox would never drain shut and the thread would
     /// never end.
     failure: Arc<std::sync::Mutex<Option<String>>>,
-    /// Writers parked on a full queue, woken after the next receive.
-    ///
-    /// Every parked writer leaves its waker — plural on purpose. Storing only
-    /// the latest would drop the others on the floor: with several writers
-    /// parked, one receive would wake one writer and strand the rest with no
-    /// further receive guaranteed to wake them. Spurious wakes are harmless;
-    /// every woken writer rechecks the queue before proceeding.
-    queue_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
-    /// Escaped bytes accepted but not yet taken by the pump.
-    ///
-    /// Incremented when a message is queued, decremented when the pump takes
-    /// it: the difference between queued and drained, which is what
-    /// [`PUMP_QUEUE_BYTES`] bounds. A plain counter rather than RAII for now —
-    /// F-12's lane drain adopts it into the `InFlight` guard.
-    in_flight: Arc<AtomicUsize>,
     /// The most recent quota breach, for [`GuestOutput::last_truncation`].
     last_truncation: std::sync::Mutex<Option<TruncationEvent>>,
 }
@@ -1029,15 +1030,61 @@ impl std::fmt::Debug for GuestOutput {
 
 impl GuestOutput {
     /// Guest standard output, written to the host process's stdout.
+    ///
+    /// Shares the process-wide stdout lane: every stdout output of every
+    /// request enqueues to one FIFO drained by one thread, which is what
+    /// keeps a stalled sink from pinning per-request resources.
     #[must_use]
     pub fn stdout() -> Self {
-        Self::to(STDOUT_PREFIX, io::stdout())
+        Self::to_lane(STDOUT_PREFIX, Self::stdout_lane())
     }
 
     /// Guest standard error, written to the host process's stderr.
+    ///
+    /// Shares the process-wide stderr lane, like [`GuestOutput::stdout`].
     #[must_use]
     pub fn stderr() -> Self {
-        Self::to(STDERR_PREFIX, io::stderr())
+        Self::to_lane(STDERR_PREFIX, Self::stderr_lane())
+    }
+
+    /// Guest output on an already-running lane.
+    ///
+    /// The two process lanes live here rather than at the call sites, so
+    /// there is exactly one stdout lane and one stderr lane per process no
+    /// matter how many stores are built. Each output mints its own failure
+    /// slot: sharing one slot across outputs would poison every present and
+    /// future output with one transient sink error, since nothing ever
+    /// clears it.
+    fn to_lane(prefix: &'static str, lane: Arc<crate::sink_lane::SinkLane>) -> Self {
+        let sink = lane.sink();
+        let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        Self::with_lane_and_sink(prefix, lane, sink, failure, MAX_OUTPUT_BYTES)
+    }
+
+    /// The process-wide stdout lane, started once.
+    fn stdout_lane() -> Arc<crate::sink_lane::SinkLane> {
+        use std::sync::OnceLock;
+        static LANE: OnceLock<Arc<crate::sink_lane::SinkLane>> = OnceLock::new();
+        Arc::clone(LANE.get_or_init(|| {
+            crate::sink_lane::SinkLane::spawn(
+                "qqq-stdout-lane",
+                Arc::new(io::stdout()) as Arc<dyn GuestSink>,
+            )
+            .expect("the stdout lane thread spawns")
+        }))
+    }
+
+    /// The process-wide stderr lane, started once.
+    fn stderr_lane() -> Arc<crate::sink_lane::SinkLane> {
+        use std::sync::OnceLock;
+        static LANE: OnceLock<Arc<crate::sink_lane::SinkLane>> = OnceLock::new();
+        Arc::clone(LANE.get_or_init(|| {
+            crate::sink_lane::SinkLane::spawn(
+                "qqq-stderr-lane",
+                Arc::new(io::stderr()) as Arc<dyn GuestSink>,
+            )
+            .expect("the stderr lane thread spawns")
+        }))
     }
 
     /// Guest output with an explicit prefix and destination.
@@ -1045,24 +1092,84 @@ impl GuestOutput {
     /// The destination is an `Arc` so that repeated calls to `async_stream` — which
     /// wasmtime-wasi makes freely, one per acquired stream — share one sink rather than
     /// racing on several.
+    ///
+    /// Spawns a private lane for the sink: the shared process lanes belong to
+    /// [`GuestOutput::stdout`] and [`GuestOutput::stderr`], and any other sink
+    /// gets its own FIFO and thread rather than borrowing one.
     #[must_use]
     pub fn to(prefix: &'static str, sink: impl GuestSink) -> Self {
         Self::to_with_limit(prefix, sink, MAX_OUTPUT_BYTES)
     }
 
     /// Construct guest output with an explicit lifetime byte quota.
+    ///
+    /// # Panics
+    ///
+    /// When the OS refuses the lane thread. Thread spawn fails only on
+    /// resource exhaustion, and a server that cannot spawn one thread is
+    /// already fail-stopped — panicking moves that failure to construction
+    /// rather than hanging the first write.
     #[must_use]
     pub fn to_with_limit(prefix: &'static str, sink: impl GuestSink, limit: u64) -> Self {
+        let sink = Arc::new(sink);
+        let shared_failure: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        // A private lane cannot fail to start in any situation the host
+        // survives: thread spawn fails only on resource exhaustion, and a
+        // server that cannot spawn one thread is already fail-stopped.
+        let lane = crate::sink_lane::SinkLane::spawn(
+            "qqq-output-lane",
+            Arc::clone(&sink) as Arc<dyn GuestSink>,
+        )
+        .expect("a guest-output lane thread spawns");
+        Self::with_lane_and_sink(prefix, lane, sink, shared_failure, limit)
+    }
+
+    /// Construct guest output on an existing lane.
+    ///
+    /// Test-only: production paths use the shared process lanes
+    /// ([`GuestOutput::stdout`], [`GuestOutput::stderr`]) or spawn a private
+    /// one ([`GuestOutput::to`]); only tests share a lane across outputs to
+    /// prove ordering and fairness on one FIFO.
+    #[cfg(test)]
+    pub(crate) fn with_lane(
+        prefix: &'static str,
+        lane: &Arc<crate::sink_lane::SinkLane>,
+        limit: u64,
+    ) -> Self {
         Self {
             prefix,
             shared: Arc::new(Shared {
                 stream: prefix,
-                sink: Arc::new(sink),
+                sink: lane.sink(),
                 budget: Arc::new(OutputBudget::new(limit)),
-                pump: std::sync::Mutex::new(None),
+                lane: Arc::clone(lane),
                 failure: Arc::new(std::sync::Mutex::new(None)),
-                queue_wakers: Arc::new(std::sync::Mutex::new(Vec::new())),
-                in_flight: Arc::new(AtomicUsize::new(0)),
+                last_truncation: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Construct guest output on a lane with an explicit sink and failure slot.
+    ///
+    /// The `to_*` constructors funnel through here so there is one place that
+    /// assembles a `Shared`, rather than three copies of the same struct
+    /// literal drifting apart.
+    fn with_lane_and_sink(
+        prefix: &'static str,
+        lane: Arc<crate::sink_lane::SinkLane>,
+        sink: Arc<dyn GuestSink>,
+        failure: Arc<std::sync::Mutex<Option<String>>>,
+        limit: u64,
+    ) -> Self {
+        Self {
+            prefix,
+            shared: Arc::new(Shared {
+                stream: prefix,
+                sink,
+                budget: Arc::new(OutputBudget::new(limit)),
+                lane,
+                failure,
                 last_truncation: std::sync::Mutex::new(None),
             }),
         }
@@ -1167,16 +1274,18 @@ impl StdoutStream for GuestOutput {
 pub struct SanitisingWriter {
     escaper: Escaper,
     shared: Arc<Shared>,
-    /// A flush marker already sent to the pump and not yet answered.
+    /// A flush marker already sent to the lane and not yet answered.
     flush_rx: Option<oneshot::Receiver<io::Result<()>>>,
-    /// An escaped write accepted against the quota but not yet queued.
+    /// An escaped write accepted against the quota but not yet queued,
+    /// with its in-flight guard once admitted.
     ///
-    /// A full queue parks the writer with the bytes held here rather than
-    /// re-escaping on retry: re-running the stateful escaper on the same input
-    /// would advance it twice for one write, dropping the line marker and
-    /// drifting the run bound. The quota stays reserved while parked, so no
-    /// refund path exists to go wrong.
-    pending: Option<(usize, Vec<u8>)>,
+    /// A lane-full park holds bytes and guard for the retry; an
+    /// in-flight-cap park holds nothing (payment is refunded) and the retry
+    /// re-runs payment from scratch. Either way the escaper never re-runs on
+    /// retry: re-running the stateful escaper on the same input would advance
+    /// it twice for one write, dropping the line marker and drifting the run
+    /// bound.
+    pending: Option<(usize, Vec<u8>, Option<crate::sink_lane::InFlight>)>,
 }
 
 impl std::fmt::Debug for SanitisingWriter {
@@ -1213,16 +1322,60 @@ impl AsyncWrite for SanitisingWriter {
         // Escape once per logical write and hold the buffer across parks: the
         // escaper is stateful, and re-running it on retry would advance the
         // line marker and the run bound twice for one write.
+        //
+        // Outside a runtime there is no executor to protect and no lane
+        // traffic to join: write inline on the calling thread, exactly as
+        // before lanes existed. All unit tests driving writes directly take
+        // this path, and nothing they emit waits anywhere, so no in-flight
+        // accounting applies.
+        if tokio::runtime::Handle::try_current().is_err() {
+            if this.pending.is_none() {
+                let need = this.escaper.escaped_len(buf);
+                if let Err(refusal) = this.shared.budget.reserve(need) {
+                    record_truncation(&this.shared, need, refusal);
+                    return Poll::Ready(Err(io::Error::other("guest output quota exhausted")));
+                }
+                let mut escaped = Vec::with_capacity(need);
+                let consumed = this.escaper.push(buf, &mut escaped);
+                debug_assert_eq!(
+                    escaped.len(),
+                    need,
+                    "the probe and the write run the same loop over the same state"
+                );
+                this.pending = Some((consumed, escaped, None));
+            }
+            let (consumed, escaped, _) = this.pending.take().expect("just stored");
+            let result = direct_write(&this.shared, &escaped).map(|()| consumed);
+            return Poll::Ready(result);
+        }
+        // On a lane the write moves through three stages, each settled once:
+        // escape (stateful, never repeated), payment (lifetime quota plus
+        // in-flight admission), and the lane send. A parked write retries from
+        // its held state at whichever stage it reached.
         if this.pending.is_none() {
-            // Reserve the ESCAPED size, probed without mutating the escaper:
-            // the sink receives escaped bytes, so input-length charging lets a
-            // newline flood deliver 20x its budget. Allocation happens only
-            // after the reservation succeeds, sized exactly to the probe.
+            // Probe, then pay, then escape: a refused write must leave the
+            // escaper exactly as it found it, so the reservation (lifetime
+            // quota) and the admission (in-flight caps) both settle before a
+            // single byte is escaped. Escaping first and refunding on refusal
+            // would advance the line marker and run bound for a write that
+            // never happened.
             let need = this.escaper.escaped_len(buf);
             if let Err(refusal) = this.shared.budget.reserve(need) {
                 record_truncation(&this.shared, need, refusal);
                 return Poll::Ready(Err(io::Error::other("guest output quota exhausted")));
             }
+            let need_u64 = u64::try_from(need).unwrap_or(u64::MAX);
+            let Some(flight) = crate::sink_lane::InFlight::reserve(&this.shared.budget, need_u64)
+            else {
+                // Over the in-flight caps: the lifetime bytes go back (the
+                // write never queued) and the write parks until the lane
+                // drains. Nothing is held, so the retry re-runs payment from
+                // scratch — and the escaper, never advanced, re-probes
+                // identically.
+                this.shared.budget.unreserve(need);
+                this.shared.lane.park(cx.waker());
+                return Poll::Pending;
+            };
             let mut escaped = Vec::with_capacity(need);
             let consumed = this.escaper.push(buf, &mut escaped);
             debug_assert_eq!(
@@ -1230,32 +1383,32 @@ impl AsyncWrite for SanitisingWriter {
                 need,
                 "the probe and the write run the same loop over the same state"
             );
-            this.pending = Some((consumed, escaped));
+            this.pending = Some((consumed, escaped, Some(flight)));
         }
-        let (consumed, escaped) = this.pending.take().expect("just stored");
-        match ensure_pump(&this.shared) {
-            // Outside a runtime: write inline, exactly as before.
-            None => {
-                let result = direct_write(&this.shared, &escaped).map(|()| consumed);
-                Poll::Ready(result)
+        let (consumed, escaped, flight) = this.pending.take().expect("paid above");
+        match this.shared.lane.send(crate::sink_lane::LaneMsg::Data {
+            bytes: escaped,
+            flight: flight.expect("paid writes always carry their guard"),
+            failure: Arc::clone(&this.shared.failure),
+        }) {
+            crate::sink_lane::LaneSend::Sent => Poll::Ready(Ok(consumed)),
+            crate::sink_lane::LaneSend::Full(crate::sink_lane::LaneMsg::Data {
+                bytes,
+                flight,
+                ..
+            }) => {
+                // The lane owns nothing yet; hold bytes and guard for the
+                // retry (the failure slot is re-read from the output on the
+                // next send — it never changes). Quota, escaper state, and
+                // in-flight counts were settled above, exactly once.
+                this.shared.lane.park(cx.waker());
+                this.pending = Some((consumed, bytes, Some(flight)));
+                Poll::Pending
             }
-            Some(tx) => match try_send_or_park(&tx, &this.shared, cx, PumpMsg::Bytes(escaped)) {
-                Ok(None) => Poll::Ready(Ok(consumed)),
-                Ok(Some(held)) => {
-                    // The pump owns nothing yet; hold the bytes for the retry.
-                    // Quota and escaper state were settled above, exactly once.
-                    let PumpMsg::Bytes(back) = held else {
-                        // Only `Bytes` is ever sent from here; anything else
-                        // would be a second message type smuggled past review.
-                        return Poll::Ready(Err(io::Error::other(
-                            "guest-output queue returned a flush marker",
-                        )));
-                    };
-                    this.pending = Some((consumed, back));
-                    Poll::Pending
-                }
-                Err(error) => Poll::Ready(Err(error)),
-            },
+            crate::sink_lane::LaneSend::Full(_) => Poll::Ready(Err(io::Error::other(
+                "guest-output lane returned a flush marker",
+            ))),
+            crate::sink_lane::LaneSend::Closed => Poll::Ready(Err(pump_gone())),
         }
     }
 
@@ -1283,37 +1436,43 @@ impl AsyncWrite for SanitisingWriter {
                 Poll::Pending => Poll::Pending,
             };
         }
-        match ensure_pump(&this.shared) {
-            None => Poll::Ready(direct_flush(&this.shared)),
-            Some(tx) => {
-                let (done, rx) = oneshot::channel();
-                // Register interest in the answer in the same step that sends
-                // the marker, so no wake-up between the send and the first poll
-                // can be lost.
-                let mut rx = rx;
-                match try_send_or_park(&tx, &this.shared, cx, PumpMsg::Flush(done)) {
-                    Err(error) => Poll::Ready(Err(error)),
-                    // The marker was not queued; the next poll sends a fresh
-                    // one, and the dropped sender answers nothing.
-                    Ok(Some(_)) => Poll::Pending,
-                    Ok(None) => match Pin::new(&mut rx).poll(cx) {
-                        // The marker only proves the flush ran; a write the
-                        // pump already failed still has to surface here.
-                        Poll::Ready(Ok(Err(error))) => Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(Ok(()))) => match stored_failure(&this.shared) {
-                            Some(failure) => {
-                                this.flush_rx = None;
-                                Poll::Ready(Err(io::Error::other(failure)))
-                            }
-                            None => Poll::Ready(Ok(())),
-                        },
-                        Poll::Ready(Err(_)) => Poll::Ready(Err(pump_gone())),
-                        Poll::Pending => {
-                            this.flush_rx = Some(rx);
-                            Poll::Pending
-                        }
-                    },
+        // Outside a runtime there is no lane traffic to join: flush inline.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Poll::Ready(direct_flush(&this.shared));
+        }
+        let lane = Arc::clone(&this.shared.lane);
+        {
+            let (done, rx) = oneshot::channel();
+            // Register interest in the answer in the same step that sends
+            // the marker, so no wake-up between the send and the first poll
+            // can be lost.
+            let mut rx = rx;
+            match lane.send(crate::sink_lane::LaneMsg::Flush(done)) {
+                crate::sink_lane::LaneSend::Closed => Poll::Ready(Err(pump_gone())),
+                // The marker was not queued; the next poll sends a fresh
+                // one, and the dropped sender answers nothing. Park so the
+                // retry waits for drain rather than spinning.
+                crate::sink_lane::LaneSend::Full(_) => {
+                    lane.park(cx.waker());
+                    Poll::Pending
                 }
+                crate::sink_lane::LaneSend::Sent => match Pin::new(&mut rx).poll(cx) {
+                    // The marker only proves the flush ran; a write the
+                    // pump already failed still has to surface here.
+                    Poll::Ready(Ok(Err(error))) => Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(Ok(()))) => match stored_failure(&this.shared) {
+                        Some(failure) => {
+                            this.flush_rx = None;
+                            Poll::Ready(Err(io::Error::other(failure)))
+                        }
+                        None => Poll::Ready(Ok(())),
+                    },
+                    Poll::Ready(Err(_)) => Poll::Ready(Err(pump_gone())),
+                    Poll::Pending => {
+                        this.flush_rx = Some(rx);
+                        Poll::Pending
+                    }
+                },
             }
         }
     }
@@ -1326,201 +1485,29 @@ impl AsyncWrite for SanitisingWriter {
     }
 }
 
-/// Try one send; hand the message back when the queue is full.
+/// Whether `bytes` more fits under an in-flight cap from `current`.
 ///
-/// Full means either bound: [`PUMP_QUEUE_MSGS`] messages or [`PUMP_QUEUE_BYTES`]
-/// queued-but-undrained bytes. A full queue stores the caller's waker and returns
-/// the message for the retry; the writer task wakes parked writers after its next
-/// receive, when space has definitely freed. The recheck after storing closes the
-/// race where space frees first. A poisoned waker slot fails rather than parking
-/// forever unwoken.
-///
-/// The byte count moves only here and in the pump loop: incremented on a queued
-/// send, decremented when the pump takes the message. A send that never queues
-/// (parked, refused, or racing a closed channel) changes nothing. The check is
-/// check-then-act like the message bound, so concurrent writers may overshoot
-/// softly; a single writer is exact, which is what the byte-bound test proves.
-fn try_send_or_park(
-    tx: &mpsc::Sender<PumpMsg>,
-    shared: &Shared,
-    cx: &mut Context<'_>,
-    msg: PumpMsg,
-) -> Result<Option<PumpMsg>, io::Error> {
-    use mpsc::error::TrySendError;
-    let bytes = match &msg {
-        PumpMsg::Bytes(body) => body.len(),
-        PumpMsg::Flush(_) => 0,
-    };
-    if byte_full(shared, bytes) {
-        // An empty queue admits one message of any size: parking it waits for
-        // a drain that can never start, because the pump only receives what
-        // writers send. The bound is therefore the limit plus one message —
-        // and a single oversized write can neither hang nor multiply, since
-        // the next write parks against the bytes it left queued.
-        let empty = shared.in_flight.load(Ordering::Relaxed) == 0;
-        if !empty {
-            push_waker(shared, cx)?;
-            // A freed message slot does not imply freed bytes (a flush marker, or
-            // a small message, may have been the take), so the byte condition is
-            // rechecked rather than trusted from the send below. Still full means
-            // hold for the retry; freed means fall through to the message path.
-            if byte_full(shared, bytes) {
-                return Ok(Some(msg));
-            }
-        }
-    }
-    match tx.try_send(msg) {
-        Ok(()) => {
-            shared.in_flight.fetch_add(bytes, Ordering::Relaxed);
-            Ok(None)
-        }
-        Err(TrySendError::Closed(_)) => Err(pump_gone()),
-        Err(TrySendError::Full(msg)) => park_for_space(tx, shared, cx, msg, bytes),
-    }
+/// An empty counter admits anything: parking a message with nothing queued
+/// waits for a drain that can never start, so the bound is always the cap
+/// plus one message. Saturating addition, so a corrupted-large counter
+/// refuses rather than wrapping into admission.
+fn admit_in_flight(current: u64, cap: u64, bytes: u64) -> bool {
+    current == 0 || current.saturating_add(bytes) <= cap
 }
 
-/// Whether `bytes` more would exceed the queued-bytes bound.
-fn byte_full(shared: &Shared, bytes: usize) -> bool {
-    shared
-        .in_flight
-        .load(Ordering::Relaxed)
-        .saturating_add(bytes)
-        > PUMP_QUEUE_BYTES
-}
-
-/// Store the caller's waker, failing on a poisoned slot.
-fn push_waker(shared: &Shared, cx: &mut Context<'_>) -> io::Result<()> {
-    let mut parked = shared
-        .queue_wakers
-        .lock()
-        .map_err(|_| io::Error::other("the guest-output queue wakers are poisoned"))?;
-    parked.push(cx.waker().clone());
-    Ok(())
-}
-
-/// Store the caller's waker and recheck the message bound, handing the message
-/// back if still full.
-///
-/// The message-count path only: the byte path rechecks its own condition
-/// above (a freed slot is not freed bytes). `bytes` is the message's measured
-/// size: a recheck send that succeeds queues exactly those bytes.
-fn park_for_space(
-    tx: &mpsc::Sender<PumpMsg>,
-    shared: &Shared,
-    cx: &mut Context<'_>,
-    msg: PumpMsg,
-    bytes: usize,
-) -> Result<Option<PumpMsg>, io::Error> {
-    use mpsc::error::TrySendError;
-    push_waker(shared, cx)?;
-    match tx.try_send(msg) {
-        Ok(()) => {
-            shared.in_flight.fetch_add(bytes, Ordering::Relaxed);
-            Ok(None)
-        }
-        Err(TrySendError::Closed(_)) => Err(pump_gone()),
-        // Every parked waker is woken after the task's next receive,
-        // so parking here always resolves.
-        Err(TrySendError::Full(msg)) => Ok(Some(msg)),
-    }
-}
-
-/// The pump's inbox if one exists, spawning the writer task on first use.
-///
-/// Returns `None` outside a Tokio runtime, where there is no executor to spawn
-/// onto and no executor thread to protect — the caller writes inline instead.
-fn ensure_pump(shared: &Arc<Shared>) -> Option<mpsc::Sender<PumpMsg>> {
-    let mut guard = shared.pump.lock().ok()?;
-    if let Some(tx) = guard.as_ref() {
-        return Some(tx.clone());
-    }
-    if tokio::runtime::Handle::try_current().is_err() {
-        return None;
-    }
-    let (tx, rx) = mpsc::channel(PUMP_QUEUE_MSGS);
-    // Only what the task needs travels with it: the sink, the failure slot,
-    // and the parked-writer waker. Handing it the whole `Shared` would also
-    // hand it the inbox sender held inside `Shared`, and a sender that never
-    // drops keeps the task — and everything it holds — alive forever.
-    tokio::spawn(pump_loop(
-        rx,
-        Arc::clone(&shared.sink),
-        Arc::clone(&shared.failure),
-        Arc::clone(&shared.queue_wakers),
-        Arc::clone(&shared.in_flight),
-    ));
-    *guard = Some(tx.clone());
-    Some(tx)
-}
-
-/// The one task that touches an output's sink.
-///
-/// FIFO consumption is the ordering guarantee: bytes reach the sink in the order
-/// `poll_write` accepted them, which per-write spawned tasks could not promise.
-/// Every blocking call runs on the blocking pool, so neither the multi-thread
-/// nor the current-thread executor ever stalls on a slow sink. The task ends
-/// when the last sender is dropped — the output and its writers — after
-/// draining whatever is still queued.
-async fn pump_loop(
-    mut rx: mpsc::Receiver<PumpMsg>,
-    sink: Arc<dyn GuestSink>,
-    failure: Arc<std::sync::Mutex<Option<String>>>,
-    queue_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
-    in_flight: Arc<AtomicUsize>,
-) {
-    while let Some(msg) = rx.recv().await {
-        // The bytes leave the queue before anyone is woken: a woken writer
-        // rechecks the counter, and a wake against the pre-take count re-parks
-        // it — after the last take no further take will ever wake it again.
-        // Saturating: the counter is purely internal, and a release must never
-        // be able to panic the pump task on an accounting surprise.
-        match &msg {
-            PumpMsg::Bytes(body) => {
-                let _ = in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_sub(body.len()))
-                });
-            }
-            PumpMsg::Flush(_) => {}
-        }
-        // A slot just freed: wake every parked writer. Each rechecks the
-        // queue on waking, so wakes that arrive too late are harmless and no
-        // writer waits on a waker overwritten by another.
-        if let Ok(mut parked) = queue_wakers.lock() {
-            for waker in parked.drain(..) {
-                waker.wake();
-            }
-        }
-        match msg {
-            PumpMsg::Bytes(bytes) => {
-                let sink = Arc::clone(&sink);
-                let outcome =
-                    tokio::task::spawn_blocking(move || sink.write_all_shared(&bytes)).await;
-                match outcome {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => record_failure(&failure, error.to_string()),
-                    Err(error) => {
-                        let message = format!("guest-output writer task failed: {error}");
-                        record_failure(&failure, message);
-                    }
-                }
-            }
-            PumpMsg::Flush(done) => {
-                let sink = Arc::clone(&sink);
-                let outcome = tokio::task::spawn_blocking(move || sink.flush_shared()).await;
-                let result = match outcome {
-                    Ok(result) => result,
-                    Err(error) => Err(io::Error::other(format!(
-                        "guest-output writer task failed: {error}"
-                    ))),
-                };
-                let _ = done.send(result);
-            }
-        }
-    }
+/// Subtract without wrapping: releases must never panic the holder.
+fn sub_saturating(counter: &AtomicU64, bytes: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(bytes))
+    });
 }
 
 /// Remember the first asynchronous failure; later calls surface it.
-fn record_failure(failure: &Arc<std::sync::Mutex<Option<String>>>, message: String) {
+///
+/// Shared with the lane thread, which reports sink failures here rather than
+/// carrying its own slot: one output, one failure record, however many
+/// threads touch it.
+pub(crate) fn record_failure(failure: &Arc<std::sync::Mutex<Option<String>>>, message: String) {
     if let Ok(mut slot) = failure.lock() {
         if slot.is_none() {
             *slot = Some(message);
@@ -1569,6 +1556,7 @@ fn pump_gone() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1935,22 +1923,23 @@ mod tests {
         );
     }
 
-    /// **Dropping the output ends the pump task.**
+    /// **Dropping the output ends the lane thread.**
     ///
-    /// The task must hold no sender and no `Shared`: either one keeps the
+    /// The thread must hold no sender and no `Shared`: either one keeps the
     /// inbox open, `recv` never returns `None`, and every request leaks a
-    /// task plus its sink and budget on a long-running server. The `Weak`
-    /// observes the task's own sink clone, so its death proves the task ended
-    /// rather than merely going quiet.
+    /// thread plus its sink and budget on a long-running server. The `Weak`
+    /// observes the thread's own sink clone, so its death proves the thread
+    /// ended rather than merely going quiet.
     #[tokio::test]
-    async fn dropping_the_output_ends_the_pump_task() {
+    async fn dropping_the_output_ends_the_lane_thread() {
         use tokio::io::AsyncWriteExt as _;
 
         let sink = Arc::new(Mutex::new(Vec::new()));
         let weak = Arc::downgrade(&sink);
         let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
-        // Start the pump: without a poll inside the runtime no task exists,
-        // and the assertion below would pass on an output that never pumps.
+        // Start the lane: without a poll inside the runtime no message is
+        // sent, and the assertion below would pass on an output that never
+        // queued.
         output.writer().write_all(b"hello").await.expect("write");
         drop(sink);
         drop(output);
@@ -1960,20 +1949,24 @@ mod tests {
             }
         })
         .await
-        .expect("the pump task must end after the output is dropped");
+        .expect("the lane thread must end after the output is dropped");
     }
 
-    /// **A full pump queue parks the writer until space frees.**
+    /// **A full lane queue parks the writer until space frees.**
     ///
-    /// The gate holds the pump on its first message, so nothing drains while
-    /// the test fills all [`PUMP_QUEUE_MSGS`] slots with one-byte writes. The
-    /// next write must come back `Pending` rather than blocking the worker or
-    /// dropping the bytes; opening the gate must let the parked write finish.
-    /// The quota (8 MiB here) is deliberately far above the few hundred queued
-    /// bytes, so only the queue bound is under test — a tripped quota would
-    /// fail the write for a different, already-tested reason.
+    /// The gate holds the lane inside its first sink write, so after an
+    /// initial burst of takes (bounded: the thread blocks in its first
+    /// write) the queue refills and the next write must come back `Pending`
+    /// rather than blocking the worker or dropping the bytes; opening the
+    /// gate must let the parked write finish. The exact send count at the
+    /// park is schedule-dependent (it depends on how many takes the first
+    /// burst got), so the test asserts the park happens, not where: what is
+    /// deterministic is that a full queue parks and a drained one proceeds.
+    /// Quota and in-flight caps sit far above the few hundred queued bytes,
+    /// so only the queue bound is under test — a tripped quota would fail
+    /// the write for a different, already-tested reason.
     #[tokio::test]
-    async fn a_full_pump_queue_parks_the_writer_until_space_frees() {
+    async fn a_full_lane_queue_parks_the_writer_until_space_frees() {
         let blocked_sink = Arc::new(BlockingSink::new());
         let _open = OpenOnDrop {
             sink: &blocked_sink,
@@ -1982,36 +1975,106 @@ mod tests {
         let mut writer = output.writer();
         let mut cx = Context::from_waker(std::task::Waker::noop());
 
-        for _ in 0..PUMP_QUEUE_MSGS {
-            assert!(matches!(
-                Pin::new(&mut writer).poll_write(&mut cx, b"x"),
-                Poll::Ready(Ok(1))
-            ));
+        let mut parked = false;
+        for _ in 0..100_000 {
+            match Pin::new(&mut writer).poll_write(&mut cx, b"x") {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Pending => {
+                    parked = true;
+                    break;
+                }
+                Poll::Ready(Err(error)) => panic!("the write must park, not fail: {error}"),
+            }
         }
         assert!(
-            matches!(
-                Pin::new(&mut writer).poll_write(&mut cx, b"x"),
-                Poll::Pending
-            ),
+            parked,
             "a full queue must park the writer rather than block or drop"
         );
 
         blocked_sink.release();
-        let mut parked = false;
         for _ in 0..100 {
             match Pin::new(&mut writer).poll_write(&mut cx, b"x") {
                 Poll::Ready(Ok(_)) => break,
                 Poll::Pending => {
-                    parked = true;
                     tokio::task::yield_now().await;
                 }
                 Poll::Ready(Err(error)) => panic!("the write must succeed after release: {error}"),
             }
         }
+    }
+
+    /// **F-12 red-first: queued small writes are coalesced.**
+    ///
+    /// 64 numbered 5-byte payloads from one writer must reach the sink as a
+    /// handful of `write_all` calls (at least 8x fewer than messages), with
+    /// bytes in exact arrival order. 64 fills but does not exceed the queue,
+    /// so every write is accepted and the test cannot hang on backpressure.
+    /// Today every message is its own blocking write: 64 calls, so this fails
+    /// on the count, not the order.
+    #[tokio::test]
+    async fn f12_queued_small_writes_are_coalesced() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(CountingSink::new());
+        let _open = OpenOnDrop { sink: &sink.inner };
+        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
+        let mut writer = output.writer();
+        let mut expected = String::from(STDOUT_PREFIX);
+        for i in 0..64u32 {
+            let payload = format!("{i:04}:");
+            expected.push_str(&payload);
+            writer
+                .write_all(payload.as_bytes())
+                .await
+                .expect("the queue accepts small writes");
+        }
+        sink.release();
+        output.writer().flush().await.expect("drain proves order");
+        let calls = sink.calls.load(Ordering::Relaxed);
         assert!(
-            parked,
-            "the writer must have parked at least once before the drain"
+            calls <= 8,
+            "64 messages must coalesce to at most 8 sink writes (8x), took {calls}"
         );
+        let bytes = sink.inner.buf.lock().expect("not poisoned").clone();
+        assert_eq!(
+            String::from_utf8(bytes).expect("ascii"),
+            expected,
+            "coalescing must preserve exact arrival order"
+        );
+    }
+
+    /// A sink that counts `write_all_shared` calls behind a gate.
+    ///
+    /// The call count is the coalescing observable: batching turns N queued
+    /// messages into fewer, larger writes. Bytes still land in order — the
+    /// count proves batching happened, the buffer proves nothing reordered.
+    struct CountingSink {
+        inner: BlockingSink,
+        calls: AtomicUsize,
+    }
+
+    impl CountingSink {
+        fn new() -> Self {
+            Self {
+                inner: BlockingSink::new(),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn release(&self) {
+            self.inner.release();
+        }
+    }
+
+    impl GuestSink for CountingSink {
+        fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.write_all_shared(bytes)
+        }
+
+        fn flush_shared(&self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Opens the gate when dropped, so a failed assertion cannot leave the
@@ -2204,71 +2267,6 @@ mod tests {
         );
     }
 
-    /// **F-07: the pump queue is byte-bounded, not just message-bounded.**
-    ///
-    /// Against a stalled sink, 256 KiB printable writes (≈1:1 escaped) must
-    /// park once queued bytes pass [`PUMP_QUEUE_BYTES`] — long before the
-    /// 64-message bound could trip. After release every byte must still drain
-    /// in order: parking delays writes, it never drops them.
-    #[tokio::test]
-    async fn f07_slow_sink_queue_is_byte_bounded() {
-        use tokio::io::AsyncWriteExt as _;
-
-        let blocked_sink = Arc::new(BlockingSink::new());
-        let _open = OpenOnDrop {
-            sink: &blocked_sink,
-        };
-        let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&blocked_sink));
-        let mut writer = output.writer();
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        let chunk = vec![b'y'; 256 * 1024];
-        let mut queued = 0;
-        for _ in 0..64 {
-            match Pin::new(&mut writer).poll_write(&mut cx, &chunk) {
-                Poll::Ready(Ok(_)) => queued += 1,
-                Poll::Pending => break,
-                Poll::Ready(Err(error)) => panic!("the quota must not trip first: {error}"),
-            }
-        }
-        assert!(
-            queued < 8,
-            "the byte bound must park by ~4 messages of 256 KiB, not the 64-message bound; queued {queued}"
-        );
-        assert!(
-            queued >= 3,
-            "several large messages must still queue before the bound bites; queued {queued}"
-        );
-        blocked_sink.release();
-        output
-            .writer()
-            .flush()
-            .await
-            .expect("a released sink drains");
-        let bytes = blocked_sink.buf.lock().expect("not poisoned").clone();
-        // Count payload bytes, not total length: 256 KiB runs trip the
-        // 4096-byte run bound, so forced breaks and their prefixes add bytes
-        // beyond the arithmetic above. The payload is all `y`; markers and
-        // breaks contain none, so the count is exact.
-        // Counted with an explicit loop: the naive-bytecount lint is right
-        // that a crate does this faster, and a new dependency for one test
-        // assertion is the worse trade.
-        let mut payload = 0usize;
-        for byte in &bytes {
-            if *byte == b'y' {
-                payload += 1;
-            }
-        }
-        assert_eq!(
-            payload,
-            queued * chunk.len(),
-            "every queued payload byte must drain after release"
-        );
-        assert!(
-            bytes.starts_with(STDOUT_PREFIX.as_bytes()),
-            "the drained bytes must still carry the marker"
-        );
-    }
-
     /// **F-07: the probe predicts the write, byte for byte.**
     ///
     /// Two thousand deterministic pseudo-random inputs (full byte range, so
@@ -2323,9 +2321,9 @@ mod tests {
 
     /// **F-07: an empty queue admits one oversized message.**
     ///
-    /// A single write larger than [`PUMP_QUEUE_BYTES`] with nothing queued must
+    /// A single write larger than the lane queue with nothing queued must
     /// still queue: parking it waits for a drain that can never start, because
-    /// the pump only receives what writers send. The bound is therefore the
+    /// the lane only receives what writers send. The bound is therefore the
     /// limit plus one message, never a hang.
     #[tokio::test]
     async fn f07_empty_queue_admits_one_oversized_message() {
@@ -2343,12 +2341,12 @@ mod tests {
         );
     }
 
-    /// **F-07: a parked writer wakes after bytes free, not after slots.**
+    /// **F-07/F-12: a parked writer wakes after bytes free, not after takes.**
     ///
-    /// The pump must decrement the byte counter BEFORE waking parked writers:
-    /// a wake against a stale count re-parks, and after the last take no
-    /// further take will ever wake the writer again — stranded with space
-    /// available. The spawned writer below completes with no test-side
+    /// The lane must release in-flight bytes (by completing writes) BEFORE
+    /// waking parked writers: a wake against a stale count re-parks, and
+    /// after the final write no further wake will ever come — stranded with
+    /// space available. The spawned writer below completes with no test-side
     /// re-polling if and only if the wake fires on the updated count.
     #[tokio::test]
     async fn f07_parked_writer_wakes_after_bytes_free() {
@@ -2360,32 +2358,33 @@ mod tests {
             sink: &blocked_sink,
         };
         let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&blocked_sink));
-        // Three 256 KiB writes (786,451 queued bytes, zero takes: the
-        // current-thread runtime cannot preempt the fill loop).
+        // Seven 32 KiB writes (229,395 in-flight bytes): an eighth would pass
+        // the 256 KiB per-output cap, so the fill below stops at seven and
+        // the spawned writer is the one that parks.
         let mut first = output.writer();
         let mut cx = Context::from_waker(std::task::Waker::noop());
-        let chunk = vec![b'y'; 256 * 1024];
-        for _ in 0..3 {
+        let chunk = vec![b'y'; 32 * 1024];
+        for _ in 0..7 {
             assert!(matches!(
                 Pin::new(&mut first).poll_write(&mut cx, &chunk),
                 Poll::Ready(Ok(_))
             ));
         }
-        // A 1 MiB write fits only once the queue is fully drained, so it
-        // parks through every take and proves the final wake by completing.
+        // A further 32 KiB write fits only once the lane is fully drained, so
+        // it parks through every write and proves the final wake by completing.
         let parked = output.clone();
         let (done, wait) = oneshot::channel();
         let parked_task = tokio::spawn(async move {
             let mut writer = parked.writer();
             writer
-                .write_all(&vec![b'w'; 1024 * 1024])
+                .write_all(&vec![b'w'; 32 * 1024])
                 .await
                 .expect("the parked write must complete after the drain");
             let _ = done.send(());
         });
-        // Let the spawned writer poll and park while the counter is still
+        // Let the spawned writer poll and park while the counts are still
         // high: the test must prove the FINAL wake, which needs the writer
-        // parked across the last take rather than arriving after the drain.
+        // parked across the last write rather than arriving after the drain.
         tokio::time::sleep(Duration::from_millis(100)).await;
         blocked_sink.release();
         output
@@ -2492,6 +2491,227 @@ mod tests {
             meter.output_refusals(),
             2,
             "each refusal notes, none double"
+        );
+    }
+
+    /// **F-12 red-first: a stalled sink must not starve the blocking pool.**
+    ///
+    /// Eight outputs share one gated sink on a runtime with four blocking
+    /// threads. Today every pump holds a blocking thread inside its sink
+    /// write, so a `spawn_blocking` probe cannot run within 500 ms. After the
+    /// lane change no guest-output write touches the blocking pool and the
+    /// probe passes immediately. The gate opens on drop so a failure cannot
+    /// hang runtime shutdown on parked blocking threads.
+    #[test]
+    fn f12_stalled_sink_does_not_starve_the_blocking_pool() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        rt.block_on(async {
+            let sink = Arc::new(BlockingSink::new());
+            let _open = OpenOnDrop { sink: &sink };
+            let mut outputs = Vec::new();
+            for _ in 0..8 {
+                let output = GuestOutput::to(STDOUT_PREFIX, Arc::clone(&sink));
+                output
+                    .writer()
+                    .write_all(b"stuck-payload")
+                    .await
+                    .expect("enqueue accepts");
+                outputs.push(output);
+            }
+            // Let the pumps reach the gate: acceptance only enqueues, so the
+            // writes above prove nothing until the sink side is engaged.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let probe = tokio::time::timeout(
+                Duration::from_millis(500),
+                tokio::task::spawn_blocking(|| 1 + 1),
+            )
+            .await;
+            assert!(
+                probe.is_ok(),
+                "spawn_blocking starved by a stalled log sink"
+            );
+        });
+    }
+
+    /// **F-12: per-output order survives a shared lane.**
+    ///
+    /// Two outputs on one lane write interleaved numbered chunks; each
+    /// output's subsequence must appear in order in the sink. Arrival order
+    /// is deterministic (sequential awaits), so the full byte string is
+    /// asserted exactly — any reorder breaks it.
+    #[tokio::test]
+    async fn f12_order_is_preserved_per_output_across_lane() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = captured();
+        let lane =
+            crate::sink_lane::SinkLane::spawn("test-order", sink.clone() as Arc<dyn GuestSink>)
+                .expect("a lane thread spawns");
+        let first = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        let second = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        let mut a = first.writer();
+        let mut b = second.writer();
+        let mut expected = String::new();
+        let mut first_a = true;
+        let mut first_b = true;
+        for i in 0..20u32 {
+            let payload = format!("a{i:04}:");
+            if first_a {
+                expected.push_str(STDOUT_PREFIX);
+                first_a = false;
+            }
+            expected.push_str(&payload);
+            a.write_all(payload.as_bytes()).await.expect("lane accepts");
+            let payload = format!("b{i:04}:");
+            if first_b {
+                expected.push_str(STDOUT_PREFIX);
+                first_b = false;
+            }
+            expected.push_str(&payload);
+            b.write_all(payload.as_bytes()).await.expect("lane accepts");
+        }
+        first.writer().flush().await.expect("drain proves order");
+        assert_eq!(
+            text(&sink),
+            expected,
+            "each output's chunks must appear in order across the shared lane"
+        );
+    }
+
+    /// **F-12: the per-output in-flight cap parks instead of dropping.**
+    ///
+    /// 32 KiB chunks against the 256 KiB per-output cap: exactly 7 queue
+    /// (19 + 7×32768 under the cap) while the sink is stalled, the 8th parks;
+    /// after release every queued payload byte drains. Takes do not release —
+    /// only completed writes do — so the count is exact, not racing the lane.
+    #[tokio::test]
+    async fn f12_per_output_in_flight_cap_parks_not_drops() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let blocked_sink = Arc::new(BlockingSink::new());
+        let _open = OpenOnDrop {
+            sink: &blocked_sink,
+        };
+        let lane = crate::sink_lane::SinkLane::spawn(
+            "test-fair",
+            Arc::clone(&blocked_sink) as Arc<dyn GuestSink>,
+        )
+        .expect("a lane thread spawns");
+        let output = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let chunk = vec![b'y'; 32 * 1024];
+        let mut queued = 0;
+        for _ in 0..64 {
+            match Pin::new(&mut writer).poll_write(&mut cx, &chunk) {
+                Poll::Ready(Ok(_)) => queued += 1,
+                Poll::Pending => break,
+                Poll::Ready(Err(error)) => panic!("the cap must park, not refuse: {error}"),
+            }
+        }
+        assert_eq!(queued, 7, "seven 32 KiB chunks fit under the 256 KiB cap");
+        blocked_sink.release();
+        output.writer().flush().await.expect("drain the lane");
+        let bytes = blocked_sink.buf.lock().expect("not poisoned").clone();
+        let mut payload = 0usize;
+        for byte in &bytes {
+            if *byte == b'y' {
+                payload += 1;
+            }
+        }
+        assert_eq!(payload, 7 * 32 * 1024, "every queued payload byte drains");
+    }
+
+    /// **F-12: a sink failure taints only the outputs it dropped bytes for.**
+    ///
+    /// On a shared lane, output A writes through a fail-once sink (first
+    /// write dies, then the sink behaves); output B, created after, must
+    /// still write cleanly. A lane-wide failure slot would poison B — and
+    /// every future output — with A's stale failure permanently. The flush
+    /// after A's write proves the failure landed before B writes.
+    #[tokio::test]
+    async fn f12_sink_failure_does_not_taint_later_outputs_on_the_lane() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(FailOnceSink {
+            remaining_failures: AtomicUsize::new(1),
+            buf: std::sync::Mutex::new(Vec::new()),
+        });
+        let lane = crate::sink_lane::SinkLane::spawn(
+            "test-failure-scope",
+            Arc::clone(&sink) as Arc<dyn GuestSink>,
+        )
+        .expect("a lane thread spawns");
+        let first = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        first
+            .writer()
+            .write_all(b"lost")
+            .await
+            .expect("acceptance precedes the failure");
+        // Let the lane process (and fail) the data before flushing: the flush
+        // must observe the recorded failure rather than carry the failed bytes
+        // inside its own batch, which would report through the marker alone
+        // and leave the slot — the thing under test — empty.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        first
+            .writer()
+            .flush()
+            .await
+            .expect_err("the flush must surface the recorded write failure");
+        let second = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        second
+            .writer()
+            .write_all(b"clean")
+            .await
+            .expect("a later output must not inherit the earlier failure");
+        second.writer().flush().await.expect("drain");
+        let bytes = sink.buf.lock().expect("not poisoned").clone();
+        assert!(
+            String::from_utf8(bytes).expect("ascii").contains("clean"),
+            "the healthy output's bytes must reach the recovered sink"
+        );
+    }
+
+    /// **F-07 on the lane path: a refused write leaves state untouched.**
+    ///
+    /// The same property as `f07_refused_write_does_not_advance_escaper_state`,
+    /// but through the lane path inside a runtime: one short line, a refused
+    /// flood, then the same line continued. A reserve-after-escape
+    /// implementation advances the escaper before refusing, and the
+    /// continuation wrongly carries a second prefix.
+    #[tokio::test]
+    async fn f07_refused_write_leaves_state_untouched_on_lane() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let captured = captured();
+        // "qqq-guest stdout | ab" is 21 escaped bytes; the flood below is refused.
+        let output = GuestOutput::to_with_limit(STDOUT_PREFIX, captured.clone(), 25);
+        let mut writer = output.writer();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"ab"),
+            Poll::Ready(Ok(_))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"\n\n\n\n\n"),
+            Poll::Ready(Err(_))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, b"cd"),
+            Poll::Ready(Ok(_))
+        ));
+        output.writer().flush().await.expect("drain");
+        assert_eq!(
+            text(&captured).matches(STDOUT_PREFIX).count(),
+            1,
+            "the refused write must not have armed a second prefix, on the lane path too"
         );
     }
 

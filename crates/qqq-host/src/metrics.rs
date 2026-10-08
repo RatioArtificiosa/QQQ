@@ -370,6 +370,8 @@ pub struct Metrics {
     live: AtomicU64,
     /// Times a pool was found empty and a caller had to wait or create.
     saturation: AtomicU64,
+    /// Guest-output writes refused at a tenant ceiling.
+    output_refusals: AtomicU64,
     /// How long acquisition took.
     acquire_latency: Histogram,
 
@@ -408,6 +410,7 @@ impl Metrics {
             discarded: Z,
             live: Z,
             saturation: Z,
+            output_refusals: Z,
             acquire_latency: Histogram::new(),
             fuel: Z,
             executions_ok: Z,
@@ -473,6 +476,17 @@ impl Metrics {
     /// Record that a pool had no free instance available.
     pub fn note_saturation(&self) {
         self.saturation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a refused guest-output write at a tenant ceiling.
+    ///
+    /// Noted by the tenant budget that refused, so one refusal counts once
+    /// however many outputs observe it. This is the operator-visible half of
+    /// the breach policy: per-output `breaches` counters name the stream, and
+    /// this series names the scale — a climbing rate here is the first sign a
+    /// tenant's log volume needs attention rather than more quota.
+    pub fn note_output_refusal(&self) {
+        self.output_refusals.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a completed execution.
@@ -558,6 +572,20 @@ impl Metrics {
     #[must_use]
     pub fn saturation(&self) -> u64 {
         self.saturation.load(Ordering::Relaxed)
+    }
+
+    /// Guest-output writes refused at a tenant ceiling.
+    ///
+    /// ```
+    /// use qqq_host::Metrics;
+    ///
+    /// let m = Metrics::new();
+    /// m.note_output_refusal();
+    /// assert_eq!(m.output_refusals(), 1);
+    /// ```
+    #[must_use]
+    pub fn output_refusals(&self) -> u64 {
+        self.output_refusals.load(Ordering::Relaxed)
     }
 
     /// The acquisition-latency histogram.
@@ -747,6 +775,11 @@ impl Metrics {
                 "qqq_instance_pool_saturation_total",
                 "Acquisitions that found the pool empty.",
                 self.saturation(),
+            ),
+            (
+                "qqq_guest_output_refusals_total",
+                "Guest-output writes refused at a tenant ceiling.",
+                self.output_refusals(),
             ),
             (
                 "qqq_execution_ok_total",
@@ -1144,6 +1177,7 @@ mod tests {
         m.note_created();
         m.note_trap(TrapLabel::Fuel);
         m.note_acquire(150, false);
+        m.note_output_refusal();
 
         let text = m.render_prometheus();
 
@@ -1151,6 +1185,7 @@ mod tests {
             "qqq_instance_created_total 1",
             "qqq_instance_acquired_total 0",
             "qqq_instance_discarded_total 0",
+            "qqq_guest_output_refusals_total 1",
             "qqq_trap_total{kind=\"fuel\"} 1",
             "qqq_trap_total{kind=\"epoch\"} 0",
             "qqq_instance_acquire_latency_seconds_count 1",

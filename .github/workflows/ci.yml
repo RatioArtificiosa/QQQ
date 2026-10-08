@@ -1326,8 +1326,16 @@ jobs:
       # exactly the new declarations. Same reasoning: both are covered by the
       # hermetic discovery tests that run green with CARGO_TARGET_DIR set,
       # not by prose examples.
+      #
+      # # And why it went UP, to 2106
+      #
+      # F-06 adds four public declarations and one doctest: `Metrics::`
+      # `note_output_refusal`, `Pool::metrics_arc`, and
+      # `TenantOutputBudgets::set_meter` (covered by the metered-refusal test,
+      # not prose), plus `Metrics::output_refusals` with a compiling doctest —
+      # measured 2103 -> 2106, the delta exactly the three uncovered items.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2103
+        run: python tools/check_api_examples.py --allow 2106
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

@@ -243,6 +243,12 @@ pub struct OutputBudget {
     /// can exceed alone. Set once during instance construction; `None` is the
     /// standalone budget every existing caller means.
     parent: std::sync::Mutex<Option<Arc<OutputBudget>>>,
+    /// The operator-visible refusal meter, on tenant ceilings only.
+    ///
+    /// Set once by the tenant registry for the budgets it creates; per-output
+    /// budgets never carry one, so one tenant refusal notes exactly once —
+    /// at the parent that refused it — never once per child that observed it.
+    meter: std::sync::Mutex<Option<Arc<crate::metrics::Metrics>>>,
 }
 
 impl OutputBudget {
@@ -261,6 +267,7 @@ impl OutputBudget {
             limit,
             breaches: AtomicU64::new(0),
             parent: std::sync::Mutex::new(None),
+            meter: std::sync::Mutex::new(None),
         }
     }
 
@@ -342,7 +349,16 @@ impl OutputBudget {
     }
 
     /// Count this refusal and name the ceiling that tripped.
+    ///
+    /// Notes the operator meter when one is attached: only tenant ceilings
+    /// carry one, so each tenant refusal is metered exactly once however many
+    /// children observe it.
     fn refused(&self) -> Refusal {
+        if let Ok(meter) = self.meter.lock() {
+            if let Some(meter) = meter.as_ref() {
+                meter.note_output_refusal();
+            }
+        }
         Refusal {
             limit: self.limit,
             breaches: self.breaches.fetch_add(1, Ordering::Relaxed) + 1,
@@ -359,6 +375,56 @@ impl OutputBudget {
     fn unreserve(&self, bytes: usize) {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         self.used.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    /// Attach the operator-visible refusal meter, if this budget is a tenant ceiling.
+    ///
+    /// `pub(crate)`: only the tenant registry meters budgets, and only the
+    /// budgets it creates — per-output budgets stay unmetered, so one tenant
+    /// refusal notes exactly once (at the parent that refused it), never once
+    /// per child that observed it.
+    pub(crate) fn set_meter(&self, meter: &Arc<crate::metrics::Metrics>) {
+        if let Ok(mut slot) = self.meter.lock() {
+            if slot.is_none() {
+                *slot = Some(Arc::clone(meter));
+            }
+        }
+    }
+}
+
+/// A per-output budget returns its consumed bytes when its request ends.
+///
+/// Dropping the last `Arc` runs this: the budget type itself is the shared
+/// payload, so there is no separate inner to key on, and a cloneable handle
+/// cannot exist to double-refund. What returns is exactly what this budget
+/// successfully reserved from the parent — rollbacks already removed anything
+/// refused, so the parent's counter holds precisely this amount for this
+/// child. Saturating: a release must never be able to panic or wrap on an
+/// accounting surprise. Budgets without a parent (standalone, or tenant
+/// ceilings themselves) refund to nothing.
+///
+/// This is what makes the tenant ceiling a *concurrent* bound rather than a
+/// cumulative one: while a request lives its bytes count; when it ends they
+/// stop. Volume over time is deliberately NOT bounded here — a token bucket
+/// at the sink belongs to a later, separate decision (see the module docs),
+/// and conflating the two would turn a memory bound into a rate limit.
+impl Drop for OutputBudget {
+    /// Panic-free by construction (`F-21`): the lock recovers rather than
+    /// panicking, and the saturating subtraction cannot wrap.
+    fn drop(&mut self) {
+        let used = self.used.load(Ordering::Relaxed);
+        if used == 0 {
+            return;
+        }
+        if let Ok(parent) = self.parent.lock() {
+            if let Some(parent) = parent.as_ref() {
+                let _ = parent
+                    .used
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        Some(current.saturating_sub(used))
+                    });
+            }
+        }
     }
 }
 
@@ -409,6 +475,12 @@ struct TenantBudgetsInner {
     /// `or_insert_with`, and the guard's `Drop` tolerates a missing entry by
     /// doing nothing, which is exactly the evicted-at-zero state.
     state: std::sync::Mutex<std::collections::HashMap<String, TenantEntry>>,
+    /// The operator-visible refusal meter, shared by every tenant budget here.
+    ///
+    /// Wired once per app at construction; entry budgets created after that
+    /// inherit it, and the registry (hence the meter link) is cloned, never
+    /// rebuilt, on replacement.
+    meter: std::sync::Mutex<Option<Arc<crate::metrics::Metrics>>>,
 }
 
 /// One tenant's entry in the registry: the shared budget plus its live count.
@@ -434,7 +506,22 @@ impl TenantOutputBudgets {
             inner: Arc::new(TenantBudgetsInner {
                 limit,
                 state: std::sync::Mutex::new(std::collections::HashMap::new()),
+                meter: std::sync::Mutex::new(None),
             }),
+        }
+    }
+
+    /// Meter this registry's tenant-ceiling refusals into shared metrics.
+    ///
+    /// Called once per app at construction, before any acquire: entry budgets
+    /// created afterwards inherit the meter, so every tenant refusal notes
+    /// exactly once into the recorder operators render. Cloned registries
+    /// share the link through the inner `Arc`.
+    pub fn set_meter(&self, meter: &Arc<crate::metrics::Metrics>) {
+        if let Ok(mut slot) = self.inner.meter.lock() {
+            if slot.is_none() {
+                *slot = Some(Arc::clone(meter));
+            }
         }
     }
 
@@ -465,6 +552,14 @@ impl TenantOutputBudgets {
                 budget: Arc::new(OutputBudget::new(self.inner.limit)),
                 live: 0,
             });
+        // A re-established entry (after eviction, or after a recovered panic
+        // dropped the map) needs the meter as much as a fresh one: without
+        // this, the first tenant after an eviction would meter nothing.
+        if let Ok(meter) = self.inner.meter.lock() {
+            if let Some(meter) = meter.as_ref() {
+                entry.budget.set_meter(meter);
+            }
+        }
         entry.live += 1;
         TenantOutputGuard {
             inner: Arc::clone(&self.inner),
@@ -2303,6 +2398,101 @@ mod tests {
             .expect("the parked writer must wake after the bytes free, with no re-poll")
             .expect("the spawned task must not be dropped");
         parked_task.await.expect("writer tasks must not panic");
+    }
+
+    /// **F-06 red-first: a busy tenant is never permanently throttled.**
+    ///
+    /// Anchor guard keeps `live >= 1` for the whole run (steady traffic with
+    /// no moment of complete idleness): 10,000 sequential request budgets each
+    /// reserving 16 bytes against a 1024-byte tenant ceiling must all succeed,
+    /// because every request's end refunds its bytes. On the cumulative
+    /// counter the ceiling trips after 64 iterations and never recovers.
+    #[test]
+    fn f06_busy_tenant_is_not_permanently_throttled() {
+        let budgets = TenantOutputBudgets::new(1024);
+        let _anchor = budgets.acquire("tenant-a");
+        for i in 0..10_000u32 {
+            let guard = budgets.acquire("tenant-a");
+            let child = Arc::new(OutputBudget::new(256));
+            child.set_parent(guard.budget());
+            assert!(
+                child.reserve(16).is_ok(),
+                "iteration {i}: refused although at most 16 bytes are live"
+            );
+        }
+    }
+
+    /// **F-06 red-first: the ceiling still bounds concurrent output, and a
+    /// finished request's bytes return.**
+    #[test]
+    fn f06_ceiling_still_bounds_concurrent_output() {
+        let budgets = TenantOutputBudgets::new(64);
+        let first = budgets.acquire("tenant-a");
+        let second = budgets.acquire("tenant-a");
+        let one = Arc::new(OutputBudget::new(64));
+        one.set_parent(first.budget());
+        let two = Arc::new(OutputBudget::new(64));
+        two.set_parent(second.budget());
+        assert!(one.reserve(40).is_ok());
+        assert!(
+            two.reserve(40).is_err(),
+            "concurrent total 80 must exceed the 64-byte tenant ceiling"
+        );
+        drop(one);
+        assert!(
+            two.reserve(40).is_ok(),
+            "after the first request ends its bytes are refunded"
+        );
+    }
+
+    /// **F-06 guard: a refund can never underflow the parent.**
+    ///
+    /// Passes before the fix too (nothing is subtracted yet) — its job is to
+    /// pin the saturating semantics across the change, not to prove the
+    /// defect. The defect is proven by the two tests above.
+    #[test]
+    fn f06_refund_never_underflows() {
+        let budgets = TenantOutputBudgets::new(64);
+        let guard = budgets.acquire("tenant-a");
+        let child = Arc::new(OutputBudget::new(64));
+        child.set_parent(guard.budget());
+        assert!(child.reserve(1000).is_err(), "over-limit reserves nothing");
+        drop(child);
+        let fresh = Arc::new(OutputBudget::new(64));
+        fresh.set_parent(guard.budget());
+        assert!(
+            fresh.reserve(64).is_ok(),
+            "the full ceiling must still be available"
+        );
+    }
+
+    /// **F-06: tenant refusals are metered exactly once each.**
+    ///
+    /// A registry wired to shared metrics counts one per tenant-ceiling
+    /// refusal — never per observing child, and never for a child-limit
+    /// refusal that never reached the tenant. Added with the meter; the
+    /// busy/concurrent tests above are the red proofs for the refund itself.
+    #[test]
+    fn f06_tenant_refusals_are_metered() {
+        let meter = Arc::new(crate::metrics::Metrics::new());
+        let budgets = TenantOutputBudgets::new(40);
+        budgets.set_meter(&meter);
+        let guard = budgets.acquire("tenant-a");
+        let child = Arc::new(OutputBudget::new(64));
+        child.set_parent(guard.budget());
+        assert!(child.reserve(40).is_ok());
+        assert_eq!(meter.output_refusals(), 0, "successes meter nothing");
+        assert!(
+            child.reserve(1).is_err(),
+            "41 bytes must exceed the tenant 40"
+        );
+        assert_eq!(meter.output_refusals(), 1, "one tenant refusal notes once");
+        assert!(child.reserve(1).is_err());
+        assert_eq!(
+            meter.output_refusals(),
+            2,
+            "each refusal notes, none double"
+        );
     }
 
     /// A sink that blocks until the test releases it.

@@ -35,7 +35,7 @@
 //! long (a needlessly idle client). See [`Pool::retry_after_seconds`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use qqq_core::sync::LockRecover;
 use qqq_core::{Error, ErrorCode, Result};
@@ -140,7 +140,9 @@ pub struct Pool {
     state: Mutex<PoolState>,
     /// Set when the host begins shutting down.
     draining: AtomicU64,
-    metrics: Metrics,
+    /// Shared so the tenant output budgets can meter refusals into the same
+    /// recorder the pool feeds: one `Metrics` per pool, however many holders.
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Debug, Default)]
@@ -162,7 +164,7 @@ impl Pool {
             capacity,
             state: Mutex::new(PoolState::default()),
             draining: AtomicU64::new(0),
-            metrics: Metrics::new(),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -352,7 +354,16 @@ impl Pool {
 
     /// The metrics recorder this pool feeds.
     #[must_use]
-    pub const fn metrics(&self) -> &Metrics {
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// The shared recorder, for components that meter into it.
+    ///
+    /// Tenant output budgets note their ceiling refusals here rather than
+    /// into a second recorder nobody renders: one pool, one `Metrics`,
+    /// however many holders.
+    pub fn metrics_arc(&self) -> &Arc<Metrics> {
         &self.metrics
     }
 

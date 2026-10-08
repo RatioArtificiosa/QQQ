@@ -313,6 +313,21 @@ impl GuestApp {
                 .with_remediation("this is a QQQ bug in digest encoding; please report it")
         })?;
 
+        // `Pool::new` treats 0 as 1 and says why: a pool that can hand nothing out
+        // is a deadlock rather than a configuration. `serve::options` already
+        // refuses `--workers 0`, so this is a second line of defence rather than
+        // the check.
+        let pool = Arc::new(Pool::new(u64::from(workers)));
+        // One registry per app, matching the pool: tenants are not global
+        // identities here, so each deployed component bounds its own tenants,
+        // exactly as each bounds its own instance slots. The registry meters
+        // tenant-ceiling refusals into the pool's recorder, so operators see
+        // them where every other operational counter lives.
+        let tenant_outputs = qqq_host::guest_output::TenantOutputBudgets::new(
+            qqq_host::guest_output::TENANT_OUTPUT_BYTES,
+        );
+        tenant_outputs.set_meter(pool.metrics_arc());
+
         Ok(Self {
             engine,
             ticker,
@@ -321,20 +336,11 @@ impl GuestApp {
             grants,
             limits,
             authority,
-            // `Pool::new` treats 0 as 1 and says why: a pool that can hand nothing out
-            // is a deadlock rather than a configuration. `serve::options` already
-            // refuses `--workers 0`, so this is a second line of defence rather than
-            // the check.
-            pool: Arc::new(Pool::new(u64::from(workers))),
+            pool,
             // One budget per app, matching the pool: the heap that carries
             // bodies is per deployed component like its instance slots.
             buffer_budget: Arc::new(tokio::sync::Semaphore::new(BUFFER_BUDGET_BYTES)),
-            // One registry per app, matching the pool: tenants are not global
-            // identities here, so each deployed component bounds its own tenants,
-            // exactly as each bounds its own instance slots.
-            tenant_outputs: qqq_host::guest_output::TenantOutputBudgets::new(
-                qqq_host::guest_output::TENANT_OUTPUT_BYTES,
-            ),
+            tenant_outputs,
             // The stream the served path appends to. `with_default_capacity` cannot fail —
             // the capacity is a non-zero constant and the check lives in `AuditStream::new`.
             audit: std::sync::Arc::new(std::sync::Mutex::new(

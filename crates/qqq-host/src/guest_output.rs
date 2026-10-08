@@ -2679,6 +2679,121 @@ mod tests {
         );
     }
 
+    /// A sink that blocks until released and fails its first two writes.
+    ///
+    /// The gate pins the lane thread inside one write while the test queues
+    /// the next messages behind it; the two failures then land on two
+    /// different drain paths (the post-loop batch write, then the `Flush`
+    /// branch). `flush_shared` always succeeds so a later flush can only
+    /// fail via the recorded slot — the instrument this test reads.
+    struct GatedFailTwiceSink {
+        gate: std::sync::Mutex<bool>,
+        wake: std::sync::Condvar,
+        writes: AtomicUsize,
+    }
+
+    impl GatedFailTwiceSink {
+        fn new() -> Self {
+            Self {
+                gate: std::sync::Mutex::new(false),
+                wake: std::sync::Condvar::new(),
+                writes: AtomicUsize::new(0),
+            }
+        }
+
+        fn release(&self) {
+            *self.gate.lock().expect("not poisoned") = true;
+            self.wake.notify_all();
+        }
+    }
+
+    impl GuestSink for GatedFailTwiceSink {
+        fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            let mut open = self.gate.lock().expect("not poisoned");
+            while !*open {
+                open = self.wake.wait(open).expect("not poisoned");
+            }
+            drop(open);
+            let _ = bytes;
+            if self.writes.fetch_add(1, Ordering::Relaxed) < 2 {
+                return Err(io::Error::other("flush-branch write failed"));
+            }
+            Ok(())
+        }
+
+        fn flush_shared(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **F-12 committed-review: a `Flush`-branch write failure still blames
+    /// its data owner.**
+    ///
+    /// The lane's `Flush` arm used to clear the pending failure slots without
+    /// recording when its batch write failed, so the owning output's slot
+    /// stayed clean and a later flush wrongly reported `Ok` over lost bytes.
+    /// The gate pins the lane thread inside the first write while B's data
+    /// and flush queue behind it, forcing the second (failing) write through
+    /// the `Flush` arm deterministically — no settle-timing involved.
+    #[tokio::test]
+    async fn f12_flush_branch_write_failure_is_attributed_to_the_data_owner() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let sink = Arc::new(GatedFailTwiceSink::new());
+        let lane = crate::sink_lane::SinkLane::spawn(
+            "test-flush-branch-attribution",
+            Arc::clone(&sink) as Arc<dyn GuestSink>,
+        )
+        .expect("a lane thread spawns");
+        let _open = GatedOpenOnDrop { sink: &sink };
+        let first = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        first
+            .writer()
+            .write_all(b"pinned")
+            .await
+            .expect("acceptance precedes the drain");
+        // The lane thread dequeues the only queued message and parks inside
+        // its gated write; everything queued after this point waits behind it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let second = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
+        second
+            .writer()
+            .write_all(b"doomed")
+            .await
+            .expect("acceptance precedes the drain");
+        let (flush_result, ()) = tokio::join!(
+            async {
+                second
+                    .writer()
+                    .flush()
+                    .await
+                    .expect_err("the flush must surface the failed batch write")
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                sink.release();
+            },
+        );
+        let _ = flush_result;
+        second
+            .writer()
+            .flush()
+            .await
+            .expect_err("the data owner's slot must remember the Flush-arm failure");
+    }
+
+    /// Opens the gated fail-twice sink on drop, so a failed assertion cannot
+    /// leave the lane thread parked on the gate — a hung test binary rather
+    /// than a red test.
+    struct GatedOpenOnDrop<'a> {
+        sink: &'a GatedFailTwiceSink,
+    }
+    impl Drop for GatedOpenOnDrop<'_> {
+        fn drop(&mut self) {
+            self.sink.release();
+        }
+    }
+
     /// **F-07 on the lane path: a refused write leaves state untouched.**
     ///
     /// The same property as `f07_refused_write_does_not_advance_escaper_state`,

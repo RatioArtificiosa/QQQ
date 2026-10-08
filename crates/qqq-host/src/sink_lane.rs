@@ -218,8 +218,25 @@ impl SinkLane {
                                 failures.push(failure);
                             }
                             Some(LaneMsg::Flush(done)) => {
-                                let result = write_batch(&*thread_sink, &mut batch)
-                                    .and_then(|()| thread_sink.flush_shared());
+                                let result = match write_batch(&*thread_sink, &mut batch) {
+                                    Ok(()) => thread_sink.flush_shared(),
+                                    Err(error) => {
+                                        // The batch write died here, not in
+                                        // the post-loop drain below, so this
+                                        // arm must attribute it: clearing the
+                                        // slots unrecorded would let the data
+                                        // owner's next flush report `Ok` over
+                                        // lost bytes.
+                                        let message = error.to_string();
+                                        for failure in failures.drain(..) {
+                                            crate::guest_output::record_failure(
+                                                &failure,
+                                                message.clone(),
+                                            );
+                                        }
+                                        Err(error)
+                                    }
+                                };
                                 guards.clear();
                                 failures.clear();
                                 let _ = done.send(result);

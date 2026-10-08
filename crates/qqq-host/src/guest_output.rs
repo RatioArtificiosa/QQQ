@@ -1556,6 +1556,7 @@ fn pump_gone() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -2690,6 +2691,7 @@ mod tests {
         gate: std::sync::Mutex<bool>,
         wake: std::sync::Condvar,
         writes: AtomicUsize,
+        entered: AtomicBool,
     }
 
     impl GatedFailTwiceSink {
@@ -2698,6 +2700,7 @@ mod tests {
                 gate: std::sync::Mutex::new(false),
                 wake: std::sync::Condvar::new(),
                 writes: AtomicUsize::new(0),
+                entered: AtomicBool::new(false),
             }
         }
 
@@ -2709,6 +2712,11 @@ mod tests {
 
     impl GuestSink for GatedFailTwiceSink {
         fn write_all_shared(&self, bytes: &[u8]) -> io::Result<()> {
+            // Signal before waiting: the test queues the next messages only
+            // after this fires, so the first write provably holds the first
+            // message alone and the second write provably runs in the `Flush`
+            // arm — no settle-timing anywhere in this test.
+            self.entered.store(true, Ordering::Relaxed);
             let mut open = self.gate.lock().expect("not poisoned");
             while !*open {
                 open = self.wake.wait(open).expect("not poisoned");
@@ -2754,7 +2762,15 @@ mod tests {
             .expect("acceptance precedes the drain");
         // The lane thread dequeues the only queued message and parks inside
         // its gated write; everything queued after this point waits behind it.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // An entry signal, not a settle sleep: the wait ends exactly when the
+        // thread holds the first message inside its write.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !sink.entered.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the lane thread enters the gated write");
         let second = GuestOutput::with_lane(STDOUT_PREFIX, &lane, u64::MAX);
         second
             .writer()
@@ -2775,6 +2791,14 @@ mod tests {
             },
         );
         let _ = flush_result;
+        // Both failure paths ran: the gated post-loop write and the `Flush`
+        // arm write. Without this pin the test could pass without ever
+        // exercising the arm under test.
+        assert_eq!(
+            sink.writes.load(Ordering::Relaxed),
+            2,
+            "the first flush must follow exactly two failed writes"
+        );
         second
             .writer()
             .flush()

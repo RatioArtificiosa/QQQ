@@ -8,7 +8,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## Start here
 
-- [README.md](README.md) — What QQQ is, in one page. _(human)_ (11 KB)
+- [README.md](README.md) — What QQQ is, in one page. _(human)_ (13 KB)
 - [QQQ-Proposal-V1.md](QQQ-Proposal-V1.md) — The full specification. Every other document derives from this one; section numbers are stable and are cited by the checklist. (large)
 
 ## What is built, and what was learned building it

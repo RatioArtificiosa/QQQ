@@ -145,6 +145,36 @@ def core_autocrlf() -> str:
     return out.stdout.strip() or "(unset)"
 
 
+def classify_eol_line(line: str) -> str | None:
+    """The committed-blob verdict for one `git ls-files --eol` line.
+
+    Returns the `path (index-eol)` finding, or `None` when the line is clean.
+
+    # Why `i/-text` (binary) is clean
+
+    Git reports `i/-text` for a blob it will never convert — a JPEG's `0D 0A`
+    bytes are image data, not line endings, so there is no "wrong endings"
+    defect to report. Flagging it fails CI on the first binary file the
+    repository ever tracks (`§O-580`: the README redesign's hero JPEG and
+    social-preview PNG). `i/lf` and `i/none` are the other clean states;
+    `i/crlf` and `i/mixed` mean the committed blob is wrong.
+    """
+    # Format: `i/<index-eol> w/<worktree-eol> attr/<attrs>\t<path>`
+    parts = line.split("\t", 1)
+    if len(parts) != 2:
+        return None
+    meta, path = parts[0], parts[1]
+    if path.endswith(".gitattributes"):
+        return None
+    index_eol = meta.split()[0] if meta.split() else ""
+    # `i/lf` is correct. `i/none` means Git tracks no EOL state. `i/-text`
+    # means Git treats the blob as binary: no conversion, no defect.
+    # `i/mixed` or `i/crlf` means the blob is wrong.
+    if index_eol and index_eol not in ("i/lf", "i/none", "i/-text"):
+        return f"{path} ({index_eol})"
+    return None
+
+
 def index_eol_report() -> list[str]:
     """Files whose **committed** bytes are not LF, from Git itself.
 
@@ -173,17 +203,9 @@ def index_eol_report() -> list[str]:
         cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
     bad: list[str] = []
     for line in out.stdout.splitlines():
-        # Format: `i/<index-eol> w/<worktree-eol> attr/<attrs>\t<path>`
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        meta, path = parts[0], parts[1]
-        if path.endswith(".gitattributes"):
-            continue
-        index_eol = meta.split()[0] if meta.split() else ""
-        # `i/lf` is correct. `i/mixed` or `i/crlf` means the blob is wrong.
-        if index_eol and index_eol != "i/lf" and index_eol != "i/none":
-            bad.append(f"{path} ({index_eol})")
+        finding = classify_eol_line(line)
+        if finding is not None:
+            bad.append(finding)
     return bad
 
 
@@ -387,6 +409,48 @@ def self_test() -> int:
             "an LF file has no CRLF to normalize",
             raw.count(b"\r\n") == 0,
             "an LF file must not be reported",
+        )
+
+        # --- the committed-blob classifier: binary is clean, CRLF is not ----
+        #
+        # `§O-580`: the README redesign committed the first binary files this
+        # repository ever tracked, and the old classifier failed CI on the
+        # hero JPEG because `git ls-files --eol` reports `i/-text` for a blob
+        # Git will never convert. These cases drive `classify_eol_line` on
+        # fabricated report lines so the distinction is pinned without a repo.
+        from normalize_eol import classify_eol_line as _classify
+
+        expect(
+            "an i/-text (binary) line is not a finding",
+            _classify("i/-text w/-text attr/-text\tassets/qqq-hero.jpg") is None,
+            "a JPEG's 0D0A bytes are image data, not line endings",
+        )
+        expect(
+            "an i/lf line is not a finding",
+            _classify("i/lf w/lf attr/text eol=lf\tREADME.md") is None,
+            "LF is the correct committed state",
+        )
+        expect(
+            "an i/none line is not a finding",
+            _classify("i/none w/none attr/-text\tarchive.zip") is None,
+            "no EOL state means no defect",
+        )
+        expect(
+            "an i/crlf line is a finding",
+            _classify("i/crlf w/crlf attr/text eol=lf\tprobe.sh")
+            == "probe.sh (i/crlf)",
+            "a CRLF committed blob is the real defect",
+        )
+        expect(
+            "an i/mixed line is a finding",
+            _classify("i/mixed w/mixed attr/text eol=lf\tprobe.sh")
+            == "probe.sh (i/mixed)",
+            "a mixed committed blob is the real defect",
+        )
+        expect(
+            ".gitattributes itself is never a finding",
+            _classify("i/crlf w/crlf attr/text\t.gitattributes") is None,
+            "the rules file is exempt by design",
         )
 
     print()

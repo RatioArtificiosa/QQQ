@@ -95,6 +95,16 @@ use crate::serve_routes::routes_from_manifest;
 pub const MAX_WORKERS: u32 = 128;
 
 /// The flags `qqqai serve` accepts.
+///
+/// # Why this carries a targeted allow for four booleans
+///
+/// `clippy::struct_excessive_bools` fires because four independent `bool`
+/// fields usually mean a struct that wants a mode. These four genuinely are
+/// four independent choices the operator makes — `--tls`, `--trace-keep-failures`,
+/// `--deterministic` and `--allow-deterministic-public` combine freely, so an
+/// enum would have to encode combinations that mean nothing. (The same
+/// reasoning carries the identical allow on `TestOptions`.)
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeOptions {
     /// Explicit host-owned native cache directory.
@@ -187,6 +197,20 @@ pub struct ServeOptions {
     /// responses are all 5xx sampled **everything** — measured — and a rate that is not the rate is
     /// worse than no flag at all.
     pub trace_keep_failures: bool,
+    /// `--deterministic` — serve with a fixed clock and seeded RNG (`F-20`).
+    ///
+    /// Off by default: guest-visible randomness in deterministic mode is
+    /// reproducible by design, so a public deterministic server would mint
+    /// predictable tokens. Loopback listeners may use it (only the operator
+    /// can reach them); anything else needs `--allow-deterministic-public`,
+    /// and the refusal names it. See [`refuse_public_deterministic`].
+    pub deterministic: bool,
+    /// `--allow-deterministic-public` — the explicit opt-in to public
+    /// deterministic serving (`F-20`).
+    ///
+    /// A loud startup warning is printed either way deterministic mode is
+    /// active: an opt-in the operator could miss is not explicit.
+    pub allow_deterministic_public: bool,
 }
 
 impl Default for ServeOptions {
@@ -206,6 +230,8 @@ impl Default for ServeOptions {
             metrics_path: None,
             trace_rate: None,
             trace_keep_failures: false,
+            deterministic: false,
+            allow_deterministic_public: false,
         }
     }
 }
@@ -216,6 +242,13 @@ impl Default for ServeOptions {
 /// machine-readable JSON, and `--json` is part of the CLI's contract. This type
 /// carried no derive until `serve` was made reachable, because nothing had ever
 /// tried to render it.
+///
+/// # Why this carries a targeted allow for four booleans
+///
+/// As on [`ServeOptions`]: `tls`, `guest_loaded`, `deterministic` and
+/// `deterministic_public` are four independent facts the report states, not a
+/// mode — collapsing them would make the JSON say less than the run knew.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ServeOutput {
     /// The address served on.
@@ -226,6 +259,20 @@ pub struct ServeOutput {
     pub workers: u32,
     /// Whether TLS was requested.
     pub tls: bool,
+    /// Whether the server runs deterministically — `F-20`.
+    ///
+    /// Carried so the rendered report and the JSON state the mode the app
+    /// installed (via `GuestApp::is_deterministic`), not the flag parsed:
+    /// a report echoing the flag could not notice a setter never called.
+    /// Read from the app below; `false` when no guest is loaded, because a
+    /// server with no guest mints no randomness at all.
+    pub deterministic: bool,
+    /// Whether that deterministic server listens publicly — `F-20`.
+    ///
+    /// The report warning must name the exposure when the operator accepted
+    /// it explicitly; a single bool would render the loopback sentence for a
+    /// public server. Implies `deterministic` when true.
+    pub deterministic_public: bool,
     /// Whether a guest component was found and loaded.
     pub guest_loaded: bool,
     /// The metrics path, when the operator exposed the registry on the
@@ -368,6 +415,26 @@ fn audit_hmac_key_file_of(args: &[String], i: usize) -> Result<String> {
     Ok(v)
 }
 
+/// Parse the deterministic-mode flags, reporting whether `arg` was one.
+///
+/// Split out of the general flag match in [`options`] because that function
+/// is at its line budget: the two flags form one feature (the `F-20` gate),
+/// and a reader looking for the gate finds it here rather than inside the
+/// general match.
+fn parse_deterministic_flag(opts: &mut ServeOptions, arg: &str) -> bool {
+    match arg {
+        "--deterministic" => {
+            opts.deterministic = true;
+            true
+        }
+        "--allow-deterministic-public" => {
+            opts.allow_deterministic_public = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Parse `qqqai serve`'s arguments.
 ///
 /// # Errors
@@ -381,6 +448,12 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
 
     while i < args.len() {
         let arg = args[i].as_str();
+        // The deterministic gate parses before the general match, so the
+        // feature's flags live with the feature rather than inside it.
+        if parse_deterministic_flag(&mut opts, arg) {
+            i += 1;
+            continue;
+        }
         match arg {
             "--aot-cache" => {
                 opts.aot_cache = Some(value_of(args, i, "--aot-cache")?.into());
@@ -448,8 +521,9 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             other => {
                 return Err(usage(format!("`{other}` is not a flag `serve` accepts"))
                     .with_remediation(
-                        "serve accepts --listen, --workers, --tls, --config and \
-                         --accept-limit",
+                        "serve accepts --listen, --workers, --tls, --config, \
+                         --accept-limit, --deterministic and \
+                         --allow-deterministic-public",
                     ))
             }
         }
@@ -508,6 +582,58 @@ fn usage(message: impl Into<String>) -> Error {
 ///
 /// So the *decisions* — is there a route table, is there a guest, is the address
 /// valid — are testable without opening a socket. Binding is the one step that
+/// Refuse deterministic mode on a non-loopback listener without the explicit opt-in (`F-20`).
+///
+/// Guest-visible randomness in deterministic mode is reproducible by design —
+/// a hash DRBG from a fixed seed — so a publicly reachable deterministic
+/// server mints predictable tokens and keys. The check runs on the *parsed*
+/// address, never on the `--listen` string: `localhost` parses loopback, and
+/// a prefix match for `"127."` would miss `::ffff:127.0.0.1` once
+/// canonicalised ([`ListenAddr::is_loopback`] handles both).
+///
+/// # Errors
+///
+/// `QQQ-7001` usage error naming `--allow-deterministic-public`, when
+/// deterministic mode targets a non-loopback listener without it.
+pub(crate) fn refuse_public_deterministic(opts: &ServeOptions, addr: &ListenAddr) -> Result<()> {
+    if opts.deterministic && !addr.is_loopback() && !opts.allow_deterministic_public {
+        return Err(usage(format!(
+            "`--deterministic` with `--listen {}` would serve reproducible randomness publicly",
+            opts.listen
+        ))
+        .with_remediation(
+            "serve deterministically on a loopback listener, or pass \
+             `--allow-deterministic-public` to accept the risk explicitly",
+        ));
+    }
+    Ok(())
+}
+
+/// The loud startup warning for deterministic mode (`F-20`).
+///
+/// A function (like [`metrics_exposure_warning`]) so the startup path and any
+/// test assert on the same sentence: two wordings for one risk drift, and the
+/// drift is always toward the softer one.
+///
+/// ```
+/// use qqq_run::serve::deterministic_mode_warning;
+///
+/// assert!(deterministic_mode_warning(false).starts_with("WARNING"));
+/// assert!(deterministic_mode_warning(true).contains("PUBLIC"));
+/// ```
+#[must_use]
+pub fn deterministic_mode_warning(public: bool) -> String {
+    if public {
+        "WARNING: deterministic mode on a PUBLIC listener — guest randomness is \
+         reproducible by design; tokens, keys and nonces minted here are predictable"
+            .to_owned()
+    } else {
+        "WARNING: deterministic mode — fixed clock, seeded RNG; for testing and \
+         replay, never for production traffic"
+            .to_owned()
+    }
+}
+
 /// needs a real port, and a test that needs one is a test that flakes on a busy
 /// machine (`§O-144`).
 ///
@@ -598,6 +724,16 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         .with_remediation("write `--listen <host>:<port>`, for example `--listen 0.0.0.0:8080`")
     })?;
 
+    // Deterministic serving is refused here — after the address parses (the
+    // check needs the parsed form) and before anything binds or runs: a
+    // refusal after the guest started would already have served predictable
+    // randomness. See `refuse_public_deterministic`.
+    refuse_public_deterministic(opts, &addr)?;
+
+    // Captured before `for_addr` moves the address below: `Prepared` reports
+    // it, and a second parse in `run` would be a second chance to disagree.
+    let loopback = addr.is_loopback();
+
     let routes = routes_from_manifest(server, &loaded.path.display().to_string())?;
 
     // --- The configuration the manifest asked for, attached ----------------
@@ -646,16 +782,18 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;
 
-    let (dispatch, guest_loaded, pool_capacity, live) = build_dispatch(loaded, opts)?;
+    let built = build_dispatch(loaded, opts)?;
 
     Ok(Prepared {
         config,
         table: routes.table,
-        dispatch,
+        dispatch: built.dispatch,
         routes: server.routes.len(),
-        guest_loaded,
-        pool_capacity,
-        live,
+        guest_loaded: built.guest_loaded,
+        pool_capacity: built.pool_capacity,
+        live: built.live,
+        loopback,
+        deterministic: built.deterministic,
     })
 }
 
@@ -822,6 +960,16 @@ pub struct Prepared {
     /// the flag and the pool — at which point a report that echoed the flag would
     /// describe a server nobody is running.
     pub pool_capacity: Option<u64>,
+    /// Whether the listener is loopback — `F-20`.
+    ///
+    /// Read from the parsed address in `prepare`, not re-derived in `run`:
+    /// two parses of one flag are two chances to disagree about `localhost`.
+    pub loopback: bool,
+    /// Whether the guest runs deterministically — `F-20`.
+    ///
+    /// Read from the installed app in `build_dispatch`, like `pool_capacity`:
+    /// the report states the mode running, not the flag parsed.
+    pub deterministic: bool,
 }
 
 /// Build the dispatcher, loading the guest when the project has been built.
@@ -837,10 +985,22 @@ pub struct Prepared {
 /// `QQQ-1002` when a component exists but is not a QQQ application, or cannot be
 /// read or compiled. Failing here means the server refuses to start rather than
 /// answering every request with an error nobody reads.
-fn build_dispatch(
-    loaded: &LoadedManifest,
-    opts: &ServeOptions,
-) -> Result<(Dispatch, bool, Option<u64>, Option<crate::live::LiveApp>)> {
+/// What `build_dispatch` installed: the dispatcher plus the facts the
+/// report states about the installation.
+///
+/// A struct rather than a tuple because `clippy::type_complexity` is right:
+/// a five-element tuple is five answers with no names, and the report must
+/// not mix up "the mode installed" with "the capacity installed".
+struct BuiltDispatch {
+    dispatch: Dispatch,
+    guest_loaded: bool,
+    pool_capacity: Option<u64>,
+    live: Option<crate::live::LiveApp>,
+    /// The installed clock mode, read from the app — never the flag.
+    deterministic: bool,
+}
+
+fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {
     let Some(artifact) = find_artifact(
         project_dir(loaded),
         "release",
@@ -850,7 +1010,14 @@ fn build_dispatch(
         // No component means no `GuestApp` and therefore **no pool**. `None` rather than
         // `Some(0)`: `0` would read as "a pool with no capacity", which is a different
         // and false statement about a project that simply has not been built.
-        return Ok((Dispatch::flat(unbuilt(loaded.name())), false, None, None));
+        // No guest also means no randomness at all, deterministic or otherwise.
+        return Ok(BuiltDispatch {
+            dispatch: Dispatch::flat(unbuilt(loaded.name())),
+            guest_loaded: false,
+            pool_capacity: None,
+            live: None,
+            deterministic: false,
+        });
     };
 
     let bytes = std::fs::read(&artifact).map_err(|e| {
@@ -869,7 +1036,16 @@ fn build_dispatch(
         opts.aot_cache.as_deref(),
         &GrantSet::from_manifest(&loaded.manifest),
     )?;
-    let cfg = EngineConfig::default();
+    // Deterministic serving runs the deterministic engine preset: without it
+    // `--deterministic` would be a flag that changes the refusal surface but
+    // not the randomness, and the guest would read OS bytes while the
+    // operator believed the run reproducible. Reachable only through the
+    // loopback-or-explicit gate above.
+    let cfg = if opts.deterministic {
+        EngineConfig::deterministic()
+    } else {
+        EngineConfig::default()
+    };
     let mut wasmtime_cfg = cfg.to_wasmtime_config()?;
     crate::aot::configure(&mut wasmtime_cfg, opts.aot_cache.as_deref())?;
     let engine = wasmtime::Engine::new(&wasmtime_cfg).map_err(|e| {
@@ -893,6 +1069,12 @@ fn build_dispatch(
         opts.listen.clone(),
         opts.workers,
     )?;
+    if opts.deterministic {
+        // The ambient state follows the engine preset: a deterministic engine
+        // with OS randomness would replay the clock and re-roll the bytes,
+        // which is neither deterministic nor real-time.
+        app.set_deterministic(true);
+    }
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.
@@ -931,6 +1113,10 @@ fn build_dispatch(
     }
 
     let capacity = app.capacity();
+    // The installed mode, like the installed capacity above: read from the
+    // app rather than echoed from the flag, so the report cannot describe a
+    // deterministic server whose setter never ran.
+    let deterministic = app.is_deterministic();
     let app = crate::live::LiveApp::new(app)?;
     // Captured before the `Arc` is moved into the dispatcher closures, so the report can
     // name the capacity that is actually installed.
@@ -953,7 +1139,13 @@ fn build_dispatch(
         dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
     }
 
-    Ok((dispatch, true, Some(capacity), Some(app)))
+    Ok(BuiltDispatch {
+        dispatch,
+        guest_loaded: true,
+        pool_capacity: Some(capacity),
+        live: Some(app),
+        deterministic,
+    })
 }
 
 /// The directory a project lives in — the manifest's parent.
@@ -1039,6 +1231,22 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
         eprintln!("{warning}");
     }
 
+    // The deterministic warning fires the same way and place (`F-20`): before
+    // the accept loop, through the same function the report carries, so the
+    // two cannot drift. The public-listener variant names the exposure
+    // because the operator explicitly accepted it — the one case where a
+    // soft warning would be read as routine.
+    //
+    // No audit row is written for the mode: the audit stream records
+    // capability consultations (`RECORDED_FUNCTIONS` is closed by design),
+    // and a fabricated capability row for a server mode would corrupt the
+    // evidence semantics `F-09` built. The mode is discoverable in persisted
+    // evidence through `ServeOutput::deterministic` in the command's JSON.
+    if opts.deterministic {
+        let public = !prepared.loopback;
+        eprintln!("{}", deterministic_mode_warning(public));
+    }
+
     qqq_serve::serve(
         prepared.config,
         prepared.table,
@@ -1064,6 +1272,8 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
         tls: opts.tls,
         guest_loaded,
         metrics_path: opts.metrics_path.clone(),
+        deterministic: prepared.deterministic,
+        deterministic_public: prepared.deterministic && !prepared.loopback,
     })
 }
 
@@ -1172,6 +1382,18 @@ pub fn render(out: &ServeOutput) -> String {
     );
     if out.tls {
         s.push_str("  TLS: on\n");
+    }
+    // The mode is in the report for the same reason the warning fires at
+    // startup: a deterministic server whose every surface claims
+    // real-time operation is a predictable-token mint nobody noticed. The
+    // public variant renders when the listener is public, so the report
+    // cannot soften the exposure the operator accepted.
+    if out.deterministic {
+        let _ = writeln!(
+            s,
+            "  {}",
+            deterministic_mode_warning(out.deterministic_public)
+        );
     }
     // The endpoint is served on the application listener, before routing, so
     // anyone who can reach the app can read tenant names and traffic volume
@@ -1346,6 +1568,62 @@ mod tests {
         assert_eq!(o.workers, 1);
     }
 
+    /// **F-20: deterministic mode on a public listener is refused.**
+    ///
+    /// Guest-visible randomness in deterministic mode is reproducible by
+    /// design; serving it publicly without an explicit opt-in would mint
+    /// predictable tokens. Pre-fix this fails: `--deterministic` is not even
+    /// a flag `serve` accepts.
+    #[test]
+    fn f20_serve_refuses_deterministic_mode_on_a_public_listener() {
+        let o = options(&args(&["--deterministic", "--listen", "0.0.0.0:8080"]))
+            .expect("--deterministic must parse");
+        let addr = ListenAddr::parse(&o.listen).expect("the listen address parses");
+        let err =
+            refuse_public_deterministic(&o, &addr).expect_err("public deterministic is refused");
+        assert!(
+            err.message.contains("deterministic"),
+            "the refusal must name the mode: {}",
+            err.message
+        );
+        assert!(
+            err.remediation
+                .as_deref()
+                .is_some_and(|r| r.contains("--allow-deterministic-public")),
+            "the fix must name the explicit opt-in: {err:?}"
+        );
+    }
+
+    /// **F-20: deterministic mode on loopback is allowed.**
+    ///
+    /// The refusal above is about *reachability*, not the mode itself: a
+    /// loopback listener cannot mint tokens for anyone but the operator.
+    #[test]
+    fn f20_serve_allows_deterministic_mode_on_loopback() {
+        let o = options(&args(&["--deterministic"])).expect("--deterministic must parse");
+        assert!(o.deterministic);
+        let addr = ListenAddr::parse(&o.listen).expect("the default listen parses");
+        refuse_public_deterministic(&o, &addr).expect("loopback deterministic is allowed");
+    }
+
+    /// **F-20: the explicit flag admits public deterministic serving.**
+    ///
+    /// The escape hatch exists so a lock-step load test can run
+    /// deterministically on a test network — loudly, and only when asked.
+    #[test]
+    fn f20_allow_flag_admits_public_deterministic_explicitly() {
+        let o = options(&args(&[
+            "--deterministic",
+            "--listen",
+            "0.0.0.0:8080",
+            "--allow-deterministic-public",
+        ]))
+        .expect("the explicit flag must parse");
+        assert!(o.allow_deterministic_public);
+        let addr = ListenAddr::parse(&o.listen).expect("the listen address parses");
+        refuse_public_deterministic(&o, &addr).expect("the explicit opt-in is honoured");
+    }
+
     #[test]
     fn an_unknown_flag_is_refused_rather_than_ignored() {
         // A server that starts with a flag silently ignored is worse than one that
@@ -1427,6 +1705,8 @@ mod tests {
             tls: false,
             guest_loaded: true,
             metrics_path: None,
+            deterministic: false,
+            deterministic_public: false,
         };
         let r = render(&out);
         assert!(r.contains("127.0.0.1:3000"), "{r}");
@@ -1452,11 +1732,47 @@ mod tests {
             tls: true,
             guest_loaded: false,
             metrics_path: None,
+            deterministic: false,
+            deterministic_public: false,
         };
         let r = render(&out);
         assert!(r.contains("not built"), "{r}");
         assert!(r.contains("qqqai build"), "the fix must be named: {r}");
         assert!(r.contains("TLS: on"), "{r}");
+    }
+
+    /// **A deterministic server names the mode in the startup report.**
+    ///
+    /// The same sentence the stderr warning carries, asserted through
+    /// `render`: a report that stayed silent about reproducible randomness
+    /// would be the exposure nobody noticed.
+    #[test]
+    fn a_deterministic_server_names_the_mode_in_the_startup_report() {
+        let out = ServeOutput {
+            listen: "127.0.0.1:3000".to_owned(),
+            routes: 1,
+            workers: 1,
+            tls: false,
+            guest_loaded: true,
+            metrics_path: None,
+            deterministic: true,
+            deterministic_public: false,
+        };
+        let r = render(&out);
+        assert!(r.contains("deterministic"), "{r}");
+        assert!(
+            !r.contains("PUBLIC"),
+            "loopback serving is not the public exposure: {r}"
+        );
+        let public = ServeOutput {
+            deterministic_public: true,
+            ..out
+        };
+        let r = render(&public);
+        assert!(
+            r.contains("PUBLIC"),
+            "the public exposure must be named: {r}"
+        );
     }
 
     /// **An exposed metrics endpoint warns at startup.** The endpoint is
@@ -1474,6 +1790,8 @@ mod tests {
             tls: false,
             guest_loaded: true,
             metrics_path: Some("/metrics".to_owned()),
+            deterministic: false,
+            deterministic_public: false,
         };
         let r = render(&out);
         assert!(
@@ -1520,6 +1838,8 @@ mod tests {
             tls: false,
             guest_loaded: true,
             metrics_path: None,
+            deterministic: false,
+            deterministic_public: false,
         };
         let line = crate::output::CommandOutput::summary(&out);
         assert!(

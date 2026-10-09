@@ -12,6 +12,20 @@
   deterministic-random overlays and commutativity sweeps 200 overlay
   pairs. (`F-15`)
 
+- **serve**: `qqqai serve` accepts `--deterministic` (fixed clock, seeded
+  RNG) on loopback listeners only; a non-loopback listener needs the
+  explicit `--allow-deterministic-public`, otherwise startup is refused
+  before anything binds. Either active mode prints a loud startup warning
+  and reports it in the JSON. Guest randomness in deterministic mode now
+  comes from a SHA-256 hash DRBG (fixed seed, per-block counter, atomically
+  reserved) instead of splitmix64 — reproducible across architectures with
+  uniform output. Still reproducible by design (the seed is fixed and
+  public): the gate above is what keeps reproducible randomness off
+  production, never the mixer.
+  The first-bytes pin changed intentionally (`36cfb6d2be11236b`); replay
+  fixtures still reproduce because replay consumes recorded values, never
+  the generator. (`F-20`)
+
 - **serve**: WebSocket upgrades check `Origin` (same-origin by default,
   requests without an `Origin` header are accepted, mismatch refused 403
   pre-upgrade, `*` an explicit opt-in sharing the CORS origin type), loopback listeners

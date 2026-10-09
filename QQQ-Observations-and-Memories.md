@@ -36694,4 +36694,30 @@ unchanged green suite plus the bound itself. Generalisable rule: bound every
 loop in every dimension an adversary controls — time bounds work, space
 bounds work differently, and one does not imply the other. → `crates/qqq-serve/src/ws_conn.rs`, `CHANGELOG.md`.
 
+## §O-600 — F-20: the gate did not exist to refuse through, and the mixer is quality, not secrecy
+
+Three corrections inside one finding. First, the premise: `qqqai serve`
+had no `--deterministic` at all — no flag, no manifest knob, a default
+engine and default ambient — so "refuse public deterministic serving"
+had nothing to refuse through. The refusal needed the surface first:
+`--deterministic` plus `--allow-deterministic-public`, loopback-or-explicit,
+refused after the address parses and before anything binds. How it was
+caught: reading the serve parser before writing the refusal test, instead
+of assuming the audit's sketch (`--deterministic --listen 0.0.0.0:8080`)
+parsed. Second, the overclaim: the first version documented the hash DRBG
+as "no longer predictable" — but the seed is fixed and public, so anyone
+reproduces the stream. CodeRabbit caught it; the docs now say what the
+hash buys (uniformity, no splitmix correlations) and what it does not
+(secrecy — that is the gate's job). Third, the overlap: the sketch's
+load-fill-store counter overlaps under concurrency; blocks are now
+reserved with `fetch_add` before filling. The audit row asked for became
+a documented deviation: the audit stream records capability consultations
+only, and a fabricated row would corrupt it — the mode is discoverable
+instead through the stderr warning and `ServeOutput::deterministic` in
+the command JSON. No replay fixture was regenerated: replay consumes
+recorded values, and the full host/run suites (571 + 596) plus
+`det009_trials.py --self-test` (13/13) prove it. Generalisable rule: read
+the refusal surface before writing the refusal; describe a control by
+what enforces it, not by what surrounds it. → `crates/qqq-host/src/ambient.rs`, `crates/qqq-run/src/serve.rs`, `crates/qqq-run/src/guest_handler.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

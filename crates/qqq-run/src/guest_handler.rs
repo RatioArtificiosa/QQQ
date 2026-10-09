@@ -186,6 +186,15 @@ pub struct GuestApp {
     /// one question, and a reader comparing an audit row to a pool claim would find they
     /// disagree.
     grant_digest: qqq_host::tenant::GrantDigest,
+    /// Whether guest instances run deterministically — `F-20`.
+    ///
+    /// Set post-construction by `qqqai serve --deterministic` (after the
+    /// loopback-or-explicit gate), never by the manifest: a manifest that
+    /// could opt its own server into reproducible randomness would be a
+    /// guest-controlled predictability switch. Defaults off, so every
+    /// existing constructor — including the integration tests' — serves
+    /// real-time randomness unless serve says otherwise.
+    deterministic: bool,
 }
 
 impl std::fmt::Debug for GuestApp {
@@ -293,8 +302,13 @@ impl GuestApp {
         // A throwaway instance, purely to resolve the export. Creating one here is
         // what turns "not a QQQ application" into a start-up failure.
         let handle = {
-            let instance =
-                Instance::create_with(&engine, &prepared, &grants, limits, &timed_options(limits))?;
+            let instance = Instance::create_with(
+                &engine,
+                &prepared,
+                &grants,
+                limits,
+                &timed_options(limits, false),
+            )?;
             instance.run(|store, wasm| {
                 HandlerHandle::resolve(&mut *store, wasm, "guest")
                     .map_err(|e| wasmtime::Error::msg(e.message.clone()))
@@ -373,7 +387,28 @@ impl GuestApp {
             component_digest,
             grant_digest,
             completion_rate: 0.0,
+            deterministic: false,
         })
+    }
+
+    /// Run guest instances deterministically — `F-20`.
+    ///
+    /// Crate-visible rather than public: only `serve` sets this, after its
+    /// listener gate, and an external caller with a setter would be a second
+    /// path to deterministic serving that bypasses the gate. Must be called
+    /// before serving; instances created afterwards read it.
+    pub(crate) fn set_deterministic(&mut self, deterministic: bool) {
+        self.deterministic = deterministic;
+    }
+
+    /// Whether this app runs guest instances deterministically.
+    ///
+    /// Crate-visible for the same reason: reported so `serve` can state the
+    /// mode it installed rather than the flag it parsed — a report that
+    /// echoes the flag cannot notice a setter that was never called.
+    #[must_use]
+    pub(crate) fn is_deterministic(&self) -> bool {
+        self.deterministic
     }
 
     /// Prepare a replacement under the same authority and aggregate resource limits.
@@ -416,6 +451,9 @@ impl GuestApp {
         // audit stream: a rotation must not double a tenant's ceiling by
         // accident, and must not forgive an over-budget tenant either.
         next.tenant_outputs = self.tenant_outputs.clone();
+        // The clock mode rolls with it too: a deterministic server that
+        // served real-time randomness after a rotation would be neither.
+        next.deterministic = self.deterministic;
         Ok(next)
     }
 
@@ -442,7 +480,7 @@ impl GuestApp {
             &self.prepared,
             &self.grants,
             self.limits,
-            &timed_options(self.limits),
+            &timed_options(self.limits, self.deterministic),
         )?;
         instance.run(|store, wasm| {
             let func = self.handle.func(store, wasm)
@@ -795,7 +833,7 @@ impl GuestApp {
         // reset boundary. The budget outlives concurrent requests through the
         // registry, never through this local.
         let tenant_output = self.tenant_outputs.acquire(tenant);
-        let mut options = timed_options(self.limits);
+        let mut options = timed_options(self.limits, self.deterministic);
         options.audit = Some(handle);
         options.tenant_output = Some(tenant_output);
         let instance = Instance::create_with(
@@ -1476,9 +1514,10 @@ impl Drop for RequestPermit<'_> {
     }
 }
 
-fn timed_options(limits: LimitSet) -> qqq_host::InstanceOptions {
+fn timed_options(limits: LimitSet, deterministic: bool) -> qqq_host::InstanceOptions {
     qqq_host::InstanceOptions {
         epoch_ticks: Some(limits.epoch_deadline_ms.max(1)),
+        deterministic,
         ..Default::default()
     }
 }

@@ -54,6 +54,43 @@ use crate::replay::{ReplayLog, ReplayValue};
 /// and a bound is cheaper than an investigation.
 pub const DEFAULT_MAX_RANDOM_BYTES: u32 = 1024 * 1024;
 
+/// The deterministic RNG's fixed seed (`F-20`).
+///
+/// Thirty-two `0x51` bytes: the previous splitmix64 state was initialised to
+/// `0x5151_5151_5151_5151`, so the lineage is visible rather than a fresh
+/// magic number. Fixed (never operator input) for the reason the
+/// [`AmbientState::rng_counter`] field documents: replay compares runs, and
+/// a configurable seed would make two runs with different configurations
+/// "disagree" about nothing.
+///
+/// What records a stream change is the pinned-bytes test plus the changelog,
+/// not the replay header: the header compares engine versions, and nothing
+/// couples a stream change to an engine bump. Replay fixtures are insulated
+/// differently — replay consumes recorded *values*, never the generator —
+/// so the pin is what forces the next change to be deliberate.
+const DETERMINISTIC_SEED: [u8; 32] = [0x51; 32];
+
+/// Fill `out` deterministically: block `i` is SHA-256(seed || i as u64-LE).
+///
+/// The hash-DRBG behind deterministic randomness (`F-20`). Reproducible by
+/// construction and statistically strong — but NOT secret: the seed is fixed
+/// and public, so the stream is reproducible by anyone, and keeping it off a
+/// public server is the serve gate's job, never the mixer's. What the hash
+/// buys over splitmix64 is output quality (uniformity, no short-range
+/// correlations), not unpredictability. `counter` advances one per 32-byte
+/// block; the caller reserves its range atomically first, so consecutive
+/// reads never overlap.
+fn fill_deterministic(seed: &[u8; 32], counter: &mut u64, out: &mut [u8]) {
+    for chunk in out.chunks_mut(32) {
+        let mut h = Sha256::new();
+        h.update(seed);
+        h.update(counter.to_le_bytes());
+        *counter = counter.wrapping_add(1);
+        let block = h.finalize();
+        chunk.copy_from_slice(&block[..chunk.len()]);
+    }
+}
+
 /// The number of members of the WIT `algorithm` enum.
 ///
 /// # Why this is a constant rather than `HashAlgorithm::all().len()`
@@ -85,10 +122,13 @@ pub struct AmbientState {
     ticks: AtomicU64,
     /// The seeded generator's state, used only in deterministic mode.
     ///
-    /// A splitmix64 counter: small, fast, and — critically — **reproducible
-    /// across architectures**, which a `HashMap`-based RNG or anything relying
-    /// on address entropy would not be.
-    rng_state: AtomicU64,
+    /// A hash-DRBG block counter: small, and — critically — **reproducible
+    /// across architectures** (`F-20`), which a `HashMap`-based RNG or
+    /// anything relying on address entropy would not be. The seed is the
+    /// fixed [`DETERMINISTIC_SEED`] below, never operator input: a seed the
+    /// operator could set is a seed the operator could set *wrongly*, and
+    /// replay compares runs, not configurations.
+    rng_counter: AtomicU64,
     /// The largest random request the host will serve in one call.
     max_random_bytes: u32,
     /// The origin of the monotonic clock, captured on first use.
@@ -166,7 +206,7 @@ impl AmbientState {
             fixed_nanos: 1_767_225_600_000_000_000,
             tick_nanos: 1_000_000,
             ticks: AtomicU64::new(0),
-            rng_state: AtomicU64::new(0x5151_5151_5151_5151),
+            rng_counter: AtomicU64::new(0),
             // 1 MiB. A guest asking for more is either buggy or attacking the
             // host's memory, and a bound is cheaper than an investigation.
             max_random_bytes: DEFAULT_MAX_RANDOM_BYTES,
@@ -698,21 +738,24 @@ impl AmbientState {
         }
         let mut out = vec![0u8; len as usize];
         if self.deterministic {
-            // splitmix64: deterministic, architecture-independent, and good
-            // enough for test reproducibility (it is explicitly NOT a CSPRNG,
-            // and is never used outside deterministic mode).
-            let mut state = self.rng_state.load(Ordering::Relaxed);
-            for chunk in out.chunks_mut(8) {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^= z >> 31;
-                let bytes = z.to_le_bytes();
-                let n = chunk.len().min(8);
-                chunk[..n].copy_from_slice(&bytes[..n]);
-            }
-            self.rng_state.store(state, Ordering::Relaxed);
+            // Hash-DRBG (`F-20`): each 32-byte block is SHA-256 over the fixed
+            // seed and a counter, so the stream is deterministic from
+            // construction and statistically strong — unlike the splitmix64
+            // mixer this replaces, with its known short-range correlations.
+            //
+            // Reproducible does NOT mean secret: the seed is fixed and public,
+            // so anyone with the source reproduces the stream. Unpredictability
+            // on a server comes from the serve gate (loopback-or-explicit),
+            // never from the mixer — this is stream *quality*, not a secrecy
+            // control, and the docs must not claim otherwise.
+            //
+            // Blocks are reserved atomically before filling, so two readers
+            // can never share keystream even if the state is ever shared:
+            // reserve-then-fill rather than the load-fill-store the sketch
+            // showed, which overlaps under concurrency.
+            let blocks = u64::from(len.div_ceil(32));
+            let mut counter = self.rng_counter.fetch_add(blocks, Ordering::Relaxed);
+            fill_deterministic(&DETERMINISTIC_SEED, &mut counter, &mut out);
             // Recorded here rather than at the single `Ok(out)` below, because
             // the real-time path's bytes are not reproducible and must not be
             // logged: a `Random` record from a real run would replay a value the
@@ -1313,23 +1356,70 @@ mod tests {
     ///
     /// # Why the value is pinned rather than computed
     ///
-    /// The first version of this test asserted a value I had guessed. It failed
-    /// — the real first eight bytes are `9639138b2c6e4176`. That is precisely
-    /// why the assertion is valuable: the generator's output is a
-    /// **compatibility surface** for replay, so an accidental change to the
-    /// mixing function would silently invalidate every recorded run. Pinning the
-    /// observed value means such a change fails the build and must be a
-    /// deliberate decision.
+    /// The output is a **compatibility surface** for replay: an accidental
+    /// change to the generator would silently invalidate every recorded run.
+    /// Pinning the observed value means such a change fails the build and
+    /// must be a deliberate decision. It was once: `F-20` replaced splitmix64
+    /// (`9639138b2c6e4176`) with the hash DRBG below, intentionally changing
+    /// the stream — replay fixtures still reproduce because replay consumes
+    /// recorded *values*, never the generator. See `CHANGELOG.md`.
     #[test]
     fn deterministic_randomness_is_pinned_to_known_bytes() {
         let s = AmbientState::new(true);
         let first = s.random_bytes(8).unwrap();
         assert_eq!(
             hex(&first),
-            "9639138b2c6e4176",
+            "36cfb6d2be11236b",
             "the deterministic generator's first 8 bytes are a compatibility \
              surface; changing them breaks replay of every recorded run"
         );
+    }
+
+    /// **F-20: the deterministic stream is a hash DRBG, not splitmix64.**
+    ///
+    /// splitmix64 has known short-range correlations unfit for feeding
+    /// guests; the hash DRBG replaces it. Pre-fix this fails: the first
+    /// eight bytes are the pinned splitmix output above. (The new stream is
+    /// still reproducible by design — the fixed seed is public — so this
+    /// pins the *mixer change*, not a secrecy claim; the serve gate is what
+    /// keeps reproducible randomness off public listeners.)
+    #[test]
+    fn f20_deterministic_bytes_are_not_splitmix() {
+        let s = AmbientState::new(true);
+        let first = s.random_bytes(8).unwrap();
+        assert_ne!(
+            hex(&first),
+            "9639138b2c6e4176",
+            "splitmix64 must not feed guests: F-20 replaces it with a hash DRBG"
+        );
+    }
+
+    /// **F-20: the DRBG stream is reproducible from its seed.**
+    ///
+    /// The same seed and counter must yield the same bytes on every machine,
+    /// or deterministic runs would diverge by host.
+    #[test]
+    fn f20_deterministic_stream_is_reproducible() {
+        let seed = [7u8; 32];
+        let (mut c1, mut c2) = (0u64, 0u64);
+        let (mut a, mut b) = ([0u8; 100], [0u8; 100]);
+        fill_deterministic(&seed, &mut c1, &mut a);
+        fill_deterministic(&seed, &mut c2, &mut b);
+        assert_eq!(a, b);
+    }
+
+    /// **F-20: the DRBG stream differs per block and per seed.**
+    ///
+    /// A counter that never advances (or a seed that never matters) would
+    /// repeat 32-byte blocks — keystream reuse across guest reads.
+    #[test]
+    fn f20_deterministic_stream_differs_per_block_and_seed() {
+        let (mut c, mut out) = (0u64, [0u8; 64]);
+        fill_deterministic(&[1u8; 32], &mut c, &mut out);
+        assert_ne!(out[..32], out[32..]);
+        let (mut c2, mut out2) = (0u64, [0u8; 64]);
+        fill_deterministic(&[2u8; 32], &mut c2, &mut out2);
+        assert_ne!(out, out2);
     }
 
     #[test]

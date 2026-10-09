@@ -35,7 +35,7 @@ const LOAD_WORKERS: u32 = 16;
 
 /// Client threads stay strictly below worker slots: at parity a timing
 /// window still saturates the pool, and saturation renders 502
-/// (`InstancePoolExhausted`) — correct product behavior that would fail
+/// (pool exhaustion) — correct product behavior that would fail
 /// a test asserting all-200. The audit lock-step is what is under test,
 /// not pool shedding, so the driver never offers more concurrency than
 /// the server staffs.

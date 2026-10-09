@@ -1663,7 +1663,7 @@ mod tests {
         );
     }
 
-    /// **F-09: FailOpenWithAlarm serves and counts every drop.**
+    /// **F-09: `FailOpenWithAlarm` serves and counts every drop.**
     ///
     /// Same dead device, but the operator chose availability: the
     /// request serves, each drop logs, and the counter audits the total.

@@ -44,8 +44,11 @@
 //! sleeping.
 
 use std::collections::BTreeMap;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use qqq_host::tenant::TenantKey;
 
 /// The limits that apply to one tenant.
 ///
@@ -208,15 +211,6 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// One tenant's rolling window.
-#[derive(Debug, Clone, Copy)]
-struct Window {
-    /// When the current window began.
-    started: Instant,
-    /// Requests seen in it.
-    count: u32,
-}
-
 /// Whether a window that began at `started` is still running.
 ///
 /// # Why this is one function rather than two comparisons
@@ -235,32 +229,67 @@ fn window_is_active(started: Instant, window: Duration, now: Instant) -> bool {
 
 /// Per-tenant limits and their accounting.
 ///
-/// Interior mutability behind a `Mutex` rather than atomics: the window is a **pair** of
-/// values that must be updated together, and two atomics would let a reader see a new
-/// `started` with an old `count` — a torn read that shows an impossible state and, worse,
-/// occasionally admits a burst twice the intended size.
+/// # Why fixed-size sharded buckets instead of a table (`F-13`)
+///
+/// The windows used to live in a `BTreeMap` bounded at 4,096 entries, and past
+/// the bound a new tenant went untracked — admitted without a rate limit. An
+/// attacker needed only to occupy the table (trivial with IPv6 rotation) and
+/// everything new was unlimited: the limiter disabled itself under pressure.
+///
+/// The buckets cannot fill: there is no insert, only indexing. A tenant hashes
+/// to one bucket; a live bucket owned by another key shares its count, an
+/// expired one is taken over. Sharing is documented intent, not a defect —
+/// collisions merge allowances symmetrically, and the
+/// [`GlobalBucket`] below bounds total admissions so no rotation strategy can
+/// exceed overall capacity. What the table's bound protected (memory) is now a
+/// property of the type: 16,384 buckets allocated once, never grown.
+///
+/// Interior mutability behind one `Mutex` rather than per-bucket locks: window
+/// state is a (key, start, count, window) tuple that must update together, and
+/// the previous design already serialised admissions on one lock, so this is
+/// no narrower than what it replaces.
 #[derive(Debug)]
 pub struct TenantLimits {
-    /// The limits, by tenant name.
-    limits: Arc<BTreeMap<String, Limits>>,
+    /// The limits, by tenant key.
+    limits: Arc<BTreeMap<TenantKey, Limits>>,
     /// The limit applied to a tenant with no entry.
     fallback: Limits,
-    /// The rolling windows, by tenant.
-    windows: std::sync::Mutex<BTreeMap<String, Window>>,
-    /// The largest number of tenants whose windows are tracked.
-    ///
-    /// Bounded for the same reason the metric label is (§10.2): the tenant is the peer IP, so
-    /// an unbounded map is a memory leak an attacker drives. Past the ceiling a new tenant
-    /// falls back to the fallback limits **with no window** — a deliberate choice to fail
-    /// open on *rate* rather than allocating without limit. The body cap needs no state and
-    /// still applies, and that is the limit which actually protects memory.
-    max_tracked: usize,
+    /// The fixed-size sharded windows. Never resized, never evicted-of the
+    /// living: only an expired bucket changes hands.
+    buckets: std::sync::Mutex<Box<[Bucket]>>,
+    /// The per-process hash seed. Unknown to any peer, so no client can aim
+    /// at (or away from) another tenant's bucket.
+    seed: std::collections::hash_map::RandomState,
 }
 
-impl TenantLimits {
-    /// The default ceiling on tracked windows.
-    pub const DEFAULT_MAX_TRACKED: usize = 4096;
+/// One sharded window: the occupant's allowance state, or nothing.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    /// Who counts here, and since when, how much, under which window.
+    occupant: Option<Occupant>,
+}
 
+/// A live bucket's state. `Copy` so the admission decision reads atomically
+/// under the one lock.
+#[derive(Debug, Clone, Copy)]
+struct Occupant {
+    /// The tenant spending this bucket.
+    key: TenantKey,
+    /// When the current window began.
+    started: Instant,
+    /// Requests seen in it.
+    count: u32,
+    /// The window those requests are counted over (the occupant's own, so a
+    /// foreign key arriving later judges expiry by the right clock).
+    window: Duration,
+}
+
+/// The number of sharded buckets. 16,384 per the audit's recommendation: large
+/// enough that accidental collisions are noise (9 tenants collide with
+/// probability ~0.0002), small enough to allocate once (~1 MiB, never grown).
+const BUCKET_COUNT: usize = 16_384;
+
+impl TenantLimits {
     /// Build a limiter from a table and a fallback.
     ///
     /// # Panics
@@ -272,9 +301,9 @@ impl TenantLimits {
     #[must_use]
     pub fn new<I>(limits: I, fallback: Limits) -> Self
     where
-        I: IntoIterator<Item = (String, Limits)>,
+        I: IntoIterator<Item = (TenantKey, Limits)>,
     {
-        let limits: BTreeMap<String, Limits> = limits.into_iter().collect();
+        let limits: BTreeMap<TenantKey, Limits> = limits.into_iter().collect();
         assert!(
             fallback.is_coherent(),
             "the fallback limits are incoherent: a zero window with a request cap would \
@@ -283,15 +312,20 @@ impl TenantLimits {
         for (tenant, l) in &limits {
             assert!(
                 l.is_coherent(),
-                "the limits for tenant `{tenant}` are incoherent: a zero window with a \
+                "the limits for tenant `{tenant:?}` are incoherent: a zero window with a \
                  request cap would allow every request"
             );
         }
         Self {
             limits: Arc::new(limits),
             fallback,
-            windows: std::sync::Mutex::new(BTreeMap::new()),
-            max_tracked: Self::DEFAULT_MAX_TRACKED,
+            buckets: std::sync::Mutex::new(
+                (0..BUCKET_COUNT)
+                    .map(|_| Bucket { occupant: None })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            seed: std::collections::hash_map::RandomState::new(),
         }
     }
 
@@ -303,8 +337,8 @@ impl TenantLimits {
 
     /// The limits that apply to a tenant.
     #[must_use]
-    pub fn limits_for(&self, tenant: &str) -> Limits {
-        self.limits.get(tenant).copied().unwrap_or(self.fallback)
+    pub fn limits_for(&self, tenant: TenantKey) -> Limits {
+        self.limits.get(&tenant).copied().unwrap_or(self.fallback)
     }
 
     /// A table whose only limit is the per-tenant **connection** ceiling.
@@ -315,9 +349,9 @@ impl TenantLimits {
     #[must_use]
     pub fn with_connections<I>(ceilings: I, fallback_connections: u32) -> Self
     where
-        I: IntoIterator<Item = (String, u32)>,
+        I: IntoIterator<Item = (TenantKey, u32)>,
     {
-        let limits: BTreeMap<String, Limits> = ceilings
+        let limits: BTreeMap<TenantKey, Limits> = ceilings
             .into_iter()
             .map(|(tenant, ceiling)| {
                 (
@@ -348,10 +382,10 @@ impl TenantLimits {
     /// The shape is `(tenant, ceiling)` rather than a map so the caller can hand it
     /// straight to `ConnectionLedger::with_limits`, which owns the fallback.
     #[must_use]
-    pub fn connections_by_tenant(&self) -> Vec<(String, u32)> {
+    pub fn connections_by_tenant(&self) -> Vec<(TenantKey, u32)> {
         self.limits
             .iter()
-            .filter_map(|(tenant, l)| l.max_connections.map(|c| (tenant.clone(), c)))
+            .filter_map(|(tenant, l)| l.max_connections.map(|c| (*tenant, c)))
             .collect()
     }
 
@@ -364,7 +398,7 @@ impl TenantLimits {
     /// # Errors
     ///
     /// [`Refusal::BodyTooLarge`] when the length exceeds the tenant's cap.
-    pub fn check_body(&self, tenant: &str, len: u64) -> Result<(), Refusal> {
+    pub fn check_body(&self, tenant: TenantKey, len: u64) -> Result<(), Refusal> {
         let limits = self.limits_for(tenant);
         if limits.allows_body(len) {
             return Ok(());
@@ -387,85 +421,239 @@ impl TenantLimits {
     /// # Errors
     ///
     /// [`Refusal::RateExceeded`] when the tenant has spent its allowance for the window.
-    pub fn check_and_record(&self, tenant: &str, now: Instant) -> Result<(), Refusal> {
+    pub fn check_and_record(&self, tenant: TenantKey, now: Instant) -> Result<(), Refusal> {
         let limits = self.limits_for(tenant);
         let Some(max) = limits.max_requests_per_window else {
-            // No rate limit: count nothing, because a window nobody reads is a map entry an
+            // No rate limit: count nothing, because a bucket nobody reads is state an
             // attacker can drive for free.
             return Ok(());
         };
 
-        let mut windows = self
-            .windows
+        let mut buckets = self
+            .buckets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // A full map admits no new tenants — but only after **reclaiming expired entries**,
-        // which is the part a first version got wrong. Without the sweep the map freezes
-        // forever once it fills: every slot is held by a tenant whose window expired minutes
-        // ago, and every *new* tenant is admitted without a rate limit for the life of the
-        // process. An attacker filling the map once would have disabled rate limiting
-        // permanently, which is worse than the memory the ceiling protects.
-        //
-        // The sweep is lazy and only runs when the map is full, so it costs nothing on the
-        // hot path. Expiry is `elapsed >= window`, the same test the rollover uses — a
-        // single definition rather than two that could drift.
-        if !windows.contains_key(tenant) && windows.len() >= self.max_tracked {
-            // Each tracked tenant expires against **its own** window, which a first version got
-            // wrong: the sweep used the *incoming* tenant's window for every entry. With
-            // per-tenant windows that is meaningless -- a 5-second tenant's stale entry was
-            // kept whenever the arriving tenant happened to have a 60-second one, so the
-            // reclamation this exists for did not happen and the map stayed full.
-            let limits_of = &self.limits;
-            let fallback = self.fallback;
-            windows.retain(|name, w| {
-                let window = limits_of.get(name).copied().unwrap_or(fallback).window;
-                window_is_active(w.started, window, now)
-            });
-            // Still full after reclaiming: every tracked tenant is inside its window. Only
-            // now does a new tenant go untracked, and the body cap — which needs no state —
-            // still applies to it.
-            if windows.len() >= self.max_tracked {
-                return Ok(());
-            }
-        }
-
-        let entry = windows.entry(tenant.to_owned()).or_insert(Window {
-            started: now,
-            count: 0,
-        });
+        let index = self.bucket_index(tenant);
+        let bucket = &mut buckets[index];
 
         // The rollover is **lazy**: a window expires when the next request arrives rather
-        // than on a timer. A timer would be a second authority on time, and an expired window
-        // for a tenant that has gone away is state worth reclaiming only when next touched.
-        if !window_is_active(entry.started, limits.window, now) {
-            entry.started = now;
-            entry.count = 0;
-        }
+        // than on a timer. A timer would be a second authority on time, and an expired
+        // bucket is worth reclaiming only when next touched.
+        //
+        // Three cases, and only the third changes hands:
+        // - empty: the tenant moves in;
+        // - same key: its own window rolls over;
+        // - another key: the occupant's *own* window decides. Expired means the
+        //   bucket is dead state and the arrival takes it over; live means a hash
+        //   collision, and the two tenants share the count. Sharing is the
+        //   documented price of a table that cannot fill — and it is symmetric:
+        //   neither side can aim at the other's bucket (the seed is per-process),
+        //   and sharing only ever refuses sooner, never admits past `max`.
+        let admit = match &mut bucket.occupant {
+            None => {
+                bucket.occupant = Some(Occupant {
+                    key: tenant,
+                    started: now,
+                    count: 1,
+                    window: limits.window,
+                });
+                true
+            }
+            Some(o) if o.key == tenant => {
+                if !window_is_active(o.started, limits.window, now) {
+                    o.started = now;
+                    o.count = 0;
+                    o.window = limits.window;
+                }
+                if o.count >= max {
+                    false
+                } else {
+                    o.count = o.count.saturating_add(1);
+                    true
+                }
+            }
+            Some(o) => {
+                if !window_is_active(o.started, o.window, now) {
+                    bucket.occupant = Some(Occupant {
+                        key: tenant,
+                        started: now,
+                        count: 1,
+                        window: limits.window,
+                    });
+                    true
+                } else if o.count >= max {
+                    false
+                } else {
+                    o.count = o.count.saturating_add(1);
+                    true
+                }
+            }
+        };
 
-        if entry.count >= max {
-            return Err(Refusal::RateExceeded {
+        if admit {
+            Ok(())
+        } else {
+            Err(Refusal::RateExceeded {
                 limit: max,
                 window_secs: limits.window.as_secs(),
-            });
+            })
         }
-        entry.count = entry.count.saturating_add(1);
-        Ok(())
     }
 
-    /// How many tenants have a tracked window.
+    /// The bucket a tenant counts in: `SipHash` under the per-process seed.
+    fn bucket_index(&self, tenant: TenantKey) -> usize {
+        let in_range = self.seed.hash_one(tenant) % BUCKET_COUNT as u64;
+        // `in_range` is below 16,384 by construction, so this fits every
+        // pointer width; the fallback names bucket zero rather than failing.
+        usize::try_from(in_range).unwrap_or(0)
+    }
+}
+
+/// The process-wide admission budgets a server enforces alongside the
+/// per-tenant limits.
+///
+/// Two windows, not one: requests and new connections cost differently (a
+/// connection holds a task and a socket before any request arrives), so one
+/// budget for both would let cheap requests crowd out handshakes or the
+/// reverse. Generous by default — this bounds rotation attacks, not
+/// legitimate flash crowds — and every field is operator-settable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalBudget {
+    /// Admissions per request window.
+    pub requests_per_window: u32,
+    /// The request window.
+    pub request_window: Duration,
+    /// New connections per connection window.
+    pub connections_per_window: u32,
+    /// The connection window.
+    pub connection_window: Duration,
+}
+
+impl Default for GlobalBudget {
+    /// Generous bounds: ~16,000 requests and ~1,600 new connections per
+    /// second. Above every load profile the repository measures (the 200k
+    /// lock-step test peaks near 3,000 requests per second) with room to
+    /// spare, and still a ceiling no rotation strategy can cross.
+    fn default() -> Self {
+        Self {
+            requests_per_window: 1_000_000,
+            request_window: Duration::from_secs(60),
+            connections_per_window: 100_000,
+            connection_window: Duration::from_secs(60),
+        }
+    }
+}
+
+/// The process-wide admission budget: the backstop identity rotation cannot cross.
+///
+/// Per-tenant buckets bound what one identity spends; this bounds what *all* of
+/// them spend together. When it is empty the server answers `503` with
+/// `Retry-After` — the same load-shedding path as pool exhaustion, because it
+/// is the same situation. A fixed window, not a token bucket with refill: the
+/// budget is exact within a window, and the window rolls over lazily on the
+/// next arrival, so there is no background task holding a second clock.
+///
+/// ```
+/// use qqq_serve::limits::GlobalBucket;
+/// use std::time::{Duration, Instant};
+///
+/// let bucket = GlobalBucket::new(2, Duration::from_secs(60));
+/// let t0 = Instant::now();
+/// assert!(bucket.admit(t0));
+/// assert!(bucket.admit(t0));
+/// assert!(!bucket.admit(t0), "the budget is spent");
+/// assert_eq!(bucket.refused_total(), 1);
+/// ```
+#[derive(Debug)]
+pub struct GlobalBucket {
+    /// Admissions allowed per window.
+    budget: u32,
+    /// The window they are counted over.
+    window: Duration,
+    /// The current window's state.
+    state: std::sync::Mutex<GlobalState>,
+}
+
+/// The current window's count. `Copy` so the decision reads atomically under
+/// the lock.
+#[derive(Debug, Clone, Copy)]
+struct GlobalState {
+    /// When the current window began.
+    started: Option<Instant>,
+    /// Admissions in it.
+    count: u32,
+    /// Lifetime refusals, for the metric. Monotonic: a refusal is a fact about
+    /// offered load, and resetting it would un-count evidence.
+    refused: u64,
+}
+
+impl GlobalBucket {
+    /// A global budget of `budget` admissions per `window`.
+    ///
+    /// # Panics
+    ///
+    /// If the window is zero: a zero window admits nothing on the first call
+    /// and resets on every later one, which is a limiter that cannot decide.
+    /// Like [`TenantLimits::new`], a bad configuration fails at construction.
     #[must_use]
-    pub fn tracked(&self) -> usize {
-        self.windows
+    pub fn new(budget: u32, window: Duration) -> Self {
+        assert!(
+            window > Duration::ZERO,
+            "a zero global window cannot bound anything"
+        );
+        Self {
+            budget,
+            window,
+            state: std::sync::Mutex::new(GlobalState {
+                started: None,
+                count: 0,
+                refused: 0,
+            }),
+        }
+    }
+
+    /// Try to admit one request. `false` means the server must shed load.
+    pub fn admit(&self, now: Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.started {
+            Some(started) if window_is_active(started, self.window, now) => {}
+            _ => {
+                state.started = Some(now);
+                state.count = 0;
+            }
+        }
+        if state.count >= self.budget {
+            state.refused = state.refused.saturating_add(1);
+            false
+        } else {
+            state.count = state.count.saturating_add(1);
+            true
+        }
+    }
+
+    /// Lifetime refusals. The metric the audit's acceptance criterion names.
+    #[must_use]
+    pub fn refused_total(&self) -> u64 {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+            .refused
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qqq_host::tenant::tenant_key;
+
+    /// One tenant as a key: the table tests used to name tenants `"a"`, `"t"`,
+    /// `"vip"`. Strings were the defect (`F-13`); keys are `Copy` values.
+    fn key(n: u32) -> TenantKey {
+        TenantKey::V4(n)
+    }
 
     // -- the limit table ---------------------------------------------------
 
@@ -473,19 +661,19 @@ mod tests {
     #[test]
     fn a_tenant_gets_its_own_limits() {
         let l = TenantLimits::new(
-            [("big".to_owned(), Limits::with_body(1_000_000))],
+            [(key(7), Limits::with_body(1_000_000))],
             Limits::with_body(1_000),
         );
-        assert_eq!(l.limits_for("big").max_body_bytes, Some(1_000_000));
-        assert_eq!(l.limits_for("small").max_body_bytes, Some(1_000));
+        assert_eq!(l.limits_for(key(7)).max_body_bytes, Some(1_000_000));
+        assert_eq!(l.limits_for(key(9)).max_body_bytes, Some(1_000));
     }
 
     /// A uniform limiter applies one limit to everyone.
     #[test]
     fn a_uniform_limiter_applies_to_everyone() {
         let l = TenantLimits::uniform(Limits::with_body(500));
-        assert_eq!(l.limits_for("a").max_body_bytes, Some(500));
-        assert_eq!(l.limits_for("b").max_body_bytes, Some(500));
+        assert_eq!(l.limits_for(key(1)).max_body_bytes, Some(500));
+        assert_eq!(l.limits_for(key(2)).max_body_bytes, Some(500));
     }
 
     // -- body caps ---------------------------------------------------------
@@ -499,14 +687,17 @@ mod tests {
     fn a_body_cap_is_inclusive_and_enforced() {
         let l = TenantLimits::uniform(Limits::with_body(100));
 
-        assert!(l.check_body("t", 0).is_ok(), "an empty body is always fine");
-        assert!(l.check_body("t", 99).is_ok());
         assert!(
-            l.check_body("t", 100).is_ok(),
+            l.check_body(key(1), 0).is_ok(),
+            "an empty body is always fine"
+        );
+        assert!(l.check_body(key(1), 99).is_ok());
+        assert!(
+            l.check_body(key(1), 100).is_ok(),
             "the bound is inclusive: `<=` the cap, or the cap is a lie by one byte"
         );
         let err = l
-            .check_body("t", 101)
+            .check_body(key(1), 101)
             .expect_err("one over must be refused");
         assert_eq!(
             err,
@@ -524,7 +715,7 @@ mod tests {
     #[test]
     fn a_body_refusal_names_both_numbers() {
         let l = TenantLimits::uniform(Limits::with_body(1_048_576));
-        let err = l.check_body("t", 5_000_000).expect_err("refused");
+        let err = l.check_body(key(1), 5_000_000).expect_err("refused");
         let text = err.to_string();
         assert!(text.contains("1048576"), "{text}");
         assert!(text.contains("5000000"), "{text}");
@@ -534,7 +725,7 @@ mod tests {
     #[test]
     fn no_cap_means_unlimited() {
         let l = TenantLimits::uniform(Limits::none());
-        assert!(l.check_body("t", u64::MAX).is_ok());
+        assert!(l.check_body(key(1), u64::MAX).is_ok());
     }
 
     /// **`None` and `Some(0)` are different**, and the difference is total refusal.
@@ -543,10 +734,13 @@ mod tests {
         let unlimited = TenantLimits::uniform(Limits::none());
         let zero = TenantLimits::uniform(Limits::with_body(0));
 
-        assert!(unlimited.check_body("t", 1).is_ok(), "None is unlimited");
-        assert!(zero.check_body("t", 0).is_ok(), "an empty body still fits");
+        assert!(unlimited.check_body(key(1), 1).is_ok(), "None is unlimited");
         assert!(
-            zero.check_body("t", 1).is_err(),
+            zero.check_body(key(1), 0).is_ok(),
+            "an empty body still fits"
+        );
+        assert!(
+            zero.check_body(key(1), 1).is_err(),
             "Some(0) refuses everything -- which is why it is not the default"
         );
     }
@@ -574,12 +768,12 @@ mod tests {
 
         for i in 0..3 {
             assert!(
-                l.check_and_record("t", t0).is_ok(),
+                l.check_and_record(key(1), t0).is_ok(),
                 "request {i} must be admitted"
             );
         }
         let err = l
-            .check_and_record("t", t0)
+            .check_and_record(key(1), t0)
             .expect_err("the fourth must be refused");
         assert_eq!(
             err,
@@ -596,17 +790,17 @@ mod tests {
         let l = TenantLimits::uniform(Limits::with_rate(2, Duration::from_secs(10)));
         let t0 = Instant::now();
 
-        assert!(l.check_and_record("t", t0).is_ok());
-        assert!(l.check_and_record("t", t0).is_ok());
-        assert!(l.check_and_record("t", t0).is_err(), "spent");
+        assert!(l.check_and_record(key(1), t0).is_ok());
+        assert!(l.check_and_record(key(1), t0).is_ok());
+        assert!(l.check_and_record(key(1), t0).is_err(), "spent");
 
         assert!(
-            l.check_and_record("t", t0 + Duration::from_secs(9))
+            l.check_and_record(key(1), t0 + Duration::from_secs(9))
                 .is_err(),
             "the window has not elapsed"
         );
         assert!(
-            l.check_and_record("t", t0 + Duration::from_secs(10))
+            l.check_and_record(key(1), t0 + Duration::from_secs(10))
                 .is_ok(),
             "the window has elapsed, so the allowance is restored"
         );
@@ -649,13 +843,15 @@ mod tests {
         let l = TenantLimits::uniform(Limits::none());
         let t0 = Instant::now();
         for _ in 0..10_000 {
-            assert!(l.check_and_record("t", t0).is_ok());
+            assert!(l.check_and_record(key(1), t0).is_ok());
         }
-        assert_eq!(
-            l.tracked(),
-            0,
-            "a window nobody reads is a map entry an attacker can drive for free"
-        );
+        // A window nobody reads must leave no state an attacker can drive:
+        // after 10,000 uncounted requests a rate-limited tenant still gets
+        // its full allowance on whatever bucket it lands on.
+        let metered = TenantLimits::uniform(Limits::with_rate(2, Duration::from_secs(60)));
+        assert!(metered.check_and_record(key(2), t0).is_ok());
+        assert!(metered.check_and_record(key(2), t0).is_ok());
+        assert!(metered.check_and_record(key(2), t0).is_err());
     }
 
     // -- isolation ---------------------------------------------------------
@@ -669,168 +865,182 @@ mod tests {
     fn tenants_do_not_share_an_allowance() {
         let l = TenantLimits::uniform(Limits::with_rate(2, Duration::from_secs(60)));
         let t0 = Instant::now();
+        // Distinct buckets, not just distinct keys: a hash collision shares
+        // one allowance by design, so the test must exclude it explicitly.
+        let (a, b) = distinct_buckets(&l, key(1), key(2));
 
-        assert!(l.check_and_record("a", t0).is_ok());
-        assert!(l.check_and_record("a", t0).is_ok());
-        assert!(l.check_and_record("a", t0).is_err(), "a is spent");
+        assert!(l.check_and_record(a, t0).is_ok());
+        assert!(l.check_and_record(a, t0).is_ok());
+        assert!(l.check_and_record(a, t0).is_err(), "a is spent");
 
         assert!(
-            l.check_and_record("b", t0).is_ok(),
+            l.check_and_record(b, t0).is_ok(),
             "b must have its own full allowance"
         );
-        assert!(l.check_and_record("b", t0).is_ok());
-        assert!(
-            l.check_and_record("b", t0).is_err(),
-            "and b is now spent too"
-        );
+        assert!(l.check_and_record(b, t0).is_ok());
+        assert!(l.check_and_record(b, t0).is_err(), "and b is now spent too");
+    }
+
+    /// Two keys that hash to different buckets on this limiter.
+    ///
+    /// Sharded buckets share an allowance on collision by design, so any test
+    /// asserting isolation must pin the layout first. The search always
+    /// terminates: 16,384 buckets and sequential keys collide with
+    /// probability ~1/16,384 per try.
+    fn distinct_buckets(
+        l: &TenantLimits,
+        first: TenantKey,
+        mut second: TenantKey,
+    ) -> (TenantKey, TenantKey) {
+        let mut n = 2u32;
+        while l.bucket_index(first) == l.bucket_index(second) {
+            n += 1;
+            second = key(n);
+        }
+        (first, second)
     }
 
     /// Per-tenant limits differ, and the limiter honours the table.
     #[test]
     fn a_tenant_can_have_a_larger_allowance() {
         let l = TenantLimits::new(
-            [(
-                "vip".to_owned(),
-                Limits::with_rate(100, Duration::from_secs(60)),
-            )],
+            [(key(7), Limits::with_rate(100, Duration::from_secs(60)))],
             Limits::with_rate(1, Duration::from_secs(60)),
         );
+        // Distinct buckets (see `distinct_buckets`): a collision would spend
+        // vip's allowance from free's single request.
+        let (vip, free) = distinct_buckets(&l, key(7), key(8));
         let t0 = Instant::now();
 
-        assert!(l.check_and_record("free", t0).is_ok());
+        assert!(l.check_and_record(free, t0).is_ok());
         assert!(
-            l.check_and_record("free", t0).is_err(),
+            l.check_and_record(free, t0).is_err(),
             "the free tier is spent"
         );
 
         for _ in 0..100 {
             assert!(
-                l.check_and_record("vip", t0).is_ok(),
+                l.check_and_record(vip, t0).is_ok(),
                 "vip has its own allowance"
             );
         }
-        assert!(
-            l.check_and_record("vip", t0).is_err(),
-            "and its own ceiling"
-        );
+        assert!(l.check_and_record(vip, t0).is_err(), "and its own ceiling");
     }
 
     // -- bounds ------------------------------------------------------------
 
-    /// **The tracked-window map is bounded, and past the bound it fails open.**
+    /// **Expired buckets change hands: a new tenant is tracked, never skipped.**
     ///
-    /// The tenant is the peer IP, so an unbounded map is a memory leak an attacker drives.
-    /// Past the ceiling a new tenant gets the fallback limits with **no window** — deliberate:
-    /// the body cap needs no state and still applies, so a new tenant cannot send an unbounded
-    /// body. Refusing instead would let an attacker lock out every legitimate new tenant by
-    /// filling the map.
+    /// Replaces the table era's reclaim tests. There is no map to fill and no
+    /// sweep: a bucket whose occupant's window elapsed is dead state, and the
+    /// next arrival takes it over with a fresh allowance. The assertion is
+    /// layout-independent — whichever bucket the newcomer lands on, an expired
+    /// occupant (or none) means admission, and the second request then proves
+    /// the newcomer was *tracked* rather than passed through.
     #[test]
-    fn the_tracked_window_map_is_bounded() {
-        let mut l = TenantLimits::uniform(Limits::with_rate(1, Duration::from_secs(60)));
-        l.max_tracked = 8;
+    fn an_expired_bucket_changes_hands() {
+        let l = TenantLimits::uniform(Limits::with_rate(1, Duration::from_secs(10)));
         let t0 = Instant::now();
 
-        for i in 0..8 {
-            assert!(l.check_and_record(&format!("t{i}"), t0).is_ok());
-        }
-        assert_eq!(l.tracked(), 8);
+        assert!(l.check_and_record(key(1), t0).is_ok(), "first fits");
 
-        assert!(
-            l.check_and_record("t8", t0).is_ok(),
-            "a tenant past the ceiling fails open on rate"
-        );
-        assert_eq!(l.tracked(), 8, "and must not grow the map");
-    }
-
-    /// **Expired entries are reclaimed, so a filled map does not disable rate limiting
-    /// permanently.**
-    ///
-    /// The defect this measures: without the sweep, the map freezes once full and every
-    /// *new* tenant is admitted without a rate limit for the life of the process. An
-    /// attacker filling the map once would have disabled rate limiting permanently — worse
-    /// than the memory the ceiling exists to protect, because a leak is visible and this is
-    /// not.
-    #[test]
-    fn expired_windows_are_reclaimed_when_the_map_is_full() {
-        let mut l = TenantLimits::uniform(Limits::with_rate(1, Duration::from_secs(10)));
-        l.max_tracked = 4;
-        let t0 = Instant::now();
-
-        // Fill the map with tenants whose windows will expire.
-        for i in 0..4 {
-            assert!(l.check_and_record(&format!("old{i}"), t0).is_ok());
-        }
-        assert_eq!(l.tracked(), 4);
-
-        // Past the window, a new tenant must get **tracked and limited**, not admitted
-        // untracked. `t0 + 11s` is past the 10-second window.
         let later = t0 + Duration::from_secs(11);
         assert!(
-            l.check_and_record("new", later).is_ok(),
-            "the first request fits"
+            l.check_and_record(key(2), later).is_ok(),
+            "the first request fits on whatever bucket it lands on"
         );
         assert!(
-            l.check_and_record("new", later).is_err(),
-            "the new tenant must be **limited**: its window must have been tracked rather \
-             than skipped because the map was full"
+            l.check_and_record(key(2), later).is_err(),
+            "the newcomer must be tracked and then limited"
         );
     }
 
-    /// **Each tracked tenant expires against its own window, not the arriving tenant's.**
+    /// **Expiry is judged by the occupant's own window, not the arrival's.**
     ///
-    /// The defect this measures: the reclaim sweep used the **incoming** tenant's window for
-    /// every tracked entry. With per-tenant windows that is meaningless — a short-window
-    /// tenant's stale entry was kept whenever the arriving tenant happened to have a long
-    /// window, so the reclamation never happened and the map stayed full.
-    ///
-    /// The setup is the one that exposes it: a tenant with a **short** window fills the map,
-    /// and a tenant with a **long** window then arrives and triggers the sweep. If the sweep
-    /// uses the arriving tenant's window, nothing is reclaimed.
+    /// A bucket stores the window it counts under. A newcomer with a long
+    /// window arriving after a short-window occupant expired must take the
+    /// bucket over — judging by the arrival's window would keep dead state
+    /// alive exactly as the old sweep bug did.
     #[test]
-    fn each_tenant_expires_against_its_own_window() {
+    fn a_new_tenant_reaps_only_expired_buckets() {
         let short = Limits::with_rate(1, Duration::from_secs(5));
-        let mut l = TenantLimits::uniform(short);
-        l.max_tracked = 2;
+        let long = Limits::with_rate(1, Duration::from_secs(60));
+        // The newcomer carries the long window; the occupant counts the short
+        // one. Takeover must judge by the occupant's 5 seconds: judging by the
+        // arrival's 60 would keep the dead bucket alive and refuse below.
+        let l = TenantLimits::new([(key(2), long)], short);
         let t0 = Instant::now();
 
-        // Two tenants with the 5-second window fill the map.
-        assert!(l.check_and_record("a", t0).is_ok());
-        assert!(l.check_and_record("b", t0).is_ok());
-        assert_eq!(l.tracked(), 2, "the map is full");
+        assert!(l.check_and_record(key(1), t0).is_ok());
 
-        // A third tenant with a **60-second** window arrives 10 seconds later. The two
-        // tracked entries expired at 5 seconds, so both must be reclaimed — but only if the
-        // sweep consults *their* window rather than the arriving tenant's.
-        let long = Limits::with_rate(1, Duration::from_secs(60));
-        let mut l2 = TenantLimits::new(
-            [("long".to_owned(), long)],
-            short, // the fallback remains the short window
-        );
-        l2.max_tracked = 2;
-        let t1 = t0;
-        assert!(l2.check_and_record("a", t1).is_ok());
-        assert!(l2.check_and_record("b", t1).is_ok());
-        assert_eq!(l2.tracked(), 2);
-
-        let later = t1 + Duration::from_secs(10);
-        assert!(l2.check_and_record("long", later).is_ok());
-
-        // `long` must be tracked and limited: the sweep reclaimed the two expired entries,
-        // which it can only do by asking *their* limits.
+        // Past the occupant's 5-second window: takeover, then tracked.
+        let later = t0 + Duration::from_secs(10);
         assert!(
-            l2.check_and_record("long", later).is_err(),
-            "the arriving tenant must be tracked and then limited -- which requires the \
-             sweep to have reclaimed the expired entries against their own 5-second window"
+            l.check_and_record(key(2), later).is_ok(),
+            "a bucket expired by its occupant's own window must change hands"
+        );
+        assert!(
+            l.check_and_record(key(2), later).is_err(),
+            "the newcomer took over an expired bucket and is now limited"
         );
     }
 
-    /// **The sweep and the rollover agree on what "expired" means.**
+    /// **Colliding tenants share one allowance — and the sharing is observable.**
     ///
-    /// They must, or a tenant is evicted and immediately re-created with a full allowance:
-    /// a rate limiter that resets itself. Both now call `window_is_active`, and this asserts
-    /// the boundary they share.
+    /// The documented price of a table that cannot fill. Two keys hashing to
+    /// one bucket spend the same count, so the second tenant's allowance is
+    /// already partly consumed. The pair is found per run (the seed is
+    /// per-process), which also proves collisions exist to be shared.
     #[test]
-    fn the_sweep_and_the_rollover_agree() {
+    fn colliding_tenants_share_one_allowance() {
+        let l = TenantLimits::uniform(Limits::with_rate(3, Duration::from_secs(60)));
+        let t0 = Instant::now();
+        let (a, b) = colliding_pair(&l);
+
+        assert!(l.check_and_record(a, t0).is_ok());
+        assert!(l.check_and_record(a, t0).is_ok());
+        assert!(
+            l.check_and_record(b, t0).is_ok(),
+            "the shared bucket still has one allowance left"
+        );
+        assert!(
+            l.check_and_record(b, t0).is_err(),
+            "the third spend on the shared bucket is refused, whoever spends it"
+        );
+        assert!(
+            l.check_and_record(a, t0).is_err(),
+            "and the first tenant shares the refusal"
+        );
+    }
+
+    /// Two distinct keys that hash to the same bucket on this limiter.
+    ///
+    /// Always terminates: past ~150 sequential keys a collision in 16,384
+    /// buckets is near-certain, and distinctness is asserted, not assumed.
+    fn colliding_pair(l: &TenantLimits) -> (TenantKey, TenantKey) {
+        let mut seen = std::collections::HashMap::new();
+        for n in 0..100_000u32 {
+            let k = key(n);
+            let idx = l.bucket_index(k);
+            if let Some(prev) = seen.insert(idx, k) {
+                if prev != k {
+                    return (prev, k);
+                }
+            }
+        }
+        panic!("no bucket collision in 100,000 sequential keys");
+    }
+
+    /// **Window expiry is exact at the boundary, by one shared definition.**
+    ///
+    /// Rollover and takeover both ask "has this window expired?", and they
+    /// **must** answer identically: if takeover considers a bucket live while
+    /// rollover considers it expired, a tenant is evicted and immediately
+    /// re-created with a full allowance, which is a rate limiter that resets
+    /// itself. Both call `window_is_active`, and this asserts the boundary
+    /// they share.
+    #[test]
+    fn window_expiry_is_exact_at_the_boundary() {
         let w = Duration::from_secs(10);
         let t0 = Instant::now();
 
@@ -846,25 +1056,98 @@ mod tests {
         assert!(!window_is_active(t0, w, t0 + Duration::from_secs(11)));
     }
 
-    /// **A tenant already tracked keeps being limited past the ceiling.**
-    ///
-    /// The control: the ceiling must not stop existing tenants being limited, or filling the
-    /// map would be a way to disable rate limiting entirely.
-    #[test]
-    fn a_tracked_tenant_is_still_limited_past_the_ceiling() {
-        let mut l = TenantLimits::uniform(Limits::with_rate(1, Duration::from_secs(60)));
-        l.max_tracked = 4;
-        let t0 = Instant::now();
+    // -- F-13: prefix-keyed tenants, no fail-open table, global bucket -------
 
-        assert!(l.check_and_record("t0", t0).is_ok());
-        for i in 1..10 {
-            let _ = l.check_and_record(&format!("t{i}"), t0);
+    /// **One /64 is one tenant: rotation inside the prefix buys nothing.**
+    ///
+    /// `F-13`: the key was the textual IP, so every address in a customer's
+    /// /64 was a fresh tenant with fresh limits. Keying on the masked prefix
+    /// makes rotation inside it share one allowance.
+    #[test]
+    fn f13_ipv6_addresses_in_the_same_64_share_one_tenant() {
+        let a: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: std::net::IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let c: std::net::IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(tenant_key(a), tenant_key(b));
+        assert_ne!(tenant_key(a), tenant_key(c));
+    }
+
+    /// **A dual-stack host is one tenant, not two.**
+    ///
+    /// `F-13`: `::ffff:1.2.3.4` and `1.2.3.4` are different strings for the
+    /// same host, doubling its quota. Canonicalisation maps one to the other.
+    #[test]
+    fn f13_ipv4_mapped_ipv6_equals_plain_ipv4() {
+        let v4: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let mapped: std::net::IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(tenant_key(v4), tenant_key(mapped));
+    }
+
+    /// **A full table still limits: the 9th tenant is refused, not untracked.**
+    ///
+    /// `F-13`: past the old table bound a new tenant went untracked. Buckets
+    /// cannot fill, so any 9 tenants each spend exactly their allowance and
+    /// the 9th is refused on its 4th request — the shape the fail-open branch
+    /// used to escape.
+    #[test]
+    fn f13_full_table_does_not_disable_limiting() {
+        let l = TenantLimits::uniform(Limits::with_rate(3, Duration::from_secs(60)));
+        let t0 = Instant::now();
+        // Nine tenants on nine distinct buckets (see `distinct_bucket_set`):
+        // a collision shares an allowance by design and would refuse early,
+        // which would prove sharing, not fullness.
+        let tenants = distinct_bucket_set(&l, 9);
+
+        for tenant in &tenants[..8] {
+            for _ in 0..3 {
+                assert!(l.check_and_record(*tenant, t0).is_ok());
+            }
         }
 
+        for _ in 0..3 {
+            assert!(l.check_and_record(tenants[8], t0).is_ok());
+        }
         assert!(
-            l.check_and_record("t0", t0).is_err(),
-            "an already-tracked tenant must still be limited"
+            l.check_and_record(tenants[8], t0).is_err(),
+            "the 9th tenant must be limited even though the table is full"
         );
+    }
+
+    /// `count` keys no two of which share a bucket on this limiter.
+    ///
+    /// Always terminates: each new key collides with the accepted set with
+    /// probability `accepted/16,384`, so the search advances almost every try.
+    fn distinct_bucket_set(l: &TenantLimits, count: usize) -> Vec<TenantKey> {
+        let mut out = Vec::with_capacity(count);
+        let mut used = std::collections::HashSet::new();
+        let mut n = 0u32;
+        while out.len() < count {
+            n += 1;
+            let k = key(n);
+            if used.insert(l.bucket_index(k)) {
+                out.push(k);
+            }
+        }
+        out
+    }
+
+    /// **Identity rotation cannot exceed overall capacity: the global bucket.**
+    ///
+    /// `F-13`: 10,000 requests, each from a different /64, against a global
+    /// budget of 100 per window — at most 100 are admitted no matter how many
+    /// identities the attacker burns.
+    #[test]
+    fn f13_global_bucket_bounds_identity_rotation() {
+        let bucket = GlobalBucket::new(100, Duration::from_secs(60));
+        let t0 = Instant::now();
+
+        let mut admitted = 0u32;
+        for _ in 0..10_000 {
+            if bucket.admit(t0) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 100, "rotation must not exceed the global budget");
     }
 
     // -- determinism -------------------------------------------------------
@@ -878,7 +1161,7 @@ mod tests {
             (0..10u64)
                 .map(|i| {
                     let now = t0 + Duration::from_secs(i * 2);
-                    l.check_and_record("t", now).is_ok()
+                    l.check_and_record(key(1), now).is_ok()
                 })
                 .collect()
         }

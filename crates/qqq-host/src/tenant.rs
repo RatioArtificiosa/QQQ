@@ -518,6 +518,98 @@ impl TenantLedger {
 }
 
 // ---------------------------------------------------------------------------
+// Network tenant identity (`F-13`)
+// ---------------------------------------------------------------------------
+
+/// The abuse-control identity of one network peer: the unit rate limits,
+/// connection ceilings, and output budgets enforce against this, never a string.
+///
+/// A `Copy` key, never an allocation: the hot path derives it from the socket
+/// address, and the string rendering exists only for logs, metrics, and audit
+/// ([`tenant_label`]).
+///
+/// IPv6 customers typically control a whole /64, so keying on the full address
+/// hands an attacker 2^64 fresh tenants. [`TenantKey::V6Prefix`] keeps the
+/// masked prefix instead. IPv4-mapped IPv6 addresses canonicalise to IPv4
+/// (`to_canonical`), so a dual-stack host is one tenant rather than two.
+///
+/// ```
+/// use qqq_host::tenant::{tenant_key, TenantKey};
+///
+/// let v4: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+/// let mapped: std::net::IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+/// assert_eq!(tenant_key(v4), tenant_key(mapped));
+/// assert!(matches!(tenant_key(v4), TenantKey::V4(_)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TenantKey {
+    /// An IPv4 address (or an IPv4-mapped IPv6 one) as a `u32`.
+    V4(u32),
+    /// The high 64 bits of the masked IPv6 prefix.
+    V6Prefix(u64),
+}
+
+/// The default IPv6 prefix length in bits: the /64 an end customer controls.
+///
+/// Deployments under prefix-rotation attack may narrow this: a /56 groups 256
+/// /64 networks into one tenant. Wider than 64 is clamped to 64:
+/// the key stores only the high 64 bits, so finer grouping is unrepresentable
+/// and 64 is the effective resolution.
+pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
+
+/// Derive the tenant key with an explicit prefix length (see
+/// [`DEFAULT_IPV6_PREFIX_BITS`] for the default).
+///
+/// IPv4 addresses are always exact: prefix masking applies to IPv6 only, and a
+/// /64 of IPv4 space is not a unit any operator means.
+#[must_use]
+pub fn tenant_key_with_prefix(ip: std::net::IpAddr, prefix_bits: u8) -> TenantKey {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => TenantKey::V4(u32::from(v4)),
+        std::net::IpAddr::V6(v6) => {
+            let bits = prefix_bits.min(64);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - bits)
+            };
+            // Intentional truncation: `>> 64` leaves fewer than 64 significant
+            // bits, so no data is lost.
+            #[allow(clippy::cast_possible_truncation)]
+            TenantKey::V6Prefix(((u128::from(v6) & mask) >> 64) as u64)
+        }
+    }
+}
+
+/// Derive the tenant key with the default prefix length.
+#[must_use]
+pub fn tenant_key(ip: std::net::IpAddr) -> TenantKey {
+    tenant_key_with_prefix(ip, DEFAULT_IPV6_PREFIX_BITS)
+}
+
+/// Render a key for logs, metrics, and audit — never the hot path.
+///
+/// The hot path carries the [`TenantKey`] itself (no allocation); the label is
+/// computed once per connection and reused for every record the connection
+/// emits.
+#[must_use]
+pub fn tenant_label_with_prefix(key: TenantKey, prefix_bits: u8) -> String {
+    match key {
+        TenantKey::V4(n) => std::net::Ipv4Addr::from(n).to_string(),
+        TenantKey::V6Prefix(p) => {
+            let addr = std::net::Ipv6Addr::from((u128::from(p)) << 64);
+            format!("{addr}/{}", prefix_bits.min(64))
+        }
+    }
+}
+
+/// Render a key derived with the default prefix length.
+#[must_use]
+pub fn tenant_label(key: TenantKey) -> String {
+    tenant_label_with_prefix(key, DEFAULT_IPV6_PREFIX_BITS)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

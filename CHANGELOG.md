@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Security
+
+- **serve**: tenants are keyed by IP prefix (`TenantKey`: exact IPv4, /64
+  IPv6 with canonical mapped addresses) instead of the textual address, so
+  rotating addresses inside one IPv6 /64 no longer buys fresh limits; the
+  rate windows are fixed-size sharded buckets that cannot fill (collisions
+  share, never evict), and a process-wide admission budget sheds rotation
+  floods with 503 + `Retry-After`. (Rotating across /64s or across IPv4
+  addresses still changes identity — the prefix is the unit, not the
+  address.) The per-tenant connection fallback is 256, down from
+  10,000. Trusted-proxy identity (forwarded headers behind configured
+  proxies) is explicitly deferred, not half-built. (`F-13`)
+
 ### Changed
 
 - **audit**: the capability-use record format moved from v1 to v2

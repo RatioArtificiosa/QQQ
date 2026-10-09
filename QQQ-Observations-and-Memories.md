@@ -36423,4 +36423,78 @@ CI's ubuntu and macOS jobs failed `clippy::doc_markdown` on `guest_handler.rs:16
 
 `audit_load.rs` named `InstancePoolExhausted` in a doc comment explaining why client threads stay below worker slots — the test deliberately avoids pool exhaustion, so it reproduces nothing. But `check_agent_cookbook.py` classifies by name occurrence and the cookbook declares QQQ-6001 `src` (no test reproduces it), so the mention failed the Windows job. The honest fix is the smaller one: reword to "pool exhaustion" prose rather than promoting the code to `test` kind, which would claim a reproduction that does not exist. Generalisable rule: when a classifier counts mentions, either the mention earns its classification or it goes — never upgrade the classification to silence the counter. → `crates/qqq-run/tests/audit_load.rs`.
 
+## §O-584 — A sharded limiter needs layout-pinned tests: fixed keys flake at 1/16,384 per run
+
+`F-13`'s first migrated isolation test used two fixed tenant keys — and with
+16,384 SipHash buckets, any two keys collide with probability ~1/16,384 per
+run. A collision shares one allowance by design, so the test asserting
+"each tenant has its own allowance" would fail on a correct build: a flake
+with a date, certain across thousands of CI runs. The fix pins the layout
+before asserting: isolation tests search per run for keys on distinct buckets
+(always terminates — each try misses with probability `accepted/16,384`),
+and the collision-sharing test searches per run for a colliding pair (which
+also proves collisions exist to be shared). Generalisable rule: when the
+mapping is random, the test fixes the layout first — a test that assumes a
+layout asserts a property of the seed. → `crates/qqq-serve/src/limits.rs`.
+
+## §O-585 — A doc comment promising `Retry-After` the code never sent
+
+`ConnectionLedger::admit` documented that the caller "answers with 503 and
+`Retry-After`", but `close_immediately` sent a bare 503 with no such header —
+the promise was believed live and was not, found while wiring the global
+bucket's 503 path (the finding demands `Retry-After` explicitly). The fix
+sends `retry-after: 1` from `close_immediately` itself, which makes the old
+promise true for both refusal paths (ledger ceiling and process-wide
+budget) rather than adding a second header site to drift. Generalisable
+rule: when implementing a demanded behavior, grep the promise first — an
+existing doc may already claim it, and then the fix is one line that pays
+two debts. → `crates/qqq-serve/src/server.rs`, `crates/qqq-serve/src/conn.rs`.
+
+## §O-586 — A pipeline's exit code is the last command's, not the gate's: two false greens in one round
+
+Twice in the `F-13` round a piped check reported success it did not earn.
+`cargo check ... | Select-String ": error"` printed nothing and showed exit
+0 — the exit of `Select-String`, and the pattern missed the compiler's
+phrasing anyway — hiding a `?`-in-tuple-return error that the very next gate
+run failed on. Then `cargo clippy ... | Select-Object -Last 5` showed
+`CLIPPY_EXIT=0` while clippy had failed: the `$LASTEXITCODE` read belonged to
+`Select-Object`, not cargo, and an empty tail was misread as clean. Both
+were caught by the full gate minutes later, but the discipline failure is
+real: a verification whose verdict is read off the wrong process is a control
+believed live that is not. Generalisable rule: capture `$LASTEXITCODE`
+before any pipe, or echo it inside the same `& { }` block as the command —
+the gate's `GATESTEP ... exit=` lines exist for exactly this reason, and
+ad-hoc checks must imitate them. → `crates/qqq-serve/src/server.rs`
+(the `let-else` fix the gate caught).
+
+## §O-587 — A grouping key makes distinct spellings collide: two canonical literals in one /64 merged silently
+
+`F-13` review minor, taken with a red test: per-tenant entries group by
+prefix, so `2001:db8::1` and `2001:db8::2` derive the same `TenantKey` and the
+`BTreeMap` collect kept one — last wins, no error. A limit the author wrote
+and the server does not apply is dead configuration, the exact shape this
+wave hunts, introduced *by the fix itself*: string keys could never collide,
+prefix keys can. The build now refuses the merge by name
+(`ManifestSchemaViolation` naming the colliding key), and the manifest's
+canonical-spelling text describes grouping rather than exact matching.
+Generalisable rule: when a fix changes a key from exact to grouped, every
+uniqueness assumption downstream of that key must be re-proven — the map
+that was a bijection is now a projection. → `crates/qqq-run/src/serve_routes.rs`,
+`crates/qqq-cap/src/manifest.rs`.
+
+## §O-588 — Every early return past a bound check must re-check the bound
+
+`F-13` review minor, taken with a red test: the new global-connection
+refusal returned without `stop_after_the_bound`, repeating the ledger
+refusal's fixed bug (`tests/accept_bound.rs` pins it) one layer out — under
+`--accept-limit`, a rotation flood the global budget sheds would never stop
+the server. The red test mirrors the ledger one (budget zero, two accepts,
+shutdown must signal) and failed by timeout pre-fix. The round's third code
+finding split the global refusal metric by kind (requests vs connections):
+one total conflated "shed load" with "stop accepting". Generalisable rule:
+when adding a second early-return beside a fixed one, the fix is part of the
+new path's definition, not a follow-up — copy the check first, then the
+return. → `crates/qqq-serve/src/server.rs`,
+`crates/qqq-serve/src/metrics.rs`, `crates/qqq-serve/tests/accept_bound.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

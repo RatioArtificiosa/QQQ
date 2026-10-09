@@ -512,6 +512,21 @@ pub struct HttpMetrics {
     latency: Latency,
     /// Bodies refused for exceeding a limit, per tenant **index**.
     body_limit_hits: Mutex<BTreeMap<u16, u64>>,
+    /// Requests refused by the process-wide admission budget (`F-13`).
+    ///
+    /// Unkeyed: the global bucket admits the process, not a tenant, so there
+    /// is no label to bound and no map to grow. Kept apart from
+    /// [`Self::global_connection_refusals`] because the remedies differ —
+    /// one says "shed load", the other says "stop accepting" — and one total
+    /// would conflate them. Agrees by construction with the request bucket's
+    /// own `refused_total` at the single refusal site.
+    global_request_refusals: AtomicU64,
+    /// New connections refused by the process-wide admission budget (`F-13`).
+    ///
+    /// The acceptor-side counterpart: fires before a byte is read, where there
+    /// is not even a request to attribute. See
+    /// [`Self::global_request_refusals`] for why the two are separate totals.
+    global_connection_refusals: AtomicU64,
 }
 
 impl HttpMetrics {
@@ -566,6 +581,38 @@ impl HttpMetrics {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *m.entry(self.tenants.index(tenant)).or_insert(0) += 1;
+    }
+
+    /// Record a request refused by the process-wide admission budget.
+    ///
+    /// # Why this is not per-tenant like `record_body_limit`
+    ///
+    /// The global bucket fires precisely when identity is untrustworthy
+    /// (rotation), so attributing the refusal to a tenant would re-introduce
+    /// the attacker-chosen cardinality the tenant labels exist to bound.
+    pub fn record_global_request_refusal(&self) {
+        self.global_request_refusals.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Request-budget refusals so far.
+    #[must_use]
+    pub fn global_request_refusals(&self) -> u64 {
+        self.global_request_refusals.load(Ordering::Relaxed)
+    }
+
+    /// Record a new connection refused by the process-wide admission budget.
+    ///
+    /// The acceptor-side counterpart to [`Self::record_global_request_refusal`]:
+    /// unkeyed for the same reason, separate for the remedy's sake.
+    pub fn record_global_connection_refusal(&self) {
+        self.global_connection_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Connection-budget refusals so far.
+    #[must_use]
+    pub fn global_connection_refusals(&self) -> u64 {
+        self.global_connection_refusals.load(Ordering::Relaxed)
     }
 
     /// Record a connection opening.
@@ -735,7 +782,32 @@ impl HttpMetrics {
         write_latency_histogram(self, &mut out);
         write_connection_gauges(self, &mut out);
         write_tenant_counters(self, &mut out);
+        write_global_refusals(self, &mut out);
         out
+    }
+}
+
+/// -- global admission budget, two unkeyed totals -----------------------
+fn write_global_refusals(m: &HttpMetrics, out: &mut String) {
+    use std::fmt::Write as _;
+    for (name, help, n) in [
+        (
+            "qqq_http_global_request_refusals_total",
+            "Requests refused by the process-wide admission budget.",
+            m.global_request_refusals(),
+        ),
+        (
+            "qqq_http_global_connection_refusals_total",
+            "New connections refused by the process-wide admission budget.",
+            m.global_connection_refusals(),
+        ),
+    ] {
+        if n == 0 {
+            continue;
+        }
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        let _ = writeln!(out, "{name} {n}");
     }
 }
 
@@ -1332,6 +1404,42 @@ mod tests {
     }
 
     // -- counters -----------------------------------------------------------
+
+    /// Global-budget refusals are two unkeyed totals, exposed for scraping.
+    ///
+    /// `F-13` acceptance names the metric. Unkeyed deliberately: the bucket
+    /// fires when identity is untrustworthy, so a per-tenant series would
+    /// re-introduce the cardinality the labels exist to bound. Split by kind
+    /// (requests vs new connections) because the remedies differ — one says
+    /// "shed load", the other says "stop accepting" — and one total would
+    /// conflate them.
+    #[test]
+    fn global_refusals_are_counted_and_rendered() {
+        let m = HttpMetrics::new();
+        assert_eq!(m.global_request_refusals(), 0);
+        assert_eq!(m.global_connection_refusals(), 0);
+        let text = m.render_prometheus();
+        assert!(
+            !text.contains("qqq_http_global_request_refusals_total")
+                && !text.contains("qqq_http_global_connection_refusals_total"),
+            "absent series are absent from the exposition, not zero — and the \
+             check must name both series, since no shorter substring covers \
+             them:\n{text}"
+        );
+
+        m.record_global_request_refusal();
+        assert_eq!(m.global_request_refusals(), 1);
+        assert_eq!(m.global_connection_refusals(), 0);
+        let text = m.render_prometheus();
+        assert!(
+            text.contains("qqq_http_global_request_refusals_total 1"),
+            "the request refusal must be scrapable:\n{text}"
+        );
+        assert!(
+            !text.contains("connection_refusals"),
+            "a kind with no refusals stays out of the exposition:\n{text}"
+        );
+    }
 
     /// A request is recorded against its (method, class).
     #[test]

@@ -59,8 +59,10 @@ use qqq_io::listener::{AcceptError, ListenAddr, Listener, ListenerConfig, Shutdo
 use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 use crate::http1::{self, ParseError, RequestHead, Version};
+use crate::limits::{GlobalBucket, GlobalBudget};
 use crate::response::{self, Response};
 use crate::route::RouteTable;
+use qqq_host::tenant::{tenant_key, tenant_label, TenantKey};
 
 /// How the server behaves.
 #[derive(Debug, Clone)]
@@ -70,6 +72,12 @@ pub struct ServerConfig {
     /// Connection lifetime rules.
     pub connection: ConnectionConfig,
     /// Per-tenant connection ceiling.
+    ///
+    /// The fallback for a tenant the manifest does not name (`F-13`: 256,
+    /// down from 10,000 — a five-digit default meant no deployment ever felt
+    /// its limiter, which is a control believed live that is not). Named
+    /// tenants keep their own `max_connections`; this field stays a public
+    /// value so embedders can set it without a manifest.
     pub connections_per_tenant: u32,
     /// Shards to bind.
     ///
@@ -111,6 +119,14 @@ pub struct ServerConfig {
     /// *per connection* — the limit would exist, be tested, and enforce nothing. That is the
     /// failure this type's `Arc` prevents by construction.
     pub limits: Option<Arc<crate::limits::TenantLimits>>,
+    /// The process-wide admission budgets, or `None` to enforce none (`F-13`).
+    ///
+    /// On by default ([`GlobalBudget::default`]): per-tenant buckets bound
+    /// what one identity spends, and this bounds what all of them spend
+    /// together, so IPv6 rotation cannot exceed overall capacity. `None` is
+    /// the escape hatch for an embedder that enforces admission itself — the
+    /// refusal sites are `Option`-checked precisely so absence is free.
+    pub global_budget: Option<GlobalBudget>,
     /// The cross-origin policy, or `None` for no CORS at all.
     ///
     /// # Why the default is `None` and not a permissive policy
@@ -162,7 +178,7 @@ impl ServerConfig {
         Self {
             addr,
             connection: ConnectionConfig::default(),
-            connections_per_tenant: 10_000,
+            connections_per_tenant: 256,
             shards: None,
             cors: None,
             // Off by default. A registry that always allocated would make the default
@@ -175,6 +191,9 @@ impl ServerConfig {
             // A built-in cap here would be a number this crate invented, silently changing
             // behaviour on upgrade -- see `qqq_cap::manifest::RequestLimits`.
             limits: None,
+            // On by default: rotation-proofing is not a policy an operator opts
+            // into after their first prefix-rotation incident.
+            global_budget: Some(GlobalBudget::default()),
             // No policy is installed by default. An embedder that has already decided
             // authority does not need a second opinion from this crate, and inventing one
             // here would make every socket test carry a policy it never asked for. The
@@ -545,6 +564,109 @@ fn ledger_for(config: &ServerConfig) -> Arc<tokio::sync::Mutex<ConnectionLedger>
     )))
 }
 
+/// The two process-wide admission budgets for a config (`F-13`).
+///
+/// Built once, like the ledger: per-connection copies would give each
+/// connection its own budget and the bound would enforce nothing.
+fn global_buckets_for(
+    config: &ServerConfig,
+) -> (Option<Arc<GlobalBucket>>, Option<Arc<GlobalBucket>>) {
+    let Some(budget) = config.global_budget else {
+        return (None, None);
+    };
+    (
+        Some(Arc::new(GlobalBucket::new(
+            budget.requests_per_window,
+            budget.request_window,
+        ))),
+        Some(Arc::new(GlobalBucket::new(
+            budget.connections_per_window,
+            budget.connection_window,
+        ))),
+    )
+}
+
+/// Everything one connection task shares, built once (`F-13` added the budgets).
+///
+/// The same argument `server_wide` makes for the registry: a per-connection
+/// copy of any of these would let two connections disagree about policy,
+/// allowances, or labels. One struct, cloned per task, so the sharing is
+/// visible at the single construction site rather than spread across a dozen
+/// `Arc::clone` lines — which is also what keeps `serve` inside its line
+/// budget.
+#[derive(Debug, Clone)]
+struct Shared {
+    /// The cross-origin policy, or `None` when the manifest declared none.
+    cors: Option<Arc<crate::cors::Cors>>,
+    /// Where per-request counters go, or `None` to record nothing.
+    metrics: Option<Arc<crate::metrics::HttpMetrics>>,
+    /// The path the registry is exposed on, or `None`.
+    metrics_path: Option<String>,
+    /// The trace sampler, or `None`.
+    sampler: Option<crate::span::Sampler>,
+    /// The per-tenant limits, or `None` when the manifest declared none.
+    limits: Option<Arc<crate::limits::TenantLimits>>,
+    /// The process-wide request budget, or `None` when disabled.
+    global_requests: Option<Arc<GlobalBucket>>,
+    /// The process-wide connection budget, or `None` when disabled.
+    global_connections: Option<Arc<GlobalBucket>>,
+    /// The per-route authentication policy, or `None` when none installed.
+    auth: Option<Arc<crate::auth::AuthPolicy>>,
+    /// The bounded set of tenant labels every connection shares.
+    tenant_labels: Arc<crate::metrics::TenantLabels>,
+    /// Where records go.
+    logger: Arc<Logger>,
+}
+
+/// Build the shared state once, so every connection task clones one `Arc`
+/// per value rather than rebuilding policy from the config.
+fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
+    // Shared with every connection task. `Arc` rather than a clone per connection: the
+    // policy is one immutable configuration, and a copy per connection would be a value
+    // that could drift from the others — the argument the logger's own comment makes.
+    // `None` when the manifest declared no `[server.cors]`, which is the common case and
+    // costs nothing to carry.
+    let cors: Option<Arc<crate::cors::Cors>> = config.cors.clone().map(Arc::new);
+    // Cloned into every connection task rather than one clone per connection: a copy of the
+    // *registry* would give each connection its own counters, and the metric would read 1
+    // forever. The `Arc` is what makes "one registry, many connections" structural.
+    let (metrics, metrics_path, sampler) = server_wide(config);
+    // Cloned into every connection task, which clones the `Arc`. The rate windows are shared
+    // **mutable** state, so this is not merely an optimisation: a per-connection copy would
+    // give each connection its own allowance and the limit would enforce nothing.
+    let limits: Option<Arc<crate::limits::TenantLimits>> = config.limits.clone();
+    // The two process-wide admission budgets (`F-13`), built once like the
+    // ledger: per-connection copies would give each connection its own budget
+    // and the bound would enforce nothing. `None` disables a budget; the
+    // default config enables both.
+    let (global_requests, global_connections) = global_buckets_for(config);
+    // Cloned per task, which clones only the `Arc`: one policy, many connections. See
+    // `ServerConfig::auth` for why `None` here means "no policy installed" rather than
+    // "everything is public".
+    let auth: Option<Arc<crate::auth::AuthPolicy>> = config.auth.clone();
+    // Bounded tenant labels, shared for the same reason the registry is: a per-connection
+    // copy would let each connection disagree about which tenants are named and which are
+    // collapsed, so the same tenant could appear under two labels depending on which
+    // connection served it.
+    let tenant_labels = Arc::new(crate::metrics::TenantLabels::new());
+    // Shared into each connection task. An `Arc` rather than a per-connection
+    // clone: the logger is one configuration every connection reads, and a copy
+    // per connection would be a value that could drift from the others.
+    let logger = Arc::new(logger);
+    Shared {
+        cors,
+        metrics,
+        metrics_path,
+        sampler,
+        limits,
+        global_requests,
+        global_connections,
+        auth,
+        tenant_labels,
+        logger,
+    }
+}
+
 /// # Errors
 ///
 /// * `QQQ-6002` — the listener could not bind. The error names the address and
@@ -559,38 +681,12 @@ pub async fn serve(
     logger: Logger,
 ) -> Result<()> {
     let listener_config = ListenerConfig::for_addr(config.addr.clone());
-    // Shared with every connection task. `Arc` rather than a clone per connection: the
-    // policy is one immutable configuration, and a copy per connection would be a value
-    // that could drift from the others — the argument the logger's own comment makes.
-    // `None` when the manifest declared no `[server.cors]`, which is the common case and
-    // costs nothing to carry.
-    let cors: Option<Arc<crate::cors::Cors>> = config.cors.clone().map(Arc::new);
-    // Cloned into every connection task rather than one clone per connection: a copy of the
-    // *registry* would give each connection its own counters, and the metric would read 1
-    // forever. The `Arc` is what makes "one registry, many connections" structural.
-    let (metrics, metrics_path, sampler) = server_wide(&config);
-    // Cloned into every connection task, which clones the `Arc`. The rate windows are shared
-    // **mutable** state, so this is not merely an optimisation: a per-connection copy would
-    // give each connection its own allowance and the limit would enforce nothing.
-    let limits: Option<Arc<crate::limits::TenantLimits>> = config.limits.clone();
-    // Cloned per task, which clones only the `Arc`: one policy, many connections. See
-    // `ServerConfig::auth` for why `None` here means "no policy installed" rather than
-    // "everything is public".
-    let auth: Option<Arc<crate::auth::AuthPolicy>> = config.auth.clone();
-    // Bounded tenant labels, shared for the same reason the registry is: a per-connection
-    // copy would let each connection disagree about which tenants are named and which are
-    // collapsed, so the same tenant could appear under two labels depending on which
-    // connection served it.
-    let tenant_labels = Arc::new(crate::metrics::TenantLabels::new());
-    // Shared into each connection task. An `Arc` rather than a per-connection
-    // clone: the logger is one configuration every connection reads, and a copy
-    // per connection would be a value that could drift from the others.
-    let logger = Arc::new(logger);
+    let shared = shared_for(&config, logger);
     let listener = Listener::bind(listener_config)
         .await
         .map_err(|e| bind_failed(&config.addr.render(), &e.to_string()))?;
 
-    announce_bound(&logger, listener.local_addr());
+    announce_bound(&shared.logger, listener.local_addr());
 
     let table = Arc::new(table);
     let ledger = ledger_for(&config);
@@ -640,20 +736,10 @@ pub async fn serve(
             let ledger = Arc::clone(&ledger);
             let connection_config = Arc::clone(&connection_config);
             let local_shutdown = task_shutdown.clone();
-            let logger = Arc::clone(&logger);
             let trace_counter = Arc::clone(&trace_counter);
-            let cors = cors.clone();
-            // Cloned per connection task, which clones only the `Arc` — the registry
-            // itself stays one value. See `ServerConfig::metrics` for why that distinction
-            // is the whole point.
-            let (metrics, metrics_path) = (metrics.clone(), metrics_path.clone());
-            // Cloned per task, which clones the `Arc` -- one limiter, many connections.
-            let limits = limits.clone();
-            // Cloned per task, which clones the `Arc` -- one policy, many connections.
-            let auth = auth.clone();
-            // Cloned per task, which clones the `Arc`: the label set must be **one** value,
-            // or two connections could disagree about whether a tenant is named.
-            let tenant_labels = Arc::clone(&tenant_labels);
+            // One clone per task for the whole shared bundle: every value
+            // below stays one value across connections (see `Shared`).
+            let shared = shared.clone();
 
             // Allocated here, on the acceptor, so the id is fixed before the task
             // starts and two connections can never share one — not even if the
@@ -682,9 +768,26 @@ pub async fn serve(
             while tasks.try_join_next().is_some() {}
             tasks.spawn(async move {
                 let id = ConnectionId::new(peer, trace);
+                // The process-wide connection budget first: it is the cheapest
+                // check and the broadest, so it sheds rotation floods before
+                // the per-tenant ledger spends a slot lookup on them.
+                if let Some(budget) = &shared.global_connections {
+                    if !budget.admit(std::time::Instant::now()) {
+                        if let Some(m) = shared.metrics.as_deref() {
+                            m.record_global_connection_refusal();
+                        }
+                        let _ = close_immediately(stream, 503).await;
+                        // A refusal is still an accept: without this the bound
+                        // never sees globally-refused connections, and the
+                        // ledger path's lesson (`tests/accept_bound.rs`) repeats
+                        // one layer out.
+                        stop_after_the_bound(limit, &accepted, &shutdown_for_task);
+                        return;
+                    }
+                }
                 {
                     let mut l = ledger.lock().await;
-                    if !l.admit(&id.tenant) {
+                    if !l.admit(id.tenant) {
                         // Refused before reading a byte. Reading a request the
                         // server will not answer spends the attacker's cost on
                         // the defender, which is the wrong way round.
@@ -706,27 +809,28 @@ pub async fn serve(
                     }
                 }
 
-                if let Some(m) = metrics.as_deref() {
+                if let Some(m) = shared.metrics.as_deref() {
                     m.connection_opened();
                 }
 
                 let ctx = ConnectionContext {
                     id: &id,
                     shutdown: &local_shutdown,
-                    logger: &logger,
-                    cors: cors.as_deref(),
-                    auth: auth.as_ref(),
+                    logger: &shared.logger,
+                    cors: shared.cors.as_deref(),
+                    auth: shared.auth.as_ref(),
                     // `ConnectionConfig` holds a plain `Duration` (a connection always has
                     // one); the context holds an `Option` because a WebSocket may
                     // legitimately want none — a long-lived socket with its own heartbeat
                     // should not be closed by a deadline the server invented. The HTTP
                     // default is what applies here.
                     idle_timeout: Some(connection_config.idle_timeout),
-                    metrics: metrics.as_ref(),
-                    metrics_path: metrics_path.as_deref(),
-                    sampler,
-                    limits: limits.as_ref(),
-                    tenant_labels: &tenant_labels,
+                    metrics: shared.metrics.as_ref(),
+                    metrics_path: shared.metrics_path.as_deref(),
+                    sampler: shared.sampler,
+                    limits: shared.limits.as_ref(),
+                    global_requests: shared.global_requests.as_ref(),
+                    tenant_labels: &shared.tenant_labels,
                 };
                 let served = serve_connection(
                     stream,
@@ -745,12 +849,12 @@ pub async fn serve(
                 // Reported **after** the ledger releases, so the open count and the close
                 // count describe the same windows. A close recorded before the release
                 // would briefly show one more connection open than the ledger admits.
-                if let Some(m) = metrics.as_deref() {
+                if let Some(m) = shared.metrics.as_deref() {
                     m.connection_closed(metric_outcome_of(served));
                 }
 
                 let mut l = ledger.lock().await;
-                l.release(&id.tenant);
+                l.release(id.tenant);
                 drop(l);
 
                 // Now that this connection is finished, honour the bound.
@@ -810,7 +914,7 @@ async fn drain_tasks(
 /// Extracted from `serve` rather than inlined, because `serve` is at its line budget
 /// without it — which is what clippy's `too_many_lines` asked for.
 #[must_use]
-fn connection_ceilings(config: &ServerConfig) -> Vec<(String, u32)> {
+fn connection_ceilings(config: &ServerConfig) -> Vec<(TenantKey, u32)> {
     config
         .limits
         .as_ref()
@@ -825,13 +929,27 @@ fn connection_ceilings(config: &ServerConfig) -> Vec<(String, u32)> {
 /// it has one, instead of both layers writing the literal and drifting.
 pub const MANIFEST_REV_UNKNOWN: &str = "unknown";
 
-/// The tenant a peer address belongs to.
+/// The tenant a peer address belongs to (`F-13`: a prefix key, not a string).
 ///
-/// The peer's IP, because there is no authentication at this layer. Named as a
-/// function rather than inlined so that when `default_auth` arrives (`SRV-008`),
-/// the change is here and every caller inherits it.
-fn tenant_of(peer: SocketAddr) -> String {
-    peer.ip().to_string()
+/// The peer's IP, because there is no authentication at this layer. A `Copy`
+/// key rather than `peer.ip().to_string()`: the old form allocated a `String`
+/// per connection on the hot path, keyed every IPv6 address separately (a
+/// /64 of fresh tenants per customer), and counted `::ffff:1.2.3.4` and
+/// `1.2.3.4` as two tenants. Named as a function rather than inlined so that
+/// when `default_auth` arrives (`SRV-008`), the change is here and every
+/// caller inherits it.
+///
+/// # Trusted proxies: deliberately absent (`F-13` phase 2, deferred)
+///
+/// Behind a reverse proxy or NAT every client shares the peer address, and
+/// `X-Forwarded-For` from an untrusted peer is attacker input, not identity.
+/// Resolving the client from forwarded headers requires a `trusted_proxies`
+/// set and the right-most-untrusted rule (the first address from the right
+/// that is not itself a trusted proxy), and half of that mechanism — parsing
+/// the header without the trust set — is worse than none. So forwarded
+/// headers are ignored entirely until the trust set lands with the rule.
+fn tenant_of(peer: SocketAddr) -> TenantKey {
+    tenant_key(peer.ip())
 }
 
 /// The `QQQ-XXXX` code carried in a response's body, if it has one.
@@ -1717,13 +1835,18 @@ pub struct ConnectionContext<'a> {
     /// connection is what makes a tenant's allowance **per tenant** rather than per
     /// connection.
     pub limits: Option<&'a Arc<crate::limits::TenantLimits>>,
+    /// The process-wide request budget, or `None` when the config disabled it.
+    ///
+    /// Borrowed like `limits`: one bucket shared by every connection is what
+    /// makes the budget **process-wide** rather than per connection.
+    pub global_requests: Option<&'a Arc<GlobalBucket>>,
     /// The bounded set of tenant labels that may appear in a metric.
     ///
     /// # Why this is not optional even when metrics are off
     ///
-    /// The tenant today is the **peer IP address** (`tenant_of`), so recording it directly
-    /// would create one time series per client — the §10.2 cardinality violation in its
-    /// worst form, because an attacker chooses the value. `TenantLabels` bounds it at 64
+    /// The tenant is a prefix key (`tenant_of`), so recording even its label
+    /// directly would create one time series per client — the §10.2 cardinality
+    /// violation in its worst form, because an attacker chooses the value. `TenantLabels` bounds it at 64
     /// distinct names and collapses the rest into one `other` series.
     ///
     /// Carried even when `metrics` is `None`, because the mapping is a property of the
@@ -1817,7 +1940,10 @@ pub struct ConnectionId {
     /// The client's address.
     pub peer: SocketAddr,
     /// The tenant the peer belongs to, derived once from `peer`.
-    pub tenant: String,
+    pub tenant: TenantKey,
+    /// The tenant's label for logs, metrics, and audit, derived once with the
+    /// key so the request path never renders it per request.
+    pub tenant_label: String,
     /// The process-wide trace id, allocated by [`TraceCounter`].
     pub trace: u64,
 }
@@ -1826,9 +1952,11 @@ impl ConnectionId {
     /// Derive a connection's identity from its peer and its allocated trace id.
     #[must_use]
     pub fn new(peer: SocketAddr, trace: u64) -> Self {
+        let tenant = tenant_of(peer);
         Self {
             peer,
-            tenant: tenant_of(peer),
+            tenant_label: tenant_label(tenant),
+            tenant,
             trace,
         }
     }
@@ -1857,7 +1985,12 @@ async fn serve_connection(
     // id. `id.trace` is the process-wide counter and is what correlates records across
     // connections; see `access_record`.
     let mut span_seq: u64 = 0;
-    let tenant = ctx.id.tenant.clone();
+    // The key enforces (limiter, ledger); the label records (logs, metrics,
+    // audit). Split once here so no call site below can pass one where the
+    // other belongs — the types already differ, and this makes the choice
+    // visible at the top of the loop rather than at each of twenty uses.
+    let tenant_key = ctx.id.tenant;
+    let tenant: &str = &ctx.id.tenant_label;
 
     loop {
         // Which action does the state machine want? `act_on_poll` holds the rule that
@@ -1912,9 +2045,17 @@ async fn serve_connection(
         // Extracted so the ordering rule lives in one named place rather than in the middle
         // of a hundred-line function where a later edit can move it without noticing. The
         // extraction is also what the line-count lint was asking for.
-        if let Some(served) =
-            refuse_before_reading(&mut stream, &head, path, table, &tenant, ctx, &mut span_seq)
-                .await
+        if let Some(served) = refuse_before_reading(
+            &mut stream,
+            &head,
+            path,
+            table,
+            tenant,
+            tenant_key,
+            ctx,
+            &mut span_seq,
+        )
+        .await
         {
             return served;
         }
@@ -1955,7 +2096,7 @@ async fn serve_connection(
             table,
             dispatch,
             ctx,
-            &tenant,
+            tenant,
             &mut buf,
             &mut span_seq,
         )
@@ -1978,14 +2119,14 @@ async fn serve_connection(
                 // The refusal is counted because a body over the cap is exactly the case
                 // `SRV-020` asks about, and no `record_request` runs for it: the connection
                 // closes without a completed request.
-                let label = ctx.tenant_labels.label(&tenant);
+                let label = ctx.tenant_labels.label(tenant);
                 m.record_body_limit(label.as_str());
             }
             return reject_body(&mut stream, &head).await;
         };
 
         let route_started = std::time::Instant::now();
-        let response = dispatch_off_thread(table, dispatch, &head, path, &body, &tenant).await;
+        let response = dispatch_off_thread(table, dispatch, &head, path, &body, tenant).await;
         // **`false`, because this path has no host failure to report** -- `CodeRabbit` finding #23.
         //
         // This used to be `response.status >= 500`, and `response` is the GUEST's answer: a guest that
@@ -1996,7 +2137,7 @@ async fn serve_connection(
         let host_failed = false;
         emit_span(
             ctx,
-            &tenant,
+            tenant,
             3,
             span_seq,
             u64::try_from(route_started.elapsed().as_micros()).unwrap_or(u64::MAX),
@@ -2014,7 +2155,7 @@ async fn serve_connection(
         span_seq += 1;
         emit_record(
             ctx.logger,
-            access_record(&head, path, &response, &tenant, ctx.id.trace, span_seq),
+            access_record(&head, path, &response, tenant, ctx.id.trace, span_seq),
         );
 
         // --- The same request, as a metric --------------------------------
@@ -2028,7 +2169,7 @@ async fn serve_connection(
                 &head,
                 &response,
                 request_started,
-                &tenant,
+                tenant,
                 body_bytes,
             );
         }
@@ -2241,9 +2382,27 @@ async fn refuse_before_reading(
     path: &str,
     table: &RouteTable,
     tenant: &str,
+    tenant_key: TenantKey,
     ctx: &ConnectionContext<'_>,
     span_seq: &mut u64,
 ) -> Option<Served> {
+    // --- Process-wide admission budget -------------------------------------
+    //
+    // First, before any per-tenant state: rotation is the attack this answers,
+    // and consulting the per-tenant limiter first would spend a bucket lookup
+    // on a request the process cannot serve. The refusal is 503 with
+    // `Retry-After` (load shedding, like pool exhaustion) and unkeyed in the
+    // metric (the tenant is untrustworthy exactly when this fires).
+    if let Some(budget) = ctx.global_requests {
+        if !budget.admit(Instant::now()) {
+            if let Some(m) = ctx.metrics {
+                m.record_global_request_refusal();
+            }
+            *span_seq += 1;
+            return Some(refuse_global(stream, head, path, tenant, ctx, *span_seq).await);
+        }
+    }
+
     // --- Per-tenant limits -------------------------------------------------
     //
     // The rate check is `check_and_record`, which consumes the allowance as a side effect:
@@ -2255,7 +2414,7 @@ async fn refuse_before_reading(
         // The **declared** length first. A client understating it is caught by the streaming
         // count in `drain_body`; a client stating it honestly pays nothing to find out.
         if let Some(declared) = head.content_length {
-            if limits.check_body(tenant, declared).is_err() {
+            if limits.check_body(tenant_key, declared).is_err() {
                 if let Some(m) = ctx.metrics {
                     let label = ctx.tenant_labels.label(tenant);
                     m.record_body_limit(label.as_str());
@@ -2268,7 +2427,7 @@ async fn refuse_before_reading(
         // §4.4 step 8, **on both outcomes**: a check that passed is a stage that ran, and emitting
         // only on refusal would make the spans describe failures rather than the request.
         let limit_started = Instant::now();
-        let over = limits.check_and_record(tenant, Instant::now()).is_err();
+        let over = limits.check_and_record(tenant_key, Instant::now()).is_err();
         emit_span(ctx, tenant, 8, *span_seq, micros_since(limit_started), over);
         if over {
             *span_seq += 1;
@@ -2370,6 +2529,38 @@ async fn refuse_auth(
     Served::Unauthorized
 }
 
+/// Refuse a request the process-wide budget cannot admit (`F-13`).
+///
+/// 503 with `Retry-After`, not 429: the tenant is not over *its* limit, the
+/// process is over *its* capacity, which is load shedding in the same sense
+/// as pool exhaustion — and the same status a rotation flood must receive no
+/// matter which identity it wears this request.
+async fn refuse_global(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    tenant: &str,
+    ctx: &ConnectionContext<'_>,
+    span: u64,
+) -> Served {
+    let mut response = crate::response::Response::text(
+        503,
+        "the server is at its process-wide admission budget; retry shortly",
+    );
+    response.set_header("retry-after", "1");
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let bytes = response::write_response(&response, head.version, false, is_head(head));
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    Served::Refused
+}
+
 async fn refuse_limits(
     stream: &mut TcpStream,
     head: &RequestHead,
@@ -2422,9 +2613,9 @@ async fn refuse_limits(
 ///
 /// # Why the label is bounded and not the tenant
 ///
-/// The tenant is the **peer IP address** (`tenant_of`), so recording it directly creates
-/// one time series per client — §10.2's cardinality violation in its worst form, because
-/// the value is entirely attacker-chosen. `TenantLabels` bounds it at 64 distinct names and
+/// The tenant is a prefix key (`tenant_of`), so recording even its label
+/// directly creates one time series per client — §10.2's cardinality violation
+/// in its worst form, because the value is entirely attacker-chosen. `TenantLabels` bounds it at 64 distinct names and
 /// collapses the rest into one `other` series, and the exact per-tenant facts stay in the
 /// access record, which is not aggregated.
 ///
@@ -2828,11 +3019,13 @@ fn wants_keep_alive(head: &RequestHead) -> bool {
 
 /// Close a connection immediately with a status and no body.
 ///
-/// Used when the ledger refuses a connection: sending a full error response
-/// would spend more of the server's budget on a peer that is already over it.
+/// Used when the ledger or the process-wide connection budget refuses a
+/// connection: sending a full error response would spend more of the server's
+/// budget on a peer that is already over it. Carries `retry-after: 1`, which
+/// is what the ledger's own documentation promises callers answer with.
 async fn close_immediately(mut stream: TcpStream, status: u16) -> std::io::Result<()> {
     let text = format!(
-        "HTTP/1.1 {status} {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\ncontent-length: 0\r\nretry-after: 1\r\nconnection: close\r\n\r\n",
         if status == 503 {
             "Service Unavailable"
         } else {
@@ -2989,9 +3182,17 @@ mod tests {
     }
 
     #[test]
-    fn a_tenant_is_the_peer_ip() {
+    fn a_tenant_is_the_peer_prefix() {
+        use qqq_host::tenant::tenant_key as expected_key;
         let peer: SocketAddr = "203.0.113.7:54321".parse().unwrap();
-        assert_eq!(tenant_of(peer), "203.0.113.7");
+        assert_eq!(tenant_of(peer), expected_key(peer.ip()));
+        assert_eq!(
+            tenant_of(peer),
+            TenantKey::V4(u32::from(std::net::Ipv4Addr::new(203, 0, 113, 7)))
+        );
+        // And the mapped form is the same tenant, not a second one.
+        let mapped: SocketAddr = "[::ffff:203.0.113.7]:54321".parse().unwrap();
+        assert_eq!(tenant_of(mapped), tenant_of(peer));
     }
 
     #[test]

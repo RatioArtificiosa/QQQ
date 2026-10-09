@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use qqq_host::tenant::TenantKey;
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::limits::{Limits, TenantLimits};
@@ -67,6 +68,15 @@ impl Server {
 
     /// Start with a full `TenantLimits`, so a test can exercise `per_tenant`.
     async fn start_with(limits: Option<TenantLimits>) -> Self {
+        Self::start_with_budget(limits, qqq_serve::limits::GlobalBudget::default()).await
+    }
+
+    /// Start with a full `TenantLimits` and an explicit process-wide budget,
+    /// so a test can exhaust the global bucket without waiting out the default.
+    async fn start_with_budget(
+        limits: Option<TenantLimits>,
+        budget: qqq_serve::limits::GlobalBudget,
+    ) -> Self {
         // Wrapped once, outside the retry loop. `TenantLimits` is deliberately not `Clone`
         // -- it owns the rate counters, so a clone would be a second set of them -- but
         // `Arc` gives each attempt the same one.
@@ -82,6 +92,7 @@ impl Server {
             let metrics = Arc::new(HttpMetrics::new());
             config.metrics = Some(Arc::clone(&metrics));
             config.limits = limits.clone();
+            config.global_budget = Some(budget);
             let local = shutdown.clone();
 
             let probe = tokio::spawn(async move {
@@ -160,8 +171,8 @@ impl Drop for Server {
 ///
 /// # Why this test and not a unit test
 ///
-/// The unit test proves `limits_for` looks a string up in a map. Only this proves the
-/// string the **server** passes is the one the manifest author wrote — which is the half
+/// The unit test proves `limits_for` looks a key up in a map. Only this proves the
+/// key the **server** passes is the one the manifest author wrote — which is the half
 /// that was wrong, and the half no unit test on the limiter can reach.
 ///
 /// The client connects over the loopback interface, so its peer address is `127.0.0.1`,
@@ -170,7 +181,7 @@ impl Drop for Server {
 async fn a_per_tenant_entry_keyed_by_the_peer_address_is_applied() {
     let limits = TenantLimits::new(
         [(
-            "127.0.0.1".to_owned(),
+            TenantKey::V4(u32::from(std::net::Ipv4Addr::LOCALHOST)),
             qqq_serve::limits::Limits::with_body(16),
         )],
         qqq_serve::limits::Limits::with_body(1000),
@@ -201,7 +212,7 @@ async fn a_per_tenant_entry_for_another_address_is_not_applied() {
     let limits = TenantLimits::new(
         [(
             // Documentation range (RFC 5737): a real address, never the loopback peer.
-            "198.51.100.7".to_owned(),
+            TenantKey::V4(u32::from(std::net::Ipv4Addr::new(198, 51, 100, 7))),
             qqq_serve::limits::Limits::with_body(16),
         )],
         qqq_serve::limits::Limits::with_body(1000),
@@ -431,7 +442,8 @@ async fn a_refusal_is_recorded() {
 #[tokio::test]
 async fn a_per_tenant_connection_ceiling_is_enforced() {
     const CEILING: u32 = 2;
-    let limits = TenantLimits::with_connections([("127.0.0.1".to_owned(), CEILING)], 16);
+    let loopback = TenantKey::V4(u32::from(std::net::Ipv4Addr::LOCALHOST));
+    let limits = TenantLimits::with_connections([(loopback, CEILING)], 16);
     let server = Server::start_with(Some(limits)).await;
 
     // Hold `CEILING` connections open. Each is kept alive for the whole test, which is what
@@ -477,7 +489,8 @@ async fn a_per_tenant_connection_ceiling_is_enforced() {
 /// the ceiling as the cause.
 #[tokio::test]
 async fn a_connection_under_the_ceiling_is_served() {
-    let limits = TenantLimits::with_connections([("127.0.0.1".to_owned(), 2)], 16);
+    let loopback = TenantKey::V4(u32::from(std::net::Ipv4Addr::LOCALHOST));
+    let limits = TenantLimits::with_connections([(loopback, 2)], 16);
     let server = Server::start_with(Some(limits)).await;
 
     // One held connection, so the ceiling has room for one more.
@@ -499,4 +512,61 @@ async fn a_connection_under_the_ceiling_is_served() {
     );
 
     drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// The process-wide admission budget (`F-13`)
+// ---------------------------------------------------------------------------
+
+/// **Rotation cannot exceed overall capacity: the global budget refuses 503.**
+///
+/// The unit test proves the bucket counts; only this proves the **server**
+/// answers — 503 with `retry-after`, never a hang or a 200, and the refusal
+/// is metered. Two requests fit the budget of two; the third is shed load,
+/// no matter that its identity is fresh (each request arrives on its own
+/// connection here, so per-connection and per-tenant state cannot explain
+/// the refusal — only the process-wide budget can).
+#[tokio::test]
+async fn f13_global_budget_refuses_with_503_and_retry_after() {
+    use qqq_serve::limits::GlobalBudget;
+
+    let budget = GlobalBudget {
+        requests_per_window: 2,
+        request_window: Duration::from_secs(60),
+        connections_per_window: 1_000,
+        connection_window: Duration::from_secs(60),
+    };
+    let server = Server::start_with_budget(None, budget).await;
+
+    for i in 0..2 {
+        let got = server
+            .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await;
+        assert!(
+            got.starts_with("HTTP/1.1 200"),
+            "request {i} fits the budget:\n{got}"
+        );
+    }
+
+    let shed = server
+        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await;
+    assert!(
+        shed.starts_with("HTTP/1.1 503"),
+        "the third request exceeds the process-wide budget:\n{shed}"
+    );
+    assert!(
+        shed.to_ascii_lowercase().contains("retry-after"),
+        "shed load must tell the client when to retry:\n{shed}"
+    );
+    assert_eq!(
+        server.metrics.global_request_refusals(),
+        1,
+        "exactly the shed request is metered"
+    );
+    assert_eq!(
+        server.metrics.global_connection_refusals(),
+        0,
+        "no connection was shed"
+    );
 }

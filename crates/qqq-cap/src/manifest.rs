@@ -1397,9 +1397,9 @@ pub struct RequestLimits {
     ///
     /// # Why an address and not a name
     ///
-    /// A request's tenant is the peer address: `qqq_serve::server::tenant_of` returns
-    /// `peer.ip().to_string()` and `TenantLimits::limits_for` looks the tenant up by that
-    /// string. So a key that is not an address literal can never match, and the entry is
+    /// A request's tenant is the peer prefix: `qqq_serve::server::tenant_of` returns
+    /// a `TenantKey` and `TenantLimits::limits_for` looks the tenant up by that
+    /// key. So a key that is not an address literal can never match, and the entry is
     /// dead configuration — it reads as a policy, it is never applied, and nothing reports
     /// the difference. [`RequestLimits::validate`] refuses such a key by name, and
     /// `§O-185` records the round that found it.
@@ -1479,12 +1479,14 @@ impl RequestLimits {
 ///
 /// # Why a key must be a canonical IP address
 ///
-/// The runtime's tenant is the **peer address**. A key that is not an address literal
+/// The runtime's tenant is the **peer prefix**. A key that is not an address literal
 /// cannot match anything, so the entry is dead configuration: a manifest author reads it
 /// back as a policy, it is never applied, and no command reports the difference. That is
 /// the *"a control believed live that is not"* shape this repository has recorded more
 /// than twenty times, and a refusal at parse time is what converts it into a visible
-/// error.
+/// error. Grouping is by prefix (`F-13`), so two canonical literals in one /64 would
+/// merge — the route builder refuses that merge by name rather than keeping one entry
+/// silently.
 ///
 /// # Why the canonical spelling and not merely a parse
 ///
@@ -1496,7 +1498,7 @@ fn validate_tenant_key(key: &str) -> Result<(), String> {
     let Ok(addr) = key.parse::<std::net::IpAddr>() else {
         return Err(format!(
             "the per-tenant limits are keyed by client address, and `{key}` is not an IP \
-             address. A request's tenant is the peer address, so a name can never match: \
+             address. A request's tenant is the peer prefix, so a name can never match: \
              write the address (for example `127.0.0.1` or `::1`), or move the cap to \
              `[server.limits.default]` if it is meant for every caller"
         ));
@@ -1504,7 +1506,7 @@ fn validate_tenant_key(key: &str) -> Result<(), String> {
     if addr.to_string() != key {
         return Err(format!(
             "the per-tenant key `{key}` is not the canonical spelling of `{addr}`. The \
-             runtime compares the key against the peer address exactly as `IpAddr` renders \
+             runtime groups keys by prefix exactly as `IpAddr` renders \
              it, so `{key}` would never match — write `{addr}`"
         ));
     }
@@ -2746,7 +2748,7 @@ reproducible = true
     /// A key that parses but is not the canonical spelling is refused too.
     ///
     /// `2001:0db8::1` and `2001:db8::1` are the same address and different strings, and the
-    /// runtime compares the key against `IpAddr`'s rendering. Accepting the long form would
+    /// runtime groups keys by prefix from `IpAddr`'s rendering. Accepting the long form would
     /// be the same dead configuration with a friendlier error message.
     #[test]
     fn a_non_canonical_ipv6_key_is_refused_and_the_canonical_one_named() {

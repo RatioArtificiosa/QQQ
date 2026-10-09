@@ -188,7 +188,7 @@ fn a_sampled_request_emits_a_span() {
 /// fixture and **left step 8 owed** — this is it.
 ///
 /// The declaration is `[server.limits]` with a per-tenant entry, and `tenant_of(peer)` gives
-/// `127.0.0.1` for a loopback connection, so the entry applies to these tests' own client.
+/// the loopback key for a loopback connection, so the entry applies to these tests' own client.
 #[test]
 fn a_manifest_with_limits_reaches_the_limit_stage() {
     const LIMITED: &str = "[package]\nname = \"span-limits\"\nversion = \"0.1.0\"\n\

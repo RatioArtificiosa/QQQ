@@ -86,6 +86,12 @@ impl Server {
     /// Retried on a fresh port, because between `free_addr` dropping its listener and
     /// `serve` binding, another test in this process can take the port.
     async fn start(accept_limit: u64) -> Self {
+        Self::start_with_budget(accept_limit, 1_000_000).await
+    }
+
+    /// Start with an explicit process-wide connection budget (`F-13`), so a test
+    /// can exhaust the global bucket instead of the per-tenant ledger.
+    async fn start_with_budget(accept_limit: u64, connections_per_window: u32) -> Self {
         // The probe's deadline, and the reason the failure message carries its total.
         //
         // A 16-attempt cascade of 20-second probes is up to 320 seconds before this fails, which
@@ -110,6 +116,12 @@ impl Server {
             // One slot per tenant: the first connection takes it and holds it, so the
             // second is refused. That refusal is the accept that must honour the bound.
             config.connections_per_tenant = 1;
+            config.global_budget = Some(qqq_serve::limits::GlobalBudget {
+                requests_per_window: 1_000_000,
+                request_window: Duration::from_secs(60),
+                connections_per_window,
+                connection_window: Duration::from_secs(60),
+            });
             let local = shutdown.clone();
             let task = tokio::spawn(async move {
                 if let Err(e) = serve(
@@ -230,5 +242,59 @@ async fn a_refused_connection_still_honours_the_accept_bound() {
     panic!(
         "the refused connection reached the accept bound and the server did not signal \
          shutdown: a refused accept is still an accept"
+    );
+}
+
+/// **A connection the global budget refuses still honours the accept bound.**
+///
+/// The same early-return shape as the ledger path above, one layer out: the
+/// process-wide connection budget admits nothing (budget zero), so both
+/// accepts are refused 503 by the global path — and the second must still
+/// signal the bound. Before the fix the branch returned without
+/// `stop_after_the_bound`, so a rotation flood under `--accept-limit` never
+/// stopped the server.
+#[tokio::test]
+async fn a_globally_refused_connection_still_honours_the_accept_bound() {
+    let server = Server::start_with_budget(2, 0).await;
+
+    for i in 0..2 {
+        let mut refused = TcpStream::connect(server.addr)
+            .await
+            .expect("connect a refused connection");
+        refused
+            .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write on a refused connection");
+        refused.flush().await.expect("flush");
+        let mut buf = [0u8; 256];
+        let reply = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut out = Vec::new();
+            loop {
+                match refused.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                }
+            }
+            out
+        })
+        .await
+        .expect("the refusal must arrive");
+        let reply = String::from_utf8_lossy(&reply);
+        assert!(
+            reply.starts_with("HTTP/1.1 503"),
+            "connection {i} must be refused by the global budget:\n{reply}"
+        );
+    }
+
+    for _ in 0..400 {
+        if server.shutdown.is_signalled() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    panic!(
+        "two globally-refused accepts reached the bound and the server did not \
+         signal shutdown: a refused accept is still an accept"
     );
 }

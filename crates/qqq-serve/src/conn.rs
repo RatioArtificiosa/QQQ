@@ -48,6 +48,8 @@
 
 use std::time::{Duration, Instant};
 
+use qqq_host::tenant::TenantKey;
+
 use crate::http1::ParseError;
 
 // ---------------------------------------------------------------------------
@@ -466,7 +468,7 @@ pub struct ConnectionLedger {
     ///
     /// Empty is the common case: a deployment that declares no per-tenant
     /// `max_connections` gets the fallback for everybody.
-    ceilings: std::collections::BTreeMap<String, u32>,
+    ceilings: std::collections::BTreeMap<TenantKey, u32>,
     /// The ceiling for a tenant not in `ceilings`.
     ///
     /// This is `ServerConfig::connections_per_tenant`, and it is a fallback rather
@@ -475,7 +477,7 @@ pub struct ConnectionLedger {
     /// same reason.
     per_tenant: u32,
     /// Open connections per tenant.
-    counts: std::collections::BTreeMap<String, u32>,
+    counts: std::collections::BTreeMap<TenantKey, u32>,
 }
 
 impl ConnectionLedger {
@@ -503,7 +505,7 @@ impl ConnectionLedger {
     #[must_use]
     pub fn with_limits<I>(ceilings: I, fallback: u32) -> Self
     where
-        I: IntoIterator<Item = (String, u32)>,
+        I: IntoIterator<Item = (TenantKey, u32)>,
     {
         Self {
             ceilings: ceilings
@@ -523,9 +525,9 @@ impl ConnectionLedger {
 
     /// The ceiling that applies to one tenant.
     #[must_use]
-    pub fn ceiling_for(&self, tenant: &str) -> u32 {
+    pub fn ceiling_for(&self, tenant: TenantKey) -> u32 {
         self.ceilings
-            .get(tenant)
+            .get(&tenant)
             .copied()
             .unwrap_or(self.per_tenant)
     }
@@ -535,13 +537,13 @@ impl ConnectionLedger {
     /// Returns `false` when the tenant is at its ceiling, which the caller
     /// answers with 503 and `Retry-After` — the same loading-shedding path as
     /// pool exhaustion, because it is the same situation.
-    pub fn admit(&mut self, tenant: &str) -> bool {
+    pub fn admit(&mut self, tenant: TenantKey) -> bool {
         let ceiling = self
             .ceilings
-            .get(tenant)
+            .get(&tenant)
             .copied()
             .unwrap_or(self.per_tenant);
-        let count = self.counts.entry(tenant.to_owned()).or_insert(0);
+        let count = self.counts.entry(tenant).or_insert(0);
         if *count >= ceiling {
             return false;
         }
@@ -555,19 +557,19 @@ impl ConnectionLedger {
     /// many short-lived tenants does not accumulate a map entry per tenant ever
     /// seen. A ledger that grows without bound is a leak in the component whose
     /// job is to bound something.
-    pub fn release(&mut self, tenant: &str) {
-        if let Some(count) = self.counts.get_mut(tenant) {
+    pub fn release(&mut self, tenant: TenantKey) {
+        if let Some(count) = self.counts.get_mut(&tenant) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                self.counts.remove(tenant);
+                self.counts.remove(&tenant);
             }
         }
     }
 
     /// How many connections a tenant holds.
     #[must_use]
-    pub fn open_for(&self, tenant: &str) -> u32 {
-        self.counts.get(tenant).copied().unwrap_or(0)
+    pub fn open_for(&self, tenant: TenantKey) -> u32 {
+        self.counts.get(&tenant).copied().unwrap_or(0)
     }
 
     /// The total across tenants.
@@ -590,6 +592,11 @@ impl ConnectionLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One tenant as a key (`F-13`: the ledger keys on [`TenantKey`], not strings).
+    fn key(n: u32) -> TenantKey {
+        TenantKey::V4(n)
+    }
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
@@ -1019,13 +1026,13 @@ mod tests {
     #[test]
     fn the_ledger_admits_up_to_the_limit() {
         let mut l = ConnectionLedger::new(2);
-        assert!(l.admit("acme"));
-        assert!(l.admit("acme"));
+        assert!(l.admit(key(1)));
+        assert!(l.admit(key(1)));
         assert!(
-            !l.admit("acme"),
+            !l.admit(key(1)),
             "the third connection exceeds a limit of two"
         );
-        assert_eq!(l.open_for("acme"), 2);
+        assert_eq!(l.open_for(key(1)), 2);
     }
 
     /// **Why the limit is per tenant.** A global limit lets one tenant starve
@@ -1033,27 +1040,27 @@ mod tests {
     #[test]
     fn one_tenant_cannot_starve_another() {
         let mut l = ConnectionLedger::new(2);
-        assert!(l.admit("noisy"));
-        assert!(l.admit("noisy"));
-        assert!(!l.admit("noisy"), "the noisy tenant is at its ceiling");
+        assert!(l.admit(key(1)));
+        assert!(l.admit(key(1)));
+        assert!(!l.admit(key(1)), "the noisy tenant is at its ceiling");
 
         // The quiet tenant is unaffected.
         assert!(
-            l.admit("quiet"),
+            l.admit(key(2)),
             "a tenant at its own limit must not consume another's"
         );
-        assert!(l.admit("quiet"));
-        assert_eq!(l.open_for("noisy"), 2);
-        assert_eq!(l.open_for("quiet"), 2);
+        assert!(l.admit(key(2)));
+        assert_eq!(l.open_for(key(1)), 2);
+        assert_eq!(l.open_for(key(2)), 2);
     }
 
     #[test]
     fn releasing_frees_a_slot() {
         let mut l = ConnectionLedger::new(1);
-        assert!(l.admit("acme"));
-        assert!(!l.admit("acme"));
-        l.release("acme");
-        assert!(l.admit("acme"), "a released slot must be reusable");
+        assert!(l.admit(key(1)));
+        assert!(!l.admit(key(1)));
+        l.release(key(1));
+        assert!(l.admit(key(1)), "a released slot must be reusable");
     }
 
     /// Releasing more than was admitted must not underflow. A double release is
@@ -1062,14 +1069,14 @@ mod tests {
     #[test]
     fn releasing_too_many_times_does_not_underflow() {
         let mut l = ConnectionLedger::new(1);
-        l.release("never-admitted");
-        assert_eq!(l.open_for("never-admitted"), 0);
+        l.release(key(9));
+        assert_eq!(l.open_for(key(9)), 0);
 
-        l.admit("acme");
-        l.release("acme");
-        l.release("acme");
-        l.release("acme");
-        assert_eq!(l.open_for("acme"), 0);
+        l.admit(key(1));
+        l.release(key(1));
+        l.release(key(1));
+        l.release(key(1));
+        assert_eq!(l.open_for(key(1)), 0);
         assert_eq!(l.total(), 0);
     }
 
@@ -1080,9 +1087,9 @@ mod tests {
     fn the_ledger_forgets_tenants_at_zero() {
         let mut l = ConnectionLedger::new(1);
         for i in 0..1000 {
-            let tenant = format!("tenant-{i}");
-            l.admit(&tenant);
-            l.release(&tenant);
+            let tenant = TenantKey::V4(i);
+            l.admit(tenant);
+            l.release(tenant);
         }
         assert_eq!(
             l.tenants(),
@@ -1094,13 +1101,13 @@ mod tests {
     #[test]
     fn the_ledger_reports_its_totals() {
         let mut l = ConnectionLedger::new(5);
-        l.admit("a");
-        l.admit("a");
-        l.admit("b");
+        l.admit(key(1));
+        l.admit(key(1));
+        l.admit(key(2));
         assert_eq!(l.total(), 3);
         assert_eq!(l.tenants(), 2);
         assert_eq!(l.per_tenant(), 5);
-        assert_eq!(l.open_for("absent"), 0);
+        assert_eq!(l.open_for(key(9)), 0);
     }
 
     /// A ceiling of zero is almost certainly a mistake, and silently rejecting
@@ -1110,8 +1117,8 @@ mod tests {
     fn a_zero_ceiling_is_raised_to_one() {
         let mut l = ConnectionLedger::new(0);
         assert_eq!(l.per_tenant(), 1);
-        assert!(l.admit("a"), "a tenant must be able to connect at all");
-        assert!(!l.admit("a"));
+        assert!(l.admit(key(1)), "a tenant must be able to connect at all");
+        assert!(!l.admit(key(1)));
     }
 
     /// **A named tenant gets its own ceiling, and other tenants keep the fallback.**
@@ -1121,25 +1128,28 @@ mod tests {
     /// must not change the ceiling for every other.
     #[test]
     fn a_named_tenant_gets_its_own_ceiling_and_others_keep_the_fallback() {
-        let mut l = ConnectionLedger::with_limits([("a".to_owned(), 2)], 5);
-        assert_eq!(l.ceiling_for("a"), 2, "the named ceiling must apply");
+        let mut l = ConnectionLedger::with_limits([(key(1), 2)], 5);
+        assert_eq!(l.ceiling_for(key(1)), 2, "the named ceiling must apply");
         assert_eq!(
-            l.ceiling_for("b"),
+            l.ceiling_for(key(2)),
             5,
             "an unnamed tenant keeps the fallback"
         );
 
-        assert!(l.admit("a"));
-        assert!(l.admit("a"));
-        assert!(!l.admit("a"), "`a` is at its own ceiling of two");
+        assert!(l.admit(key(1)));
+        assert!(l.admit(key(1)));
+        assert!(!l.admit(key(1)), "`a` is at its own ceiling of two");
 
         for _ in 0..5 {
             assert!(
-                l.admit("b"),
+                l.admit(key(2)),
                 "`b` is bounded by the fallback, not by `a`'s entry"
             );
         }
-        assert!(!l.admit("b"), "`b` is now at the fallback ceiling of five");
+        assert!(
+            !l.admit(key(2)),
+            "`b` is now at the fallback ceiling of five"
+        );
     }
 
     /// A zero ceiling in the **table** is raised the same way the fallback is.
@@ -1149,12 +1159,12 @@ mod tests {
     /// connect, which would answer every request with 503 and say nothing about why.
     #[test]
     fn a_zero_ceiling_in_the_table_is_raised_to_one() {
-        let mut l = ConnectionLedger::with_limits([("a".to_owned(), 0)], 5);
-        assert_eq!(l.ceiling_for("a"), 1);
-        assert!(l.admit("a"), "the tenant must be able to connect at all");
-        assert!(!l.admit("a"));
+        let mut l = ConnectionLedger::with_limits([(key(1), 0)], 5);
+        assert_eq!(l.ceiling_for(key(1)), 1);
+        assert!(l.admit(key(1)), "the tenant must be able to connect at all");
+        assert!(!l.admit(key(1)));
         assert_eq!(
-            l.ceiling_for("b"),
+            l.ceiling_for(key(2)),
             5,
             "raising `a` must not touch the fallback"
         );

@@ -274,15 +274,15 @@ async fn body_bytes_are_recorded() {
     );
 }
 
-/// **The peer address becomes one series key, not one per request.**
+/// **The peer prefix becomes one series key, not one per request.**
 ///
-/// `tenant_of` returns the peer's address, so recording it directly would create one time
-/// series per client — §10.2's cardinality violation in its worst form, because the value
-/// is entirely attacker-chosen.
+/// `tenant_of` returns the peer's prefix key, so recording even its label directly
+/// would create one time series per client — §10.2's cardinality violation in its
+/// worst form, because the value is entirely attacker-chosen.
 ///
 /// # What this test asserts, and what it does not
 ///
-/// It asserts the **wiring**: a request is recorded under the peer address, and one client
+/// It asserts the **wiring**: a request is recorded under the peer's label, and one client
 /// produces **one** series rather than one per request — that the closed set is *applied*
 /// rather than merely defined, which is where the defect was (the set was correct and
 /// unused).

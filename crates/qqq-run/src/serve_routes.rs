@@ -201,7 +201,7 @@ pub fn routes_from_manifest(server: &Server, manifest_path: &str) -> Result<Serv
         auth,
         auth_policy,
         unauthenticated,
-        limits: build_limits(server.limits.as_ref()),
+        limits: build_limits(server.limits.as_ref())?,
     })
 }
 
@@ -257,8 +257,10 @@ fn route_auth(mode: AuthMode) -> qqq_serve::auth::RouteAuth {
 /// everything.
 fn build_limits(
     declared: Option<&qqq_cap::manifest::RequestLimits>,
-) -> Option<std::sync::Arc<qqq_serve::limits::TenantLimits>> {
-    let declared = declared?;
+) -> Result<Option<std::sync::Arc<qqq_serve::limits::TenantLimits>>> {
+    let Some(declared) = declared else {
+        return Ok(None);
+    };
 
     let convert = |l: &qqq_cap::manifest::TenantLimit| qqq_serve::limits::Limits {
         max_body_bytes: l.max_body_bytes,
@@ -272,13 +274,42 @@ fn build_limits(
         .as_ref()
         .map_or_else(qqq_serve::limits::Limits::none, &convert);
 
-    let per_tenant = declared
-        .per_tenant
-        .iter()
-        .map(|(tenant, limit)| (tenant.clone(), convert(limit)));
+    // Manifest keys are validated as canonical IP literals at parse time, so a
+    // key that does not parse here means a caller bypassed validation — which
+    // must fail loudly rather than drop the entry and serve unlimited.
+    //
+    // Two keys may still parse and group to one tenant (`2001:db8::1` and
+    // `2001:db8::2` share their /64): the table would keep one and drop the
+    // other silently, which is dead configuration. That merge is refused here,
+    // naming the key that collides.
+    let mut per_tenant = Vec::with_capacity(declared.per_tenant.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for (tenant, limit) in &declared.per_tenant {
+        let key: std::net::IpAddr = tenant.parse().map_err(|_| {
+            Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!(
+                    "the per-tenant limits key `{tenant}` is not an IP address; \
+                     keys are validated at parse time, so this manifest bypassed validation"
+                ),
+            )
+        })?;
+        let key = qqq_host::tenant::tenant_key(key);
+        if !seen.insert(key) {
+            return Err(Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!(
+                    "the per-tenant limits key `{tenant}` groups to the same tenant as \
+                     another entry: per-tenant entries are enforced by IP prefix, so two \
+                     keys in one prefix would silently keep only one"
+                ),
+            ));
+        }
+        per_tenant.push((key, convert(limit)));
+    }
 
-    Some(std::sync::Arc::new(qqq_serve::limits::TenantLimits::new(
-        per_tenant, fallback,
+    Ok(Some(std::sync::Arc::new(
+        qqq_serve::limits::TenantLimits::new(per_tenant, fallback),
     )))
 }
 
@@ -323,6 +354,11 @@ mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
     use qqq_cap::server::METHODS;
+
+    /// An address literal as the runtime keys it (`F-13`).
+    fn key(ip: &str) -> qqq_host::tenant::TenantKey {
+        qqq_host::tenant::tenant_key(ip.parse().expect("test addresses parse"))
+    }
 
     fn server_from(toml: &str) -> Server {
         let m = Manifest::parse(&format!(
@@ -506,14 +542,20 @@ max_body_bytes = 1024
         let routes = routes_from_manifest(&server, "q.ai.toml").expect("valid");
         let limits = routes.limits.expect("a limiter");
 
-        assert!(limits.check_body("anyone", 1024).is_ok(), "at the cap");
-        assert!(limits.check_body("anyone", 1025).is_err(), "over the cap");
+        assert!(
+            limits.check_body(key("198.51.100.7"), 1024).is_ok(),
+            "at the cap"
+        );
+        assert!(
+            limits.check_body(key("198.51.100.7"), 1025).is_err(),
+            "over the cap"
+        );
     }
 
     /// **Per-tenant entries override the fallback.**
     ///
-    /// The key is a client address, not a name: the runtime's tenant is the peer address
-    /// (`tenant_of`), so a name could never match — `Manifest::parse` now refuses one.
+    /// The key is a client address, not a name: the runtime's tenant is the peer
+    /// prefix (`tenant_of`), so a name could never match — `Manifest::parse` now refuses one.
     /// `§O-185` records the round that found the mismatch between this field's
     /// documentation and the lookup.
     #[test]
@@ -533,12 +575,40 @@ max_body_bytes = 100_000
         let limits = routes.limits.expect("a limiter");
 
         assert!(
-            limits.check_body("198.51.100.7", 101).is_err(),
+            limits.check_body(key("198.51.100.7"), 101).is_err(),
             "the fallback applies to an address with no entry"
         );
         assert!(
-            limits.check_body("127.0.0.1", 50_000).is_ok(),
+            limits.check_body(key("127.0.0.1"), 50_000).is_ok(),
             "the named address gets its own cap"
+        );
+    }
+
+    /// **Two manifest keys in one /64 are refused, not silently merged.**
+    ///
+    /// `F-13` review: per-tenant entries group by prefix, so `2001:db8::1`
+    /// and `2001:db8::2` derive the same `TenantKey` and the table would keep
+    /// one — last wins, silently. A limit the author wrote and the server
+    /// does not apply is dead configuration, so the build refuses it by name.
+    #[test]
+    fn two_keys_in_one_prefix_are_refused() {
+        let server = server_from(
+            r#"
+routes = [{ path = "/", methods = ["GET"], handler = "root" }]
+
+[server.limits.per_tenant."2001:db8::1"]
+max_body_bytes = 100
+
+[server.limits.per_tenant."2001:db8::2"]
+max_body_bytes = 200
+"#,
+        );
+        let err = routes_from_manifest(&server, "q.ai.toml")
+            .expect_err("two keys grouping to one tenant must be refused");
+        let text = format!("{err}");
+        assert!(
+            text.contains("2001:db8::2") || text.contains("2001:db8::1"),
+            "the refusal must name the colliding key: {text}"
         );
     }
 
@@ -560,15 +630,15 @@ max_requests_per_window = 2
         let limits = routes.limits.expect("a limiter");
         let now = std::time::Instant::now();
 
-        assert!(limits.check_and_record("t", now).is_ok());
-        assert!(limits.check_and_record("t", now).is_ok());
+        assert!(limits.check_and_record(key("10.9.9.9"), now).is_ok());
+        assert!(limits.check_and_record(key("10.9.9.9"), now).is_ok());
         assert!(
-            limits.check_and_record("t", now).is_err(),
+            limits.check_and_record(key("10.9.9.9"), now).is_err(),
             "the cap of 2 applies"
         );
         assert!(
             limits
-                .check_and_record("t", now + std::time::Duration::from_secs(60))
+                .check_and_record(key("10.9.9.9"), now + std::time::Duration::from_secs(60))
                 .is_ok(),
             "and the window is 60 seconds, the documented default"
         );
@@ -590,11 +660,14 @@ window_seconds = 5
         let limits = routes.limits.expect("a limiter");
         let now = std::time::Instant::now();
 
-        assert!(limits.check_and_record("t", now).is_ok());
-        assert!(limits.check_and_record("t", now).is_err(), "spent");
+        assert!(limits.check_and_record(key("10.9.9.9"), now).is_ok());
+        assert!(
+            limits.check_and_record(key("10.9.9.9"), now).is_err(),
+            "spent"
+        );
         assert!(
             limits
-                .check_and_record("t", now + std::time::Duration::from_secs(5))
+                .check_and_record(key("10.9.9.9"), now + std::time::Duration::from_secs(5))
                 .is_ok(),
             "5 seconds, not 60"
         );

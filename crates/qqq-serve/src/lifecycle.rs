@@ -52,7 +52,7 @@
 //!    component ID + manifest rev*. There is no such mapping. The router
 //!    ([`crate::route`]) is **path-only**: [`Route`] has no host field, and the
 //!    only tenant derivation in this crate is
-//!    [`tenant_of`](crate::server), which keys on the *client IP* for per-tenant
+//!    [`tenant_of`](crate::server), which keys on the *client IP prefix* for per-tenant
 //!    limits. §4.4's claim that "step 4 is the only place routing state lives"
 //!    therefore describes an intent, not the code.
 //! 2. **Step 15, `AUDIT APPEND` — built, unwired.**
@@ -214,10 +214,10 @@ pub const STAGES: [Stage; 15] = [
         file: None,
         symbol: None,
         // The only tenant derivation in `qqq-serve` is `tenant_of`, keyed on the
-        // client IP for per-tenant limits. There is no host/path -> tenant ->
+        // client IP prefix for per-tenant limits. There is no host/path -> tenant ->
         // component ID + manifest rev map anywhere in the workspace.
         status: Status::Absent,
-        gap: "no host/path -> tenant -> component ID + manifest rev mapping exists; `tenant_of` keys on the client IP for limits only",
+        gap: "no host/path -> tenant -> component ID + manifest rev mapping exists; `tenant_of` keys on the client IP prefix for limits only",
     },
     Stage {
         step: 5,

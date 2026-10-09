@@ -64,11 +64,15 @@ wasmtime-wasi = { workspace = true }
 # Sync>`. Sanitising a guest's output therefore requires implementing `AsyncWrite`,
 # which requires `tokio`.
 #
-# The `unsafe`-free route was checked first: a hand-built `RawWaker` for a synchronous
-# poll would have avoided the trait, but the crate-level `forbid(unsafe_code)` rejects
-# it and `forbid` cannot be relaxed by an inner `allow`. The synchronous *behaviour* is
-# kept — `poll_write` escapes, enqueues, and reports in one step and never returns
-# `Pending` — but the bytes now reach the sink through a per-output writer task, so
+# The `unsafe`-free route exists: `std::task::Waker::noop()` (stable since
+# Rust 1.85) drives the synchronous behaviour in tests with no hand-built
+# vtable — see `guest_output.rs`, which polls writers against a noop waker
+# throughout its suite. A hand-built `RawWaker` was the first attempt and the
+# compiler refused it under the crate-level `forbid(unsafe_code)` — correctly,
+# since `noop()` made it unnecessary rather than merely forbidden.
+# The synchronous *behaviour* is kept — `poll_write` escapes, enqueues, and
+# reports in one step and never returns `Pending` — but the bytes now reach
+# the sink through a per-output writer task, so
 # the `rt` (spawn, blocking pool, runtime handle) and `sync` (channel, flush
 # notification) features are load-bearing in production, not test-only.
 #

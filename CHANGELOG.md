@@ -4,6 +4,17 @@
 
 ### Security
 
+- **serve, host**: every HTTP/1.1 parse error now closes the connection —
+  one unified rule replacing the subset method (`closes_connection`
+  deleted; the old keep-alive-after-414 described a socket the server had
+  already shut down). A tab anywhere in the request line is refused
+  (previously only tab separators were; a tab inside the target was
+  accepted — probed, then fixed with an F-04 table row). Stale comments
+  corrected against shipped code: the `RawWaker` note (safe wakers exist
+  via `Waker::noop`), the F-10 admission test doc, and the workspace tier
+  labels (target tier, not done-ness). The Latin-1 and `MAX_ESCAPED_RUN`
+  docs already matched. (`F-23`)
+
 - **run**: the epoch ticker parks on the deadline-scaled period instead of
   sleeping 1 ms — one lineage wakes ~10/s at the default 100 ms tick
   rather than 1,000/s forever. Tick counts are ceiling-rounded with a

@@ -752,11 +752,12 @@ mod tests {
 
     /// **F-10: a manifest asking for fewer is admitted at its own number.**
     ///
-    /// The comment above `admit` already promises this while the code charges
-    /// the host ceiling — the test pins the promise, and the old behaviour
-    /// test (`the_reservation_uses_the_hosts_instance_ceiling`) is replaced,
-    /// not kept alongside: two tests asserting opposite arithmetics is a
-    /// suite that passes either way.
+    /// The comment above `admit` promises the manifest's number and the code
+    /// charges it too, since the F-10 fix: more asked than run is a refusal
+    /// with both numbers, never a silent clamp. This test pins the promise
+    /// against the old behaviour it replaced (charging the host ceiling) —
+    /// the old test is gone, not kept alongside, because two tests asserting
+    /// opposite arithmetics is a suite that passes either way.
     #[test]
     fn f10_manifest_asking_for_fewer_instances_is_admitted_at_its_own_number() {
         use crate::config::PoolShape;

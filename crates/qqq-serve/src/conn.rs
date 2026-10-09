@@ -26,11 +26,13 @@
 //!    for keep-alive and still be told `Connection: close`, because the server
 //!    is draining or the request was malformed. The response is the authority.
 //!
-//! 2. **An error closes the connection.** After a framing error the parser's
-//!    view of where one request ends is not trustworthy, so reading on risks
-//!    interpreting body bytes as the next request — which *is* the smuggling
-//!    attack. This is why [`ParseError::closes_connection`] exists and why the
-//!    machine consults it rather than deciding for itself.
+//! 2. **A parse error closes the connection.** Any head the parser could
+//!    not read leaves the framing offset unknowable — where the next request
+//!    would begin is a guess, and a guess about framing *is* the smuggling
+//!    attack. There is no subset of "safe" parse errors (`F-23` removed the
+//!    old `closes_connection` distinction): the machine owns this rule, and
+//!    the socket path agrees — `reject_parse_error` always shuts down after
+//!    replying.
 //!
 //! 3. **A drain stops accepting, not finishing.** Graceful shutdown means
 //!    in-flight requests complete and idle connections close. Killing an
@@ -43,8 +45,6 @@
 //!    guests will not finish. After the deadline the connection is closed and
 //!    the event is counted, because a silent forced close during a deploy is
 //!    how a slow request becomes an unexplained 502.
-//!
-//! `ParseError::closes_connection` is referenced above; see [`crate::http1`].
 
 use std::time::{Duration, Instant};
 
@@ -359,21 +359,21 @@ impl Connection {
         self.idle_since = Some(now);
     }
 
-    /// Mark that the head failed to parse.
+    /// Mark that the head failed to parse: the connection always closes.
     ///
-    /// # Why this takes the error rather than a bare "failed"
+    /// # Why there is no per-error distinction (`F-23`)
     ///
-    /// Because whether to close depends on the error, and the parser already
-    /// knows the answer: [`ParseError::closes_connection`] is true exactly when
-    /// the parser's view of where this request ends is untrustworthy. Deciding
-    /// that here would duplicate the rule, and the two copies would eventually
-    /// disagree — with the disagreement being a smuggling vulnerability.
+    /// Any head the parser could not read leaves the framing offset
+    /// unknowable — where the next request would begin is a guess, and a
+    /// guess about framing is the smuggling attack itself. The old subset
+    /// (`ParseError::closes_connection`) described a connection the server
+    /// had already shut down, because `reject_parse_error` never had a
+    /// keep-alive path. One rule in one place.
     pub fn on_parse_error(&mut self, error: &ParseError) {
+        let _ = error;
         self.head_started = None;
         self.in_flight = false;
-        if error.closes_connection() {
-            self.closed = Some(CloseReason::ProtocolError);
-        }
+        self.closed = Some(CloseReason::ProtocolError);
     }
 
     /// Begin a graceful shutdown.
@@ -786,44 +786,86 @@ mod tests {
         assert_eq!(c.poll(t0), Action::Close(CloseReason::ProtocolError));
     }
 
-    /// But a request-scoped error — a bad route, an oversized target — does
-    /// **not** close, because the parser still knows where the request ends and
-    /// the connection remains usable.
+    /// But a request-scoped error — a bad route, an oversized target — also
+    /// closes now (`F-23`): the old test below pinned keep-alive after a 414
+    /// on the grounds that the framing was still known, but the server never
+    /// had a keep-alive path after any parse error, so the test described a
+    /// connection the socket had already closed. Framing offset unknowable
+    /// means unknowable for every variant, not just the smuggling-shaped ones.
     #[test]
-    fn a_request_scoped_error_does_not_close_the_connection() {
+    fn a_request_scoped_error_closes_the_connection() {
         let mut c = conn();
         let t0 = Instant::now();
         c.begin_request(t0);
         c.on_request_parsed(true);
 
         c.on_parse_error(&ParseError::TargetTooLong { bytes: 1, limit: 1 });
-        assert!(
-            c.is_open(),
-            "an oversized target is request-scoped; the framing is still known"
+        assert_eq!(
+            c.close_reason(),
+            Some(CloseReason::ProtocolError),
+            "even a request-scoped error closes: the socket always shut down"
         );
-        // And it can serve the next request.
-        c.on_response_sent(t0, false);
-        assert!(c.is_open());
     }
 
-    /// The machine consults the parser rather than deciding for itself, so the
-    /// two cannot disagree. Every error that says it closes must close the
-    /// connection.
+    /// **F-23: every parse error closes the connection.**
+    ///
+    /// One unified rule replaces the old subset: any head the parser could
+    /// not read leaves the framing offset unknowable, so the socket always
+    /// shuts down after the reply (`reject_parse_error` never had a
+    /// keep-alive path — the machine's "stay open" for request-scoped
+    /// errors described a connection the server had already closed). Every
+    /// variant of the enum, constructed here with dummy fields, must close.
+    /// Pre-fix this fails: the subset method keeps request-scoped errors
+    /// open.
     #[test]
-    fn every_closing_parse_error_closes_the_connection() {
+    fn f23_all_parse_errors_close_the_connection() {
         let errors = [
-            ParseError::ConflictingFraming,
-            ParseError::DuplicateContentLength,
+            ParseError::Incomplete { got: 0 },
+            ParseError::BadRequestLine {
+                detail: String::new(),
+            },
+            ParseError::UnknownMethod {
+                method: String::new(),
+            },
+            ParseError::UnsupportedVersion {
+                version: String::new(),
+            },
             ParseError::TooManyHeaders { limit: 1 },
-            ParseError::HeadTooLarge { limit: 1 },
             ParseError::HeaderTooLong {
-                name: "X".to_owned(),
+                name: String::new(),
                 bytes: 2,
                 limit: 1,
             },
+            ParseError::TargetTooLong { bytes: 1, limit: 1 },
+            ParseError::HeadTooLarge { limit: 1 },
+            ParseError::MalformedHeader {
+                line: String::new(),
+            },
+            ParseError::InvalidHeaderName {
+                name: String::new(),
+            },
+            ParseError::TargetNotAbsolute {
+                target: String::new(),
+            },
+            ParseError::ConflictingFraming,
+            ParseError::DuplicateContentLength,
+            ParseError::InvalidContentLength {
+                value: String::new(),
+            },
+            ParseError::ObsFoldedHeader,
+            ParseError::DuplicateTransferEncoding,
+            ParseError::DuplicateHost,
+            ParseError::InvalidUtf8,
+            ParseError::BodyTooLarge {
+                declared: 2,
+                limit: 1,
+            },
+            ParseError::UnsupportedTransferEncoding {
+                value: String::new(),
+            },
         ];
+        assert_eq!(errors.len(), 20, "the table must cover every variant");
         for e in &errors {
-            assert!(e.closes_connection(), "{e} should close");
             let mut c = conn();
             c.on_parse_error(e);
             assert_eq!(

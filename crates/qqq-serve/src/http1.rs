@@ -243,28 +243,6 @@ impl ParseError {
         }
     }
 
-    /// Whether the connection should be closed after answering.
-    ///
-    /// Limits and framing errors close: the parser's view of where this request
-    /// ends is not trustworthy, so continuing to read on the same connection
-    /// risks interpreting body bytes as the next request — which is the
-    /// smuggling attack itself.
-    #[must_use]
-    pub const fn closes_connection(&self) -> bool {
-        matches!(
-            self,
-            Self::TooManyHeaders { .. }
-                | Self::HeadTooLarge { .. }
-                | Self::HeaderTooLong { .. }
-                | Self::ConflictingFraming
-                | Self::DuplicateContentLength
-                | Self::ObsFoldedHeader
-                | Self::DuplicateTransferEncoding
-                | Self::DuplicateHost
-                | Self::InvalidUtf8
-        )
-    }
-
     /// Convert to the shared error type.
     #[must_use]
     pub fn to_error(&self) -> Error {
@@ -748,10 +726,19 @@ fn parse_header_block<'a>(
 
 /// Parse the request line into its three parts.
 fn parse_request_line(line: &str) -> std::result::Result<(Method, String, Version), ParseError> {
+    // No tab anywhere in the request line (`F-23`): `has_control_bytes`
+    // deliberately permits tab (field values strip it as OWS), so the line
+    // needs its own rule. A tab is neither the SP separator nor a legal
+    // target byte, and a proxy that strips or splits on it reads a different
+    // request than we do. `splitn(3, ' ')` below then sees only spaces.
+    if line.contains('\t') {
+        return Err(ParseError::BadRequestLine {
+            detail: "tab in the request line".to_owned(),
+        });
+    }
     // `splitn(3, ' ')` rather than `split_whitespace`: a request target must not
     // contain a space (it would be percent-encoded), so splitting on the first
-    // two spaces is the correct rule, and it means a target containing a tab is
-    // rejected rather than silently accepted as a different target.
+    // two spaces is the correct rule.
     let mut parts = line.splitn(3, ' ');
     let method_str = parts.next().unwrap_or("");
     let target = parts.next().ok_or_else(|| ParseError::BadRequestLine {
@@ -957,6 +944,11 @@ mod tests {
             (
                 "GET\t/\tHTTP/1.1\r\nHost: x\r\n\r\n",
                 "tab separator",
+                is_bad_request_line,
+            ),
+            (
+                "GET /a\tb HTTP/1.1\r\nHost: x\r\n\r\n",
+                "tab within the target",
                 is_bad_request_line,
             ),
             (
@@ -1247,10 +1239,6 @@ mod tests {
             431,
             "a limit error is 431, which a client can act on"
         );
-        assert!(
-            e.closes_connection(),
-            "framing is untrustworthy; the connection must close"
-        );
     }
 
     /// A single oversized header is refused with 431 and names the header, so a
@@ -1300,10 +1288,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e, ParseError::ConflictingFraming);
-        assert!(
-            e.closes_connection(),
-            "ambiguous framing must close the connection"
-        );
     }
 
     /// Two `Content-Length` headers let a proxy honour one and the origin the

@@ -36759,4 +36759,29 @@ theater. Generalisable rule: when the audit's tests and a reviewer's
 suggestion disagree, the specified values plus the documented contract
 decide. → `crates/qqq-run/src/guest_handler.rs`, `crates/qqq-host/src/instance.rs`, `crates/qqq-host/src/lib.rs`, `CHANGELOG.md`.
 
+## §O-603 — F-23: the keep-alive-after-414 was dead on the serve path, and tab-in-target was accepted
+
+Two of the seven comment sites hid live defects behind true-sounding
+prose. First, the subset method: `closes_connection` plus the state
+machine's "request-scoped errors stay open" described a keep-alive the
+server never offered — `reject_parse_error` shuts down unconditionally —
+so the unification (delete the method, always close, exhaustive 20-variant
+test) changed no observable serve behavior while removing the disagreement.
+Second, the tab comment claimed the split rule rejects tabs in the target;
+a throwaway probe proved `GET /a\tb` ACCEPTED (tab-as-separator was
+covered, tab-in-target was not — the audit's "F-04 makes it true" was
+wrong about this one), so the request line now refuses tabs explicitly
+with an F-04 table row. Relationship to the earlier record: `§O-030b`
+documented the parser-decides indirection (`closes_connection`) as
+load-bearing while the subset existed — this supersedes that rationale
+(the indirection died with the subset; the machine owns the single rule
+now), while `§O-028e`'s status-code content is untouched. The other four
+sites were prose-only (RawWaker
+note, F-10 test doc, tier labels); Latin-1 and `MAX_ESCAPED_RUN` already
+matched. CodeRabbit's one minor (clarify this entry against `§O-028e` /
+`§O-030b`) is taken above. Generalisable
+rule: a comment claiming a refusal needs the table row that proves it —
+prose about a check the suite never drives is the fixture-that-cannot-fail
+in documentation form. → `crates/qqq-serve/src/http1.rs`, `crates/qqq-serve/src/conn.rs`, `crates/qqq-serve/src/server.rs`, `crates/qqq-host/src/admission.rs`, `crates/qqq-host/Cargo.toml`, `Cargo.toml`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

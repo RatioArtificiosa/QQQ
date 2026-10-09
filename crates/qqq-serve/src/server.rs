@@ -1445,7 +1445,10 @@ async fn serve_ws_route(
 /// naming a defect in QQQ rather than in the request.
 ///
 /// The connection closes because the framing offset is no longer knowable -- the parser
-/// stopped mid-head, so where the next request would begin is unknown.
+/// stopped mid-head, so where the next request would begin is unknown. This holds for
+/// EVERY parse error (`F-23` unified the rule): there is no keep-alive path after a
+/// reply to a malformed head, and `Connection::on_parse_error` records the same
+/// outcome, so the machine and the socket cannot disagree.
 async fn reject_parse_error(
     stream: &mut TcpStream,
     conn: &mut Connection,

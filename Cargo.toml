@@ -4,6 +4,12 @@
 # QQQ-Proposal-V1.md §4.3. Most members are not yet implemented; they are
 # declared here so that the architecture is enforced by the build system from
 # the first commit rather than by convention.
+#
+# "Tier: stable" on a member below is the TARGET tier, not a claim that the
+# crate is done: it names the stability contract the crate is being built
+# toward (public API discipline, semver care), while crate versions sit at
+# `0.0.0` until the first release cuts them. Read the tier as intent, the
+# version as status.
 
 [workspace]
 resolver = "2"

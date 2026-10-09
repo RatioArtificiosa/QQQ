@@ -219,7 +219,7 @@ each. Two are **supported**, one is **not enabled in V1**:
 | Model | Wasm feature | V1 policy |
 |---|---|---|
 | **Async single-threaded** | Component Model `async`, `future`, `stream` (WASI 0.3) | **Default and recommended.** One logical task per request; concurrency comes from many instances, not many threads inside one |
-| **Shared-memory threads** | Wasm `threads` proposal (`SharedMemory`) | **Enabled but discouraged**, behind an explicit manifest opt-in (`[limits] shared_memory = true`) |
+| **Shared-memory threads** | Wasm `threads` proposal (`SharedMemory`) | **Disabled in every mode since `F-22`** (was: enabled-but-discouraged behind an explicit manifest opt-in; the interim diagnostic proved a parked `atomic.wait32` ignores the epoch deadline, so no opt-in can be safe until parking is interruptible) |
 | **Cooperative threads** | Component Model cooperative threads (gated 🧵) | **Not enabled in V1.** Requires stack switching, which Wasmtime still lists as work-in-progress; tracked as `FUT-004` |
 
 **Context.** The async default is not a preference in the abstract — it is forced
@@ -252,10 +252,12 @@ predicted.**
    `qqq-serve` rather than a test artefact: **a single-threaded reactor cannot use
    this yield at all** (`§O-056b`).
 2. **CPU-parallel workloads have no good answer inside one instance.** The
-   escape is shared memory behind an opt-in, and the opt-in is discouraged
-   precisely because it weakens accounting. A legitimate CPU-parallel workload is
-   therefore a case where the recommended model is wrong, and the manifest must
-   say so explicitly rather than the host discovering it.
+   escape was shared memory behind an opt-in, and the opt-in was discouraged
+   precisely because it weakens accounting — until `F-22` removed the escape
+   entirely (a parked `atomic.wait32` ignores the epoch deadline, proved by
+   diagnostic). A legitimate CPU-parallel workload is therefore a case where
+   the recommended model is wrong and V1 has no in-guest answer, which is a
+   reason to revisit rather than a reason to opt in.
 3. **A guest that blocks in a host call still blocks the calling thread** on the
    synchronous path. The async path is the answer, which is why `HOST-015` is a
    prerequisite for `HOST-017`.
@@ -36719,5 +36721,20 @@ recorded values, and the full host/run suites (571 + 596) plus
 `det009_trials.py --self-test` (13/13) prove it. Generalisable rule: read
 the refusal surface before writing the refusal; describe a control by
 what enforces it, not by what surrounds it. → `crates/qqq-host/src/ambient.rs`, `crates/qqq-run/src/serve.rs`, `crates/qqq-run/src/guest_handler.rs`, `CHANGELOG.md`.
+
+## §O-601 — F-22: the diagnostic proved the hang, so threads turn off everywhere
+
+The finding was UNVERIFIED, and the mandate said confirm first: a scratch
+test (threads plus shared memory on, epoch deadline tripping at four times
+the rate, three-second watchdog, since deleted — the log is the evidence)
+printed HANG CONFIRMED, exiting 42 with the call never returned. So
+`wasm_threads(false)` moved from the deterministic arm to unconditional,
+and the old DET-012 test — which asserted the default engine *accepted*
+shared memory — was rewritten to assert both engines refuse, beside the
+new production-engine test. Defence in depth is now two tests over two
+engines for the same bytes. The `send` stub stays refused untouched (it
+wires to I-01, never this goal). Generalisable rule: an UNVERIFIED finding
+gets a throwaway experiment before a permanent fix — the experiment's log
+is what makes the fix proportionate rather than superstitious. → `crates/qqq-host/src/config.rs`, `CHANGELOG.md`.
 
 *End of `QQQ-Observations-and-Memories.md`.*

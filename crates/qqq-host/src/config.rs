@@ -114,6 +114,19 @@ impl EngineConfig {
         // Guard pages make out-of-bounds accesses trap rather than corrupt,
         // which is the sandbox's primary memory-safety mechanism.
         c.memory_guard_size(MEMORY_GUARD_BYTES);
+        // Threads are unsupported in every mode (`F-22`): a guest parked in
+        // `memory.atomic.wait32` with an infinite timeout ignores the epoch
+        // deadline — interruption is checked at instruction boundaries, never
+        // inside the wait — pinning one worker thread per malicious request
+        // until `--workers` and the blocking pool are exhausted. The interim
+        // diagnostic proved it (3 s watchdog, epoch tripping at 4x the
+        // deadline rate, call never returned). QQQ provides no thread-spawn
+        // host function, so shared memory has no legitimate use, and a
+        // shared module now fails to compile with an error naming threads.
+        // Set unconditionally rather than per mode: the deterministic arm
+        // below keeps its own refusal test as defence in depth, but one
+        // engine must never admit what the other refuses for the same bytes.
+        c.wasm_threads(false);
 
         // -- Determinism ------------------------------------------------
         if self.deterministic {
@@ -121,20 +134,14 @@ impl EngineConfig {
             // same bits on every architecture. Without this, a NaN produced on
             // x86 can differ from one produced on aarch64, breaking the
             // bit-identical replay guarantee in §10.5.
+            //
+            // (Shared-memory refusal lives in the Memory section above for
+            // every mode; the deterministic refusal test stays as defence in
+            // depth.)
             c.cranelift_nan_canonicalization(true);
             // Relaxed-SIMD fusion is explicitly disallowed in deterministic
             // mode: it permits re-association that changes results.
             c.wasm_relaxed_simd(false);
-            // Shared memory is refused in deterministic mode (`DET-012`): a
-            // shared linear memory is visible to every holder at once, which
-            // defeats per-instance memory accounting, and atomics on it are
-            // outside the fuel-and-epoch determinism story. Upstream leaves
-            // `wasm_threads` on by default and QQQ never disables it outside
-            // this arm, so a shared-memory component compiles under the
-            // default engine and fails here — that asymmetry is the point:
-            // the default path is untouched while replay-grade runs cannot
-            // admit what they cannot reproduce.
-            c.wasm_threads(false);
         } else {
             // Relaxed SIMD is a Tier 1 proposal and a genuine performance win
             // for the JSON and parsing hot paths (§9.4). It is only excluded
@@ -696,14 +703,40 @@ mod tests {
         }
     }
 
+    /// **`F-22`: the production engine rejects shared memory.**
+    ///
+    /// The interim diagnostic proved the hang is real: with threads enabled,
+    /// a guest parked in `memory.atomic.wait32` with an infinite timeout
+    /// ignores the epoch deadline (checked at instruction boundaries, never
+    /// inside the wait), pinning one worker thread per malicious request.
+    /// QQQ provides no thread-spawn host function, so shared memory has no
+    /// legitimate use. Pre-fix this fails: the default engine compiles it.
+    #[test]
+    fn f22_shared_memory_module_is_rejected_by_the_production_engine() {
+        const SHARED: &str = "(component (core module $m (memory 1 1 shared)))";
+        let engine = wasmtime::Engine::new(
+            &EngineConfig::default()
+                .to_wasmtime_config()
+                .expect("default config builds"),
+        )
+        .expect("production engine builds");
+        let err = wasmtime::component::Component::new(&engine, SHARED)
+            .expect_err("shared memory / atomics must be disabled in every mode");
+        let text = format!("{err:#}").to_ascii_lowercase();
+        assert!(
+            text.contains("shared") || text.contains("thread"),
+            "the refusal must name its cause, not fail opaquely: {err:#}"
+        );
+    }
+
     /// **`DET-012`: deterministic mode refuses shared memory.**
     ///
-    /// Upstream's `wasm_threads` defaults on and the default engine keeps it,
-    /// so a shared-memory component compiles there — probed, `Ok` on both
-    /// engines before the flag (`§O-537`). The deterministic engine must not
-    /// admit what replay cannot reproduce, so the same bytes fail here. The
-    /// asymmetry is asserted both ways: default acceptance documents that the
-    /// refusal is the deterministic preset's doing, not a broken fixture.
+    /// Before `F-22` this test asserted an asymmetry: upstream's
+    /// `wasm_threads` defaulted on, the default engine kept it, and only the
+    /// deterministic preset refused (`§O-537`). `F-22` disables threads in
+    /// every mode, so both engines refuse the same bytes — kept as defence
+    /// in depth beside the production-engine test above, so a future edit
+    /// that re-enables threads on either path fails two tests, not zero.
     #[test]
     fn deterministic_mode_rejects_shared_memory() {
         const SHARED: &str = "(component (core module $m (memory 1 1 shared)))";
@@ -726,9 +759,12 @@ mod tests {
                 .expect("default config builds"),
         )
         .expect("default engine builds");
+        let err = wasmtime::component::Component::new(&default_engine, SHARED)
+            .expect_err("shared memory must not compile on the default engine either");
+        let text = format!("{err:#}").to_ascii_lowercase();
         assert!(
-            wasmtime::component::Component::new(&default_engine, SHARED).is_ok(),
-            "the default path is untouched: refusal is deterministic-only"
+            text.contains("shared") || text.contains("thread"),
+            "the refusal must name its cause, not fail opaquely: {err:#}"
         );
     }
 

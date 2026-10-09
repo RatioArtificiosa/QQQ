@@ -12,6 +12,14 @@
   deterministic-random overlays and commutativity sweeps 200 overlay
   pairs. (`F-15`)
 
+- **host**: WebAssembly threads are disabled in every mode, not only
+  deterministic mode. An interim diagnostic proved the hang real: a guest
+  parked in `memory.atomic.wait32` ignores the epoch deadline, pinning one
+  worker thread per malicious request. Shared-memory modules now fail to
+  compile on the production engine with an error naming threads; the
+  deterministic refusal test stays as defence in depth. No thread-spawn
+  host function exists, so nothing legitimate used shared memory. (`F-22`)
+
 - **serve**: `qqqai serve` accepts `--deterministic` (fixed clock, seeded
   RNG) on loopback listeners only; a non-loopback listener needs the
   explicit `--allow-deterministic-public`, otherwise startup is refused

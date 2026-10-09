@@ -1149,8 +1149,10 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **ARCH-013** Write the guest-concurrency ADR fixing the async-single-threaded default.
   → Done: **`§D-006`**, upgraded to a full ADR. It states a policy for all three
     guest concurrency models rather than only the default: async-single-threaded
-    is **default and recommended**, shared-memory threads are **enabled but
-    discouraged** behind an explicit manifest opt-in, and cooperative threads are
+    is **default and recommended**, shared-memory threads are **disabled in every
+    mode since `F-22`** (the interim diagnostic proved a parked `atomic.wait32`
+    ignores the epoch deadline; the opt-in in `ARCH-014` remains future work
+    with interruptible parking as a prerequisite), and cooperative threads are
     **not enabled in V1** because they need stack switching, which Wasmtime still
     lists as work-in-progress (`FUT-004`).
   → The alternatives table records why thread-per-request-inside-one-instance is
@@ -5645,6 +5647,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
     disabled; see `§O-537`). Engine-level disabling is an open prerequisite
     (`DET-012`, `ARCH-014`), not a silent property. `ABI-016` (interface level)
     stays open behind the same prerequisites.
+  → Update 2026-10-09 (`F-22`): the engine-level prerequisite is closed —
+    `wasm_threads(false)` in every mode, both engines refuse the same bytes
+    (production-engine test plus deterministic refusal as defence in depth).
+    Shared-memory threads are unsupported, not merely un-enabled.
   → **Measured**: `proposal_historical_rejected_fields_still_fail` green
     (`shared_memory` refused as unknown; dropping `deny_unknown_fields` fails
     exactly that test, 253 filtered — `deny-red.log`, restored byte-identical,

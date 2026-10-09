@@ -126,7 +126,7 @@ fn attempt_serve_hostile(sandbox: &Sandbox, extra: &[&str], count: u32) -> Strin
             // A DIFFERENT trace id every time, all claiming `sampled=1`. If the host inherited the
             // flag, every one of them would be recorded.
             let req = format!(
-                "GET /orders HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+                "GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
                  traceparent: 00-{served:032x}-{served:016x}-01\r\n\r\n"
             );
             let _ = s.write_all(req.as_bytes());

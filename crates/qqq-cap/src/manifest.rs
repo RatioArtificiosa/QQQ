@@ -1359,11 +1359,15 @@ pub struct Server {
     /// asked for one — changing behaviour on upgrade. A deployment that wants limits
     /// declares them, and a deployment that does not gets the behaviour it had.
     ///
-    /// The *connection* ceiling is different and already defaults to 10 000: it bounds a
+    /// The *connection* ceiling is different and already defaults to 256: it bounds a
     /// resource this crate owns (sockets), while a body cap bounds a resource the
     /// application's design decides (what a legitimate payload looks like).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<RequestLimits>,
+    /// `[server.websocket]` — the upgrade policy, absent meaning same-origin
+    /// only with 1 MiB caps (`F-14`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebsocketPolicy>,
 }
 
 /// `[server.limits]` — the per-tenant **request** limits.
@@ -1609,6 +1613,48 @@ impl AuthMode {
     pub const fn validates_a_credential(self) -> bool {
         matches!(self, Self::BearerJwt | Self::Mtls | Self::SignedRequest)
     }
+}
+
+/// `[server.websocket]` — the WebSocket policy (`F-14`).
+///
+/// Modelled here as the **file format** it is; `qqq-serve::ws` builds the
+/// policy from these values and owns the matching. Absent means same-origin
+/// upgrades only, loopback host names only, 1 MiB caps — so a manifest that
+/// never thought about upgrades gets the strict behaviour, not the
+/// permissive one.
+///
+/// A literal `"*"` in `allowed_origins` is the explicit opt-in to any origin.
+/// Unlike `[server.cors]`, where `*` is refused, an upgrade has no passive
+/// enforcement to fall back on — the only question is who decides, and `"*"`
+/// written in the manifest is the operator deciding.
+///
+/// ```
+/// use qqq_cap::manifest::WebsocketPolicy;
+///
+/// let policy = WebsocketPolicy {
+///     allowed_origins: vec!["*".to_owned()],
+///     ..Default::default()
+/// };
+/// assert_eq!(policy.allowed_origins, vec!["*"]);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebsocketPolicy {
+    /// Origins admitted besides the request's own. Empty is same-origin only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
+    /// Extra names the loopback `Host` allow-list admits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_hosts: Vec<String>,
+    /// The largest single frame buffered, in bytes. Absent means 1 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_bytes: Option<u64>,
+    /// The largest reassembled message, in bytes. Absent means 1 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_message_bytes: Option<u64>,
+    /// The process-wide buffered-bytes budget. Absent means 64 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_buffer_bytes: Option<u64>,
 }
 
 /// `[server.cors]` — the cross-origin policy.
@@ -1905,6 +1951,49 @@ allow_origins = ["https://app.example.com"]
             assert!(
                 err.to_string().contains("allow_origins"),
                 "{origins}: {err}"
+            );
+        }
+    }
+
+    /// A `[server.websocket]` table parses, and its values survive.
+    ///
+    /// `F-14`: the policy the server enforces must be the policy the manifest
+    /// states — including the `"*"` opt-in, which `[server.cors]` refuses and
+    /// this table admits deliberately.
+    #[test]
+    fn a_websocket_table_parses_with_its_values() {
+        let src = format!(
+            "{MINIMAL}\n[server.websocket]\n\
+             allowed_origins = [\"https://app.example.com\", \"*\"]\n\
+             allowed_hosts = [\"devbox.local\"]\n\
+             max_frame_bytes = 262144\n"
+        );
+        let m = Manifest::parse(&src).expect("a websocket table must parse");
+        let ws = m.server.websocket.expect("websocket");
+        assert_eq!(ws.allowed_origins, vec!["https://app.example.com", "*"]);
+        assert_eq!(ws.allowed_hosts, vec!["devbox.local"]);
+        assert_eq!(ws.max_frame_bytes, Some(262_144));
+    }
+
+    /// Malformed websocket values are refused at parse time, by name.
+    #[test]
+    fn malformed_websocket_values_are_refused() {
+        for (stanza, needle) in [
+            ("allowed_origins = [\"null\"]", "null"),
+            ("allowed_origins = [\"https://*.example.com\"]", "wildcard"),
+            (
+                "allowed_origins = [\"https://app.example.com/path\"]",
+                "not a URL",
+            ),
+            ("allowed_origins = [\"app.example.com\"]", "scheme"),
+            ("allowed_hosts = [\"\"]", "allowed_hosts"),
+            ("max_frame_bytes = 0", "max_frame_bytes"),
+        ] {
+            let src = format!("{MINIMAL}\n[server.websocket]\n{stanza}\n");
+            let err = Manifest::parse(&src).expect_err(&format!("`{stanza}` must be refused"));
+            assert!(
+                err.to_string().contains(needle),
+                "`{stanza}` must name `{needle}`: {err}"
             );
         }
     }

@@ -76,6 +76,87 @@ pub use crate::manifest::METHODS;
 // The section
 // ---------------------------------------------------------------------------
 
+/// Check a `[server.websocket]` table (`F-14`).
+///
+/// Origins admit the literal `"*"` (the explicit any-origin opt-in, which
+/// `[server.cors]` refuses) and otherwise must be `scheme://host[:port]`
+/// shapes — the runtime parses them strictly, so a value that cannot parse
+/// would be dead configuration. A zero cap refuses everything, like a zero
+/// connection ceiling, and is refused for the same reason. Absolute ceilings
+/// are enforced where the numbers live (`qqq-serve`), not here.
+fn validate_websocket(ws: &crate::manifest::WebsocketPolicy) -> Result<(), ManifestError> {
+    for origin in &ws.allowed_origins {
+        let value = origin.trim();
+        if value == "*" {
+            continue;
+        }
+        if value.contains('*') {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_origins".to_owned(),
+                reason: format!(
+                    "`{value}` is a wildcard host, which V1 refuses; list each origin \
+                     in full, because a partial matcher is a substring matcher and \
+                     that is the classic WebSocket bypass"
+                ),
+            });
+        }
+        if value.eq_ignore_ascii_case("null") {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_origins".to_owned(),
+                reason: "`null` is sent by sandboxed iframes and `file://` pages: \
+                         admitting it grants exactly the callers least able to be trusted"
+                    .to_owned(),
+            });
+        }
+        let Some((scheme, rest)) = value.split_once("://") else {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_origins".to_owned(),
+                reason: format!(
+                    "`{value}` is not `scheme://host[:port]`; the upgrade check \
+                     compares origins exactly, so this entry could never match"
+                ),
+            });
+        };
+        if scheme.is_empty() || rest.is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_origins".to_owned(),
+                reason: format!("`{value}` has no scheme or no host"),
+            });
+        }
+        if rest.contains('/') || rest.contains('?') || rest.contains('#') {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_origins".to_owned(),
+                reason: format!(
+                    "`{value}` carries a path, query or fragment; an origin is not a URL"
+                ),
+            });
+        }
+    }
+    for host in &ws.allowed_hosts {
+        if host.trim().is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_hosts".to_owned(),
+                reason: "an empty host admits nothing and documents nothing; remove it".to_owned(),
+            });
+        }
+    }
+    for (name, cap) in [
+        ("max_frame_bytes", ws.max_frame_bytes),
+        ("max_message_bytes", ws.max_message_bytes),
+        ("max_total_buffer_bytes", ws.max_total_buffer_bytes),
+    ] {
+        if cap == Some(0) {
+            return Err(ManifestError::InvalidField {
+                field: format!("server.websocket.{name}"),
+                reason: "a zero cap refuses every WebSocket payload: every message \
+                         would close with 1009 and nothing would say why"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Check the `[server.cors]` table.
 ///
 /// # Why a `*` is refused here *and* in `qqq-serve::cors`
@@ -87,9 +168,9 @@ pub use crate::manifest::METHODS;
 /// the file an auditor reads, so the answer must be available without starting a
 /// listener.
 ///
-/// The two messages differ in audience: this one names the field path in `qqq.toml`
-/// and shows the fix, because the reader is editing a file; that one states the
-/// security consequence, because the reader is writing code.
+/// The two messages differ in audience: the manifest error names the field path in
+/// `qqq.toml` and shows the fix, because the reader is editing a file; the runtime
+/// error states the security consequence, because the reader is writing code.
 fn validate_cors(cors: &Cors) -> Result<(), ManifestError> {
     if cors.allow_origins.iter().any(|o| o.trim() == "*") {
         return Err(ManifestError::InvalidField {
@@ -116,8 +197,7 @@ fn validate_cors(cors: &Cors) -> Result<(), ManifestError> {
 }
 
 impl Server {
-    /// Check the section for the mistakes a manifest author actually makes.
-    ///
+    /// Check the section for the mistakes a manifest author actually makes.    ///
     /// # Errors
     ///
     /// Returns the first problem found, naming the field, the reason and the fix —
@@ -159,6 +239,10 @@ impl Server {
                     field: "server.limits".to_owned(),
                     reason,
                 })?;
+        }
+
+        if let Some(ws) = &self.websocket {
+            validate_websocket(ws)?;
         }
 
         Ok(())
@@ -286,7 +370,10 @@ impl Server {
     /// diff, which is why it is worth the extra predicate.
     #[must_use]
     pub fn is_empty_unconfigured(&self) -> bool {
-        self.routes.is_empty() && self.default_auth == AuthMode::Deny && self.cors.is_none()
+        self.routes.is_empty()
+            && self.default_auth == AuthMode::Deny
+            && self.cors.is_none()
+            && self.websocket.is_none()
     }
 
     /// How many routes are declared.
@@ -400,6 +487,7 @@ mod tests {
             default_auth: AuthMode::Deny,
             cors: None,
             limits: None,
+            websocket: None,
         };
         let open_routes = s.unauthenticated_routes();
         assert_eq!(open_routes.len(), 1);
@@ -758,6 +846,7 @@ allow_origins = ["https://app.example.com"]
                     },
                 )]),
             }),
+            websocket: None,
         };
         let text = toml::to_string(&s).expect("serializes");
         let back: Server = toml::from_str(&text).expect("parses");

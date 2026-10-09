@@ -123,7 +123,8 @@ fn attempt_serve_with(sandbox: &Sandbox, manifest: &str, extra: &[&str], count: 
     while served < count && Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = s.set_read_timeout(Some(READ_DEADLINE));
-            let _ = s.write_all(b"GET /orders HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let _ = s
+                .write_all(b"GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             let mut buf = String::new();
             let _ = s.read_to_string(&mut buf);
             // **An empty read is a failure in itself, asserted here once rather than in each

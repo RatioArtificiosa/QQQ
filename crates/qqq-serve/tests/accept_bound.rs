@@ -208,7 +208,7 @@ async fn a_refused_connection_still_honours_the_accept_bound() {
     let mut held = TcpStream::connect(server.addr)
         .await
         .expect("connect the first connection");
-    held.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+    held.write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
         .await
         .expect("write on the first connection");
     held.flush().await.expect("flush");
@@ -222,7 +222,7 @@ async fn a_refused_connection_still_honours_the_accept_bound() {
         .expect("connect the second connection");
     let mut refusal = refusal;
     refusal
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .expect("write on the second connection");
     refusal.flush().await.expect("flush");
@@ -262,7 +262,7 @@ async fn a_globally_refused_connection_still_honours_the_accept_bound() {
             .await
             .expect("connect a refused connection");
         refused
-            .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .await
             .expect("write on a refused connection");
         refused.flush().await.expect("flush");

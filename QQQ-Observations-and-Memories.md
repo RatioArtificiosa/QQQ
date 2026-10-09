@@ -36556,4 +36556,47 @@ limit bind first after the request budget resets — so the test now pins
 count *and* a window; asserting one half proves nothing about the rate.
 → `crates/qqq-serve/src/limits.rs`.
 
+## §O-592 — A whole message in one frame skips the accumulation path: the single-frame fast path bypassed the message cap
+
+`F-14` red caught it: `Assembler::push` checked the cap on the first
+*fragment* and on *continuations* but never on a `fin` frame that completes
+immediately — so any message fitting in one frame sailed past the limit the
+fragments obey. The fast path exists to skip accumulation work, and the cap
+check rode along with the skipped work. The fix checks the cap before the
+`fin` branch too, and the red test (1 KiB cap, 1025-byte single frame →
+1009) pins the path that was missing. Generalisable rule: when a limit is
+enforced inside the slow path, the fast path needs its own check stated
+separately — "no accumulation needed" must never imply "no validation
+needed". → `crates/qqq-serve/src/ws_message.rs`.
+
+## §O-593 — Test filler becomes load-bearing the day a check lands: `Host: x` broke 76 requests at once
+
+`F-14`'s loopback `Host` allow-list turned every `Host: x` filler in the
+socket suites into a 421 — 76 requests across 15 files, including the F-09
+200k lock-step driver, which would have failed its entire load with refused
+requests rather than served ones. The migration (filler → `127.0.0.1`) is
+mechanical, but the catch is not: a filler value is a claim that the field
+does not matter, and a new enforcement check is exactly what makes it
+matter. The parser unit tests keep `Host: x` deliberately — the allow-list
+lives in the serve path, not the parser, so parser fixtures still prove
+parsing and nothing else. Generalisable rule: when adding request-path
+enforcement, grep the test tree for filler in the enforced field first —
+the suite will go red in dozens of places that have nothing to do with the
+change. → `crates/qqq-serve/tests/`, `crates/qqq-run/tests/`.
+
+## §O-594 — Three review dispositions on F-14: a glued docblock, an overclaim, and a string-matched loopback
+
+The `F-14` review left three minors. (1) Taken: an edit dance glued the
+`[server.websocket]` doc block above `validate_cors` — a misplaced comment
+claiming the wrong function, removed and the CORS contract restated
+concisely. (2) Taken in prose: the changelog called a missing `Origin`
+proof of a non-browser client; it is accepted, not diagnosed — reworded to
+what the server does. (3) Taken with a red test: `is_loopback` matched
+three strings, missing the rest of 127.0.0.0/8, case variants, and mapped
+`::ffff:127.x` — parsed via `to_canonical` instead, so the whole loopback
+range is recognised and nothing else is. Generalisable rule: an address
+check written as string equality is a bypass waiting for the second
+spelling. → `crates/qqq-cap/src/server.rs`, `CHANGELOG.md`,
+`crates/qqq-io/src/listener.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

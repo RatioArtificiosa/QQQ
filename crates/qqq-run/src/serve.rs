@@ -622,6 +622,11 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // The cross-origin policy, or `None` when `[server.cors]` is absent.
     config.cors = build_cors(server)?;
 
+    // The WebSocket policy. Always built, never optional on this path: absent
+    // `[server.websocket]` means same-origin-only with 1 MiB caps, which is a
+    // policy, not an absence.
+    config.ws = build_ws(server)?;
+
     // Metrics, always on for the production command.
     //
     // No manifest switch exists for this, and inventing one would be a configuration
@@ -701,6 +706,99 @@ fn build_cors(server: &qqq_cap::manifest::Server) -> Result<Option<qqq_serve::co
     }
 
     Ok(Some(cors))
+}
+
+/// Build the WebSocket policy from `[server.websocket]` (`F-14`).
+///
+/// Origins come from the websocket table when it names any, else from the
+/// CORS table when that names any, else same-origin only. One list feeds
+/// both enforcements: an origin the operator trusted for reads is trusted
+/// for upgrades, so the two policies cannot disagree about who is
+/// trustworthy — only the defaults differ (CORS absent means no headers,
+/// upgrades absent-`Origin` means a non-browser client).
+///
+/// # Errors
+///
+/// `QQQ-2002` when an origin does not parse, when two cascade sources would
+/// collide, or when a cap exceeds its absolute ceiling. Caps of zero were
+/// already refused at parse time; ceilings live with the numbers, so they
+/// fail here, at startup, naming the field.
+fn build_ws(server: &qqq_cap::manifest::Server) -> Result<qqq_serve::ws::WsConfig> {
+    use qqq_serve::ws::{WsConfig, WsLimits, WsOriginPolicy};
+
+    let declared = server.websocket.as_ref();
+    let origins: &[String] = match declared {
+        Some(w) if !w.allowed_origins.is_empty() => &w.allowed_origins,
+        _ => match server.cors.as_ref() {
+            Some(c) if !c.allow_origins.is_empty() => &c.allow_origins,
+            _ => &[],
+        },
+    };
+    let origins = WsOriginPolicy::from_manifest(origins).map_err(|e| {
+        Error::new(
+            ErrorCode::ManifestSchemaViolation,
+            format!("`[server.websocket] allowed_origins` is not usable: {e}"),
+        )
+        .with_remediation(
+            "name each origin exactly as `scheme://host[:port]`, or `\"*\"` to \
+             admit every origin explicitly",
+        )
+    })?;
+
+    let defaults = WsLimits::default();
+    let frame = declared
+        .and_then(|w| w.max_frame_bytes)
+        .unwrap_or(defaults.max_frame_bytes);
+    let message = declared
+        .and_then(|w| w.max_message_bytes)
+        .map(|m| {
+            usize::try_from(m).map_err(|_| {
+                Error::new(
+                    ErrorCode::ManifestSchemaViolation,
+                    format!(
+                        "`[server.websocket] max_message_bytes` is {m}, which does not fit \
+                         this target"
+                    ),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(defaults.max_message_bytes);
+    let total = declared
+        .and_then(|w| w.max_total_buffer_bytes)
+        .unwrap_or(defaults.max_total_buffer_bytes);
+    for (name, value, ceiling) in [
+        ("max_frame_bytes", frame, qqq_serve::ws::FRAME_LIMIT_CEILING),
+        (
+            "max_message_bytes",
+            message as u64,
+            qqq_serve::ws::MESSAGE_LIMIT_CEILING as u64,
+        ),
+        (
+            "max_total_buffer_bytes",
+            total,
+            qqq_serve::ws::TOTAL_BUFFER_CEILING,
+        ),
+    ] {
+        if value > ceiling {
+            return Err(Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!(
+                    "`[server.websocket] {name}` is {value}, past the absolute ceiling \
+                     {ceiling}: lower it or raise it deliberately against that number"
+                ),
+            ));
+        }
+    }
+    let limits = WsLimits::new(frame, message, total);
+
+    Ok(WsConfig {
+        origins,
+        extra_hosts: declared
+            .map(|w| w.allowed_hosts.clone())
+            .unwrap_or_default(),
+        limits,
+    })
 }
 
 /// A server that is ready to bind.
@@ -1092,6 +1190,84 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// A `[server]` section parsed the way a manifest provides it.
+    fn manifest_server(toml: &str) -> qqq_cap::manifest::Server {
+        let m = qqq_cap::manifest::Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[server]\n\
+             routes = [{{ path = \"/\", methods = [\"GET\"], handler = \"root\" }}]\n{toml}\n"
+        ))
+        .expect("test manifests parse");
+        m.server
+    }
+
+    /// Absent `[server.websocket]` is a policy, not an absence: same-origin
+    /// only, loopback names only, 1 MiB caps.
+    #[test]
+    fn websocket_defaults_are_strict() {
+        let ws = build_ws(&manifest_server("")).expect("defaults build");
+        assert!(!ws.origins.allows_any());
+        assert!(ws.origins.allowed().is_empty());
+        assert!(ws.extra_hosts.is_empty());
+        assert_eq!(ws.limits.max_frame_bytes, 1024 * 1024);
+        assert_eq!(ws.limits.max_message_bytes, 1024 * 1024);
+        assert_eq!(ws.limits.max_total_buffer_bytes, 64 * 1024 * 1024);
+    }
+
+    /// A `[server.websocket]` table is honored field for field.
+    #[test]
+    fn a_websocket_table_is_honored() {
+        let ws = build_ws(&manifest_server(
+            "[server.websocket]\n\
+             allowed_origins = [\"https://app.example.com\", \"*\"]\n\
+             allowed_hosts = [\"devbox.local\"]\n\
+             max_frame_bytes = 262144\n",
+        ))
+        .expect("a websocket table builds");
+        assert!(ws.origins.allows_any(), "the explicit `*` opts in");
+        assert_eq!(ws.origins.allowed().len(), 1);
+        assert_eq!(ws.extra_hosts, vec!["devbox.local"]);
+        assert_eq!(ws.limits.max_frame_bytes, 262_144);
+        assert_eq!(
+            ws.limits.max_message_bytes,
+            1024 * 1024,
+            "absent caps keep their defaults"
+        );
+    }
+
+    /// Without its own table, upgrades inherit the CORS origins.
+    ///
+    /// One list feeds both enforcements: an origin trusted for reads is
+    /// trusted for upgrades, so the two policies cannot disagree about who
+    /// is trustworthy.
+    #[test]
+    fn websocket_inherits_cors_origins() {
+        let ws = build_ws(&manifest_server(
+            "[server.cors]\nallow_origins = [\"https://app.example.com\"]\n",
+        ))
+        .expect("cors inheritance builds");
+        assert_eq!(ws.origins.allowed().len(), 1);
+        assert!(
+            ws.origins
+                .allowed()
+                .iter()
+                .any(|o| o.as_str() == "https://app.example.com"),
+            "the CORS origin reaches the upgrade policy"
+        );
+    }
+
+    /// A cap past its absolute ceiling fails at startup, naming the field.
+    #[test]
+    fn websocket_caps_past_the_ceiling_are_refused() {
+        let err = build_ws(&manifest_server(
+            "[server.websocket]\nmax_frame_bytes = 17825792\n",
+        ))
+        .expect_err("17 MiB past the 16 MiB ceiling must be refused");
+        assert!(
+            format!("{err}").contains("max_frame_bytes"),
+            "the refusal must name the field: {err}"
+        );
     }
 
     #[test]

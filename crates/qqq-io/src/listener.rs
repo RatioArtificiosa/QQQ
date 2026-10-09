@@ -169,6 +169,36 @@ impl ListenAddr {
         self.host == "0.0.0.0" || self.host == "::" || self.host == "[::]"
     }
 
+    /// Whether this binds a loopback interface.
+    ///
+    /// `127.0.0.1`, `localhost` and `::1` are reachable only from this
+    /// machine — which is exactly what makes DNS rebinding against them
+    /// dangerous, and why the server applies its `Host` allow-list here
+    /// (`F-14`) and nowhere else.
+    ///
+    /// ```
+    /// use qqq_io::listener::ListenAddr;
+    ///
+    /// assert!(ListenAddr::parse("127.0.0.1:3000").expect("parses").is_loopback());
+    /// assert!(!ListenAddr::parse("0.0.0.0:80").expect("parses").is_loopback());
+    /// ```
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        if self.host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        // Parsed, not string-matched: the whole 127.0.0.0/8 is loopback, and
+        // so is `::ffff:127.x` once canonicalised — a prefix check for
+        // "127." would miss the mapped form and invite its own bypass.
+        let Ok(ip) = self.host.parse::<std::net::IpAddr>() else {
+            return false;
+        };
+        match ip.to_canonical() {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        }
+    }
+
     /// Resolve to socket addresses.
     ///
     /// # Errors
@@ -579,6 +609,30 @@ mod tests {
     fn localhost_is_accepted() {
         let a = ListenAddr::parse("localhost:3000").expect("must parse");
         assert_eq!(a.host(), "localhost");
+    }
+
+    /// Loopback binds are recognised, and anything else is not.
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for s in [
+            "127.0.0.1:80",
+            "127.0.0.2:80",
+            "localhost:80",
+            "LOCALHOST:80",
+            "[::1]:80",
+            "[::ffff:127.0.0.1]:80",
+        ] {
+            assert!(
+                ListenAddr::parse(s).expect("must parse").is_loopback(),
+                "{s} binds loopback"
+            );
+        }
+        for s in ["0.0.0.0:80", "[::]:80", "192.0.2.7:80", "[2001:db8::1]:80"] {
+            assert!(
+                !ListenAddr::parse(s).expect("must parse").is_loopback(),
+                "{s} does not bind loopback"
+            );
+        }
     }
 
     /// **Hostnames are refused.** Binding to `example.com` would bind to

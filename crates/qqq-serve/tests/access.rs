@@ -141,7 +141,7 @@ impl Server {
     /// failed, with five empty status lines.
     async fn status_of(&self, target: &str) -> u16 {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
-        let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        let req = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
         stream.write_all(req.as_bytes()).await.expect("write");
         stream.flush().await.expect("flush");
 

@@ -4,6 +4,14 @@
 
 ### Security
 
+- **serve**: WebSocket upgrades check `Origin` (same-origin by default,
+  requests without an `Origin` header are accepted, mismatch refused 403
+  pre-upgrade, `*` an explicit opt-in sharing the CORS origin type), loopback listeners
+  refuse foreign `Host` values with 421 on every route (DNS-rebinding
+  defence), and buffer caps default to 1 MiB frames / 1 MiB messages under
+  a 64 MiB process-wide budget — configurable to the previous 16 MiB /
+  64 MiB absolute ceilings, with over-cap closing 1009. (`F-14`)
+
 - **serve**: tenants are keyed by IP prefix (`TenantKey`: exact IPv4, /64
   IPv6 with canonical mapped addresses) instead of the textual address, so
   rotating addresses inside one IPv6 /64 no longer buys fresh limits; the

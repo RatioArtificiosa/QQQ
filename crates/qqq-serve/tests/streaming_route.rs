@@ -131,7 +131,7 @@ impl Server {
     /// incrementally rather than waiting for EOF.
     async fn open(&self, target: &str) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
-        let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n");
+        let req = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
         stream
             .write_all(req.as_bytes())
             .await
@@ -160,7 +160,7 @@ impl Server {
     async fn open_chunked(&self, target: &str, chunks: &[&[u8]]) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
         let head = format!(
-            "GET {target} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).await.expect("write head");
         for chunk in chunks {
@@ -189,7 +189,7 @@ impl Server {
     async fn open_chunked_truncated(&self, target: &str) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
         let head = format!(
-            "GET {target} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).await.expect("write head");
         stream
@@ -204,7 +204,7 @@ impl Server {
     async fn open_with_body(&self, target: &str, body: &[u8]) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
         let head = format!(
-            "GET {target} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         stream.write_all(head.as_bytes()).await.expect("write head");
@@ -221,7 +221,9 @@ impl Server {
     /// involved, because a blocking read never completes rather than completing slowly.
     async fn open_declaring(&self, target: &str, declared: u64) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
-        let req = format!("GET {target} HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n\r\n");
+        let req = format!(
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {declared}\r\n\r\n"
+        );
         stream
             .write_all(req.as_bytes())
             .await
@@ -651,7 +653,7 @@ async fn a_declared_body_over_the_cap_to_a_streaming_route_is_rejected_with_413(
 
     let got = server
         .request_raw(
-            "GET /events HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
         )
         .await;
 
@@ -794,7 +796,7 @@ async fn a_chunked_body_past_the_drain_cap_is_still_refused_promptly() {
     // the handler and the connection, which are the contract.
     let mut client = TcpStream::connect(server.addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
         .await
         .expect("write head");
     for piece in body.chunks(8192) {
@@ -851,7 +853,7 @@ async fn a_body_handler_receives_the_servers_tenant_name() {
 
     let got = server
         .request_raw(
-            "GET /events HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
         )
         .await;
     assert!(got.contains("200 OK"), "the stub must answer: {got:?}");

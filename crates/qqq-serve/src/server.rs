@@ -62,6 +62,7 @@ use crate::http1::{self, ParseError, RequestHead, Version};
 use crate::limits::{GlobalBucket, GlobalBudget};
 use crate::response::{self, Response};
 use crate::route::RouteTable;
+use crate::ws::{loopback_host_allowed, upgrade_origin_allowed};
 use qqq_host::tenant::{tenant_key, tenant_label, TenantKey};
 
 /// How the server behaves.
@@ -154,6 +155,13 @@ pub struct ServerConfig {
     /// `qqq_serve::auth::AuthPolicy::decide` is fail-closed for a route it was not told
     /// about. See that module for why the missing-entry case refuses.
     pub auth: Option<Arc<crate::auth::AuthPolicy>>,
+    /// The WebSocket policy: origins, loopback host names, buffer caps (`F-14`).
+    ///
+    /// Default denies cross-origin upgrades and foreign `Host` values on
+    /// loopback listeners, with 1 MiB caps. An embedder that serves browsers
+    /// from named origins configures them here; the manifest path builds this
+    /// from `[server.websocket]` (or inherits the CORS origins).
+    pub ws: crate::ws::WsConfig,
     /// Stop accepting after this many connections, or `None` to run until shutdown.
     ///
     /// # Why this is a server setting and not a test harness
@@ -199,6 +207,9 @@ impl ServerConfig {
             // here would make every socket test carry a policy it never asked for. The
             // manifest-driven path installs one; see `ServerConfig::auth`.
             auth: None,
+            // Same-origin only, loopback names only, 1 MiB caps. The manifest
+            // path replaces this; see `ServerConfig::ws`.
+            ws: crate::ws::WsConfig::default(),
             // Unbounded by default: a production server runs until it is told to stop, and a
             // default bound would be a number this crate invented that silently stopped
             // serving. `qqqai serve --accept-limit` sets it.
@@ -616,6 +627,12 @@ struct Shared {
     tenant_labels: Arc<crate::metrics::TenantLabels>,
     /// Where records go.
     logger: Arc<Logger>,
+    /// The WebSocket policy every connection enforces (`F-14`).
+    ws: crate::ws::WsConfig,
+    /// Whether the listener is loopback, hence under the `Host` allow-list.
+    loopback_only: bool,
+    /// The process-wide WebSocket buffer budget, in bytes.
+    ws_buffer: Arc<tokio::sync::Semaphore>,
 }
 
 /// Build the shared state once, so every connection task clones one `Arc`
@@ -653,6 +670,15 @@ fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
     // clone: the logger is one configuration every connection reads, and a copy
     // per connection would be a value that could drift from the others.
     let logger = Arc::new(logger);
+    // The process-wide WebSocket buffer budget (`F-14`): one semaphore for
+    // every connection, so `connections × message size` cannot exceed the
+    // configured total. Permits are bytes; the default is 64 MiB. Saturating
+    // rather than `as`: the configured value is at most the 1 GiB ceiling,
+    // which fits every target, and a conversion that silently truncated
+    // would shrink the budget it means to enforce.
+    let ws_buffer = Arc::new(tokio::sync::Semaphore::new(
+        usize::try_from(config.ws.limits.max_total_buffer_bytes).unwrap_or(usize::MAX),
+    ));
     Shared {
         cors,
         metrics,
@@ -664,6 +690,9 @@ fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
         auth,
         tenant_labels,
         logger,
+        ws: config.ws.clone(),
+        loopback_only: config.addr.is_loopback(),
+        ws_buffer,
     }
 }
 
@@ -830,6 +859,9 @@ pub async fn serve(
                     sampler: shared.sampler,
                     limits: shared.limits.as_ref(),
                     global_requests: shared.global_requests.as_ref(),
+                    ws: &shared.ws,
+                    loopback_only: shared.loopback_only,
+                    ws_buffer: &shared.ws_buffer,
                     tenant_labels: &shared.tenant_labels,
                 };
                 let served = serve_connection(
@@ -1354,6 +1386,29 @@ async fn serve_ws_route(
         return Served::HandlerClosed;
     }
 
+    // --- Origin, before the upgrade (`F-14`) --------------------------------
+    //
+    // Browsers do not apply the same-origin policy to WebSockets, so the
+    // server checks `Origin` itself. Refused with 403 and no body detail,
+    // before the handshake runs: past this point the connection speaks
+    // frames, and a refusal must not arrive framed.
+    if !upgrade_origin_allowed(
+        &ctx.ws.origins,
+        head.header("origin"),
+        head.header("host").unwrap_or(""),
+    ) {
+        if stream
+            .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await
+            .is_err()
+            || stream.flush().await.is_err()
+        {
+            return Served::ClientClosed;
+        }
+        let _ = stream.shutdown().await;
+        return Served::Refused;
+    }
+
     let ws_ctx = crate::ws_conn::WsContext {
         peer: ctx.id.peer,
         tenant,
@@ -1365,6 +1420,8 @@ async fn serve_ws_route(
         // WebSocket read blocks forever and nothing else can end it.
         shutdown: ctx.shutdown,
         idle_timeout: ctx.idle_timeout,
+        limits: ctx.ws.limits,
+        buffer: std::sync::Arc::clone(ctx.ws_buffer),
     };
     let outcome =
         crate::ws_conn::serve_websocket(stream, head, handler, None, leftover, &ws_ctx).await;
@@ -1840,6 +1897,15 @@ pub struct ConnectionContext<'a> {
     /// Borrowed like `limits`: one bucket shared by every connection is what
     /// makes the budget **process-wide** rather than per connection.
     pub global_requests: Option<&'a Arc<GlobalBucket>>,
+    /// The WebSocket policy: origins, loopback host names, buffer caps.
+    ///
+    /// Borrowed: one policy shared by every connection is what keeps two
+    /// connections from disagreeing about which origins may upgrade.
+    pub ws: &'a crate::ws::WsConfig,
+    /// Whether this listener is loopback, hence under the `Host` allow-list.
+    pub loopback_only: bool,
+    /// The process-wide WebSocket buffer budget.
+    pub ws_buffer: &'a Arc<tokio::sync::Semaphore>,
     /// The bounded set of tenant labels that may appear in a metric.
     ///
     /// # Why this is not optional even when metrics are off
@@ -2386,6 +2452,23 @@ async fn refuse_before_reading(
     ctx: &ConnectionContext<'_>,
     span_seq: &mut u64,
 ) -> Option<Served> {
+    // --- Loopback `Host` allow-list (`F-14`) --------------------------------
+    //
+    // First, before routing and before any policy: DNS rebinding points
+    // attacker names at loopback listeners, and the `Host` header is the only
+    // thing distinguishing the attacker's name from the loopback names. Any
+    // other `Host` is refused on every route with 421 (misdirected), not
+    // routed, limited, or authenticated — answering it any other way would
+    // let a rebinding attack reach the guest. Non-loopback listeners skip
+    // this: their names are the operator's, not the loopback set's.
+    if ctx.loopback_only {
+        let host = head.header("host").unwrap_or("");
+        if !loopback_host_allowed(host, &ctx.ws.extra_hosts) {
+            *span_seq += 1;
+            return Some(refuse_host(stream, head, path, tenant, ctx, *span_seq).await);
+        }
+    }
+
     // --- Process-wide admission budget -------------------------------------
     //
     // First, before any per-tenant state: rotation is the attack this answers,
@@ -2548,6 +2631,33 @@ async fn refuse_global(
         "the server is at its process-wide admission budget; retry shortly",
     );
     response.set_header("retry-after", "1");
+
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let bytes = response::write_response(&response, head.version, false, is_head(head));
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    Served::Refused
+}
+
+/// Refuse a request whose `Host` is not a loopback name (`F-14`).
+///
+/// 421 with no body detail: the request was directed at a name this listener
+/// does not serve, and saying more (which names are served, why this one is
+/// not) teaches a rebinding attacker exactly what to try next.
+async fn refuse_host(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    tenant: &str,
+    ctx: &ConnectionContext<'_>,
+    span: u64,
+) -> Served {
+    let response = crate::response::Response::text(421, "misdirected request");
 
     emit_record(
         ctx.logger,
@@ -3193,6 +3303,43 @@ mod tests {
         // And the mapped form is the same tenant, not a second one.
         let mapped: SocketAddr = "[::ffff:203.0.113.7]:54321".parse().unwrap();
         assert_eq!(tenant_of(mapped), tenant_of(peer));
+    }
+
+    /// **A loopback listener serves only its own names (`F-14`).**
+    ///
+    /// DNS rebinding points `evil.example` at 127.0.0.1; the `Host` header is
+    /// what distinguishes the attacker's name from the loopback names. Any
+    /// other `Host` on a loopback listener is refused on every route.
+    #[test]
+    fn f14_loopback_listener_rejects_foreign_host_header() {
+        for good in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(
+                loopback_host_allowed(good, &[]),
+                "{good} is a loopback name"
+            );
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:8080",
+            "127.0.0.1.evil.example",
+            "x",
+        ] {
+            assert!(
+                !loopback_host_allowed(bad, &[]),
+                "{bad} must not reach any route"
+            );
+        }
+        assert!(
+            loopback_host_allowed("devbox.local:8080", &["devbox.local".to_owned()]),
+            "configured names extend the allow-list"
+        );
     }
 
     #[test]

@@ -191,7 +191,7 @@ async fn a_per_tenant_entry_keyed_by_the_peer_address_is_applied() {
     // 100 bytes is under the fallback and over the per-tenant cap, so the answer says
     // which one the server chose.
     let got = server
-        .request("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+        .request("POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
         .await;
 
     assert!(
@@ -224,7 +224,7 @@ async fn a_per_tenant_entry_for_another_address_is_not_applied() {
     // reads it. Declaring without sending would test the read timeout instead.
     let body = "a".repeat(100);
     let raw = format!(
-        "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{body}"
+        "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{body}"
     );
     let got = server.request(&raw).await;
 
@@ -246,7 +246,7 @@ async fn a_body_over_the_cap_is_refused_with_413() {
 
     let got = server
         .request(
-            "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+            "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
         )
         .await;
 
@@ -267,7 +267,7 @@ async fn a_body_at_the_cap_is_served() {
 
     let at = server
         .request(
-            "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
         )
         .await;
     assert!(
@@ -277,7 +277,7 @@ async fn a_body_at_the_cap_is_served() {
 
     let over = server
         .request(
-            "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\nConnection: close\r\n\r\nhello!",
+            "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 6\r\nConnection: close\r\n\r\nhello!",
         )
         .await;
     assert!(over.contains("413"), "one over must be refused: {over}");
@@ -302,7 +302,7 @@ async fn no_limiter_means_no_cap() {
     }
     let got = server
         .request(&format!(
-            "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n{body}"
+            "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n{body}"
         ))
         .await;
     assert!(
@@ -326,7 +326,7 @@ async fn a_rate_limit_refuses_with_429() {
 
     for i in 0..2 {
         let ok = server
-            .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .await;
         assert!(
             ok.contains("200 OK"),
@@ -335,7 +335,7 @@ async fn a_rate_limit_refuses_with_429() {
     }
 
     let refused = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         refused.contains("429"),
@@ -356,7 +356,7 @@ async fn the_allowance_spans_connections() {
     // Three connections, each its own socket.
     for i in 0..3 {
         let ok = server
-            .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .await;
         assert!(
             ok.contains("200 OK"),
@@ -366,7 +366,7 @@ async fn the_allowance_spans_connections() {
 
     // A fourth, on yet another socket, must be refused.
     let refused = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         refused.contains("429"),
@@ -389,10 +389,10 @@ async fn a_refusal_is_recorded() {
     let server = Server::start(Some(Limits::with_rate(1, Duration::from_secs(60)))).await;
 
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
 
     // The refused connection is reported as `Refused`, and it is not a success.
@@ -451,7 +451,7 @@ async fn a_per_tenant_connection_ceiling_is_enforced() {
     let mut held: Vec<TcpStream> = Vec::new();
     for _ in 0..CEILING {
         let mut c = TcpStream::connect(server.addr).await.expect("held connect");
-        c.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        c.write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
             .await
             .expect("write");
         c.flush().await.expect("flush");
@@ -466,7 +466,7 @@ async fn a_per_tenant_connection_ceiling_is_enforced() {
 
     // The ceiling is now full, so this connection must be refused by the ledger.
     let refused = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         refused.starts_with("HTTP/1.1 503") && refused.contains("content-length: 0"),
@@ -495,7 +495,7 @@ async fn a_connection_under_the_ceiling_is_served() {
 
     // One held connection, so the ceiling has room for one more.
     let mut c = TcpStream::connect(server.addr).await.expect("held connect");
-    c.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+    c.write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
         .await
         .expect("write");
     c.flush().await.expect("flush");
@@ -504,7 +504,7 @@ async fn a_connection_under_the_ceiling_is_served() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let under_ceiling = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         under_ceiling.starts_with("HTTP/1.1 200"),
@@ -540,7 +540,7 @@ async fn f13_global_budget_refuses_with_503_and_retry_after() {
 
     for i in 0..2 {
         let got = server
-            .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .await;
         assert!(
             got.starts_with("HTTP/1.1 200"),
@@ -549,7 +549,7 @@ async fn f13_global_budget_refuses_with_503_and_retry_after() {
     }
 
     let shed = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         shed.starts_with("HTTP/1.1 503"),

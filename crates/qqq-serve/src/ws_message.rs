@@ -77,23 +77,37 @@ pub enum Progress {
     Control(Frame),
 }
 
-/// The largest message this assembler will accumulate.
+/// The largest message this assembler accumulates by default (`F-14`).
 ///
-/// Larger than [`crate::ws_frame::MAX_FRAME_BYTES`] because a message may be many frames,
+/// 1 MiB: `N` connections can no longer each buffer 64 MiB. Configurable per
+/// server up to [`MESSAGE_BYTES_CEILING`] — see [`crate::ws::WsLimits`].
+///
+/// Larger than the frame default because a message may be many frames,
 /// and smaller than any plausible memory ceiling because an unauthenticated peer chooses
 /// how many fragments to send. The check is on the **running total**, which is the part the
 /// frame layer cannot see: each frame is under its own cap and a thousand of them are not.
-pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// The absolute ceiling no configuration may exceed: the pre-`F-14` default.
+///
+/// ```
+/// use qqq_serve::ws_message::{MAX_MESSAGE_BYTES, MESSAGE_BYTES_CEILING};
+///
+/// assert!(MAX_MESSAGE_BYTES <= MESSAGE_BYTES_CEILING);
+/// ```
+pub const MESSAGE_BYTES_CEILING: usize = 64 * 1024 * 1024;
 
 /// Assembles frames into messages.
 ///
 /// One per connection. Holding the state is the point: whether a `Continuation` is legal
 /// and whether a `Text` may arrive both depend on what came before, and a value that
 /// forgot would have to be told.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Assembler {
     /// The message being accumulated, if any.
     in_progress: Option<InProgress>,
+    /// This connection's message cap, in bytes.
+    limit: usize,
 }
 
 #[derive(Debug)]
@@ -105,11 +119,44 @@ struct InProgress {
     payload: Vec<u8>,
 }
 
+impl Default for Assembler {
+    /// The default cap. A default assembler must be usable, and a zero cap
+    /// would refuse every message — so this is [`Assembler::new`], not a
+    /// zeroed struct.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Assembler {
-    /// A new assembler with no message in progress.
+    /// A new assembler with no message in progress, under the default cap.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            in_progress: None,
+            limit: MAX_MESSAGE_BYTES,
+        }
+    }
+
+    /// A new assembler with an explicit per-connection cap.
+    ///
+    /// Every configured cap is at most [`MESSAGE_BYTES_CEILING`] (see
+    /// [`WsLimits`](crate::ws::WsLimits)); a larger cap would let one
+    /// connection hold what the default denies to all of them together.
+    ///
+    /// ```
+    /// use qqq_serve::ws_message::Assembler;
+    ///
+    /// let mut a = Assembler::with_limit(4);
+    /// assert_eq!(a.buffered(), 0);
+    /// ```
+    #[must_use]
+    pub fn with_limit(limit: usize) -> Self {
+        debug_assert!(limit <= MESSAGE_BYTES_CEILING);
+        Self {
+            in_progress: None,
+            limit,
+        }
     }
 
     /// Whether a message is partly accumulated.
@@ -132,9 +179,10 @@ impl Assembler {
     /// in progress, or a data frame arrives while a message is — both are §5.4 violations
     /// that only the arrival *sequence* can reveal.
     ///
-    /// [`FrameError::Truncated`] when the accumulated total would exceed
-    /// [`MAX_MESSAGE_BYTES`]. Checked **before** extending, so a peer cannot make the
-    /// assembler allocate its way out of memory by sending many fragments.
+    /// [`FrameError::TooLarge`] when the accumulated total would exceed this
+    /// connection's cap (close code 1009). Checked **before** extending, so a
+    /// peer cannot make the assembler allocate its way out of memory by
+    /// sending many fragments.
     pub fn push(&mut self, frame: Frame) -> Result<Progress, FrameError> {
         // Control frames pass through and leave any message in progress **untouched**.
         // §5.4 allows them to interleave, so a ping is not a restart.
@@ -154,9 +202,17 @@ impl Assembler {
                     });
                 }
                 if frame.fin {
-                    // A single-frame message: no accumulation needed, but the **text
-                    // check still runs**, because §8.1 applies to every text message and
-                    // not only to fragmented ones.
+                    // A single-frame message: no accumulation needed, but the
+                    // cap still applies — without this a whole message in one
+                    // frame would bypass the limit the fragments obey.
+                    if frame.payload.len() > self.limit {
+                        return Err(FrameError::TooLarge {
+                            limit: self.limit as u64,
+                            got: frame.payload.len() as u64,
+                        });
+                    }
+                    // The **text check still runs**, because §8.1 applies to
+                    // every text message and not only to fragmented ones.
                     let message = Message {
                         kind: frame.opcode,
                         payload: frame.payload,
@@ -167,10 +223,10 @@ impl Assembler {
                     return Ok(Progress::Complete(message));
                 }
                 // The first fragment of a fragmented message.
-                if frame.payload.len() > MAX_MESSAGE_BYTES {
-                    return Err(FrameError::Truncated {
-                        needed: frame.payload.len(),
-                        got: 0,
+                if frame.payload.len() > self.limit {
+                    return Err(FrameError::TooLarge {
+                        limit: self.limit as u64,
+                        got: frame.payload.len() as u64,
                     });
                 }
                 self.in_progress = Some(InProgress {
@@ -194,13 +250,13 @@ impl Assembler {
                     .payload
                     .len()
                     .saturating_add(frame.payload.len());
-                if total > MAX_MESSAGE_BYTES {
+                if total > self.limit {
                     // The message is abandoned rather than left half-built. A caller that
                     // recovers must not be able to continue assembling a message that was
                     // already refused, or it would accept a payload it had rejected.
-                    return Err(FrameError::Truncated {
-                        needed: total,
-                        got: in_progress.payload.len(),
+                    return Err(FrameError::TooLarge {
+                        limit: self.limit as u64,
+                        got: total as u64,
                     });
                 }
 
@@ -508,7 +564,11 @@ mod tests {
         let err = a
             .push(cont(true, &vec![b'b'; half]))
             .expect_err("the total must be bounded");
-        assert!(matches!(err, FrameError::Truncated { .. }), "{err:?}");
+        assert!(
+            matches!(err, FrameError::TooLarge { .. }),
+            "over the cap is too-large, not a short read: {err:?}"
+        );
+        assert_eq!(err.close_code(), 1009);
         assert!(
             !a.is_accumulating(),
             "the abandoned message must not be resumable -- a caller that continued would \
@@ -523,7 +583,11 @@ mod tests {
         let err = a
             .push(text(false, &vec![b'a'; MAX_MESSAGE_BYTES + 1]))
             .expect_err("must refuse");
-        assert!(matches!(err, FrameError::Truncated { .. }), "{err:?}");
+        assert!(
+            matches!(err, FrameError::TooLarge { .. }),
+            "over the cap is too-large, not a short read: {err:?}"
+        );
+        assert_eq!(err.close_code(), 1009);
         assert!(!a.is_accumulating());
     }
 
@@ -596,6 +660,22 @@ mod tests {
             Progress::Complete(m) => assert_eq!(m.as_text().expect("utf8"), ""),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// **A message over the configured cap closes with 1009, not 1002.**
+    ///
+    /// `F-14`: the default cap is 1 MiB, and exceeding it is "message too
+    /// big" (§7.4.1, code 1009) — not a protocol error (1002), which tells
+    /// the client its framing was wrong and invites a retry that fails the
+    /// same way.
+    #[test]
+    fn f14_message_over_configured_cap_closes_with_1009() {
+        let mut a = Assembler::with_limit(1024);
+        let err = a
+            .push(text(true, &vec![b'a'; 1025]))
+            .expect_err("one byte over the configured cap must be refused");
+        assert_eq!(err.close_code(), 1009, "message too big: {err:?}");
+        assert!(!a.is_accumulating());
     }
 
     /// An empty first fragment followed by content assembles.

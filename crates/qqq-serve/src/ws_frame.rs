@@ -135,21 +135,58 @@ pub enum FrameError {
         /// Why it was refused.
         reason: String,
     },
+    /// A frame or message larger than the configured cap. §7.4.1 code 1009.
+    ///
+    /// Separate from [`FrameError::Truncated`]: a short read is a transport
+    /// condition the caller remedies by reading more, while an over-cap
+    /// frame must close the connection — conflating them would either retry
+    /// a refusal or close a partial read.
+    TooLarge {
+        /// The cap that applied, in bytes.
+        limit: u64,
+        /// The size the peer attempted, in bytes.
+        got: u64,
+    },
 }
 
 impl FrameError {
     /// The close code §7.4.1 requires for this failure.
     ///
     /// `1002` (protocol error) for a malformed frame, `1007` (invalid payload data) for a
-    /// text or close reason that is not UTF-8. The distinction matters to a client: 1002
-    /// means "your framing is wrong", 1007 means "your content is wrong", and a client
-    /// that retries after 1007 with a corrected payload succeeds where it would loop on
-    /// 1002.
+    /// text or close reason that is not UTF-8, `1009` (message too big) for a frame or
+    /// message past the configured cap. The distinction matters to a client: 1002
+    /// means "your framing is wrong", 1007 means "your content is wrong", 1009 means
+    /// "your message is too large" — and a client that retries after 1002 with a
+    /// corrected payload succeeds where it would loop forever on a cap refusal
+    /// misreported as framing.
     #[must_use]
     pub const fn close_code(&self) -> u16 {
         match self {
             Self::InvalidClosePayload { .. } => 1007,
+            Self::TooLarge { .. } => 1009,
             _ => 1002,
+        }
+    }
+
+    /// The bytes a cap refusal charged but never buffered, if any.
+    ///
+    /// Cap refusals ([`FrameError::TooLarge`]) arrive pre-charged against the
+    /// process-wide budget; framing errors never held permits. The caller
+    /// settles the account from this answer rather than re-matching the
+    /// variant, so a future variant cannot silently leak permits.
+    ///
+    /// ```
+    /// use qqq_serve::ws_frame::FrameError;
+    ///
+    /// let err = FrameError::TooLarge { limit: 1024, got: 2048 };
+    /// assert_eq!(err.refused_bytes(), Some(2048));
+    /// assert_eq!(err.close_code(), 1009);
+    /// ```
+    #[must_use]
+    pub const fn refused_bytes(&self) -> Option<u64> {
+        match self {
+            Self::TooLarge { got, .. } => Some(*got),
+            _ => None,
         }
     }
 }
@@ -180,13 +217,21 @@ impl std::fmt::Display for FrameError {
                 write!(f, "unexpected continuation: {expected}")
             }
             Self::InvalidClosePayload { reason } => write!(f, "invalid close payload: {reason}"),
+            Self::TooLarge { limit, got } => write!(
+                f,
+                "the frame is {got} bytes, over this connection's {limit}-byte cap"
+            ),
         }
     }
 }
 
 impl std::error::Error for FrameError {}
 
-/// The largest single frame this crate will buffer.
+/// The largest single frame this connection buffers by default (`F-14`).
+///
+/// 1 MiB: large enough for legitimate messages, small enough that `N`
+/// connections cannot each hold 16 MiB. Configurable per server up to
+/// [`FRAME_BYTES_CEILING`] — see [`crate::ws::WsLimits`].
 ///
 /// A 64-bit length field can claim 2^63 bytes, and `Vec::with_capacity` on such a value
 /// **aborts the process** rather than returning an error — so the ceiling is checked
@@ -195,7 +240,20 @@ impl std::error::Error for FrameError {}
 ///
 /// A caller wanting larger messages streams them across frames, which is what §5.4's
 /// fragmentation exists for.
-pub const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: u64 = 1024 * 1024;
+
+/// The absolute ceiling no configuration may exceed: the pre-`F-14` default.
+///
+/// Kept, not removed: raising a cap past the value the crate previously
+/// enforced by default must be a conscious choice against a named number,
+/// not an unbounded field.
+///
+/// ```
+/// use qqq_serve::ws_frame::{FRAME_BYTES_CEILING, MAX_FRAME_BYTES};
+///
+/// assert!(MAX_FRAME_BYTES <= FRAME_BYTES_CEILING);
+/// ```
+pub const FRAME_BYTES_CEILING: u64 = 16 * 1024 * 1024;
 
 /// A decoded frame.
 ///
@@ -273,6 +331,39 @@ impl Frame {
 /// (§5.1) — see [`FrameError::UnmaskedClientFrame`] for why accepting one is a security
 /// failure and not merely a leniency.
 pub fn decode_server_frame(bytes: &[u8]) -> Result<Option<(Frame, usize)>, FrameError> {
+    decode_server_frame_with_limit(bytes, MAX_FRAME_BYTES)
+}
+
+/// Decode one client frame with an explicit per-connection cap.
+///
+/// `limit` bounds this frame's payload; see [`WsLimits`](crate::ws::WsLimits)
+/// for where it comes from. Anything over it is [`FrameError::TooLarge`]
+/// (close code 1009), never a short read.
+///
+/// # Errors
+///
+/// [`FrameError::TooLarge`] when the declared payload exceeds `limit`;
+/// any other [`FrameError`] exactly as [`decode_server_frame`] reports it.
+///
+/// ```
+/// use qqq_serve::ws_frame::decode_server_frame_with_limit;
+///
+/// // A masked empty ping (0x89, 0x80) decodes under any limit.
+/// let raw = [0x89u8, 0x80, 0x00, 0x00, 0x00, 0x00];
+/// let (frame, used) = decode_server_frame_with_limit(&raw, 1024)
+///     .expect("decodes")
+///     .expect("complete");
+/// assert_eq!(used, raw.len());
+/// assert!(frame.payload.is_empty());
+/// ```
+pub fn decode_server_frame_with_limit(
+    bytes: &[u8],
+    limit: u64,
+) -> Result<Option<(Frame, usize)>, FrameError> {
+    // Every configured limit is at most `FRAME_BYTES_CEILING` (see
+    // [`WsLimits`](crate::ws::WsLimits)); a larger limit would break the
+    // `as usize` conversion below on 32-bit targets.
+    debug_assert!(limit <= FRAME_BYTES_CEILING);
     if bytes.len() < 2 {
         return Ok(None);
     }
@@ -347,18 +438,14 @@ pub fn decode_server_frame(bytes: &[u8]) -> Result<Option<(Frame, usize)>, Frame
         n => u64::from(n),
     };
 
-    if payload_len > MAX_FRAME_BYTES {
-        // `needed` is only for the message, so a saturating conversion is right: the
-        // value is already known to exceed the ceiling, and the exact figure a 32-bit
-        // target cannot represent is not worth failing over.
-        #[allow(clippy::cast_possible_truncation)]
-        let needed = payload_len.min(usize::MAX as u64) as usize;
-        return Err(FrameError::Truncated {
-            needed,
-            got: bytes.len(),
+    if payload_len > limit {
+        return Err(FrameError::TooLarge {
+            limit,
+            got: payload_len,
         });
     }
-    // Safe on every target: `payload_len` is at most `MAX_FRAME` (16 MiB), which fits a
+    // Safe on every target: `payload_len` is at most `limit`, and every
+    // configured limit is at most `FRAME_BYTES_CEILING` (16 MiB), which fits a
     // 32-bit `usize` with room to spare. The `u64` field is why it is written this way —
     // the wire format is 64-bit and the in-memory one need not be.
     #[allow(clippy::cast_possible_truncation)]

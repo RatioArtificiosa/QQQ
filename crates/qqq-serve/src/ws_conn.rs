@@ -204,6 +204,13 @@ pub struct WsContext<'a> {
     /// `None` means no idle limit, which is what a WebSocket expecting heartbeats wants:
     /// the peer sends a ping on its own schedule and the server answers it.
     pub idle_timeout: Option<std::time::Duration>,
+    /// This connection's buffer caps: one frame, one message.
+    pub limits: crate::ws::WsLimits,
+    /// The process-wide buffered-bytes budget, in bytes.
+    ///
+    /// Shared by every connection: `connections × message size` cannot exceed
+    /// the configured total no matter how many peers fragment at once.
+    pub buffer: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 /// Perform the handshake and, if it succeeds, run the connection until either side closes.
@@ -261,6 +268,66 @@ pub async fn serve_websocket(
     outcome
 }
 
+/// One connection's share of the process-wide buffer budget.
+///
+/// Permits are exact bytes, acquired per data frame and released when the
+/// frame's message completes or is refused. The `Drop` backstop returns any
+/// remainder when the connection ends — stranded fragments from a dead
+/// assembly, or a path that returned early — so every permit returns exactly
+/// once: `release` subtracts what it returns, and `Drop` returns only what
+/// is left.
+struct BufferBudget {
+    /// The shared budget.
+    sem: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Bytes currently charged to this connection.
+    held: usize,
+}
+
+impl BufferBudget {
+    /// Hold nothing yet against a shared budget.
+    fn new(sem: std::sync::Arc<tokio::sync::Semaphore>) -> Self {
+        Self { sem, held: 0 }
+    }
+
+    /// Try to charge `n` bytes. `false` sheds rather than waits: waiting on
+    /// a shared budget is head-of-line blocking across connections.
+    fn acquire(&mut self, n: usize) -> bool {
+        let Ok(permit) = self
+            .sem
+            .try_acquire_many(u32::try_from(n).unwrap_or(u32::MAX))
+        else {
+            return false;
+        };
+        // Held, not dropped: the permit lives as `held` bytes until released.
+        std::mem::forget(permit);
+        self.held = self.held.saturating_add(n);
+        true
+    }
+
+    /// Return `n` bytes, clamping to what is held: releasing more than held
+    /// would mint permits the budget never issued.
+    fn release(&mut self, n: usize) {
+        let n = n.min(self.held);
+        self.held -= n;
+        self.sem.add_permits(n);
+    }
+}
+
+impl Drop for BufferBudget {
+    fn drop(&mut self) {
+        self.sem.add_permits(self.held);
+    }
+}
+
+/// A byte count as `usize`.
+///
+/// All values here are bounded by the configured caps (at most 64 MiB), so
+/// the fallback is unreachable by construction — it names zero rather than
+/// failing, because every call site already enforces the cap first.
+fn u64_to_usize(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(0)
+}
+
 /// The read/assemble/dispatch loop.
 async fn run_frames(
     stream: &mut TcpStream,
@@ -268,20 +335,39 @@ async fn run_frames(
     prefix: Vec<u8>,
     ctx: &WsContext<'_>,
 ) -> WsOutcome {
-    let mut assembler = Assembler::new();
+    let mut assembler = Assembler::with_limit(ctx.limits.max_message_bytes);
     // Seeded with the leftover bytes rather than empty: see `serve_websocket`.
     let mut buf: Vec<u8> = prefix;
+    // The process-wide budget this connection currently holds. Acquired per
+    // data frame, released when its message completes or is refused, and any
+    // remainder returned when the connection ends — permits are exact, so
+    // every path must settle its account exactly once.
+    let mut budget = BufferBudget::new(std::sync::Arc::clone(&ctx.buffer));
 
     loop {
         // Decode as many whole frames as the buffer holds. A single read can carry
         // several, and decoding only one per read would leave the rest until the next
         // syscall — which for a peer that has stopped sending never comes.
         loop {
-            match ws_frame::decode_server_frame(&buf) {
+            match ws_frame::decode_server_frame_with_limit(&buf, ctx.limits.max_frame_bytes) {
                 Ok(Some((frame, used))) => {
                     buf.drain(..used);
+                    if !frame.opcode.is_control() && !budget.acquire(frame.payload.len()) {
+                        // The process is full: shed this connection's bytes with
+                        // 1009 rather than waiting, because waiting on a shared
+                        // budget is head-of-line blocking across connections —
+                        // and a slow consumer could hold it deliberately.
+                        let mut sender = WsSender { stream };
+                        sender
+                            .send_frame(&Frame::close(
+                                1009,
+                                "the server's WebSocket buffer budget is exhausted",
+                            ))
+                            .await;
+                        return WsOutcome::ProtocolError;
+                    }
                     if let Some(outcome) =
-                        dispatch_frame(stream, handler, &mut assembler, frame).await
+                        dispatch_frame(stream, handler, &mut assembler, frame, &mut budget).await
                     {
                         return outcome;
                     }
@@ -369,11 +455,17 @@ async fn close_with(stream: &mut TcpStream, code: u16, reason: &str) {
 }
 
 /// Handle one decoded frame, returning an outcome when the connection should end.
+///
+/// `budget` holds this connection's share of the process-wide buffer budget:
+/// data frames arrived pre-charged by the caller, and this settles the
+/// account — released when the message completes or is refused, so permits
+/// track buffered bytes rather than leaking per frame.
 async fn dispatch_frame(
     stream: &mut TcpStream,
     handler: &dyn WebSocketHandler,
     assembler: &mut Assembler,
     frame: Frame,
+    budget: &mut BufferBudget,
 ) -> Option<WsOutcome> {
     if frame.opcode == Opcode::Ping {
         // §5.5.3: a pong carries **the same payload** as the ping. An empty pong is a
@@ -398,17 +490,36 @@ async fn dispatch_frame(
         return Some(WsOutcome::Closed);
     }
 
+    // Data frames arrive pre-charged against the process budget (see
+    // `run_frames`); control frames bypass it, so only these settle an
+    // account below. Captured before `push` consumes the frame.
+    let data_len = (!frame.opcode.is_control()).then_some(frame.payload.len());
     match assembler.push(frame) {
         // A control frame passed through (`Ping`/`Close` were handled above, so this is a
         // `Pong` from the peer) and a fragment was accumulated: in both cases the
-        // connection continues and nothing is dispatched.
+        // connection continues and nothing is dispatched. A pong was never
+        // charged (control frames bypass the budget), so there is nothing to
+        // settle here; an accumulated fragment stays charged until its message
+        // completes.
         Ok(Progress::Control(_) | Progress::Accumulating) => None,
         Ok(Progress::Complete(message)) => {
+            budget.release(message.payload.len());
             let mut sender = WsSender { stream };
             handler.on_message(&message, &mut sender).await;
             None
         }
         Err(e) => {
+            // The refused bytes return too: a refusal that kept its permits
+            // would let a peer drain the process budget with messages the
+            // server never buffered. A cap refusal returns the whole attempted
+            // total (it covers every fragment acquired so far); any other
+            // error returns just this frame, and stranded fragments from a
+            // dead assembly return with the connection (see `BufferBudget`).
+            match (e.refused_bytes(), data_len) {
+                (Some(total), _) => budget.release(u64_to_usize(total)),
+                (None, Some(n)) => budget.release(n),
+                (None, None) => {}
+            }
             let mut sender = WsSender { stream };
             sender
                 .send_frame(&Frame::close(e.close_code(), &e.to_string()))

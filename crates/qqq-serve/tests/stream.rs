@@ -146,7 +146,7 @@ async fn a_streaming_writer_produces_a_valid_chunked_response() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");
@@ -199,7 +199,7 @@ async fn the_head_reaches_the_client_before_any_body() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");
@@ -244,7 +244,7 @@ async fn an_empty_write_does_not_end_the_body() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");
@@ -280,7 +280,7 @@ async fn an_http10_stream_writes_no_chunk_terminator() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.0\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");
@@ -333,7 +333,7 @@ async fn a_client_disconnect_is_an_error_the_handler_can_see() {
     {
         let mut client = TcpStream::connect(addr).await.expect("connect");
         client
-            .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await
             .expect("request");
         let mut buf = [0u8; 64];
@@ -374,7 +374,7 @@ async fn finish_is_idempotent() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");

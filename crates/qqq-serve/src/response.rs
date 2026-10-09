@@ -83,6 +83,7 @@ pub const fn reason_phrase(status: u16) -> &'static str {
         413 => "Content Too Large",
         414 => "URI Too Long",
         415 => "Unsupported Media Type",
+        421 => "Misdirected Request",
         422 => "Unprocessable Content",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -1486,7 +1487,7 @@ mod tests {
     fn every_status_qqq_emits_has_a_real_phrase() {
         for status in [
             200u16, 201, 204, 301, 302, 304, 307, 308, 400, 401, 403, 404, 405, 408, 409, 413, 415,
-            422, 429, 431, 500, 501, 502, 503, 504, 505,
+            421, 422, 429, 431, 500, 501, 502, 503, 504, 505,
         ] {
             let phrase = reason_phrase(status);
             assert_ne!(phrase, "Unknown", "{status} needs a real reason phrase");

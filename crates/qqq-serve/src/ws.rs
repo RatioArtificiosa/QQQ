@@ -38,10 +38,13 @@
 //! chose — there is no secret to collide against. See the workspace manifest, where the
 //! dependency's presence is explained for the same reason.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use base64::Engine as _;
 use sha1::{Digest as _, Sha1};
+
+use crate::cors::Origin;
 
 /// The GUID RFC 6455 §4.2.2 fixes for the accept computation.
 ///
@@ -245,8 +248,406 @@ impl Handshake {
     }
 }
 
-/// Validate a `Sec-WebSocket-Key`.
+/// Who may open a WebSocket, and who may name a loopback host (`F-14`).
 ///
+/// Browsers do not apply the same-origin policy to `WebSockets`: any page can
+/// open a socket to the server and the browser attaches ambient credentials.
+/// The server must therefore check `Origin` itself, before the upgrade —
+/// `Cross-Site WebSocket Hijacking` is not stopped by anything else.
+///
+/// The default is **same-origin only**: an absent `Origin` (a non-browser
+/// client) upgrades, a present one must match the request's `Host` or the
+/// explicit allow-list. A literal `*` in the allow-list is the explicit
+/// opt-in to any origin, and it must be written to be meant.
+///
+/// The allow-list reuses [`Origin`]: the same validated, canonicalized type
+/// the CORS policy matches against, so the two policies cannot disagree
+/// about what an origin *is* — only about which ones are admitted.
+///
+/// ```
+/// use qqq_serve::ws::WsOriginPolicy;
+///
+/// let policy = WsOriginPolicy::default();
+/// assert!(policy.allowed().is_empty(), "same-origin only by default");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WsOriginPolicy {
+    /// Origins admitted besides the request's own. Empty is same-origin only.
+    allowed: BTreeSet<Origin>,
+    /// A literal `*` was configured: any origin upgrades.
+    allow_any: bool,
+}
+
+impl WsOriginPolicy {
+    /// Same-origin only: no explicit origins, no wildcard.
+    ///
+    /// ```
+    /// use qqq_serve::ws::WsOriginPolicy;
+    ///
+    /// let policy = WsOriginPolicy::same_origin();
+    /// assert!(!policy.allows_any());
+    /// assert!(policy.allowed().is_empty());
+    /// ```
+    #[must_use]
+    pub fn same_origin() -> Self {
+        Self::default()
+    }
+
+    /// Build from explicit origin strings plus the wildcard.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::cors::CorsError::BadOrigin`] for a value that is neither a
+    /// valid origin nor the literal `*`. A wildcard smuggled in as
+    /// `*.example.com` is not a suffix rule — suffix matching is the bypass
+    /// `cors.rs` documents — so only the exact string `*` opts in.
+    ///
+    /// ```
+    /// use qqq_serve::ws::WsOriginPolicy;
+    ///
+    /// let policy = WsOriginPolicy::from_manifest(&[
+    ///     "https://app.example.com".to_owned(),
+    ///     "*".to_owned(),
+    /// ])
+    /// .expect("valid origins");
+    /// assert!(policy.allows_any());
+    /// assert_eq!(policy.allowed().len(), 1);
+    /// assert!(WsOriginPolicy::from_manifest(&["https://*.example.com".to_owned()]).is_err());
+    /// ```
+    pub fn from_manifest(values: &[String]) -> Result<Self, crate::cors::CorsError> {
+        use crate::cors::CorsError;
+        let mut allowed = BTreeSet::new();
+        let mut allow_any = false;
+        for v in values {
+            if v.trim() == "*" {
+                allow_any = true;
+            } else {
+                if v.contains('*') {
+                    return Err(CorsError::BadOrigin(format!(
+                        "`{v}` is a wildcard host, which V1 refuses: list each origin \
+                         in full, because a partial matcher is a substring matcher"
+                    )));
+                }
+                allowed.insert(Origin::parse(v)?);
+            }
+        }
+        Ok(Self { allowed, allow_any })
+    }
+
+    /// Whether any origin upgrades without further checks.
+    ///
+    /// ```
+    /// use qqq_serve::ws::WsOriginPolicy;
+    ///
+    /// assert!(!WsOriginPolicy::default().allows_any());
+    /// ```
+    #[must_use]
+    pub fn allows_any(&self) -> bool {
+        self.allow_any
+    }
+
+    /// The explicitly allowed origins, for reporting.
+    ///
+    /// ```
+    /// use qqq_serve::ws::WsOriginPolicy;
+    ///
+    /// let policy = WsOriginPolicy::from_manifest(&["https://a.example".to_owned()])
+    ///     .expect("valid");
+    /// assert_eq!(policy.allowed().len(), 1);
+    /// ```
+    #[must_use]
+    pub fn allowed(&self) -> &BTreeSet<Origin> {
+        &self.allowed
+    }
+}
+
+/// Whether an upgrade with this `Origin` may proceed to the handshake.
+///
+/// `origin` is the raw header value (`None` when absent), `host` the raw
+/// `Host` header. Absent upgrades (non-browser clients); present must be
+/// same-origin, explicitly allowed, or covered by the `*` opt-in. Anything
+/// else — including a malformed `Origin`, which is refused rather than
+/// passed through — does not upgrade.
+///
+/// ```
+/// use qqq_serve::ws::{upgrade_origin_allowed, WsOriginPolicy};
+///
+/// let policy = WsOriginPolicy::default();
+/// assert!(upgrade_origin_allowed(&policy, None, "127.0.0.1:8080"));
+/// assert!(upgrade_origin_allowed(
+///     &policy,
+///     Some("http://127.0.0.1:8080"),
+///     "127.0.0.1:8080"
+/// ));
+/// assert!(!upgrade_origin_allowed(
+///     &policy,
+///     Some("https://evil.example"),
+///     "127.0.0.1:8080"
+/// ));
+/// ```
+#[must_use]
+pub fn upgrade_origin_allowed(policy: &WsOriginPolicy, origin: Option<&str>, host: &str) -> bool {
+    let Some(raw) = origin else {
+        return true;
+    };
+    if policy.allow_any {
+        return true;
+    }
+    let Ok(origin) = Origin::parse(raw) else {
+        return false;
+    };
+    if policy.allowed.contains(&origin) {
+        return true;
+    }
+    same_origin(&origin, host)
+}
+
+/// Whether a parsed `Origin` is the request's own authority.
+///
+/// Compared normalised: lowercase scheme and host (which [`Origin::parse`]
+/// already guarantees), default ports elided on both sides. Never a
+/// substring match — `http://evil-127.0.0.1:8080` is not `127.0.0.1:8080`
+/// no matter how it reads.
+///
+/// The request's scheme is deliberately not compared: the `Host` header
+/// carries none. Resolving both ports against the *origin's* scheme default
+/// is fail-closed in every realizable case — an `https` page cannot reach a
+/// plaintext socket (the browser blocks mixed content before sending), so a
+/// downgrade mismatch refuses rather than admits.
+fn same_origin(origin: &Origin, host: &str) -> bool {
+    let Some((origin_scheme, origin_authority)) = origin.as_str().split_once("://") else {
+        return false;
+    };
+    let (origin_host, origin_port) = split_authority(origin_authority);
+    let (host_host, host_port) = split_authority(host.trim().to_ascii_lowercase().as_str());
+    if origin_host != host_host {
+        return false;
+    }
+    let default = default_port(origin_scheme);
+    let origin_port = origin_port.filter(|p| !p.is_empty());
+    let host_port = host_port.filter(|p| !p.is_empty());
+    origin_port.as_deref().or(default) == host_port.as_deref().or(default)
+}
+
+/// Split `host[:port]` (IPv6 in brackets) into lowercase host and port.
+///
+/// The `Origin` side arrives pre-lowercased from [`Origin::parse`]; the
+/// `Host` side is lowercased here, so both halves meet normalised.
+fn split_authority(authority: &str) -> (String, Option<String>) {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        // `[::1]` or `[::1]:8080`.
+        match stripped.split_once("]:") {
+            Some((host, port)) => (format!("[{host}]"), Some(port.to_owned())),
+            None => (authority.to_ascii_lowercase(), None),
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        // A second colon means an unbracketed IPv6 literal, which has no port.
+        if host.contains(':') {
+            (authority.to_ascii_lowercase(), None)
+        } else {
+            (host.to_ascii_lowercase(), Some(port.to_owned()))
+        }
+    } else {
+        (authority.to_ascii_lowercase(), None)
+    }
+}
+
+/// The default port for a scheme, when the authority names none.
+fn default_port(scheme: &str) -> Option<&str> {
+    match scheme {
+        "http" | "ws" => Some("80"),
+        "https" | "wss" => Some("443"),
+        _ => None,
+    }
+}
+
+/// Whether this `Host` may reach a loopback listener (`F-14`).
+///
+/// DNS rebinding points attacker names at 127.0.0.1; the `Host` header is
+/// what distinguishes the attacker's name from the loopback names. Only the
+/// loopback names (plus configured extras, with or without ports) pass —
+/// everything else is refused on every route, not only `WebSockets`.
+///
+/// Matching is exact on the lowercased host with an optional `:port`, never
+/// a substring: `127.0.0.1.evil.example` is not `127.0.0.1`.
+///
+/// ```
+/// use qqq_serve::ws::loopback_host_allowed;
+///
+/// assert!(loopback_host_allowed("localhost:3000", &[]));
+/// assert!(loopback_host_allowed("[::1]", &[]));
+/// assert!(!loopback_host_allowed("evil.example", &[]));
+/// assert!(!loopback_host_allowed("127.0.0.1.evil.example", &[]));
+/// ```
+#[must_use]
+pub fn loopback_host_allowed(host: &str, extra: &[String]) -> bool {
+    const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+    let name = host_name(host.trim());
+    LOOPBACK.contains(&name.as_str()) || extra.iter().any(|e| name == host_name(e.trim()))
+}
+
+/// The bare lowercased host without any `:port`.
+///
+/// Both halves — the request's `Host` and each configured extra — meet
+/// stripped, so `devbox.local:8080` matches an extra written with or without
+/// its port. A non-numeric or empty port is not a port at all: the whole
+/// value compares, and fails closed.
+fn host_name(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    // Brackets first: `[::1]:8080` splits on the wrong colon with a naive
+    // `rsplit`.
+    if let Some(stripped) = lower.strip_prefix('[') {
+        match stripped.split_once("]:") {
+            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+                return format!("[{h}]");
+            }
+            _ => return lower,
+        }
+    }
+    lower
+        .rsplit_once(':')
+        .filter(|(h, p)| !h.contains(':') && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        .map_or_else(|| lower.clone(), |(h, _)| h.to_owned())
+}
+
+/// The per-connection WebSocket buffer limits (`F-14`).
+///
+/// Three numbers because three different multiplications threaten the heap:
+/// one frame (`max_frame_bytes`), one reassembled message
+/// (`max_message_bytes`), and all connections' buffered bytes together
+/// (`max_total_buffer_bytes`, enforced by a process-wide semaphore). All
+/// three default small (1 MiB / 1 MiB / 64 MiB) and rise only to their
+/// absolute ceilings — the values the crate enforced before `F-14` — so
+/// raising a cap is a conscious choice against a named number.
+///
+/// ```
+/// use qqq_serve::ws::WsLimits;
+///
+/// let limits = WsLimits::default();
+/// assert_eq!(limits.max_frame_bytes, 1024 * 1024);
+/// assert_eq!(limits.max_message_bytes, 1024 * 1024);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLimits {
+    /// The largest single frame buffered, in bytes.
+    pub max_frame_bytes: u64,
+    /// The largest reassembled message, in bytes.
+    pub max_message_bytes: usize,
+    /// The process-wide buffered-bytes budget, in bytes.
+    pub max_total_buffer_bytes: u64,
+}
+
+/// The absolute ceiling for one frame: the pre-`F-14` default.
+///
+/// ```
+/// use qqq_serve::ws::{FRAME_LIMIT_CEILING, WsLimits};
+///
+/// assert!(WsLimits::default().max_frame_bytes <= FRAME_LIMIT_CEILING);
+/// ```
+pub const FRAME_LIMIT_CEILING: u64 = crate::ws_frame::FRAME_BYTES_CEILING;
+/// The absolute ceiling for one message: the pre-`F-14` default.
+///
+/// ```
+/// use qqq_serve::ws::{MESSAGE_LIMIT_CEILING, WsLimits};
+///
+/// assert!(WsLimits::default().max_message_bytes <= MESSAGE_LIMIT_CEILING);
+/// ```
+pub const MESSAGE_LIMIT_CEILING: usize = crate::ws_message::MESSAGE_BYTES_CEILING;
+/// The absolute ceiling for the process-wide buffer budget.
+///
+/// ```
+/// use qqq_serve::ws::{TOTAL_BUFFER_CEILING, WsLimits};
+///
+/// assert!(WsLimits::default().max_total_buffer_bytes <= TOTAL_BUFFER_CEILING);
+/// ```
+pub const TOTAL_BUFFER_CEILING: u64 = 1024 * 1024 * 1024;
+
+impl Default for WsLimits {
+    /// 1 MiB frames, 1 MiB messages, 64 MiB process-wide.
+    fn default() -> Self {
+        Self {
+            max_frame_bytes: crate::ws_frame::MAX_FRAME_BYTES,
+            max_message_bytes: crate::ws_message::MAX_MESSAGE_BYTES,
+            max_total_buffer_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+impl WsLimits {
+    /// Build explicit limits.
+    ///
+    /// # Panics
+    ///
+    /// If any cap exceeds its absolute ceiling — see the `*_CEILING`
+    /// constants. A cap past the value the crate previously enforced must
+    /// fail at startup where someone is watching, not under load. Like
+    /// [`crate::limits::TenantLimits::new`], construction is the choke point.
+    ///
+    /// ```
+    /// use qqq_serve::ws::WsLimits;
+    ///
+    /// let limits = WsLimits::new(65536, 65536, 1048576);
+    /// assert_eq!(limits.max_frame_bytes, 65536);
+    /// ```
+    #[must_use]
+    pub fn new(
+        max_frame_bytes: u64,
+        max_message_bytes: usize,
+        max_total_buffer_bytes: u64,
+    ) -> Self {
+        assert!(
+            max_frame_bytes <= FRAME_LIMIT_CEILING,
+            "max_frame_bytes {max_frame_bytes} exceeds the absolute ceiling {FRAME_LIMIT_CEILING}"
+        );
+        assert!(
+            max_message_bytes <= MESSAGE_LIMIT_CEILING,
+            "max_message_bytes {max_message_bytes} exceeds the absolute ceiling {MESSAGE_LIMIT_CEILING}"
+        );
+        assert!(
+            max_total_buffer_bytes <= TOTAL_BUFFER_CEILING,
+            "max_total_buffer_bytes {max_total_buffer_bytes} exceeds the absolute ceiling {TOTAL_BUFFER_CEILING}"
+        );
+        Self {
+            max_frame_bytes,
+            max_message_bytes,
+            max_total_buffer_bytes,
+        }
+    }
+}
+
+/// One place for the whole WebSocket policy: origins, hosts, and buffer caps.
+///
+/// A single struct so the three cannot be configured in disagreement — the
+/// origin allow-list, the loopback host names, and the caps travel together
+/// from the manifest to the connection.
+///
+/// ```
+/// use qqq_serve::ws::WsConfig;
+///
+/// let config = WsConfig::default();
+/// assert!(config.extra_hosts.is_empty());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsConfig {
+    /// Who may upgrade besides the request's own origin.
+    pub origins: WsOriginPolicy,
+    /// Extra names the loopback `Host` allow-list admits.
+    pub extra_hosts: Vec<String>,
+    /// The buffer caps.
+    pub limits: WsLimits,
+}
+
+impl Default for WsConfig {
+    /// Same-origin only, loopback names only, 1 MiB caps.
+    fn default() -> Self {
+        Self {
+            origins: WsOriginPolicy::default(),
+            extra_hosts: Vec::new(),
+            limits: WsLimits::default(),
+        }
+    }
+}
+
+/// Validate a `Sec-WebSocket-Key`.///
 /// §4.1 requires 16 bytes, base64-encoded. Checked because the key is the *evidence* the
 /// client is speaking the protocol: a value of the wrong length means either a different
 /// protocol or a broken client, and computing an accept for it would produce a handshake
@@ -417,6 +818,70 @@ mod tests {
             without_guid,
             accept_for("dGhlIHNhbXBsZSBub25jZQ=="),
             "the GUID must be appended, or the accept value is wrong"
+        );
+    }
+
+    // -- origin policy (F-14) ------------------------------------------------
+
+    /// **A cross-origin upgrade is refused: the browser attaches ambient credentials.**
+    ///
+    /// `F-14`: browsers do not apply the same-origin policy to `WebSockets`, so
+    /// any page can open a socket to the server with the user's cookies. The
+    /// server must check `Origin` itself, before the upgrade.
+    #[test]
+    fn f14_cross_origin_upgrade_is_refused() {
+        let policy = WsOriginPolicy::default();
+        assert!(
+            !upgrade_origin_allowed(&policy, Some("https://evil.example"), "127.0.0.1:8080"),
+            "a foreign origin must not upgrade"
+        );
+    }
+
+    /// **Same-origin upgrades pass, compared normalised — never by substring.**
+    ///
+    /// `Origin` is `scheme://host[:port]`, matched against the request's
+    /// `Host` after lowercasing and eliding default ports. Substring matching
+    /// would accept `evil-127.0.0.1` for `127.0.0.1`.
+    #[test]
+    fn f14_same_origin_upgrade_is_allowed() {
+        let policy = WsOriginPolicy::default();
+        assert!(
+            upgrade_origin_allowed(&policy, Some("http://127.0.0.1:8080"), "127.0.0.1:8080"),
+            "the same origin upgrades"
+        );
+        assert!(
+            upgrade_origin_allowed(&policy, Some("HTTP://127.0.0.1:8080"), "127.0.0.1:8080"),
+            "the scheme and host compare case-insensitively"
+        );
+        assert!(
+            upgrade_origin_allowed(&policy, Some("http://127.0.0.1:80"), "127.0.0.1"),
+            "default ports elide on both sides"
+        );
+        assert!(
+            !upgrade_origin_allowed(&policy, Some("http://127.0.0.1:8080"), "127.0.0.1:9090"),
+            "a different port is a different origin"
+        );
+        assert!(
+            !upgrade_origin_allowed(
+                &policy,
+                Some("http://evil-127.0.0.1:8080"),
+                "127.0.0.1:8080"
+            ),
+            "no substring matching, ever"
+        );
+    }
+
+    /// **No `Origin` means a non-browser client, which is allowed.**
+    ///
+    /// Native clients (and the test harness) send no `Origin`. Refusing them
+    /// would break every non-browser WebSocket user to stop a browser-only
+    /// attack.
+    #[test]
+    fn f14_missing_origin_is_allowed_for_non_browser_clients() {
+        let policy = WsOriginPolicy::default();
+        assert!(
+            upgrade_origin_allowed(&policy, None, "127.0.0.1:8080"),
+            "an absent Origin is a non-browser client"
         );
     }
 

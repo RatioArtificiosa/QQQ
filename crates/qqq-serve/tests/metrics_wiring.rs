@@ -154,7 +154,7 @@ async fn a_request_is_recorded_through_serve() {
     assert_eq!(server.metrics.total_requests(), 0, "nothing yet");
 
     let got = server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(got.contains("200 OK"), "{got}");
 
@@ -180,13 +180,13 @@ async fn the_servers_chosen_status_is_recorded() {
     let server = Server::start().await;
 
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     server
-        .request("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .request("POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         .await;
     let missing = server
-        .request("GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /missing HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
     assert!(missing.contains("404"), "{missing}");
 
@@ -226,7 +226,7 @@ async fn each_request_on_a_connection_is_recorded() {
     let mut chunk = [0u8; 4096];
     for _ in 0..3 {
         stream
-            .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await
             .expect("write");
         stream.flush().await.expect("flush");
@@ -255,7 +255,7 @@ async fn body_bytes_are_recorded() {
 
     server
         .request(
-            "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            "POST /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
         )
         .await;
 
@@ -305,7 +305,7 @@ async fn the_peer_ip_is_one_series_key_not_one_per_request() {
     let server = Server::start().await;
 
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
 
     // The key is the peer address, and it is **one** key rather than one per request.
@@ -332,7 +332,7 @@ async fn latency_is_recorded() {
     assert_eq!(server.metrics.latency().count(), 0);
 
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
 
     assert_eq!(server.metrics.latency().count(), 1);
@@ -356,7 +356,7 @@ async fn a_connection_opens_and_closes_once() {
     let server = Server::start().await;
 
     server
-        .request("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
 
     // The close is recorded after the ledger releases, so give the task a moment to finish.
@@ -471,7 +471,7 @@ async fn a_server_with_no_registry_serves_normally() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .expect("write");
     client.flush().await.expect("flush");

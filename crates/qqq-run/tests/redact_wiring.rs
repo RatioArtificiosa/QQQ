@@ -96,7 +96,8 @@ fn request_and_collect(child: Child, port: u16, path: &str) -> (String, bool) {
     while Instant::now() < deadline {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
             connected = true;
-            let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let req =
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             let _ = s.write_all(req.as_bytes());
             let mut buf = String::new();
             let _ = s.read_to_string(&mut buf);

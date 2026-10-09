@@ -330,7 +330,7 @@ fn request(port: u16, raw: &str) -> String {
 fn get(port: u16, path: &str) -> String {
     request(
         port,
-        &format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"),
     )
 }
 
@@ -502,7 +502,7 @@ fn the_manifest_cors_policy_reaches_the_response() {
     let serving = start(&s, "cors-allow", 1);
     let response = request(
         serving.port,
-        "GET /healthz HTTP/1.1\r\nHost: x\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n",
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n",
     );
 
     assert!(
@@ -525,7 +525,7 @@ fn an_origin_outside_the_manifest_list_is_not_granted() {
     let serving = start(&s, "cors-deny", 1);
     let response = request(
         serving.port,
-        "GET /healthz HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n",
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n",
     );
 
     assert!(
@@ -562,7 +562,7 @@ fn the_manifest_body_limit_is_enforced_on_a_real_request() {
     let response = request(
         serving.port,
         &format!(
-            "POST /orders HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -591,7 +591,7 @@ fn a_body_under_the_limit_is_not_refused_by_it() {
     let response = request(
         serving.port,
         &format!(
-            "POST /orders HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -719,7 +719,7 @@ const CONNECTION_CEILING_ONE: &str = "[package]\nname = \"app\"\nversion = \"0.1
 /// connections, so dropping this would release the slot.
 fn hold_open(port: u16) -> TcpStream {
     let mut held = TcpStream::connect(("127.0.0.1", port)).expect("connect the held connection");
-    held.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+    held.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
         .expect("write on the held connection");
     held.flush().expect("flush");
     held.set_read_timeout(Some(Duration::from_secs(10)))
@@ -762,7 +762,7 @@ fn a_manifest_connection_ceiling_is_applied() {
 
     let refused = request(
         serving.port,
-        "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     );
     assert!(
         is_bare_ledger_refusal(&refused),
@@ -791,7 +791,7 @@ fn raising_the_ceiling_lets_a_second_connection_through() {
 
     let second = request(
         serving.port,
-        "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     );
     assert!(
         !is_bare_ledger_refusal(&second),

@@ -134,7 +134,7 @@ impl Drop for Server {
 async fn a_server_with_no_cors_configuration_emits_nothing() {
     let server = Server::start(None).await;
     let got = server
-        .request("GET /orders HTTP/1.1\r\nHost: x\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
+        .request("GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
         .await;
 
     assert!(got.contains("200 OK"), "{got}");
@@ -153,7 +153,7 @@ async fn a_configured_origin_is_granted_and_another_is_not() {
     .await;
 
     let granted = server
-        .request("GET /orders HTTP/1.1\r\nHost: x\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
+        .request("GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         granted.contains("Access-Control-Allow-Origin: https://app.example.com"),
@@ -162,7 +162,7 @@ async fn a_configured_origin_is_granted_and_another_is_not() {
     assert!(granted.contains("Vary: Origin"), "{granted}");
 
     let denied = server
-        .request("GET /orders HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n")
+        .request("GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n")
         .await;
     assert!(
         !denied
@@ -193,7 +193,7 @@ async fn an_error_response_carries_the_grant() {
     .await;
 
     let got = server
-        .request("GET /missing HTTP/1.1\r\nHost: x\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
+        .request("GET /missing HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
         .await;
 
     assert!(got.contains("404"), "{got}");
@@ -212,7 +212,7 @@ async fn a_request_with_no_origin_gets_no_vary() {
     .await;
 
     let got = server
-        .request("GET /orders HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .request("GET /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await;
 
     assert!(got.contains("200 OK"), "{got}");
@@ -242,7 +242,7 @@ async fn a_granted_preflight_never_reaches_the_handler() {
 
     let got = server
         .request(
-            "OPTIONS /orders HTTP/1.1\r\nHost: x\r\n\
+            "OPTIONS /orders HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Origin: https://app.example.com\r\n\
              Access-Control-Request-Method: POST\r\n\
              Access-Control-Request-Headers: content-type\r\n\
@@ -279,7 +279,7 @@ async fn a_preflight_for_a_disallowed_method_is_refused() {
 
     let got = server
         .request(
-            "OPTIONS /orders HTTP/1.1\r\nHost: x\r\n\
+            "OPTIONS /orders HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Origin: https://app.example.com\r\n\
              Access-Control-Request-Method: DELETE\r\n\
              Connection: close\r\n\r\n",
@@ -303,7 +303,7 @@ async fn a_preflight_from_an_unlisted_origin_is_refused() {
 
     let got = server
         .request(
-            "OPTIONS /orders HTTP/1.1\r\nHost: x\r\n\
+            "OPTIONS /orders HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Origin: https://evil.example.com\r\n\
              Access-Control-Request-Method: GET\r\n\
              Connection: close\r\n\r\n",
@@ -330,7 +330,7 @@ async fn an_ordinary_options_reaches_the_handler() {
     let server = Server::start(Some(cors)).await;
 
     let got = server
-        .request("OPTIONS /orders HTTP/1.1\r\nHost: x\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
+        .request("OPTIONS /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n")
         .await;
 
     // No `OPTIONS` route exists, so the router answers 405 with the allowance — the
@@ -359,7 +359,7 @@ async fn a_preflight_for_an_unknown_path_is_still_a_policy_decision() {
 
     let got = server
         .request(
-            "OPTIONS /not-a-route HTTP/1.1\r\nHost: x\r\n\
+            "OPTIONS /not-a-route HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Origin: https://app.example.com\r\n\
              Access-Control-Request-Method: GET\r\n\
              Connection: close\r\n\r\n",

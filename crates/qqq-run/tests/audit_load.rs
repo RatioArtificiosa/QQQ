@@ -267,7 +267,7 @@ fn request_keepalive(port: u16, stream: &mut Option<TcpStream>) -> Option<u16> {
 /// will reuse the connection. `None` on any I/O failure.
 fn request_once(stream: &mut TcpStream) -> Option<(u16, bool)> {
     stream
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
         .ok()?;
     let mut head = Vec::new();
     let mut byte = [0u8; 1];

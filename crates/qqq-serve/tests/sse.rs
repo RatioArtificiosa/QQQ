@@ -362,7 +362,7 @@ async fn a_client_receives_the_head_and_events_incrementally() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
         .expect("request");
     client.flush().await.expect("flush");
@@ -424,7 +424,7 @@ async fn a_client_disconnect_mid_stream_is_an_error_not_a_panic() {
     {
         let mut client = TcpStream::connect(addr).await.expect("connect");
         client
-            .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await
             .expect("request");
         // Read a little, then vanish without terminating the body.

@@ -109,12 +109,33 @@ impl Server {
     async fn connect_ws(&self, key: &str) -> TcpStream {
         let mut stream = TcpStream::connect(self.addr).await.expect("connect");
         let req = format!(
-            "GET /ws HTTP/1.1\r\nHost: x\r\n\
+            "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
              Sec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {key}\r\n\r\n"
         );
+        stream.write_all(req.as_bytes()).await.expect("write");
+        stream.flush().await.expect("flush");
+        stream
+    }
+
+    /// Connect and send an upgrade with an explicit `Host` and optional
+    /// `Origin` (`F-14`): the policy under test reads exactly these two.
+    async fn connect_raw(&self, host: &str, origin: Option<&str>) -> TcpStream {
+        let mut stream = TcpStream::connect(self.addr).await.expect("connect");
+        let mut req = format!(
+            "GET /ws HTTP/1.1\r\nHost: {host}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        );
+        if let Some(o) = origin {
+            use std::fmt::Write as _;
+            write!(req, "Origin: {o}\r\n").expect("writes to a String");
+        }
+        req.push_str("\r\n");
         stream.write_all(req.as_bytes()).await.expect("write");
         stream.flush().await.expect("flush");
         stream
@@ -470,7 +491,7 @@ async fn a_websocket_route_without_an_upgrade_is_not_hijacked() {
 
     let mut client = TcpStream::connect(server.addr).await.expect("connect");
     client
-        .write_all(b"GET /ws HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .expect("write");
     client.flush().await.expect("flush");
@@ -503,7 +524,7 @@ async fn a_frame_coalesced_with_the_handshake_is_not_lost() {
 
     let mut client = TcpStream::connect(server.addr).await.expect("connect");
     let mut request = format!(
-        "GET /ws HTTP/1.1\r\nHost: x\r\n\
+        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Version: 13\r\n\
@@ -645,7 +666,7 @@ async fn a_route_without_a_websocket_handler_uses_the_flat_one() {
 
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client
-        .write_all(b"GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /plain HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .expect("write");
     client.flush().await.expect("flush");
@@ -704,7 +725,7 @@ async fn an_upgrade_with_a_chunked_body_is_rejected_before_the_handshake() {
     // indentation as header whitespace — obs-fold, which the server may refuse
     // with 400 before ever reading Transfer-Encoding. This test must prove the
     // *body* check runs, so the head must be beyond suspicion.
-    let req = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    let req = "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     stream
         .write_all(req.as_bytes())
         .await
@@ -724,5 +745,124 @@ async fn an_upgrade_with_a_chunked_body_is_rejected_before_the_handshake() {
         counting.messages.load(Ordering::SeqCst),
         0,
         "the handler must not see a message from a refused upgrade"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Origin and Host policy (`F-14`)
+// ---------------------------------------------------------------------------
+
+/// **A cross-origin upgrade is refused with 403, before any upgrade.**
+///
+/// `F-14`: the `Host` here is the server's own, so only the `Origin` is
+/// foreign — isolating the origin check from the `Host` allow-list. The
+/// response must carry no upgrade and no body detail.
+#[tokio::test]
+async fn f14_cross_origin_upgrade_is_refused() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let host = server.addr.to_string();
+    let mut client = server
+        .connect_raw(&host, Some("https://evil.example"))
+        .await;
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 403"),
+        "a foreign origin must be refused pre-upgrade:\n{head}"
+    );
+    assert!(!head.contains("101"), "no upgrade on refusal");
+}
+
+/// **A same-origin upgrade completes with 101.**
+#[tokio::test]
+async fn f14_same_origin_upgrade_is_allowed() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let host = server.addr.to_string();
+    let origin = format!("http://{host}");
+    let mut client = server.connect_raw(&host, Some(&origin)).await;
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "the same origin upgrades:\n{head}"
+    );
+}
+
+/// **No `Origin` is a non-browser client, which upgrades with 101.**
+#[tokio::test]
+async fn f14_missing_origin_is_allowed_for_non_browser_clients() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let host = server.addr.to_string();
+    let mut client = server.connect_raw(&host, None).await;
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "a missing Origin is not a browser attack:\n{head}"
+    );
+}
+
+/// **A foreign `Host` on a loopback listener is refused on every route.**
+///
+/// `F-14`: DNS rebinding aims `evil.example` at 127.0.0.1. The upgrade route
+/// answers 421 — and so does an ordinary route, proving the check runs
+/// before routing rather than inside the WebSocket path.
+#[tokio::test]
+async fn f14_loopback_listener_rejects_foreign_host_header() {
+    let server = Server::start(Arc::new(Echo)).await;
+
+    let mut ws = server.connect_raw("evil.example", None).await;
+    let ws_head = read_head(&mut ws).await;
+    assert!(
+        ws_head.starts_with("HTTP/1.1 421"),
+        "a foreign Host must not reach the upgrade path:\n{ws_head}"
+    );
+
+    let mut plain = TcpStream::connect(server.addr).await.expect("connect");
+    plain
+        .write_all(b"GET /nope HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    plain.flush().await.expect("flush");
+    let plain_head = read_head(&mut plain).await;
+    assert!(
+        plain_head.starts_with("HTTP/1.1 421"),
+        "a foreign Host must not reach any route, not only WebSockets:\n{plain_head}"
+    );
+}
+
+/// **A message over the 1 MiB default cap closes with 1009.**
+///
+/// `F-14`: one masked binary frame of 1 MiB + 1 byte under the default caps.
+/// The server must answer with a close frame carrying 1009 (message too big).
+#[tokio::test]
+async fn f14_message_over_configured_cap_closes_with_1009() {
+    let server = Server::start(Arc::new(Echo)).await;
+    let host = server.addr.to_string();
+    let mut client = server.connect_raw(&host, None).await;
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "the upgrade itself must succeed:\n{head}"
+    );
+
+    // One masked binary frame, 1 MiB + 1 byte, 64-bit length form.
+    let payload = vec![0x61u8; 1024 * 1024 + 1];
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let mut frame = vec![0x82u8, 0xFFu8];
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(&mask);
+    for (i, b) in payload.iter().enumerate() {
+        frame.push(b ^ mask[i % 4]);
+    }
+    client.write_all(&frame).await.expect("write frame");
+    client.flush().await.expect("flush");
+
+    let (opcode, body) = read_server_frame(&mut client)
+        .await
+        .expect("the server must answer with a close frame");
+    assert_eq!(opcode, 0x8, "an over-cap message ends in a close frame");
+    assert!(body.len() >= 2, "a close frame carries a code: {body:?}");
+    assert_eq!(
+        u16::from_be_bytes([body[0], body[1]]),
+        1009,
+        "over the cap is 1009, message too big"
     );
 }

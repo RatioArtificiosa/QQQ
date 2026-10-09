@@ -4,6 +4,14 @@
 
 ### Security
 
+- **cap**: serialized `GrantSet` and `Resolution` blobs no longer
+  deserialize back into authority — data cannot construct it. The manifest
+  remains the authorized construction input and overlays only narrow the
+  result. Serialization for `why` and audit output stays; a compile-time
+  guard fails the build if the derive returns; monotonicity sweeps 200
+  deterministic-random overlays and commutativity sweeps 200 overlay
+  pairs. (`F-15`)
+
 - **serve**: WebSocket upgrades check `Origin` (same-origin by default,
   requests without an `Origin` header are accepted, mismatch refused 403
   pre-upgrade, `*` an explicit opt-in sharing the CORS origin type), loopback listeners

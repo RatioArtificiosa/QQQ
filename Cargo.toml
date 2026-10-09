@@ -123,6 +123,9 @@ thiserror = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Compile-time trait guards (`assert_not_impl_any!` for `F-15`). MIT OR
+# Apache-2.0, both in `deny.toml`'s allow list; dev-only, never shipped.
+static_assertions = "1"
 toml = "0.9"
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "time", "io-util", "signal", "macros"] }

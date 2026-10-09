@@ -218,7 +218,18 @@ impl Overlay {
 /// none exists. Provenance is carried in the separate [`Resolution::trace`],
 /// which is where a human or agent looks to understand *how* the authority was
 /// arrived at.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Why `Deserialize` is absent (`F-15`)
+///
+/// Data cannot prove its own authorization. A `GrantSet` built from JSON
+/// would bypass [`GrantSet::from_manifest`] and the narrowing layers — the
+/// private fields do not help, because serde constructs the struct itself.
+/// Only `Serialize` is derived (for `why` output and the audit stream); the
+/// compile-time guard in the test module fails the build if `Deserialize`
+/// is ever re-added. There is deliberately no hand-written "validating"
+/// `Deserialize`: no validation can establish that data was legitimately
+/// authorised.
+#[derive(Debug, Clone, Serialize)]
 pub struct GrantSet {
     capabilities: BTreeSet<Capability>,
     /// Which layers contributed, in application order — for the `why` chain.
@@ -452,7 +463,12 @@ impl WhyNode {
 }
 
 /// The complete resolution result, including the archaeology.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Recorded output serializes (for `why` and the audit stream) but never
+/// deserializes back into authority: `grants` is a [`GrantSet`], and
+/// [`GrantSet`] cannot be built from data (`F-15`). The compile-time guard
+/// in the test module covers this type too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Resolution {
     /// The final, effective grant set.
     pub grants: GrantSet,
@@ -1151,5 +1167,107 @@ monotonic = true
         // The digest is in the error context, so it reaches the audit record.
         let d = denial(Capability::SqlQuery, &r);
         assert!(d.context.iter().any(|(k, _)| k == "grant-digest"));
+    }
+
+    // -- F-15: data cannot prove its own authorization ------------------------
+
+    /// A deterministic PRNG (xorshift64*, fixed seed): property sweeps must
+    /// reproduce exactly on every machine and every run, and an external
+    /// RNG crate would be a dependency for test code.
+    struct Deterministic(u64);
+
+    impl Deterministic {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// A random capability subset as an allow-only overlay.
+    fn random_overlay(rng: &mut Deterministic, layer: Layer, tag: &str) -> Overlay {
+        let all = Capability::all();
+        let caps: Vec<Capability> = all
+            .iter()
+            .copied()
+            .filter(|_| rng.next() & 1 == 0)
+            .collect();
+        Overlay::allow_only(layer, caps, tag)
+    }
+
+    /// **Narrowing is monotone: `restrict(A, B)` grants a subset of `A`.**
+    ///
+    /// `F-15` property (§11.2): 200 deterministic-random overlays against the
+    /// manifest set, each result a subset of what it narrowed — authority
+    /// only ever shrinks, never appears.
+    #[test]
+    fn f15_narrowing_is_monotone() {
+        let base = GrantSet::from_manifest(&manifest());
+        let mut rng = Deterministic(0x00F1_5EED);
+        for i in 0..200 {
+            let overlay = random_overlay(&mut rng, Layer::Organization, "sweep");
+            let narrowed = base.narrow(&overlay);
+            for c in narrowed.capabilities() {
+                assert!(
+                    base.grants(c),
+                    "sweep {i}: narrowed set grants {c:?} the base never had"
+                );
+            }
+            assert!(
+                narrowed.len() <= base.len(),
+                "sweep {i}: narrowing grew the set"
+            );
+        }
+    }
+
+    /// **Overlays commute: order changes history, never authority.**
+    ///
+    /// `F-15` property (§11.2): 200 deterministic-random overlay pairs,
+    /// applied in both orders, grant exactly the same capabilities — so no
+    /// ordering can smuggle authority in. (Equality ignores provenance by
+    /// design, which is what makes this assertable.)
+    #[test]
+    fn f15_overlays_commute() {
+        let base = GrantSet::from_manifest(&manifest());
+        let mut rng = Deterministic(0x00C0_FFEE);
+        for i in 0..200 {
+            let first = random_overlay(&mut rng, Layer::Organization, "first");
+            let second = random_overlay(&mut rng, Layer::Platform, "second");
+            let ab = base.narrow(&first).narrow(&second);
+            let ba = base.narrow(&second).narrow(&first);
+            assert_eq!(
+                ab, ba,
+                "sweep {i}: overlay order changed the granted authority"
+            );
+            for c in ab.capabilities() {
+                assert!(
+                    base.grants(c),
+                    "sweep {i}: commuted set grants {c:?} the base never had"
+                );
+            }
+        }
+    }
+
+    /// **A `GrantSet` cannot be deserialised: data is not authority.**
+    ///
+    /// `F-15`: the derive is removed, and this assertion fails the build if
+    /// anyone re-adds it. There is no validating middle ground — see the
+    /// finding: data cannot prove its own authorization.
+    #[test]
+    fn f15_grant_set_cannot_be_deserialised() {
+        static_assertions::assert_not_impl_any!(GrantSet: serde::de::DeserializeOwned);
+    }
+
+    /// **A recorded `Resolution` cannot be deserialised into authority either.**
+    ///
+    /// `Resolution` carries the effective `GrantSet`; letting recorded output
+    /// parse back into the type the host enforces would be the same hole one
+    /// level up. Serialization (for `why` and audit output) stays.
+    #[test]
+    fn f15_resolution_cannot_be_deserialised() {
+        static_assertions::assert_not_impl_any!(Resolution: serde::de::DeserializeOwned);
     }
 }

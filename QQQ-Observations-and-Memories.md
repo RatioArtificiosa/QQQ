@@ -36599,4 +36599,36 @@ check written as string equality is a bypass waiting for the second
 spelling. → `crates/qqq-cap/src/server.rs`, `CHANGELOG.md`,
 `crates/qqq-io/src/listener.rs`.
 
+## §O-595 — Data constructed authority: a JSON blob deserialized straight into the enforced grant set
+
+`F-15` runtime red: `serde_json::from_value::<GrantSet>` on
+`{"capabilities": ["http_server"], "applied_layers": ["manifest"]}`
+succeeded pre-fix — any code with a JSON document (a lockfile reader, a
+replay loader, a future config path) could mint arbitrary capabilities,
+bypassing `from_manifest` and every narrowing layer, while the private
+fields and the "no `grant()` method" prose stood by. The fix removes
+`Deserialize` from `GrantSet` and from `Resolution` (which carries the
+effective set — the same hole one level up), keeps `Serialize` for `why`
+and audit output, and pins the absence with `assert_not_impl_any!`
+(`static_assertions`, MIT/Apache-2.0, deny-clean, dev-only). No
+`RecordedGrants` type was added: a tree-wide grep finds zero
+deserialization sites for either type, so there is nothing to convert —
+and inventing a non-authority type with no readers would be scope, not
+safety. Monotonicity sweeps 200 deterministic-random overlays and
+commutativity sweeps 200 overlay pairs (fixed-seed xorshift, no new RNG
+dependency). Generalisable rule: a private field is not a closed
+constructor while a derive can build the struct. → `crates/qqq-cap/src/resolve.rs`.
+
+## §O-596 — A red proof must parse to prove anything: dotted names vs the snake_case wire format
+
+The first version of the `F-15` runtime proof fed `{"capabilities":
+["http.server"]}` — the *display* names — and `from_value` correctly
+refused it, so the "proof" passed and proved nothing: a fixture that
+cannot fail (handbook §4). The wire format is snake_case (`http_server`)
+with kebab-case layers, and only the corrected blob deserialized —
+turning the passing proof into the failing one the finding needed.
+Generalisable rule: a red proof earns its name by failing for the reason
+claimed — assert the failure mode, not just the failure, and distrust a
+red that arrives before the fixture is shown to parse. → `crates/qqq-cap/tests/` (temporary proof, since removed).
+
 *End of `QQQ-Observations-and-Memories.md`.*

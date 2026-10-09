@@ -36497,4 +36497,20 @@ new path's definition, not a follow-up — copy the check first, then the
 return. → `crates/qqq-serve/src/server.rs`,
 `crates/qqq-serve/src/metrics.rs`, `crates/qqq-serve/tests/accept_bound.rs`.
 
+## §O-589 — A default that reports is not a gate: the api-examples checker passed locally at 3000 and failed in CI at 2117
+
+`tools/check_api_examples.py` without `--allow` measures against a compiled-in
+3000 and always passes; CI invokes it with `--allow 2117`, the ratchet. The
+local gate ran the bare tool name, certified OK, and all three Rust jobs
+failed the same tree at 2128 outstanding — eleven new public items (the
+`TenantKey` family, `GlobalBudget`/`GlobalBucket` with its methods, the four
+global-refusal metric functions) without compiling doctests. The fix fences
+every new item (thirteen doctests that all run, measured 2128 → 2115) and
+lowers the ci.yml ratchet to match, with the wave's paragraph in the file's
+own convention. Generalisable rule: run a checker exactly as CI invokes it —
+copy the command line from ci.yml, not the tool name — because a reporting
+default and an enforcing flag are different verdicts wearing one filename.
+→ `crates/qqq-host/src/tenant.rs`, `crates/qqq-serve/src/limits.rs`,
+`crates/qqq-serve/src/metrics.rs`, `.github/workflows/ci.yml`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

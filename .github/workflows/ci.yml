@@ -1372,8 +1372,17 @@ jobs:
       # doctests that all run (`ChainKey::from_hex`, `new_ring`,
       # `with_chain_key`) — measured 2109 -> 2117. Same reasoning: the rest
       # is covered by the red-first F-09 tests, not by prose.
+      #
+      # # And why it went DOWN, to 2115
+      #
+      # F-13 fences every new public item with a compiling doctest that runs
+      # (`TenantKey` and its key/label functions, `DEFAULT_IPV6_PREFIX_BITS`,
+      # `GlobalBudget`, `GlobalBucket` with `new`/`admit`/`refused_total`, and
+      # the four global-refusal metric functions) — outstanding measured
+      # 2128 -> 2115 with 13 new compiling fences, all green in the doctest
+      # suites, so the ratchet follows the count down.
       - name: public-API example coverage (DX-015)
-        run: python tools/check_api_examples.py --allow 2117
+        run: python tools/check_api_examples.py --allow 2115
       - name: prove the API-example counters and gate are live
         run: python tools/check_api_examples.py --self-test
 

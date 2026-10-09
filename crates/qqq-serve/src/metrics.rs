@@ -590,11 +590,26 @@ impl HttpMetrics {
     /// The global bucket fires precisely when identity is untrustworthy
     /// (rotation), so attributing the refusal to a tenant would re-introduce
     /// the attacker-chosen cardinality the tenant labels exist to bound.
+    ///
+    /// ```
+    /// use qqq_serve::metrics::HttpMetrics;
+    ///
+    /// let m = HttpMetrics::new();
+    /// m.record_global_request_refusal();
+    /// assert_eq!(m.global_request_refusals(), 1);
+    /// ```
     pub fn record_global_request_refusal(&self) {
         self.global_request_refusals.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Request-budget refusals so far.
+    ///
+    /// ```
+    /// use qqq_serve::metrics::HttpMetrics;
+    ///
+    /// let m = HttpMetrics::new();
+    /// assert_eq!(m.global_request_refusals(), 0);
+    /// ```
     #[must_use]
     pub fn global_request_refusals(&self) -> u64 {
         self.global_request_refusals.load(Ordering::Relaxed)
@@ -604,12 +619,27 @@ impl HttpMetrics {
     ///
     /// The acceptor-side counterpart to [`Self::record_global_request_refusal`]:
     /// unkeyed for the same reason, separate for the remedy's sake.
+    ///
+    /// ```
+    /// use qqq_serve::metrics::HttpMetrics;
+    ///
+    /// let m = HttpMetrics::new();
+    /// m.record_global_connection_refusal();
+    /// assert_eq!(m.global_connection_refusals(), 1);
+    /// ```
     pub fn record_global_connection_refusal(&self) {
         self.global_connection_refusals
             .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Connection-budget refusals so far.
+    ///
+    /// ```
+    /// use qqq_serve::metrics::HttpMetrics;
+    ///
+    /// let m = HttpMetrics::new();
+    /// assert_eq!(m.global_connection_refusals(), 0);
+    /// ```
     #[must_use]
     pub fn global_connection_refusals(&self) -> u64 {
         self.global_connection_refusals.load(Ordering::Relaxed)

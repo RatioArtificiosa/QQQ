@@ -551,6 +551,16 @@ pub enum TenantKey {
 
 /// The default IPv6 prefix length in bits: the /64 an end customer controls.
 ///
+/// ```
+/// use qqq_host::tenant::{tenant_key_with_prefix, DEFAULT_IPV6_PREFIX_BITS};
+///
+/// let ip: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+/// assert_eq!(
+///     tenant_key_with_prefix(ip, DEFAULT_IPV6_PREFIX_BITS),
+///     qqq_host::tenant::tenant_key(ip)
+/// );
+/// ```
+///
 /// Deployments under prefix-rotation attack may narrow this: a /56 groups 256
 /// /64 networks into one tenant. Wider than 64 is clamped to 64:
 /// the key stores only the high 64 bits, so finer grouping is unrepresentable
@@ -562,6 +572,23 @@ pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
 ///
 /// IPv4 addresses are always exact: prefix masking applies to IPv6 only, and a
 /// /64 of IPv4 space is not a unit any operator means.
+///
+/// ```
+/// use qqq_host::tenant::{tenant_key_with_prefix, TenantKey};
+///
+/// // A /56 groups the whole 2001:db8::/56 into one tenant ...
+/// let a: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+/// let b: std::net::IpAddr = "2001:db8:0:ff::1".parse().unwrap();
+/// assert_eq!(tenant_key_with_prefix(a, 56), tenant_key_with_prefix(b, 56));
+/// // ... while the default /64 keeps them apart.
+/// assert_ne!(
+///     qqq_host::tenant::tenant_key(a),
+///     qqq_host::tenant::tenant_key(b)
+/// );
+/// // IPv4 is always exact, whatever the prefix length.
+/// let v4: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+/// assert!(matches!(tenant_key_with_prefix(v4, 56), TenantKey::V4(_)));
+/// ```
 #[must_use]
 pub fn tenant_key_with_prefix(ip: std::net::IpAddr, prefix_bits: u8) -> TenantKey {
     match ip.to_canonical() {
@@ -582,6 +609,15 @@ pub fn tenant_key_with_prefix(ip: std::net::IpAddr, prefix_bits: u8) -> TenantKe
 }
 
 /// Derive the tenant key with the default prefix length.
+///
+/// ```
+/// use qqq_host::tenant::{tenant_key, TenantKey};
+///
+/// let v4: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+/// assert_eq!(tenant_key(v4), TenantKey::V4(0xC0_0002_07));
+/// let v6: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
+/// assert!(matches!(tenant_key(v6), TenantKey::V6Prefix(_)));
+/// ```
 #[must_use]
 pub fn tenant_key(ip: std::net::IpAddr) -> TenantKey {
     tenant_key_with_prefix(ip, DEFAULT_IPV6_PREFIX_BITS)
@@ -592,6 +628,14 @@ pub fn tenant_key(ip: std::net::IpAddr) -> TenantKey {
 /// The hot path carries the [`TenantKey`] itself (no allocation); the label is
 /// computed once per connection and reused for every record the connection
 /// emits.
+///
+/// ```
+/// use qqq_host::tenant::{tenant_key_with_prefix, tenant_label_with_prefix};
+///
+/// let ip: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+/// let key = tenant_key_with_prefix(ip, 56);
+/// assert_eq!(tenant_label_with_prefix(key, 56), "2001:db8::/56");
+/// ```
 #[must_use]
 pub fn tenant_label_with_prefix(key: TenantKey, prefix_bits: u8) -> String {
     match key {
@@ -604,6 +648,18 @@ pub fn tenant_label_with_prefix(key: TenantKey, prefix_bits: u8) -> String {
 }
 
 /// Render a key derived with the default prefix length.
+///
+/// ```
+/// use qqq_host::tenant::{tenant_key, tenant_label};
+///
+/// let v4: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+/// assert_eq!(tenant_label(tenant_key(v4)), "192.0.2.7");
+/// let v6: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
+/// assert_eq!(
+///     tenant_label(tenant_key(v6)),
+///     "2001:db8:1:2::/64"
+/// );
+/// ```
 #[must_use]
 pub fn tenant_label(key: TenantKey) -> String {
     tenant_label_with_prefix(key, DEFAULT_IPV6_PREFIX_BITS)

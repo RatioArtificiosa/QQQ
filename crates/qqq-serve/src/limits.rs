@@ -517,6 +517,15 @@ impl TenantLimits {
 /// budget for both would let cheap requests crowd out handshakes or the
 /// reverse. Generous by default — this bounds rotation attacks, not
 /// legitimate flash crowds — and every field is operator-settable.
+///
+/// ```
+/// use qqq_serve::limits::GlobalBudget;
+/// use std::time::Duration;
+///
+/// let budget = GlobalBudget::default();
+/// assert_eq!(budget.requests_per_window, 1_000_000);
+/// assert_eq!(budget.request_window, Duration::from_secs(60));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalBudget {
     /// Admissions per request window.
@@ -595,6 +604,14 @@ impl GlobalBucket {
     /// If the window is zero: a zero window admits nothing on the first call
     /// and resets on every later one, which is a limiter that cannot decide.
     /// Like [`TenantLimits::new`], a bad configuration fails at construction.
+    ///
+    /// ```
+    /// use qqq_serve::limits::GlobalBucket;
+    /// use std::time::Duration;
+    ///
+    /// let bucket = GlobalBucket::new(1, Duration::from_secs(60));
+    /// assert_eq!(bucket.refused_total(), 0);
+    /// ```
     #[must_use]
     pub fn new(budget: u32, window: Duration) -> Self {
         assert!(
@@ -613,6 +630,16 @@ impl GlobalBucket {
     }
 
     /// Try to admit one request. `false` means the server must shed load.
+    ///
+    /// ```
+    /// use qqq_serve::limits::GlobalBucket;
+    /// use std::time::{Duration, Instant};
+    ///
+    /// let bucket = GlobalBucket::new(1, Duration::from_secs(60));
+    /// let t0 = Instant::now();
+    /// assert!(bucket.admit(t0));
+    /// assert!(!bucket.admit(t0), "the budget of one is spent");
+    /// ```
     pub fn admit(&self, now: Instant) -> bool {
         let mut state = self
             .state
@@ -635,6 +662,17 @@ impl GlobalBucket {
     }
 
     /// Lifetime refusals. The metric the audit's acceptance criterion names.
+    ///
+    /// ```
+    /// use qqq_serve::limits::GlobalBucket;
+    /// use std::time::{Duration, Instant};
+    ///
+    /// let bucket = GlobalBucket::new(1, Duration::from_secs(60));
+    /// let t0 = Instant::now();
+    /// assert!(bucket.admit(t0));
+    /// assert!(!bucket.admit(t0));
+    /// assert_eq!(bucket.refused_total(), 1);
+    /// ```
     #[must_use]
     pub fn refused_total(&self) -> u64 {
         self.state

@@ -36513,4 +36513,47 @@ default and an enforcing flag are different verdicts wearing one filename.
 → `crates/qqq-host/src/tenant.rs`, `crates/qqq-serve/src/limits.rs`,
 `crates/qqq-serve/src/metrics.rs`, `.github/workflows/ci.yml`.
 
+## §O-590 — A refusal that completes is invisible to the failure counter: the connection budget throttled the benchmark at p99 with failed=0
+
+`F-13` perf fallout, closed per `§O-543` (two same-SHA reruns, then artifact
+vectors before any conclusion). CI's PERF-020 failed `multi` (8.8k vs
+9.0–13.0k floors) and `tailp99` (p99 pinned at ~253ms) across four samples
+on one SHA. The vectors exonerated scheduling luck: within-run spread
+~0.3% (`multi` 8790/8831/8848) and ~0.05% (`tailp99` p99
+253071477/252991184/252840146), and `failed=0` on every run — a refusal
+completes as a 503, so the failure counter cannot see throttling. The
+diagnostic was arithmetic, not reruns: the harness opens one connection per
+request (`Connection: close`), sustained workloads churn ~100k connections
+per 10 seconds, and the new connection-budget default was 100k/60s — the
+tail run's 101,256 attempts crossed it near the p99 threshold, and every
+refused connection pays the 250ms refusal drain, pinning p99 at ~253ms
+deterministically. The fix equalises the defaults (1M/60s each): legitimate
+churn is at most one connection per request, so the connection budget now
+binds only on floods, pinned by an invariant test rather than a number.
+Generalisable rule: when p99 pins at a timeout value with zero failures,
+read it as a refused cohort completing slowly — then divide the workload's
+churn by the budget. → `crates/qqq-serve/src/limits.rs`,
+`crates/qqq-serve/src/server.rs`.
+
+## §O-591 — Three review dispositions on the perf fix: one tradeoff rebutted, one misread rebutted, one half-invariant taken
+
+The `F-13` perf-fix review left three findings. (1) Rebutted with evidence:
+keep a lower connection budget in production and raise it only for
+benchmarks. A 100k/60s production default reintroduces the exact
+exhaustion on any legitimate `Connection: close` API above ~1.6k conn/s —
+normal REST traffic, not an attack — while the flood shape the budget
+targets (many connections, little traffic) stays bounded at 1M/60s, an
+order of magnitude above measured legit peaks; and benchmarks must measure
+the shipped default, not a special one. The field stays operator-settable
+for deployments that want it tighter. (2) Rebutted with checker evidence:
+the claim that stability.md's observation counts (449/590) should read
+137/139 miscounts the corpus — `sync_docs --check` and `check_doc_claims`
+verify those exact figures green, and they moved with each appended
+observation as designed. (3) Taken: the budget invariant asserted counts
+but not windows — a longer connection window would let the connection
+limit bind first after the request budget resets — so the test now pins
+`connection_window == request_window` too. Generalisable rule: a rate is a
+count *and* a window; asserting one half proves nothing about the rate.
+→ `crates/qqq-serve/src/limits.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

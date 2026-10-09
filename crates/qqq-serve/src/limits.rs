@@ -539,15 +539,25 @@ pub struct GlobalBudget {
 }
 
 impl Default for GlobalBudget {
-    /// Generous bounds: ~16,000 requests and ~1,600 new connections per
+    /// Generous bounds: ~16,000 requests and ~16,000 new connections per
     /// second. Above every load profile the repository measures (the 200k
-    /// lock-step test peaks near 3,000 requests per second) with room to
-    /// spare, and still a ceiling no rotation strategy can cross.
+    /// lock-step test peaks near 3,000 requests per second; the sustained
+    /// perf workloads churn ~100k `Connection: close` connections per 10
+    /// seconds) with room to spare, and still a ceiling no rotation strategy
+    /// can cross.
+    ///
+    /// The two budgets are deliberately equal: legitimate churn is at most
+    /// one connection per request, so the connection budget never binds
+    /// before the request budget does — it constrains only floods (many
+    /// connections, little legitimate traffic), which is the attack it
+    /// exists for. A tighter connection default exhausted mid-benchmark
+    /// while requests stayed far under budget, pinning p99 at the refusal
+    /// drain with zero counted failures.
     fn default() -> Self {
         Self {
             requests_per_window: 1_000_000,
             request_window: Duration::from_secs(60),
-            connections_per_window: 100_000,
+            connections_per_window: 1_000_000,
             connection_window: Duration::from_secs(60),
         }
     }
@@ -1186,6 +1196,38 @@ mod tests {
             }
         }
         assert_eq!(admitted, 100, "rotation must not exceed the global budget");
+    }
+
+    /// **The default connection budget never binds before the request budget.**
+    ///
+    /// `F-13` perf fallout: the harness opens one connection per request
+    /// (`Connection: close`), so legitimate churn reaches ~100k connections
+    /// per 10-second sustained workload. A 100k/60s connection default
+    /// exhausted mid-suite while requests stayed far under budget — the tail
+    /// workload's p99 pinned at ~253ms (the refusal drain) with zero counted
+    /// failures, because a 503 completes. Connections are bounded by requests
+    /// (at most one per request), so the connection default must cover the
+    /// request default and only bind on floods: many connections, little
+    /// legitimate traffic.
+    #[test]
+    fn default_connection_budget_covers_every_request() {
+        let budget = GlobalBudget::default();
+        assert!(
+            budget.connections_per_window >= budget.requests_per_window,
+            "legitimate churn is at most one connection per request, so the \
+             connection default ({}) must cover the request default ({}), \
+             binding only on floods",
+            budget.connections_per_window,
+            budget.requests_per_window,
+        );
+        // Counts alone are not the whole invariant: a longer connection
+        // window would keep the connection budget spent after the request
+        // budget resets, letting the connection limit bind first. `F-13`
+        // review caught the missing half.
+        assert_eq!(
+            budget.connection_window, budget.request_window,
+            "equal windows, or the count comparison proves nothing"
+        );
     }
 
     // -- determinism -------------------------------------------------------

@@ -1530,6 +1530,14 @@ pub fn epoch_tick_interval(deadline_ms: u64) -> Duration {
 /// "trap at the next tick", never "never trap". The caller passes the same
 /// period the ticker parks on, so the two cannot disagree about what a tick
 /// means (`F-17`).
+///
+/// ```
+/// use qqq_host::instance::ticks_for_deadline;
+///
+/// assert_eq!(ticks_for_deadline(55, std::time::Duration::from_millis(10)), 6);
+/// assert_eq!(ticks_for_deadline(10, std::time::Duration::from_millis(10)), 1);
+/// assert_eq!(ticks_for_deadline(0, std::time::Duration::from_millis(10)), 1);
+/// ```
 #[must_use]
 pub fn ticks_for_deadline(deadline_ms: u64, tick: Duration) -> u64 {
     let tick_ms = tick.as_millis().max(1);

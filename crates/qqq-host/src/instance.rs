@@ -1504,8 +1504,7 @@ pub fn digest_of(bytes: &[u8]) -> String {
     s
 }
 
-/// The epoch tick interval the host should use for a given deadline.
-///
+/// The epoch tick interval the host should use for a given deadline.///
 /// # Why this is a pure function
 ///
 /// The relationship between "a 5-second deadline" and "how often the host must
@@ -1522,6 +1521,23 @@ pub fn epoch_tick_interval(deadline_ms: u64) -> Duration {
     // above 100 ms the overshoot becomes visible to users.
     let ms = (deadline_ms / 100).clamp(1, 100);
     Duration::from_millis(ms)
+}
+
+/// How many epoch ticks a millisecond deadline needs on a ticker period.
+///
+/// The store counts ticks, not milliseconds: a 55 ms deadline on a 10 ms
+/// ticker needs 6 ticks (5 would trap 5 ms early), and the minimum is 1 —
+/// "trap at the next tick", never "never trap". The caller passes the same
+/// period the ticker parks on, so the two cannot disagree about what a tick
+/// means (`F-17`).
+#[must_use]
+pub fn ticks_for_deadline(deadline_ms: u64, tick: Duration) -> u64 {
+    let tick_ms = tick.as_millis().max(1);
+    let deadline = u128::from(deadline_ms);
+    // Ceiling division without overflow: `deadline + tick - 1` can wrap for
+    // absurd deadlines, while div-then-remainder cannot.
+    let ticks = deadline / tick_ms + u128::from(deadline % tick_ms != 0);
+    u64::try_from(ticks.max(1)).unwrap_or(u64::MAX)
 }
 
 /// Deterministic-mode clock configuration.
@@ -2084,6 +2100,29 @@ mod tests {
         assert_eq!(epoch_tick_interval(0), Duration::from_millis(1));
         // Ceiling: never overshoot more than 100 ms.
         assert_eq!(epoch_tick_interval(86_400_000), Duration::from_millis(100));
+    }
+
+    /// **F-17: deadline ticks round up to the tick period, minimum 1.**
+    ///
+    /// The store counts epoch *ticks*, not milliseconds: a 55 ms deadline on
+    /// a 10 ms ticker needs 6 ticks (5 would trap 5 ms early), and even a
+    /// zero deadline needs 1 ("trap at the next tick", never "never trap").
+    /// Pre-fix this fails to compile: the helper does not exist — the tick
+    /// count was the deadline in milliseconds by assumption of a 1 ms tick.
+    #[test]
+    fn f17_deadline_ticks_round_up_to_the_tick_period() {
+        assert_eq!(
+            ticks_for_deadline(55, std::time::Duration::from_millis(10)),
+            6
+        );
+        assert_eq!(
+            ticks_for_deadline(10, std::time::Duration::from_millis(10)),
+            1
+        );
+        assert_eq!(
+            ticks_for_deadline(0, std::time::Duration::from_millis(10)),
+            1
+        );
     }
 
     /// The interval must never exceed the deadline — a guest could otherwise

@@ -195,6 +195,12 @@ pub struct GuestApp {
     /// existing constructor — including the integration tests' — serves
     /// real-time randomness unless serve says otherwise.
     deterministic: bool,
+    /// The epoch ticker period for this app's engine lineage — `F-17`.
+    ///
+    /// Derived once from the limits via the helper, shared by the ticker
+    /// thread and the per-request tick counts: two computations of one
+    /// quantity would be two chances to disagree about what a tick is.
+    epoch_tick: std::time::Duration,
 }
 
 impl std::fmt::Debug for GuestApp {
@@ -282,9 +288,14 @@ impl GuestApp {
         context: (u32, Option<Arc<EpochTicker>>),
     ) -> Result<Self> {
         let (workers, ticker) = context;
+        // The tick follows the deadline through the helper (`F-17`): a 10 s
+        // budget ticks every 100 ms (~10 wakeups/s), not every 1 ms. Same
+        // tick feeds the thread period below and the epoch-tick count in
+        // `timed_options`, so the two cannot disagree about what a tick is.
+        let tick = qqq_host::instance::epoch_tick_interval(limits.epoch_deadline_ms);
         let ticker = match ticker {
             Some(ticker) => ticker,
-            None => Arc::new(EpochTicker::start(engine.clone())?),
+            None => Arc::new(EpochTicker::start(engine.clone(), tick)?),
         };
 
         if authority.is_empty() {
@@ -307,7 +318,7 @@ impl GuestApp {
                 &prepared,
                 &grants,
                 limits,
-                &timed_options(limits, false),
+                &timed_options(limits, false, tick),
             )?;
             instance.run(|store, wasm| {
                 HandlerHandle::resolve(&mut *store, wasm, "guest")
@@ -388,6 +399,7 @@ impl GuestApp {
             grant_digest,
             completion_rate: 0.0,
             deterministic: false,
+            epoch_tick: tick,
         })
     }
 
@@ -454,6 +466,9 @@ impl GuestApp {
         // The clock mode rolls with it too: a deterministic server that
         // served real-time randomness after a rotation would be neither.
         next.deterministic = self.deterministic;
+        // And the tick with it: a rotated app on a different period would
+        // count ticks the ticker never emits.
+        next.epoch_tick = self.epoch_tick;
         Ok(next)
     }
 
@@ -480,7 +495,7 @@ impl GuestApp {
             &self.prepared,
             &self.grants,
             self.limits,
-            &timed_options(self.limits, self.deterministic),
+            &timed_options(self.limits, self.deterministic, self.epoch_tick),
         )?;
         instance.run(|store, wasm| {
             let func = self.handle.func(store, wasm)
@@ -833,7 +848,7 @@ impl GuestApp {
         // reset boundary. The budget outlives concurrent requests through the
         // registry, never through this local.
         let tenant_output = self.tenant_outputs.acquire(tenant);
-        let mut options = timed_options(self.limits, self.deterministic);
+        let mut options = timed_options(self.limits, self.deterministic, self.epoch_tick);
         options.audit = Some(handle);
         options.tenant_output = Some(tenant_output);
         let instance = Instance::create_with(
@@ -1514,9 +1529,16 @@ impl Drop for RequestPermit<'_> {
     }
 }
 
-fn timed_options(limits: LimitSet, deterministic: bool) -> qqq_host::InstanceOptions {
+fn timed_options(
+    limits: LimitSet,
+    deterministic: bool,
+    tick: std::time::Duration,
+) -> qqq_host::InstanceOptions {
     qqq_host::InstanceOptions {
-        epoch_ticks: Some(limits.epoch_deadline_ms.max(1)),
+        epoch_ticks: Some(qqq_host::instance::ticks_for_deadline(
+            limits.epoch_deadline_ms.max(1),
+            tick,
+        )),
         deterministic,
         ..Default::default()
     }
@@ -1524,18 +1546,47 @@ fn timed_options(limits: LimitSet, deterministic: bool) -> qqq_host::InstanceOpt
 
 /// One timer per engine lineage, retained until all generations drain. Fuel
 /// remains a second bound; an epoch cannot interrupt a blocking host import.
+///
+/// The thread parks on the tick period (`F-17`) instead of sleeping 1 ms:
+/// one lineage wakes ~10/s at the default 100 ms tick rather than 1,000/s
+/// forever. Per-lineage rather than process-wide: production serve runs one
+/// lineage (replacements share the ticker), and a global registry would let
+/// concurrent tests pollute each other's wake-up counts — the acceptance
+/// test needs a hermetic ticker.
+///
+/// Shutdown parks in reverse: `Drop` sets the flag and unparks, so a parked
+/// thread joins immediately instead of sleeping out its period.
 struct EpochTicker {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    unpark: Option<std::thread::Thread>,
+    /// Wake-ups served, for the idle-rate test — `F-17`, test-only.
+    ///
+    /// Counted per loop pass (not per epoch emitted: catch-up emits several
+    /// epochs per wake-up, and the bound under test is wake-ups).
+    /// `cfg(test)`-gated so production carries no instrumentation for the
+    /// test suite: the struct both builds must agree on is unchanged, only
+    /// this counter comes and goes.
+    #[cfg(test)]
+    wakeups: Arc<std::sync::atomic::AtomicU64>,
 }
 impl EpochTicker {
-    fn start(engine: wasmtime::Engine) -> Result<Self> {
+    fn start(engine: wasmtime::Engine, tick: std::time::Duration) -> Result<Self> {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
+        #[cfg(test)]
+        let wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        #[cfg(test)]
+        let counted = Arc::clone(&wakeups);
         let driver = engine;
+        // The child's `Thread` handle, sent back before the loop starts: the
+        // parent cannot name the child's handle any other way, and `Drop`
+        // needs it to unpark a parked ticker.
+        let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("qqq-epochs".into())
             .spawn(move || {
+                let _ = tx.send(std::thread::current());
                 // Fail-stop first (`F-01`): a dead ticker silently disables
                 // wall-clock deadlines, leaving only fuel to bound CPU. A
                 // panic here aborts the process rather than parking the
@@ -1545,10 +1596,17 @@ impl EpochTicker {
                 let started = std::time::Instant::now();
                 let mut emitted = 0;
                 while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    #[cfg(test)]
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    std::thread::park_timeout(tick);
                     // Account for scheduler/timer granularity (notably Windows):
-                    // one sleep is not necessarily one millisecond of elapsed time.
-                    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    // one park is not necessarily one tick of elapsed time.
+                    // Catch-up preserved from the sleep loop: missed quanta
+                    // still advance the epoch, so a delayed thread cannot let
+                    // a guest run past its budget.
+                    let elapsed =
+                        u64::try_from(started.elapsed().as_millis() / tick.as_millis().max(1))
+                            .unwrap_or(u64::MAX);
                     for _ in emitted..elapsed {
                         driver.increment_epoch();
                     }
@@ -1556,15 +1614,31 @@ impl EpochTicker {
                 }
             })
             .map_err(|e| Error::new(ErrorCode::InternalInvariantViolated, e.to_string()))?;
+        let unpark = rx.recv().ok();
         Ok(Self {
             stop,
             thread: Some(thread),
+            unpark,
+            #[cfg(test)]
+            wakeups,
         })
+    }
+
+    /// Wake-ups served since start — the idle-rate acceptance test reads this.
+    #[cfg(test)]
+    fn wakeups(&self) -> u64 {
+        self.wakeups.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 impl Drop for EpochTicker {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Unpark before joining: without this a parked ticker sleeps out its
+        // whole period on every shutdown, and a 100 ms tick would add 100 ms
+        // to every app teardown and test.
+        if let Some(unpark) = &self.unpark {
+            unpark.unpark();
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -1648,6 +1722,72 @@ mod tests {
             max_subrequests: 16,
         };
         GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
+    }
+
+    /// **F-17: an idle ticker wakes at most ~100 times per second.**
+    ///
+    /// The old ticker slept 1 ms unconditionally — about 1,000 wakeups/s per
+    /// engine for its whole lifetime, idle or not. The reworked ticker parks
+    /// on its period (10 ms here, so at most ~102 wakeups in a second).
+    /// Pre-fix this fails to compile: the ticker takes no period and
+    /// exposes no wake-up count.
+    #[test]
+    fn f17_idle_ticker_wakes_at_most_100_per_second() {
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine =
+            wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
+        let ticker =
+            EpochTicker::start(engine, std::time::Duration::from_millis(10)).expect("ticker");
+        let before = ticker.wakeups();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let woke = ticker.wakeups() - before;
+        assert!(
+            woke <= 1000 / 10 + 2,
+            "idle wake-ups must stay near 100/s, got {woke}"
+        );
+    }
+
+    /// **F-17: an infinite loop traps within deadline + 2 ticks + tolerance.**
+    ///
+    /// The reworked tick math must not let a guest run past its budget: a
+    /// 200 ms deadline on a 10 ms ticker (20 ticks) traps within 200 + 20 +
+    /// 250 ms on every OS. The call runs on a worker joined with a timeout
+    /// so a broken ticker fails the test instead of hanging the suite.
+    /// Pre-fix this fails to compile: the ticker takes no period.
+    #[test]
+    fn f17_infinite_loop_traps_within_deadline_plus_tolerance() {
+        const SPIN: &str = r#"(module (func (export "spin") (loop (br 0))))"#;
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine =
+            wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
+        let tick = std::time::Duration::from_millis(10);
+        let _ticker = EpochTicker::start(engine.clone(), tick).expect("ticker");
+        let module = wasmtime::Module::new(&engine, SPIN).expect("compiles");
+        let mut store = wasmtime::Store::new(&engine, ());
+        store.set_epoch_deadline(qqq_host::instance::ticks_for_deadline(200, tick));
+        let instance = wasmtime::Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .expect("instantiate");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin");
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(spin.call(&mut store, ()));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the ticker must interrupt the loop, not hang the suite");
+        let elapsed = started.elapsed();
+        assert!(
+            outcome.is_err(),
+            "an infinite loop past its deadline must trap, not return"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(200 + 20 + 250),
+            "trap must land within deadline + 2 ticks + tolerance, took {elapsed:?}"
+        );
     }
 
     /// **F-09: a dead sink refuses with 503 and never runs the guest.**

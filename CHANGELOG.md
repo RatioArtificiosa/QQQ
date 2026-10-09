@@ -4,6 +4,14 @@
 
 ### Security
 
+- **run**: the epoch ticker parks on the deadline-scaled period instead of
+  sleeping 1 ms — one lineage wakes ~10/s at the default 100 ms tick
+  rather than 1,000/s forever. Tick counts are ceiling-rounded with a
+  minimum of 1, shutdown unparks instead of sleeping out the period, and
+  the catch-up and Windows-granularity handling survive unchanged.
+  Per-lineage by design: production serve runs one lineage, and a shared
+  global would let concurrent tests pollute the idle-rate bound. (`F-17`)
+
 - **cap**: serialized `GrantSet` and `Resolution` blobs no longer
   deserialize back into authority — data cannot construct it. The manifest
   remains the authorized construction input and overlays only narrow the

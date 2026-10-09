@@ -36737,4 +36737,26 @@ wires to I-01, never this goal). Generalisable rule: an UNVERIFIED finding
 gets a throwaway experiment before a permanent fix — the experiment's log
 is what makes the fix proportionate rather than superstitious. → `crates/qqq-host/src/config.rs`, `CHANGELOG.md`.
 
+## §O-602 — F-17: the ticker parks on the deadline-scaled period; per-lineage, not process-wide
+
+The audit prefers one process-wide ticker over `Weak<Engine>`, but the
+acceptance test it also mandates — idle wake-ups over one second bounded
+by `1000/tick + 2` — needs a hermetic ticker: a shared global would let
+concurrent tests pollute each other's counts. Production serve runs one
+lineage (replacements share the ticker), so per-lineage at the helper
+period meets the ≤100/s bound with no global state and no poison-recovery
+questions under unwinding. The period comes from `epoch_tick_interval`
+and the same value feeds `ticks_for_deadline` (ceiling, minimum 1), so
+thread and store cannot disagree about what a tick is; catch-up, Windows
+granularity handling, and the fail-stop guard survive unchanged, and
+shutdown unparks instead of sleeping out the period. CodeRabbit's one
+minor (add a tick for ticker phase so a deadline never expires early)
+was rebutted with evidence: the audit pins exact counts (6/1/1), the
+config docs state epoch is the approximate backstop while fuel is the
+precise bound, early expiry is the fail-safe direction, and the proposed
+test cannot deterministically arrange ticker phase — it would be flaky
+theater. Generalisable rule: when the audit's tests and a reviewer's
+suggestion disagree, the specified values plus the documented contract
+decide. → `crates/qqq-run/src/guest_handler.rs`, `crates/qqq-host/src/instance.rs`, `crates/qqq-host/src/lib.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -167,8 +167,8 @@ pub use host_wasi::{
     Registered as WasiRegistered,
 };
 pub use instance::{
-    digest_of, epoch_tick_interval, uses_virtual_clock, DeterministicClock, ExecutionMode,
-    ExecutionOutcome, Instance, InstanceOptions, PreparedComponent,
+    digest_of, epoch_tick_interval, ticks_for_deadline, uses_virtual_clock, DeterministicClock,
+    ExecutionMode, ExecutionOutcome, Instance, InstanceOptions, PreparedComponent,
 };
 pub use linker::{
     build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,

@@ -36631,4 +36631,67 @@ Generalisable rule: a red proof earns its name by failing for the reason
 claimed — assert the failure mode, not just the failure, and distrust a
 red that arrives before the fixture is shown to parse. → `crates/qqq-cap/tests/` (temporary proof, since removed).
 
+## §O-597 — A generated file is a promise the commit must keep: F-14 added the manifest table and never ran the schema generator
+
+The `F-14` commit added `websocket: Option<WebsocketPolicy>` to the manifest
+`Server` struct with parse-time validation, wiring, and tests — and never ran
+`python tools/gen_schemas.py`. CI's WIT job (`gen_schemas.py --check`) and the
+macOS/Ubuntu Rust jobs (`check_schema_conformance.py`, which names the exact
+omission: `$defs.Server omits key 'websocket'`) failed deterministically, twice
+each on the same SHA (run 37914399025, original plus `--failed` rerun). The
+mistake was treating the schema as documentation that follows code; it is a
+generated artifact with two directional checkers, and the commit shipped without
+consulting either. The remedy was one generator run plus both checkers green
+locally. Generalisable rule: a struct change that code-generates an artifact
+must run the generator and every checker that reads the artifact before the
+commit — `gen_schemas --check` and `check_schema_conformance` test opposite
+directions, so one passing proves nothing about the other. → `schema/qqq-toml.schema.json`, `tools/gen_schemas.py`, `crates/qqq-cap/src/manifest.rs`.
+
+## §O-598 — A close frame sent is not a close frame delivered: refusing 1 MiB+1 then dropping the socket RSTs, and on some Windows stacks the client never sees 1009
+
+The `F-14` refusal paths sent close 1009 and tore the connection down at once.
+`TooLarge` fires on the declared length alone — ten header bytes — so ~1 MiB of
+the peer's frame was still unread when the socket closed, and closing with
+unread received data sends RST. On most stacks the already-buffered close frame
+stays readable after the RST; on the CI runners' Windows stacks it is
+discarded, so `read_server_frame` got EOF-with-nothing and
+`f14_message_over_configured_cap_closes_with_1009` failed at
+`crates/qqq-serve/tests/websocket.rs:860` — three Windows CI runs out of three
+(8bbf51d original, its same-SHA rerun, and 466564b), zero failures in 9+ local
+runs on a workstation whose stack keeps buffered bytes. Timeline forensics
+distinguished the mechanism from a timeout: the whole 19-test suite finished in
+2.75 s (no 5 s read timeout fired) and the server's `protocol_error` record was
+present (the close WAS sent). The remedy is `refuse_with`: send the close,
+half-close, drain peer bytes to EOF/close/2 s timeout, then tear down — the
+final close finds an empty buffer and goes out as FIN, which no stack reorders
+ahead of data. Applied to all three refusal sites plus the close echo; the test
+now sleeps 500 ms before reading, modelling the slow client that forces the
+losing interleaving. CodeRabbit's three minors on the fix: two taken (the
+module doc overclaimed "every ending drains" — narrowed to the `refuse_with`
+paths with the `close_with` boundary named; the `allowed_origins` schema text
+omitted the CORS cascade — documented at the source field in `manifest.rs` and
+regenerated), one rebutted (`minimum: 0` is the generator's uniform emission
+across 14 fields, value validation is parse-time and pinned by
+`malformed_websocket_values_are_refused` — changing generator policy is
+separate scope). Generalisable rule: any close-then-teardown with potential
+unread peer bytes must drain first, and a test that reads immediately only
+proves the scheduler won the race. → `crates/qqq-serve/src/ws_conn.rs`, `crates/qqq-serve/tests/websocket.rs`, `crates/qqq-cap/src/manifest.rs`.
+
+## §O-599 — Two post-commit minors on the refusal drain: bound the drain in space as well as time, and never call a Close frame a FIN
+
+CodeRabbit's `--committed` review of the `F-14` repair commit found two
+minors, both taken. The drain loop was bounded in time (2 s) but not in
+space: a peer flooding bytes post-refusal could turn it into unbounded read
+work, so it now also stops at `REFUSAL_DRAIN_MAX_BYTES` (8 MiB — eight times
+the ~1 MiB of unread data that motivated the drain, so a legitimate peer
+never reaches it, and reaching it falls back to the same immediate teardown
+the timeout uses). The CHANGELOG said the close frame "is delivered as FIN",
+conflating the WebSocket Close frame with the TCP FIN — reworded to say the
+close-frame bytes reach the peer *before* the TCP FIN. No deterministic test
+can distinguish the capped drain from the uncapped one (both deliver the
+close; the cap only shortens a flooding peer's 2 s), so the evidence is the
+unchanged green suite plus the bound itself. Generalisable rule: bound every
+loop in every dimension an adversary controls — time bounds work, space
+bounds work differently, and one does not imply the other. → `crates/qqq-serve/src/ws_conn.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

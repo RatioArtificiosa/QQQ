@@ -18,7 +18,11 @@
   refuse foreign `Host` values with 421 on every route (DNS-rebinding
   defence), and buffer caps default to 1 MiB frames / 1 MiB messages under
   a 64 MiB process-wide budget — configurable to the previous 16 MiB /
-  64 MiB absolute ceilings, with over-cap closing 1009. (`F-14`)
+  64 MiB absolute ceilings, with over-cap closing 1009. Refusals and the
+  close echo drain the peer (close, half-close, read to EOF/close/2 s
+  timeout/8 MiB cap) before teardown so the close-frame bytes reach the
+  peer before the TCP FIN instead of being lost to a reset on stacks
+  that discard buffered bytes. (`F-14`)
 
 - **serve**: tenants are keyed by IP prefix (`TenantKey`: exact IPv4, /64
   IPv6 with canonical mapped addresses) instead of the textual address, so

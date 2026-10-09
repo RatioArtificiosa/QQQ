@@ -1640,7 +1640,8 @@ impl AuthMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebsocketPolicy {
-    /// Origins admitted besides the request's own. Empty is same-origin only.
+    /// Origins admitted besides the request's own. Empty inherits
+    /// `[server.cors] allow_origins` when that names any, else same-origin only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
     /// Extra names the loopback `Host` allow-list admits.

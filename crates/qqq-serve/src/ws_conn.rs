@@ -24,6 +24,16 @@
 //!    distinguish a clean close from a network fault, and a client that cannot tell will
 //!    *reconnect* — turning a deliberate shutdown into a reconnect storm.
 //!
+//! 3. **A close the peer cannot read is a silent close.** Every refusal and the
+//!    close echo drain the peer first (see `refuse_with`): tearing down a socket
+//!    that still holds unread peer bytes sends RST, and on some stacks an RST
+//!    discards even bytes already buffered at the peer — so the close frame
+//!    never arrives and a refusal the server meant to explain looks like a
+//!    network fault. (The shutdown and idle paths in `run_frames` use
+//!    `close_with` without a drain: there the server is ending the connection
+//!    on its own behalf rather than answering the peer, so no explanation is
+//!    owed one.)
+//!
 //! # Why the read side and the write side are separate tasks
 //!
 //! Because a WebSocket is full-duplex: a guest that is computing may still need to answer
@@ -357,13 +367,12 @@ async fn run_frames(
                         // 1009 rather than waiting, because waiting on a shared
                         // budget is head-of-line blocking across connections —
                         // and a slow consumer could hold it deliberately.
-                        let mut sender = WsSender { stream };
-                        sender
-                            .send_frame(&Frame::close(
-                                1009,
-                                "the server's WebSocket buffer budget is exhausted",
-                            ))
-                            .await;
+                        refuse_with(
+                            stream,
+                            1009,
+                            "the server's WebSocket buffer budget is exhausted",
+                        )
+                        .await;
                         return WsOutcome::ProtocolError;
                     }
                     if let Some(outcome) =
@@ -377,10 +386,7 @@ async fn run_frames(
                     // §7.4.1: the server must say *why* it is closing. A silent close is
                     // indistinguishable from a network fault, and a client that cannot
                     // tell the difference retries.
-                    let mut sender = WsSender { stream };
-                    sender
-                        .send_frame(&Frame::close(e.close_code(), &e.to_string()))
-                        .await;
+                    refuse_with(stream, e.close_code(), &e.to_string()).await;
                     return WsOutcome::ProtocolError;
                 }
             }
@@ -444,6 +450,65 @@ async fn run_frames(
     }
 }
 
+/// How long a refused connection waits for the peer to go away after the
+/// server sent its close frame.
+///
+/// Long enough for the peer to read the close and answer with its own (one
+/// round trip plus slack); short enough that a peer holding the connection
+/// open on purpose only parks one task briefly. Hitting it is not an error —
+/// the close was already delivered, and the teardown below is identical.
+const REFUSAL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many peer bytes a closing connection drains at most.
+///
+/// The timeout above bounds the drain in time; this bounds it in space, so a
+/// peer flooding bytes post-refusal cannot turn the drain into unbounded
+/// read work. 8 MiB is eight times the largest refusal that motivated the
+/// drain (an over-cap frame refuses on its length, leaving ~1 MiB unread),
+/// so a legitimate peer never reaches it — and reaching it falls back to the
+/// same immediate teardown the timeout uses, never to buffering.
+const REFUSAL_DRAIN_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Send a close frame and drain the peer before tearing down.
+///
+/// A close frame the peer cannot read is a silent close, and §7.1.1 requires
+/// better: the server must deliver the code. Sending the frame is not enough
+/// on its own — after it the connection is dropped while the peer's bytes may
+/// still sit unread in the receive buffer (an over-cap frame refuses on its
+/// length alone, so ~1 MiB is still in flight), and closing a socket with
+/// unread received data sends RST. On some stacks an RST discards even bytes
+/// already buffered at the peer, so the close frame never arrives and the
+/// client reports a network fault for a refusal the server meant to explain.
+/// Draining first — half-close, read-and-discard until the peer's FIN, close,
+/// the byte cap, or this timeout — means the final close finds an empty
+/// buffer and goes out as FIN, which no stack reorders ahead of the data.
+async fn refuse_with(stream: &mut TcpStream, code: u16, reason: &str) {
+    let mut sender = WsSender { stream };
+    sender.send_frame(&Frame::close(code, reason)).await;
+    // Half-close: the write side is done, but the read side must stay open to
+    // consume what the peer already sent — that is what keeps the teardown
+    // below from becoming a reset.
+    let _ = stream.shutdown().await;
+    let deadline = tokio::time::Instant::now() + REFUSAL_DRAIN_TIMEOUT;
+    let mut chunk = [0u8; 4096];
+    let mut drained = 0usize;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline || drained >= REFUSAL_DRAIN_MAX_BYTES {
+            break;
+        }
+        match tokio::time::timeout(deadline - now, stream.read(&mut chunk)).await {
+            // Bytes already in flight: discarded, and the loop keeps draining.
+            Ok(Ok(n)) if n > 0 => {
+                drained = drained.saturating_add(n);
+            }
+            // The peer went away (EOF), reset, or the wait ran out: the close
+            // frame was already sent, so there is nothing more this path owes.
+            Ok(_) | Err(_) => break,
+        }
+    }
+}
+
 /// Send a close frame with a code and reason, ignoring a write failure.
 ///
 /// A close is the last thing written on a connection that is already ending, so a failure
@@ -483,10 +548,11 @@ async fn dispatch_frame(
         //
         // The echo carries the peer's own code, or 1000 when it sent none, which §7.1.5
         // permits: a close with no status means "no status", and replying with 1000 is
-        // the defined way to say "normal closure".
+        // the defined way to say "normal closure". The drain inside is the same one
+        // every refusal uses: the peer may have pipelined messages behind its close,
+        // and they must not turn this clean ending into a reset.
         let code = frame.close_code().unwrap_or(1000);
-        let mut sender = WsSender { stream };
-        sender.send_frame(&Frame::close(code, "")).await;
+        refuse_with(stream, code, "").await;
         return Some(WsOutcome::Closed);
     }
 
@@ -520,10 +586,7 @@ async fn dispatch_frame(
                 (None, Some(n)) => budget.release(n),
                 (None, None) => {}
             }
-            let mut sender = WsSender { stream };
-            sender
-                .send_frame(&Frame::close(e.close_code(), &e.to_string()))
-                .await;
+            refuse_with(stream, e.close_code(), &e.to_string()).await;
             Some(WsOutcome::ProtocolError)
         }
     }

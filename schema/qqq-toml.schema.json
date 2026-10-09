@@ -570,6 +570,17 @@
             "$ref": "#/$defs/Route"
           },
           "type": "array"
+        },
+        "websocket": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebsocketPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[server.websocket]` — the upgrade policy, absent meaning same-origin only with 1 MiB caps (`F-14`)."
         }
       },
       "title": "qqq-toml#Server",
@@ -630,6 +641,65 @@
         }
       },
       "title": "qqq-toml#TenantLimit",
+      "type": "object"
+    },
+    "WebsocketPolicy": {
+      "$id": "https://qqq.codes/schema/qqq-toml#WebsocketPolicy",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `WebsocketPolicy` table.",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Extra names the loopback `Host` allow-list admits.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_origins": {
+          "description": "Origins admitted besides the request's own. Empty inherits `[server.cors] allow_origins` when that names any, else same-origin only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_frame_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The largest single frame buffered, in bytes. Absent means 1 MiB."
+        },
+        "max_message_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The largest reassembled message, in bytes. Absent means 1 MiB."
+        },
+        "max_total_buffer_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The process-wide buffered-bytes budget. Absent means 64 MiB."
+        }
+      },
+      "title": "qqq-toml#WebsocketPolicy",
       "type": "object"
     }
   },

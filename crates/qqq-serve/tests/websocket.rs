@@ -855,6 +855,15 @@ async fn f14_message_over_configured_cap_closes_with_1009() {
     client.write_all(&frame).await.expect("write frame");
     client.flush().await.expect("flush");
 
+    // Wait before reading: a slow client is the realistic shape (mobile, loaded
+    // loop), and it forces the losing interleaving out of hiding. Without a
+    // graceful server close, the server's RST lands while this client is still
+    // asleep — and on Windows an RST discards even bytes already buffered, so
+    // the close frame below never arrives. The server must linger for the
+    // peer's close (RFC 6455 §7.1.1) rather than resetting a socket that still
+    // holds ~1 MiB of unread peer bytes.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let (opcode, body) = read_server_frame(&mut client)
         .await
         .expect("the server must answer with a close frame");

@@ -164,12 +164,18 @@ jobs:
       # remove that ambiguity: `.gitattributes` must agree with `core.autocrlf`
       # for this to be a line-ending test at all, and `git ls-files --eol` must
       # see the tracked state as LF before any self-test runs.
+      #
+      # `$3 == "attr/-text"` admits binary-marked paths (`I-07`'s fuzz seeds
+      # carry the `\r\n` under test): the `i/` field reflects content
+      # detection, so a NUL-free binary file never reports `i/-text`
+      # whatever the attributes say, and without the attr clause no such
+      # fixture could ever be committed. Same rule as `normalize_eol.py`.
       - name: Prove the checkout is LF before judging anything else
         run: |
           echo "core.autocrlf=$(git config --get core.autocrlf || echo '(unset)')"
           echo "--- tracked end-of-line state (must be i/lf) ---"
-          git ls-files --eol | grep -v '\.gitattributes' | awk '$1 != "i/lf" && $1 != "i/none" && $1 != "i/-text" { print "NOT LF: " $0; bad=1 } END { exit bad ? 1 : 0 }'
-          echo "every tracked file is i/lf, i/none, or git-binary (i/-text)"
+          git ls-files --eol | grep -v '\.gitattributes' | awk '$1 != "i/lf" && $1 != "i/none" && $1 != "i/-text" && $3 != "attr/-text" { print "NOT LF: " $0; bad=1 } END { exit bad ? 1 : 0 }'
+          echo "every tracked file is i/lf, i/none, or binary (i/-text or attr/-text)"
 
       - name: Prove the self-tests do not leave the tree with the wrong endings
         run: |

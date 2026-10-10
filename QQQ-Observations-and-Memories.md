@@ -36925,4 +36925,20 @@ probes that still fail real defects. Generalisable rule: a checker
 that classifies by content needs an escape for content it must not
 judge - otherwise the first legitimate exception becomes pressure to
 weaken the check instead of scoping it. → `tools/normalize_eol.py`, `.gitattributes`.
+## §O-613 - I-07 follow-up: the CI line-ending gate had the same content-not-attribute blindness in awk
+
+Fixing the Python classifier was not enough: CI's Line-endings job
+failed on the seeds through a different gate, an inline awk over
+`git ls-files --eol` that admits only `i/lf`, `i/none` and `i/-text`.
+Same root cause as the classifier - the `i/` field is content
+detection, so the binary-marked ASCII seeds report `i/crlf` here
+too - fixed the same way, by also admitting `attr/-text`, with the
+shared rationale stated in both places. Three layers, one rule:
+a path git will never convert cannot have a line-ending defect.
+The local simulation (PowerShell restatement of the awk predicate,
+no grep/awk on this bench) reports zero flags with the seeds
+admitted; ubuntu CI is the verifier. Generalisable rule: when a
+gate exists in two implementations, a fix to one is a hypothesis
+about the other until both are read - the Python tool and the awk
+one-liner enforced the same claim from different code. → `.github/workflows/ci.yml`.
 *End of `QQQ-Observations-and-Memories.md`.*

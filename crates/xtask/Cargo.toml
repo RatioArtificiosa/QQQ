@@ -1,0 +1,22 @@
+[package]
+name = "xtask"
+description = "QQQ developer workflows: one gate (`ci`), fast hygiene (`hygiene`), and worktree-based fault injection (`fault-inject`). Phase 1 of I-08: invoke the existing checks, do not reimplement them."
+# Never published: developer tooling reachable only through the alias.
+# The naming exemption in `crates/qqq-core/tests/naming.rs` pins this —
+# flip it and the `xtask` case fails.
+publish = false
+# Tier: beta — developer workflows, never shipped. Internal tooling with a
+# new, evolving surface; the benchmark harness precedent for tooling that
+# the specification's table does not name (see UNDOCUMENTED_IN_PROPOSAL).
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

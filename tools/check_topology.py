@@ -97,6 +97,11 @@ ORDER = [
     "qqq-pkg",
     "qqq-run",
     "qqq-registry",
+    # Developer tooling (`I-08`): no `qqq-*` dependencies, nothing depends on
+    # it, so any position passes — last keeps the product order untouched.
+    # Registered here AND in `crates/qqq-core/tests/architecture.rs`: a new
+    # crate is a two-file change by design.
+    "xtask",
 ]
 
 # Crates the Proposal lists as "narrowly-scoped, require unsafe" exceptions that

@@ -868,310 +868,16 @@ cmd_checks() {
     # version behind the gate it is supposed to predict is not a check.
     cmd_lint_ci
 
-    python3 tools/check_topology.py
-    # ARCH-010: the stability tier each crate declares, against Proposal §4.3.
-    python3 tools/check_tiers.py
-    python3 tools/check_tiers.py --self-test
-    python3 tools/check_no_ambient.py
-    python3 tools/gen_schemas.py --check
-    python3 tools/gen_llms_txt.py --check
-    # `--self-test` too: the `--check` half only compares the generated files to the tree, so a
-    # generator that stopped emitting a file, or emitted it empty, would pass. The self-test is
-    # what proves the check can fail. It was in `ci.yml` and had never been here (`§O-286`).
-    python3 tools/gen_llms_txt.py --self-test
-    python3 tools/normalize_eol.py --check
-    python3 tools/normalize_eol.py --self-test
-    python3 tools/check_wit_errors.py
-    # The real toolchain's parse, not a Python one. `wasm-tools` is installed in the image for
-    # this; without it the checker fails loudly rather than skipping (`§O-291`).
-    python3 tools/check_wit.py
-    # `§O-354`: this checker had **no demonstrated failure mode in either gate** -- not a
-    # `--self-test`, not a `fault_inject_*.py` harness. `tools/check_conformance.py` found it by
-    # requiring every conformance obligation's checker to prove it can fail, which is a question
-    # `check_gate_parity.py` does not ask.
-    python3 tools/check_wit.py --self-test
-    python3 tools/check_wit_since.py
-    # `CON-015`: the deprecation mechanics, same invocation as CI so parity
-    # holds with no new declaration. The fault-inject harness stays CI-only
-    # under the existing `fault_inject_*.py` declaration (it mutates the tree;
-    # the bridge runs on a bind mount, where a leftover IS the defect).
-    python3 tools/check_wit_deprecated.py
-    # `TEST-010`: the cross-language conformance fixture and the parity matrix. It requires each
-    # obligation's checker to be invoked in BOTH gates, so it belongs in both -- and its own
-    # `--self-test` injects nine faults, one per rule.
-    #
-    # **All three forms, because `check_gate_parity.py` compares INVOCATIONS, not scripts.** The
-    # first version ran `--matrix` here and the bare form in ci.yml, and parity failed on both
-    # directions at once -- the two gates ran the same file and different commands.
-    python3 tools/check_language_parity.py
-    python3 tools/check_language_parity.py --self-test
-    python3 tools/run_language_probes.py --self-test
-    python3 tools/check_conformance.py
-    python3 tools/check_conformance.py --matrix
-    python3 tools/check_conformance.py --self-test
-    # These self-tests use temporary fixtures; no guest toolchain or Cargo mutation.
-    python3 tools/check_live_dev.py --self-test
-    python3 tools/fault_inject_live_components.py --self-test
-    # `§O-415`: source module docs state which checklist items they implement, and nothing
-    # compared that to `tools/backlog.json`. It found five blind spots in its own vocabulary and
-    # has a demonstrated end-to-end failure: an injected total claim against an open item exits 1.
-    python3 tools/check_source_claims.py --check
-    python3 tools/check_source_claims.py --self-test
-    python3 tools/check_batch_first.py
-    python3 tools/audit_unsafe.py
-    python3 tools/audit_unsafe.py --self-test
-    # The register half: `audit_unsafe.py` counts `unsafe` blocks, `--check-doc` asserts that
-    # `docs/unsafe-audit.md` states the numbers it measured. Only the first ran here, so the
-    # bridge verified the count and not the document that publishes it (`§O-286`).
-    python3 tools/audit_unsafe.py --check-doc
-    python3 tools/check_advisories.py
-    python3 tools/check_advisories.py --self-test
-    python3 tools/check_sbom.py --self-test
-    python3 tools/check_security_scope.py
-    python3 tools/check_security_scope.py --self-test
-    python3 tools/check_threat_model.py
-    python3 tools/check_threat_model.py --self-test
-    python3 tools/check_glossary.py
-    python3 tools/check_glossary.py --self-test
-    python3 tools/check_reconciliation.py
-    python3 tools/check_reconciliation.py --self-test
-
-    # # The corpus arithmetic, and why these four were absent
-    #
-    # `check_checklist_counts.py` validates the checklist's own totals against its items, and
-    # `check_lifecycle_counts.py` validates the `ARCH-011` entry against the `STAGES` table. Both
-    # ran in `ci.yml` and neither had ever run here — and there is no reason for that: they are
-    # pure Python, they read only the workspace, and they need no build.
-    #
-    # Measured, not assumed (`§O-286`): run against this image they exit **0** with their
-    # self-tests, exactly as they do in CI. A second gate that skips them is a weaker gate, and
-    # the divergence had accumulated without anyone deciding it.
-    python3 tools/check_checklist_counts.py
-    python3 tools/check_checklist_counts.py --self-test
-    # The same subject one level down: a `-> Done:` block that repeats a substantial line, or a ticked
-    # item with no evidence line. **`check_checklist_counts` counts items and `check_doc_claims` resolves
-    # numerals; neither reads prose** -- so a duplicated sentence rendered as a repeated clause and
-    # passed. The self-test fabricates both defects, and the 53 items ticked before the convention
-    # existed are listed by name so that list can only shrink.
-    python3 tools/check_done_lines.py
-    python3 tools/check_done_lines.py --self-test
-    python3 tools/check_admission.py
-    python3 tools/check_admission.py --self-test
-    # `PLAN-001`: the tracked `tools/backlog.json` against the checklist it is derived from.
-    python3 tools/gen_backlog.py --check
-    python3 tools/gen_backlog.py --self-test
-    # `PLAN-002`: the tracked dashboard is derived from the canonical backlog and milestone
-    # declaration; it must not become a second, hand-maintained progress ledger.
-    python3 tools/milestone_dashboard.py --check
-    python3 tools/milestone_dashboard.py --self-test
-    # `PLAN-003`: the milestones against their declared criteria. `--report` exits 0; a release runs
-    # `--milestone MX`, which does not.
-    python3 tools/check_milestones.py --report
-    python3 tools/check_milestones.py --self-test
-    python3 tools/check_lifecycle_counts.py
-    python3 tools/check_lifecycle_counts.py --self-test
-    python3 tools/check_error_catalogue.py
-    python3 tools/check_error_catalogue.py --self-test
-    python3 tools/check_error_all.py
-    python3 tools/check_error_all.py --self-test
-    python3 tools/check_no_poison_expect.py
-    python3 tools/check_no_poison_expect.py --self-test
-    python3 tools/check_panic_strategy.py
-    python3 tools/check_panic_strategy.py --self-test
-    python3 tools/check_wit_reference.py
-    python3 tools/check_wit_reference.py --self-test
-    python3 tools/check_glossary_usage.py
-    python3 tools/check_glossary_usage.py --self-test
-    python3 tools/check_verified_facts.py
-    python3 tools/check_verified_facts.py --self-test
-    python3 tools/check_wit_bindings.py
-    python3 tools/check_wit_bindings.py --self-test
-    python3 tools/check_wit_vendoring.py
-    python3 tools/check_wit_vendoring.py --self-test
-    python3 tools/check_spdx.py
-    python3 tools/check_spdx.py --self-test
-    python3 tools/check_license_boundary.py
-    python3 tools/check_license_boundary.py --self-test
-    python3 tools/check_tombstones.py
-    python3 tools/check_tombstones.py --self-test
-    python3 tools/check_scope_table.py
-    python3 tools/check_scope_table.py --self-test
-    python3 tools/check_toolchain.py
-    python3 tools/check_toolchain.py --self-test
-    python3 tools/check_gate_parity.py
-    python3 tools/check_gate_parity.py --self-test
-    python3 tools/check_metric_cardinality.py
-    python3 tools/check_metric_cardinality.py --self-test
-    python3 tools/check_public_reachability.py
-    python3 tools/check_public_reachability.py --self-test
-    python3 tools/check_coderabbit_config.py
-    python3 tools/check_coderabbit_config.py --self-test
-    python3 tools/check_checklist_citations.py
-    python3 tools/check_checklist_citations.py --self-test
-    # §9.2's budget table against the Proposal and the checklist. Kept here as
-    # well as in ci.yml on purpose: the image must be able to prove the same
-    # things CI does, or the two drift and the image certifies less than it looks.
-    python3 tools/check_bench_contract.py
-    python3 tools/check_bench_contract.py --self-test
-    # PERF-020's live half needs the Rust release binary and the reference
-    # application, which the bridge image does not build; its pure failure-mode
-    # self-test runs here and in CI.
-    python3 tools/run_perf_regression.py --self-test
-    python3 tools/self_test_schemas.py
-
-    # The mutating one, then the validator that proves it restored everything.
-    python3 tools/self_test_xrefs.py
-    python3 tools/check_xrefs.py
-
-    # A leaked `\uXXXX` renders as literal text in Markdown, so a cross-reference that looks
-    # present is invisible to a search for the real character. Kept beside the xref check for
-    # the same reason: both are about a document saying what it means.
-    python3 tools/check_unicode_escapes.py
-    python3 tools/check_unicode_escapes.py --self-test
-
-    # `CON-011`: the WIT style rules Proposal §6.3 says are enforced in review.
-    python3 tools/check_wit_style.py
-    python3 tools/check_wit_style.py --self-test
-
-    # `DX-004`: §12.2's five parts, on errors the **built binary** emits. Its subject is an
-    # artifact rather than a source tree, so it is skipped with a clear reason when the binary
-    # has not been built here — a check that silently passes on a missing subject certifies
-    # nothing.
-    if [ -x target/debug/qqqai ]; then
-        python3 tools/check_error_standard.py
-        python3 tools/check_error_standard.py --self-test
-    else
-        echo "SKIP: DX-004 needs a built qqqai (cargo build -p qqq-run); not present"
-    fi
-
-    # DOC-018: a hand-written document asserting a count the tree no longer produces. This used
-    # to be gated on a build, because the `workspace-tests` resolver ran the suite. That marker
-    # was removed -- a resolved count that is *supposed* to grow made a table about a past audit
-    # fail whenever a test was added (`§O-238`) -- and every counted fact in this corpus now has
-    # its own owner, so the checker currently resolves no claim and reports that state. It runs
-    # unconditionally, because it needs no build and gating it here would skip a check that can
-    # always run.
-    python3 tools/check_doc_claims.py
-    python3 tools/check_doc_claims.py --self-test
-    # AGENT-024. The `cli` half needs a built qqqai, which this image does not have; the checker
-    # says SKIPPED and names the reason rather than passing quietly, and the static half -- the
-    # four classifications, including the negative one -- runs here in full.
-    python3 tools/check_agent_cookbook.py
-    python3 tools/check_agent_cookbook.py --self-test
-    # AGENT-023. The dynamic half shells out to `qqqai build`, which compiles; a container with
-    # no toolchain reports SKIPPED and names the reason, and the static half always runs.
-    python3 tools/check_agent_bench.py
-    python3 tools/check_agent_bench.py --self-test
-    # TEST-016. The execution half needs an artifact; the container has none, so the run prints
-    # a named failure rather than a pass, and the vocabulary's self-test always runs.
-    # TEST-016. The reference guest is absent here, so the run reports a NAMED SKIP rather than a
-    # failure or a pass -- and the command is identical to the one in `ci.yml`, which is what keeps
-    # the two gates comparable.
-    python3 tools/run_conformance.py
-    python3 tools/run_conformance.py --self-test
-    python3 tools/run_conformance.py --list
-
-    # The corpus guard's **repair** path -- what runs after a killed harness leaves an
-    # injection behind. It had a `NameError` in its verification loop, so it repaired
-    # the corpus and then died on it (`§O-191`). This drives the real function against
-    # a throwaway copy, so it can be checked here without mutating the bind mount.
-    python3 tools/check_corpus_repair.py
-    python3 tools/check_corpus_repair.py --self-test
-
-    # `§O-364`: `include_str!` is a **compile-time dependency on a file**, and the production image
-    # copies an allowlist. The scaffold embedded `rust-toolchain.toml`, the file was not on that
-    # list, and `Production image (SEC-029)` was the only red job of the twelve in run
-    # `36326245198` -- while fmt, clippy, the workspace suite and this whole gate were green
-    # locally, because on the developer's machine the file exists. This checker is what makes the
-    # class impossible instead of closing it with one more `COPY` line, which is how the first two
-    # instances in that file were closed.
-    python3 tools/check_include_str.py
-    python3 tools/check_include_str.py --self-test
-
-    # `§O-268`: a `subprocess` call that decodes with the *locale's* encoding. It was fixed as 42
-    # call sites and the scanner lived in `.scratch/`, which is gitignored, so nothing enforced it.
-    # `§O-292` recorded that this checker was *"registered in both gates"*. It was registered in
-    # **neither** -- which is the claim `check_gate_parity.py`'s rule 5 now refuses to allow.
-    python3 tools/check_subprocess_encoding.py
-    python3 tools/check_subprocess_encoding.py --self-test
-
-    # `CON-001`/`CON-016`: the published schema against the Rust source's `#[serde(rename = ...)]`
-    # and its optionality markers. Drift-checking proves the document matches the *generator*; it
-    # says nothing about whether the generator read the source correctly, and it did not, three
-    # times, in one struct -- every one of which passed `--check`.
-    #
-    # The runtime probe inside it is skipped with a notice when no binary has been built here, so
-    # this runs unconditionally and reports what it could not measure rather than passing silently.
-    python3 tools/check_schema_conformance.py
-    python3 tools/check_schema_conformance.py --self-test
-
-    # `§O-286`: these two ran in CI's line-ending step and **not here**, so the bridge verified
-    # neither. Both are pure Python, both were run against this image to prove it, and neither
-    # touches a tracked file -- `check_handoff.py --self-test` drives pure functions precisely so
-    # that it does not dirty the tree it exists to certify.
-    python3 tools/check_handoff.py --self-test
-    python3 tools/check_xrefs.py --self-test
-
-    # `DET-009` / `DOD-003`: the 10,000-trial harness's own guards.
-    #
-    # Its `--self-test` is pure logic -- it needs neither a built `qqqai` nor a guest -- which is
-    # exactly why it runs here and the end-to-end half does not. This image builds workspace tests,
-    # not the CLI binary: the `cli` halves of `DX-004` and `AGENT-024` are declared skips below for
-    # the same reason. So the gate proves the *instrument* (the pinned digest, the vacuity guards,
-    # and the divergence counter firing on a one-byte mutation) while the 10,000-trial measurement
-    # itself is re-derived by `python tools/det009_trials.py --full` where a binary exists.
-    #
-    # Without this, the number `DOD-003` publishes would come from an instrument nothing had ever
-    # watched fail -- the defect `§O-354` records for `check_wit.py`.
-    python3 tools/det009_trials.py --self-test
-
-    # # Why the line-ending guard runs LAST, and why the scratch copy is deliberate
-    #
-    # Ten of the steps above inject a defect into a *generated* tracked document and
-    # restore it. Each of those read-modify-write cycles used `Path.write_text`, which
-    # translates `\n` to `os.linesep`. On Windows that is `\r\n`, so the checkers left
-    # every generated document CRLF -- and `normalize_eol.py --check` fails the moment
-    # a tracked text file reads CRLF. No CI job ran both, which is why the defect was
-    # latent; this environment now runs both, so the guard below is the one that would
-    # have caught it. The writers are byte-faithful now.
-    #
-    # It copies the tree to a scratch directory rather than pointing the checkers at
-    # `/workspace`. The bind mount is owned by Windows' user id, which this container
-    # cannot match, so a rewrite could fail part-way. A copied tree can be written
-    # freely, and `normalize_eol.py` asks Git rather than walking a directory.
-    _eol_guard_dir="$(mktemp -d)"
-    git -c safe.directory="${WORKSPACE}" -C "${WORKSPACE}" archive --format=tar HEAD \
-        | tar -x -C "${_eol_guard_dir}"
-    for _t in check_error_catalogue check_glossary check_reconciliation check_wit_reference \
-              check_tombstones check_checklist_counts check_done_lines check_admission check_advisories check_verified_facts; \
-                do
-        ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/${_t}.py" --self-test >/dev/null )
-    done
-    if ( cd "${_eol_guard_dir}" && python3 "${WORKSPACE}/tools/normalize_eol.py" --check ); then
-        echo "   the self-tests leave the tree with LF, in a scratch copy of HEAD"
-    else
-        echo "" >&2
-        echo "!! a self-test wrote a tracked file with CRLF." >&2
-        echo "   A checker's inject/restore went through a newline-translating write." >&2
-        rm -rf "${_eol_guard_dir}"
-        return 1
-    fi
-    rm -rf "${_eol_guard_dir}"
-
-    # Final word: the corpus is intact after everything that mutated it.
-    #
-    # `check_corpus_at_rest.py` belongs HERE, and it was declared ci-only below for as long as it has
-    # existed. The declared reason was *"it needs a clean tree"*, and **this file already guarantees
-    # one** -- the source guard exits 3 on a modified tracked file. Measured in this image on
-    # 2026-09-28: `git status --porcelain` empty, and the check itself `EXIT=0`. Keeping it out cost
-    # a CI failure when the `§O-400` edit landed without a digest re-record, so the exclusion made
-    # this a strictly weaker gate than the one it protected.
-    python3 tools/self_test_xrefs.py --check-clean
-    python3 tools/check_corpus_at_rest.py
-    # PLAN-016: the bridge runs the read-only ritual too. `--record` is a
-    # developer-only writer; both gates must reject stale derived documents.
-    python3 tools/sync_docs.py --check
-    python3 tools/normalize_eol.py --check
+    # `I-08` phase 1: the whole check list lives in `crates/xtask` and both
+    # gates call it -- the `ci.yml` Rust job calls this same single command.
+    # The per-checker rationale that used to live below now lives in each
+    # checker's module docs; `crates/xtask/src/main.rs` names the execution
+    # lanes. The only thing left in this function that the single gate does
+    # not own is the linter-version check above: the scratch-copy xrefs
+    # harness, the EOL check, the corpus checks and the final
+    # `self_test_xrefs.py --check-clean` validation all run inside
+    # `cargo xtask ci`.
+    cargo xtask ci
 }
 
 # # What this bridge does NOT run, and why each one is legitimate
@@ -1217,8 +923,6 @@ cmd_checks() {
 #   tools/run_perf_regression.py         starts qqqai serve and drives the reference app; the
 #                                       live measurement belongs to the PERF-020 CI job, while
 #                                       the pure self-test runs in both gates.
-#   tools/check_api_examples.py (2 cmds)   compiles and runs doctests from every public
-#                                          declaration — a cargo build of the whole workspace
 #   tools/fault_inject_*.py (9 cmds)       each recompiles a crate with a mutation applied;
 #                                          the WIT harnesses instead mutate `.wit` files
 #                                          (verified parseable) and restore them, which is
@@ -1243,18 +947,20 @@ cmd_checks() {
 # the image and the checker now runs here, so the declaration was **removed rather than kept**:
 # this checker fails on a stale exemption, and a list that only grows stops meaning anything.
 #
-# And **one divergence in the other direction** — a command this bridge runs that CI does not:
+# `tools/check_api_examples.py` (2 cmds) and `tools/check_sbom.py --self-test`
+# used to be on this list; both now run in both gates through `cargo xtask ci`,
+# so the declarations were **removed rather than kept**, like `check_wit.py`
+# below: this checker fails on a stale exemption.
 #
-#   tools/check_sbom.py --self-test        the bridge proves the checker can fail; CI does not
-#                                          repeat it because it runs the real `sbom` half in the
-#                                          job that produces the artifact. The bridge is allowed
-#                                          to be the wider gate, but not silently.
+# And **one divergence in the other direction** — REMOVED by `I-08` phase 1
+# for the same reason (no remaining bridge-only command once `xtask` covers
+# the self-test): the heading stays so a future divergence has a place to go.
 #
 # The list is **parsed by `tools/check_gate_parity.py`**, which fails when the two gates diverge
 # beyond it *and* when an entry on it stops diverging — a stale exemption is a defect in its own
 # right, and a list that only grows is a list that stops meaning anything (`§O-291`).
 #
-# If this list and `ci.yml` disagree beyond these fifteen, that is the defect — not the
+# If this list and `ci.yml` disagree beyond these nine, that is the defect — not the
 # divergence itself. A parity checker would be the durable form; it needs this list as data,
 # which is why the list is here rather than in a comment somewhere else.
 

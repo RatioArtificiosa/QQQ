@@ -164,8 +164,77 @@ def read_gate_invocations() -> dict[str, str]:
             else:
                 # YAML: drop a `#` that starts a comment (preceded by whitespace or at line start).
                 kept.append(re.sub(r"(?:(?<=\s)|^)#.*$", "", line))
-        stripped[name] = "\n".join(kept)
+        stripped[name] = expand_single_gate("\n".join(kept))
     return stripped
+
+
+# A gate that calls the single gate (`I-08` phase 1) enforces everything that
+# gate enforces. Anchored on the command position so a comment merely
+# mentioning `cargo xtask ci` does not expand (comments are stripped above,
+# so this matches real invocations only).
+# A bare `--help` (or any trailing argument) must NOT expand: it names
+# the gate without executing it, and crediting coverage to a mention
+# is the fixture-that-cannot-fail in gate form. A trailing `#` shell comment
+# after a real invocation still expands: the bridge keeps trailing comments
+# (only full-line `#` lines are dropped above), so requiring bare
+# end-of-line would silently credit a real gate with zero coverage.
+# A shell operator after a real invocation (`&&`, `||`, `;`, `|`, `&`, `>`,
+# `<`, with or without surrounding spaces) still expands for the same
+# reason: it chains the gate, it does not name it. The operator -- not an
+# argument -- is what keeps `--help` and `--flag` rejected, and a `#` opens
+# a comment only after whitespace (`ci#x` is a word, not a comment).
+# This pattern is identical in `tools/check_gate_parity.py` by design: two
+# spellings of one rule would drift, and parity must cover the executed
+# invocation, not a differently-matched one.
+XTASK_CALL = re.compile(
+    r"^\s*(?:run:\s*)?cargo\s+xtask\s+ci(?:\s*$|\s+#.*$|\s*(?:&&|\|\||[;|&><]).*$)",
+    re.MULTILINE,
+)
+
+
+def xtask_invocations() -> list[str]:
+    """The normalized invocations `cargo xtask ci` runs, via `cargo xtask list`.
+
+    Fails loudly: an obligation certified against an unreadable gate is the
+    fixture-that-cannot-fail in checker form.
+    """
+    import subprocess
+
+    out = subprocess.run(
+        ["cargo", "xtask", "list"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"`cargo xtask list` failed: {out.stderr.strip()}")
+    lines = sorted({l.strip() for l in out.stdout.splitlines() if l.strip().startswith("tools/")})
+    if not lines:
+        raise RuntimeError("`cargo xtask list` yielded no tools/ lines; certifying nothing")
+    return lines
+
+
+def expand_single_gate(text: str, coverage=None) -> str:
+    """Append the single gate's coverage when `text` really invokes it.
+
+    `coverage` is injectable so `--self-test` can drive this without cargo;
+    the live path passes `None` and reads the real `cargo xtask list`. A
+    cargo failure is a `FATAL` `SystemExit` (the file's idiom for an
+    unreadable gate, see `load()`), not an uncaught `RuntimeError`: a
+    traceback where a verdict belongs is noise the gate cannot act on.
+    """
+    if XTASK_CALL.search(text):
+        if coverage is not None:
+            lines = coverage
+        else:
+            try:
+                lines = xtask_invocations()
+            except RuntimeError as e:
+                raise SystemExit(f"FATAL: {e}") from e
+        return text + "\n" + "\n".join(lines)
+    return text
 
 
 def failure_mode_demo(script: str, ci_text: str) -> str | None:
@@ -569,6 +638,77 @@ def self_test(fixture: dict, ctx: dict) -> int:
         else:
             print(f"  FAIL  NOT DETECTED: {label}")
             failures += 1
+
+    # A `--help` mention must not expand: it names the gate without executing
+    # it, and crediting coverage to a mention is the fixture-that-cannot-fail
+    # in gate form.
+    _help_text = "      - name: gate\n        run: cargo xtask ci --help"
+    if expand_single_gate(_help_text, ["tools/a.py"]) == _help_text:
+        print("  OK    a --help mention does not expand")
+    else:
+        print("  FAIL  a --help mention expanded to coverage it never ran")
+        failures += 1
+    _real_text = "      - name: gate\n        run: cargo xtask ci"
+    if "tools/a.py" in expand_single_gate(_real_text, ["tools/a.py"]):
+        print("  OK    a real invocation expands")
+    else:
+        print("  FAIL  a real invocation did not expand")
+        failures += 1
+    # The bridge keeps trailing `#` comments (only full-line comments are
+    # dropped), so a real invocation with one must still expand -- otherwise
+    # a live gate is silently credited with zero coverage.
+    _bridge_comment = "cargo xtask ci  # the single gate"
+    if "tools/a.py" not in expand_single_gate(_bridge_comment, ["tools/a.py"]):
+        print("  FAIL  a bridge invocation with a trailing comment did not expand")
+        failures += 1
+    else:
+        print("  OK    a bridge invocation with a trailing comment expands")
+    # A comment does not rescue a non-invocation: `--help` names the gate
+    # without executing it, comment or not.
+    _help_comment = "      - name: gate\n        run: cargo xtask ci --help  # usage"
+    if expand_single_gate(_help_comment, ["tools/a.py"]) == _help_comment:
+        print("  OK    a --help mention with a trailing comment does not expand")
+    else:
+        print("  FAIL  a --help mention with a trailing comment expanded")
+        failures += 1
+    # A shell operator chains the gate instead of naming it: `&&`, `||`,
+    # `;`, `|` all execute `cargo xtask ci`, so they expand -- while a
+    # trailing argument still must not.
+    for _label, _text, _want_expand in (
+        ("chained with &&", "cargo xtask ci && echo done", True),
+        ("chained with ;", "      - name: gate\n        run: cargo xtask ci; echo done", True),
+        ("fallback with ||", "cargo xtask ci || echo fallback", True),
+        ("piped", "cargo xtask ci | tee log", True),
+        ("flagged", "cargo xtask ci --flag", False),
+    ):
+        _expanded = "tools/a.py" in expand_single_gate(_text, ["tools/a.py"])
+        if _expanded == _want_expand:
+            print(f"  OK    {_label} {'expands' if _want_expand else 'does not expand'}")
+        else:
+            print(f"  FAIL  {_label}: expanded={_expanded}, want={_want_expand}")
+            failures += 1
+    # A cargo failure is a FATAL verdict, not a traceback: the gate is
+    # unreadable, and an obligation certified against it would be the
+    # fixture-that-cannot-fail. `--self-test` itself never touches cargo
+    # (every case above passes `coverage` explicitly); this forces the live
+    # path with a failing `cargo` shim.
+    import subprocess as _sp
+    from unittest import mock as _mock
+
+    def _boom(*a, **k):
+        return _sp.CompletedProcess(args=a, returncode=1, stdout="", stderr="boom")
+
+    with _mock.patch.object(_sp, "run", _boom):
+        try:
+            expand_single_gate("      - name: gate\n        run: cargo xtask ci", None)
+            print("  FAIL  a cargo failure expanded instead of raising FATAL")
+            failures += 1
+        except SystemExit as e:
+            if "FATAL" in str(e.code):
+                print("  OK    a cargo failure raises FATAL, not a traceback")
+            else:
+                print(f"  FAIL  cargo failure raised SystemExit without FATAL: {e.code!r}")
+                failures += 1
 
     # And the premise: the unmodified fixture must be clean, or every detection above is noise.
     clean = validate(fixture, **ctx)

@@ -102,6 +102,16 @@
 
 ### Changed
 
+- Developer gate unified (`I-08` phase 1): `cargo xtask ci` runs the union
+  of the CI Rust job and the bridge checks — format, lints, build, test,
+  ignored suites, every checker with its liveness proof, the release probe
+  — in parallel where independent with summary aggregation, and both
+  `ci.yml` and `docker/entrypoint.sh` call it. The gate-parity checker
+  stays as the backstop (now `xtask`-aware); fault injection runs on `git
+  worktree` copies, never the real tree. Phase 2 (porting checkers to Rust,
+  semver/structure tooling) is explicitly out of scope.
+  (`I-08`)
+
 - **audit**: the capability-use record format moved from v1 to v2
   (`timestamp_unix_ms` on every row, HMAC-SHA-256 chain when
   `--audit-hmac-key-file` is given). Old files keep verifying: the

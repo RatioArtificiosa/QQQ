@@ -96,7 +96,7 @@ NOT_YET_BUILT: frozenset[str] = frozenset(
 # is the reverse of the drift that matters. They are listed so the check reports *new* divergence
 # instead of failing forever on a known gap. Adding a crate to this set is a deliberate act; the
 # list is printed on every run so it cannot grow unnoticed.
-UNDOCUMENTED_IN_PROPOSAL: frozenset[str] = frozenset({"qqq-sys", "qqq-bench"})
+UNDOCUMENTED_IN_PROPOSAL: frozenset[str] = frozenset({"qqq-sys", "qqq-bench", "xtask"})
 
 
 def declared_in_manifest() -> dict[str, str]:

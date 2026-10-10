@@ -291,11 +291,74 @@ def check(
     return problems
 
 
+# A gate that calls the single gate (`I-08` phase 1) runs everything that
+# gate runs. Anchored on the command position like `CI_INVOCATION`, so a
+# comment merely mentioning `cargo xtask ci` does not expand.
+# A bare `--help` (or any trailing argument) must NOT expand: it names
+# the gate without executing it, and crediting coverage to a mention
+# is the fixture-that-cannot-fail in gate form. A trailing `#` shell comment
+# after a real invocation still expands: neither gate strips trailing
+# comments before this search, so requiring bare end-of-line would silently
+# credit a real gate with zero coverage. A shell operator after a real
+# invocation (`&&`, `||`, `;`, `|`, `&`, `>`, `<`, with or without
+# surrounding spaces) still expands for the same reason: it chains the
+# gate, it does not name it. The operator -- not an argument -- is what
+# keeps `--help` rejected, and a `#` opens a comment only after whitespace.
+# This pattern is identical in `tools/check_conformance.py` by design: two
+# spellings of one rule would drift, and parity must cover the executed
+# invocation, not a differently-matched one.
+XTASK_CALL = re.compile(
+    r"^\s*(?:run:\s*)?cargo\s+xtask\s+ci(?:\s*$|\s+#.*$|\s*(?:&&|\|\||[;|&><]).*$)",
+    re.MULTILINE,
+)
+
+
+def xtask_coverage() -> list[str]:
+    """The python invocations `cargo xtask ci` runs, via `cargo xtask list`.
+
+    Fails loudly rather than certifying nothing: an unreadable gate cannot
+    be compared, and a comparison that silently skipped the single gate
+    would pass two empty hands as agreement (rule 4's shape).
+    """
+    import subprocess
+
+    out = subprocess.run(
+        ["cargo", "xtask", "list"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"`cargo xtask list` failed: {out.stderr.strip()}")
+    lines = sorted({l.strip() for l in out.stdout.splitlines() if l.strip().startswith("tools/")})
+    if not lines:
+        raise RuntimeError("`cargo xtask list` yielded no tools/ lines; certifying nothing")
+    return lines
+
+
+def expand_gate(text: str, invs: list[str], coverage: list[str] | None = None) -> list[str]:
+    """Pure: `invs` plus the single gate's coverage when `text` calls it.
+
+    `coverage` is injectable so `--self-test` can drive this without cargo;
+    the live path passes `None` and reads the real `cargo xtask list`.
+    """
+    if not XTASK_CALL.search(text):
+        return invs
+    lines = coverage if coverage is not None else xtask_coverage()
+    return sorted(set(invs) | set(lines))
+
+
 def collect():
     ci_only, bridge_only = declaration()
+    ci_text = CI.read_text(encoding="utf-8", errors="replace")
+    bridge_text = ENTRYPOINT.read_text(encoding="utf-8", errors="replace")
+    ci = expand_gate(ci_text, invocations(ci_text, CI_INVOCATION))
+    bridge = expand_gate(bridge_text, invocations(bridge_text, BRIDGE_INVOCATION))
     return (
-        invocations(CI.read_text(encoding="utf-8", errors="replace"), CI_INVOCATION),
-        invocations(ENTRYPOINT.read_text(encoding="utf-8", errors="replace"), BRIDGE_INVOCATION),
+        ci,
+        bridge,
         ci_only,
         bridge_only,
         checkers(),
@@ -303,7 +366,14 @@ def collect():
 
 
 def validate(verbose: bool) -> int:
-    ci, bridge, ci_only, bridge_only, scripts = collect()
+    # A gate that cannot be read cannot be compared: `collect()` raises
+    # `RuntimeError` when `cargo xtask list` fails, and that becomes a FAIL
+    # verdict here rather than a traceback where a verdict belongs.
+    try:
+        ci, bridge, ci_only, bridge_only, scripts = collect()
+    except RuntimeError as e:
+        print(f"FAIL  cannot compare gates: {e}")
+        return 1
     print(f"ci.yml invocations        : {len(ci)}")
     print(f"bridge invocations        : {len(bridge)}")
     print(f"check_*.py in tools/      : {len(scripts)}")
@@ -454,19 +524,141 @@ def self_test() -> int:
     )
 
     # The real repository must currently agree.
-    ci, bridge, ci_only, bridge_only, scripts = collect()
-    real = check(ci, bridge, ci_only, bridge_only, scripts)
-    ok = not real
-    print(
-        f"  {'OK  ' if ok else 'DEAD'}  the real gates agree "
-        f"({len(ci)} vs {len(bridge)} invocations, {len(scripts)} checker(s))"
+    simple(
+        "a gate calling xtask expands to the union",
+        expand_gate("      - name: gate\n        run: cargo xtask ci", ["tools/a.py"], ["tools/b.py --self-test"])
+        == ["tools/a.py", "tools/b.py --self-test"],
+        "the single gate must contribute its coverage to both sides",
     )
-    if not ok:
-        failures += 1
-        for p in real[:3]:
-            print(f"        {p}")
+    simple(
+        "a gate not calling xtask is unchanged",
+        expand_gate("run: python tools/a.py", ["tools/a.py"], ["tools/b.py"]) == ["tools/a.py"],
+        "expansion must not invent coverage",
+    )
+    simple(
+        "a comment mentioning xtask does not expand",
+        expand_gate("# both gates call cargo xtask ci one day", ["tools/a.py"], ["tools/b.py"])
+        == ["tools/a.py"],
+        "the pattern is anchored on the command position",
+    )
+    simple(
+        "a --help mention does not expand",
+        expand_gate("        run: cargo xtask ci --help", ["tools/a.py"], ["tools/b.py"])
+        == ["tools/a.py"],
+        "naming the gate is not executing it",
+    )
+    simple(
+        "a ci invocation with a trailing comment expands",
+        expand_gate(
+            "      - name: gate\n        run: cargo xtask ci  # the single gate",
+            ["tools/a.py"],
+            ["tools/b.py --self-test"],
+        )
+        == ["tools/a.py", "tools/b.py --self-test"],
+        "a # comment after a real invocation is still an invocation",
+    )
+    simple(
+        "a bridge invocation with a trailing comment expands",
+        expand_gate(
+            "cargo xtask ci  # the single gate",
+            ["tools/a.py"],
+            ["tools/b.py --self-test"],
+        )
+        == ["tools/a.py", "tools/b.py --self-test"],
+        "the bridge keeps trailing comments, so the matcher must accept them",
+    )
+    simple(
+        "a --help mention with a trailing comment does not expand",
+        expand_gate(
+            "        run: cargo xtask ci --help  # usage",
+            ["tools/a.py"],
+            ["tools/b.py"],
+        )
+        == ["tools/a.py"],
+        "a comment does not turn naming the gate into executing it",
+    )
+    simple(
+        "a ci invocation chained with && expands",
+        expand_gate(
+            "      - name: gate\n        run: cargo xtask ci && echo done",
+            ["tools/a.py"],
+            ["tools/b.py --self-test"],
+        )
+        == ["tools/a.py", "tools/b.py --self-test"],
+        "chaining executes the gate; only arguments withhold coverage",
+    )
+    simple(
+        "a bridge invocation with || expands",
+        expand_gate(
+            "cargo xtask ci || echo fallback",
+            ["tools/a.py"],
+            ["tools/b.py --self-test"],
+        )
+        == ["tools/a.py", "tools/b.py --self-test"],
+        "a fallback still executes the gate first",
+    )
+    simple(
+        "an invocation with a flag does not expand",
+        expand_gate("cargo xtask ci --flag", ["tools/a.py"], ["tools/b.py"])
+        == ["tools/a.py"],
+        "an argument names a different invocation, operator or not",
+    )
 
-    total = 17
+    # The live gates must read cleanly: an unreadable gate is a self-test
+    # failure, not a traceback escaping the suite.
+    try:
+        ci, bridge, ci_only, bridge_only, scripts = collect()
+    except RuntimeError as e:
+        print(f"  DEAD  the live gates are unreadable: {e}")
+        failures += 1
+        ci = None
+    if ci is not None:
+        real = check(ci, bridge, ci_only, bridge_only, scripts)
+        ok = not real
+        print(
+            f"  {'OK  ' if ok else 'DEAD'}  the real gates agree "
+            f"({len(ci)} vs {len(bridge)} invocations, {len(scripts)} checker(s))"
+        )
+        if not ok:
+            failures += 1
+            for p in real[:3]:
+                print(f"        {p}")
+
+    # A cargo failure fails the gate without a traceback: the comparison
+    # cannot run against an unreadable gate. None of these depend on what
+    # the live gates currently contain -- an earlier version called the
+    # real `validate()` under the failing shim, which only exercised the
+    # failure path while both live gates still invoked the single gate.
+    import subprocess as _sp
+    from unittest import mock as _mock
+
+    def _boom(*a, **k):
+        return _sp.CompletedProcess(args=a, returncode=1, stdout="", stderr="boom")
+
+    # Unit level: an input that invokes the single gate propagates the
+    # coverage failure as `RuntimeError`.
+    with _mock.patch.object(_sp, "run", _boom):
+        try:
+            expand_gate("cargo xtask ci", ["tools/a.py"], None)
+            print("  FAIL  a coverage failure expanded instead of raising")
+            failures += 1
+        except RuntimeError:
+            print("  OK    a coverage failure raises instead of expanding")
+    # Gate level: a `collect()` failure becomes a FAIL verdict, not an
+    # escape, with no live files read.
+    with _mock.patch.object(sys.modules[__name__], "collect") as _collect:
+        _collect.side_effect = RuntimeError("boom")
+        try:
+            if validate(verbose=False) == 1:
+                print("  OK    a collect failure fails the gate without a traceback")
+            else:
+                print("  FAIL  a collect failure did not fail the gate")
+                failures += 1
+        except RuntimeError as e:
+            print(f"  FAIL  a collect failure escaped as a traceback: {e}")
+            failures += 1
+
+    total = 29
     print("")
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) not detected")

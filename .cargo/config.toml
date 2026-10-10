@@ -1,0 +1,3 @@
+# `cargo xtask` runs `crates/xtask` (`I-08`, the standard cargo-xtask pattern).
+[alias]
+xtask = "run --package xtask --"

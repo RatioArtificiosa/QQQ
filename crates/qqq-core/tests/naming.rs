@@ -96,12 +96,16 @@ fn the_cli_binary_is_named_qqqai_and_never_qqq() {
         }
 
         // A crate with a main.rs and no `[[bin]]` produces its package name.
+        // `xtask` is the one exemption, for the reason stated on the package
+        // rule above: its binary is never installed (the `cargo xtask` alias
+        // runs it in place), so no install surface exists to collide.
+        let is_xtask = dir_name == "xtask";
         let has_main = workspace_root()
             .join("crates")
             .join(&dir_name)
             .join("src/main.rs")
             .is_file();
-        if has_main && declared_bin_names(&text).is_empty() {
+        if has_main && declared_bin_names(&text).is_empty() && !is_xtask {
             problems.push(format!(
                 "`{dir_name}` has src/main.rs and no `[[bin]]` stanza, so Cargo \
                  names the binary after the package; §D-001 requires `qqqai`"
@@ -170,6 +174,21 @@ fn no_package_is_named_qqq() {
             name, "qqq",
             "`{dir_name}` is named `qqq`, which is taken on crates.io and npm (§D-001)"
         );
+        // `xtask` is exempt from the prefix rule, not from the `qqq` ban
+        // above. §D-001 guards the public install surface (crates.io, npm,
+        // installed binaries); `xtask` is `publish = false` developer
+        // tooling reachable only through the `cargo xtask` alias, so it can
+        // collide with nothing — and renaming it would satisfy neither rule
+        // (the binary still would not be `qqqai`) while breaking the
+        // cargo-xtask convention the `I-08` design names. The exemption pins
+        // its precondition: flip `publish` and this fails.
+        if name == "xtask" {
+            assert!(
+                text.contains("publish = false"),
+                "`xtask` is exempt as unpublished tooling only; `publish = false` is gone"
+            );
+            continue;
+        }
         assert!(
             name.starts_with("qqq-") || name == "qqqai",
             "`{dir_name}` is named `{name}`; every package is `qqq-…` or `qqqai` (§D-001)"

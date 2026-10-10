@@ -74,6 +74,10 @@ members = [
     # Implements: ARCH-009, SEC-020
     # Proposal: §4.3 Crate topology
     "crates/qqq-sys",
+
+    # Tier: beta — developer workflows, never shipped.
+    # Implements: I-08 (phase 1: invoke the existing checks)
+    "crates/xtask",
 ]
 
 [workspace.package]

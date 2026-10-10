@@ -36941,4 +36941,434 @@ admitted; ubuntu CI is the verifier. Generalisable rule: when a
 gate exists in two implementations, a fix to one is a hypothesis
 about the other until both are read - the Python tool and the awk
 one-liner enforced the same claim from different code. → `.github/workflows/ci.yml`.
+## §O-614 - I-08: tools spawned under `cargo run` inherit xtask's package identity, and one variable broke `cargo machete`
+
+`cargo xtask hygiene` failed its `machete` step while the same
+binary run directly passed: `cargo machete` analysed a directory
+literally named `machete`. Bisecting the inherited environment named
+the culprit - `CARGO_PKG_NAME=xtask`, set by the parent `cargo run`.
+The child is a different crate in a different role; identity
+variables describing xtask misdescribe it. The fix scrubs
+`CARGO_MANIFEST_*`, `CARGO_PRIMARY_PACKAGE` and the `CARGO_PKG_`,
+`CARGO_BIN_`, `CARGO_CRATE_` families from every spawned step while
+keeping toolchain selection, home, network and color, with a unit
+test asserting both halves. Generalisable rule: a runner that spawns
+builds must scrub the environment that describes itself, or every
+child tool runs as a chimera of two crates. → `crates/xtask/src/main.rs`.
+
+## §O-615 - I-08: a new workspace member is a seven-surface change, and the gate enumerated every one
+
+Adding the `xtask` member tripped, in order: topology (`§4.3` order
+in two files), tiers (vocabulary plus the deliberate undocumented set),
+naming (package prefix and binary rules with a pinned publish=false
+exemption, which then caught the missing `publish = false` itself),
+the forbid-attribute root convention (a documented empty lib.rs),
+the unsafe-audit counts (plus hardcoded self-test numbers), the
+unsafe-scan's own fixtures (self-flagging test strings), and the
+conformance fixture's textual gate coupling (taught the xtask
+expansion). No single list names all seven; the full `cargo xtask ci`
+run is what enumerated them, one red gate at a time. Generalisable
+rule: in a self-consistent repository the price of a new member is
+paid in gate failures - budget a full-gate iteration per member, and
+treat each failure as the machinery working, not as breakage.
+ → `crates/xtask/`, `tools/check_tiers.py`, `tools/check_topology.py`, `tools/check_conformance.py`, `tools/audit_unsafe.py`.
+
+## §O-616 - I-08: one live_components failure under the new runner that no variant reproduces
+
+The first full `cargo xtask ci` failed
+`native_output_is_real_and_cache_survives_engine_recreation` (child-hit
+file missing after a successful child); the single test, the full
+target, the full suite plain, the full suite with the scrubbed
+environment, and the full `cargo xtask ci` retry all pass. Nothing in
+the wave touches that path, and the scrub is exonerated by direct
+experiment. Disposition: suspected flake, single occurrence, with
+the retry and CI's three platforms as evidence. If it recurs it earns
+a finding of its own; until then it is recorded, not chased.
+ → `crates/qqq-run/tests/live_components.rs`.
+## §O-617 - I-08 review round: four findings, one of them a vacuous pass I wrote myself
+
+Post-commit review of the xtask commit found four, all taken with
+red proof. The sharpest is my own: parameterising the audit self-test's
+hardcoded counts, I also parameterised its *stale* fixture into
+correctness - `n=len(files)+7` became `n=len(files)` - and the test
+passed vacuously, certifying a recorder that repaired nothing. Review
+named exactly that. The other three: the ported unsafe scan passed
+empty trees and unreadable files silently (now counted and failed),
+the help check assumed `workspace/target` (now `CARGO_TARGET_DIR`,
+then cargo metadata, then default - the bridge builds elsewhere), and
+the stability page missed the new member's row (now three crates,
+not two). Generalisable rule: a test that cannot fail is not a test,
+and parameterising a fixture is the easiest way to write one by
+accident - the stale case must stay stale on purpose.
+ → `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`, `docs/stability.md`.
+## §O-618 - I-08 review round two: the stale fixture had a twin, and one major never reproduced
+
+A second review found two more, both taken: the audit self-test's
+*other* hardcoded count (`**85**` in the must-fail bad fixture goes
+live the day the tree scans exactly 85 files) is now derived stale
+like its sibling, and the new stability bullet uses the siblings'
+em dash (verified byte-wise after rendering lied that all three
+matched - display normalisation is why the check reads bytes). A
+third finding, a major on the bridge surgery, appeared in one review
+and in no other: the re-review of the identical SHA reports nothing
+there, and syntax, parity and self-tests corroborate nothing wrong.
+Disposition: unreproduced review noise, recorded as such - if it
+recurs with text it will be worked like the others.
+ → `tools/audit_unsafe.py`, `docs/stability.md`.
+## §O-619 - I-08 review round three: empty scans and help-text mentions are gates that cannot fail
+
+A third review found two, both taken. First, the unsafe scanner
+passed empty trees and forbid-less scans silently - the same vacuity
+shape just fixed in xtask's own scanner, now with a shared remedy:
+refuse emptiness loudly, with self-test cases for both arms. Second,
+the xtask-call matchers in both gate readers credited coverage to
+`cargo xtask ci --help`, which names the gate without executing it;
+both patterns now require end-of-line, with `--help` non-expansion
+cases in both self-tests. Generalisable rule: any matcher that
+grants coverage must be tested against the mention that looks like
+an invocation - help text, comments, and docs are where coverage
+goes to be claimed without being run.
+ → `tools/audit_unsafe.py`, `tools/check_conformance.py`, `tools/check_gate_parity.py`.
+## §O-620 - I-08 review round four: new self-test cases ran after the verdict that judges them
+
+The vacuity cases appended to the unsafe-audit self-test incremented
+the shared `failures` counter - and then the function printed
+SELF-TEST PASSED unconditionally, because the verdict block sat above
+them, not below. A failing new case would still have exited 0: the
+exact vacuity the cases exist to close, wearing the cases as
+camouflage. Fixed by moving the verdict idiom below the new cases,
+and proved live by sabotage (invert one assertion: DEAD plus exit 1),
+then restored green. Generalisable rule: appended test cases must be
+read for where the verdict sits, not just what they assert - coverage
+below the finish line is decoration.
+ → `tools/audit_unsafe.py`.
+## §O-621 - I-08 review round five: the ported scan matched the attribute's text, not the attribute
+
+`run_unsafe_scan` in xtask counted any line containing
+`forbid(unsafe_code)` as a crate carrying the attribute - including a
+comment saying so - and xtask's own `main.rs` carried no `forbid` at
+all while claiming the workspace-wide invariant. Fixed both
+directions: `main.rs` now states `#![forbid(unsafe_code)]` beside the
+`lib.rs` the architecture test reads, and `unsafe_line_is_violation`
+skips `"..."` string literals (a real block can never hide in string
+data) while still matching comments (fail-safe: a commented-out block
+is one uncomment away from live). Positive test for the attribute,
+negative test for the same text in a string. Generalisable rule: a
+ported check must be at least as precise as the grep it replaces, and
+the port must itself pass the check it ports - self-hosting is the
+cheapest soundness proof a checker has.
+ → `crates/xtask/src/main.rs`.
+## §O-622 - I-08 review round five: `orders-clippy` ran in the parallel lane against the target-dir lock
+
+Every other `cargo` step runs sequential because cargo serialises on
+the target directory; `orders-clippy` sat in `Lane::Par`, so the one
+gate could contend with itself. Moved to `Lane::Seq` and added a test
+over `all_steps()` asserting every `cargo clippy|build|test|run` step
+rides the sequential lane (`fmt` exempt - no build). The table now
+states its own locking discipline, and the test refuses any future
+cargo step added to the wrong lane. Generalisable rule: when a runner
+documents an ordering constraint, the step table is the place that
+lies - assert the discipline over the table, not beside it.
+ → `crates/xtask/src/main.rs`.
+## §O-623 - I-08 review round five: the gate matchers rejected real invocations wearing comments
+
+`XTASK_CALL` in both gate matchers required bare end-of-line after
+`cargo xtask ci`, but the bridge keeps trailing `#` comments (only
+full-line `#` lines are dropped) - so a real, commented invocation
+would silently contribute zero coverage while parity reported
+agreement. Red proof first: a probe showed all three forms
+(ci, bridge, parity) refusing to expand. The patterns now accept an
+optional trailing `#` comment while still rejecting `--help`, even
+with a comment attached, with self-test cases for every form.
+Generalisable rule: a command matcher must accept every form its own
+gates allow, or the day someone documents an invocation inline the
+coverage quietly drops to nothing.
+ → `tools/check_conformance.py`, `tools/check_gate_parity.py`.
+## §O-624 - I-08 review round five: the audit self-test certified a page about nothing
+
+`audit_unsafe.py --self-test` scanned the live tree to build its
+"correct" doc fixture but never validated that scan - pointing
+`QQQ_UNSAFE_ROOT` at an empty directory printed `UNSAFE AUDIT DOC OK
+-- 0 file(s)` and `SELF-TEST PASSED`. The synthetic vacuity cases at
+the function's tail passed while the real input was empty, which is
+the same hole wearing a lab coat. The self-test now calls
+`validate_scan` on the live scan first; the sabotage rerun fails with
+two `DEAD` lines and exit 1. Generalisable rule: every number a
+self-test builds fixtures from must itself be validated - an
+unvalidated premise makes the whole test a demonstration, not a
+measurement.
+ → `tools/audit_unsafe.py`.
+## §O-625 - I-08 review round five: a comment mentioning `forbid` counted as a crate carrying it
+
+`scan()` guarded code patterns against comments and strings but
+recorded lint-attribute matches unguarded, so eight prose mentions of
+`#![forbid(unsafe_code)]` (doc comments, fixture strings) became
+`forbid_attr` hits and `validate_scan` certified their crates on
+hearsay. Red proof: a comment-only tree validated clean. The same
+`is_comment_or_string` guard now files mentions as prose - forbid hits
+23 to 15, prose 3 to 11, roots steady at 12, so the page needed no
+re-record - with comment-only and string-only property tests refusing
+validation. Generalisable rule: a classifier with two output buckets
+must guard every pattern, not just the code ones; the unguarded
+bucket is where hearsay becomes certification.
+ → `tools/audit_unsafe.py`.
+## §O-626 - I-08 review round five (mechanical): the `xtask` bullet hid one level down
+
+The new member's `stability.md` bullet was nested under `qqq-bench`,
+rendering two top-level crates with a third smuggled inside the
+second's item. Dedented to a third top-level bullet, text unchanged;
+`sync_docs --check` and the claims gate stayed green with no
+regeneration. No lesson beyond the obvious: a list of members that
+does not render every member is a roster that lies by indentation.
+ → `docs/stability.md`.
+## §O-627 - I-08 review round six: a quote inside a char literal opened string mode and hid the line
+
+The ported unsafe scan skipped `"..."` strings but never tracked `'...'`
+chars, so `let q = '"'; unsafe { f() }` entered string mode at the
+literal's quote and missed the block — a false negative in exactly the
+direction a safety scan must not fail. Red proof first (the new test
+failed on the first assert), then the fix: char-literal tracking with
+the nearby-closing-quote heuristic, ported from `audit_unsafe.py`'s
+`is_comment_or_string` — which already had it, so the Python tool and
+its Rust port disagreed on the same line until now. The same review
+caught the raw-strings comment claiming misses "only ever fail safe":
+a quote inside raw content desyncs the scan, and a block hidden behind
+that desync is a miss, so the comment now names the residual instead of
+blessing it. Generalisable rule: when two implementations share one
+contract, a guard added to one is a defect filed against the other —
+port the guard the same day or record the divergence.
+ → `crates/xtask/src/main.rs`.
+## §O-628 - I-08 review round seven: the classifier knew one comment form, and the other certified roots
+
+`walk_line`'s predecessor handled `//`, strings and chars — but not
+`/* ... */`. A block comment naming `#![forbid(unsafe_code)]` therefore
+filed a `forbid_attr` hit and validated a crate on a comment: red proof
+showed the comment-only tree validating clean, and a multiline variant
+with the attribute on a continuation line did the same. The walker now
+tracks block state across lines (`scan()` threads each line's exit state
+into the next), with the precedence that keeps it honest — block beats
+string beats line-comment at every character — plus block-comment prose
+controls for both code and lint shapes. The live tree holds 26 lines
+with `/*` and none matching any pattern, so the fix changes no live
+verdict; it closes the shape, not an incident. Generalisable rule: a
+classifier that names its states (`//`, string, char) is claiming an
+exhaustive list — review it by enumerating the language's actual comment
+forms, not the ones the author remembered.
+ → `tools/audit_unsafe.py`.
+## §O-629 - I-08 review round seven: three forbid shapes that are not crate coverage, and one bin that had none
+
+An outer `#[forbid(unsafe_code)]` on a function, an inner attribute in
+`tests/`, and (by §O-628's proof) any comment shape all filed
+`forbid_attr` hits, and validation counted the crate covered. Red proofs
+first — all three trees validated clean — then the routing: only an
+inner attribute at a discovered entrypoint (`src/lib.rs`, `src/main.rs`,
+crate-root `build.rs`, found by `Cargo.toml` presence) keeps the
+counted kind; the others report as `forbid_item` / `forbid_elsewhere`
+and validation names every uncovered entrypoint. Running the hardened
+check against the live tree refused exactly one: `qqq-run/src/main.rs`
+carried no forbid, so the bin target permitted what the library
+forbids. It now carries the attribute (the file holds no `unsafe`, and
+the gate's build proves it compiles). The Rust port had the same shape
+one layer down — `contains("forbid(unsafe_code)")` on the entrypoint
+text — now a code-position matcher with its own regression tests, per
+§O-627's rule about porting the guard the same day. Generalisable rule:
+coverage is a statement about a *place*, not a *pattern* — a matcher
+that cannot name the place it certifies will eventually certify the
+wrong one.
+ → `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`, `crates/qqq-run/src/main.rs`.
+## §O-630 - I-08 review round seven: the git helper inherited repo-location overrides, and commits assumed no gpgsign
+
+`git()` spawned children with the parent environment intact, so a
+`GIT_DIR` set anywhere above it redirected `init`/`add`/`commit` at a
+scratch directory to the wrong repository — red proof: the worktree
+test failed under a bogus inherited `GIT_DIR`, green after
+`scrub_git_env` removes the three location keys (same chimera class as
+§O-614, pinned by a unit test in the same style). The same test's
+commit now passes `-c commit.gpgsign=false`: no red proof exists for
+that half — it guards dev machines with signing enabled, where the
+commit would block on pinentry — and it is recorded as hardening, not
+as a reproduced defect. Generalisable rule: a helper that runs `git`
+in a directory it chose must scrub the variables that choose
+repositories, and a test that commits must pin the user config it
+cannot tolerate.
+ → `crates/xtask/src/main.rs`.
+## §O-631 - I-08 review round seven (mechanical): the bridge comment still described machinery that moved into the gate
+
+`cmd_checks` is now two lines — the linter-version check and
+`cargo xtask ci` — but its comment still claimed a scratch-copy EOL
+guard and a corpus final word "below". Both live in the gate (verified
+against the step table: the xrefs harness, `normalize_eol`,
+`check_corpus_at_rest` and `self_test_xrefs --check-clean`), so the
+comment now says exactly what stays outside and why. No lesson beyond
+§O-626's: migration commits must re-read the comments that described
+the pre-migration shape.
+ → `docker/entrypoint.sh`.
+## §O-632 - I-08 review round eight: the crate-shaped fixtures were not crate-shaped
+
+The entrypoint shape cases built `Cargo.toml` beside `m/` instead of
+inside it, so `entrypoints()` discovered nothing (`[]` on the probe)
+and every refusal came from the empty root set — the per-entrypoint
+requirement, the very thing the cases exist to pin, never engaged. Red
+proof first, then the fix: the manifest moved into `m/`, and the
+"other target" case now covers `src/lib.rs`, leaves `src/main.rs`
+bare, and asserts the refusal names `m/src/main.rs` — which only
+passes if discovery, coverage routing and missing-entrypoint naming
+all work through a real scan. Generalisable rule: a fixture that
+exercises discovery must satisfy the discovery rule itself, or the
+test passes on a path the live code never takes — crate-shaped means
+the manifest is where the tool looks.
+ → `tools/audit_unsafe.py`.
+## §O-633 - I-08 review round nine: block state leaked across files, and an open block reported nothing
+
+Threading block state line-to-line fixed the multiline case and opened
+two new ones: `in_block` initialised once outside the file loop, so a
+`/*` left open in file A swallowed file B's code into prose — and an
+opener left open at EOF classified the rest of its own file as comment
+with no report anywhere. Red evidence: the committed code shows the
+single init, and a probe classifies file B's real `unsafe {` as prose
+under the leaked state. The state now resets per file, files ending
+open are collected as `unterminated`, validation refuses each by name,
+and a two-file self-test pins both halves (B's hit survives, A's open
+block is refused). Generalisable rule: state threaded through a loop
+must be audited for where the loop's *units* begin — initialising once
+for a per-line need is correct, and the same line is a leak the moment
+the unit becomes the file.
+ → `tools/audit_unsafe.py`.
+## §O-634 - I-08 review round ten: an unreadable gate tracebacks where a verdict belongs
+
+Both gate readers let a failing `cargo xtask list` escape as an
+uncaught `RuntimeError`: red proof with a mocked failing cargo showed
+the traceback in `expand_single_gate`, `collect` and `validate` alike.
+A traceback is exit-nonzero so the gate still goes red — but it is
+noise no summary can aggregate and no reader can act on, one step
+removed from silence. The conformance path now raises the file's own
+`FATAL: ...` `SystemExit` idiom, the parity path prints `FAIL cannot
+compare gates` and returns 1, each pinned by a failing-cargo-shim
+self-test case while the injectable-`coverage` path keeps every other
+case cargo-free. Generalisable rule: every error a checker can produce
+needs a verdict shape — `FATAL`, `FAIL`, `DEAD` — because a traceback
+where a verdict belongs is a failure mode the gate reports but nobody
+reads.
+ → `tools/check_conformance.py`, `tools/check_gate_parity.py`.
+## §O-635 - I-08 review round ten: the lexer threaded blocks and reset strings, so a string-held opener won
+
+After §O-633's fix the walker threaded block state and reset string
+state per line — exactly backwards for a multiline string holding
+`/*`: line two opened a block inside what was still a string, and the
+`unsafe` beneath it classified as prose. Red proof first (the new test
+went `DEAD` before the fix), then string state threads alongside block
+state, char state stays per line (a char literal cannot span lines —
+carrying it over would let a stray quote eat the next line), and a file
+ending mid-string is refused like an open block. Generalisable rule:
+every state a lexer tracks needs a lifetime audit — per-character,
+per-line, per-file — and the state whose lifetime you guess is the next
+miss; the test for each is a construct that crosses the boundary you
+chose.
+ → `tools/audit_unsafe.py`.
+## §O-636 - I-08 review round ten: autobins are entrypoints, and the uncounted kinds needed their own assertion
+
+Coverage discovery knew `lib.rs`, `main.rs` and `build.rs` but not
+Cargo's autobins — red proof: a tree with `unsafe` in an uncovered
+`src/bin/tool.rs` validated clean. `entrypoints()` now discovers both
+autobin shapes (`<name>.rs`, `<name>/main.rs`) while modules and data
+files under `src/bin` stay non-entries (pinned by a discovery test),
+`is_entrypoint()` recognises the same shapes, and the "uncovered bin"
+refusal names the bin end to end. The same round's last gap was an
+assertion that checked the refusal but not the routing: the "other
+target" case now also requires `m/tests/t.rs` to file as
+`forbid_elsewhere`, so a misfiling fails the case even when the refusal
+still holds. Generalisable rule: enumerate the target shapes the build
+tool knows, not the ones the crate has today — and assert the
+classification, not just the verdict, or a right answer for the wrong
+reason passes.
+ → `tools/audit_unsafe.py`.
+## §O-637 - I-08 review round eleven: raw strings toggled quote mode, desyncing both scanners
+
+A `"` inside `r#"..."#` is content, not a delimiter — but both
+scanners treated it as one, so an inner quote closed (or opened)
+string mode and the rest of the line classified wrong, in either
+direction. The audit walker now recognises raw openers (prefix plus
+hash count with the identifier boundary the lexer demands, so `bar"`
+stays an identifier plus a string), ignores escapes inside, closes
+only on a quote with the exact count, and threads the state across
+lines with an `unterminated` refusal at EOF. The Rust port takes the
+same rule single-line per §O-627 (its multiline residual stays
+fail-loud, documented, where the audit tool is the backstop) —
+red proof first on the port, then green 14/14. `rb` is accepted
+although only `r`/`br` exist: on valid code the superset is unreachable,
+on invalid code it errs toward string, and the tests pin both.
+Generalisable rule: a quote-tracking scanner that does not know raw
+strings does not track quotes — lex the prefix or drop the claim.
+ → `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`.
+## §O-638 - I-08 review round twelve: the gate named finishing steps, so a hang named nothing
+
+`run_step` printed only on completion, so a hung sequential step left
+the log silent at exactly the moment it mattered — every `xtask-ci`
+log in this wave's evidence ends mid-list with no marker of the
+in-flight step. Red proof: the hygiene output shows completion lines
+only. Sequential steps now print a `run <name>` start line (line-flushed,
+so it survives piping into a hang); parallel steps stay
+completion-only, because start lines across scoped threads interleave
+and would name nothing reliably. Generalisable rule: a runner's log
+must mark starts, not just finishes — a completion-only log is an
+alibi for every step that never finished.
+ → `crates/xtask/src/main.rs`.
+## §O-639 - I-08 review round thirteen: one test uncoupled, one timeout rebutted
+
+The cargo-failure self-test called the real `validate()` under a
+failing shim — which exercises the failure path only while both live
+gates still invoke the single gate. Red proof: agreeing fixture gates
+with no xtask call return 0, the cargo path never taken, so the old
+assertion would fail on content it never examines. The checks are now
+decoupled three ways — a literal input asserting `RuntimeError` with
+zero files read, a replaced `collect()` asserting the FAIL verdict,
+and the live `collect()` guarded into a recorded failure — 26/26
+green. The round's second finding asked for a 30-minute timeout scoped
+to the test command "run by the CARGO_STEPS configuration": rebutted,
+not fixed, on three legs — no such configuration exists (`CARGO_STEPS`
+is a Rust const; the gate is one `run:` line), no such mechanism
+exists (Actions timeouts scope to steps and jobs; splitting the step
+un-does I-08; an in-process timeout needs a new dependency against the
+crate's std-only rule), and the bound already exists (job
+`timeout-minutes: 60` with a measured rationale, plus this wave's `run`
+start lines naming the hung step). Generalisable rule: a test that
+passes through live files tests the files, not the code — and a review
+ask that names a mechanism that is not there gets evidence, not work.
+ → `tools/check_gate_parity.py`.
+## §O-640 - I-08 review round fourteen: comments nest, and the job comment claimed a tool nobody installed
+
+Rust block comments nest, so the boolean cleared at the first `*/`
+and certified `/* /* */ code */` from the inner close on — red proof
+first (the nested test went `DEAD`), then depth in the audit walker
+and in the port's forbid check, each with nesting regression tests.
+The round's major was a comment claiming the Rust job "provides"
+`wasm-tools` for the live-dev check while the job installed checkout,
+toolchain and cache only: red proof isolated the job's `uses:` lines,
+and the guest build does shell out to a `wasm-tools` binary, so the
+check ran on ambient PATH luck. Same pinned action the WIT job uses,
+adjacent to its consumer, check untouched outside the gate.
+Generalisable rule: a comment that says the environment provides X
+needs the install step as its neighbour — otherwise the claim is true
+on every machine that already had X and false everywhere else.
+ → `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`, `.github/workflows/ci.yml`.
+## §O-641 - I-08 review round fifteen: chained gates, borrowed prefixes, homeless fixtures
+
+Three minors, one pattern: each named something the code treated as
+outside its contract. (1) Both gate matchers required bare end-of-line,
+so `cargo xtask ci && echo` executed the gate while earning zero
+coverage — red proof across five operator forms in both checkers, then
+one identical pattern accepting `&& || ; | & > <` (and `#` after
+whitespace only) while `--help`/`--flag` still reject, with per-form
+self-tests. (2) The raw opener accepted `rb` — no language's prefix —
+and misread `\r`+`b` escapes as raw openers hiding the line: red
+mechanism proof on the old alternation, then `cr` in / `rb` out in both
+scanners with tests each way (the `cr` demand is operational, not
+linguistic: unreachable on valid Rust, harmless to accept). (3) The two
+oldest mention cases built `src/lib.rs` with no manifest, so discovery
+returned nothing and their refusal proved only the empty root set —
+merged into the crate-shaped table where the entrypoint path engages.
+Generalisable rule: a matcher, a lexer and a fixture each have an
+unstated "inputs look like this" — review them by feeding what they
+excluded, not what they already handle.
+ → `tools/check_conformance.py`, `tools/check_gate_parity.py`, `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

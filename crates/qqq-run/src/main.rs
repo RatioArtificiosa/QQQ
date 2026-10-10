@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// The binary target carries the same crate-level forbid as the library:
+// `unsafe` in argument parsing would be reachable before any capability
+// exists to constrain it. See `ARCH-008`.
+#![forbid(unsafe_code)]
+
 //! The `qqqai` binary.
 //!
 //! # Why the argument parsing is hand-written

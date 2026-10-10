@@ -141,6 +141,11 @@ const ORDER: &[&str] = &[
     "qqq-run",
     "qqq-registry",
     "qqq-sys",
+    // Developer tooling (`I-08`): no `qqq-*` dependencies, nothing depends on
+    // it, so any position passes — last keeps the product order untouched.
+    // Registered here AND in `tools/check_topology.py`'s `ORDER`: a new crate
+    // is a two-file change, and the duplication is the point (see above).
+    "xtask",
 ];
 
 /// Crates the Proposal names but that do not exist yet.

@@ -14,11 +14,11 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **190** |
+| `.rs` files scanned under `crates/` | **192** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
-| Crates carrying a bare `#![forbid(unsafe_code)]` | **11** (every crate) |
+| Crates carrying a bare `#![forbid(unsafe_code)]` | **12** (every crate) |
 | Occurrences of the token `unsafe` in comments or strings | 0 (the scanner strips prose) |
 
 **Reproduce with `python tools/audit_unsafe.py`.** It exits non-zero if any

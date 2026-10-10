@@ -39,10 +39,11 @@ Every crate declares its tier on the comment block above its entry in the worksp
 | `qqq-debug` | `beta` | DWARF → source mapping, trap diagnostics, time-travel replay |
 | `qqq-sys` | `exception` | Linux hardening. Designated for `unsafe`; currently contains none |
 | `qqq-bench` | `stable` | The benchmark harness. Has no workspace dependency, so it can measure any crate without joining its graph |
+| `xtask` | `beta` | Developer workflows: one gate, fast hygiene, worktree fault injection. Never shipped; reachable only through the `cargo xtask` alias |
 
-### Two crates this workspace builds that §4.3's table does not name
+### Three crates this workspace builds that §4.3's table does not name
 
-Stated plainly rather than left for a reader to notice. `tools/check_tiers.py` reports both on
+Stated plainly rather than left for a reader to notice. `tools/check_tiers.py` reports all three on
 every run:
 
 - **`qqq-sys`** — §4.3 mentions only a *different* planned crate, `qqq-sys-signals`, in its
@@ -50,6 +51,9 @@ every run:
 - **`qqq-bench`** — the benchmark harness. §4.3 has no row for it either; the ordering comment in
   `tools/check_topology.py` explains where it sits and why its lack of an internal dependency
   edge is deliberate.
+- **`xtask`** — the developer-workflows crate (`I-08`). The product
+  architecture table has no row for a never-shipped helper invoked
+  through a cargo alias, for the same reason the harness has none.
 
 Two crates §4.3 lists are **not built in this repository**: `qqq-registry` and `qqq-fabric`. The
 latter is a separate repository and licence by design (§13.2).
@@ -138,7 +142,7 @@ A promise with no check is a wish. Each row above names a mechanism:
 | Crate tiers | `tools/check_tiers.py` (this document's own source), `tools/check_topology.py` |
 | WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, <!-- qqq:claim wit-files -->17<!-- /qqq:claim --> `.wit` files validating |
 | Ledger | <!-- qqq:claim checklist-done -->274<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->587<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->306<!-- /qqq:claim --> open (`check_doc_claims.py`) |
-| Register | <!-- qqq:claim observation-headings -->472<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->613<!-- /qqq:claim --> |
+| Register | <!-- qqq:claim observation-headings -->500<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->641<!-- /qqq:claim --> |
 | Manifest | `schema/qqq-toml.schema.json`, `tools/gen_schemas.py --check` |
 | Lockfile | `schema/qqq-lock.schema.json`, the same check |
 | CLI JSON | `schema/cli-envelope.schema.json`, the error catalogue's round-trip test |

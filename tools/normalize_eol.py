@@ -183,10 +183,16 @@ def classify_eol_line(line: str) -> str | None:
     index_eol = fields[0]
     # `i/lf` is correct. `i/none` means Git tracks no EOL state. `i/-text`
     # means Git treats the blob as binary: no conversion, no defect.
-    # `i/mixed` or `i/crlf` means the blob is wrong.
-    if index_eol not in ("i/lf", "i/none", "i/-text"):
-        return f"{path} ({index_eol})"
-    return None
+    # `attr/-text` is the declared twin of `i/-text`: a path marked binary
+    # in `.gitattributes` is never converted whatever bytes it holds, so a
+    # CRLF blob there cannot drift on checkout. This matters because `i/`
+    # reflects content detection (a NUL-free file never reports `i/-text`),
+    # so without this clause a binary-marked ASCII fixture — a fuzz seed
+    # whose `\r\n` is the protocol under test — could never be committed.
+    # `i/mixed` or `i/crlf` on a non-binary path means the blob is wrong.
+    if index_eol in ("i/lf", "i/none", "i/-text") or "attr/-text" in fields:
+        return None
+    return f"{path} ({index_eol})"
 
 
 def findings_in_lines(lines: list[str]) -> list[str]:
@@ -486,6 +492,14 @@ def self_test() -> int:
             classify_eol_line("i/crlf w/crlf attr/text eol=lf\tprobe.sh")
             == "probe.sh (i/crlf)",
             "a CRLF committed blob is the real defect",
+        )
+        expect(
+            "an attr/-text i/crlf line is not a finding",
+            classify_eol_line(
+                "i/crlf w/crlf attr/-text\tfuzz/corpus/http1_diff/seed-001-get-minimal"
+            )
+            is None,
+            "a binary-marked path is never converted, so CRLF there cannot drift",
         )
         expect(
             "an i/mixed line is a finding",

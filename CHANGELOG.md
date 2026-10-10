@@ -4,6 +4,16 @@
 
 ### Security
 
+- **serve**: the HTTP/1.1 head parser is now fuzzed differentially against
+  `httparse` (`I-07`): a nightly target parses the same bytes with both
+  and aborts on any field disagreement when both accept, or on any input
+  QQQ accepts that the reference rejects (QQQ stays the stricter parser;
+  its refusals are by design). Seeded with every `F-04` table row, wired
+  into the nightly fuzz schedule with crash artifacts, and backed by a
+  regression corpus that pins the rows on stable Rust. The first 10-minute
+  run (15.5M executions, ASan, Linux) is clean with an empty allow-list.
+  (`I-07`)
+
 - **serve, host, cap**: integer overflow in release now panics instead of
   wrapping ‐ per-package `overflow-checks` for the three security-critical
   crates, so the parsers, limiters and capability engine run the same

@@ -78,6 +78,7 @@ jobs:
           - manifest_parse
           - component_load
           - host_interfaces
+          - http1_diff
     steps:
       - uses: actions/checkout@v5
 
@@ -125,6 +126,10 @@ jobs:
                  manifest_parse  -> crates/qqq-cap/tests/fuzz_corpus.rs  (MANIFESTS)
                  component_load  -> crates/qqq-host/tests/fuzz_corpus.rs (COMPONENTS)
                  host_interfaces -> crates/qqq-host/tests/fuzz_corpus.rs (HOSTILE)
+                 http1_diff      -> crates/qqq-serve/tests/fuzz_corpus.rs (add the
+                                    bytes as an accept row with its fields, or a
+                                    reject row; a differential mismatch also names
+                                    the arm in `fuzz/http1_diff_allowlist.md`)
             3. Fix the bug so that entry, and every existing entry, passes.
             4. Commit both together.
 

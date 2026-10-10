@@ -47,6 +47,10 @@
 
 use qqq_cap::manifest::Manifest;
 
+/// The `I-07` differential classification over both parsers, as pure
+/// functions the fuzz target calls and the tests below pin.
+pub mod diff;
+
 /// Documents that exercise the manifest parser's shapes.
 ///
 /// # Why these particular inputs

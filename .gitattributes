@@ -61,6 +61,10 @@
 *.wasm  binary
 *.cwasm binary
 *.wat   text eol=lf
+# Fuzz seed corpora are protocol bytes, not text: `\r\n` is the terminator
+# under test, and normalising it to `\n` would turn every seed into a
+# no-terminator input. Per-target, beside the `.gitignore` negation.
+fuzz/corpus/http1_diff/* binary
 *.wit   text eol=lf
 
 # Vendored/lock data that must round-trip exactly.

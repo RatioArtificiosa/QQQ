@@ -139,6 +139,10 @@ fuzz/artifacts/
 # from nothing.
 fuzz/corpus/*/
 !fuzz/corpus/README.md
+# Curated seeds for `http1_diff` (`I-07`): every `F-04` table row, committed
+# so every run starts from pinned shapes. Per-target negation on purpose —
+# see `fuzz/corpus/README.md`.
+!fuzz/corpus/http1_diff/
 
 # Local tooling
 .tools/

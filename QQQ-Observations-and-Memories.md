@@ -36881,4 +36881,48 @@ A companion environmental miss in the same run (PERF-020: the fleet
 dealt an 8370C runner with no reviewed baseline) followed the
 documented record-new-baseline process with measured review, not a
 retry. → `crates/qqq-sys/tests/harden.rs`, `.github/perf/baseline.json`.
+## §O-610 - I-07: libFuzzer does not link on Windows, so the local fuzz run goes through the Linux container
+
+The differential target builds on nightly but does not run on
+Windows, in two different ways: the default ASan build links and then
+fails to start (exit 0xC0000135, the ASan runtime DLL is absent), while
+the `--sanitizer none` build fails earlier at link time on
+`__start___sancov_cntrs` - coverage instrumentation without a runtime. The existing programme
+never noticed because it only ever runs on ubuntu (compile job and
+nightly schedule both pin ubuntu-latest). The 10-minute run therefore
+goes through the project's Linux container (`fuzz 600 http1_diff`,
+ASan, guard live): 15.5M executions, zero findings, seed hash
+recorded. Generalisable rule: a platform-gated capability needs its
+platform in the acceptance - 'runs locally' on a Windows bench does
+not cover a libFuzzer target. → `fuzz/fuzz_targets/http1_diff.rs`, `docker/entrypoint.sh`.
+
+## §O-611 - I-07: the gitignore claimed curated seeds are committed while ignoring every seed directory
+
+`.gitignore` says the curated seed corpus in `fuzz/corpus/` IS
+committed, then `fuzz/corpus/*/` ignores all of it - and no seed file
+for any target is tracked, not even the README the exception names.
+Caught by reading `git status` for the 23 new seed files and finding
+none of them. The fix writes the missing README (the convention the
+comment assumed) and negates only the `http1_diff` directory, so
+machine-generated corpus stays ignored while curated seeds commit.
+Generalisable rule: a comment claiming a file is committed needs the
+negation that makes it true - prose about version control the status
+output contradicts is the fixture-that-cannot-fail in repository
+form. → `.gitignore`, `fuzz/corpus/README.md`.
+## §O-612 - I-07: the EOL checker could never pass a binary fixture, because its clean verdict keyed on content, not attributes
+
+Marking the seed directory `binary` did not satisfy
+`normalize_eol.py`: it keys committed-blob cleanliness on the `i/`
+field of `git ls-files --eol`, and that field reflects content
+detection - a NUL-free file never reports `i/-text`, whatever the
+attributes say. So an ASCII fixture whose CRLF is the protocol under
+test could never be committed while the checker stood. The fix
+treats `attr/-text` as clean beside `i/-text`: a path git will never
+convert cannot drift on checkout, which is the only defect the tool
+exists to catch. Proved live by the tool's own `--self-test` with a
+new probe for the binary-marked CRLF line, alongside the existing
+probes that still fail real defects. Generalisable rule: a checker
+that classifies by content needs an escape for content it must not
+judge - otherwise the first legitimate exception becomes pressure to
+weaken the check instead of scoping it. → `tools/normalize_eol.py`, `.gitattributes`.
 *End of `QQQ-Observations-and-Memories.md`.*

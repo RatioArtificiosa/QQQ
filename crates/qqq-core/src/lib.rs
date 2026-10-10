@@ -52,8 +52,8 @@ pub mod sync;
 
 pub use error::{Error, ErrorClass, ErrorCode, Result};
 pub use ids::{
-    ComponentId, IdError, PackageName, TenantId, Version, VersionParseError, BINARY_NAME,
-    BRAND_NAME, MAX_ID_LEN, SCHEMA_VERSION, VERSION, WASI_TARGET_VERSION, WASMTIME_LINE,
+    BINARY_NAME, BRAND_NAME, ComponentId, IdError, MAX_ID_LEN, PackageName, SCHEMA_VERSION,
+    TenantId, VERSION, Version, VersionParseError, WASI_TARGET_VERSION, WASMTIME_LINE,
 };
 
 #[cfg(test)]

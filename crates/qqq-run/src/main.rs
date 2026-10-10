@@ -486,7 +486,10 @@ fn dispatch_audit_log(
     let mut sarif = false;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        match a {
             "--sarif" => {
                 sarif = true;
                 i += 1;
@@ -793,7 +796,9 @@ fn dispatch_inspect(
     let mut diff_against: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         if a == "--diff" {
             let Some(v) = args.get(i + 1) else {
                 let e = missing_value("--diff");
@@ -912,7 +917,9 @@ fn dispatch_audit(
 
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         if a == "--sarif" {
             sarif = true;
         } else if a == "--fail-on" {
@@ -1030,11 +1037,11 @@ fn dispatch_audit(
     // defect this commit fixed for `--sarif`, and it survived one round because
     // the exit-code bug above was the one I was looking for. Found by CodeRabbit
     // reviewing this commit, and reproduced before fixing.
-    if out.format() == Format::Human {
-        if let Err(e) = out.write_document(&report.render()) {
-            let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
-            return ExitCode::from(exit::INTERNAL);
-        }
+    if out.format() == Format::Human
+        && let Err(e) = out.write_document(&report.render())
+    {
+        let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
+        return ExitCode::from(exit::INTERNAL);
     }
     if let Err(e) = out.emit(&payload) {
         let _ = out.emit_error_with_exit(name, &e, exit::INTERNAL);
@@ -1151,11 +1158,7 @@ fn dispatch_style(
             Ok(qqq_run::style::StyleOutput::from(outcome))
         },
         |report: &qqq_run::style::StyleOutput| {
-            if report.ok {
-                exit::OK
-            } else {
-                exit::FAILURE
-            }
+            if report.ok { exit::OK } else { exit::FAILURE }
         },
     )
 }
@@ -1203,7 +1206,9 @@ fn verify_options(args: &[String]) -> qqq_core::Result<qqq_run::verify::VerifyOp
 
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         let (flag, inline): (&str, Option<&str>) = match a.split_once('=') {
             Some((f, v)) if TAKES_VALUE.contains(&f) => (f, Some(v)),
             _ => (a, None),
@@ -1527,7 +1532,9 @@ fn dispatch_openapi(
     let mut target: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         if let Some(v) = a.strip_prefix("--out=") {
             target = Some(v.to_owned());
         } else if a == "--out" || a == "-o" {
@@ -1638,7 +1645,9 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
     let mut saw_name = false;
 
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--lang" | "--language" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -1744,7 +1753,9 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
     let mut opts = qqq_run::InitOptions::default();
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--lang" | "--language" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -1961,7 +1972,9 @@ fn test_options(
     };
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--filter" | "-f" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -2224,7 +2237,9 @@ fn add_cap_options(
 
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--cap" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -2738,7 +2753,9 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
 
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--dev" => dev = true,
             "--exact" => exact = true,
@@ -2834,7 +2851,9 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
     let mut opts = qqq_run::DevOptions::default();
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--port" | "-p" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -3055,7 +3074,10 @@ fn dispatch_caps(
     let mut explain = false;
     let mut i = 0usize;
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        match a {
             "--explain" => explain = true,
             "--manifest" => i += 1,
             other if other.starts_with('-') => {
@@ -3133,7 +3155,9 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
     let mut target: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         match a {
             "--aot-cache" => {
                 cache = Some(std::path::PathBuf::from(
@@ -3216,7 +3240,9 @@ fn run_options(
     let mut i = 0;
 
     while i < args.len() {
-        let a = args[i].as_str();
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
         if after_separator {
             opts.args.push(a.to_owned());
             i += 1;
@@ -3418,7 +3444,10 @@ fn dispatch_schema(
     let mut only: Option<String> = None;
     let mut i = 0usize;
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        match a {
             // Accepted and identical to the bare command; see the doc comment.
             "--all" | "--errors" => {}
             "--command" => {
@@ -3526,8 +3555,13 @@ impl qqq_run::output::CommandOutput for SchemaDocument {
 
         // A narrowed request carries the name it asked for at the top level, so the caller
         // does not have to search a one-element array to confirm what it got.
+        // Total rather than subscripted: `doc` is an object literal above, so
+        // the `else` is unreachable structure that returns as-is.
         if let Some(c) = &self.only {
-            doc["command"] = serde_json::Value::String(c.clone());
+            let Some(map) = doc.as_object_mut() else {
+                return doc;
+            };
+            map.insert("command".to_owned(), serde_json::Value::String(c.clone()));
         }
         doc
     }
@@ -3799,8 +3833,8 @@ fn wasm_target_present_with(inputs: &WasmProbeInputs) -> bool {
 
     // Fallback: some mounted toolchain has it. Weaker evidence than the
     // sysroot, which is why it is second.
-    if let Some(home) = &inputs.rustup_home {
-        if home.join("toolchains").read_dir().is_ok_and(|entries| {
+    if let Some(home) = &inputs.rustup_home
+        && home.join("toolchains").read_dir().is_ok_and(|entries| {
             entries.flatten().any(|e| {
                 e.path()
                     .join("lib")
@@ -3808,9 +3842,9 @@ fn wasm_target_present_with(inputs: &WasmProbeInputs) -> bool {
                     .join(WASM_TARGET)
                     .is_dir()
             })
-        }) {
-            return true;
-        }
+        })
+    {
+        return true;
     }
 
     // Last resort: ask rustup, which is authoritative about what is installed
@@ -4161,6 +4195,13 @@ const _: fn() = || {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4941,10 +4982,12 @@ mod tests {
         assert_eq!(cat.len(), qqq_core::ErrorCode::all().len());
         for entry in &cat {
             assert!(entry["code"].as_str().unwrap().starts_with("QQQ-"));
-            assert!(entry["docs_url"]
-                .as_str()
-                .unwrap()
-                .contains("qqq.codes/errors"));
+            assert!(
+                entry["docs_url"]
+                    .as_str()
+                    .unwrap()
+                    .contains("qqq.codes/errors")
+            );
         }
     }
 

@@ -218,12 +218,12 @@ fn find_entry(source: &str, span: TableSpan, key: &str) -> Option<(usize, usize,
         // `qqqai/json` are recognised as the same key. A manifest written by a
         // different tool may quote differently, and failing to find an existing
         // entry would produce a duplicate — which the lockfile reader rejects.
-        if let Some((lhs, rhs)) = trimmed.split_once('=') {
-            if unquote(lhs.trim()) == key {
-                let value_start = span.body_start + (line.len() - rhs.len());
-                let _ = value_start;
-                return Some((offset, offset + line.len(), rhs.trim().to_owned()));
-            }
+        if let Some((lhs, rhs)) = trimmed.split_once('=')
+            && unquote(lhs.trim()) == key
+        {
+            let value_start = span.body_start + (line.len() - rhs.len());
+            let _ = value_start;
+            return Some((offset, offset + line.len(), rhs.trim().to_owned()));
         }
         offset += line.len();
     }

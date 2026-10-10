@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! Guest invocation, against **real** compiled components.
 //!
 //! # Why the fixtures are compiled from WAT
@@ -22,7 +30,7 @@
 use qqq_cap::manifest::Manifest;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::Error;
-use qqq_host::invoke::{Failure, HandlerHandle, HANDLER_INTERFACE, HANDLER_METHOD};
+use qqq_host::invoke::{Failure, HANDLER_INTERFACE, HANDLER_METHOD, HandlerHandle};
 use qqq_host::{Instance, LimitSet, PreparedComponent};
 
 /// The smallest component that **is** a QQQ application.

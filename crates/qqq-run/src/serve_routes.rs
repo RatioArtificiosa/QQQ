@@ -390,10 +390,12 @@ default_auth = "bearer-jwt"
         // Every declared route is reachable — the property that was missing before.
         assert!(built.table.match_route(Method::Post, "/orders").is_some());
         assert!(built.table.match_route(Method::Get, "/orders/42").is_some());
-        assert!(built
-            .table
-            .match_route(Method::Delete, "/orders/42")
-            .is_some());
+        assert!(
+            built
+                .table
+                .match_route(Method::Delete, "/orders/42")
+                .is_some()
+        );
         assert!(built.table.match_route(Method::Get, "/healthz").is_some());
 
         // And the handler names survive, which is what dispatch resolves.

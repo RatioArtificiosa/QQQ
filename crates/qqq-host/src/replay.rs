@@ -245,9 +245,12 @@ impl ReplayValue {
                 }
                 let mut out = Vec::with_capacity(canonical.len() / 2);
                 let bytes = canonical.as_bytes();
+                // Destructured rather than subscripted: the even-length
+                // check above makes every chunk exactly two bytes.
                 for pair in bytes.chunks(2) {
-                    let hi = hex_nibble(pair[0])?;
-                    let lo = hex_nibble(pair[1])?;
+                    let [hi, lo] = pair else { return None };
+                    let hi = hex_nibble(*hi)?;
+                    let lo = hex_nibble(*lo)?;
                     out.push((hi << 4) | lo);
                 }
                 Some(Self::Random(out))
@@ -716,23 +719,26 @@ fn parse_records(all: &[&str], body_start: usize) -> Result<Vec<ReplayRecord>, R
             continue;
         }
         let f: Vec<&str> = line.split(' ').collect();
-        if f.len() != 6 {
+        // Destructured rather than subscripted: anything but six fields is
+        // the malformed-record error, so the shape carries the check — no
+        // length test and five subscripts to drift apart.
+        let [seq_s, func_s, v1_s, v2_s, prev_s, chain_s] = f.as_slice() else {
             return Err(malformed(
                 lineno,
                 "a record needs six space-separated fields",
             ));
-        }
-        let sequence: u64 = f[0]
+        };
+        let sequence: u64 = seq_s
             .parse()
             .map_err(|_| malformed(lineno, "the sequence is not a number"))?;
         if sequence != seq_expected {
             return Err(ReplayError::OutOfOrder);
         }
-        let function = static_function(f[1])
+        let function = static_function(func_s)
             .ok_or_else(|| malformed(lineno, "the function is not one this log may record"))?;
-        let value = ReplayValue::from_canonical(f[2], f[3])
+        let value = ReplayValue::from_canonical(v1_s, v2_s)
             .ok_or_else(|| malformed(lineno, "the value is not canonical for its kind"))?;
-        if f[4] != previous {
+        if *prev_s != previous {
             return Err(ReplayError::Discontinuous { line: lineno });
         }
         let rederived = ReplayRecord::compute_chain(&ReplayFields {
@@ -742,7 +748,7 @@ fn parse_records(all: &[&str], body_start: usize) -> Result<Vec<ReplayRecord>, R
             canonical: Cow::Owned(value.canonical()),
             previous: &previous,
         });
-        if rederived != f[5] {
+        if rederived != *chain_s {
             return Err(ReplayError::Tampered { line: lineno });
         }
         records.push(ReplayRecord {
@@ -1266,8 +1272,14 @@ fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        out.push(char::from(HEX[usize::from(b >> 4)]));
-        out.push(char::from(HEX[usize::from(b & 0x0f)]));
+        // `#[expect]` with a reason, as in `audit.rs`: a masked nibble is
+        // 0..16 by construction.
+        #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
+        let hi = HEX[usize::from(b >> 4)];
+        #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
+        let lo = HEX[usize::from(b & 0x0f)];
+        out.push(char::from(hi));
+        out.push(char::from(lo));
     }
     out
 }
@@ -1276,6 +1288,13 @@ fn hex(bytes: &[u8]) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

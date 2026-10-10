@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
+
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
 //! Opt-in language probe. Runs actual compiled guests; never treats compilation as conformance.
 
 use std::time::Instant;
 
 use qqq_cap::{manifest::Manifest, resolve::GrantSet};
-use qqq_host::{config::EngineConfig, LimitSet};
+use qqq_host::{LimitSet, config::EngineConfig};
 use qqq_run::guest_handler::GuestApp;
 
 /// The probe is an inbound HTTP server, so its test manifest must grant the

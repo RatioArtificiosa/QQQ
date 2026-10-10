@@ -26,7 +26,7 @@
 
 mod common;
 
-use common::{run_refused, serve_and_request, Sandbox};
+use common::{Sandbox, run_refused, serve_and_request};
 
 const MANIFEST: &str = "[package]\nname = \"metrics-probe\"\nversion = \"0.1.0\"\n\
      [server]\ndefault_auth = \"none\"\n\

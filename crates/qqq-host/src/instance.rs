@@ -43,7 +43,7 @@ use wasmtime::component::{Component, Instance as WasmInstance, Linker};
 use wasmtime::{Store, StoreLimitsBuilder};
 
 use crate::config::{EngineConfig, StoreLimits};
-use crate::linker::{build_linker, StoreData};
+use crate::linker::{StoreData, build_linker};
 use crate::trap::Trap;
 
 /// A compiled component, ready to instantiate many times.
@@ -1256,7 +1256,7 @@ impl ReadyStore {
             grants.clone(),
             opts.tenant_output.clone(),
         ); // Attached here rather than in every host function: the seam that records is
-           // `ambient::require`, which reads the store, so the store is where the handle has to be.
+        // `ambient::require`, which reads the store, so the store is where the handle has to be.
         opts.audit.clone_into(&mut data.audit);
         opts.test.clone_into(&mut data.test);
         // **The ambient mode travels with the store, and this line is the fix.** `StoreData::new`

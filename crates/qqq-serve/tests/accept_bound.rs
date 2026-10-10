@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! The accept bound is honoured on the path where the ledger refuses (`SRV-020`).
 //!
 //! # The defect these pin
@@ -48,7 +57,7 @@ use tokio::net::TcpStream;
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method as RouteMethod, Route, RouteTable};
-use qqq_serve::server::{serve, Dispatch, Handler, ServerConfig};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
 use qqq_serve::{RequestHead, Response, RouteMatch};
 
 /// A port nobody is using, for the reason `tests/socket.rs` documents.

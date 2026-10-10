@@ -550,10 +550,11 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
 
 /// `1 interface` / `2 interfaces`.
 fn plural(items: &[String]) -> String {
-    if items.len() == 1 {
-        format!("`{}`", items[0])
-    } else {
-        format!("{} interfaces", items.len())
+    // Destructured rather than subscripted: the single-element shape carries
+    // its own check, so no length test and index pair to drift apart.
+    match items {
+        [only] => format!("`{only}`"),
+        _ => format!("{} interfaces", items.len()),
     }
 }
 
@@ -1087,11 +1088,12 @@ mod tests {
                 e.message
             );
             // The syntax hint applies to every bad name, so it is always there.
-            assert!(e
-                .remediation
-                .as_deref()
-                .unwrap_or("")
-                .contains("lowercase dotted pairs"));
+            assert!(
+                e.remediation
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("lowercase dotted pairs")
+            );
         }
     }
 

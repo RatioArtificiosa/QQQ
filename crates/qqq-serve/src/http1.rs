@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! HTTP/1.1 request parsing, with the bomb limits Proposal §6.4 requires.
 //!
@@ -402,7 +403,7 @@ impl RequestHead {
     #[must_use]
     pub fn query(&self) -> Option<&str> {
         let q = self.target.find('?')?;
-        let rest = &self.target[q + 1..];
+        let rest = &self.target[q.saturating_add(1)..];
         let end = rest.find('#').unwrap_or(rest.len());
         Some(&rest[..end])
     }
@@ -499,12 +500,18 @@ pub fn head_end(input: &[u8]) -> Option<usize> {
 pub fn head_end_from(input: &[u8], from: usize) -> Option<usize> {
     let from = from.min(input.len());
     let mut search = from;
-    while let Some(rel) = memchr::memchr(b'\r', &input[search..]) {
-        let i = search + rel;
-        if input[i..].starts_with(b"\r\n\r\n") {
-            return Some(i + 4);
+    // Total rather than subscripted throughout: past-the-end yields `None`
+    // (no terminator here) instead of panicking the scan — same outcome as
+    // the guards, without subscripts.
+    while let Some(rest) = input.get(search..) {
+        let Some(rel) = memchr::memchr(b'\r', rest) else {
+            break;
+        };
+        let i = search.saturating_add(rel);
+        if input.get(i..).is_some_and(|s| s.starts_with(b"\r\n\r\n")) {
+            return Some(i.saturating_add(4));
         }
-        search = i + 1;
+        search = i.saturating_add(1);
     }
     None
 }
@@ -529,8 +536,12 @@ pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), Par
     };
 
     // The head is everything up to and including the final CRLF CRLF, minus the
-    // terminator itself.
-    let head = &input[..end - 4];
+    // terminator itself. Total rather than subscripted: `end` sits four bytes
+    // past the terminator by construction of `head_end`, so the `else` is
+    // unreachable structure with the short-input error.
+    let Some(head) = input.get(..end.saturating_sub(4)) else {
+        return Err(ParseError::Incomplete { got: input.len() });
+    };
 
     // Strict UTF-8: `from_utf8`, never lossy. The old decoder turned invalid
     // bytes into U+FFFD — a *different string than the client sent* sailing
@@ -825,7 +836,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let mut end = max;
     while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
     format!("{}…", &s[..end])
 }
@@ -834,6 +845,13 @@ fn truncate(s: &str, max: usize) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

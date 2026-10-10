@@ -191,11 +191,12 @@ mod tests {
         // search is ambiguous in a monorepo and NN-5 forbids inferring it.
         let e = LoadedManifest::discover(&child, None).unwrap_err();
         assert!(e.message.contains("no `qqq.toml`"), "got: {}", e.message);
-        assert!(e
-            .remediation
-            .as_deref()
-            .unwrap_or("")
-            .contains("--manifest"));
+        assert!(
+            e.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("--manifest")
+        );
 
         let _ = std::fs::remove_dir_all(&parent);
     }

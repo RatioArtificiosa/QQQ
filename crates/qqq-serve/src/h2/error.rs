@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! HTTP/2 error types: connection errors, stream errors, and their wire codes.
 //!

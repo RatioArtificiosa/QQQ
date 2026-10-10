@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! A guest cannot influence sampling — `OBS-014`, the security claim §10.4 makes.
 //!
 //! > *"Sampling is host-controlled (head-based with tail sampling option) and **never**

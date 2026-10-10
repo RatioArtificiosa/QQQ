@@ -447,6 +447,12 @@ impl Latency {
             // a whole bucket and makes every quantile slightly wrong — and *plausibly*
             // wrong, which is worse than obviously wrong.
             if micros <= *bound {
+                // `#[expect]` with a reason: `i` enumerates `BOUNDS` and the
+                // array has exactly `BOUNDS.len()` entries.
+                #[expect(
+                    clippy::indexing_slicing,
+                    reason = "i enumerates BOUNDS over len-matched array"
+                )]
                 self.buckets[i].fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -1012,6 +1018,13 @@ fn prometheus_escape(value: &str) -> String {
 }
 
 #[cfg(test)]
+// Test indexing (F-18): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 mod tests {
     use super::*;
 

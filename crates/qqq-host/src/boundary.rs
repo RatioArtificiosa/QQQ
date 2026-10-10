@@ -868,12 +868,14 @@ mod tests {
     fn text_refuses_empty_oversized_and_control_bearing_values() {
         assert!(text("name", "orders", MAX_IDENTIFIER_BYTES).is_accept());
         assert!(text("name", "", MAX_IDENTIFIER_BYTES).is_reject());
-        assert!(text(
-            "name",
-            &"a".repeat(MAX_IDENTIFIER_BYTES + 1),
-            MAX_IDENTIFIER_BYTES
-        )
-        .is_reject());
+        assert!(
+            text(
+                "name",
+                &"a".repeat(MAX_IDENTIFIER_BYTES + 1),
+                MAX_IDENTIFIER_BYTES
+            )
+            .is_reject()
+        );
         assert!(text("name", "a\0b", MAX_IDENTIFIER_BYTES).is_reject());
         assert!(text("name", "a\nb", MAX_IDENTIFIER_BYTES).is_reject());
         assert!(text("name", "a\tb", MAX_IDENTIFIER_BYTES).is_reject());

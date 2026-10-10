@@ -42,8 +42,8 @@
 //! for a large body when the real cause was a trap. They stay separate: [`Failure`]
 //! is the host's, and a guest's `http-error` is returned *as data*.
 
-use wasmtime::component::{ComponentExportIndex, Instance as WasmInstance};
 use wasmtime::Store;
+use wasmtime::component::{ComponentExportIndex, Instance as WasmInstance};
 
 use qqq_core::{Error, ErrorCode, Result};
 

@@ -188,7 +188,11 @@ fn validate_name(s: &str) -> Result<(), IdError> {
             max: MAX_ID_LEN,
         });
     }
-    let first = s.chars().next().expect("non-empty checked above");
+    let Some(first) = s.chars().next() else {
+        // Total rather than expect: emptiness is checked above, so this arm
+        // names the invariant instead of panicking on it.
+        return Err(IdError::Empty);
+    };
     if !first.is_ascii_alphabetic() {
         return Err(IdError::MustStartWithLetter { ch: first });
     }
@@ -198,7 +202,11 @@ fn validate_name(s: &str) -> Result<(), IdError> {
             return Err(IdError::InvalidCharacter { ch, at: i });
         }
     }
-    let last = s.chars().next_back().expect("non-empty checked above");
+    let Some(last) = s.chars().next_back() else {
+        // As above: the string is non-empty here, so this arm is the
+        // invariant's name, not a reachable error.
+        return Err(IdError::Empty);
+    };
     if last == '-' || last == '_' {
         return Err(IdError::TrailingSeparator { ch: last });
     }

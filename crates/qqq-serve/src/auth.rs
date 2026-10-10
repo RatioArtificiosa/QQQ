@@ -291,9 +291,11 @@ mod tests {
         // id a new unlisted route.
         let mut policy = AuthPolicy::new();
         policy.insert("/orders/:id", "order-by-id", RouteAuth::Public);
-        assert!(policy
-            .decide(&matched("/orders/:id", "order-by-id"))
-            .is_allowed());
+        assert!(
+            policy
+                .decide(&matched("/orders/:id", "order-by-id"))
+                .is_allowed()
+        );
         assert_eq!(policy.len(), 1, "one declaration, one entry");
     }
 }

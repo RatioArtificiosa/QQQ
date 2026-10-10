@@ -289,10 +289,12 @@ impl TraceContext {
         let parts: Vec<&str> = header.split('-').collect();
         // **A short header is invalid for every version**, so this bound holds before the version is
         // known. The exact count is checked below, because it depends on the version.
-        if parts.len() < FIELDS {
+        // Destructured rather than subscripted: fewer than four parts is the
+        // `FieldCount` error, so the shape carries the check — no separate
+        // length test and index pair to drift apart.
+        let [version, trace, parent, flags, ..] = parts.as_slice() else {
             return Err(TraceContextError::FieldCount { got: parts.len() });
-        }
-        let (version, trace, parent, flags) = (parts[0], parts[1], parts[2], parts[3]);
+        };
 
         check(version, 2, "version")?;
 
@@ -303,7 +305,7 @@ impl TraceContext {
         // sentence; `CodeRabbit` finding #17 is the code catching up.
         if version.eq_ignore_ascii_case("ff") {
             return Err(TraceContextError::InvalidVersion {
-                got: version.to_owned(),
+                got: (*version).to_owned(),
             });
         }
 
@@ -311,7 +313,7 @@ impl TraceContext {
         // of a format that says exactly what it contains. For a higher version W3C requires a receiver
         // to parse the fields it knows and ignore the rest -- which is the entire reason the version
         // byte exists, and refusing them made it decorative.
-        if version == VERSION && parts.len() != FIELDS {
+        if *version == VERSION && parts.len() != FIELDS {
             return Err(TraceContextError::FieldCount { got: parts.len() });
         }
         check(trace, TraceId::TRACE_LEN, "trace-id")?;

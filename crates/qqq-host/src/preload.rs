@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 use qqq_core::{Error, ErrorCode, Result};
 
 use crate::admission::HostCapacity;
-use crate::config::{aot_cache_key, build_engine, target_triple, EngineConfig};
+use crate::config::{EngineConfig, aot_cache_key, build_engine, target_triple};
 
 /// One component to preload.
 ///
@@ -304,6 +304,13 @@ pub fn cache_key_for(item: &PreloadItem, engine_config: &EngineConfig) -> String
     aot_cache_key(&item.digest, target_triple(), engine_config)
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

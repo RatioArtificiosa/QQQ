@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! Architecture tests — the invariants of Proposal §4.1 and §4.3, checked as
 //! tests rather than asserted in prose.
 //!
@@ -75,11 +83,9 @@ fn package_name(crate_dir: &Path) -> String {
             in_package = line == "[package]";
             continue;
         }
-        if in_package {
-            if let Some(rest) = line.strip_prefix("name") {
-                let rest = rest.trim_start().trim_start_matches('=').trim();
-                return rest.trim_matches('"').to_owned();
-            }
+        if in_package && let Some(rest) = line.strip_prefix("name") {
+            let rest = rest.trim_start().trim_start_matches('=').trim();
+            return rest.trim_matches('"').to_owned();
         }
     }
     panic!("{} has no [package] name", crate_dir.display());
@@ -172,12 +178,10 @@ fn declared_qqq_deps(crate_dir: &Path) -> Vec<String> {
             in_deps = trimmed == "[dependencies]" || trimmed == "[dev-dependencies]";
             continue;
         }
-        if in_deps {
-            if let Some((key, _)) = trimmed.split_once('=') {
-                let key = key.trim();
-                if key.starts_with("qqq-") {
-                    out.push(key.to_owned());
-                }
+        if in_deps && let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim();
+            if key.starts_with("qqq-") {
+                out.push(key.to_owned());
             }
         }
     }

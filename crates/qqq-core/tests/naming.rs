@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! The naming invariant — `§D-001`, and the one rule the objective calls a defect.
 //!
 //! # The rule
@@ -125,11 +133,9 @@ fn declared_bin_names(manifest: &str) -> Vec<String> {
             in_bin = trimmed == "[[bin]]";
             continue;
         }
-        if in_bin {
-            if let Some(rest) = trimmed.strip_prefix("name") {
-                let rest = rest.trim_start().trim_start_matches('=').trim();
-                out.push(rest.trim_matches('"').to_owned());
-            }
+        if in_bin && let Some(rest) = trimmed.strip_prefix("name") {
+            let rest = rest.trim_start().trim_start_matches('=').trim();
+            out.push(rest.trim_matches('"').to_owned());
         }
     }
     out
@@ -152,12 +158,10 @@ fn no_package_is_named_qqq() {
                 in_package = trimmed == "[package]";
                 continue;
             }
-            if in_package {
-                if let Some(rest) = trimmed.strip_prefix("name") {
-                    let rest = rest.trim_start().trim_start_matches('=').trim();
-                    package_name = Some(rest.trim_matches('"').to_owned());
-                    break;
-                }
+            if in_package && let Some(rest) = trimmed.strip_prefix("name") {
+                let rest = rest.trim_start().trim_start_matches('=').trim();
+                package_name = Some(rest.trim_matches('"').to_owned());
+                break;
             }
         }
 

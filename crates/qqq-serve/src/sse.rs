@@ -206,10 +206,10 @@ impl Event {
             let _ = writeln!(out, "event:{}", fold_newlines(event));
         }
 
-        if let Some(id) = &self.id {
-            if !id.contains('\u{0}') {
-                let _ = writeln!(out, "id:{}", fold_newlines(id));
-            }
+        if let Some(id) = &self.id
+            && !id.contains('\u{0}')
+        {
+            let _ = writeln!(out, "id:{}", fold_newlines(id));
         }
 
         if let Some(retry) = self.retry {
@@ -327,13 +327,24 @@ fn split_lines(s: &str) -> Vec<&str> {
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\n' || bytes[i] == b'\r' {
-            out.push(&s[start..i]);
-            i += if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                2
-            } else {
-                1
-            };
+        // `.get()` rather than subscripts: the loop guard bounds `i`, and
+        // the two-byte lookahead is guarded by its own length check.
+        let is_break = bytes.get(i).is_some_and(|b| *b == b'\n' || *b == b'\r');
+        if is_break {
+            // Bound on a `let`: `#[expect]` does not apply to expression
+            // statements. `i` sits on a `\n` or `\r` — both one-byte chars —
+            // and `start` is either 0 or a previous `i`, so both bounds are
+            // char boundaries by construction.
+            #[expect(
+                clippy::expect_used,
+                reason = "bounds sit on one-byte chars by construction"
+            )]
+            let line: &str = s.get(start..i).expect("bounds sit on one-byte chars");
+            out.push(line);
+            let is_crlf = bytes.get(i) == Some(&b'\r')
+                && i.checked_add(1)
+                    .is_some_and(|j| bytes.get(j) == Some(&b'\n'));
+            i += if is_crlf { 2 } else { 1 };
             start = i;
         } else {
             i += 1;

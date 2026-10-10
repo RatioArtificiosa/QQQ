@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! F-10: the pool and admission agree, proven against live engines.
 //!
 //! `build_pooling` sized `total_memories` at one per instance while a
@@ -14,7 +22,7 @@
 use qqq_cap::manifest::{Limits, Manifest};
 use qqq_cap::resolve::GrantSet;
 use qqq_core::ErrorCode;
-use qqq_host::{build_engine, EngineConfig, HostCapacity, Instance, LimitSet, PreparedComponent};
+use qqq_host::{EngineConfig, HostCapacity, Instance, LimitSet, PreparedComponent, build_engine};
 
 /// Nine memories in one core module: one past the eight the shape allows.
 const NINE_MEMORIES: &str = r#"

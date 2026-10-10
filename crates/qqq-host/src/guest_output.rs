@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! Sanitising sinks for guest stdout and stderr.
 //!
@@ -126,8 +127,8 @@
 use std::future::Future as _;
 use std::io::{self, Write};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use qqq_core::sync::LockRecover;
@@ -282,10 +283,10 @@ impl OutputBudget {
     /// `pub(crate)` because only instance construction wires parents; every
     /// other crate meets budgets through [`TenantOutputGuard::budget`].
     pub(crate) fn set_parent(&self, parent: &Arc<OutputBudget>) {
-        if let Ok(mut slot) = self.parent.lock() {
-            if slot.is_none() {
-                *slot = Some(Arc::clone(parent));
-            }
+        if let Ok(mut slot) = self.parent.lock()
+            && slot.is_none()
+        {
+            *slot = Some(Arc::clone(parent));
         }
     }
 
@@ -312,16 +313,16 @@ impl OutputBudget {
                 Err(actual) => used = actual,
             }
         }
-        if let Some(parent) = self.parent.lock().ok().and_then(|p| p.clone()) {
-            if let Err(refusal) = parent.reserve(bytes) {
-                self.unreserve(bytes);
-                // The host reads this output's own counter, and a tenant
-                // refusal is still a refused write on this output: without
-                // this, `breaches` would stay zero while `last_truncation`
-                // reports a breach for the same write.
-                self.breaches.fetch_add(1, Ordering::Relaxed);
-                return Err(refusal);
-            }
+        if let Some(parent) = self.parent.lock().ok().and_then(|p| p.clone())
+            && let Err(refusal) = parent.reserve(bytes)
+        {
+            self.unreserve(bytes);
+            // The host reads this output's own counter, and a tenant
+            // refusal is still a refused write on this output: without
+            // this, `breaches` would stay zero while `last_truncation`
+            // reports a breach for the same write.
+            self.breaches.fetch_add(1, Ordering::Relaxed);
+            return Err(refusal);
         }
         Ok(())
     }
@@ -332,14 +333,17 @@ impl OutputBudget {
     /// carry one, so each tenant refusal is metered exactly once however many
     /// children observe it.
     fn refused(&self) -> Refusal {
-        if let Ok(meter) = self.meter.lock() {
-            if let Some(meter) = meter.as_ref() {
-                meter.note_output_refusal();
-            }
+        if let Ok(meter) = self.meter.lock()
+            && let Some(meter) = meter.as_ref()
+        {
+            meter.note_output_refusal();
         }
         Refusal {
             limit: self.limit,
-            breaches: self.breaches.fetch_add(1, Ordering::Relaxed) + 1,
+            breaches: self
+                .breaches
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1),
         }
     }
 
@@ -362,10 +366,10 @@ impl OutputBudget {
     /// refusal notes exactly once (at the parent that refused it), never once
     /// per child that observed it.
     pub(crate) fn set_meter(&self, meter: &Arc<crate::metrics::Metrics>) {
-        if let Ok(mut slot) = self.meter.lock() {
-            if slot.is_none() {
-                *slot = Some(Arc::clone(meter));
-            }
+        if let Ok(mut slot) = self.meter.lock()
+            && slot.is_none()
+        {
+            *slot = Some(Arc::clone(meter));
         }
     }
 
@@ -412,10 +416,10 @@ impl OutputBudget {
     /// `InFlight` guard carries it, so the pairing cannot drift apart.
     pub(crate) fn release_in_flight(&self, bytes: u64) {
         sub_saturating(&self.in_flight, bytes);
-        if let Ok(parent) = self.parent.lock() {
-            if let Some(parent) = parent.as_ref() {
-                sub_saturating(&parent.in_flight, bytes);
-            }
+        if let Ok(parent) = self.parent.lock()
+            && let Some(parent) = parent.as_ref()
+        {
+            sub_saturating(&parent.in_flight, bytes);
         }
     }
 }
@@ -444,10 +448,10 @@ impl Drop for OutputBudget {
         if used == 0 {
             return;
         }
-        if let Ok(parent) = self.parent.lock() {
-            if let Some(parent) = parent.as_ref() {
-                sub_saturating(&parent.used, used);
-            }
+        if let Ok(parent) = self.parent.lock()
+            && let Some(parent) = parent.as_ref()
+        {
+            sub_saturating(&parent.used, used);
         }
     }
 }
@@ -542,10 +546,10 @@ impl TenantOutputBudgets {
     /// exactly once into the recorder operators render. Cloned registries
     /// share the link through the inner `Arc`.
     pub fn set_meter(&self, meter: &Arc<crate::metrics::Metrics>) {
-        if let Ok(mut slot) = self.inner.meter.lock() {
-            if slot.is_none() {
-                *slot = Some(Arc::clone(meter));
-            }
+        if let Ok(mut slot) = self.inner.meter.lock()
+            && slot.is_none()
+        {
+            *slot = Some(Arc::clone(meter));
         }
     }
 
@@ -579,12 +583,12 @@ impl TenantOutputBudgets {
         // A re-established entry (after eviction, or after a recovered panic
         // dropped the map) needs the meter as much as a fresh one: without
         // this, the first tenant after an eviction would meter nothing.
-        if let Ok(meter) = self.inner.meter.lock() {
-            if let Some(meter) = meter.as_ref() {
-                entry.budget.set_meter(meter);
-            }
+        if let Ok(meter) = self.inner.meter.lock()
+            && let Some(meter) = meter.as_ref()
+        {
+            entry.budget.set_meter(meter);
         }
-        entry.live += 1;
+        entry.live = entry.live.saturating_add(1);
         TenantOutputGuard {
             inner: Arc::clone(&self.inner),
             tenant: tenant.to_owned(),
@@ -640,7 +644,7 @@ impl Clone for TenantOutputGuard {
         // Created by `acquire`, so the entry exists; a missing entry would
         // mean an eviction raced a counted guard, which the locking forbids.
         if let Some(entry) = state.get_mut(&self.tenant) {
-            entry.live += 1;
+            entry.live = entry.live.saturating_add(1);
         }
         Self {
             inner: Arc::clone(&self.inner),
@@ -803,7 +807,7 @@ struct CountSink(usize);
 
 impl EscapeSink for CountSink {
     fn push(&mut self, bytes: &[u8]) {
-        self.0 += bytes.len();
+        self.0 = self.0.saturating_add(bytes.len());
     }
 }
 
@@ -885,17 +889,17 @@ impl Escaper {
                 // it is host-chosen and constant, not guest-controlled.
                 b'\r' => {
                     sink.push(b"\\r");
-                    self.since_break += 2;
+                    self.since_break = self.since_break.saturating_add(2);
                 }
                 b'\t' => {
                     sink.push(b"\\t");
-                    self.since_break += 2;
+                    self.since_break = self.since_break.saturating_add(2);
                 }
                 // So a guest cannot emit a literal `\n` and have a reader mistake it for
                 // a break the host inserted.
                 b'\\' => {
                     sink.push(b"\\\\");
-                    self.since_break += 2;
+                    self.since_break = self.since_break.saturating_add(2);
                 }
                 0x00..=0x1f | 0x7f => {
                     // Stack-assembled, never formatted: `format!` here would
@@ -904,6 +908,9 @@ impl Escaper {
                     // whose whole point is allocation discipline. Lowercase hex
                     // matches the previous `{:02x}` output byte for byte.
                     const HEX: &[u8; 16] = b"0123456789abcdef";
+                    // `#[expect]` with a reason, as in `audit.rs`: a masked
+                    // nibble is 0..16 by construction.
+                    #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
                     let escaped = [
                         b'\\',
                         b'x',
@@ -911,11 +918,11 @@ impl Escaper {
                         HEX[usize::from(byte & 0x0f)],
                     ];
                     sink.push(&escaped);
-                    self.since_break += 4;
+                    self.since_break = self.since_break.saturating_add(4);
                 }
                 _ => {
                     sink.push(&[byte]);
-                    self.since_break += 1;
+                    self.since_break = self.since_break.saturating_add(1);
                 }
             }
             if self.since_break >= MAX_ESCAPED_RUN {
@@ -1066,11 +1073,18 @@ impl GuestOutput {
         use std::sync::OnceLock;
         static LANE: OnceLock<Arc<crate::sink_lane::SinkLane>> = OnceLock::new();
         Arc::clone(LANE.get_or_init(|| {
-            crate::sink_lane::SinkLane::spawn(
+            // As in `to_with_limit` below: spawn fails only on resource
+            // exhaustion, which fail-stops the host before this matters.
+            #[expect(
+                clippy::expect_used,
+                reason = "documented panic on thread-spawn failure"
+            )]
+            let lane = crate::sink_lane::SinkLane::spawn(
                 "qqq-stdout-lane",
                 Arc::new(io::stdout()) as Arc<dyn GuestSink>,
             )
-            .expect("the stdout lane thread spawns")
+            .expect("the stdout lane thread spawns");
+            lane
         }))
     }
 
@@ -1079,11 +1093,17 @@ impl GuestOutput {
         use std::sync::OnceLock;
         static LANE: OnceLock<Arc<crate::sink_lane::SinkLane>> = OnceLock::new();
         Arc::clone(LANE.get_or_init(|| {
-            crate::sink_lane::SinkLane::spawn(
+            // As above.
+            #[expect(
+                clippy::expect_used,
+                reason = "documented panic on thread-spawn failure"
+            )]
+            let lane = crate::sink_lane::SinkLane::spawn(
                 "qqq-stderr-lane",
                 Arc::new(io::stderr()) as Arc<dyn GuestSink>,
             )
-            .expect("the stderr lane thread spawns")
+            .expect("the stderr lane thread spawns");
+            lane
         }))
     }
 
@@ -1117,6 +1137,12 @@ impl GuestOutput {
         // A private lane cannot fail to start in any situation the host
         // survives: thread spawn fails only on resource exhaustion, and a
         // server that cannot spawn one thread is already fail-stopped.
+        // `#[expect]` with a reason — the documented `# Panics` contract
+        // above — rather than a `Result` the constructors cannot return.
+        #[expect(
+            clippy::expect_used,
+            reason = "documented panic on thread-spawn failure"
+        )]
         let lane = crate::sink_lane::SinkLane::spawn(
             "qqq-output-lane",
             Arc::clone(&sink) as Arc<dyn GuestSink>,
@@ -1344,6 +1370,10 @@ impl AsyncWrite for SanitisingWriter {
                 );
                 this.pending = Some((consumed, escaped, None));
             }
+            // `#[expect]` with a reason: the branch above either stored or
+            // early-returned, so `take` cannot be `None` — the guard is the
+            // check, this names it rather than re-testing it.
+            #[expect(clippy::expect_used, reason = "stored above or early-returned")]
             let (consumed, escaped, _) = this.pending.take().expect("just stored");
             let result = direct_write(&this.shared, &escaped).map(|()| consumed);
             return Poll::Ready(result);
@@ -1385,10 +1415,17 @@ impl AsyncWrite for SanitisingWriter {
             );
             this.pending = Some((consumed, escaped, Some(flight)));
         }
+        // As above: payment stored or the write parked/failed, so `take`
+        // cannot be `None`.
+        #[expect(clippy::expect_used, reason = "stored above or parked/failed")]
         let (consumed, escaped, flight) = this.pending.take().expect("paid above");
+        // Unwrapped separately so the reason attaches to a statement: only
+        // paid writes reach the lane send, so the guard is always `Some`.
+        #[expect(clippy::expect_used, reason = "only paid writes reach the lane send")]
+        let flight = flight.expect("paid writes always carry their guard");
         match this.shared.lane.send(crate::sink_lane::LaneMsg::Data {
             bytes: escaped,
-            flight: flight.expect("paid writes always carry their guard"),
+            flight,
             failure: Arc::clone(&this.shared.failure),
         }) {
             crate::sink_lane::LaneSend::Sent => Poll::Ready(Ok(consumed)),
@@ -1508,10 +1545,10 @@ fn sub_saturating(counter: &AtomicU64, bytes: u64) {
 /// carrying its own slot: one output, one failure record, however many
 /// threads touch it.
 pub(crate) fn record_failure(failure: &Arc<std::sync::Mutex<Option<String>>>, message: String) {
-    if let Ok(mut slot) = failure.lock() {
-        if slot.is_none() {
-            *slot = Some(message);
-        }
+    if let Ok(mut slot) = failure.lock()
+        && slot.is_none()
+    {
+        *slot = Some(message);
     }
 }
 
@@ -1553,12 +1590,19 @@ fn pump_gone() -> io::Error {
     io::Error::other("the guest-output writer task is gone")
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::Mutex;
     use std::time::Duration;
 
     /// A captured sink.
@@ -3081,7 +3125,7 @@ mod tests {
             let mut found = 0usize;
             for byte in payload {
                 if *byte == b'a' + id {
-                    found += 1;
+                    found = found.saturating_add(1);
                 }
             }
             assert!(

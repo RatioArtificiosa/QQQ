@@ -282,7 +282,11 @@ where
             // error, and a partial head may still be diagnosable.
             return Ok(buf);
         }
-        buf.extend_from_slice(&chunk[..read]);
+        // Bound on a `let`, as below: `read` returns at most the chunk
+        // length by contract.
+        #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+        let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
+        buf.extend_from_slice(fresh);
 
         // A head larger than this is not a head. Bounded so a hostile or broken
         // peer cannot make the harness allocate without limit.
@@ -295,7 +299,11 @@ where
     };
 
     // --- How much body to expect -----------------------------------------
-    let framing = framing_of(&buf[..head_end]);
+    // Bound on a `let`: `head_end` comes from the finder over this same
+    // buffer, so the range always exists.
+    #[expect(clippy::expect_used, reason = "head_end found in buf")]
+    let head: &[u8] = buf.get(..head_end).expect("head_end found in buf");
+    let framing = framing_of(head);
 
     match framing {
         Framing::Length(n) => {
@@ -310,7 +318,11 @@ where
                     // this is a short read rather than a failure to measure.
                     break;
                 }
-                buf.extend_from_slice(&chunk[..read]);
+                // Bound on a `let`: `read` returns at most the chunk length
+                // by contract.
+                #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+                let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
+                buf.extend_from_slice(fresh);
             }
         }
         Framing::None => {
@@ -323,7 +335,11 @@ where
             // via the timeout rather than a byte limit, because a legitimate
             // chunked body can be large.
             loop {
-                if buf.ends_with(b"0\r\n\r\n") || find_head_end(&buf[head_end..]).is_some() {
+                // Bound on a `let`: `head_end` indexes the same buffer the
+                // finder scanned, so the range always exists.
+                #[expect(clippy::expect_used, reason = "head_end found in buf")]
+                let post_head: &[u8] = buf.get(head_end..).expect("head_end found in buf");
+                if buf.ends_with(b"0\r\n\r\n") || find_head_end(post_head).is_some() {
                     break;
                 }
                 let mut chunk = [0_u8; 8 * 1024];
@@ -333,7 +349,11 @@ where
                 if read == 0 {
                     break;
                 }
-                buf.extend_from_slice(&chunk[..read]);
+                // Bound on a `let`: `read` returns at most the chunk length
+                // by contract.
+                #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+                let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
+                buf.extend_from_slice(fresh);
             }
         }
     }
@@ -379,10 +399,10 @@ pub fn framing_of(head: &[u8]) -> Framing {
     let lower = text.to_ascii_lowercase();
 
     // A status of 1xx, 204, or 304 has no body.
-    if let Some(status) = status_of(&lower) {
-        if status == 204 || status == 304 || (100..200).contains(&status) {
-            return Framing::None;
-        }
+    if let Some(status) = status_of(&lower)
+        && (status == 204 || status == 304 || (100..200).contains(&status))
+    {
+        return Framing::None;
     }
 
     if lower.contains("transfer-encoding:") && lower.contains("chunked") {
@@ -390,14 +410,14 @@ pub fn framing_of(head: &[u8]) -> Framing {
     }
 
     for line in lower.lines() {
-        if let Some(rest) = line.strip_prefix("content-length:") {
-            if let Ok(n) = rest.trim().parse::<usize>() {
-                return if n == 0 {
-                    Framing::None
-                } else {
-                    Framing::Length(n)
-                };
-            }
+        if let Some(rest) = line.strip_prefix("content-length:")
+            && let Ok(n) = rest.trim().parse::<usize>()
+        {
+            return if n == 0 {
+                Framing::None
+            } else {
+                Framing::Length(n)
+            };
         }
     }
 
@@ -708,6 +728,13 @@ pub fn connections_for(concurrency: Concurrency) -> u32 {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

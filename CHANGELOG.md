@@ -4,6 +4,20 @@
 
 ### Security
 
+- **serve, host, cap**: integer overflow in release now panics instead of
+  wrapping ‐ per-package `overflow-checks` for the three security-critical
+  crates, so the parsers, limiters and capability engine run the same
+  arithmetic the tests exercise. The Wave-0 advisory lints (`unwrap_used`,
+  `expect_used`, `indexing_slicing`, lossy casts) are deny in those crates,
+  with `saturating_*`/`checked_*`/`.get()` conversions across 13 parser and
+  accounting modules at zero warnings; the workspace is on edition 2024,
+  migrated one crate at a time with the full suite green between each (the
+  migration deleted a stale `WASMTIME_COMPONENT_MODEL_ASYNC_STACKFUL` gate
+  the gate test proved gone in Wasmtime 48). Measured cost of the checks on
+  the `parse_head` hot path is below the noise floor (200,000 parses:
+  191.3 ms on vs 196.1 ms off, medians of 3 on the same machine).
+  (`F-18`)
+
 - **serve, host**: every HTTP/1.1 parse error now closes the connection —
   one unified rule replacing the subset method (`closes_connection`
   deleted; the old keep-alive-after-414 described a socket the server had

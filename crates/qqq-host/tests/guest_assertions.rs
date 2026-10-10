@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! **The seam, witnessed** — a real guest reaches the assertion host through the macros, and both ways an
 //! assertion can go wrong are witnessed too.
 //!

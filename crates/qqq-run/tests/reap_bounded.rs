@@ -30,7 +30,7 @@ mod common;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{free_port, lost_the_port_race, reap_within, should_retry, Sandbox, ATTEMPTS};
+use common::{ATTEMPTS, Sandbox, free_port, lost_the_port_race, reap_within, should_retry};
 
 /// A minimal manifest that `serve` accepts, so the child's only way out is a signal.
 const MANIFEST: &str = "[package]\nname = \"reap-probe\"\nversion = \"0.1.0\"\n\

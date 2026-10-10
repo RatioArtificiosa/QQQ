@@ -37,8 +37,8 @@
 //! registered under its own grant rather than the whole interface being
 //! exposed whenever any part of it is granted.
 
-use wasmtime::component::Linker;
 use wasmtime::StoreContextMut;
+use wasmtime::component::Linker;
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;

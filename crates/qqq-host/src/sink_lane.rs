@@ -289,10 +289,10 @@ impl SinkLane {
     /// and the list grows with polls rather than writers. Spurious wakes are
     /// harmless — every woken writer rechecks before proceeding.
     pub(crate) fn park(&self, waker: &Waker) {
-        if let Ok(mut parked) = self.parked.lock() {
-            if !parked.iter().any(|w| w.will_wake(waker)) {
-                parked.push(waker.clone());
-            }
+        if let Ok(mut parked) = self.parked.lock()
+            && !parked.iter().any(|w| w.will_wake(waker))
+        {
+            parked.push(waker.clone());
         }
     }
 }

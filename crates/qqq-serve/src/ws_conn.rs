@@ -446,7 +446,10 @@ async fn run_frames(
             // browser closing a tab sends nothing.
             return WsOutcome::ClientGone;
         }
-        buf.extend_from_slice(&chunk[..n]);
+        // Bound on a `let`: `read` returns at most the buffer length by contract.
+        #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+        let fresh: &[u8] = chunk.get(..n).expect("read returns at most chunk len");
+        buf.extend_from_slice(fresh);
     }
 }
 

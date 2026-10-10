@@ -272,10 +272,10 @@ impl<T> Registry<T> {
                 .ok_or_else(|| refused("component was removed during preparation"))?
                 .active
                 .replace(generation);
-            if let Some(old) = &previous {
-                if pinned {
-                    state.retired.push(Arc::downgrade(old));
-                }
+            if let Some(old) = &previous
+                && pinned
+            {
+                state.retired.push(Arc::downgrade(old));
             }
             previous
         };
@@ -384,10 +384,8 @@ impl<T> Registry<T> {
             }
             advance(&mut state)?;
             let old = state.entries.remove(name);
-            if pinned {
-                if let Some(g) = old.as_ref().and_then(|e| e.active.as_ref()) {
-                    state.retired.push(Arc::downgrade(g));
-                }
+            if pinned && let Some(g) = old.as_ref().and_then(|e| e.active.as_ref()) {
+                state.retired.push(Arc::downgrade(g));
             }
             old
         };

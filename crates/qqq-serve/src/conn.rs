@@ -412,10 +412,10 @@ impl Connection {
 
         // 2. The drain deadline, checked before everything else so a stuck
         //    request cannot hold a draining process open forever.
-        if let Some(deadline) = self.drain_deadline {
-            if now >= deadline {
-                return Action::Close(CloseReason::DrainDeadline);
-            }
+        if let Some(deadline) = self.drain_deadline
+            && now >= deadline
+        {
+            return Action::Close(CloseReason::DrainDeadline);
         }
 
         // 4. A request in flight is never interrupted by a timeout. The guest's
@@ -435,10 +435,10 @@ impl Connection {
         }
 
         // 5. Idle between requests.
-        if let Some(idle_since) = self.idle_since {
-            if now.saturating_duration_since(idle_since) >= self.config.idle_timeout {
-                return Action::Close(CloseReason::IdleTimeout);
-            }
+        if let Some(idle_since) = self.idle_since
+            && now.saturating_duration_since(idle_since) >= self.config.idle_timeout
+        {
+            return Action::Close(CloseReason::IdleTimeout);
         }
 
         // 6. Draining: do not start a new request.

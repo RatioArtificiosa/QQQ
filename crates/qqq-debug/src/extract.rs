@@ -202,7 +202,10 @@ fn collect_sections(bytes: &[u8], out: &mut BTreeMap<String, Vec<u8>>, depth: u8
         let Some(&id) = bytes.get(pos) else { return };
         pos += 1;
 
-        let Some((size, n)) = read_uleb(&bytes[pos..]) else {
+        // Total rather than subscripted: the loop guard bounds `pos`, so the
+        // `else` arms are unreachable structure that terminates the scan
+        // instead of panicking it.
+        let Some((size, n)) = read_uleb(bytes.get(pos..).unwrap_or(&[])) else {
             return;
         };
         pos += n;
@@ -220,10 +223,10 @@ fn collect_sections(bytes: &[u8], out: &mut BTreeMap<String, Vec<u8>>, depth: u8
         match id {
             // Custom section: a name (varint length + bytes) then the content.
             0 => {
-                if let Some((name, content)) = split_custom_section(payload) {
-                    if name.starts_with(".debug_") {
-                        out.insert(name.to_owned(), content.to_vec());
-                    }
+                if let Some((name, content)) = split_custom_section(payload)
+                    && name.starts_with(".debug_")
+                {
+                    out.insert(name.to_owned(), content.to_vec());
                 }
             }
             // Section id 1 in a component is a **nested core module**, whose own
@@ -376,6 +379,13 @@ fn resolve_file<R: gimli::Reader>(
     dwarf.attr_string(unit, file.path_name()).ok()
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

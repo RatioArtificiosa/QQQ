@@ -538,6 +538,13 @@ impl Default for SecretStore {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,10 +724,11 @@ mod tests {
             .apply("other-key", PermittedOp::Sign, b"x", &crypto)
             .expect_err("not granted");
         assert_eq!(err.code, ErrorCode::SecretUseFailed);
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "variant" && v == "not-granted"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == "not-granted")
+        );
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not run for an ungranted secret"
@@ -738,10 +746,11 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Hmac, b"x", &crypto)
             .expect_err("hmac was not permitted");
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "variant" && v == "operation-not-permitted"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == "operation-not-permitted")
+        );
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not run for a non-permitted operation"
@@ -825,10 +834,11 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Sign, &big, &crypto)
             .expect_err("too long");
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "variant" && v == "input-too-long"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == "input-too-long")
+        );
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not be handed an oversized input"
@@ -849,10 +859,11 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Sign, b"x", &crypto)
             .expect_err("the primitive failed");
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "variant" && v == "unavailable"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == "unavailable")
+        );
         assert!(
             !err.cause.is_empty(),
             "the primitive's reason must be kept for the host log"
@@ -866,12 +877,14 @@ mod tests {
         let sig = s
             .apply("signing-key", PermittedOp::Sign, b"msg", &crypto)
             .expect("sign");
-        assert!(s
-            .verify("signing-key", b"msg", &sig, &crypto)
-            .expect("verify"));
-        assert!(!s
-            .verify("signing-key", b"msg", b"wrong", &crypto)
-            .expect("verify"));
+        assert!(
+            s.verify("signing-key", b"msg", &sig, &crypto)
+                .expect("verify")
+        );
+        assert!(
+            !s.verify("signing-key", b"msg", b"wrong", &crypto)
+                .expect("verify")
+        );
     }
 
     /// `verify` goes through the same grant and permission checks as `apply`.
@@ -892,10 +905,11 @@ mod tests {
         let err = hmac_only
             .verify("mac", b"m", b"s", &crypto)
             .expect_err("mac does not permit verify");
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "variant" && v == "operation-not-permitted"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == "operation-not-permitted")
+        );
     }
 
     /// An out-of-range discriminant from the guest is rejected.
@@ -1018,9 +1032,10 @@ mod tests {
         let crypto = FakeCrypto::new();
         assert!(!s.exists("anything"));
         assert!(s.permitted_operations("anything").is_empty());
-        assert!(s
-            .apply("anything", PermittedOp::Sign, b"x", &crypto)
-            .is_err());
+        assert!(
+            s.apply("anything", PermittedOp::Sign, b"x", &crypto)
+                .is_err()
+        );
     }
 
     /// Every `secret-error` variant must carry a remediation.
@@ -1038,10 +1053,11 @@ mod tests {
                 e.remediation.is_some(),
                 "`{variant}` must have a remediation"
             );
-            assert!(e
-                .context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == variant));
+            assert!(
+                e.context
+                    .iter()
+                    .any(|(k, v)| k == "variant" && v == variant)
+            );
         }
     }
 }

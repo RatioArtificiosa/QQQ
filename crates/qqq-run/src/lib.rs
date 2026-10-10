@@ -29,7 +29,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod addcap;
-pub use addcap::{add_cap, stanza_for, AddCapOptions, AddCapOutput};
+pub use addcap::{AddCapOptions, AddCapOutput, add_cap, stanza_for};
 pub mod audit;
 pub use audit::{AuditOutput, FindingOutput};
 pub mod aot;
@@ -86,50 +86,49 @@ pub mod verify;
 pub mod watch;
 
 pub use build::{
-    plan, plan_pure, probe, rust_artifact_path, shell_quote, toolchain_for, verify_artifact,
-    ArtifactKind, ArtifactSpec, BuildOptions, BuildOutput, BuildPlan, ToolRequirement,
-    COMPONENT_EXTENSION, OUTPUT_DIR,
+    ArtifactKind, ArtifactSpec, BuildOptions, BuildOutput, BuildPlan, COMPONENT_EXTENSION,
+    OUTPUT_DIR, ToolRequirement, plan, plan_pure, probe, rust_artifact_path, shell_quote,
+    toolchain_for, verify_artifact,
 };
 pub use commands::{
-    caps, classify_posture, developer_overlay, diff_artifacts, fix_stanza_for, inspect,
-    inspect_artifact, sibling_lockfile, why, ArtifactDiff, ArtifactReport, CapabilityChange,
-    CapabilityReport, CapsOutput, InspectOutput, InterfaceReport, LimitsReport, NamespaceGroup,
-    Posture, WhyOutput, WhyStep,
+    ArtifactDiff, ArtifactReport, CapabilityChange, CapabilityReport, CapsOutput, InspectOutput,
+    InterfaceReport, LimitsReport, NamespaceGroup, Posture, WhyOutput, WhyStep, caps,
+    classify_posture, developer_overlay, diff_artifacts, fix_stanza_for, inspect, inspect_artifact,
+    sibling_lockfile, why,
 };
-pub use deps::{add, remove, DependencyChangeOutput, DependencyEdit};
+pub use deps::{DependencyChangeOutput, DependencyEdit, add, remove};
 pub use dev::{
-    build_once, capability_warning, run as run_dev, select_tier, watch_roots, watch_rules,
-    DevOptions, DevOutput, ReloadRecord, ReloadTier,
+    DevOptions, DevOutput, ReloadRecord, ReloadTier, build_once, capability_warning,
+    run as run_dev, select_tier, watch_roots, watch_rules,
 };
 pub use install::{
-    cannot_fetch, lockfile_path, lockfile_required, lockfile_stale, read_lockfile, resolve,
-    CapabilityChangeReport, InstallOptions, InstallOutput, LockMode, Resolution,
+    CapabilityChangeReport, InstallOptions, InstallOutput, LockMode, Resolution, cannot_fetch,
+    lockfile_path, lockfile_required, lockfile_stale, read_lockfile, resolve,
 };
 pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{
-    command_schemas, CommandName, CommandOutput, CommandSchema, Envelope, ErrorContextEntry,
-    ErrorPayload, Format, Output,
+    CommandName, CommandOutput, CommandSchema, Envelope, ErrorContextEntry, ErrorPayload, Format,
+    Output, command_schemas,
 };
 pub use run::{
-    capability_for_import, check_imports, exposure_rank, locate_artifact, new_engine,
-    parse_cap_flag, prepare, resolve_grants, ImportCheck, Prepared, RunOptions, RunOutcome,
-    RunOutput,
+    ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput, capability_for_import, check_imports,
+    exposure_rank, locate_artifact, new_engine, parse_cap_flag, prepare, resolve_grants,
 };
 pub use scaffold::{
-    crate_name, create, detect, files_for, init, manifest_for, readme_for, validate_name,
     Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,
-    WrittenFile,
+    WrittenFile, crate_name, create, detect, files_for, init, manifest_for, readme_for,
+    validate_name,
 };
 pub use test_runner::{
-    by_file, discover, execute as run_tests, filter_tests, tests_dir, to_junit, to_tap,
-    DiscoveredTest, OutcomeReport, TestFormat, TestOptions, TestOutcome, TestOutput,
+    DiscoveredTest, OutcomeReport, TestFormat, TestOptions, TestOutcome, TestOutput, by_file,
+    discover, execute as run_tests, filter_tests, tests_dir, to_junit, to_tap,
 };
 pub use update::{
-    apply, authority_unknown_for_moved, cannot_update, contradictory_request, decide, diff,
-    moved_count, plan as plan_update, report, CandidateReport, Decision, FixedVersions, NoRegistry,
-    Strategy, UpdateCandidate, UpdateOptions, UpdateOutput, VersionSource,
+    CandidateReport, Decision, FixedVersions, NoRegistry, Strategy, UpdateCandidate, UpdateOptions,
+    UpdateOutput, VersionSource, apply, authority_unknown_for_moved, cannot_update,
+    contradictory_request, decide, diff, moved_count, plan as plan_update, report,
 };
 pub use watch::{
-    Change, Debouncer, FileFingerprint, IgnoreRules, Snapshot, DEFAULT_DEBOUNCE,
-    DEFAULT_POLL_INTERVAL,
+    Change, DEFAULT_DEBOUNCE, DEFAULT_POLL_INTERVAL, Debouncer, FileFingerprint, IgnoreRules,
+    Snapshot,
 };

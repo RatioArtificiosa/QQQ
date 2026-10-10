@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
+
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
 //! `--workers` sizes the instance pool, proved over a real socket (`CLI-011`).
 //!
 //! # What this file exists to prove, and what would prove less

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! The WebSocket frame layer, per RFC 6455 §5.
 //!
@@ -279,7 +280,7 @@ impl Frame {
     /// character boundary, because the reason must remain valid UTF-8 (§5.5.1).
     #[must_use]
     pub fn close(code: u16, reason: &str) -> Self {
-        let mut payload = Vec::with_capacity(2 + reason.len());
+        let mut payload = Vec::with_capacity(reason.len().saturating_add(2));
         payload.extend_from_slice(&code.to_be_bytes());
         // 125 total, minus the two code bytes.
         let mut budget = 123;
@@ -289,7 +290,7 @@ impl Frame {
                 break;
             }
             payload.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
-            budget -= n;
+            budget = budget.saturating_sub(n);
         }
         Self {
             opcode: Opcode::Close,
@@ -314,7 +315,12 @@ impl Frame {
         if self.opcode != Opcode::Close || self.payload.len() < 2 {
             return None;
         }
-        Some(u16::from_be_bytes([self.payload[0], self.payload[1]]))
+        // Destructured rather than subscripted: the length check above makes
+        // the prefix exactly two bytes.
+        let [b0, b1, ..] = self.payload.as_slice() else {
+            return None;
+        };
+        Some(u16::from_be_bytes([*b0, *b1]))
     }
 }
 
@@ -332,6 +338,16 @@ impl Frame {
 /// failure and not merely a leniency.
 pub fn decode_server_frame(bytes: &[u8]) -> Result<Option<(Frame, usize)>, FrameError> {
     decode_server_frame_with_limit(bytes, MAX_FRAME_BYTES)
+}
+
+/// Copy `N` bytes at `offset`, or `None` on a short read.
+///
+/// The decoder's bounds checks funnel through here so no call site
+/// subscripts: a short read is `Ok(None)` upstream (more bytes may arrive),
+/// never an error. `checked_add` keeps the end arithmetic total for the
+/// arithmetic pass below.
+fn take<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+    bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
 }
 
 /// Decode one client frame with an explicit per-connection cap.
@@ -367,8 +383,12 @@ pub fn decode_server_frame_with_limit(
     if bytes.len() < 2 {
         return Ok(None);
     }
-    let b0 = bytes[0];
-    let b1 = bytes[1];
+    // Destructured rather than subscripted: the length check above makes the
+    // two-byte header exact.
+    let [b0, b1, ..] = bytes else {
+        return Ok(None);
+    };
+    let (b0, b1) = (*b0, *b1);
 
     let fin = b0 & 0x80 != 0;
     let rsv = b0 & 0x70;
@@ -408,11 +428,11 @@ pub fn decode_server_frame_with_limit(
     let mut offset = 2;
     let payload_len: u64 = match short_len {
         126 => {
-            if bytes.len() < offset + 2 {
+            let Some(raw) = take::<2>(bytes, offset) else {
                 return Ok(None);
-            }
-            let v = u64::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
-            offset += 2;
+            };
+            let v = u64::from(u16::from_be_bytes(raw));
+            offset = offset.saturating_add(2);
             // §5.2: the 16-bit form is only for lengths that do not fit in 7 bits. A
             // smaller value here is a protocol error, and accepting it is a smuggling
             // primitive — two encodings of one payload mean two peers can disagree about
@@ -423,13 +443,11 @@ pub fn decode_server_frame_with_limit(
             v
         }
         127 => {
-            if bytes.len() < offset + 8 {
+            let Some(raw) = take::<8>(bytes, offset) else {
                 return Ok(None);
-            }
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&bytes[offset..offset + 8]);
-            let v = u64::from_be_bytes(arr);
-            offset += 8;
+            };
+            let v = u64::from_be_bytes(raw);
+            offset = offset.saturating_add(8);
             if v < 65_536 {
                 return Err(FrameError::NonMinimalLength { length: v });
             }
@@ -451,19 +469,15 @@ pub fn decode_server_frame_with_limit(
     #[allow(clippy::cast_possible_truncation)]
     let payload_len = payload_len as usize;
 
-    let mask_end = offset + 4;
-    if bytes.len() < mask_end {
+    let mask_end = offset.saturating_add(4);
+    // Taken rather than subscripted, like the length fields above: a short
+    // read is `Ok(None)`, and the four mask bytes arrive as an array.
+    let Some(mask) = take::<4>(bytes, offset) else {
         return Ok(None);
-    }
-    let mask = [
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ];
+    };
     offset = mask_end;
 
-    let end = offset + payload_len;
+    let end = offset.saturating_add(payload_len);
     if bytes.len() < end {
         return Ok(None);
     }
@@ -471,10 +485,15 @@ pub fn decode_server_frame_with_limit(
     // §5.3: the mask is XOR'd **by index**, starting at zero for each frame. A running
     // XOR carried across frames corrupts everything after the first — and it is the kind
     // of bug that appears only with a payload longer than one mask period, which a test
-    // with a short fixture would not catch.
-    let mut payload = bytes[offset..end].to_vec();
-    for (i, byte) in payload.iter_mut().enumerate() {
-        *byte ^= mask[i % 4];
+    // with a short fixture would not catch. Zipped over a cycled mask rather
+    // than indexed by `i % 4`: the cycle restarts at zero per frame by
+    // construction, which is exactly the property the comment above demands.
+    let Some(payload_bytes) = bytes.get(offset..end) else {
+        return Ok(None);
+    };
+    let mut payload = payload_bytes.to_vec();
+    for (byte, m) in payload.iter_mut().zip(mask.iter().cycle()) {
+        *byte ^= m;
     }
 
     if opcode == Opcode::Close {
@@ -504,7 +523,14 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
                 .to_owned(),
         });
     }
-    if std::str::from_utf8(&payload[2..]).is_err() {
+    // Total rather than subscripted: the checks above leave at least two
+    // bytes, so the `else` is unreachable structure with the UTF-8 error.
+    let Some(reason) = payload.get(2..) else {
+        return Err(FrameError::InvalidClosePayload {
+            reason: "the close reason after the status code must be UTF-8".to_owned(),
+        });
+    };
+    if std::str::from_utf8(reason).is_err() {
         return Err(FrameError::InvalidClosePayload {
             reason: "the close reason after the status code must be UTF-8".to_owned(),
         });
@@ -528,7 +554,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
 // crate builds for. A `try_into` per arm would state the same thing less clearly.
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode(frame: &Frame) -> Vec<u8> {
-    let mut out = Vec::with_capacity(frame.payload.len() + 10);
+    let mut out = Vec::with_capacity(frame.payload.len().saturating_add(10));
     let b0 = (if frame.fin { 0x80 } else { 0 }) | frame.opcode.as_u8();
     out.push(b0);
 
@@ -590,6 +616,13 @@ pub fn text_of(frame: &Frame) -> Result<&str, FrameError> {
 /// speaking this protocol".
 pub type ProtocolError = HandshakeError;
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

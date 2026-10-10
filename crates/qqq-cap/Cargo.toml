@@ -13,7 +13,39 @@ keywords = ["qqq", "capability", "security", "sandbox", "wasm"]
 categories = ["wasm", "development-tools"]
 
 [lints]
-workspace = true
+# F-18 deny promotion (Wave 6): this crate does NOT inherit
+# `workspace.lints` because Cargo forbids mixing `lints.workspace = true`
+# with overrides. The table below is the workspace table with the Wave-0
+# advisory lints raised to deny. `qqq-cap` is in the security-critical set
+# (the single authority gate: grants, narrowing-only resolution) with
+# release `overflow-checks` on, so a new `unwrap`/`expect`/subscript/cast
+# here must fail the build, not warn. Kept in sync with `[workspace.lints]`
+# in the root manifest by hand; `clippy -- -D warnings` proves it on every
+# gate.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
+elided_lifetimes_in_paths = "deny"
+explicit_outlives_requirements = "deny"
+redundant_imports = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
 
 [dependencies]
 qqq-core = { path = "../qqq-core", version = "0.1.1" }

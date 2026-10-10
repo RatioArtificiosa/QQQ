@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! `PERF-005` — the real ABI-crossing costs, measured across a **live Wasmtime
 //! component boundary**, replacing the planning estimates in `§9.3`.
 //!
@@ -356,23 +365,18 @@ pub const ASYNC_WAT: &str = r#"
 
 /// Build an engine with the async component model enabled.
 ///
-/// # Why the environment variable is set, and why that is reported
+/// # Why no environment variable is set
 ///
-/// Wasmtime 48 gates `component-model-async-stackful` behind
-/// `WASMTIME_COMPONENT_MODEL_ASYNC_STACKFUL` as well as the `Config` knob. The
-/// engine below would refuse to compile [`ASYNC_WAT`] with the knob alone. This
-/// is stated because it is a fact about the configuration the number belongs to,
-/// and `§9.1` requires the environment be published *with* the result — a
-/// measurement whose precondition is unstated is a measurement of something else.
+/// An earlier revision of this function also set
+/// `WASMTIME_COMPONENT_MODEL_ASYNC_STACKFUL=1`, on the claim that Wasmtime 48
+/// gated `component-model-async-stackful` behind the variable as well as the
+/// `Config` knob. Measured 2026-10-09 (edition-2024 migration): the gate test
+/// below passes with the knob alone, so the variable gate is gone upstream
+/// and the claim was stale. It is stated because `§9.1` requires the
+/// environment be published *with* the result — a measurement whose
+/// precondition is unstated is a measurement of something else.
 #[must_use]
 pub fn async_engine() -> wasmtime::Engine {
-    // SAFETY-equivalent: `set_var` is not unsafe, but it IS process-global and
-    // racy against other threads reading the environment. It is called once,
-    // before any engine is built, in a test binary that spawns no threads before
-    // this point. Stated because an unremarked global write in a test is the kind
-    // of thing that makes a suite flaky in a way nobody can find later.
-    std::env::set_var("WASMTIME_COMPONENT_MODEL_ASYNC_STACKFUL", "1");
-
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true);
     config.consume_fuel(true);

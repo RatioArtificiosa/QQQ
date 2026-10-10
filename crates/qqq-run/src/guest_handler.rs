@@ -638,19 +638,19 @@ impl GuestApp {
         // could never cover. FailOpenWithAlarm counts the refusal loudly
         // and serves anyway — the operator chose availability over
         // auditability, in one visible call.
-        if let Some(appender) = self.audit_appender.as_ref() {
-            if appender.is_failed() {
-                match self.audit_policy {
-                    qqq_host::audit_sink::AuditFailurePolicy::FailClosed => {
-                        return Ok(audit_unavailable(
-                            &self.pool,
-                            self.completion_rate,
-                            "the audit worker cannot persist",
-                        ));
-                    }
-                    qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm => {
-                        self.note_audit_drop("pre-flight: worker already failed");
-                    }
+        if let Some(appender) = self.audit_appender.as_ref()
+            && appender.is_failed()
+        {
+            match self.audit_policy {
+                qqq_host::audit_sink::AuditFailurePolicy::FailClosed => {
+                    return Ok(audit_unavailable(
+                        &self.pool,
+                        self.completion_rate,
+                        "the audit worker cannot persist",
+                    ));
+                }
+                qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm => {
+                    self.note_audit_drop("pre-flight: worker already failed");
                 }
             }
         }
@@ -1645,6 +1645,13 @@ impl Drop for EpochTicker {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2217,8 +2224,8 @@ mod tests {
     /// agreement below would pass on requests that never ran.
     #[test]
     fn concurrent_requests_persist_without_barrier_deadlock() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
         let Some(app) = test_app_with_capacity(8, qqq_cap::resolve::GrantSet::empty()) else {
             return;
         };

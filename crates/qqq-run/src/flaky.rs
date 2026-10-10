@@ -291,15 +291,15 @@ pub fn append_history(path: &Path, records: &[TestRecord]) -> Result<()> {
     if records.is_empty() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::new(
-                    ErrorCode::ManifestSchemaViolation,
-                    format!("create {}: {e}", parent.display()),
-                )
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::new(
+                ErrorCode::ManifestSchemaViolation,
+                format!("create {}: {e}", parent.display()),
+            )
+        })?;
     }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -401,7 +401,10 @@ pub fn detect(records: &[TestRecord], window: usize) -> Vec<Flake> {
         let recent = if window == 0 || all.len() <= window {
             &all[..]
         } else {
-            &all[all.len() - window..]
+            // Total rather than subscripted: the guard makes the subtraction
+            // non-negative, and `unwrap_or(&[])` can only fire if it lies —
+            // in which case an empty window reports nothing, the safe direction.
+            all.get(all.len().saturating_sub(window)..).unwrap_or(&[])
         };
         let failures = recent.iter().filter(|r| !r.passed).count();
         // **Both, so a test that never passes is reported as broken rather than as flaky.**
@@ -546,6 +549,13 @@ pub fn platform() -> String {
     std::env::consts::OS.to_owned()
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,9 +584,11 @@ mod tests {
         assert_eq!(found[0].failures, 1);
         assert_eq!(found[0].runs, 4);
         assert_eq!(found[0].platform, "linux");
-        assert!(found[0]
-            .summary()
-            .contains("failed 1 of the last 4 run(s) on linux"));
+        assert!(
+            found[0]
+                .summary()
+                .contains("failed 1 of the last 4 run(s) on linux")
+        );
         assert!(found[0].summary().contains("eb1bba9"));
     }
 
@@ -663,9 +675,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("history.jsonl");
 
-        assert!(read_history(&path)
-            .expect("a missing history is empty")
-            .is_empty());
+        assert!(
+            read_history(&path)
+                .expect("a missing history is empty")
+                .is_empty()
+        );
 
         let first = vec![rec("a", "linux", true, "c1")];
         append_history(&path, &first).expect("append");

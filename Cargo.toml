@@ -78,7 +78,11 @@ members = [
 
 [workspace.package]
 version = "0.1.1"
-edition = "2021"
+# F-18 edition migration (Wave 6): 2024, migrated one crate at a time with
+# the full suite green between crates (core 260s, bench 178s, sys 174s,
+# io 211s, abi 364s, cap 228s, serve 237s, host 197s, pkg 140s, debug 149s,
+# run 103s — all exit 0). MSRV stays 1.97: edition 2024 needs rustc 1.85+.
+edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
 repository = "https://github.com/RatioArtificiosa/QQQ"
@@ -177,6 +181,19 @@ codegen-units = 1
 # dead code that only tests could see, because Cargo always unwinds test
 # harnesses regardless of this setting.
 strip = "debuginfo"
+# `F-18`: integer overflow checks in release for the security-critical
+# packages. Debug and test builds panic on overflow while release wraps, so
+# without this the tests exercise different arithmetic semantics than
+# production — and the parsers (`http1.rs`, `h2/*`, `ws_frame.rs`), limiters
+# and byte accounting are exactly where an overflow becomes a vulnerability.
+# Per-package rather than whole-profile: the cost question is then bounded to
+# three crates, and the PERF-020 delta below covers it.
+[profile.release.package.qqq-serve]
+overflow-checks = true
+[profile.release.package.qqq-host]
+overflow-checks = true
+[profile.release.package.qqq-cap]
+overflow-checks = true
 
 # The dev profile is tuned for iteration speed, not runtime speed.
 [profile.dev]
@@ -226,6 +243,16 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# F-18 warn set (Wave 6): unwrapping, expect, indexing and lossy casts must
+# not appear in shipping code unexamined. Warn first, burn down to zero,
+# then deny for the security-critical crates. Test modules carry one
+# reasoned module-level allow each: setup code legitimately unwraps, and a
+# per-site conversion there would trade readability for nothing.
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
 
 # F-18 warn set (Wave 0): rustdoc link hygiene. Broken intra-doc links rot
 # silently into dead documentation; warning now, deny in Wave 6.

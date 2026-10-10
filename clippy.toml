@@ -1,0 +1,11 @@
+# Clippy configuration (`F-18`).
+#
+# Test setup code legitimately unwraps: a failing fixture must panic rather
+# than propagate, and converting every test `.expect("engine")` into a
+# `Result` chain would trade readability for nothing. These two options are
+# clippy's sanctioned mechanism for exactly that — they apply only to code
+# compiled under `--cfg test` (unit-test modules, integration targets,
+# examples used as tests), never to shipping code, which the workspace
+# `warn` (and per-crate `deny`) below still covers in full.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

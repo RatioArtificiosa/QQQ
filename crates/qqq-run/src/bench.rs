@@ -35,12 +35,12 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use qqq_bench::HARNESS_SOURCE;
 use qqq_bench::budget::{Budget, Item, Measurement, Unit};
 use qqq_bench::methodology::{
     BenchmarkName, Concurrency, Environment, Methodology, NonClaims, Warmup,
 };
 use qqq_bench::workload::{Shape, Workload};
-use qqq_bench::HARNESS_SOURCE;
 use qqq_core::error::{Error, ErrorCode};
 
 /// The URL `§9.1` requires be published, so a reader can audit the harness.
@@ -106,8 +106,9 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
     let mut opts = BenchOptions::default();
     let mut i = 0;
 
-    while i < args.len() {
-        let arg = args[i].as_str();
+    // Total rather than subscripted: the `else` ends argument parsing instead
+    // of panicking it — same outcome as the guard, without the subscript.
+    while let Some(arg) = args.get(i).map(String::as_str) {
         match arg {
             "--listen" | "--target" | "--url" => {
                 let v = value_of(args, i, arg)?;
@@ -303,7 +304,12 @@ pub fn read_environment() -> Environment {
         // Unreachable in practice: every field above is non-empty by construction.
         // Stated rather than `unwrap`ed because a benchmark must not panic while
         // reporting its own conditions -- that would lose the measurement and the
-        // explanation together.
+        // explanation together. The `#[expect]` names the same contract for the
+        // fallback call: its literals are non-empty, so `new` cannot fail it.
+        #[expect(
+            clippy::expect_used,
+            reason = "fallback literals are non-empty by inspection"
+        )]
         Environment::new(
             "unknown",
             1,
@@ -334,10 +340,10 @@ fn cpu_model() -> String {
     // falling back to a named unknown rather than inventing a model.
     if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("model name") {
-                if let Some(value) = rest.split(':').nth(1) {
-                    return value.trim().to_owned();
-                }
+            if let Some(rest) = line.strip_prefix("model name")
+                && let Some(value) = rest.split(':').nth(1)
+            {
+                return value.trim().to_owned();
             }
         }
     }
@@ -350,12 +356,11 @@ fn cpu_model() -> String {
 fn total_memory_bytes() -> u64 {
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb) = rest.split_whitespace().next() {
-                    if let Ok(kb) = kb.parse::<u64>() {
-                        return kb.saturating_mul(1024);
-                    }
-                }
+            if let Some(rest) = line.strip_prefix("MemTotal:")
+                && let Some(kb) = rest.split_whitespace().next()
+                && let Ok(kb) = kb.parse::<u64>()
+            {
+                return kb.saturating_mul(1024);
             }
         }
     }
@@ -366,10 +371,10 @@ fn total_memory_bytes() -> u64 {
 
 /// The kernel version, or a named unknown.
 fn kernel_version() -> String {
-    if let Ok(text) = std::fs::read_to_string("/proc/version") {
-        if let Some(token) = text.split_whitespace().nth(2) {
-            return token.to_owned();
-        }
+    if let Ok(text) = std::fs::read_to_string("/proc/version")
+        && let Some(token) = text.split_whitespace().nth(2)
+    {
+        return token.to_owned();
     }
     std::env::consts::OS.to_owned()
 }
@@ -644,11 +649,15 @@ pub async fn run(opts: &BenchOptions, target: SocketAddr) -> Result<BenchOutput,
 
     // A run with no workloads still needs a document, and the environment is
     // readable without running anything -- so the empty case reports the machine
-    // rather than an empty object.
-    let methodology = methodology.unwrap_or_else(|| {
-        let hello = Workload::find(&BenchmarkName::Hello).expect("hello is in the table");
-        methodology_for(hello, opts).expect("the hello methodology is constructible")
-    });
+    // rather than an empty object. Total rather than expect: the table without
+    // its Hello row is a broken build, reported as an error like any other.
+    let methodology = if let Some(built) = methodology {
+        built
+    } else {
+        let hello = Workload::find(&BenchmarkName::Hello)
+            .ok_or_else(|| usage("the benchmark table is missing its Hello workload"))?;
+        methodology_for(hello, opts)?
+    };
 
     Ok(BenchOutput::new(&results, &methodology))
 }

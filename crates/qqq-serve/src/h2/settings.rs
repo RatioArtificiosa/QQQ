@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! SETTINGS: the parameters both ends of a connection declare about themselves.
 //!
@@ -273,10 +274,8 @@ impl Settings {
         // rather than a field because it is a property of the *role*, not of the
         // settings, and getting it wrong is a connection error a peer will
         // enforce.
-        if !server {
-            if let Some(push) = self.enable_push {
-                params.push((SettingId::EnablePush, u32::from(push)));
-            }
+        if !server && let Some(push) = self.enable_push {
+            params.push((SettingId::EnablePush, u32::from(push)));
         }
         if let Some(n) = self.max_concurrent_streams {
             params.push((SettingId::MaxConcurrentStreams, n));
@@ -595,12 +594,16 @@ mod tests {
         let s = Settings::server_default();
         assert_eq!(s.stream_limit(), Some(DEFAULT_MAX_CONCURRENT_STREAMS));
         let params = s.to_params(true);
-        assert!(params
-            .iter()
-            .any(|(id, v)| *id == SettingId::MaxConcurrentStreams && *v == 100));
-        assert!(params
-            .iter()
-            .any(|(id, _)| *id == SettingId::InitialWindowSize));
+        assert!(
+            params
+                .iter()
+                .any(|(id, v)| *id == SettingId::MaxConcurrentStreams && *v == 100)
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(id, _)| *id == SettingId::InitialWindowSize)
+        );
         assert!(params.iter().any(|(id, _)| *id == SettingId::MaxFrameSize));
     }
 

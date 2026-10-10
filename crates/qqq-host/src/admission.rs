@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! Admission control: refuse a component whose declared requirements exceed the
 //! host's capacity — `HOST-023`.
@@ -128,7 +129,14 @@ impl HostCapacity {
         } else {
             self.max_instances
         };
-        self.available_bytes() / n
+        // `n` is at least 1 by construction above, so the checked division is
+        // exact on every reachable path; the zero fallback is unreachable
+        // fail-closed structure, matching `fitting_instances` below. A `match`
+        // (not `unwrap_or`) because this is a `const fn`.
+        match self.available_bytes().checked_div(n) {
+            Some(v) => v,
+            None => 0,
+        }
     }
 }
 
@@ -512,7 +520,10 @@ mod tests {
     /// 1000×8 B tables + 64 KiB metadata. Named once so the boundary tests
     /// below read as arithmetic, not magic.
     fn rss_1_1_1(ceiling_bytes: u64) -> u64 {
-        ceiling_bytes + 2 * MIB + 8000 + 64 * 1024
+        ceiling_bytes
+            .saturating_add(MIB.saturating_mul(2))
+            .saturating_add(8000)
+            .saturating_add(1024u64.saturating_mul(64))
     }
 
     const MIB: u64 = 1024 * 1024;
@@ -711,10 +722,11 @@ mod tests {
             ..shape
         };
         let err = admit(&limits(64 * MIB, 1, 1), &shape, &cap).expect_err("refused");
-        assert!(err
-            .context
-            .iter()
-            .any(|(k, v)| k == "refusal" && v == "too_many_instances"));
+        assert!(
+            err.context
+                .iter()
+                .any(|(k, v)| k == "refusal" && v == "too_many_instances")
+        );
         // And `max_memory_per_instance` must not panic on the same input.
         assert_eq!(cap.max_memory_per_instance(), 1024 * MIB);
     }

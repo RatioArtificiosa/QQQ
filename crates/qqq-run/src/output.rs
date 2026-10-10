@@ -990,6 +990,13 @@ pub fn command_schemas() -> Vec<CommandSchema> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,10 +1072,12 @@ mod tests {
         assert_eq!(v["command"], "why");
         assert_eq!(v["error"]["code"], "QQQ-4003");
         assert_eq!(v["error"]["retryable"], false);
-        assert!(v["error"]["docs_url"]
-            .as_str()
-            .unwrap()
-            .ends_with("QQQ-4003"));
+        assert!(
+            v["error"]["docs_url"]
+                .as_str()
+                .unwrap()
+                .ends_with("QQQ-4003")
+        );
         assert!(v["error"]["remediation"].is_string());
         // Context must be an array of named objects, not tuples.
         assert_eq!(v["error"]["context"][0]["name"], "capability");

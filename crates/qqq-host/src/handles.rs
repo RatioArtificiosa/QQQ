@@ -268,7 +268,15 @@ impl<T> HandleTable<T> {
         // structure, and the bound is a manifest field so the tradeoff is
         // visible rather than hidden.
         for i in 0..self.slots.len() {
-            if let Slot::Free { next_generation } = self.slots[i] {
+            // Read through `.get()`: the loop bound makes `None`
+            // unreachable, and copying the generation out here (rather than
+            // matching on the subscript) ends the borrow before the write
+            // below — the shape that also satisfies the borrow checker.
+            let next_generation = match self.slots.get(i) {
+                Some(Slot::Free { next_generation }) => Some(*next_generation),
+                _ => None,
+            };
+            if let Some(next_generation) = next_generation {
                 // A generation of `u32::MAX` cannot be incremented, so the slot is
                 // retired rather than reused. Refusing is the safe direction: a
                 // wrapped generation would make an old handle valid again, which
@@ -278,7 +286,14 @@ impl<T> HandleTable<T> {
                     continue;
                 }
                 let generation = next_generation;
-                self.slots[i] = Slot::Live { value, generation };
+                // `#[expect]` with a reason: `i` ranges over the live table,
+                // so the subscript cannot fail — and an invariant violation
+                // here must panic loudly (fail-stop) rather than skip a write
+                // and corrupt the table silently.
+                #[expect(clippy::indexing_slicing, reason = "i ranges over the live table")]
+                {
+                    self.slots[i] = Slot::Live { value, generation };
+                }
                 self.live += 1;
                 self.stats.opened += 1;
                 // As above: `i < slots.len() <= limit` and `limit` is a `u32`.
@@ -388,11 +403,16 @@ impl<T> HandleTable<T> {
         // Replace with a free slot carrying the NEXT generation. Doing this by
         // assignment rather than by `take` + `put` is what keeps the generation
         // monotonic: the slot never passes through a state where an old handle
-        // would match.
+        // would match. `get_mut` rather than subscripted: the match above
+        // validated the index, and the `None` arm reports the same error —
+        // total without restating the bound.
         let placeholder = Slot::Free {
             next_generation: generation.wrapping_add(1),
         };
-        let old = std::mem::replace(&mut self.slots[index], placeholder);
+        let old = match self.slots.get_mut(index) {
+            Some(slot) => std::mem::replace(slot, placeholder),
+            None => return Err(Self::invalid_handle_message(handle)),
+        };
         self.live -= 1;
         self.stats.closed += 1;
 

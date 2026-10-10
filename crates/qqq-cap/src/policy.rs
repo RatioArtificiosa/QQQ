@@ -584,10 +584,14 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     let mut star: Option<(usize, usize)> = None;
 
     while ti < t.len() {
-        if pi < p.len() && (p[pi] == t[ti]) {
+        // `.get()` rather than subscripts: `ti < t.len()` is the loop
+        // invariant, so `t.get(ti)` is always `Some` and the comparison is
+        // exactly the guarded form — `None == Some` is false, matching the
+        // old `pi < p.len() &&` guard — with no panic path at all.
+        if p.get(pi) == t.get(ti) {
             pi += 1;
             ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
+        } else if p.get(pi) == Some(&'*') {
             star = Some((pi, ti));
             pi += 1;
         } else if let Some((sp, st)) = star {
@@ -599,7 +603,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
             return false;
         }
     }
-    while pi < p.len() && p[pi] == '*' {
+    while p.get(pi) == Some(&'*') {
         pi += 1;
     }
     pi == p.len()
@@ -1801,16 +1805,27 @@ fn split_keyword<'a>(text: &'a str, keyword: &str) -> Option<(&'a str, &'a str)>
     let mut in_string = false;
     let mut i = 0usize;
     while i + keyword.len() <= text.len() {
-        let ch = bytes[i] as char;
+        // Total rather than subscripted: the loop guard makes `i` in-bounds,
+        // so the `else` arms below are unreachable structure, not behavior —
+        // they terminate the scan instead of panicking if the invariant ever
+        // lies.
+        let Some(&b) = bytes.get(i) else { break };
+        let ch = b as char;
         if ch == '"' {
             in_string = !in_string;
             i += 1;
             continue;
         }
         if !in_string && text[i..].starts_with(keyword) {
-            let before_ok = i == 0 || (bytes[i - 1] as char).is_whitespace();
+            let before_ok = i == 0
+                || bytes
+                    .get(i - 1)
+                    .is_some_and(|b| (*b as char).is_whitespace());
             let after = i + keyword.len();
-            let after_ok = after == text.len() || (bytes[after] as char).is_whitespace();
+            let after_ok = after == text.len()
+                || bytes
+                    .get(after)
+                    .is_some_and(|b| (*b as char).is_whitespace());
             if before_ok && after_ok {
                 return Some((&text[..i], text[after..].trim_start()));
             }
@@ -1857,13 +1872,15 @@ fn parse_or(text: &str, source: &str, line: usize, depth: u8) -> Result<Expr, Po
     let parts = split_top_level(text, "or");
     if parts.len() > 1 {
         let mut it = parts.into_iter();
-        let mut acc = parse_and(
-            it.next()
-                .expect("parts holds at least two elements, so the first next() is Some"),
-            source,
+        // Total rather than expect: the length check above makes `None`
+        // impossible, so the error names an internal invariant violation —
+        // a bug, not user input — rather than panicking on it.
+        let first = it.next().ok_or(PolicyError::new(
             line,
-            depth + 1,
-        )?;
+            source,
+            "internal error: split produced no parts after a length check",
+        ))?;
+        let mut acc = parse_and(first, source, line, depth + 1)?;
         for part in it {
             let rhs = parse_and(part, source, line, depth + 1)?;
             acc = Expr::Or(Box::new(acc), Box::new(rhs));
@@ -1884,13 +1901,14 @@ fn parse_and(text: &str, source: &str, line: usize, depth: u8) -> Result<Expr, P
     let parts = split_top_level(text, "and");
     if parts.len() > 1 {
         let mut it = parts.into_iter();
-        let mut acc = parse_unary(
-            it.next()
-                .expect("parts holds at least two elements, so the first next() is Some"),
-            source,
+        // As in `parse_or` above: the length check makes `None` impossible,
+        // so the error names the invariant violation rather than panicking.
+        let first = it.next().ok_or(PolicyError::new(
             line,
-            depth + 1,
-        )?;
+            source,
+            "internal error: split produced no parts after a length check",
+        ))?;
+        let mut acc = parse_unary(first, source, line, depth + 1)?;
         for part in it {
             let rhs = parse_unary(part, source, line, depth + 1)?;
             acc = Expr::And(Box::new(acc), Box::new(rhs));
@@ -2059,17 +2077,16 @@ fn check_operator_type(
             ),
         ));
     }
-    if op == Compare::Matches {
-        if let Literal::Text(p) = value {
-            if p.is_empty() {
-                return Err(PolicyError::new(
-                    line,
-                    source,
-                    "an empty glob matches only the empty string; write the \
+    if op == Compare::Matches
+        && let Literal::Text(p) = value
+        && p.is_empty()
+    {
+        return Err(PolicyError::new(
+            line,
+            source,
+            "an empty glob matches only the empty string; write the \
                      empty string explicitly with `== \"\"` if that is meant",
-                ));
-            }
-        }
+        ));
     }
     Ok(())
 }
@@ -2083,7 +2100,10 @@ fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < text.len() {
-        let ch = bytes[i] as char;
+        // As in `split_keyword`: the loop guard bounds `i`, so the `else`
+        // terminates rather than panics on a lying invariant.
+        let Some(&b) = bytes.get(i) else { break };
+        let ch = b as char;
         match ch {
             '"' => in_string = !in_string,
             '(' if !in_string => depth += 1,
@@ -2091,9 +2111,15 @@ fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
             _ => {}
         }
         if !in_string && depth == 0 && text[i..].starts_with(keyword) {
-            let before_ok = i == 0 || (bytes[i - 1] as char).is_whitespace();
+            let before_ok = i == 0
+                || bytes
+                    .get(i - 1)
+                    .is_some_and(|b| (*b as char).is_whitespace());
             let after = i + keyword.len();
-            let after_ok = after == text.len() || (bytes[after] as char).is_whitespace();
+            let after_ok = after == text.len()
+                || bytes
+                    .get(after)
+                    .is_some_and(|b| (*b as char).is_whitespace());
             if before_ok && after_ok {
                 parts.push(&text[start..i]);
                 start = after;
@@ -2117,7 +2143,10 @@ fn find_top_level(text: &str, op: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i + op.len() <= text.len() {
-        let ch = bytes[i] as char;
+        // As in `split_keyword` above: loop-guarded, so the `else` is
+        // unreachable structure rather than behavior.
+        let Some(&b) = bytes.get(i) else { break };
+        let ch = b as char;
         match ch {
             '"' => in_string = !in_string,
             '(' if !in_string => depth += 1,
@@ -2137,6 +2166,15 @@ fn find_top_level(text: &str, op: &str) -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// Test fixtures index single-rule policies directly (`rules()[0]`) and
+// unwrap parses that must succeed for the test to mean anything: setup
+// idiom, one reason for the module rather than per-site noise.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test setup indexes fixtures built inline above"
+)]
 mod tests {
     use super::*;
     use crate::resolve::GrantSet;

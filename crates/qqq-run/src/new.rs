@@ -828,11 +828,20 @@ fn rust_sources(opts: &NewOptions, crate_name: &str) -> Vec<(String, String)> {
     // copy of it.
     if opts.template == Template::Http {
         files.push(("wit/app.wit".to_owned(), APP_WORLD.to_owned()));
+        // `#[expect]` with a reason: the key is a string literal into the
+        // ABI registry compiled into the same workspace, so absence means a
+        // broken build rather than a runtime condition — and this function
+        // returns a file list, not a `Result`, so there is no error channel
+        // to convert into without restructuring every scaffold caller.
+        #[expect(
+            clippy::expect_used,
+            reason = "literal key into the compiled-in ABI registry"
+        )]
+        let http_wit = qqq_abi::wit_source("qqq:http@1.0.0")
+            .expect("`qqq:http@1.0.0` is in the ABI registry, which is where this comes from");
         files.push((
             "wit/deps/qqq-http/qqq-http.wit".to_owned(),
-            qqq_abi::wit_source("qqq:http@1.0.0")
-                .expect("`qqq:http@1.0.0` is in the ABI registry, which is where this comes from")
-                .to_owned(),
+            http_wit.to_owned(),
         ));
     }
 
@@ -1610,12 +1619,11 @@ pub fn detect(dir: &Path, explicit: Option<Language>) -> Result<Detection> {
         let path = entry.path();
         // Only files, and only ones we would otherwise write. Listing every
         // file would bury the two that matter.
-        if path.is_file() {
-            if let Some(n) = path.file_name().and_then(|s| s.to_str()) {
-                if PRESERVED_INTERESTING.contains(&n) {
-                    preserved.push(n.to_owned());
-                }
-            }
+        if path.is_file()
+            && let Some(n) = path.file_name().and_then(|s| s.to_str())
+            && PRESERVED_INTERESTING.contains(&n)
+        {
+            preserved.push(n.to_owned());
         }
     }
     preserved.sort_unstable();
@@ -1908,6 +1916,13 @@ pub struct InitOptions {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

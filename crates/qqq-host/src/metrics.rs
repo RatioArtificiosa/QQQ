@@ -236,6 +236,20 @@ impl Histogram {
         }
     }
 
+    /// The counter for a bucket index derived from a [`BUCKETS`] lookup.
+    ///
+    /// Carries the single `#[expect]` for the histogram readers: every index
+    /// comes from `position().unwrap_or(len)` or enumeration over `BUCKETS`,
+    /// against an array of length `len + 1` — always in bounds by
+    /// construction, and a new bucket count breaks the type, not the bound.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indices derive from BUCKETS lookup over len+1 array"
+    )]
+    fn bucket(&self, idx: usize) -> &AtomicU64 {
+        &self.counts[idx]
+    }
+
     /// Record one observation, in nanoseconds.
     ///
     /// Saturating: an observation is clamped to `u64::MAX` rather than wrapping.
@@ -246,7 +260,7 @@ impl Histogram {
             .iter()
             .position(|&bound| nanos <= bound)
             .unwrap_or(BUCKETS.len());
-        self.counts[idx].fetch_add(1, Ordering::Relaxed);
+        self.bucket(idx).fetch_add(1, Ordering::Relaxed);
         // `fetch_add` wraps on overflow; a histogram sum that wrapped would
         // understate total time. Practically unreachable (2^64 ns is 584 years)
         // but the guard is one comparison and the failure mode is silent.
@@ -283,10 +297,10 @@ impl Histogram {
         let mut out = Vec::with_capacity(BUCKETS.len() + 1);
         let mut cumulative = 0_u64;
         for (i, &bound) in BUCKETS.iter().enumerate() {
-            cumulative = cumulative.saturating_add(self.counts[i].load(Ordering::Relaxed));
+            cumulative = cumulative.saturating_add(self.bucket(i).load(Ordering::Relaxed));
             out.push((Some(bound), cumulative));
         }
-        cumulative = cumulative.saturating_add(self.counts[BUCKETS.len()].load(Ordering::Relaxed));
+        cumulative = cumulative.saturating_add(self.bucket(BUCKETS.len()).load(Ordering::Relaxed));
         out.push((None, cumulative));
         out
     }
@@ -328,7 +342,7 @@ impl Histogram {
         let mut cumulative = 0_u64;
         let mut lower = 0_u64;
         for (i, &bound) in BUCKETS.iter().enumerate() {
-            let count_in_bucket = self.counts[i].load(Ordering::Relaxed);
+            let count_in_bucket = self.bucket(i).load(Ordering::Relaxed);
             if cumulative + count_in_bucket >= target {
                 if count_in_bucket == 0 {
                     // Degenerate but reachable if a concurrent observer added to
@@ -505,7 +519,7 @@ impl Metrics {
 
     /// Record a trap by its bounded label.
     pub fn note_trap(&self, label: TrapLabel) {
-        self.traps[label.index()].fetch_add(1, Ordering::Relaxed);
+        self.trap(label).fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a trap by error code, when the code is one the taxonomy knows.
@@ -693,7 +707,21 @@ impl Metrics {
     /// The count recorded against one trap label.
     #[must_use]
     pub fn trap_count(&self, label: TrapLabel) -> u64 {
-        self.traps[label.index()].load(Ordering::Relaxed)
+        self.trap(label).load(Ordering::Relaxed)
+    }
+
+    /// The counter for a trap label.
+    ///
+    /// Carries the single `#[expect]` for the label readers: [`TrapLabel::index`]
+    /// matches all nine variants to 0..9, and the array has exactly nine
+    /// entries — a tenth variant breaks the match at compile time, so the
+    /// contract cannot rot.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "index() is exhaustive 0..9 over len-9"
+    )]
+    fn trap(&self, label: TrapLabel) -> &AtomicU64 {
+        &self.traps[label.index()]
     }
 
     /// Every trap count, as `(label, count)` in a fixed order.
@@ -875,6 +903,13 @@ impl Metrics {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

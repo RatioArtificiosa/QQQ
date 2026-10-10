@@ -197,21 +197,20 @@ impl IgnoreRules {
         }
 
         // -- exact file names
-        if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-            if self.files.iter().any(|f| file_name == f) {
-                return true;
-            }
+        if let Some(file_name) = path.file_name().and_then(|s| s.to_str())
+            && self.files.iter().any(|f| file_name == f)
+        {
+            return true;
         }
 
         // -- extensions
-        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-            if self
+        if let Some(ext) = path.extension().and_then(|s| s.to_str())
+            && self
                 .extensions
                 .iter()
                 .any(|e| ext.eq_ignore_ascii_case(e.as_str()))
-            {
-                return true;
-            }
+        {
+            return true;
         }
 
         false
@@ -497,6 +496,13 @@ impl Debouncer {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

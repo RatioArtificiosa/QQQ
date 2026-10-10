@@ -38,6 +38,10 @@ pub const KEY_ID_LEN: usize = 8;
 /// The on-disk length of a `.sig` file: a signature followed by its key id.
 pub const SIGNED_LEN: usize = SIGNATURE_LEN + KEY_ID_LEN;
 
+// `KeyId::of` zips the id array with a 32-byte digest: a longer id would
+// truncate silently, so the bound is a compile error rather than a comment.
+const _: () = assert!(KEY_ID_LEN <= 32);
+
 /// An identifier for a public key: eight bytes of SHA-256 over its encoded form.
 ///
 /// # Why a hash and not the key
@@ -54,7 +58,12 @@ impl KeyId {
     pub fn of(public_key: &[u8; 32]) -> Self {
         let digest = Sha256::digest(public_key);
         let mut id = [0u8; KEY_ID_LEN];
-        id.copy_from_slice(&digest[..KEY_ID_LEN]);
+        // Zipped rather than sliced: both lengths are consts, and the
+        // assertion below makes a future const change a compile error
+        // instead of a silent truncation.
+        for (slot, b) in id.iter_mut().zip(digest.iter()) {
+            *slot = *b;
+        }
         Self(id)
     }
 
@@ -276,9 +285,13 @@ impl DetachedSignature {
             ));
         }
         let mut signature = [0u8; SIGNATURE_LEN];
-        signature.copy_from_slice(&bytes[..SIGNATURE_LEN]);
+        // Split, not sliced: the length check above makes `SIGNATURE_LEN` a
+        // valid split point, and `split_at` carries no subscript for the
+        // lint to flag — nor a second length test to drift from the first.
+        let (sig_bytes, id_bytes) = bytes.split_at(SIGNATURE_LEN);
+        signature.copy_from_slice(sig_bytes);
         let mut id = [0u8; KEY_ID_LEN];
-        id.copy_from_slice(&bytes[SIGNATURE_LEN..]);
+        id.copy_from_slice(id_bytes);
         Ok(Self {
             signature,
             key_id: KeyId(id),

@@ -318,9 +318,12 @@ impl ChainKey {
             return Err("an audit chain key is 64 hexadecimal characters (32 bytes)".to_owned());
         }
         let mut bytes = [0u8; 32];
-        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        // Zipped rather than indexed: 64 hex chars chunked by 2 is exactly
+        // 32 chunks, so the loop cannot overrun the array — no bound to
+        // restate, no `expect` to justify.
+        for (slot, chunk) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
             let text = std::str::from_utf8(chunk).map_err(|_| "non-UTF-8 key".to_owned())?;
-            bytes[i] = u8::from_str_radix(text, 16).map_err(|_| "non-hex key".to_owned())?;
+            *slot = u8::from_str_radix(text, 16).map_err(|_| "non-hex key".to_owned())?;
         }
         Ok(Self(bytes))
     }
@@ -718,10 +721,17 @@ fn field_bytes(out: &mut Vec<u8>, value: &str) {
 /// infallible path is exactly what `F-21` removed everywhere else.
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     let mut block = [0u8; 64];
+    // Zipped and taken rather than sliced: the digest half always fills 32
+    // slots and the key half stops at the shorter of key and block, so no
+    // runtime bound appears in a subscript.
     if key.len() > block.len() {
-        block[..32].copy_from_slice(&Sha256::digest(key));
+        for (slot, b) in block.iter_mut().take(32).zip(Sha256::digest(key)) {
+            *slot = b;
+        }
     } else {
-        block[..key.len()].copy_from_slice(key);
+        for (slot, b) in block.iter_mut().zip(key.iter()) {
+            *slot = *b;
+        }
     }
     let mut inner = Sha256::new();
     inner.update(xor_block(&block, 0x36));
@@ -739,8 +749,9 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// is wrong.
 fn xor_block(block: &[u8; 64], pad: u8) -> [u8; 64] {
     let mut padded = [pad; 64];
-    for (i, byte) in block.iter().enumerate() {
-        padded[i] ^= byte;
+    // Both arrays are 64 by type: the zip cannot truncate, so no subscript.
+    for (slot, byte) in padded.iter_mut().zip(block.iter()) {
+        *slot ^= byte;
     }
     padded
 }
@@ -750,8 +761,15 @@ fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        out.push(char::from(HEX[usize::from(b >> 4)]));
-        out.push(char::from(HEX[usize::from(b & 0x0f)]));
+        // `#[expect]` with a reason: the shift and mask yield 0..16 by
+        // construction, and a 16-entry table indexed by a nibble has no
+        // total form that is not the same subscript with more punctuation.
+        #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
+        let hi = HEX[usize::from(b >> 4)];
+        #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
+        let lo = HEX[usize::from(b & 0x0f)];
+        out.push(char::from(hi));
+        out.push(char::from(lo));
     }
     out
 }
@@ -1234,6 +1252,15 @@ impl AuditStream {
     /// own constructor rather than here.
     #[must_use]
     pub fn with_default_capacity() -> Self {
+        // `#[expect]` with a reason, not a conversion: `new` only fails on
+        // a zero capacity and the constant is visibly non-zero, so no error
+        // type exists for this call. If the constant ever becomes zero this
+        // still panics loudly rather than misbehaving. The lint stays live
+        // for every other site.
+        #[expect(
+            clippy::expect_used,
+            reason = "non-zero const; new() only fails on zero"
+        )]
         Self::new(DEFAULT_CAPACITY).expect("DEFAULT_CAPACITY is non-zero")
     }
 
@@ -1633,16 +1660,16 @@ impl Ledger {
     pub fn count(&mut self, tenant: Option<&TenantId>, capability: Capability, outcome: Outcome) {
         let slot = outcome_slot(outcome);
         let entry = self.total.entry(capability).or_insert([0; 4]);
-        entry[slot] += 1;
+        bump(entry, slot);
         if let Some(t) = tenant {
             let entry = self
                 .per_tenant
                 .entry((t.clone(), capability))
                 .or_insert([0; 4]);
-            entry[slot] += 1;
+            bump(entry, slot);
         } else {
             let entry = self.unscoped.entry(capability).or_insert([0; 4]);
-            entry[slot] += 1;
+            bump(entry, slot);
         }
     }
 
@@ -1705,7 +1732,9 @@ impl Ledger {
     pub fn total_refusals(&self) -> u64 {
         self.total
             .values()
-            .map(|c| c[outcome_slot(Outcome::Denied)] + c[outcome_slot(Outcome::Attempted)])
+            .map(|c| {
+                slot(c, outcome_slot(Outcome::Denied)) + slot(c, outcome_slot(Outcome::Attempted))
+            })
             .sum()
     }
 
@@ -1782,11 +1811,43 @@ const fn outcome_slot(outcome: Outcome) -> usize {
     }
 }
 
+/// Add one to an outcome slot.
+///
+/// Carries the single `#[expect]` for the three counters in
+/// [`Ledger::count`]: the slot comes from [`outcome_slot`], whose exhaustive
+/// match over the four-variant enum yields 0..4 for len-4 arrays — the reason
+/// names that contract rather than re-testing it at every counter. A fifth
+/// variant breaks the match at compile time, so the contract cannot rot.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "outcome_slot is exhaustive 0..4 over len-4"
+)]
+fn bump(entry: &mut [u64; 4], slot: usize) {
+    entry[slot] += 1;
+}
+
+/// Read an outcome slot: the read half of the same contract.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "outcome_slot is exhaustive 0..4 over len-4"
+)]
+fn slot(entry: &[u64; 4], slot: usize) -> u64 {
+    entry[slot]
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// Test setup indexes small fixed vectors directly (`records()[0]`,
+// `lines[1]`); converting each to `.get()` would trade readability for
+// nothing — the vectors are built two lines above each assertion. One
+// module-level reason, not per-site noise.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test setup indexes vectors built inline above"
+)]
 mod tests {
     use super::*;
 

@@ -176,7 +176,7 @@ pub fn decide(
                     decision: Decision::Keep {
                         reason: format!("the requirement `{r}` cannot be parsed: {e}"),
                     },
-                }
+                };
             }
         },
         None => None,
@@ -586,6 +586,13 @@ pub fn moved_count(candidates: &[UpdateCandidate]) -> usize {
         .count()
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,11 +623,13 @@ mod tests {
     #[test]
     fn a_dry_run_never_writes() {
         assert!(UpdateOptions::default().may_write());
-        assert!(!UpdateOptions {
-            dry_run: true,
-            ..Default::default()
-        }
-        .may_write());
+        assert!(
+            !UpdateOptions {
+                dry_run: true,
+                ..Default::default()
+            }
+            .may_write()
+        );
     }
 
     // -- decide -------------------------------------------------------------

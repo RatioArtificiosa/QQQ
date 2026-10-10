@@ -70,7 +70,7 @@
 //! `true`. The metric half is `TrapLabel::Other`-adjacent: see
 //! [`crate::metrics::Metrics::note_host_panic`].
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// A contained panic, as reported to the host's log.
 ///

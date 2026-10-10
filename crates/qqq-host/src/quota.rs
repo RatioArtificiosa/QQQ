@@ -570,10 +570,11 @@ mod tests {
         };
         let e = v.into_result("bucket").expect_err("a reject must fail");
         assert_eq!(e.code, ErrorCode::McpArgumentInvalid);
-        assert!(e
-            .context
-            .iter()
-            .any(|(k, v)| k == "argument" && v == "bucket"));
+        assert!(
+            e.context
+                .iter()
+                .any(|(k, v)| k == "argument" && v == "bucket")
+        );
         assert!(e.remediation.is_some());
     }
 

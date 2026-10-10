@@ -561,10 +561,10 @@ mod tests {
             if trimmed.starts_with("//") {
                 continue;
             }
-            if let Some(at) = line.find("func_wrap(") {
-                if let Some(n) = first_kebab_literal(&line[at + "func_wrap(".len()..]) {
-                    names.push(n);
-                }
+            if let Some(at) = line.find("func_wrap(")
+                && let Some(n) = first_kebab_literal(&line[at + "func_wrap(".len()..])
+            {
+                names.push(n);
             }
         }
         assert_eq!(

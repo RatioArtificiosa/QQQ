@@ -849,7 +849,7 @@ pub fn landlock_available() -> bool {
     // `landlock` exposes the probe through its own compatibility type. Using it
     // rather than hand-rolling a `landlock_create_ruleset` call keeps this safe and
     // keeps the ABI knowledge in the crate that owns it.
-    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
+    use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr};
     // `handle_access` on a default ruleset queries the kernel ABI. If the kernel
     // has no Landlock, the crate reports an error rather than an ABI, and this
     // returns false. No ruleset is created and `restrict_self` is never called, so
@@ -914,8 +914,8 @@ pub fn harden(policy: &HardenPolicy) -> HardenReport {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        HardenPolicy, SeccompProfile, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK,
-        STEP_NO_NEW_PRIVS, STEP_SECCOMP,
+        HardenPolicy, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS, STEP_SECCOMP,
+        SeccompProfile, StepOutcome,
     };
     use nix::unistd::{Gid, Uid};
 
@@ -1029,8 +1029,8 @@ mod imp {
         // accepted silently -- the two most security-relevant choices in this
         // function, so they should be visible at the call site.
         use landlock::{
-            Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
-            RulesetCreatedAttr, RulesetStatus, ABI,
+            ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+            RulesetAttr, RulesetCreatedAttr, RulesetStatus,
         };
 
         if !policy.landlock {
@@ -1557,8 +1557,8 @@ mod imp {
 #[cfg(not(target_os = "linux"))]
 mod imp {
     use super::{
-        HardenPolicy, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS,
-        STEP_SECCOMP,
+        HardenPolicy, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS, STEP_SECCOMP,
+        StepOutcome,
     };
 
     /// `no_new_privs` is a Linux `prctl`, so there is nothing to do elsewhere.

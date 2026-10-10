@@ -47,6 +47,13 @@ impl CommandOutput for BenchOutput {
 }
 
 #[cfg(test)]
+// Test indexing (F-18): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 mod tests {
     use super::*;
     use crate::bench::{BenchOptions, BenchResult, BenchResultOutput, BudgetVerdict};
@@ -54,9 +61,9 @@ mod tests {
     // where it is only re-exported. Asserting the value at its source is the
     // stronger check: a re-export that drifted would not be noticed by a test
     // that read the drift.
+    use qqq_bench::HARNESS_SOURCE;
     use qqq_bench::methodology::BenchmarkName;
     use qqq_bench::workload::Workload;
-    use qqq_bench::HARNESS_SOURCE;
 
     fn verdict(met: bool) -> BudgetVerdict {
         BudgetVerdict {

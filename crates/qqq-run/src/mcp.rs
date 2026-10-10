@@ -69,7 +69,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The JSON-RPC version this server speaks. There is one, and it is not negotiable.
 const JSONRPC: &str = "2.0";
@@ -145,7 +145,9 @@ fn describe(name: &str) -> &'static str {
         }
         "qqq_caps_explain" => "Explain what one capability grants and what it refuses.",
         "qqq_caps_list" => "List every capability the project declares, with its grants.",
-        "qqq_build" => "Build the project's guest component for `wasm32-wasip2`. Takes `dry_run` to describe what would run without running it.",
+        "qqq_build" => {
+            "Build the project's guest component for `wasm32-wasip2`. Takes `dry_run` to describe what would run without running it."
+        }
         "qqq_run" => "Run the guest component against a request, without serving.",
         "qqq_test" => "Run the project's conformance tests.",
         "qqq_audit" => "Read the capability audit and report the worst severity found.",
@@ -629,7 +631,7 @@ fn inspect(arguments: &Value) -> Value {
                 "found": false,
                 "path": path.display().to_string(),
                 "error": { "code": e.id(), "message": e.to_string() },
-            }))
+            }));
         }
     };
 
@@ -688,7 +690,7 @@ fn audit(arguments: &Value) -> Value {
                 "found": false,
                 "path": path.display().to_string(),
                 "error": { "code": e.id(), "message": e.to_string() },
-            }))
+            }));
         }
     };
 
@@ -714,7 +716,7 @@ fn audit(arguments: &Value) -> Value {
                 return failed(&json!({
                     "project": report.project,
                     "error": { "code": "QQQ-1003", "message": e },
-                }))
+                }));
             }
         },
         None => None,
@@ -1230,6 +1232,13 @@ mod argument_tests {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

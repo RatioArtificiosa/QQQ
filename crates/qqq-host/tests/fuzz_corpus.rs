@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! The host-side regression corpus — `SEC-012`'s always-on half for the loader
 //! and the boundary checks.
 //!
@@ -29,11 +37,11 @@
 //! complements: this is the fast net that catches a regression on the commit that
 //! caused it, and `libfuzzer` is the wide one that finds new shapes overnight.
 
-use qqq_host::boundary::{
-    self, consistent_length, discriminant, list_size, one_of, path_component, path_shape,
-    range_within, render_for_diagnostic, size, text, Verdict,
-};
 use qqq_host::PreparedComponent;
+use qqq_host::boundary::{
+    self, Verdict, consistent_length, discriminant, list_size, one_of, path_component, path_shape,
+    range_within, render_for_diagnostic, size, text,
+};
 
 /// The engine the host uses, built once.
 ///

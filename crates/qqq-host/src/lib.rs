@@ -129,57 +129,56 @@ pub mod sink_lane;
 pub mod tenant;
 pub mod trap;
 
-pub use admission::{admit, Admitted, HostCapacity, Refusal};
-pub use ambient::{hash_data, require, AmbientState, HashAlgorithm, HostCallError, RandomFailure};
+pub use admission::{Admitted, HostCapacity, Refusal, admit};
+pub use ambient::{AmbientState, HashAlgorithm, HostCallError, RandomFailure, hash_data, require};
 pub use audit::{
-    genesis_digest, Append, AppendCounters, AuditRecord, AuditStream, Ledger, LedgerError, Outcome,
-    DEFAULT_CAPACITY,
+    Append, AppendCounters, AuditRecord, AuditStream, DEFAULT_CAPACITY, Ledger, LedgerError,
+    Outcome, genesis_digest,
 };
 pub use boundary::{
-    all, boundaries_checking, consistent_length, discriminant, interfaces, list_size, one_of,
-    path_component, path_shape, range_within, render_for_diagnostic, size, text, Boundary,
-    CheckClass, Rejection, BOUNDARIES, MAX_ECHO_BYTES, MAX_IDENTIFIER_BYTES, MAX_LIST_BYTES,
-    MAX_LIST_ELEMENTS, MAX_PATH_BYTES,
+    BOUNDARIES, Boundary, CheckClass, MAX_ECHO_BYTES, MAX_IDENTIFIER_BYTES, MAX_LIST_BYTES,
+    MAX_LIST_ELEMENTS, MAX_PATH_BYTES, Rejection, all, boundaries_checking, consistent_length,
+    discriminant, interfaces, list_size, one_of, path_component, path_shape, range_within,
+    render_for_diagnostic, size, text,
 };
 pub use config::{
-    aot_cache_key, build_engine, build_pooling, target_triple, EngineConfig,
-    StoreLimits as LimitSet,
+    EngineConfig, StoreLimits as LimitSet, aot_cache_key, build_engine, build_pooling,
+    target_triple,
 };
 #[cfg(feature = "release-panic-probe")]
 #[doc(hidden)]
 pub use guard::probe_panic_guard;
-pub use guard::{guard, guard_reporting, PanicReport};
+pub use guard::{PanicReport, guard, guard_reporting};
 pub use guest_output::{
-    Escaper, GuestOutput, GuestSink, SanitisingWriter, MAX_ESCAPED_RUN, STDERR_PREFIX,
-    STDOUT_PREFIX,
+    Escaper, GuestOutput, GuestSink, MAX_ESCAPED_RUN, STDERR_PREFIX, STDOUT_PREFIX,
+    SanitisingWriter,
 };
 pub use handles::{Handle, HandleStats, HandleTable};
 pub use host_http::{
-    describe_ungranted as describe_http_ungranted, register as register_http,
-    INTERFACE as HTTP_INTERFACE,
+    INTERFACE as HTTP_INTERFACE, describe_ungranted as describe_http_ungranted,
+    register as register_http,
 };
 pub use host_secrets::{
-    PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore, MAX_SECRET_INPUT,
+    MAX_SECRET_INPUT, PermittedOp, RequestedOp, SecretCrypto, SecretMaterial, SecretStore,
 };
 pub use host_wasi::{
-    context as wasi_context, context_with_tenant_output,
-    describe_missing_env as describe_missing_wasi_env, register as register_wasi, DeniedClock,
-    Registered as WasiRegistered,
+    DeniedClock, Registered as WasiRegistered, context as wasi_context, context_with_tenant_output,
+    describe_missing_env as describe_missing_wasi_env, register as register_wasi,
 };
 pub use instance::{
-    digest_of, epoch_tick_interval, ticks_for_deadline, uses_virtual_clock, DeterministicClock,
-    ExecutionMode, ExecutionOutcome, Instance, InstanceOptions, PreparedComponent,
+    DeterministicClock, ExecutionMode, ExecutionOutcome, Instance, InstanceOptions,
+    PreparedComponent, digest_of, epoch_tick_interval, ticks_for_deadline, uses_virtual_clock,
 };
 pub use linker::{
-    build_linker, describe_gap, interface_for, recheck, required_interfaces, BoundInterfaces,
-    BuiltLinker, StoreData, TrappingLimiter,
+    BoundInterfaces, BuiltLinker, StoreData, TrappingLimiter, build_linker, describe_gap,
+    interface_for, recheck, required_interfaces,
 };
 pub use metrics::{Histogram, Metrics, TrapLabel};
-pub use pool::{exhausted_error, Acquired, Exhausted, Pool, ReleaseOutcome};
-pub use preload::{cache_key_for, preload, PreloadItem, PreloadOutcome, PreloadReport};
+pub use pool::{Acquired, Exhausted, Pool, ReleaseOutcome, exhausted_error};
+pub use preload::{PreloadItem, PreloadOutcome, PreloadReport, cache_key_for, preload};
 pub use quota::{Charge, HandleQuota, SubrequestBudget, Verdict, WARN_THRESHOLD_PERCENT};
 pub use tenant::{
     ComponentDigest, GrantDigest, InstanceKey, LedgerReport, ScopeRefusal, TenantLedger,
     TenantScope,
 };
-pub use trap::{classify_trap, format_bytes, human_message, remediation_for, Trap, WasmFrame};
+pub use trap::{Trap, WasmFrame, classify_trap, format_bytes, human_message, remediation_for};

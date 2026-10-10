@@ -35,8 +35,8 @@
 //! `Err(None)` — which also type-checks — would lose the guest's actual reason, so
 //! [`decode_response`] treats that shape as malformed rather than guessing.
 
-use wasmtime::component::Val;
 use wasmtime::Store;
+use wasmtime::component::Val;
 
 use qqq_core::{Error, ErrorCode, Result};
 
@@ -413,6 +413,13 @@ fn signature_mismatch(handle: &HandlerHandle, e: &wasmtime::Error) -> Error {
     )
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

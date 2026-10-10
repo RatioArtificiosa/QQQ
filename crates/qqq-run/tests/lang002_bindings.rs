@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! `LANG-002` — Rust bindings generated from `wit/` via `wit-bindgen`.
 //!
 //! # What this test is for, and what it found the first time it was written

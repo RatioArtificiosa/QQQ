@@ -36784,4 +36784,81 @@ rule: a comment claiming a refusal needs the table row that proves it —
 prose about a check the suite never drives is the fixture-that-cannot-fail
 in documentation form. → `crates/qqq-serve/src/http1.rs`, `crates/qqq-serve/src/conn.rs`, `crates/qqq-serve/src/server.rs`, `crates/qqq-host/src/admission.rs`, `crates/qqq-host/Cargo.toml`, `Cargo.toml`, `CHANGELOG.md`.
 
+## §O-604 - F-18 deny: Cargo refuses lint overrides beside workspace inheritance, so the deny tables are explicit
+
+The first attempt kept `[lints] workspace = true` in `qqq-serve` and added
+`[lints.clippy] unwrap_used = "deny"` beside it. Cargo rejects the manifest
+outright: "cannot override `workspace.lints` in `lints`". The remedy is full
+explicit tables in the three security-critical crates, copied from
+`[workspace.lints]` with the Wave-0 set raised to deny and a comment naming
+the sync obligation. The louder lesson is the shape from §11: a control
+believed live that is not. Had Cargo silently *ignored* the override instead
+of refusing it, the deny would have existed on paper while warn ruled the
+build. So the deny is proven live by fault injection: an `unwrap()` in
+shipping code fails `clippy` with `unwrap_used` denied (exit 101), then is
+reverted. The injection must land in shipping code - the first attempt put
+it in a `#[cfg(test)]` module where `allow-unwrap-in-tests` exempts it and
+the build stayed green, which is exactly the false-proof this guards
+against. Generalisable rule: a deny-level control needs a red proof on the
+real path, and the proof must fail for the reason you claim. → `Cargo.toml`, `crates/qqq-serve/Cargo.toml`, `crates/qqq-host/Cargo.toml`, `crates/qqq-cap/Cargo.toml`.
+
+## §O-605 - F-18 edition: `set_var` is unsafe in edition 2024, and the Wasmtime env-gate claim was stale
+
+Migrating `qqq-bench` to edition 2024 broke `abi_cost.rs` with E0133:
+`std::env::set_var` is an unsafe function in edition 2024, and
+`unsafe_code = "forbid"` bars the `unsafe` block that would contain it. The
+call existed on the claim that Wasmtime 48 gates
+`component-model-async-stackful` behind `WASMTIME_COMPONENT_MODEL_ASYNC_STACKFUL`
+as well as the `Config` knob. Rather than working around the unsafety, the
+migration tested the claim: the call was removed and the gate test
+(`the_async_probe_is_gated_on_the_stackful_feature`) was run, and it passed
+- `ASYNC_WAT` compiles with the knob alone, so the variable gate is gone
+upstream and the comment described a different program. The stale prose is
+replaced with the measured note. Generalisable rule: an edition migration is
+a semantic migration, not a flag flip - new keywords and new unsafety need
+per-crate full-suite proof, which is what caught this instead of a workaround
+hiding it. → `crates/qqq-bench/tests/abi_cost.rs`, `crates/qqq-bench/Cargo.toml`.
+
+## §O-606 - F-18 arithmetic: `Option::unwrap_or` is not const-stable, so const admission code matches instead
+
+Converting the `max_memory_per_instance` division to
+`checked_div(n).unwrap_or(0)` failed with E0658: the function is `const fn`
+and `unwrap_or` is not stable as const. The fix is a `match` with a
+fail-closed zero arm, which is const-compatible. The fallback direction
+matters: zero means "no memory fits" and refuses admission, while a
+saturating maximum would admit everything - an unreachable arm in
+admission code must fail closed. Generalisable rule: total-arithmetic
+conversions must respect the evaluation context (`const fn`, `Drop`,
+no-panic paths), and every unreachable fallback needs a stated direction. → `crates/qqq-host/src/admission.rs`.
+
+## §O-607 - A Python round-trip silently rewrote eleven manifests from LF to CRLF
+
+The edition-consolidation script read each crate manifest with
+`pathlib.read_text` and wrote it back with `write_text`. On Windows the
+write defaults to `os.linesep`, so every newline became CRLF in an
+LF-everywhere repository - eleven files changed bytes with zero content
+change. It was caught by reading `git status` for lines not intended
+(eight phantom `M` entries with empty diffs) and fixed with the project's
+own `tools/normalize_eol.py`, after which `--check` is green. Generalisable
+rule: never round-trip repository files through Python text mode on Windows
+without `newline=""`; prefer the project's normalize tool; and the
+handbook's inspect-don't-trust status read is what catches silent-byte
+changes before they ride a commit. → `tools/normalize_eol.py`, `crates/*/Cargo.toml`.
+## §O-608 - CodeRabbit: raw arithmetic lived in test and doctest code the file-level warn never reaches; only the doctest silence is explained
+
+The pre-commit review flagged `found += 1` in a `guest_output` test loop
+and four `used + idle` sites in `pool.rs` (two compiled doctests, two
+`assert!` invariants) sitting under a file-level
+`#![warn(clippy::arithmetic_side_effects)]` while the gate was green.
+Reproduced as gate-green-with-patterns-present: the warn fires on
+shipping code in the same files but not on these sites. Doctests are
+explained - they compile as separate crates without the attribute. The
+unit-test silence is not yet explained, and the fix does not depend on
+the explanation: all five sites now use `saturating_add`, identical on
+every reachable path for these bounded counters, so the total-arithmetic
+discipline holds whether or not the lint ever looks at test code.
+Generalisable rule: a file-level lint is a control believed live - prove
+what it does not cover by grepping for the pattern, not by the gate's
+silence; and a review finding about uncovered code is fixed by converting,
+not by extending the allow. → `crates/qqq-host/src/guest_output.rs`, `crates/qqq-host/src/pool.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

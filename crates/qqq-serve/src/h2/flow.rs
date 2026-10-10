@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! Flow control (RFC 9113 §5.2, §6.9).
 //!
@@ -447,7 +448,17 @@ impl Window {
     /// allows is the violation §5.2.2 defines, and the check is here rather than
     /// at the call site so that it cannot be skipped.
     pub fn try_consume(&mut self, stream: Option<u32>, n: u32) -> Result<(), FlowError> {
-        let after = self.size - i64::from(n);
+        // Checked rather than plain: the values here stay within ±2^32
+        // against an i64, so the `else` is unreachable structure — and it
+        // reports the same `WindowExceeded` the range check below produces.
+        let after = self
+            .size
+            .checked_sub(i64::from(n))
+            .ok_or(FlowError::WindowExceeded {
+                stream,
+                window: self.size,
+                requested: n,
+            })?;
         if after < 0 {
             return Err(FlowError::WindowExceeded {
                 stream,
@@ -468,7 +479,16 @@ impl Window {
     /// and a window that large could never be extended again because no
     /// `WINDOW_UPDATE` increment is representable.
     pub fn try_increase(&mut self, stream: Option<u32>, increment: u32) -> Result<(), FlowError> {
-        let after = self.size + i64::from(increment);
+        // As above: operands within ±2^32 against an i64, so the `else`
+        // carries the same `WindowOverflow` the ceiling check produces.
+        let after =
+            self.size
+                .checked_add(i64::from(increment))
+                .ok_or(FlowError::WindowOverflow {
+                    stream,
+                    window: self.size,
+                    increment,
+                })?;
         if after > i64::from(MAX_WINDOW) {
             return Err(FlowError::WindowOverflow {
                 stream,
@@ -511,8 +531,25 @@ impl Window {
         stream: u32,
         new_initial: u32,
     ) -> Result<(), FlowError> {
-        let delta = i64::from(new_initial) - i64::from(self.initial);
-        let after = self.size + delta;
+        // Checked throughout: both operands stay within ±2^31, so neither
+        // operation can overflow an i64 — the `else` arms are unreachable
+        // structure carrying the same `SettingsWindowOverflow` the ceiling
+        // check produces (with a zero delta, since no delta was computed).
+        let delta = i64::from(new_initial)
+            .checked_sub(i64::from(self.initial))
+            .ok_or(FlowError::SettingsWindowOverflow {
+                stream,
+                window: self.size,
+                delta: 0,
+            })?;
+        let after = self
+            .size
+            .checked_add(delta)
+            .ok_or(FlowError::SettingsWindowOverflow {
+                stream,
+                window: self.size,
+                delta,
+            })?;
         if after > i64::from(MAX_WINDOW) {
             return Err(FlowError::SettingsWindowOverflow {
                 stream,
@@ -643,6 +680,14 @@ impl Direction {
             .iter()
             .position(|(id, _)| *id == stream_id)
             .unwrap_or(self.streams.len().saturating_sub(1));
+        // `#[expect]` with a reason: presence is guaranteed by the push (or
+        // the pre-existing entry the position found), so the subscript cannot
+        // fail — and `get_mut` would need an error channel this `&mut`
+        // return has no room for.
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "push-or-find above guarantees presence"
+        )]
         &mut self.streams[index].1
     }
 
@@ -678,10 +723,10 @@ impl Direction {
     pub fn apply_initial_window_size(&mut self, new_initial: u32) -> Result<(), FlowError> {
         let mut first_error = None;
         for (id, window) in &mut self.streams {
-            if let Err(e) = window.apply_initial_window_size(*id, new_initial) {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
+            if let Err(e) = window.apply_initial_window_size(*id, new_initial)
+                && first_error.is_none()
+            {
+                first_error = Some(e);
             }
         }
         self.initial_stream_window = new_initial;

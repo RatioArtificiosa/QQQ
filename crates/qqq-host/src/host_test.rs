@@ -54,8 +54,8 @@
 //! links.
 
 use std::collections::BTreeMap;
-use wasmtime::component::Linker;
 use wasmtime::StoreContextMut;
+use wasmtime::component::Linker;
 
 use qqq_cap::capability::Capability;
 

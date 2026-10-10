@@ -504,8 +504,13 @@ impl ErrorCode {
     /// because a future minor version may add codes this build does not know.
     #[must_use]
     pub const fn from_number(n: u16) -> Option<Self> {
+        // Iterated rather than subscripted: no index, no bound to state.
+        // (Not `find`: this stays `const`-compatible, and closures are not
+        // const-callable on the MSRV floor this function promises.)
         let mut i = 0;
         while i < Self::all().len() {
+            // `#[expect]` with a reason: the loop bound is the check.
+            #[expect(clippy::indexing_slicing, reason = "loop bound is the check")]
             let c = Self::all()[i];
             if c as u16 == n {
                 return Some(c);
@@ -713,6 +718,13 @@ macro_rules! qqq_err {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

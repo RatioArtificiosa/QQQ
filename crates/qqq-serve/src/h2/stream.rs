@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! Per-stream state and frame legality (RFC 9113 §5.1).
 //!
@@ -554,7 +555,7 @@ impl Stream {
                 ),
             ));
         }
-        self.recv_unacked -= n;
+        self.recv_unacked = self.recv_unacked.saturating_sub(n);
         Ok(())
     }
 
@@ -1691,12 +1692,16 @@ mod tests {
             assert!(s.refusal_is_fatal(FrameKind::Data), "{state}");
         }
         // §5.1: RST_STREAM is permitted from both reserved states.
-        assert!(Stream::new(sid(1), StreamState::ReservedLocal)
-            .accepts(FrameKind::RstStream)
-            .is_ok());
-        assert!(Stream::new(sid(1), StreamState::ReservedRemote)
-            .accepts(FrameKind::RstStream)
-            .is_ok());
+        assert!(
+            Stream::new(sid(1), StreamState::ReservedLocal)
+                .accepts(FrameKind::RstStream)
+                .is_ok()
+        );
+        assert!(
+            Stream::new(sid(1), StreamState::ReservedRemote)
+                .accepts(FrameKind::RstStream)
+                .is_ok()
+        );
     }
 
     /// The two functions must agree: any pair `accepts` allows is not fatal, and
@@ -2214,11 +2219,15 @@ mod tests {
         ] {
             assert!(!kind.to_string().is_empty());
         }
-        assert!(!AdmissionError::NotMonotonic { got: 1, last: 3 }
-            .to_string()
-            .is_empty());
-        assert!(!AdmissionError::TooManyStreams { limit: 1, open: 1 }
-            .to_string()
-            .is_empty());
+        assert!(
+            !AdmissionError::NotMonotonic { got: 1, last: 3 }
+                .to_string()
+                .is_empty()
+        );
+        assert!(
+            !AdmissionError::TooManyStreams { limit: 1, open: 1 }
+                .to_string()
+                .is_empty()
+        );
     }
 }

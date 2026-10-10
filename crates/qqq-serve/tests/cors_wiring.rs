@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! CORS headers over a real socket (`SRV-019`).
 //!
 //! # Why these drive `serve`
@@ -28,7 +37,7 @@ use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::cors::Cors;
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{serve, Dispatch, Handler, ServerConfig};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
 use qqq_serve::{RequestHead, Response, RouteMatch};
 
 /// A port nobody is using, for the reason `tests/socket.rs` documents.

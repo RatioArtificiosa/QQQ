@@ -64,7 +64,7 @@ pub fn to_guest(method: ServeMethod) -> Result<abi::Method> {
             .with_remediation(
                 "declare the method in the manifest's route table using one of the \
                  nine methods `qqq:http` defines, or handle it in the host",
-            ))
+            ));
         }
     })
 }
@@ -161,6 +161,13 @@ pub fn from_guest(method: abi::Method) -> ServeMethod {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

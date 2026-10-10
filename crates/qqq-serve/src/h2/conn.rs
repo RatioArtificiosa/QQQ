@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! The HTTP/2 connection layer: preface, frame dispatch, multiplexing and
 //! `CONTINUATION`-reassembly.
@@ -66,8 +67,8 @@ use super::flow::FlowControl;
 #[cfg(test)]
 use super::frame::SettingId;
 use super::frame::{
-    parse_frame, to_bytes, Flags, Frame, FrameHeader, FrameType, CLIENT_PREFACE, FRAME_HEADER_LEN,
-    MAX_FRAME_PAYLOAD,
+    CLIENT_PREFACE, FRAME_HEADER_LEN, Flags, Frame, FrameHeader, FrameType, MAX_FRAME_PAYLOAD,
+    parse_frame, to_bytes,
 };
 use super::hpack::{Decoder, Encoder, HeaderField};
 use super::settings::Settings;
@@ -358,12 +359,12 @@ impl Connection {
                 .push_back(to_bytes(&self.settings.to_frame(true)));
         }
 
-        loop {
-            // §4.2: a frame header is 9 bytes, and the payload length comes from it.
-            if self.inbound.len() < FRAME_HEADER_LEN {
-                break;
-            }
-            let header = FrameHeader::parse(&self.inbound[..FRAME_HEADER_LEN])
+        // `while let`: a short buffer ends the loop instead of panicking
+        // it — same outcome as the length check, without the subscript.
+        // (§4.2: a frame header is 9 bytes, and the payload length comes
+        // from it.)
+        while let Some(head) = self.inbound.get(..FRAME_HEADER_LEN) {
+            let header = FrameHeader::parse(head)
                 .map_err(|e| ConnectionError::protocol(ErrorCode::ProtocolError, e.to_string()))?;
             let total = header.total_len();
 
@@ -496,10 +497,10 @@ impl Connection {
         // makes it legal on a stream that was never opened.
         if let Frame::RstStream { error, .. } = &frame {
             let code = *error;
-            if let Ok(id) = StreamId::client_from_frame(raw_id) {
-                if let Some(stream) = self.streams.get_mut(id) {
-                    stream.close();
-                }
+            if let Ok(id) = StreamId::client_from_frame(raw_id)
+                && let Some(stream) = self.streams.get_mut(id)
+            {
+                stream.close();
             }
             self.flow.close_stream(raw_id);
             self.remember_closed(raw_id);
@@ -540,11 +541,11 @@ impl Connection {
         let end_stream = frame_flags(&frame).end_stream();
 
         // HEADERS may open a block that continues across CONTINUATIONs.
-        if let Frame::Headers { fragment, .. } = &frame {
-            if !frame_flags(&frame).end_headers() {
-                self.begin_header_block(fragment, raw_id, end_stream, kind, events)?;
-                return Ok(());
-            }
+        if let Frame::Headers { fragment, .. } = &frame
+            && !frame_flags(&frame).end_headers()
+        {
+            self.begin_header_block(fragment, raw_id, end_stream, kind, events)?;
+            return Ok(());
         }
 
         if let Frame::Continuation { fragment, .. } = &frame {
@@ -558,7 +559,10 @@ impl Connection {
                 // not delivered. Charging only `data.len()` drifts the connection
                 // out of sync with the peer's accounting by up to 255 bytes per
                 // frame, until a send stalls for no visible reason.
-                let charged = data.len() + usize::from(*padding) + 1;
+                let charged = data
+                    .len()
+                    .saturating_add(usize::from(*padding))
+                    .saturating_add(1);
                 let charged = u32::try_from(charged).unwrap_or(u32::MAX);
                 self.charge_recv(raw_id, charged, events)?;
                 events.push(Event::Data {
@@ -833,7 +837,7 @@ impl Connection {
                  forbids a CONTINUATION that does not follow a HEADERS",
             ));
         };
-        pending.continuations += 1;
+        pending.continuations = pending.continuations.saturating_add(1);
         if pending.continuations > MAX_CONTINUATIONS {
             return Err(ConnectionError::protocol(
                 ErrorCode::EnhanceYourCalm,
@@ -844,8 +848,8 @@ impl Connection {
                 ),
             ));
         }
-        if pending.fragment.len() + fragment.len() > MAX_HEADER_BLOCK_BYTES {
-            let got = pending.fragment.len() + fragment.len();
+        if pending.fragment.len().saturating_add(fragment.len()) > MAX_HEADER_BLOCK_BYTES {
+            let got = pending.fragment.len().saturating_add(fragment.len());
             return Err(Self::header_block_too_large(got));
         }
         pending.fragment.extend_from_slice(fragment);
@@ -1024,10 +1028,10 @@ impl Connection {
             stream_id,
             error: code,
         }));
-        if let Ok(id) = StreamId::client_from_frame(stream_id) {
-            if let Some(stream) = self.streams.get_mut(id) {
-                stream.close();
-            }
+        if let Ok(id) = StreamId::client_from_frame(stream_id)
+            && let Some(stream) = self.streams.get_mut(id)
+        {
+            stream.close();
         }
         self.flow.close_stream(stream_id);
         self.remember_closed(stream_id);
@@ -1054,13 +1058,13 @@ impl Connection {
             .map(|s| s.id().get())
             .collect();
         for id in ids {
-            if let Some(credit) = self.flow.take_stream_replenishment(id) {
-                if credit > 0 {
-                    self.outbound.push_back(to_bytes(&Frame::WindowUpdate {
-                        stream_id: id,
-                        increment: credit,
-                    }));
-                }
+            if let Some(credit) = self.flow.take_stream_replenishment(id)
+                && credit > 0
+            {
+                self.outbound.push_back(to_bytes(&Frame::WindowUpdate {
+                    stream_id: id,
+                    increment: credit,
+                }));
             }
         }
     }
@@ -1142,6 +1146,13 @@ const _: () = assert!(END_STREAM == 0x1);
 const _: () = assert!(END_HEADERS == 0x4);
 const _: () = assert!(PADDED == 0x8);
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1788,9 +1799,11 @@ mod tests {
                 error: ErrorCode::Cancel,
             }))
             .expect("a reset is not a connection error");
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, Event::StreamReset { stream_id: 1, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::StreamReset { stream_id: 1, .. }))
+        );
 
         // Stream 3 is untouched: this is the multiplexing guarantee.
         let id3 = StreamId::client(3).unwrap();

@@ -537,10 +537,10 @@ fn watch(
         }
 
         if debouncer.should_fire(Instant::now()).is_none() {
-            if let Some(limit) = max_cycles {
-                if cycle >= limit {
-                    break;
-                }
+            if let Some(limit) = max_cycles
+                && cycle >= limit
+            {
+                break;
             }
             continue;
         }
@@ -557,8 +557,10 @@ fn watch(
             || std::fs::read(&loaded.path).ok().as_deref() != Some(loaded.source.as_bytes());
         let started = Instant::now();
         let err = if restart_required {
-            Some(Error::new(qqq_core::ErrorCode::ManifestSchemaViolation,
-                "restart required: manifest or lifecycle policy changed; active generation retained"))
+            Some(Error::new(
+                qqq_core::ErrorCode::ManifestSchemaViolation,
+                "restart required: manifest or lifecycle policy changed; active generation retained",
+            ))
         } else {
             prepare_update(loaded, opts, project, rules, &snapshot, &live)?
         };
@@ -581,10 +583,10 @@ fn watch(
         );
         last_pending.clear();
 
-        if let Some(limit) = max_cycles {
-            if cycle >= limit {
-                break;
-            }
+        if let Some(limit) = max_cycles
+            && cycle >= limit
+        {
+            break;
         }
     }
 
@@ -712,14 +714,21 @@ impl DevServer {
 impl Drop for DevServer {
     fn drop(&mut self) {
         self.shutdown.signal();
-        if let Some(thread) = self.thread.take() {
-            if let Ok(Err(error)) = thread.join() {
-                eprintln!("dev listener: {error}");
-            }
+        if let Some(thread) = self.thread.take()
+            && let Ok(Err(error)) = thread.join()
+        {
+            eprintln!("dev listener: {error}");
         }
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

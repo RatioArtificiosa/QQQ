@@ -234,7 +234,9 @@ mod tests {
         let index: Vec<&str> = Method::ALL.iter().map(|m| m.as_wit_str()).collect();
         assert_eq!(
             index,
-            vec!["get", "head", "post", "put", "delete", "connect", "options", "trace", "patch"]
+            vec![
+                "get", "head", "post", "put", "delete", "connect", "options", "trace", "patch"
+            ]
         );
     }
 

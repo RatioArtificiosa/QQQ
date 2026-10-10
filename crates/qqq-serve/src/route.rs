@@ -819,22 +819,27 @@ fn walk(
         if let Some(route) = node.handlers.get(&method) {
             return Some(route.clone());
         }
-        if let Some(child) = &node.wildcard {
-            if let Some(route) = child.handlers.get(&method) {
-                captures.push(String::new());
-                return Some(route.clone());
-            }
+        if let Some(child) = &node.wildcard
+            && let Some(route) = child.handlers.get(&method)
+        {
+            captures.push(String::new());
+            return Some(route.clone());
         }
         return None;
     }
 
-    let segment = segments[index];
+    let Some(segment) = segments.get(index).copied() else {
+        // Total rather than subscripted: the early return above makes this
+        // unreachable, and `None` ends the walk instead of panicking the
+        // request path.
+        return None;
+    };
 
     // -- 1. literal, most specific ------------------------------------
-    if let Some(child) = node.literals.get(segment) {
-        if let Some(found) = walk(child, segments, index + 1, method, captures) {
-            return Some(found);
-        }
+    if let Some(child) = node.literals.get(segment)
+        && let Some(found) = walk(child, segments, index + 1, method, captures)
+    {
+        return Some(found);
     }
 
     // -- 2. parameter -------------------------------------------------
@@ -843,17 +848,17 @@ fn walk(
     // `/orders/:id`. This matters because a trailing slash is common in
     // hand-written URLs, and treating it as an empty id would route
     // `/orders/` to a handler expecting a real value.
-    if !segment.is_empty() {
-        if let Some(child) = &node.param {
-            captures.push((*segment).to_owned());
-            if let Some(found) = walk(child, segments, index + 1, method, captures) {
-                return Some(found);
-            }
-            // The subtree did not match, so the capture is undone before
-            // trying the next candidate — otherwise a failed branch would
-            // leak a value into a later match.
-            captures.pop();
+    if !segment.is_empty()
+        && let Some(child) = &node.param
+    {
+        captures.push((*segment).to_owned());
+        if let Some(found) = walk(child, segments, index + 1, method, captures) {
+            return Some(found);
         }
+        // The subtree did not match, so the capture is undone before
+        // trying the next candidate — otherwise a failed branch would
+        // leak a value into a later match.
+        captures.pop();
     }
 
     // -- 3. wildcard, least specific ----------------------------------
@@ -861,7 +866,15 @@ fn walk(
     // A wildcard captures the remainder *joined by `/`*, so `/files/*rest`
     // against `/files/a/b/c` yields `a/b/c`.
     if let Some(child) = &node.wildcard {
-        captures.push(segments[index..].join("/"));
+        // `get` with a default: `index` is below `len` here, so the range
+        // always exists — the default names the unreachable arm instead of
+        // subscripting it.
+        captures.push(
+            segments
+                .get(index..)
+                .map(|r| r.join("/"))
+                .unwrap_or_default(),
+        );
         if let Some(found) = walk(child, segments, segments.len(), method, captures) {
             return Some(found);
         }
@@ -907,14 +920,18 @@ fn collect_methods(node: &Node, segments: &[&str], index: usize, out: &mut Vec<M
         out.extend(node.handlers.keys().copied());
         return;
     }
-    let segment = segments[index];
+    // As in `walk` above: the early return bounds `index`, so the `else`
+    // only ends collection.
+    let Some(segment) = segments.get(index).copied() else {
+        return;
+    };
     if let Some(child) = node.literals.get(segment) {
         collect_methods(child, segments, index + 1, out);
     }
-    if !segment.is_empty() {
-        if let Some(child) = &node.param {
-            collect_methods(child, segments, index + 1, out);
-        }
+    if !segment.is_empty()
+        && let Some(child) = &node.param
+    {
+        collect_methods(child, segments, index + 1, out);
     }
     if let Some(child) = &node.wildcard {
         collect_methods(child, segments, segments.len(), out);

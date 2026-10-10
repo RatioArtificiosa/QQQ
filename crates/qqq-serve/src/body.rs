@@ -466,7 +466,13 @@ impl BodyReader {
         let mut crlf = [0u8; 2];
         let mut got = 0;
         while got < 2 {
-            let n = read_some(io, &mut crlf[got..]).await?;
+            // Total rather than subscripted: `got` only advances on bytes
+            // actually read, so overrun means the peer closed mid-terminator
+            // — which is exactly what `Truncated` reports.
+            let Some(buf) = crlf.get_mut(got..) else {
+                return Err(BodyError::Truncated);
+            };
+            let n = read_some(io, buf).await?;
             if n == 0 {
                 return Err(BodyError::Truncated);
             }

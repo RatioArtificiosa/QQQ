@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! `qqqai mcp` over its real stdio transport — `AGENT-004`, and the shape `AGENT-019` requires.
 //!
 //! # Why these tests pipe into the binary rather than calling `mcp::answer`
@@ -155,9 +164,11 @@ fn a_working_tool_returns_structured_content() {
         codes[0].get("meaning").is_none(),
         "the tool must not claim a meaning it cannot supply: {codes:?}"
     );
-    assert!(codes[0]["docs"]
-        .as_str()
-        .is_some_and(|d| d.starts_with("https://qqq.codes/errors/")));
+    assert!(
+        codes[0]["docs"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("https://qqq.codes/errors/"))
+    );
 }
 
 /// **NO TOOL ANSWERS `unimplemented` -- `AGENT-006` to `AGENT-017`, over all twelve.**
@@ -502,7 +513,8 @@ fn the_tool_dry_run_contract_agrees_with_the_command_schemas() {
         mapped += 1;
         let tool_says = tool["inputSchema"]["properties"].get("dry_run").is_some();
         assert_eq!(
-            tool_says, *command,
+            tool_says,
+            *command,
             "`{name}` and the `{}` command disagree about `dry_run` -- two places, one answer: {tool}",
             name.strip_prefix("qqq_").expect("a prefix")
         );
@@ -799,18 +811,18 @@ fn every_mutating_tool_takes_dry_run_and_says_so() {
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qqq_schema","arguments":{}}}"#,
     ]);
     let reply = parse(&replies[0]);
-    let mutating: std::collections::HashMap<String, bool> = reply["result"]["structuredContent"]
-        ["commands"]
-        .as_array()
-        .expect("commands")
-        .iter()
-        .map(|c| {
-            (
-                c["command"].as_str().expect("a name").to_owned(),
-                c["mutating"].as_bool().expect("a bool"),
-            )
-        })
-        .collect();
+    let mutating: std::collections::HashMap<String, bool> =
+        reply["result"]["structuredContent"]["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .map(|c| {
+                (
+                    c["command"].as_str().expect("a name").to_owned(),
+                    c["mutating"].as_bool().expect("a bool"),
+                )
+            })
+            .collect();
 
     let replies = run_mcp(&[r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#]);
     let reply = parse(&replies[0]);

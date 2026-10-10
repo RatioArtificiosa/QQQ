@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! F-08: the memory ceiling is aggregate across memories, proven against a
 //! live engine — not just against the limiter in isolation.
 //!
@@ -19,7 +27,7 @@
 use qqq_cap::manifest::{Limits, Manifest};
 use qqq_cap::resolve::GrantSet;
 use qqq_core::ErrorCode;
-use qqq_host::{build_engine, EngineConfig, HostCapacity, Instance, LimitSet, PreparedComponent};
+use qqq_host::{EngineConfig, HostCapacity, Instance, LimitSet, PreparedComponent, build_engine};
 
 /// Two memories of 16 pages each: 32 pages total, over a 24-page ceiling.
 const TWO_MEMORIES: &str = r#"

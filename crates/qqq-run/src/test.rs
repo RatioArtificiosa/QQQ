@@ -176,7 +176,11 @@ impl TestOutcome {
         if self.trial_outputs.len() < 2 {
             return false;
         }
-        let first = &self.trial_outputs[0];
+        // Total rather than subscripted: non-empty by the check above, so
+        // the `else` is unreachable structure that reports determinism.
+        let Some(first) = self.trial_outputs.first() else {
+            return false;
+        };
         self.trial_outputs.iter().any(|o| o != first)
     }
 
@@ -691,7 +695,10 @@ fn is_runner_bookkeeping(line: &str) -> bool {
     }
 
     if CARGO_VERBS.iter().any(|verb| {
-        t.starts_with(verb) && (t.len() == verb.len() || t.as_bytes()[verb.len()] == b' ')
+        // Total rather than subscripted: a short line yields `None` (false)
+        // instead of panicking, matching the length guard it replaces.
+        t.starts_with(verb)
+            && (t.len() == verb.len() || t.as_bytes().get(verb.len()) == Some(&b' '))
     }) {
         return true;
     }
@@ -733,7 +740,9 @@ fn strip_ansi(line: &str) -> String {
         // copy would corrupt any multi-byte character, and cargo's output is not
         // guaranteed to be ASCII — a test printing an accented word would have
         // it mangled, and the mangling would differ between runs only by luck.
-        if bytes[i] != 0x1b {
+        // Total rather than subscripted: past-the-end yields `None` (not ESC),
+        // matching the loop guard it replaces.
+        if bytes.get(i) != Some(&0x1b) {
             let ch = line[i..].chars().next().unwrap_or('\u{fffd}');
             out.push(ch);
             i += ch.len_utf8();
@@ -750,18 +759,24 @@ fn strip_ansi(line: &str) -> String {
         // the dangerous direction: the bytes it removes are compared, so a real
         // divergence could be erased, and the erasure is deterministic — it
         // corrupts the same way every run and so looks like agreement.
-        if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+        // Total rather than subscripted throughout: a missing byte yields
+        // `None` (not the expected one), matching each length guard these
+        // replace.
+        if bytes.get(i + 1) == Some(&b'[') {
             let mut j = i + 2;
-            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+            while bytes
+                .get(j)
+                .is_some_and(|b| b.is_ascii_digit() || *b == b';')
+            {
                 j += 1;
             }
-            if j < bytes.len() && bytes[j] == b'm' && j > i + 2 {
+            if bytes.get(j) == Some(&b'm') && j > i + 2 {
                 // A well-formed sequence: `ESC [ <digits/semicolons> m`.
                 i = j + 1;
                 continue;
             }
             // `ESC [ m` with no parameters is also valid — it is a reset.
-            if j == i + 2 && j < bytes.len() && bytes[j] == b'm' {
+            if j == i + 2 && bytes.get(j) == Some(&b'm') {
                 i = j + 1;
                 continue;
             }
@@ -1505,6 +1520,13 @@ pub fn to_tap(output: &TestOutput) -> String {
     s
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

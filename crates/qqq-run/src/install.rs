@@ -514,21 +514,27 @@ mod tests {
     /// and has the lockfile changed underneath it has been defeated.
     #[test]
     fn locked_and_frozen_never_write() {
-        assert!(!InstallOptions {
-            mode: LockMode::Locked,
-            ..Default::default()
-        }
-        .may_write());
-        assert!(!InstallOptions {
-            mode: LockMode::Frozen,
-            ..Default::default()
-        }
-        .may_write());
-        assert!(!InstallOptions {
-            dry_run: true,
-            ..Default::default()
-        }
-        .may_write());
+        assert!(
+            !InstallOptions {
+                mode: LockMode::Locked,
+                ..Default::default()
+            }
+            .may_write()
+        );
+        assert!(
+            !InstallOptions {
+                mode: LockMode::Frozen,
+                ..Default::default()
+            }
+            .may_write()
+        );
+        assert!(
+            !InstallOptions {
+                dry_run: true,
+                ..Default::default()
+            }
+            .may_write()
+        );
         assert!(InstallOptions::default().may_write());
     }
 
@@ -575,16 +581,20 @@ mod tests {
     #[test]
     fn only_force_ignores_the_lockfile_pins() {
         assert!(InstallOptions::default().honours_lockfile());
-        assert!(InstallOptions {
-            mode: LockMode::Locked,
-            ..Default::default()
-        }
-        .honours_lockfile());
-        assert!(!InstallOptions {
-            force: true,
-            ..Default::default()
-        }
-        .honours_lockfile());
+        assert!(
+            InstallOptions {
+                mode: LockMode::Locked,
+                ..Default::default()
+            }
+            .honours_lockfile()
+        );
+        assert!(
+            !InstallOptions {
+                force: true,
+                ..Default::default()
+            }
+            .honours_lockfile()
+        );
     }
 
     /// `--offline` is not a synonym for `--locked`: it still writes.

@@ -158,7 +158,10 @@ impl Distribution {
             let raw = (p * n as f64).ceil() as usize;
             raw.max(1).min(n)
         };
-        Some(sorted[rank - 1])
+        // Total rather than subscripted: `rank` is clamped to `1..=n` above
+        // and `n` is non-empty here, so `rank - 1` is a valid index — but
+        // `checked_sub` + `get` states the bound instead of assuming it.
+        sorted.get(rank.checked_sub(1)?).copied()
     }
 
     /// The median. A convenience over [`Distribution::percentile`] at `0.5`.

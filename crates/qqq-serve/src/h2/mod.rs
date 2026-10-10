@@ -87,18 +87,18 @@ pub mod hpack;
 pub mod settings;
 pub mod stream;
 
-pub use conn::{Connection, Event, State, MAX_CONTINUATIONS, MAX_HEADER_BLOCK_BYTES};
+pub use conn::{Connection, Event, MAX_CONTINUATIONS, MAX_HEADER_BLOCK_BYTES, State};
 pub use error::{ConnectionError, ErrorCode, StreamError};
 pub use flow::{FlowControl, FlowError};
 pub use frame::{
-    parse_frame, to_bytes, write_frame, Flags, Frame, FrameError, FrameHeader, FrameType,
-    PrioritySpec, SettingId, CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN,
-    MAX_FRAME_PAYLOAD,
+    CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN, Flags, Frame, FrameError,
+    FrameHeader, FrameType, MAX_FRAME_PAYLOAD, PrioritySpec, SettingId, parse_frame, to_bytes,
+    write_frame,
 };
 pub use hpack::{
-    Decoder, Encoder, HeaderField, HpackError, DEFAULT_HEADER_TABLE_SIZE, MAX_HEADER_LIST_SIZE,
+    DEFAULT_HEADER_TABLE_SIZE, Decoder, Encoder, HeaderField, HpackError, MAX_HEADER_LIST_SIZE,
 };
 pub use settings::{
-    Settings, SettingsError, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS,
+    DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS, Settings, SettingsError,
 };
 pub use stream::{FrameKind, Stream, StreamId, StreamState};

@@ -87,7 +87,11 @@ fn fill_deterministic(seed: &[u8; 32], counter: &mut u64, out: &mut [u8]) {
         h.update(counter.to_le_bytes());
         *counter = counter.wrapping_add(1);
         let block = h.finalize();
-        chunk.copy_from_slice(&block[..chunk.len()]);
+        // Zipped rather than subscripted: `chunks_mut(32)` yields at most
+        // 32 bytes and the digest is exactly 32, so nothing can overrun.
+        for (slot, b) in chunk.iter_mut().zip(block.iter()) {
+            *slot = *b;
+        }
     }
 }
 
@@ -566,10 +570,10 @@ impl AmbientState {
         if !self.deterministic {
             return;
         }
-        if let Some(log) = &self.replay {
-            if let Ok(mut log) = log.lock() {
-                let _ = log.record(function, value);
-            }
+        if let Some(log) = &self.replay
+            && let Ok(mut log) = log.lock()
+        {
+            let _ = log.record(function, value);
         }
     }
 
@@ -991,6 +995,13 @@ pub fn hash_data(
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

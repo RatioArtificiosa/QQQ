@@ -1265,15 +1265,15 @@ impl Manifest {
                 push(Capability::ClockMonotonic);
             }
         }
-        if let Some(e) = &self.capabilities.env {
-            if !e.allow.is_empty() {
-                push(Capability::EnvRead);
-            }
+        if let Some(e) = &self.capabilities.env
+            && !e.allow.is_empty()
+        {
+            push(Capability::EnvRead);
         }
-        if let Some(d) = &self.capabilities.dns {
-            if !d.resolve.is_empty() {
-                push(Capability::DnsResolve);
-            }
+        if let Some(d) = &self.capabilities.dns
+            && !d.resolve.is_empty()
+        {
+            push(Capability::DnsResolve);
         }
 
         out.sort_unstable();
@@ -1700,6 +1700,13 @@ pub const METHODS: [&str; 9] = [
     "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT",
 ];
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

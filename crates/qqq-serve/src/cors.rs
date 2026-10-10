@@ -735,9 +735,11 @@ mod tests {
         assert!(cors.simple(Some("https://example.com")).is_granted());
 
         let with_port = Cors::from_manifest(["https://example.com:8443"]).expect("valid");
-        assert!(with_port
-            .simple(Some("https://example.com:8443"))
-            .is_granted());
+        assert!(
+            with_port
+                .simple(Some("https://example.com:8443"))
+                .is_granted()
+        );
         assert!(!with_port.simple(Some("https://example.com")).is_granted());
     }
 

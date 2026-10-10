@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! A streaming route served through `serve` (`SRV-004`).
 //!
 //! # Why this test did not exist until now
@@ -34,7 +43,7 @@ use tokio::sync::oneshot;
 
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{serve, Dispatch, Handler, RouteMatch, ServerConfig};
+use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, serve};
 use qqq_serve::stream::{StreamError, StreamWriter};
 use qqq_serve::{BodyBytes, BodyHandler, RequestHead, Response};
 

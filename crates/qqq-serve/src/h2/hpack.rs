@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! HPACK: header compression for HTTP/2 (RFC 7541).
 //!
@@ -181,10 +182,12 @@ pub const STATIC_TABLE_LEN: usize = STATIC_TABLE.len();
 #[must_use]
 pub fn static_entry(index: usize) -> Option<(&'static str, Option<&'static str>)> {
     // Static indices are 1-based (`index - 1`); index 0 is not a static entry.
+    // Total rather than subscripted: out-of-range yields `None`, which is
+    // exactly what the explicit checks below used to return.
     if index == 0 || index > STATIC_TABLE_LEN {
         return None;
     }
-    Some(STATIC_TABLE[index - 1])
+    STATIC_TABLE.get(index.saturating_sub(1)).copied()
 }
 
 /// Find the exact `(name, value)` static match, if any.
@@ -193,7 +196,7 @@ fn static_exact(name: &str, value: &str) -> Option<usize> {
     STATIC_TABLE
         .iter()
         .position(|(n, v)| *n == name && *v == Some(value))
-        .map(|i| i + 1)
+        .map(|i| i.saturating_add(1))
 }
 
 /// Find the first static entry with this name, if any.
@@ -202,7 +205,7 @@ fn static_name(name: &str) -> Option<usize> {
     STATIC_TABLE
         .iter()
         .position(|(n, _)| *n == name)
-        .map(|i| i + 1)
+        .map(|i| i.saturating_add(1))
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +523,7 @@ pub fn encode_integer(value: u64, prefix_bits: u8, first_byte: u8) -> Vec<u8> {
         (1..=8).contains(&prefix_bits),
         "an HPACK integer prefix is 1..=8 bits"
     );
-    let mask = (1u16 << prefix_bits) - 1;
+    let mask = (1u16 << prefix_bits).saturating_sub(1);
     let mask = u8::try_from(mask).unwrap_or(0xff);
     let max_prefix = u64::from(mask);
 
@@ -530,7 +533,9 @@ pub fn encode_integer(value: u64, prefix_bits: u8, first_byte: u8) -> Vec<u8> {
         return out;
     }
     out.push(first_byte | mask);
-    let mut remaining = value - max_prefix;
+    // Saturating: `value >= max_prefix` past the early return above, so this
+    // is exact on every reachable path.
+    let mut remaining = value.saturating_sub(max_prefix);
     while remaining >= 128 {
         // `as u8` is avoided: a truncating cast here is exactly the bug this
         // function exists to avoid, and `try_from` on a masked value cannot fail.
@@ -575,20 +580,20 @@ pub fn decode_integer(
     let Some(&first) = input.get(at) else {
         return Err(HpackError::Truncated { at });
     };
-    let mask = u8::try_from((1u16 << prefix_bits) - 1).unwrap_or(0xff);
+    let mask = u8::try_from((1u16 << prefix_bits).saturating_sub(1)).unwrap_or(0xff);
     let prefix = u64::from(first & mask);
     if prefix < u64::from(mask) {
-        return Ok((prefix, at + 1));
+        return Ok((prefix, at.saturating_add(1)));
     }
 
     let mut value = u64::from(mask);
     let mut shift = 0u32;
-    let mut i = at + 1;
+    let mut i = at.saturating_add(1);
     loop {
         let Some(&byte) = input.get(i) else {
             return Err(HpackError::Truncated { at: i });
         };
-        i += 1;
+        i = i.saturating_add(1);
         let add = u64::from(byte & 0x7f)
             .checked_shl(shift)
             .ok_or(HpackError::InvalidIndex {
@@ -602,7 +607,7 @@ pub fn decode_integer(
         if byte & 0x80 == 0 {
             return Ok((value, i));
         }
-        shift += 7;
+        shift = shift.saturating_add(7);
         // Seven bits per byte, so 10 bytes is 70 bits and cannot fit in a u64.
         // Checking the shift rather than the value catches the overflow *before*
         // the addition that would wrap.
@@ -672,8 +677,16 @@ pub fn decode_string(input: &[u8], at: usize) -> Result<(String, usize), HpackEr
             available,
         });
     }
-    let raw = &input[i..i + length];
-    i += length;
+    // Total rather than subscripted: the overrun check above bounds the
+    // range, and `saturating_add` keeps the end arithmetic total for the
+    // pass below.
+    let Some(raw) = input.get(i..i.saturating_add(length)) else {
+        return Err(HpackError::StringOverrun {
+            declared: length,
+            available,
+        });
+    };
+    i = i.saturating_add(length);
 
     if huffman {
         let decoded = huffman_decode(raw)?;
@@ -692,10 +705,26 @@ pub fn decode_string(input: &[u8], at: usize) -> Result<(String, usize), HpackEr
 // Huffman
 // ---------------------------------------------------------------------------
 
+/// One Huffman table entry: the code and its bit length.
+///
+/// Carries the single `#[expect]` for table reads: the table holds all 256
+/// byte values plus EOS (257 entries), so a `u8` index is always in bounds
+/// by type — no length check could add information.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "256 byte values into a 257-entry table"
+)]
+fn huffman_entry(byte: u8) -> (u32, u8) {
+    HUFFMAN[usize::from(byte)]
+}
+
 /// Encode bytes with the RFC 7541 Appendix B code.
 #[must_use]
 pub fn huffman_encode(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len() * 6 / 5);
+    // Saturating capacity math: the multiplier is small over input lengths,
+    // so saturation is unreachable — and aborting (fail-stop) beats a wrapped
+    // under-allocation on the unreachable arm.
+    let mut out = Vec::with_capacity(input.len().saturating_mul(6) / 5);
     // A 64-bit accumulator with a bit count, rather than a bit-by-bit writer:
     // the longest code is 30 bits, so 64 bits always holds a whole code plus the
     // leftover of the previous ones (at most 29 bits pending before adding 30).
@@ -703,11 +732,14 @@ pub fn huffman_encode(input: &[u8]) -> Vec<u8> {
     let mut bits: u32 = 0;
 
     for &byte in input {
-        let (code, len) = HUFFMAN[usize::from(byte)];
-        accumulator = (accumulator << len) | u64::from(code);
-        bits += u32::from(len);
+        let (code, len) = huffman_entry(byte);
+        // Checked shifts with saturating fallbacks: `len` is at most 30 from
+        // the table and `bits` stays below 64, so the fallbacks are
+        // unreachable structure — total without changing any reachable value.
+        accumulator = accumulator.checked_shl(u32::from(len)).unwrap_or(u64::MAX) | u64::from(code);
+        bits = bits.saturating_add(u32::from(len));
         while bits >= 8 {
-            bits -= 8;
+            bits = bits.saturating_sub(8);
             out.push(u8::try_from((accumulator >> bits) & 0xff).unwrap_or(0));
         }
     }
@@ -715,8 +747,11 @@ pub fn huffman_encode(input: &[u8]) -> Vec<u8> {
         // §5.2: the padding is the most significant bits of the EOS code, which
         // are all ones. Zero-padding would produce a different byte string for
         // the same text — the ambiguity the padding rule exists to remove.
-        let shift = 8 - bits;
-        let padded = (accumulator << shift) | ((1u64 << shift) - 1);
+        // `bits` is 1..8 here (the loop above leaves less than 8), so both
+        // checked ops below are exact on every reachable path.
+        let shift = 8u32.saturating_sub(bits);
+        let padded = accumulator.checked_shl(shift).unwrap_or(u64::MAX)
+            | (1u64.checked_shl(shift).unwrap_or(0)).saturating_sub(1);
         out.push(u8::try_from(padded & 0xff).unwrap_or(0));
     }
     out
@@ -731,15 +766,20 @@ pub fn huffman_encode(input: &[u8]) -> Vec<u8> {
 /// because they have different causes — a corrupt block, a hostile block, and a
 /// non-canonical encoder respectively.
 pub fn huffman_decode(input: &[u8]) -> Result<Vec<u8>, HpackError> {
-    let mut out = Vec::with_capacity(input.len() * 8 / 5);
+    // Saturating capacity math, as in the encoder above.
+    let mut out = Vec::with_capacity(input.len().saturating_mul(8) / 5);
     let mut code: u32 = 0;
     let mut len: u32 = 0;
 
     for &byte in input {
         for shift in (0..8).rev() {
             let bit = (byte >> shift) & 1;
-            code = (code << 1) | u32::from(bit);
-            len += 1;
+            // Checked shift with a saturating fallback: the shift amount is
+            // always 1, so the fallback is unreachable structure — the bit
+            // loss above 32 bits is pre-existing wrapping behavior the length
+            // bound below already polices, unchanged by this form.
+            code = code.checked_shl(1).unwrap_or(u32::MAX) | u32::from(bit);
+            len = len.saturating_add(1);
 
             // A code longer than 30 bits cannot be a prefix of any entry, so it
             // is invalid the moment it exceeds the longest code. The check is
@@ -791,7 +831,9 @@ pub fn huffman_decode(input: &[u8]) -> Result<Vec<u8>, HpackError> {
 
 /// Whether the low `len` bits of `code` are all ones.
 fn all_ones(code: u32, len: u32) -> bool {
-    len > 0 && code == (1u32 << len) - 1
+    // Checked shift with saturating subtract: callers pass at most 7, so
+    // both fallbacks are unreachable structure.
+    len > 0 && code == (1u32.checked_shl(len).unwrap_or(0)).saturating_sub(1)
 }
 
 /// Look up a `(code, len)` pair in the Huffman table.
@@ -853,7 +895,7 @@ impl DynamicTable {
     /// requests into a connection, with no error anywhere.
     #[must_use]
     pub fn entry_size(name: &str, value: &str) -> usize {
-        name.len() + value.len() + 32
+        name.len().saturating_add(value.len()).saturating_add(32)
     }
 
     /// Bytes currently accounted.
@@ -944,10 +986,10 @@ impl DynamicTable {
             self.size = 0;
             return;
         }
-        while self.size + entry_size > self.max_size {
+        while self.size.saturating_add(entry_size) > self.max_size {
             self.evict_one();
         }
-        self.size += entry_size;
+        self.size = self.size.saturating_add(entry_size);
         self.entries.push_front(HeaderField { name, value });
     }
 
@@ -973,7 +1015,10 @@ impl DynamicTable {
         if index == 0 {
             return None;
         }
-        self.entries.get(index - 1)
+        // Checked rather than subscripted arithmetic: index 0 is refused
+        // above, so the subtraction is exact — and `get` (not a subscript)
+        // turns any future off-by-one into `None`.
+        index.checked_sub(1).and_then(|i| self.entries.get(i))
     }
 
     /// Find the index of an exact match, 1-based, for the encoder.
@@ -982,7 +1027,7 @@ impl DynamicTable {
         self.entries
             .iter()
             .position(|e| e.name == name && e.value == value)
-            .map(|i| i + 1)
+            .map(|i| i.saturating_add(1))
     }
 
     /// Find the first entry with this name, 1-based, for the encoder.
@@ -991,7 +1036,7 @@ impl DynamicTable {
         self.entries
             .iter()
             .position(|e| e.name == name)
-            .map(|i| i + 1)
+            .map(|i| i.saturating_add(1))
     }
 }
 
@@ -1066,15 +1111,17 @@ impl Decoder {
         let mut total = 0usize;
         let mut i = 0usize;
 
-        while i < block.len() {
+        // `while let` rather than `while` plus a guarded subscript: past the
+        // end the getter yields `None` and the loop ends — same outcome as
+        // the length guard, without a subscript.
+        while let Some(&first) = block.get(i) {
             if out.len() >= self.max_header_count {
                 return Err(HpackError::HeaderListTooLarge {
                     what: "field count",
-                    got: out.len() + 1,
+                    got: out.len().saturating_add(1),
                     limit: self.max_header_count,
                 });
             }
-            let first = block[i];
             if first & 0x80 != 0 {
                 // -- Indexed Header Field (§6.1) ---------------------------
                 let (index, next) = decode_integer(block, 7, i)?;
@@ -1169,9 +1216,15 @@ impl Decoder {
                 value: value.unwrap_or("").to_owned(),
             });
         }
-        let dynamic_index = index - STATIC_TABLE_LEN - 1;
+        let dynamic_index = index
+            .checked_sub(STATIC_TABLE_LEN)
+            .and_then(|i| i.checked_sub(1))
+            .ok_or(HpackError::InvalidIndex {
+                index: index as u64,
+                table: "either table",
+            })?;
         self.table
-            .lookup(dynamic_index + 1)
+            .lookup(dynamic_index.saturating_add(1))
             .cloned()
             .ok_or(HpackError::InvalidIndex {
                 index: index as u64,
@@ -1326,7 +1379,7 @@ impl Encoder {
     /// this function's.
     #[must_use]
     pub fn encode(&mut self, fields: &[HeaderField]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(64 + fields.len() * 16);
+        let mut out = Vec::with_capacity(64usize.saturating_add(fields.len().saturating_mul(16)));
         // Any owed size update goes first, before any representation that
         // depends on the table's new size (§4.2, §6.3).
         if let Some(size) = self.pending_size_update.take() {
@@ -1346,7 +1399,7 @@ impl Encoder {
             return;
         }
         if let Some(dynamic) = self.table.find(&field.name, &field.value) {
-            let index = STATIC_TABLE_LEN + dynamic;
+            let index = STATIC_TABLE_LEN.saturating_add(dynamic);
             out.extend_from_slice(&encode_integer(index as u64, 7, 0x80));
             return;
         }
@@ -1362,7 +1415,7 @@ impl Encoder {
         let name_index = static_name(&field.name).or_else(|| {
             self.table
                 .find_name(&field.name)
-                .map(|i| STATIC_TABLE_LEN + i)
+                .map(|i| STATIC_TABLE_LEN.saturating_add(i))
         });
         let name_index = name_index.unwrap_or(0);
 
@@ -1406,6 +1459,13 @@ impl Default for Encoder {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,8 +1482,14 @@ mod tests {
 
     fn unhex(s: &str) -> Vec<u8> {
         let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        (0..clean.len() / 2)
-            .map(|i| u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).expect("hex"))
+        (0..clean.len().saturating_div(2))
+            .map(|i| {
+                u8::from_str_radix(
+                    &clean[i.saturating_mul(2)..i.saturating_mul(2).saturating_add(2)],
+                    16,
+                )
+                .expect("hex")
+            })
             .collect()
     }
 
@@ -2476,7 +2542,7 @@ mod tests {
         let mut block = Vec::new();
         for _ in 0..10 {
             block.extend_from_slice(&encode_integer(32, 6, 0x40)); // indexed name: cookie
-                                                                   // 16384 bytes of value, literal.
+            // 16384 bytes of value, literal.
             block.extend_from_slice(&encode_integer(16_384, 7, 0x00));
             block.extend(std::iter::repeat_n(b'x', 16_384));
         }

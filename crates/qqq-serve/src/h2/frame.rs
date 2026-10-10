@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! The HTTP/2 frame layer: the 9-byte header, and every frame type `SRV-002`
 //! requires.
@@ -387,17 +388,27 @@ impl FrameHeader {
                 got: bytes.len(),
             });
         }
-        let length = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
+        // Destructured rather than subscripted: the length check above makes
+        // the prefix exactly nine bytes, and naming each byte turns the
+        // shift-and-mask layout below into a readable row.
+        let [b0, b1, b2, b3, b4, b5, b6, b7, b8]: [u8; FRAME_HEADER_LEN] = bytes
+            .get(..FRAME_HEADER_LEN)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(FrameError::Truncated {
+                need: FRAME_HEADER_LEN,
+                got: bytes.len(),
+            })?;
+        let length = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
         // The reserved bit is masked, not rejected. RFC 9113 §4.1: "The
         // semantics of this bit are undefined, and the bit MUST remain unset
         // (0x0) when sending and MUST be ignored when receiving." Rejecting it
         // would break a peer using it for an extension this endpoint has not
         // agreed to.
-        let stream_id = u32::from_be_bytes([bytes[5] & 0x7f, bytes[6], bytes[7], bytes[8]]);
+        let stream_id = u32::from_be_bytes([b5 & 0x7f, b6, b7, b8]);
         Ok(Self {
             length,
-            frame_type: FrameType::from_u8(bytes[3]),
-            flags: Flags::from_bits(bytes[4]),
+            frame_type: FrameType::from_u8(b3),
+            flags: Flags::from_bits(b4),
             stream_id,
         })
     }
@@ -614,10 +625,19 @@ impl PrioritySpec {
                 got: bytes.len(),
             });
         }
+        // As in `FrameHeader::parse`: the length check makes the prefix
+        // exactly five bytes; destructuring states the layout.
+        let [e0, d0, d1, d2, w]: [u8; Self::LEN] = bytes
+            .get(..Self::LEN)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(FrameError::Truncated {
+                need: Self::LEN,
+                got: bytes.len(),
+            })?;
         Ok(Self {
-            exclusive: bytes[0] & 0x80 != 0,
-            depends_on: u32::from_be_bytes([bytes[0] & 0x7f, bytes[1], bytes[2], bytes[3]]),
-            weight: bytes[4],
+            exclusive: e0 & 0x80 != 0,
+            depends_on: u32::from_be_bytes([e0 & 0x7f, d0, d1, d2]),
+            weight: w,
         })
     }
 
@@ -908,7 +928,14 @@ pub fn parse_frame(bytes: &[u8]) -> Result<(Frame<'_>, usize), FrameError> {
             got: bytes.len(),
         });
     }
-    let payload = &bytes[FRAME_HEADER_LEN..total];
+    // Total rather than subscripted: the length check above bounds the range,
+    // and the `Truncated` below is the same error it would have produced.
+    let payload = bytes
+        .get(FRAME_HEADER_LEN..total)
+        .ok_or(FrameError::Truncated {
+            need: total,
+            got: bytes.len(),
+        })?;
     let frame = decode(header, payload)?;
     Ok((frame, total))
 }
@@ -962,7 +989,13 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
             let mut priority = None;
             if flags.has_priority() {
                 priority = Some(PrioritySpec::parse(rest)?);
-                rest = &rest[PrioritySpec::LEN..];
+                // Total rather than subscripted: `parse` just verified at
+                // least five bytes, so the `Truncated` below is unreachable
+                // structure — the same error the length check would produce.
+                rest = rest.get(PrioritySpec::LEN..).ok_or(FrameError::Truncated {
+                    need: PrioritySpec::LEN,
+                    got: rest.len(),
+                })?;
             }
             // The priority field is not padding and must not be trimmed by the
             // pad length: RFC 9113 §6.2 orders the payload as pad-length,
@@ -1005,7 +1038,15 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "exactly 4 bytes",
                 });
             }
-            let raw = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            // Converted rather than subscripted: exactly four bytes were
+            // just verified, and the array type carries that instead of four
+            // subscripts restating it.
+            let bytes4: [u8; 4] = payload.try_into().map_err(|_| FrameError::BadLength {
+                frame_type,
+                length,
+                expected: "exactly 4 bytes",
+            })?;
+            let raw = u32::from_be_bytes(bytes4);
             // An unassigned code is not a violation (RFC 9113 §7). A `RST_STREAM`
             // carrying one is still a reset, so it must not be dropped.
             Ok(Frame::RstStream {
@@ -1062,8 +1103,13 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "exactly 8 bytes",
                 });
             }
-            let mut payload8 = [0u8; 8];
-            payload8.copy_from_slice(payload);
+            // As above: the check makes the conversion exact, and the array
+            // is used directly instead of copied into a second one.
+            let payload8: [u8; 8] = payload.try_into().map_err(|_| FrameError::BadLength {
+                frame_type,
+                length,
+                expected: "exactly 8 bytes",
+            })?;
             Ok(Frame::Ping {
                 flags,
                 payload: payload8,
@@ -1078,14 +1124,23 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "at least 8 bytes",
                 });
             }
-            let last_stream_id =
-                u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
-            let raw_error = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            // Destructured rather than subscripted: eight header bytes plus
+            // the debug tail, so the shape carries the length check — and a
+            // short payload is the same `BadLength`, not a panic.
+            let [l0, l1, l2, l3, e0, e1, e2, e3, debug @ ..] = payload else {
+                return Err(FrameError::BadLength {
+                    frame_type,
+                    length,
+                    expected: "at least 8 bytes",
+                });
+            };
+            let last_stream_id = u32::from_be_bytes([l0 & 0x7f, *l1, *l2, *l3]);
+            let raw_error = u32::from_be_bytes([*e0, *e1, *e2, *e3]);
             Ok(Frame::GoAway {
                 last_stream_id,
                 error: ErrorCode::from_u32(raw_error),
                 raw_error,
-                debug: &payload[8..],
+                debug,
             })
         }
         FrameType::WindowUpdate => {
@@ -1096,8 +1151,15 @@ pub fn decode(header: FrameHeader, payload: &[u8]) -> Result<Frame<'_>, FrameErr
                     expected: "exactly 4 bytes",
                 });
             }
-            let increment =
-                u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
+            // As in the arms above: exactly four bytes verified, converted
+            // as an array, then destructured — no subscript anywhere.
+            let raw: [u8; 4] = payload.try_into().map_err(|_| FrameError::BadLength {
+                frame_type,
+                length,
+                expected: "exactly 4 bytes",
+            })?;
+            let [r0, r1, r2, r3] = raw;
+            let increment = u32::from_be_bytes([r0 & 0x7f, r1, r2, r3]);
             if increment == 0 {
                 return Err(FrameError::ZeroWindowIncrement { stream_id });
             }
@@ -1184,7 +1246,10 @@ fn strip_trailing_padding(rest: &[u8], pad_len: u8, length: u32) -> Result<&[u8]
     if rest.len() < pad {
         return Err(FrameError::BadPadding { pad_len, length });
     }
-    Ok(&rest[..rest.len() - pad])
+    // Total rather than subscripted: the check above bounds the range, and
+    // `saturating_sub` keeps the arithmetic total for the pass below.
+    rest.get(..rest.len().saturating_sub(pad))
+        .ok_or(FrameError::BadPadding { pad_len, length })
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,12 +1282,20 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
             // The pad-length octet is present **iff** PADDED was set, not iff
             // the padding is non-zero: `PADDED` with a zero pad length is legal
             // and still costs one byte in the payload.
-            let mut payload = Vec::with_capacity(data.len() + pad + usize::from(flags.padded()));
+            // Saturating throughout these writers: the summands are
+            // frame-bounded (16 MiB ceiling), so saturation is unreachable —
+            // and on the unreachable arm a huge allocation aborts (fail-stop)
+            // rather than a wrapped one under-allocating silently.
+            let mut payload = Vec::with_capacity(
+                data.len()
+                    .saturating_add(pad)
+                    .saturating_add(usize::from(flags.padded())),
+            );
             if flags.padded() {
                 payload.push(*padding);
             }
             payload.extend_from_slice(data);
-            payload.resize(payload.len() + pad, 0);
+            payload.resize(payload.len().saturating_add(pad), 0);
             push(
                 header_for(payload.len(), FrameType::Data, *flags, *stream_id),
                 &payload,
@@ -1238,7 +1311,10 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
         } => {
             let pad = padding.map_or(0, usize::from);
             let mut payload = Vec::with_capacity(
-                fragment.len() + PrioritySpec::LEN + usize::from(flags.padded()),
+                fragment
+                    .len()
+                    .saturating_add(PrioritySpec::LEN)
+                    .saturating_add(usize::from(flags.padded())),
             );
             if flags.padded() {
                 payload.push(padding.unwrap_or(0));
@@ -1247,7 +1323,7 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
                 payload.extend_from_slice(&spec.write());
             }
             payload.extend_from_slice(fragment);
-            payload.resize(payload.len() + pad, 0);
+            payload.resize(payload.len().saturating_add(pad), 0);
             push(
                 header_for(payload.len(), FrameType::Headers, *flags, *stream_id),
                 &payload,
@@ -1274,7 +1350,9 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
             );
         }
         Frame::Settings { params } => {
-            let mut payload = Vec::with_capacity(params.len() * 6);
+            // Saturating, as above: six bytes per parameter, bounded by the
+            // frame ceiling upstream.
+            let mut payload = Vec::with_capacity(params.len().saturating_mul(6));
             for (id, value) in params {
                 payload.extend_from_slice(&id.as_u16().to_be_bytes());
                 payload.extend_from_slice(&value.to_be_bytes());
@@ -1313,7 +1391,9 @@ pub fn write_frame(frame: &Frame<'_>, out: &mut Vec<u8>) {
             debug,
         } => {
             let code = error.map_or(*raw_error, ErrorCode::as_u32);
-            let mut payload = Vec::with_capacity(8 + debug.len());
+            // Saturating, as above: eight header bytes plus attacker-bounded
+            // debug data.
+            let mut payload = Vec::with_capacity(8usize.saturating_add(debug.len()));
             payload.extend_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
             payload.extend_from_slice(&code.to_be_bytes());
             payload.extend_from_slice(debug);
@@ -1410,6 +1490,13 @@ pub fn to_bytes(frame: &Frame<'_>) -> Vec<u8> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

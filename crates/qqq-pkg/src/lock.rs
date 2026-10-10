@@ -466,20 +466,20 @@ impl Lockfile {
         // test asserting they agree is what caught it. A field whose absence is
         // indistinguishable from its emptiness after a round trip must be
         // indistinguishable in the hash too.
-        if let Some(build) = &self.metadata.build {
-            if !build.is_empty() {
-                h.update(b"\x1d"); // a group separator, so config cannot collide
-                                   // with a package record
-                h.update(build.language.as_deref().unwrap_or("").as_bytes());
+        if let Some(build) = &self.metadata.build
+            && !build.is_empty()
+        {
+            h.update(b"\x1d"); // a group separator, so config cannot collide
+            // with a package record
+            h.update(build.language.as_deref().unwrap_or("").as_bytes());
+            h.update(b"\x00");
+            h.update(build.target.as_deref().unwrap_or("").as_bytes());
+            h.update(b"\x00");
+            h.update(build.profile.as_deref().unwrap_or("").as_bytes());
+            h.update(b"\x00");
+            for c in &build.caps {
+                h.update(c.as_bytes());
                 h.update(b"\x00");
-                h.update(build.target.as_deref().unwrap_or("").as_bytes());
-                h.update(b"\x00");
-                h.update(build.profile.as_deref().unwrap_or("").as_bytes());
-                h.update(b"\x00");
-                for c in &build.caps {
-                    h.update(c.as_bytes());
-                    h.update(b"\x00");
-                }
             }
         }
 
@@ -794,6 +794,13 @@ fn difference(a: &[String], b: &[String]) -> Vec<String> {
     a.iter().filter(|x| !b.contains(x)).cloned().collect()
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

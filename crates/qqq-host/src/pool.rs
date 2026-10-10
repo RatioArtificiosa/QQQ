@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! The instance pool: acquisition, backpressure and occupancy — `HOST-012` and
 //! the instance half of `HOST-019`.
@@ -247,7 +248,7 @@ impl Pool {
     ///         go.wait();
     ///         let (used, idle) = pool.snapshot();
     ///         samples.fetch_add(1, Ordering::Relaxed);
-    ///         if used + idle > CAPACITY {
+    ///         if used.saturating_add(idle) > CAPACITY {
     ///             bad.fetch_add(1, Ordering::Relaxed);
     ///         }
     ///         churn.wait();
@@ -273,7 +274,7 @@ impl Pool {
     ///             samples.fetch_add(1, Ordering::Relaxed);
     ///             released.fetch_add(1, Ordering::Relaxed);
     ///             overlapped.store(true, Ordering::Relaxed);
-    ///             if used + idle > CAPACITY {
+    ///             if used.saturating_add(idle) > CAPACITY {
     ///                 bad.fetch_add(1, Ordering::Relaxed);
     ///             }
     ///         }
@@ -457,9 +458,9 @@ impl Pool {
             return Err(exhausted_error(Exhausted::AllBusy, self.capacity, retry));
         }
         let slot_reused = state.idle > 0;
-        state.in_use += 1;
+        state.in_use = state.in_use.saturating_add(1);
         if slot_reused {
-            state.idle -= 1;
+            state.idle = state.idle.saturating_sub(1);
         }
         drop(state);
 
@@ -495,8 +496,8 @@ impl Pool {
             );
             return ReleaseOutcome::SlotFreed;
         }
-        state.in_use -= 1;
-        state.idle += 1;
+        state.in_use = state.in_use.saturating_sub(1);
+        state.idle = state.idle.saturating_add(1);
         drop(state);
         self.metrics.note_released();
         ReleaseOutcome::SlotFreed
@@ -521,7 +522,7 @@ impl Pool {
             );
             return ReleaseOutcome::Discarded;
         }
-        state.in_use -= 1;
+        state.in_use = state.in_use.saturating_sub(1);
         drop(state);
         self.metrics.note_discarded();
         ReleaseOutcome::Discarded
@@ -790,8 +791,8 @@ mod tests {
     /// only shows under contention.
     #[test]
     fn concurrent_acquires_never_exceed_capacity() {
-        use std::sync::atomic::AtomicU64;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
 
         const CAPACITY: u64 = 8;
         const THREADS: usize = 16;
@@ -865,7 +866,7 @@ mod tests {
             let (used, idle) = sampler_p.snapshot();
             sampler_samples.fetch_add(1, Ordering::Relaxed);
             assert!(
-                used + idle <= CAPACITY,
+                used.saturating_add(idle) <= CAPACITY,
                 "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
             );
             sampler_churn.wait();
@@ -876,7 +877,7 @@ mod tests {
                 let (used, idle) = sampler_p.snapshot();
                 sampler_samples.fetch_add(1, Ordering::Relaxed);
                 assert!(
-                    used + idle <= CAPACITY,
+                    used.saturating_add(idle) <= CAPACITY,
                     "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
                 );
                 assert!(used <= CAPACITY, "in_use {used} exceeds {CAPACITY}");

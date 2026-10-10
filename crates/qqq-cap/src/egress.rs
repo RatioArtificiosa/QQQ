@@ -950,13 +950,15 @@ mod tests {
             TenantEgress::allowing_hosts(&["a.example.com"]).expect("valid pattern"),
         );
 
-        assert!(policy
-            .authorize(
-                &grants_with_http(),
-                &tenant("acme"),
-                &Destination::new("a.example.com", 443, Scheme::Https)
-            )
-            .is_allowed());
+        assert!(
+            policy
+                .authorize(
+                    &grants_with_http(),
+                    &tenant("acme"),
+                    &Destination::new("a.example.com", 443, Scheme::Https)
+                )
+                .is_allowed()
+        );
         assert_eq!(
             policy
                 .authorize(

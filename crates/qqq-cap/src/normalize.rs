@@ -156,7 +156,7 @@ impl NormalizeError {
     #[must_use]
     pub fn to_error(&self) -> qqq_core::Error {
         let e = qqq_core::Error::new(self.code(), self.to_string());
-        let e = match self {
+        match self {
             Self::PathMissing { declared } => e
                 .with_context("path", declared.clone())
                 .with_remediation(format!(
@@ -177,8 +177,7 @@ impl NormalizeError {
             Self::ConflictingGrants { subject, .. } => e
                 .with_context("subject", subject.clone())
                 .with_remediation("grant each path once, with a single mode"),
-        };
-        e
+        }
     }
 }
 
@@ -342,10 +341,10 @@ impl HostPattern {
     /// Whether this pattern permits connecting to `host:port`.
     #[must_use]
     pub fn matches(&self, host: &str, port: u16) -> bool {
-        if let Some(required) = self.port {
-            if required != port {
-                return false;
-            }
+        if let Some(required) = self.port
+            && required != port
+        {
+            return false;
         }
         let host = host.to_ascii_lowercase();
         if self.is_ip_literal {
@@ -368,7 +367,10 @@ impl HostPattern {
             let bare = self.host.trim_start_matches("*.");
             host.len() > bare.len() + 1 && host.ends_with(bare) && {
                 let prefix_len = host.len() - bare.len();
-                host.as_bytes()[prefix_len - 1] == b'.'
+                // Total rather than subscripted: the length guard above
+                // bounds the index, and `.get()` states the same check
+                // without a panic path.
+                host.as_bytes().get(prefix_len - 1) == Some(&b'.')
             }
         } else {
             host == self.host
@@ -766,12 +768,15 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
     // effective authority would otherwise depend on iteration order, which is
     // exactly the ambiguity a security model must not have.
     fs.sort();
+    // Destructured rather than subscripted: `windows(2)` always yields
+    // two-element slices, and the shape carries that instead of `[0]`/`[1]`.
     for pair in fs.windows(2) {
-        if pair[0].canonical_path == pair[1].canonical_path && pair[0].mode != pair[1].mode {
+        let [first, second] = pair else { continue };
+        if first.canonical_path == second.canonical_path && first.mode != second.mode {
             return Err(NormalizeError::ConflictingGrants {
-                subject: pair[0].canonical_path.clone(),
-                first: pair[0].mode.to_string(),
-                second: pair[1].mode.to_string(),
+                subject: first.canonical_path.clone(),
+                first: first.mode.to_string(),
+                second: second.mode.to_string(),
             });
         }
     }
@@ -786,11 +791,13 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
 #[must_use]
 fn is_absolute_host_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
+    // `.get()` rather than subscripts: short strings yield `None` instead
+    // of panicking, which is exactly the `false` the length guard produced.
+    let b = normalized.as_bytes();
     normalized.starts_with('/')
-        || (normalized.len() >= 3
-            && normalized.as_bytes()[0].is_ascii_alphabetic()
-            && normalized.as_bytes()[1] == b':'
-            && normalized.as_bytes()[2] == b'/')
+        || (b.first().is_some_and(u8::is_ascii_alphabetic)
+            && b.get(1) == Some(&b':')
+            && b.get(2) == Some(&b'/'))
 }
 
 /// Whether a declared grant path is a filesystem root.
@@ -842,9 +849,11 @@ pub fn is_filesystem_root(path: &str) -> bool {
         return collapse_dotdot(normalized.split('/'), 2).len() == 2;
     }
     let rest = if normalized.len() >= 3
-        && normalized.as_bytes()[0].is_ascii_alphabetic()
-        && normalized.as_bytes()[1] == b':'
-        && normalized.as_bytes()[2] == b'/'
+        // `.get()` rather than subscripts, as in `is_absolute_host_path`
+        // above: short strings yield `None` (false) instead of panicking.
+        && normalized.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && normalized.as_bytes().get(1) == Some(&b':')
+        && normalized.as_bytes().get(2) == Some(&b'/')
     {
         &normalized[3..]
     } else if let Some(stripped) = normalized.strip_prefix('/') {
@@ -1020,13 +1029,22 @@ pub fn path_is_within(candidate: &str, root: &str) -> bool {
 
     // Component-wise prefix: every root component must match, in order. This is
     // what makes `/var/lib/orders-evil` fail — `orders-evil` != `orders`.
-    cand[..root_parts.len()] == root_parts[..]
+    // `starts_with` rather than subscripted ranges: the length guard above
+    // bounds the comparison, and the method states it without a panic path.
+    cand.starts_with(&root_parts)
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

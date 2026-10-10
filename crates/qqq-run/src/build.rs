@@ -665,7 +665,12 @@ impl BuildPlan {
             "`only_step` was called on a plan with {} steps; use `steps` if the plan may have more",
             self.steps.len()
         );
-        &self.steps[0]
+        // Destructured rather than subscripted: the assert above makes the
+        // single step exact, and the shape carries the check.
+        let [only] = self.steps.as_slice() else {
+            unreachable!("asserted a single step above");
+        };
+        only
     }
 
     /// The directory the plan operates in, taken from its first step.
@@ -1330,12 +1335,21 @@ impl ArtifactKind {
     /// of the format that only a real artifact can refute.
     #[must_use]
     pub fn classify(bytes: &[u8]) -> Self {
-        if bytes.len() < 8 || &bytes[0..4] != b"\0asm" {
+        if bytes.len() < 8 || bytes.get(..4) != Some(b"\0asm".as_slice()) {
             return Self::NotWasm;
         }
         // Little-endian: version = bytes[4..6], layer = bytes[6..8].
-        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        let layer = u16::from_le_bytes([bytes[6], bytes[7]]);
+        // Converted as arrays: eight bytes verified above, so both
+        // conversions are exact — and a short buffer is `NotWasm`, the same
+        // verdict the length check already gives.
+        let version = bytes
+            .get(4..6)
+            .and_then(|s| <[u8; 2]>::try_from(s).ok())
+            .map_or(0, u16::from_le_bytes);
+        let layer = bytes
+            .get(6..8)
+            .and_then(|s| <[u8; 2]>::try_from(s).ok())
+            .map_or(0, u16::from_le_bytes);
         match layer {
             // A core module: version 1, no layer.
             0 if version == 1 => Self::CoreModule,
@@ -1798,6 +1812,13 @@ impl CommandOutput for BuildOutput {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,11 +2174,12 @@ mod tests {
         let opts = BuildOptions::from_flags(0, Some("x86_64-unknown-linux-gnu".to_owned()));
         let e = plan_pure(&loaded(RUST), &opts).unwrap_err();
         assert_eq!(e.code, ErrorCode::MissingTarget);
-        assert!(e
-            .remediation
-            .as_deref()
-            .unwrap_or("")
-            .contains("wasm32-wasip2"));
+        assert!(
+            e.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("wasm32-wasip2")
+        );
     }
 
     /// Whatever toolchain this test machine has, `plan` must either succeed or

@@ -82,17 +82,17 @@ impl Digest {
         // A different algorithm is refused rather than accepted. Accepting
         // `md5:` and treating the hex as opaque would mean a lockfile could
         // specify a weaker digest and nothing would notice.
-        if let Some((algo, _)) = s.split_once(':') {
-            if algo != DIGEST_ALGORITHM {
-                return Err(Error::new(
-                    ErrorCode::SignatureVerificationFailed,
-                    format!("`{algo}` is not a digest algorithm QQQ verifies"),
-                )
-                .with_remediation(format!(
-                    "only `{DIGEST_ALGORITHM}` is accepted; a weaker digest cannot be \
+        if let Some((algo, _)) = s.split_once(':')
+            && algo != DIGEST_ALGORITHM
+        {
+            return Err(Error::new(
+                ErrorCode::SignatureVerificationFailed,
+                format!("`{algo}` is not a digest algorithm QQQ verifies"),
+            )
+            .with_remediation(format!(
+                "only `{DIGEST_ALGORITHM}` is accepted; a weaker digest cannot be \
                      relied on for content addressing"
-                )));
-            }
+            )));
         }
 
         if hex.len() != 64 {
@@ -359,6 +359,13 @@ impl StoreLayout {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

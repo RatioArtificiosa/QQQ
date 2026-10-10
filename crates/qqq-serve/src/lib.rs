@@ -128,20 +128,20 @@ pub mod ws_message;
 pub use conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
 pub use cors::{Cors, CorsError, Decision, Origin, Reason};
 pub use http1::{
-    head_end, is_valid_header_name, parse_head, ParseError, RequestHead, Version, MAX_HEADERS,
-    MAX_HEADER_BYTES, MAX_HEAD_BYTES, MAX_REQUEST_BYTES, MAX_TARGET_BYTES,
+    MAX_HEAD_BYTES, MAX_HEADER_BYTES, MAX_HEADERS, MAX_REQUEST_BYTES, MAX_TARGET_BYTES, ParseError,
+    RequestHead, Version, head_end, is_valid_header_name, parse_head,
 };
 pub use response::{
-    error_response, forbids_body, from_error, method_not_allowed, not_found, parse_error_response,
-    reason_phrase, response_body_for_wire, retry_after_value, write_chunk, write_last_chunk,
-    write_response, write_response_head, write_stream_head, ErrorResponse, Failure, Response,
-    CHUNK_MAX, SPLIT_THRESHOLD,
+    CHUNK_MAX, ErrorResponse, Failure, Response, SPLIT_THRESHOLD, error_response, forbids_body,
+    from_error, method_not_allowed, not_found, parse_error_response, reason_phrase,
+    response_body_for_wire, retry_after_value, write_chunk, write_last_chunk, write_response,
+    write_response_head, write_stream_head,
 };
 pub use route::{
-    Match, Method, Params, Route, RouteTable, RouterError, MAX_PARAMS, MAX_ROUTES, WILDCARD,
+    MAX_PARAMS, MAX_ROUTES, Match, Method, Params, Route, RouteTable, RouterError, WILDCARD,
 };
-pub use server::{serve, Dispatch, Handler, RouteMatch, Served, ServerConfig};
+pub use server::{Dispatch, Handler, RouteMatch, Served, ServerConfig, serve};
 pub use stream::{
-    emit_stream_record, StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler,
+    StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler, emit_stream_record,
 };
-pub use ws::{accept_for, Handshake, HandshakeError};
+pub use ws::{Handshake, HandshakeError, accept_for};

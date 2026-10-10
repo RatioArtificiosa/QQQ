@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
+
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
 //! Real component calls, failed admission, generation lifetime, and cache reuse.
 
 use qqq_cap::resolve::GrantSet;
-use qqq_host::{config::EngineConfig, LimitSet};
+use qqq_host::{LimitSet, config::EngineConfig};
 use qqq_run::{guest_handler::GuestApp, live::LiveApp};
 use std::sync::Arc;
 
@@ -271,9 +280,11 @@ fn running_guest_is_preempted_and_capacity_is_released() {
     )
     .unwrap();
     let start = std::time::Instant::now();
-    assert!(guest
-        .handle_request(&request(), None, "test-tenant")
-        .is_err());
+    assert!(
+        guest
+            .handle_request(&request(), None, "test-tenant")
+            .is_err()
+    );
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(guest.in_flight(), 0);
     let live = LiveApp::new(guest).unwrap();
@@ -328,10 +339,11 @@ fn overlapping_generations_share_one_capacity_limit() {
         1,
         "replacement must share the old quota"
     );
-    assert!(next
-        .value()
-        .handle_request(&request(), None, "test-tenant")
-        .is_err());
+    assert!(
+        next.value()
+            .handle_request(&request(), None, "test-tenant")
+            .is_err()
+    );
     assert!(call.join().unwrap().is_err(), "old CPU work must terminate");
     assert_eq!(next.value().in_flight(), 0);
     assert_eq!(

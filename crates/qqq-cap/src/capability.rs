@@ -296,15 +296,8 @@ impl Capability {
     pub fn from_name(s: &str) -> Option<Self> {
         // Linear scan over 24 entries is faster than a map and keeps the
         // function `const`-friendly. Not a hot path (parse time only).
-        let mut i = 0;
-        while i < Self::all().len() {
-            let c = Self::all()[i];
-            if c.name() == s {
-                return Some(c);
-            }
-            i += 1;
-        }
-        None
+        // Iterated rather than subscripted: no index, no bound to state.
+        Self::all().iter().find(|c| c.name() == s).copied()
     }
 
     /// The closest known capability name to `input`, for error messages.
@@ -475,14 +468,33 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut cur = vec![0usize; b.len() + 1];
     for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
+        // `#[expect]` with a reason, here and below: both rows are allocated
+        // `b.len() + 1` two lines above and `j` ranges over `b`, so `j + 1`
+        // is always in bounds — the allocation is the bound, restated once
+        // per subscript would be noise. (The `+ 1`s are arithmetic the
+        // `arithmetic_side_effects` pass below converts to checked form.)
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "rows are b.len()+1, j ranges over b"
+        )]
+        {
+            cur[0] = i + 1;
+        }
         for (j, cb) in b.iter().enumerate() {
             let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "rows are b.len()+1, j ranges over b"
+            )]
+            {
+                cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+            }
         }
         std::mem::swap(&mut prev, &mut cur);
     }
-    prev[b.len()]
+    #[expect(clippy::indexing_slicing, reason = "prev has b.len()+1 entries")]
+    let distance = prev[b.len()];
+    distance
 }
 
 // ---------------------------------------------------------------------------

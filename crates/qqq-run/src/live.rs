@@ -12,7 +12,7 @@
 //! ```
 
 use crate::generations::{Generation, Registry};
-use crate::guest_handler::{failure_response, GuestApp};
+use crate::guest_handler::{GuestApp, failure_response};
 use qqq_core::Result;
 use std::sync::Arc;
 
@@ -279,14 +279,15 @@ mod tests {
         .unwrap();
         let live = LiveApp::new(app).unwrap();
         let before = live.acquire().unwrap();
-        assert!(live
-            .replace_checked(source.replace("\"v1\"", "\"v2\"").as_bytes(), || {
+        assert!(
+            live.replace_checked(source.replace("\"v1\"", "\"v2\"").as_bytes(), || {
                 Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::CompilationFailed,
                     "policy changed",
                 ))
             })
-            .is_err());
+            .is_err()
+        );
         assert_eq!(live.acquire().unwrap().revision(), before.revision());
         assert_eq!(live.acquire().unwrap().digest(), before.digest());
         live.replace(source.as_bytes()).unwrap();

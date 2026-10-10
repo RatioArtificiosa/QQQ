@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![warn(clippy::arithmetic_side_effects)]
 
 //! Per-tenant request limits, and the accounting that enforces them (`SRV-020`).
 //!
@@ -434,6 +435,15 @@ impl TenantLimits {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let index = self.bucket_index(tenant);
+        // `#[expect]` with a reason: the index is a hash modulo the bucket
+        // count and the table holds exactly that many buckets, so the
+        // subscript cannot fail — and a `.get()` with an else-arm would need
+        // an error for an impossible case in a function whose errors mean
+        // refusal, which would misreport a bug as a limit.
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "hash modulo bucket count over full table"
+        )]
         let bucket = &mut buckets[index];
 
         // The rollover is **lazy**: a window expires when the next request arrives rather
@@ -502,7 +512,8 @@ impl TenantLimits {
 
     /// The bucket a tenant counts in: `SipHash` under the per-process seed.
     fn bucket_index(&self, tenant: TenantKey) -> usize {
-        let in_range = self.seed.hash_one(tenant) % BUCKET_COUNT as u64;
+        let buckets = BUCKET_COUNT as u64;
+        let in_range = self.seed.hash_one(tenant).checked_rem(buckets).unwrap_or(0);
         // `in_range` is below 16,384 by construction, so this fits every
         // pointer width; the fallback names bucket zero rather than failing.
         usize::try_from(in_range).unwrap_or(0)
@@ -692,6 +703,13 @@ impl GlobalBucket {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,7 +960,7 @@ mod tests {
     ) -> (TenantKey, TenantKey) {
         let mut n = 2u32;
         while l.bucket_index(first) == l.bucket_index(second) {
-            n += 1;
+            n = n.saturating_add(1);
             second = key(n);
         }
         (first, second)
@@ -1070,10 +1088,10 @@ mod tests {
         for n in 0..100_000u32 {
             let k = key(n);
             let idx = l.bucket_index(k);
-            if let Some(prev) = seen.insert(idx, k) {
-                if prev != k {
-                    return (prev, k);
-                }
+            if let Some(prev) = seen.insert(idx, k)
+                && prev != k
+            {
+                return (prev, k);
             }
         }
         panic!("no bucket collision in 100,000 sequential keys");
@@ -1170,7 +1188,7 @@ mod tests {
         let mut used = std::collections::HashSet::new();
         let mut n = 0u32;
         while out.len() < count {
-            n += 1;
+            n = n.saturating_add(1);
             let k = key(n);
             if used.insert(l.bucket_index(k)) {
                 out.push(k);

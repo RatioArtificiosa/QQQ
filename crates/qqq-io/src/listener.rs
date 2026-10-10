@@ -600,9 +600,11 @@ mod tests {
             assert!(a.is_any_interface(), "`{s}` binds every interface");
         }
         // And a loopback address does not.
-        assert!(!ListenAddr::parse("127.0.0.1:80")
-            .unwrap()
-            .is_any_interface());
+        assert!(
+            !ListenAddr::parse("127.0.0.1:80")
+                .unwrap()
+                .is_any_interface()
+        );
     }
 
     #[test]
@@ -704,11 +706,12 @@ mod tests {
     fn an_unclosed_bracket_is_refused_with_the_right_hint() {
         let e = ListenAddr::parse("[::1:8080").unwrap_err();
         assert!(e.message.contains("bracket"), "got: {}", e.message);
-        assert!(e
-            .remediation
-            .as_deref()
-            .unwrap_or("")
-            .contains("[::1]:8080"));
+        assert!(
+            e.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("[::1]:8080")
+        );
     }
 
     #[test]
@@ -806,8 +809,10 @@ mod tests {
             detail: "too many open files".to_owned(),
         };
         assert!(e.to_string().contains("too many open files"));
-        assert!(AcceptError::ShuttingDown
-            .to_string()
-            .contains("shutting down"));
+        assert!(
+            AcceptError::ShuttingDown
+                .to_string()
+                .contains("shutting down")
+        );
     }
 }

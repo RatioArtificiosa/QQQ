@@ -22,6 +22,13 @@
 
 fn main() {
     // `TARGET` is set by Cargo for every build script. It is the full triple, not the components.
+    // `#[expect]` with a reason: without `TARGET` the script cannot name the
+    // triple, and a build script's only failure mode is failing the build —
+    // which is exactly what should happen, loudly, with the reason attached.
+    #[expect(
+        clippy::expect_used,
+        reason = "Cargo sets TARGET for every build script"
+    )]
     let target = std::env::var("TARGET").expect("Cargo sets TARGET for a build script");
     println!("cargo:rustc-env=QQQ_TARGET_TRIPLE={target}");
 

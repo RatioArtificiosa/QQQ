@@ -73,8 +73,8 @@ use std::sync::Arc;
 
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
-use qqq_host::config::EngineConfig;
 use qqq_host::LimitSet;
+use qqq_host::config::EngineConfig;
 use qqq_io::{ListenAddr, Shutdown};
 use qqq_serve::access_log::Level;
 use qqq_serve::access_log::Logger;
@@ -446,8 +446,7 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
     let mut opts = ServeOptions::default();
     let mut i = 0;
 
-    while i < args.len() {
-        let arg = args[i].as_str();
+    while let Some(arg) = args.get(i).map(String::as_str) {
         // The deterministic gate parses before the general match, so the
         // feature's flags live with the feature rather than inside it.
         if parse_deterministic_flag(&mut opts, arg) {
@@ -524,7 +523,7 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                         "serve accepts --listen, --workers, --tls, --config, \
                          --accept-limit, --deterministic and \
                          --allow-deterministic-public",
-                    ))
+                    ));
             }
         }
     }
@@ -653,24 +652,23 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // reached the check and `serve` ran on with the collision in place. Measured by the hang it
     // caused. This function runs unconditionally, and it is the one that already refuses a manifest
     // declaring no routes.
-    if let Some(metrics_path) = &opts.metrics_path {
-        if loaded
+    if let Some(metrics_path) = &opts.metrics_path
+        && loaded
             .manifest
             .server
             .routes
             .iter()
             .any(|r| r.path == *metrics_path)
-        {
-            return Err(Error::new(
-                ErrorCode::ManifestSchemaViolation,
-                format!("`--metrics-path {metrics_path}` is also a route in the manifest"),
-            )
-            .with_context("manifest", loaded.path.display().to_string())
-            .with_remediation(
-                "pick a path the application does not serve, for example `--metrics-path \
+    {
+        return Err(Error::new(
+            ErrorCode::ManifestSchemaViolation,
+            format!("`--metrics-path {metrics_path}` is also a route in the manifest"),
+        )
+        .with_context("manifest", loaded.path.display().to_string())
+        .with_remediation(
+            "pick a path the application does not serve, for example `--metrics-path \
                  /internal/metrics`",
-            ));
-        }
+        ));
     }
 
     // **A bad `--audit-log` is refused before serving, not at the first request.**

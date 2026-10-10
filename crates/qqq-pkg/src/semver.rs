@@ -153,7 +153,9 @@ impl Requirement {
         // empty", which is true of the requirement but not of what the user
         // wrote — they wrote a trailing comma.
         let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-        if parts.len() == 1 && parts[0] == "*" {
+        // Destructured rather than subscripted: exactly one part that is
+        // `"*"` is the `Any` requirement — the shape carries the check.
+        if let ["*"] = parts.as_slice() {
             return Ok(Self {
                 clauses: vec![Clause {
                     op: Op::Any,
@@ -237,7 +239,8 @@ impl Requirement {
     /// Whether this is the `*` requirement.
     #[must_use]
     pub fn is_any(&self) -> bool {
-        self.clauses.len() == 1 && self.clauses[0].op == Op::Any
+        // As above: one clause that is `Any`, matched as a shape.
+        matches!(self.clauses.as_slice(), [Clause { op: Op::Any, .. }])
     }
 }
 
@@ -400,7 +403,10 @@ fn parse_partial_version(rest: &str, whole: &str) -> Result<Version> {
     }
 
     let mut nums = [0u32; 3];
-    for (i, part) in parts.iter().enumerate() {
+    // Zipped rather than subscripted: at most three parts (checked above)
+    // fill three slots, so the pairing cannot overrun — and a short version
+    // leaves the remaining slots zero, exactly as before.
+    for (slot, part) in nums.iter_mut().zip(parts.iter()) {
         // Reject an empty component explicitly: `1..3` splits into
         // `["1", "", "3"]`, and `"".parse::<u32>()` fails with a message about
         // an empty string rather than about the malformed version.
@@ -410,15 +416,17 @@ fn parse_partial_version(rest: &str, whole: &str) -> Result<Version> {
                 &format!("`{rest}` has an empty component; expected `major.minor.patch`"),
             ));
         }
-        nums[i] = part
+        *slot = part
             .parse::<u32>()
             .map_err(|_| bad(whole, &format!("`{part}` in `{rest}` is not a number")))?;
     }
 
+    // Destructured: the array is exactly three slots by type.
+    let [major, minor, patch] = nums;
     Ok(Version {
-        major: nums[0],
-        minor: nums[1],
-        patch: nums[2],
+        major,
+        minor,
+        patch,
     })
 }
 

@@ -45,7 +45,7 @@
 //! "this report is in a format I do not recognise".
 
 use qqq_core::Error;
-use qqq_debug::{render_frames, resolve_frames, ReportedFrame, ResolveReport, SourceMap};
+use qqq_debug::{ReportedFrame, ResolveReport, SourceMap, render_frames, resolve_frames};
 
 /// Extract a source map from an artifact, degrading to an empty map.
 ///
@@ -138,39 +138,39 @@ pub fn parse_frame(cause: &str) -> Option<ReportedFrame> {
     // Form 1: `func (file:line)`. The location is the last parenthesised group;
     // a function name may itself contain parentheses (Rust closures render as
     // `foo::{{closure}}`), so the *last* `(` is the delimiter, not the first.
-    if text.ends_with(')') {
-        if let Some(open) = text.rfind(" (") {
-            let func = text[..open].trim();
-            let inner = &text[open + 2..text.len() - 1];
-            if !func.is_empty() {
-                if let Some((file, line)) = split_location(inner) {
-                    return Some(ReportedFrame {
-                        module: None,
-                        func: func.to_owned(),
-                        // The engine resolved this, so no offset is reported --
-                        // and inventing one would be a guess.
-                        offset: None,
-                        file: Some(file),
-                        line: Some(line),
-                    });
-                }
-            }
+    if text.ends_with(')')
+        && let Some(open) = text.rfind(" (")
+    {
+        let func = text[..open].trim();
+        let inner = &text[open + 2..text.len() - 1];
+        if !func.is_empty()
+            && let Some((file, line)) = split_location(inner)
+        {
+            return Some(ReportedFrame {
+                module: None,
+                func: func.to_owned(),
+                // The engine resolved this, so no offset is reported --
+                // and inventing one would be a guess.
+                offset: None,
+                file: Some(file),
+                line: Some(line),
+            });
         }
     }
 
     // Form 2: `func+0xoffset`.
-    if let Some((func, offset)) = text.rsplit_once("+0x") {
-        if let Ok(offset) = u64::from_str_radix(offset, 16) {
-            let func = func.trim();
-            if !func.is_empty() {
-                return Some(ReportedFrame {
-                    module: None,
-                    func: func.to_owned(),
-                    offset: Some(offset),
-                    file: None,
-                    line: None,
-                });
-            }
+    if let Some((func, offset)) = text.rsplit_once("+0x")
+        && let Ok(offset) = u64::from_str_radix(offset, 16)
+    {
+        let func = func.trim();
+        if !func.is_empty() {
+            return Some(ReportedFrame {
+                module: None,
+                func: func.to_owned(),
+                offset: Some(offset),
+                file: None,
+                line: None,
+            });
         }
     }
 
@@ -255,12 +255,19 @@ pub fn resolve_error(err: &Error, map: &SourceMap) -> ResolvedBacktrace {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use qqq_core::ErrorCode;
-    use qqq_debug::source_map::LineEntry;
     use qqq_debug::FrameLocation;
+    use qqq_debug::source_map::LineEntry;
 
     fn entry(address: u64, file: &str, line: u32) -> LineEntry {
         LineEntry {

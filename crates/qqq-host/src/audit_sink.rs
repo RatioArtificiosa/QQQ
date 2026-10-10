@@ -212,13 +212,13 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
                 dropped_partial_line: false,
                 complete_bytes: 0,
                 quarantined_to: None,
-            })
+            });
         }
         Err(e) => {
             return Err(SinkError::Io {
                 path: path.to_path_buf(),
                 reason: e.to_string(),
-            })
+            });
         }
     };
 
@@ -450,13 +450,13 @@ impl AuditFile {
     ///
     /// `already` is how many records the file holds, which the **loader** measured; see the field.
     pub fn open(path: &Path, already: usize) -> Result<Self, SinkError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                create_dir_restricted(parent).map_err(|e| SinkError::Io {
-                    path: path.to_path_buf(),
-                    reason: format!("its directory could not be created: {e}"),
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            create_dir_restricted(parent).map_err(|e| SinkError::Io {
+                path: path.to_path_buf(),
+                reason: format!("its directory could not be created: {e}"),
+            })?;
         }
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
@@ -2130,9 +2130,16 @@ fn write_record_line(
 }
 
 #[cfg(test)]
+// Test indexing (F-18): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 mod tests {
     use super::*;
-    use crate::audit::{genesis_digest, Outcome};
+    use crate::audit::{Outcome, genesis_digest};
     use crate::tenant::{ComponentDigest, GrantDigest};
     use qqq_cap::capability::Capability;
 

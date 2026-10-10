@@ -58,17 +58,17 @@ pub use capability::{
 };
 pub use egress::{Decision, Denial, Destination, EgressPolicy, Scheme, TenantEgress, TenantId};
 pub use manifest::{
-    group_by_namespace, ByteSize, Capabilities, ClockCapability, CryptoCapability, DnsCapability,
-    EnvCapability, FsCapability, FsMode, HttpCapability, Manifest, ManifestError, Package,
+    ByteSize, Capabilities, ClockCapability, CryptoCapability, DnsCapability, EnvCapability,
+    FsCapability, FsMode, HttpCapability, Manifest, ManifestError, Package, group_by_namespace,
 };
 pub use normalize::{
-    is_filesystem_root, path_is_within, FsGrant, HostEnv, HostPattern, NormalizeError, Normalized,
-    RealEnv, SecretRef,
+    FsGrant, HostEnv, HostPattern, NormalizeError, Normalized, RealEnv, SecretRef,
+    is_filesystem_root, path_is_within,
 };
 pub use policy::{
-    glob_match, Binding, Compare, Expr, Field, Literal, Policy, PolicyError, RequirementOutcome,
-    Rule, Selector, TerminationProof, Verb, MAX_EXPR_DEPTH, MAX_RULES, MAX_SOURCE_BYTES,
+    Binding, Compare, Expr, Field, Literal, MAX_EXPR_DEPTH, MAX_RULES, MAX_SOURCE_BYTES, Policy,
+    PolicyError, RequirementOutcome, Rule, Selector, TerminationProof, Verb, glob_match,
 };
 pub use resolve::{
-    denial, CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode,
+    CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode, denial,
 };

@@ -543,10 +543,10 @@ impl Methodology {
         if harness_source.trim().is_empty() {
             return Err(MethodologyError::BlankHarnessSource);
         }
-        if let Warmup::None { justification } = &warmup {
-            if justification.trim().is_empty() {
-                return Err(MethodologyError::UnjustifiedNoWarmup);
-            }
+        if let Warmup::None { justification } = &warmup
+            && justification.trim().is_empty()
+        {
+            return Err(MethodologyError::UnjustifiedNoWarmup);
         }
         // Both zero-valued warmups mean the same thing: the caller described a
         // warmup that does no work. Clippy is right that two arms with identical
@@ -883,15 +883,17 @@ mod tests {
     fn a_complete_environment_is_accepted() {
         // The control. Without it, every assertion above would still pass if the
         // constructor rejected everything.
-        assert!(Environment::new(
-            "AMD Ryzen 9 7950X",
-            16,
-            1,
-            "Ubuntu 24.04.1 LTS",
-            "6.8.0-45-generic",
-            BTreeMap::from([("rustc".to_owned(), "1.98.0".to_owned())])
-        )
-        .is_ok());
+        assert!(
+            Environment::new(
+                "AMD Ryzen 9 7950X",
+                16,
+                1,
+                "Ubuntu 24.04.1 LTS",
+                "6.8.0-45-generic",
+                BTreeMap::from([("rustc".to_owned(), "1.98.0".to_owned())])
+            )
+            .is_ok()
+        );
     }
 
     // -- Warmup -------------------------------------------------------------
@@ -942,19 +944,21 @@ mod tests {
     #[test]
     fn a_justified_no_warmup_is_accepted() {
         // The control for the test above. A cold-start row is the real case.
-        assert!(Methodology::new(
-            env(),
-            Warmup::None {
-                justification: std::borrow::Cow::Borrowed(
-                    "cold start: warming would measure the opposite",
-                ),
-            },
-            Concurrency::Sequential,
-            3,
-            non_claims(),
-            "https://github.com/RatioArtificiosa/QQQ",
-        )
-        .is_ok());
+        assert!(
+            Methodology::new(
+                env(),
+                Warmup::None {
+                    justification: std::borrow::Cow::Borrowed(
+                        "cold start: warming would measure the opposite",
+                    ),
+                },
+                Concurrency::Sequential,
+                3,
+                non_claims(),
+                "https://github.com/RatioArtificiosa/QQQ",
+            )
+            .is_ok()
+        );
     }
 
     // -- Methodology --------------------------------------------------------
@@ -982,15 +986,17 @@ mod tests {
     fn exactly_three_repetitions_is_the_boundary_and_is_accepted() {
         // The boundary case: 3 is required, so 3 must pass. An off-by-one using
         // `<=` would reject the one value §9.1 demands.
-        assert!(Methodology::new(
-            env(),
-            Warmup::Discard { iterations: 100 },
-            Concurrency::Fixed { connections: 8 },
-            Methodology::REQUIRED_REPETITIONS,
-            non_claims(),
-            "https://github.com/RatioArtificiosa/QQQ",
-        )
-        .is_ok());
+        assert!(
+            Methodology::new(
+                env(),
+                Warmup::Discard { iterations: 100 },
+                Concurrency::Fixed { connections: 8 },
+                Methodology::REQUIRED_REPETITIONS,
+                non_claims(),
+                "https://github.com/RatioArtificiosa/QQQ",
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1054,8 +1060,10 @@ mod tests {
         .expect("non-blank");
         assert_eq!(claims.len(), 2);
         assert!(!claims.is_empty());
-        assert!(NonClaims::unqualified("nothing")
-            .expect("non-blank")
-            .is_empty());
+        assert!(
+            NonClaims::unqualified("nothing")
+                .expect("non-blank")
+                .is_empty()
+        );
     }
 }

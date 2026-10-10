@@ -172,7 +172,7 @@ impl Handshake {
             other => {
                 return Err(HandshakeError::UnsupportedVersion {
                     got: other.map(str::to_owned),
-                })
+                });
             }
         }
 

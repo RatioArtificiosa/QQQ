@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! Drive the load generator against a real listener, over a real socket.
 //!
 //! # Why this is an integration test and not a unit test
@@ -18,7 +27,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use qqq_bench::loadgen::{drive, one_request, parse_response, Limit, Plan};
+use qqq_bench::loadgen::{Limit, Plan, drive, one_request, parse_response};
 use qqq_bench::methodology::Concurrency;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

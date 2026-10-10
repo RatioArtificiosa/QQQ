@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! Hardening tests — `SEC-019`.
 //!
 //! # Why these tests re-execute the test binary
@@ -42,9 +51,9 @@
 use std::process::Command;
 
 use qqq_sys::harden::{
-    harden, host_capabilities, landlock_available, mpk_support, HardenPolicy, HardenReport,
-    SeccompProfile, Step, StepOutcome, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK,
-    STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP,
+    HardenPolicy, HardenReport, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK, STEP_NO_NEW_PRIVS,
+    STEP_ORDER, STEP_SECCOMP, SeccompProfile, Step, StepOutcome, harden, host_capabilities,
+    landlock_available, mpk_support,
 };
 
 /// The environment variable that turns this binary into a hardening child.
@@ -234,7 +243,7 @@ fn harden_child_entry_point() {
 /// `"indeterminate:<errno>"`.
 #[cfg(target_os = "linux")]
 fn probe_denied_syscall() -> String {
-    use nix::sys::uio::{process_vm_readv, RemoteIoVec};
+    use nix::sys::uio::{RemoteIoVec, process_vm_readv};
     use std::io::IoSliceMut;
     let pid = nix::unistd::getpid();
 
@@ -973,9 +982,11 @@ fn the_default_policy_is_safe_to_apply_in_process() {
         .map(|i| u8::try_from(i % 251).expect("i % 251 is in 0..=250"))
         .collect();
     assert_eq!(v.len(), 1000);
-    assert!(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .is_ok());
+    assert!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .is_ok()
+    );
 }
 
 /// A second application of the default policy is idempotent.

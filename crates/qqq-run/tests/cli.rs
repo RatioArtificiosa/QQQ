@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! End-to-end tests that run the **real `qqqai` binary** and inspect its output.
 //!
 //! # Why these exist, and why they are separate from the unit tests
@@ -2075,8 +2084,7 @@ const READS_WALL_CLOCK: &str = r#"(component
 /// `--cap clock.wall` against a manifest that grants nothing is refused — and that refusal is the subject
 /// of `run_refuses_an_ungranted_import_and_names_the_right_capability` below, not a defect. **A manifest
 /// that grants nothing has nothing to narrow.**
-const CLOCK_GRANTED: &str =
-    "[package]\nname = \"replay-fixture\"\nversion = \"0.1.0\"\n\n[capabilities.clock]\nwall = true\n";
+const CLOCK_GRANTED: &str = "[package]\nname = \"replay-fixture\"\nversion = \"0.1.0\"\n\n[capabilities.clock]\nwall = true\n";
 
 /// **`--replay` reproduces a recorded execution, and a log that runs out is a failure rather than a
 /// fallback to the real clock** — Checklist `TEST-006`, and Gate 1's *"`--replay` reproduces it"*.

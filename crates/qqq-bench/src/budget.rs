@@ -493,7 +493,7 @@ impl Budget {
                 return Err(BudgetError::NotATimeBudget {
                     item: self.item,
                     unit: other,
-                })
+                });
             }
         };
         self.meets(&measured)
@@ -673,6 +673,13 @@ impl fmt::Display for Verdict {
     }
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,11 +784,11 @@ mod tests {
                 let path = entry.path();
                 if path.is_dir() {
                     walk(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        out.push_str(&text);
-                        out.push('\n');
-                    }
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                {
+                    out.push_str(&text);
+                    out.push('\n');
                 }
             }
         }

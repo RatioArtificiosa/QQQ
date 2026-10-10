@@ -47,8 +47,8 @@ use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
-use wasmtime::component::Linker;
 use wasmtime::StoreLimits;
+use wasmtime::component::Linker;
 
 /// The host-state type every store carries.
 ///
@@ -274,6 +274,9 @@ impl Default for StoreData {
         // The bundle form keeps one construction path for outputs with and
         // without a tenant parent; the clones are dropped here because no
         // tenant budget is linked and nothing observes them.
+        // `#[expect]` with a reason — documented `# Panics` contract, same as
+        // `new_with_tenant_output`: an empty environment always builds.
+        #[expect(clippy::expect_used, reason = "empty grants and env always build")]
         let (wasi, _stdout, _stderr) =
             crate::host_wasi::context_with_tenant_output(&GrantSet::empty(), &[], None)
                 .expect("an empty grant set and empty environment always build");
@@ -354,6 +357,9 @@ impl StoreData {
         let budget = tenant_output
             .as_ref()
             .map(|guard| std::sync::Arc::clone(guard.budget()));
+        // `#[expect]` with a reason: the documented `# Panics` contract —
+        // an empty environment always builds.
+        #[expect(clippy::expect_used, reason = "empty environment always builds")]
         let (wasi, _stdout, _stderr) =
             crate::host_wasi::context_with_tenant_output(&grants, &[], budget.as_ref())
                 .expect("an empty environment cannot fail to build");
@@ -455,6 +461,11 @@ impl StoreData {
         // documents: the context borrows `grants`, and a borrow inside a literal that
         // also moves it is rejected. The bundle form keeps one construction
         // path; with no tenant budget the returned outputs are dropped unused.
+        // `#[expect]` with a reason: an injected test environment always builds.
+        #[expect(
+            clippy::expect_used,
+            reason = "injected test environment always builds"
+        )]
         let (wasi, _stdout, _stderr) =
             crate::host_wasi::context_with_tenant_output(&grants, env, None)
                 .expect("building a context from an injected environment cannot fail");
@@ -1264,6 +1275,13 @@ pub fn recheck(data: &StoreData, capability: Capability) -> Option<qqq_core::Err
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

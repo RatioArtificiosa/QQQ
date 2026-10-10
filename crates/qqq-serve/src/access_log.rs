@@ -673,11 +673,7 @@ impl Format {
     /// ```
     #[must_use]
     pub const fn for_terminal(is_terminal: bool) -> Self {
-        if is_terminal {
-            Self::Human
-        } else {
-            Self::Json
-        }
+        if is_terminal { Self::Human } else { Self::Json }
     }
 
     /// Parse a format from its CLI spelling.
@@ -863,6 +859,13 @@ fn json_string(s: &str) -> String {
     out
 }
 
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

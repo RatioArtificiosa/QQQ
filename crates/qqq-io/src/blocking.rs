@@ -32,8 +32,8 @@
 //! The cost is one thread. For a process whose whole job is to serve until
 //! interrupted, that is the correct trade.
 
-use std::future::Future;
-
+// Edition 2024 puts `Future` in the prelude, so the explicit import is
+// redundant here.
 use qqq_core::{Error, ErrorCode, Result};
 
 /// Run a future to completion on a fresh current-thread runtime.

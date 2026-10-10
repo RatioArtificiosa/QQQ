@@ -71,6 +71,6 @@ pub mod extract;
 pub mod resolve;
 pub mod source_map;
 
-pub use extract::{extract, ExtractionReport};
-pub use resolve::{render_frames, resolve_frames, ReportedFrame, ResolveReport};
+pub use extract::{ExtractionReport, extract};
+pub use resolve::{ReportedFrame, ResolveReport, render_frames, resolve_frames};
 pub use source_map::{FrameLocation, SourceMap};

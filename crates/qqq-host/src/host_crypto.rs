@@ -45,13 +45,13 @@
 //!   never falls back to a weaker generator. Predictable "randomness" is worse
 //!   than an error, because the guest would not know to stop.
 
-use wasmtime::component::{Linker, ResourceAny};
 use wasmtime::StoreContextMut;
+use wasmtime::component::{Linker, ResourceAny};
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 
-use crate::ambient::{hash_data, HostCallError};
+use crate::ambient::{HostCallError, hash_data};
 use crate::linker::StoreData;
 
 /// The WIT package this module implements.

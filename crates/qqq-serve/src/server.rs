@@ -63,7 +63,7 @@ use crate::limits::{GlobalBucket, GlobalBudget};
 use crate::response::{self, Response};
 use crate::route::RouteTable;
 use crate::ws::{loopback_host_allowed, upgrade_origin_allowed};
-use qqq_host::tenant::{tenant_key, tenant_label, TenantKey};
+use qqq_host::tenant::{TenantKey, tenant_key, tenant_label};
 
 /// How the server behaves.
 #[derive(Debug, Clone)]
@@ -800,19 +800,19 @@ pub async fn serve(
                 // The process-wide connection budget first: it is the cheapest
                 // check and the broadest, so it sheds rotation floods before
                 // the per-tenant ledger spends a slot lookup on them.
-                if let Some(budget) = &shared.global_connections {
-                    if !budget.admit(std::time::Instant::now()) {
-                        if let Some(m) = shared.metrics.as_deref() {
-                            m.record_global_connection_refusal();
-                        }
-                        let _ = close_immediately(stream, 503).await;
-                        // A refusal is still an accept: without this the bound
-                        // never sees globally-refused connections, and the
-                        // ledger path's lesson (`tests/accept_bound.rs`) repeats
-                        // one layer out.
-                        stop_after_the_bound(limit, &accepted, &shutdown_for_task);
-                        return;
+                if let Some(budget) = &shared.global_connections
+                    && !budget.admit(std::time::Instant::now())
+                {
+                    if let Some(m) = shared.metrics.as_deref() {
+                        m.record_global_connection_refusal();
                     }
+                    let _ = close_immediately(stream, 503).await;
+                    // A refusal is still an accept: without this the bound
+                    // never sees globally-refused connections, and the
+                    // ledger path's lesson (`tests/accept_bound.rs`) repeats
+                    // one layer out.
+                    stop_after_the_bound(limit, &accepted, &shutdown_for_task);
+                    return;
                 }
                 {
                     let mut l = ledger.lock().await;
@@ -2298,31 +2298,30 @@ async fn serve_special_route(
         return Some(served);
     }
 
-    if head.method == crate::route::Method::Options {
-        if let Some(requested) = head.header("access-control-request-method") {
-            if let Some(cors) = ctx.cors {
-                *span_seq += 1;
-                if special_route_has_body(head) {
-                    return Some(reject_special_route_body(stream, head).await);
-                }
-                return Some(
-                    serve_preflight(
-                        stream,
-                        head,
-                        path,
-                        PreflightRequest {
-                            cors,
-                            requested_method: requested,
-                            requested_headers: head.header("access-control-request-headers"),
-                        },
-                        ctx,
-                        tenant,
-                        *span_seq,
-                    )
-                    .await,
-                );
-            }
+    if head.method == crate::route::Method::Options
+        && let Some(requested) = head.header("access-control-request-method")
+        && let Some(cors) = ctx.cors
+    {
+        *span_seq += 1;
+        if special_route_has_body(head) {
+            return Some(reject_special_route_body(stream, head).await);
         }
+        return Some(
+            serve_preflight(
+                stream,
+                head,
+                path,
+                PreflightRequest {
+                    cors,
+                    requested_method: requested,
+                    requested_headers: head.header("access-control-request-headers"),
+                },
+                ctx,
+                tenant,
+                *span_seq,
+            )
+            .await,
+        );
     }
 
     let m = table.match_route(head.method, path)?;
@@ -2399,10 +2398,10 @@ fn stop_after_the_bound(
     accepted: &std::sync::atomic::AtomicU64,
     shutdown: &Shutdown,
 ) {
-    if let Some(limit) = limit {
-        if accepted.load(std::sync::atomic::Ordering::SeqCst) >= limit {
-            shutdown.signal();
-        }
+    if let Some(limit) = limit
+        && accepted.load(std::sync::atomic::Ordering::SeqCst) >= limit
+    {
+        shutdown.signal();
     }
 }
 
@@ -2479,14 +2478,14 @@ async fn refuse_before_reading(
     // on a request the process cannot serve. The refusal is 503 with
     // `Retry-After` (load shedding, like pool exhaustion) and unkeyed in the
     // metric (the tenant is untrustworthy exactly when this fires).
-    if let Some(budget) = ctx.global_requests {
-        if !budget.admit(Instant::now()) {
-            if let Some(m) = ctx.metrics {
-                m.record_global_request_refusal();
-            }
-            *span_seq += 1;
-            return Some(refuse_global(stream, head, path, tenant, ctx, *span_seq).await);
+    if let Some(budget) = ctx.global_requests
+        && !budget.admit(Instant::now())
+    {
+        if let Some(m) = ctx.metrics {
+            m.record_global_request_refusal();
         }
+        *span_seq += 1;
+        return Some(refuse_global(stream, head, path, tenant, ctx, *span_seq).await);
     }
 
     // --- Per-tenant limits -------------------------------------------------
@@ -2499,16 +2498,16 @@ async fn refuse_before_reading(
     if let Some(limits) = ctx.limits {
         // The **declared** length first. A client understating it is caught by the streaming
         // count in `drain_body`; a client stating it honestly pays nothing to find out.
-        if let Some(declared) = head.content_length {
-            if limits.check_body(tenant_key, declared).is_err() {
-                if let Some(m) = ctx.metrics {
-                    let label = ctx.tenant_labels.label(tenant);
-                    m.record_body_limit(label.as_str());
-                }
-                return Some(
-                    refuse_limits(stream, head, path, tenant, ctx, *span_seq + 1, false).await,
-                );
+        if let Some(declared) = head.content_length
+            && limits.check_body(tenant_key, declared).is_err()
+        {
+            if let Some(m) = ctx.metrics {
+                let label = ctx.tenant_labels.label(tenant);
+                m.record_body_limit(label.as_str());
             }
+            return Some(
+                refuse_limits(stream, head, path, tenant, ctx, *span_seq + 1, false).await,
+            );
         }
         // §4.4 step 8, **on both outcomes**: a check that passed is a stage that ran, and emitting
         // only on refusal would make the spans describe failures rather than the request.
@@ -2522,24 +2521,24 @@ async fn refuse_before_reading(
     }
 
     // --- The route's authentication policy ---------------------------------
-    if let Some(policy) = ctx.auth {
-        if let Some(matched) = table.match_route(head.method, path) {
-            // §4.4 step 5, **on both outcomes**, for the same reason as step 8 above.
-            let policy_started = Instant::now();
-            let decision = policy.decide(&matched);
-            let refused = matches!(decision, crate::auth::Decision::Refuse { .. });
-            emit_span(
-                ctx,
-                tenant,
-                5,
-                *span_seq,
-                micros_since(policy_started),
-                refused,
-            );
-            if let crate::auth::Decision::Refuse { mode } = decision {
-                *span_seq += 1;
-                return Some(refuse_auth(stream, head, path, tenant, ctx, *span_seq, mode).await);
-            }
+    if let Some(policy) = ctx.auth
+        && let Some(matched) = table.match_route(head.method, path)
+    {
+        // §4.4 step 5, **on both outcomes**, for the same reason as step 8 above.
+        let policy_started = Instant::now();
+        let decision = policy.decide(&matched);
+        let refused = matches!(decision, crate::auth::Decision::Refuse { .. });
+        emit_span(
+            ctx,
+            tenant,
+            5,
+            *span_seq,
+            micros_since(policy_started),
+            refused,
+        );
+        if let crate::auth::Decision::Refuse { mode } = decision {
+            *span_seq += 1;
+            return Some(refuse_auth(stream, head, path, tenant, ctx, *span_seq, mode).await);
         }
     }
 
@@ -2885,7 +2884,17 @@ async fn read_head(
 
     loop {
         if let Some(end) = http1::head_end_from(buf, scanned) {
-            return match http1::parse_head(&buf[..end]) {
+            // Bound on a `let`: `#[expect]` does not apply to expression
+            // statements, so the reason lives where the lint can see it.
+            // `head_end_from` returns an index into `buf` by contract.
+            #[expect(
+                clippy::expect_used,
+                reason = "head_end_from returns an index into buf"
+            )]
+            let head_bytes: &[u8] = buf
+                .get(..end)
+                .expect("head_end_from returns an index into buf");
+            return match http1::parse_head(head_bytes) {
                 Ok((head, _consumed)) => {
                     // Keep the remainder: it is the start of the body and must
                     // not be discarded, or the next read would re-fetch bytes
@@ -2910,10 +2919,10 @@ async fn read_head(
         //     stalled. `Connection` does not model this, because it is a
         //     property of the *read* rather than of the connection, so the
         //     deadline is kept here.
-        if let Some(started) = header_started {
-            if Instant::now().duration_since(started) >= config.header_timeout {
-                return Err(ReadOutcome::HeaderTimeout);
-            }
+        if let Some(started) = header_started
+            && Instant::now().duration_since(started) >= config.header_timeout
+        {
+            return Err(ReadOutcome::HeaderTimeout);
         }
 
         let mut chunk = [0u8; 8192];
@@ -2941,7 +2950,11 @@ async fn read_head(
                 // full head arriving in one read would miss its own
                 // terminator, which is what the socket test caught.
                 scanned = buf.len().saturating_sub(3);
-                buf.extend_from_slice(&chunk[..n]);
+                // Bound on a `let`, as above: `read` returns at most the
+                // buffer length by contract.
+                #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+                let fresh: &[u8] = chunk.get(..n).expect("read returns at most chunk len");
+                buf.extend_from_slice(fresh);
                 // The head ceiling is enforced by the *parser*, not here: it is
                 // the parser that knows the limit and that a body may legally
                 // exceed it. Duplicating the check would give two limits, and a

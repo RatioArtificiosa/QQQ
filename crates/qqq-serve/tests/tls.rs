@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Test-setup idiom (`F-18`): fixtures unwrap, assertions index vectors
+// built inline above. One file-level reason, not per-site noise;
+// shipping code carries no such allowance.
+#![allow(
+    clippy::expect_used,
+    reason = "test setup unwraps fixtures and indexes inline vectors"
+)]
+
 //! TLS and mTLS, driven by **real handshakes** in process.
 //!
 //! Implements the test half of `SRV-007`, `SRV-008` and `SEC-017`; Proposal §6.4
@@ -53,8 +61,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use qqq_core::ErrorCode;
 use qqq_serve::tls::{
-    CertificateSource, ClientAuth, Negotiated, PeerIdentity, ResolvedCertificate, TlsConfig,
-    ALPN_H2, ALPN_HTTP11, CIPHER_SUITES, PROTOCOL_VERSIONS,
+    ALPN_H2, ALPN_HTTP11, CIPHER_SUITES, CertificateSource, ClientAuth, Negotiated,
+    PROTOCOL_VERSIONS, PeerIdentity, ResolvedCertificate, TlsConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -1076,14 +1084,18 @@ async fn required_client_auth_refuses_an_untrusted_client_certificate() {
 fn the_two_client_auth_modes_differ_in_mandatory_status() {
     assert!(!ClientAuth::None.is_required());
     assert!(!ClientAuth::None.requests_certificate());
-    assert!(ClientAuth::Required {
-        ca_file: "ca.pem".into()
-    }
-    .is_required());
-    assert!(!ClientAuth::Optional {
-        ca_file: "ca.pem".into()
-    }
-    .is_required());
+    assert!(
+        ClientAuth::Required {
+            ca_file: "ca.pem".into()
+        }
+        .is_required()
+    );
+    assert!(
+        !ClientAuth::Optional {
+            ca_file: "ca.pem".into()
+        }
+        .is_required()
+    );
 }
 
 // ---------------------------------------------------------------------------

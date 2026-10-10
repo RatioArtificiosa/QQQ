@@ -147,7 +147,7 @@ impl Policy {
                 }
                 let scale = 10u32.pow(
                     u32::try_from(frac.len())
-                        .expect("the check above bounds the length by FRACTION_DIGITS"),
+                        .map_err(|_| format!("`{s}` has a fractional part no `u32` can count"))?,
                 );
                 let whole: u32 = whole.parse().map_err(|_| format!("`{s}` is not a rate"))?;
                 let frac: u32 = frac.parse().map_err(|_| format!("`{s}` is not a rate"))?;
@@ -197,11 +197,7 @@ impl Policy {
             b = a % b;
             a = t;
         }
-        if a == 0 {
-            1
-        } else {
-            a
-        }
+        if a == 0 { 1 } else { a }
     }
 
     /// The bucket a trace falls in, in `0..denominator`.

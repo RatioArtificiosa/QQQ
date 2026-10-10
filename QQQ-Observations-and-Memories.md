@@ -36861,4 +36861,24 @@ Generalisable rule: a file-level lint is a control believed live - prove
 what it does not cover by grepping for the pattern, not by the gate's
 silence; and a review finding about uncovered code is fixed by converting,
 not by extending the allow. → `crates/qqq-host/src/guest_output.rs`, `crates/qqq-host/src/pool.rs`.
+## §O-609 - F-18 follow-up: the local gate cannot see Linux-only code, and edition 2024 lit the fuse
+
+Ubuntu CI failed clippy on a `collapsible_if` in a
+`#[cfg(target_os = "linux")]`-gated test (`qqq-sys/tests/harden.rs`,
+`nix_uid`) while Windows and macOS were green on the same invocation
+and toolchain: macOS is unix but not linux, so only the ubuntu job
+compiles the region. The nesting predates this wave - edition 2024
+stabilised let-chains, which made the pre-existing nesting newly
+collapsible, so the migration invalidated every platform-specific
+green it never re-proved. The fix is the same collapse; since no
+Linux machine is at hand, `cargo fmt` (which parses cfg'd-out code
+and failed loudly on the brace repairs) plus a standalone rustc
+syntax-and-type check of the snippet stand in, with ubuntu CI as the
+verifier. Generalisable rule: `clippy --workspace` is three gates,
+one per OS - a local `-D warnings` proves Windows only, and an
+edition migration re-opens every cfg-gated region on every platform.
+A companion environmental miss in the same run (PERF-020: the fleet
+dealt an 8370C runner with no reviewed baseline) followed the
+documented record-new-baseline process with measured review, not a
+retry. → `crates/qqq-sys/tests/harden.rs`, `.github/perf/baseline.json`.
 *End of `QQQ-Observations-and-Memories.md`.*

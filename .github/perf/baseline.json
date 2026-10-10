@@ -653,5 +653,87 @@
    "samples": 3,
    "schema_version": 1
   }
-  ]
+  ,
+ {
+  "budget_misses": [
+   "hello",
+   "json",
+   "multi",
+   "tailp99"
+  ],
+  "commit": "c0af6fed49de7f162786800e0a707321fd6f2dfd",
+  "does_not_measure": [
+   "run on Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz by a harness measuring itself; a p99 includes the client's own syscall and scheduling cost, not only the server's",
+   "HTTP/1.1 with `Connection: close`: every request opens a connection, so this does not measure keep-alive or HTTP/2 reuse",
+   "the reference application's `db` row reads an in-guest store, not a Postgres round trip: the host has no `qqq:sql` implementation (O-155)"
+  ],
+  "environment": {
+   "cpu_model": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+   "kernel": "6.17.0-1022-azure",
+   "memory_bytes": 16765374464,
+   "os": "linux x86_64",
+   "physical_cores": 4,
+   "toolchains": {
+    "qqqai": "0.1.1",
+    "rustc": "unknown"
+   }
+  },
+  "harness_source": "https://github.com/RatioArtificiosa/QQQ",
+  "measured_budget_items": [
+   "PERF-002",
+   "PERF-010",
+   "PERF-011"
+  ],
+  "metrics": {
+   "hello": {
+    "median": 534850.0,
+    "metric": "p99_nanos",
+    "samples": [
+     570915.0,
+     516015.0,
+     534850.0
+    ]
+   },
+   "json": {
+    "median": 2040.1069064165486,
+    "metric": "requests_per_second",
+    "samples": [
+     2513.406671415003,
+     1982.821897835336,
+     2040.1069064165486
+    ]
+   },
+   "multi": {
+    "median": 17575.532272126493,
+    "metric": "requests_per_second",
+    "samples": [
+     16881.081990493236,
+     17575.532272126493,
+     17731.697264071194
+    ]
+   },
+   "tailp99": {
+    "median": 4456099.0,
+    "metric": "p99_nanos",
+    "samples": [
+     4641010.0,
+     4456099.0,
+     4408649.0
+    ]
+   }
+  },
+  "not_measured_budget_items": [
+   "PERF-003",
+   "PERF-004",
+   "PERF-007",
+   "PERF-008",
+   "PERF-009",
+   "PERF-012",
+   "PERF-013"
+  ],
+  "profile": "ubuntu-latest",
+  "samples": 3,
+  "schema_version": 1
+ }
+]
 }

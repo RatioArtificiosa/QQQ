@@ -301,12 +301,11 @@ fn nix_uid() -> u32 {
         .unwrap_or_default()
         .lines()
     {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            if let Some(first) = rest.split_whitespace().next() {
-                if let Ok(v) = first.parse::<u32>() {
-                    return v;
-                }
-            }
+        if let Some(rest) = line.strip_prefix("Uid:")
+            && let Some(first) = rest.split_whitespace().next()
+            && let Ok(v) = first.parse::<u32>()
+        {
+            return v;
         }
     }
     0

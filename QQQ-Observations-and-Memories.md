@@ -37393,4 +37393,57 @@ unifying CI behind a runner, inventory everything the steps *assume*
 list is the visible half, and the provisioning half is what the first
 green run forgets.
  → `.github/workflows/ci.yml`, `README.md`.
+## §O-643 - I-08 review round sixteen: a finding whose numbers match nothing, rebutted with the resolver
+
+Review claimed the stability register row should read 137 distinct
+`§O` headings with highest `§O-139`. The live row reads 501 / `§O-642`,
+and the figure is not hand-copied: `check_doc_claims.py` derives it
+from four register forms (code fences stripped, suffixed and bare
+variants counted) and the gate enforces it 23/23. An independent count
+of the highest identifier alone gives 642, disproving `§O-139`
+outright, and no register form yields 137. No code changed; the
+evidence is the resolver plus the green claims gate, and the finding
+is recorded as review noise rather than fixed. Generalisable rule: a
+review number that matches no derivation in the tree is rebutted with
+the derivation, not chased — running down a phantom count would mean
+editing a page its own gate proves correct.
+ → `docs/stability.md`.
+## §O-644 - I-08 first CI run, continued: the parallel wave outran the build, and paths compared as strings
+
+Two more causes behind the three red Rust jobs. (1) `check_error_standard`
+shells the prebuilt `target/debug/qqqai` but rode the parallel wave
+ahead of `build` — green locally only because the binary lingered from
+earlier builds; on cold runners all three platforms failed with "no
+built qqqai binary". Red proof first (a lane-invariant test failing on
+the table as committed), then the step moves sequential where table
+order runs it after `build`, pinned by that test. The sibling steps
+that need binaries (`help-brevity`, `det009`, `live-dev --self-test`)
+were already sequential, which is why only one checker fell over.
+(2) The xtask worktree test failed only on macOS+Windows at
+`worktree_contains`: git prints the *resolved* path (symlinked temp
+dirs, separators, case) while the caller holds what it passed in.
+Local Windows stayed green, hiding the platform dependence. The
+comparison now canonicalizes both sides (string compare as fallback),
+pinned by a dotted-path unit test that fails on the old code.
+Generalisable rule: a gate that builds must order consumers after the
+build in the table, not in the developer's warm tree — and a path
+comparison that never saw a symlink is a comparison of spellings.
+ → `crates/xtask/src/main.rs`.
+## §O-645 - I-08 first CI run, PERF: a 4 MiB memory difference is a different runner, and the vectors say nothing regressed
+
+PERF-020 failed with "no reviewed baseline matches runner identity":
+same EPYC 7763, same kernel, same toolchains as a reviewed entry —
+but 16,770,748,416 vs 16,766,414,848 bytes, 4.1 MiB over the 1 MiB
+tolerance. Reruns cannot help a deterministic identity miss, so per
+§O-543 the work went to vectors instead: candidate vs nearest-entry
+deltas +1.7/+4.4/-2.6/+2.0%, every one inside the candidate's own
+within-run spread (14.3/18.7/1.1/3.5%). No serving-path code changed
+in this wave, so the vectors transfer; recorded as a reviewed entry
+naming the measured tree per the 8370C precedent, appended textually
+(a wholesale reformat was reverted — 518/442 of diff noise), with
+`select_baseline` resolving the failing identity locally and an empty
+`compare`. Generalisable rule: an identity miss is answered with a
+reviewed entry plus vector evidence, never with tolerance edits or
+blind reruns.
+ → `.github/perf/baseline.json`.
 *End of `QQQ-Observations-and-Memories.md`.*

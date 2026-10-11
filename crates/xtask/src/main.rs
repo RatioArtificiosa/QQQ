@@ -349,7 +349,11 @@ const PY_STEPS: &[Step] = &[
         &["tools/check_error_catalogue.py"],
     ),
     Step::py(
-        Lane::Par,
+        // Sequential, not parallel: this checker shells the prebuilt
+        // `target/debug/qqqai`, and the parallel wave runs ahead of `build`
+        // -- on a cold runner that is "no built qqqai binary" on all three
+        // platforms. The sequential lane runs after `build` by table order.
+        Lane::Seq,
         "check_error_standard",
         &["tools/check_error_standard.py"],
     ),
@@ -1584,10 +1588,18 @@ fn worktree_dir(name: &str) -> PathBuf {
 
 fn worktree_contains(list: &str, dir: &Path) -> bool {
     // `git worktree list --porcelain` prints `worktree <path>` records (plus
-    // blank lines and `bare`/`detached` markers); compare the record paths.
+    // blank lines and `bare`/`detached` markers); compare the record paths
+    // canonically. Git prints the *resolved* path (symlinked temp dirs on
+    // macOS, separators and case on Windows) while the caller usually holds
+    // the unresolved one -- a string compare fails exactly there, proven by
+    // CI failing this assert on macOS+Windows while Linux stayed green.
+    // The direct compare remains as the fallback when either side cannot
+    // be resolved.
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     list.lines().any(|l| {
-        l.strip_prefix("worktree ")
-            .is_some_and(|p| Path::new(p.trim()) == dir)
+        l.strip_prefix("worktree ").is_some_and(|p| {
+            std::fs::canonicalize(p.trim()).is_ok_and(|c| c == canon) || Path::new(p.trim()) == dir
+        })
     })
 }
 
@@ -1964,6 +1976,29 @@ mod tests {
     }
 
     #[test]
+    fn worktree_contains_resolves_noncanonical_paths() {
+        // `git worktree list` prints resolved paths; the caller holds what
+        // it passed in. A trailing `.` is the portable stand-in for every
+        // platform's resolution difference (macOS temp symlinks, Windows
+        // separators and case): string comparison fails it, canonical
+        // comparison does not.
+        let dir = std::env::temp_dir().join(format!("qqq-xtask-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let dotted = dir.join(".");
+        let list = format!("worktree {}\nHEAD abc\n\n", dotted.display());
+        assert!(
+            worktree_contains(&list, &dir),
+            "resolved record did not match the unresolved dir"
+        );
+        assert!(
+            !worktree_contains("worktree /elsewhere\nHEAD abc\n", &dir),
+            "an unrelated record matched"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn discovery_prefers_first_working_candidate() {
         const CANDS: &[&[&str]] = &[&["python3"], &["python"], &["py", "-3"]];
         let none = |_: &str, _: &[&str], _: &[&str]| false;
@@ -2006,6 +2041,30 @@ mod tests {
                     s.lane,
                     Lane::Seq,
                     "{} runs cargo {first} outside the sequential lane",
+                    s.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_needing_checkers_run_sequentially() {
+        // Checkers that shell a prebuilt `target/debug/qqqai` must not run
+        // in the parallel wave ahead of `build`: on a cold runner there is
+        // no binary yet, and CI failed `check_error_standard` on all three
+        // platforms with exactly that message. The sequential lane runs
+        // after `build` by table order, so the lane is the fix.
+        const NEEDS_BINARY: &[&str] = &["tools/check_error_standard.py"];
+        for s in all_steps() {
+            if let StepKind::Py { args } = s.kind
+                && let Some(script) = args.first()
+                && NEEDS_BINARY.contains(script)
+                && !args.contains(&"--self-test")
+            {
+                assert_eq!(
+                    s.lane,
+                    Lane::Seq,
+                    "{} needs a built binary outside the sequential lane",
                     s.name
                 );
             }

@@ -37400,8 +37400,9 @@ Review claimed the stability register row should read 137 distinct
 and the figure is not hand-copied: `check_doc_claims.py` derives it
 from four register forms (code fences stripped, suffixed and bare
 variants counted) and the gate enforces it 23/23. An independent count
-of the highest identifier alone gives 642, disproving `§O-139`
-outright, and no register form yields 137. No code changed; the
+of the highest identifier alone gave 642 at the time (before §O-643
+itself landed), disproving `§O-139` outright, and no register form
+yields 137. No code changed; the
 evidence is the resolver plus the green claims gate, and the finding
 is recorded as review noise rather than fixed. Generalisable rule: a
 review number that matches no derivation in the tree is rebutted with

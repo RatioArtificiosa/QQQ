@@ -37520,20 +37520,25 @@ a runner means inventorying provisioning in *every* environment that
 runs it — dev machine, CI image, bridge image — or the first green
 run is on the machine that happened to have everything.
  → `docker/entrypoint.sh`.
-## §O-651 - Bridge red, cause five: the suite outgrew the container, proven at exactly 8.00/8.00 GiB
+## §O-651 - Bridge red, misread first: the suite did not outgrow the container, one test did
 
 The `qqq-run` lib binary died to SIGKILL at the suite's tail with no
-test failing first — six hundred lib tests across twelve threads,
-each holding Wasmtime engines, peaking past the container's 8 GiB
-while the 1-minute sampler saw at most half. Reproduction with 10s
-sampling caught the kill at exactly 8.00/8.00 GiB: environmental
-resource pressure, not a regression (green with headroom everywhere
-else, no serving-path change in the wave). The 8G was never a designed
-bound for the test suite — it constrains a fuzz workload — so the
-service limit goes to 16 GiB explicitly, matching CI runners, with
-the reasoning in the compose comment and the live limit printed in
-every stats log. Thread-capping was rejected (divergent test
-behavior); warming was rejected (luck, not evidence).
+test failing first. First read as "six hundred lib tests across twelve
+threads peaking past 8 GiB", reproduced at 8.00/8.00 GiB with 10-second
+sampling, and the fix was to raise the service limit to 16 GiB. Wrong
+on both counts, and the raise is what exposed it: at 16 GiB the kill
+happened anyway, so the diagnosis had to be wrong. Per-test bisection
+in the container narrowed it to two tests, both attaching `/dev/full`;
+a direct probe showed `audit_sink::load()` never returning on that
+device. The real cause was one test reading an endless source:
+`/dev/full` serves bytes forever with no newline, and
+`BufRead::lines()` grows its buffer until a newline arrives, so the
+allocation climbed 34 MiB → the full limit in ~25 seconds at 100% CPU.
+Suite peak is 34 MiB; 576/576 `qqq-host` tests pass in 1.21s. The limit
+went back to 8G with the reason recorded, and the reader is bounded
+(§O-653). Generalisable rule: a fix that "works" by raising a limit is
+a diagnosis waiting to be disproved — when the failure survives the
+raise, the first reading was wrong and the raise is what proved it.
  → `docker/compose.yaml`.
 ## §O-652 - Bridge review round one: the refusal test read the operator's build
 
@@ -37548,4 +37553,46 @@ is about the platform choice and nothing else. Same "read the tree it
 runs on" family as §O-617: an environment-dependent assertion is a
 test that passes wherever the developer happens to be.
  → `tools/check_error_standard.py`.
+## §O-653 - The unbounded read is fixed at the read, and the ENOSPC tests keep their shape
+
+`MAX_AUDIT_LINE_BYTES` (8 MiB) with a per-line cap enforced *during*
+the read: `fill_buf` in slices bounded by the remaining budget, so the
+cost is known before it is spent. A `take(limit + 1)` wrapper cannot be
+used — the caller's reader is long-lived, so the wrapper would be
+dropped at return and take its buffered bytes with it. `is_last_line`
+takes the same bounded read and stops one line past the candidate.
+Red proof first: the committed `load()` timed out (exit 124) on
+`/dev/full` in the container; the two new tests pass on the fixed code
+(`a_source_without_a_newline_is_refused_not_read_forever` is Unix-gated
+to drive the real device, `a_line_past_the_bound_is_refused` proves the
+bound on every platform). The F-09 tests switched from `/dev/full` to a
+sized tmpfs, because `/dev/full`'s endless stream is a *read* failure
+the loader now correctly refuses, not the ENOSPC *write* failure those
+tests are about — same dead-sink property, without the accidental
+pathology. Both pass, so the ENOSPC path is still exercised; the
+tmpfs mount needs root and the tests skip with a printed reason when it
+is unavailable, per §O-125. Generalisable rule: a fixture chosen for
+one property can carry another — when the second becomes load-bearing,
+move to a fixture that has only the first.
+ → `crates/qqq-host/src/audit_sink.rs`, `crates/qqq-run/src/guest_handler.rs`.
+## §O-654 - The bounded read decoded per slice, and the dead device was only probably dead
+
+Review of the fix found two things the tests could not see, both real.
+(1) `bounded_read_line` decoded UTF-8 per `fill_buf` slice, so a
+multi-byte character straddling two slices was refused as malformed —
+the bound fixed one unboundedness and introduced a boundary bug. The
+reader now accumulates bytes and decodes once, and the caller's 1-based
+line number travels in so a malformed line reports where it is instead
+of "line 0". (2) The sized tmpfs was `size=1k`, which the kernel grants
+a whole page: the first audit write could have succeeded, making the
+"every write fails" property a likelihood rather than a certainty. The
+fixture now fills the mount before the app attaches, so ENOSPC is the
+certain outcome. A third finding asked that the tests *fail* when mount
+is unavailable; that is rebutted — `orders_api_component()` skips with
+a printed reason for the same reason (a missing privilege is not a
+defect), and the two findings contradicted each other on exactly this
+point. Generalisable rule: a fix reviewed only by its own new tests
+passes by construction; ask what the fixture cannot exhibit, and what
+the boundary it introduced cannot reach.
+ → `crates/qqq-host/src/audit_sink.rs`, `crates/qqq-run/src/guest_handler.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

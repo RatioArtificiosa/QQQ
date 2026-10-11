@@ -1689,6 +1689,86 @@ mod tests {
         test_app_with_capacity(1, qqq_cap::resolve::GrantSet::empty())
     }
 
+    /// A directory on a tiny tmpfs, so every write past it fails with `ENOSPC`.
+    ///
+    /// # Why not `/dev/full`
+    ///
+    /// `/dev/full` fails writes as this needs, but it also serves an
+    /// unbounded stream of zero bytes with no newline. The audit loader
+    /// now refuses that (`SinkError::UnreadableLine`) because reading it
+    /// costs memory without bound — the OOM kill that ended the lib test
+    /// binary with no test failing first, reproduced at exactly 16.00/16.00
+    /// GiB in the Linux bridge. Attaching it therefore exercises the read
+    /// refusal, not the ENOSPC write failure the F-09 tests are about.
+    ///
+    /// A sized tmpfs gives the same "every write fails" property through a
+    /// readable, newline-terminable file: `load()` sees a short file, and
+    /// the first `append` hits `ENOSPC`, which is the dead-sink case the
+    /// tests exist to prove.
+    ///
+    /// Mounting needs root or a user namespace; when it is unavailable the
+    /// constructor returns `None` and the caller skips with a printed
+    /// reason rather than passing quietly (`§O-125`'s fixture-that-cannot-
+    /// fail shape, which this repository keeps recording).
+    #[cfg(unix)]
+    struct DeadDevice {
+        dir: std::path::PathBuf,
+        mounted: bool,
+    }
+
+    #[cfg(unix)]
+    impl DeadDevice {
+        fn mount(tag: &str) -> Option<Self> {
+            use std::process::Command;
+            let dir = std::env::temp_dir().join(format!("qqq-f09-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let ok = Command::new("mount")
+                .args(["-t", "tmpfs", "-o", "size=1k", "tmpfs", dir.to_str()?])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                let _ = std::fs::remove_dir_all(&dir);
+                println!("skipping {tag}: tmpfs mount unavailable (no root)");
+                return None;
+            }
+            // Fill the mount before the app attaches: a `size=1k` tmpfs is
+            // granted a whole page, so the first audit write could succeed
+            // and the "every write fails" property these tests need would
+            // not hold. Consuming the capacity up front makes ENOSPC the
+            // certain outcome rather than a likely one.
+            let log = dir.join("audit.jsonl");
+            if let Err(e) = std::fs::write(&log, "x".repeat(64 * 1024)) {
+                let _ = std::fs::remove_dir_all(&dir);
+                println!("skipping {tag}: tmpfs fill failed: {e}");
+                return None;
+            }
+            Some(Self { dir, mounted: true })
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.dir.join("audit.jsonl")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DeadDevice {
+        fn drop(&mut self) {
+            if self.mounted {
+                use std::process::Command;
+                let _ = Command::new("umount")
+                    .arg(&self.dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     /// A test app granted `HttpServer`, for tests that assert on the granted
     /// outcome arms (`Granted`/`Failed`) rather than the ungranted one. The
     /// manifest is the sole layer permitted to grant, so the test declares
@@ -1799,20 +1879,35 @@ mod tests {
 
     /// **F-09: a dead sink refuses with 503 and never runs the guest.**
     ///
-    /// `/dev/full` fails every write with `ENOSPC`, deterministically —
+    /// A device whose every write fails with `ENOSPC`, deterministically —
     /// the disk-died-mid-run case without staging a dying disk. The first
     /// request's persist fails after the guest ran (`FailClosed` turns the
     /// response into 503); the worker is now failed, so the second
     /// request is refused by the pre-flight with the guest unexecuted,
     /// proven by the stream holding no new rows. Unix-only: there is no
     /// always-failing device on Windows.
+    ///
+    /// # Why a sized tmpfs rather than `/dev/full`
+    ///
+    /// This used to attach `/dev/full`, which fails writes as intended but
+    /// also serves an unbounded stream of zero bytes with no newline: the
+    /// audit loader now refuses that (a line it can never terminate, which
+    /// used to allocate until the container's OOM killer ended the test
+    /// binary — a `SIGKILL` with no test failing, reproduced at exactly
+    /// 16.00/16.00 GiB). A small `tmpfs` mounted on a scratch directory
+    /// gives the same "every write fails" property through a *readable*
+    /// file, so the test still exercises the ENOSPC path it was written
+    /// for and not the read pathology it acquired by accident.
     #[cfg(unix)]
     #[test]
     fn f09_fail_closed_returns_503_without_running_the_guest() {
         let Some(mut app) = test_app() else {
             return;
         };
-        app.attach_audit_file(std::path::Path::new("/dev/full"))
+        let Some(dead) = DeadDevice::mount("f09-closed") else {
+            return;
+        };
+        app.attach_audit_file(&dead.path())
             .expect("attach opens the device");
         let first = app
             .handle_request(
@@ -1853,14 +1948,21 @@ mod tests {
     ///
     /// Same dead device, but the operator chose availability: the
     /// request serves, each drop logs, and the counter audits the total.
+    ///
+    /// Sized tmpfs rather than `/dev/full` for the reason the fail-closed
+    /// test documents: the loader refuses `/dev/full`'s endless newline-free
+    /// stream, which is not the ENOSPC behaviour this test is about.
     #[cfg(unix)]
     #[test]
     fn f09_fail_open_serves_and_counts_every_drop() {
         let Some(mut app) = test_app() else {
             return;
         };
+        let Some(dead) = DeadDevice::mount("f09-open") else {
+            return;
+        };
         app.set_audit_failure_policy(qqq_host::audit_sink::AuditFailurePolicy::FailOpenWithAlarm);
-        app.attach_audit_file(std::path::Path::new("/dev/full"))
+        app.attach_audit_file(&dead.path())
             .expect("attach opens the device");
         let response = app
             .handle_request(

@@ -121,6 +121,21 @@ pub enum SinkError {
         /// Why it was refused.
         reason: String,
     },
+    /// A single line exceeds [`MAX_AUDIT_LINE_BYTES`].
+    ///
+    /// Not a synonym for [`Self::Malformed`]: a too-long line is not garbage, it is
+    /// an input whose size was never bounded. Reading it costs memory in
+    /// proportion to its length, so on a device that returns bytes forever
+    /// without a newline the reader never stops — an OOM kill rather than an
+    /// error. The F-09 tests hit exactly that with `/dev/full`.
+    UnreadableLine {
+        /// The path involved.
+        path: PathBuf,
+        /// The bytes the line had already reached.
+        bytes: usize,
+        /// The bound in force.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for SinkError {
@@ -137,6 +152,14 @@ impl std::fmt::Display for SinkError {
                 write!(f, "audit file line {line} is not a record: {reason}")
             }
             Self::NotAStream { reason } => write!(f, "the audit file is not a stream: {reason}"),
+            Self::UnreadableLine { path, bytes, limit } => {
+                write!(
+                    f,
+                    "the audit file {} has a line of {bytes} bytes, past the {limit}-byte \
+                     bound; it is not an audit log",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -199,8 +222,104 @@ pub struct Loaded {
 /// The bytes a line occupies on disk, terminator included.
 ///
 /// Zero for a line that failed to read, which the loop returns on before the value is used.
-fn line_bytes_of(line: &Result<String, std::io::Error>) -> u64 {
-    line.as_ref().map_or(0, |l| l.len() as u64 + 1)
+/// The largest single line [`load`] will read before refusing the file.
+///
+/// An audit record is a one-line JSON object; a real one is a few hundred
+/// bytes. A file whose line exceeds this is not an audit log, and reading
+/// it costs memory in proportion to what it contains — which on a
+/// always-succeeding device (`/dev/full` returns bytes forever and never
+/// a newline) is unbounded, ending in an OOM kill rather than an error.
+///
+/// The refusal is load-bearing, not paranoia: the F-09 tests attach
+/// `/dev/full` on purpose, and `load()` never returned on it.
+pub const MAX_AUDIT_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read one line and its byte count, refusing one past [`MAX_AUDIT_LINE_BYTES`].
+///
+/// # Why the cap is enforced during the read
+///
+/// `BufRead::read_line` grows its buffer until a newline arrives, so a file
+/// that never emits one is an unbounded allocation *inside* that call — an
+/// `if line.len() > LIMIT` afterwards is a verdict on a read that already
+/// happened. On `/dev/full`, which serves bytes forever, that allocation
+/// reaches the container limit and the OOM killer ends the process.
+///
+/// The cap is therefore applied to the read itself, by `fill_buf` in slices:
+/// each slice is at most the remaining budget, so the total the read may
+/// cost is known before it is spent. `take` cannot be used here — the
+/// caller's reader is long-lived, so a wrapper would be dropped at return
+/// and take its buffered bytes with it.
+///
+/// The read stops at `limit + 1` bytes: the extra byte is the
+/// discriminator, so a line of exactly `limit` bytes is accepted and one
+/// that needed more is refused.
+fn bounded_read_line<R: BufRead>(
+    reader: &mut R,
+    path: &Path,
+    line_no: usize,
+) -> Result<(String, usize), SinkError> {
+    let limit = MAX_AUDIT_LINE_BYTES;
+    // Accumulated as bytes and decoded once at the end: a multi-byte
+    // character can straddle two `fill_buf` slices, and decoding per slice
+    // would refuse a perfectly valid line for being cut in the middle of a
+    // character. The caller's 1-based line number travels in so a malformed
+    // line is reported where it is, not as "line 0".
+    let mut raw: Vec<u8> = Vec::new();
+    let mut read = 0usize;
+    loop {
+        // The read may cost at most one byte past the bound; the extra byte
+        // is the discriminator, so a line of exactly `limit` bytes is
+        // accepted and one needing more is refused.
+        let budget = limit.saturating_add(1).saturating_sub(read);
+        if budget == 0 {
+            break;
+        }
+        let buf = reader.fill_buf().map_err(|e| SinkError::Io {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        if buf.is_empty() {
+            break;
+        }
+        // Only as far as this slice's newline, or the whole slice when it
+        // holds none — and never past the budget.
+        let upto = buf
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(buf.len(), |p| p + 1)
+            .min(budget);
+        // `get` rather than a slice index, so an unexpected short buffer is
+        // a refusal rather than a panic — the audit path must not panic on
+        // malformed input.
+        let slice = buf.get(..upto).ok_or_else(|| SinkError::Malformed {
+            line: line_no,
+            reason: "a line is not valid UTF-8".to_owned(),
+        })?;
+        let ended_newline = slice.last() == Some(&b'\n');
+        let hit_budget = upto == budget;
+        raw.extend_from_slice(slice);
+        let _ = buf;
+        reader.consume(upto);
+        read += upto;
+        // Stop on a newline (the line is complete) or on a budget hit (the
+        // line is either exactly `limit` bytes or over; the check below
+        // decides which).
+        if ended_newline || hit_budget {
+            break;
+        }
+    }
+    if raw.len() > limit {
+        return Err(SinkError::UnreadableLine {
+            path: path.to_path_buf(),
+            bytes: raw.len(),
+            limit,
+        });
+    }
+    let line = String::from_utf8(raw).map_err(|_| SinkError::Malformed {
+        line: line_no,
+        reason: "a line is not valid UTF-8".to_owned(),
+    })?;
+    Ok((line, read))
 }
 
 pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
@@ -227,15 +346,23 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
     // Tracked as the loop goes rather than derived afterwards, so the offset is exact.
     let mut complete_bytes: u64 = 0;
     let mut offset: u64 = 0;
-    for (i, line) in BufReader::new(file).lines().enumerate() {
-        // **Advance FIRST.** At the bottom, the blank-line `continue` below would skip it and the
+    let mut reader = BufReader::new(file);
+    let mut i: usize = 0;
+    // A manual loop, not `BufRead::lines()`: `lines()` grows its buffer until a
+    // newline arrives, so a file that never emits one is an unbounded
+    // allocation -- on `/dev/full`, which serves bytes forever, that is an OOM
+    // kill rather than an error. `read_line` reports what it read, so the bound
+    // is enforceable per line.
+    loop {
+        let (line, read) = bounded_read_line(&mut reader, path, i + 1)?;
+        if read == 0 {
+            break;
+        }
+        // **Advance FIRST.** The blank-line `continue` below would otherwise skip it and the
         // truncation point would fall inside a record -- worse than not truncating at all.
-        offset += line_bytes_of(&line);
-        let line = line.map_err(|e| SinkError::Io {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        offset += u64::try_from(read).unwrap_or(u64::MAX);
         if line.trim().is_empty() {
+            i += 1;
             continue;
         }
         match AuditRecord::from_json(&line) {
@@ -272,6 +399,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
                 });
             }
         }
+        i += 1;
     }
 
     Ok(Loaded {
@@ -288,20 +416,27 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
 /// torn-tail decision hinges on it: calling a corrupt middle line
 /// "last" would quarantine evidence, and calling a torn tail
 /// "corrupt" would refuse a restart over a crash.
+///
+/// The loop stops at `i + 2` rather than reading to EOF: one read past the
+/// candidate is all the answer needs, and a file that never emits a newline
+/// (`/dev/full` serves bytes forever) would otherwise turn this probe into
+/// the same unbounded read the caller is trying to avoid.
 fn is_last_line(path: &Path, i: usize) -> Result<bool, SinkError> {
     let mut probe = BufReader::new(File::open(path).map_err(|e| SinkError::Io {
         path: path.to_path_buf(),
         reason: e.to_string(),
     })?);
-    let mut buf = String::new();
     let mut n = 0;
-    while probe.read_line(&mut buf).map_err(|e| SinkError::Io {
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    })? > 0
-    {
+    // One read past the candidate is all the answer needs, so the loop stops
+    // there — and uses the same bounded read as `load`, because a source
+    // that never emits a newline would otherwise turn this probe into the
+    // unbounded read the caller is trying to avoid.
+    while n <= i + 1 {
+        let (_line, read) = bounded_read_line(&mut probe, path, n + 1)?;
+        if read == 0 {
+            break;
+        }
         n += 1;
-        buf.clear();
     }
     Ok(i + 1 == n)
 }
@@ -3085,6 +3220,69 @@ mod tests {
                 assert!(reason.contains("capacity is 1"), "got: {reason}");
             }
             other => panic!("a capacity below the history must be refused, got {other:?}"),
+        }
+    }
+
+    /// **A source that never emits a newline is refused, not read forever.**
+    ///
+    /// The F-09 fail-closed and fail-open tests attach `/dev/full`, which
+    /// returns zero bytes on every read with no newline anywhere. `load()`
+    /// used `BufRead::lines()`, which grows its buffer until a newline
+    /// arrives, so the buffer grew until the container's OOM killer ended
+    /// the process — the whole lib test binary died at its tail with no
+    /// test failing first. Reproduced in the Linux bridge at exactly
+    /// 16.00/16.00 GiB.
+    ///
+    /// This drives `load()` against the real device, so it is Unix-gated:
+    /// the three-OS gate still exercises the bound through
+    /// `a_line_past_the_bound_is_refused`, and the device is the one input
+    /// that has no portable stand-in.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_without_a_newline_is_refused_not_read_forever() {
+        use std::time::Duration;
+
+        let t = std::time::Instant::now();
+        let outcome = load(std::path::Path::new("/dev/full"));
+        let elapsed = t.elapsed();
+        match outcome {
+            Err(e @ SinkError::UnreadableLine { .. }) => {
+                assert!(
+                    elapsed < Duration::from_secs(30),
+                    "the refusal took {elapsed:?}, so it read past the bound"
+                );
+                assert!(
+                    e.to_string().contains("past the"),
+                    "the refusal should name the bound, got: {e}"
+                );
+            }
+            other => panic!("an endless source must be refused, got {other:?}"),
+        }
+    }
+
+    /// **A line past the bound is refused by name, on every platform.**
+    ///
+    /// The Unix test above proves the device case; this proves the bound
+    /// itself drives `load()`'s own reader, which is the part every OS
+    /// shares. It writes a real file through `load()` — no lowered
+    /// constant, no injected reader — so the refusal comes from the
+    /// shipping path with the shipping limit.
+    #[test]
+    fn a_line_past_the_bound_is_refused() {
+        // A line longer than the bound. It is not a record, and that is
+        // deliberate: the refusal must be the bound, which is checked
+        // before any parse, so a parse failure would prove the wrong thing.
+        let long = "y".repeat(MAX_AUDIT_LINE_BYTES + 1024);
+        let scratch = Scratch::new("longline");
+        let path = scratch.file();
+        std::fs::write(&path, format!("{long}\n")).expect("write the long line");
+
+        match load(&path) {
+            Err(SinkError::UnreadableLine { bytes, limit, .. }) => {
+                assert_eq!(limit, MAX_AUDIT_LINE_BYTES);
+                assert!(bytes > limit, "the refusal reports what it saw: {bytes}");
+            }
+            other => panic!("a line past the bound must be refused, got {other:?}"),
         }
     }
 }

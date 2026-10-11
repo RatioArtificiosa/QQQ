@@ -37447,4 +37447,21 @@ naming the measured tree per the 8370C precedent, appended textually
 reviewed entry plus vector evidence, never with tolerance edits or
 blind reruns.
  → `.github/perf/baseline.json`.
+## §O-646 - I-08 CI, second identity miss: same CPU, new toolchain pairing, fleet range as the verdict
+
+The next CI run failed PERF-020 on identity again — but a different
+one: the 8573C runner now reports `qqqai 0.1.1` where its reviewed
+entry says `0.0.0`, and identity includes toolchains. Comparing
+against the same-CPU old entry mixes binary evolution with signal
+(+14% hello looks alarming until the version is controlled for), so
+the check went against the current binary's fleet range instead: all
+four candidate medians inside the observed 0.1.1 ranges, json's one
+high sample absorbed by the n=3 median per §O-543. Recorded textually
+(the reformat trap from last round stayed reverted), `select_baseline`
+resolves with an empty `compare`, and the candidate commit names the
+measured tree. Generalisable rule: compare a candidate against the
+fleet running its binary, not the history of its hardware — and when
+the second miss needs the same procedure, the procedure is the
+finding, not the hardware.
+ → `.github/perf/baseline.json`.
 *End of `QQQ-Observations-and-Memories.md`.*

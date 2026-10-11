@@ -216,7 +216,7 @@ Populated only from repository evidence. Nothing here is a roadmap promise.
 
 | Area | Status |
 |---|---|
-| Core runtime | IN PROGRESS — pre-alpha workspace, 11 crates |
+| Core runtime | IN PROGRESS — pre-alpha workspace, 12 crates (11 shipped plus the never-shipped `xtask` gate runner) |
 | WebAssembly execution | IMPLEMENTED — Wasmtime 48.0.5 pinned, real components served over HTTP |
 | Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 5 host modules bound (WASI baseline, clock, crypto, http, test assertions); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
 | CLI | IN PROGRESS — new, build, run, dev, serve, test, inspect, audit, MCP and more |

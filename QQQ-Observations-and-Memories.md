@@ -37371,4 +37371,26 @@ Generalisable rule: a matcher, a lexer and a fixture each have an
 unstated "inputs look like this" — review them by feeding what they
 excluded, not what they already handle.
  → `tools/check_conformance.py`, `tools/check_gate_parity.py`, `tools/audit_unsafe.py`, `crates/xtask/src/main.rs`.
+## §O-642 - I-08 first CI run: the unification shipped the checks and dropped what they stand on
+
+Five red jobs, three causes, all mine. (1) All three Rust jobs failed
+with `no such command: machete/deny`: moving the check steps into
+`cargo xtask ci` deleted the `install-action` steps that provisioned
+them — "matrix, toolchains, caches and timeouts stay" never listed
+tool installs, so nobody noticed them leave. Restored adjacent to the
+gate step with the split written down (the job provides the tools, the
+gate only runs them). (2) MSRV failed `expected 11 workspace crates,
+examined 12` — and that failure is the control *working*: the guard
+exists so a miscounted member fails loudly, and the new member tripped
+it exactly as designed. Updated deliberately per its own instruction.
+(3) Supply chain failed on `xtask.cdx.json` listing no components: a
+zero-dependency, never-shipped crate's SBOM is correctly empty, and the
+non-empty assertion is correctly strict — so the collect step excludes
+it by name with the reason, weakening neither the check nor the truth.
+README's prose count went 11 to 12 with it. Generalisable rule: when
+unifying CI behind a runner, inventory everything the steps *assume*
+(installs, caches, toolchains, targets, counts, artifacts) — the check
+list is the visible half, and the provisioning half is what the first
+green run forgets.
+ → `.github/workflows/ci.yml`, `README.md`.
 *End of `QQQ-Observations-and-Memories.md`.*

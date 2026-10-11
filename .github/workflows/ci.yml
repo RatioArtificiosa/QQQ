@@ -1012,6 +1012,17 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Tool prerequisites the single gate invokes but cannot install: `deny`
+      # and `machete` are cargo subcommands, and the gate runs them the way
+      # the spelled-out steps used to. Dropping these when the steps moved
+      # into `cargo xtask ci` broke all three Rust jobs with `no such
+      # command` -- the job provides the tools, the gate only runs them
+      # (same split as the wasm-tools step below).
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@cargo-machete
+
       # `I-08` phase 1: the whole check list lives in `crates/xtask` and both
       # gates call it. `cargo xtask ci` runs every step this job used to spell
       # out (format, lints, build, test, ignored suites, checkers with their
@@ -1094,12 +1105,13 @@ jobs:
           case "$COUNT" in
             ''|*[!0-9]*) echo "the crate count is not a number: '$COUNT'"; exit 1 ;;
           esac
-          # The workspace has 11 members. Asserting the exact number means a crate
-          # that stops being picked up -- the failure this guard exists for -- is a
-          # failure rather than a smaller success.
+          # The workspace has 12 members (11 shipped crates plus the
+          # never-shipped `xtask` gate runner). Asserting the exact number
+          # means a crate that stops being picked up -- the failure this
+          # guard exists for -- is a failure rather than a smaller success.
           echo "MSRV checked $COUNT crate(s)"
-          if [ "$COUNT" -ne 11 ]; then
-            echo "expected 11 workspace crates, examined $COUNT"
+          if [ "$COUNT" -ne 12 ]; then
+            echo "expected 12 workspace crates, examined $COUNT"
             echo "if you added or removed a crate, update this number deliberately"
             exit 1
           fi
@@ -1442,12 +1454,21 @@ jobs:
       # `crates/*/target/` on a runner that had built in place, collecting stale
       # files from an earlier target directory. The paths are pruned rather than
       # filtered afterwards so the intent is visible.
+      #
+      # `xtask` is pruned by name: it is `publish = false`, never shipped, and
+      # carries zero dependencies by design, so its SBOM is a correctly empty
+      # component list — and the well-formedness check below rightly refuses
+      # empty lists, because everywhere else an empty list is a generation
+      # bug rather than the truth. Collecting it would force a choice between
+      # weakening that check and failing on a file that answers nothing a
+      # consumer asks; the exclusion keeps both honest.
       - name: Collect the SBOM files
         run: |
           mkdir -p sbom
           find crates fuzz \
             -name '*.cdx.json' \
             -not -path '*/target/*' \
+            -not -name 'xtask.cdx.json' \
             -exec cp {} sbom/ \;
           echo "Generated $(ls -1 sbom | wc -l) SBOM file(s):"
           ls -1 sbom

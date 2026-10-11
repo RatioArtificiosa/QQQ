@@ -128,13 +128,20 @@ services:
     network_mode: bridge
 
     # A resource bound, because a fuzz target with a memory-limit bug could
-    # otherwise take the developer's machine with it. Generous — the pooling
-    # allocator's own tests need headroom — but finite.
+    # otherwise take the developer's machine with it — but finite is not
+    # arbitrary: the unified gate's full test suite peaks past 8 GiB (six
+    # hundred lib tests across twelve threads, each holding Wasmtime
+    # engines), and at 8 GiB the `qqq-run` lib binary died to the OOM
+    # killer at the suite's tail with no test failing first (8.00/8.00 GiB
+    # at the kill, green with headroom). 16 GiB keeps the fuzz containment
+    # finite on a 32 GiB developer machine while giving the suite the room
+    # CI runners (16 GiB) already provide; the per-run stats log prints the
+    # live limit, so future comparisons carry their frame with them.
     deploy:
       resources:
         limits:
           cpus: '8'
-          memory: 8G
+          memory: 16G
 
     init: true
     tty: false

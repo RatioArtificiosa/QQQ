@@ -877,6 +877,17 @@ cmd_checks() {
     # harness, the EOL check, the corpus checks and the final
     # `self_test_xrefs.py --check-clean` validation all run inside
     # `cargo xtask ci`.
+    #
+    # Tool prerequisites the single gate invokes but cannot install: `deny`
+    # and `machete` are cargo subcommands, and this image carries neither
+    # (the Dockerfile installs fuzz, cyclonedx and wasm-tools only). The
+    # first unified bridge run failed both steps with `no such command` --
+    # the same amputation CI needed its install-action steps for. `--locked`
+    # per the Dockerfile convention; no `|| true` fallback, so an
+    # uninstallable tool fails here instead of letting the gate certify
+    # without it.
+    cargo install cargo-deny --locked
+    cargo install cargo-machete --locked
     cargo xtask ci
 }
 

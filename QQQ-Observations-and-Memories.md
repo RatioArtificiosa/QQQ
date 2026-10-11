@@ -37464,4 +37464,88 @@ fleet running its binary, not the history of its hardware — and when
 the second miss needs the same procedure, the procedure is the
 finding, not the hardware.
  → `.github/perf/baseline.json`.
+## §O-647 - Bridge red, cause one: the parallel wave outran the build on a cold runner
+
+`check_error_standard` shells the prebuilt `target/debug/qqqai` but
+rode the parallel wave ahead of `build` — green locally only because
+the binary lingered from earlier builds; on the bridge (cold
+`/linux-target`) all three CI platforms failed it first, and the
+bridge run confirmed the shape. Red proof first (a lane-invariant
+test failing on the table as committed), then the step moves
+sequential where table order runs it after `build`, pinned by that
+test. Its siblings that need binaries (`help-brevity`, `det009`,
+`live-dev --self-test`) were already sequential, which is why only
+one checker fell over. Generalisable rule: a gate that builds must
+order its consumers after the build in the table, not in the
+developer's warm tree.
+ → `crates/xtask/src/main.rs`.
+## §O-648 - Bridge red, cause two: git prints resolved paths, callers hold the rest
+
+The xtask worktree test failed only on macOS+Windows asserting
+`worktree_contains`: `git worktree list` prints the *resolved* path
+(symlinked temp dirs, separators, case) while the caller holds what
+it passed in — and Linux, which resolves nothing, stayed green,
+hiding the platform dependence the way warm trees hid the lane bug.
+The comparison now canonicalizes both sides (string compare as
+fallback), pinned by a dotted-path unit test that fails on the old
+code. Generalisable rule: a path comparison that never saw a symlink
+is a comparison of spellings; prove it with the least portable
+spelling available.
+ → `crates/xtask/src/main.rs`.
+## §O-649 - Bridge red, cause three: existence-order executed the wrong platform's binary
+
+`check_error_standard.py` picked its subject by existence order
+(`qqqai.exe` first) from a hardcoded `target/` — so on the
+bind-mounted bridge it executed the host's PE binary on Linux (`Exec
+format error`), and it never looked at `CARGO_TARGET_DIR` where the
+ELF actually lives. Red proof twice against the committed code (the
+bridge traceback plus a probe running the new tests at the old
+function: target dir ignored, lone `.exe` resolved). Now the platform
+names the file, the environment names the directory, and anything
+else is the loud missing-binary refusal. Generalisable rule: on a
+shared tree, existence is not identity — the platform-educated guess
+beats the first file found.
+ → `tools/check_error_standard.py`.
+## §O-650 - Bridge red, cause four: the unification added steps the image cannot run
+
+`deny` and `machete` failed with `no such command`: the old bridge
+checks never ran them and the image never carried them, so unifying
+the gates widened the bridge path past its provisioning — the same
+amputation class as §O-642, one environment further out. The fix is
+runtime installs in `entrypoint.sh` (`--locked`, no `|| true`
+vacuity), because the image rebuild flow is heavier than the two
+minutes this costs per run and the job-provides/gate-runs split from
+the CI fix applies unchanged. Generalisable rule: unifying CI behind
+a runner means inventorying provisioning in *every* environment that
+runs it — dev machine, CI image, bridge image — or the first green
+run is on the machine that happened to have everything.
+ → `docker/entrypoint.sh`.
+## §O-651 - Bridge red, cause five: the suite outgrew the container, proven at exactly 8.00/8.00 GiB
+
+The `qqq-run` lib binary died to SIGKILL at the suite's tail with no
+test failing first — six hundred lib tests across twelve threads,
+each holding Wasmtime engines, peaking past the container's 8 GiB
+while the 1-minute sampler saw at most half. Reproduction with 10s
+sampling caught the kill at exactly 8.00/8.00 GiB: environmental
+resource pressure, not a regression (green with headroom everywhere
+else, no serving-path change in the wave). The 8G was never a designed
+bound for the test suite — it constrains a fuzz workload — so the
+service limit goes to 16 GiB explicitly, matching CI runners, with
+the reasoning in the compose comment and the live limit printed in
+every stats log. Thread-capping was rejected (divergent test
+behavior); warming was rejected (luck, not evidence).
+ → `docker/compose.yaml`.
+## §O-652 - Bridge review round one: the refusal test read the operator's build
+
+Review found the lone-`.exe` case clearing `CARGO_TARGET_DIR` and
+asserting on `ROOT/target` alone — so it passed for the wrong reason
+whenever the operator's own tree held a native `qqqai`, and proves
+refusal only on machines that have never built. Fixed by staging a
+throwaway target dir containing just `qqqai.exe` under the Linux
+platform mock; the pre-fix function resolves that exact staging
+(exit 0 on the same fixture), the fixed one refuses it, so the case
+is about the platform choice and nothing else. Same "read the tree it
+runs on" family as §O-617: an environment-dependent assertion is a
+test that passes wherever the developer happens to be.
+ → `tools/check_error_standard.py`.
 *End of `QQQ-Observations-and-Memories.md`.*

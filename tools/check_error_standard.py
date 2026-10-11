@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -94,7 +95,19 @@ CASES: list[tuple[str, list[str], bool]] = [
 
 
 def qqqai() -> Path:
-    """The built binary, preferring the workspace target directory.
+    """The built binary for THIS platform under the ACTIVE target directory.
+
+    # Why the platform leads and the directory follows
+
+    Two ways the old existence-ordered search picked the wrong file, the
+    second observed live in the Linux bridge: on a bind-mounted tree the
+    host's `qqqai.exe` sits beside the container's `qqqai`, and preferring
+    the `.exe` executed a PE binary on Linux (`Exec format error`) -- worse
+    than a clear refusal. And `ROOT/target` is not where the binary lives
+    when `CARGO_TARGET_DIR` points elsewhere (the bridge builds to
+    `/linux-target`): a hardcoded directory searches the wrong tree. So
+    the platform names the file, the environment names the directory, and
+    anything else is the loud missing-binary refusal below, unchanged.
 
     # Why a missing binary is a failure and not a skip
 
@@ -102,11 +115,12 @@ def qqqai() -> Path:
     the rule `check_xrefs.py` states for its own corpus. If the binary is absent the operator
     has run this at the wrong time, and saying so is the useful answer.
     """
-    for name in ("qqqai.exe", "qqqai"):
-        candidate = ROOT / "target" / "debug" / name
-        if candidate.is_file():
-            return candidate
-    print("FAIL -- no built `qqqai` binary; run `cargo build -p qqq-run` first")
+    base = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug"
+    name = "qqqai.exe" if sys.platform in ("win32", "cygwin", "msys") else "qqqai"
+    candidate = base / name
+    if candidate.is_file():
+        return candidate
+    print(f"FAIL -- no built `{name}` binary under {base}; run `cargo build -p qqq-run` first")
     raise SystemExit(1)
 
 
@@ -275,6 +289,46 @@ def self_test(args) -> int:
     if not caught:
         failures += 1
     print(f"  {'OK  ' if caught else 'FAIL'} a remediation restating the message is caught")
+
+    # Binary resolution: the platform's own binary under the active target
+    # directory -- never the other platform's leftover, never a hardcoded
+    # `target/` when `CARGO_TARGET_DIR` points elsewhere. The bridge builds
+    # to `/linux-target` while the bind mount carries the host's `.exe`:
+    # existence-order executed a PE binary on Linux.
+    from unittest import mock as _mock
+
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / "lt" / "debug"
+        staged.mkdir(parents=True)
+        plat = "qqqai.exe" if sys.platform in ("win32", "cygwin", "msys") else "qqqai"
+        (staged / plat).write_text("staged-binary", encoding="utf-8")
+        with _mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(Path(tmp) / "lt")}):
+            try:
+                got = qqqai()
+            except SystemExit:
+                got = None
+            if got == staged / plat:
+                print("  OK    resolution prefers the target dir over the tree")
+            else:
+                print(f"  FAIL  resolution picked {got}")
+                failures += 1
+
+    # A lone `.exe` on a non-Windows platform is refused, not executed.
+    # Staged in a temporary target dir with no native binary beside it, so
+    # the assertion is about platform choice rather than about whichever
+    # build happens to be in `ROOT/target` on the operator's machine.
+    with _mock.patch.object(sys, "platform", "linux"):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "debug"
+            staged.mkdir(parents=True)
+            (staged / "qqqai.exe").write_text("PE-decoy", encoding="utf-8")
+            with _mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": tmp}):
+                try:
+                    got = qqqai()
+                    print(f"  FAIL  a lone .exe resolved on linux: {got}")
+                    failures += 1
+                except SystemExit:
+                    print("  OK    a lone .exe is refused on linux")
 
     print()
     if failures:

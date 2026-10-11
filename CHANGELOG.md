@@ -112,6 +112,22 @@
   semver/structure tooling) is explicitly out of scope.
   (`I-08`)
 
+- **build**: the bridge and the gate agree about what runs them. Five Linux
+  bridge findings from the unification, each fixed with its own red proof:
+  `cargo` subcommand prerequisites (`cargo-deny`, `cargo-machete`) are now
+  installed at runtime in `docker/entrypoint.sh` beside the gate, because the
+  bridge image never carried them and the old bridge path never ran them;
+  `check_error_standard.py` picks its binary by platform and reads
+  `CARGO_TARGET_DIR`, instead of executing the first existing name (which on
+  the bind-mounted bridge was the host's PE binary — `Exec format error`);
+  the xtask worktree path comparison canonicalizes both sides, so git's
+  resolved path matches the caller's unresolved one on macOS and Windows;
+  and the bridge container's memory limit is 16 GiB, explicit, because the
+  full test suite peaks past 8 GiB and was OOM-killed at exactly
+  8.00/8.00 GiB in a targeted reproduction. The binary-consuming checker now
+  runs sequentially after `build` in the gate's step table.
+  (`I-08`, `bridge`)
+
 - **audit**: the capability-use record format moved from v1 to v2
   (`timestamp_unix_ms` on every row, HMAC-SHA-256 chain when
   `--audit-hmac-key-file` is given). Old files keep verifying: the

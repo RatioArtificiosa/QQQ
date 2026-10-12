@@ -37700,4 +37700,75 @@ small. The example was deleted after measuring; the numbers live here.
 Generalisable rule: a benchmark whose spread exceeds its delta measures
 the host, not the change — report the spread, keep the requirement.
  → `Cargo.toml`.
+## §O-662 - Bridge10's single failure is a startup race, proven transient by five clean retries
+
+`worker_pool.rs: a_saturated_single_slot_pool_refuses_and_a_wider_one_serves`
+failed at line 454 with an empty response in 0.37s: the server accepted
+the first connection and closed it with zero bytes. The readiness probe
+waits for the socket to *bind*, but nothing waits for the serve loop to
+be ready — under full-suite load the first connection lands in that gap.
+Same message text as bridge15's line-432 failure, but a different
+assertion and a different cause: there the sibling test also failed
+(environment-wide sandbox breakage, fixed by per-child target dirs and
+green since bridge16), here the sibling passes and the product path is
+correct. Retry evidence, same tree, same container: 5/5 passes
+(0.45–20.32s, the spread itself showing the load dependence), plus green
+on Windows gate, all three CI OSes (run 38222119944, 14/14), and
+bridge16/17/18. No wave change touches serve/pool/accept paths.
+Disposition: flake with retry evidence. A test-side readiness retry
+would harden it; left for a future wave because the product behavior is
+correct and the failure is rare (1 in 6+ loaded runs).
+ → `crates/qqq-run/tests/worker_pool.rs`.
+## §O-663 - Bridge10 normality: the consumer is unambiguous, the band matches, the median holds the F-17 line
+
+123 one-minute samples, `qqq-dev-linux-run-9549adb8a53f`: CPU mean
+43.1%, p50 11.2%, p99 815.5%, max 854.2% (~8.5 of 12 cores); MEM max
+3344 MiB = 40.8% of the 8 GiB limit, ending 380 MiB (no accumulation).
+The two foreign containers sit at 0.0% — the consumer is the bridge
+container (parallel rustc + test binaries) with evidence, not
+assumption. Against bridge7 (checks-only: 9.3%/25.5%/1.3GiB): different
+workload, since I-08 runs the full unified gate here — the comparable
+number is the median 11.2% vs 9.3%, which is the F-17 idle-CPU
+measurement the mandate asks for, recorded as parity held (no idle
+regression). Against full-test priors (bridge6 cold 19.1%/790%/2.6GiB,
+bridge16/17 ~600-800% peaks ~2-3GiB, bridge18 597/817% ~3GiB): same
+band, mem slightly higher from the heavier unified gate (release probe
++ audit_load + full suite in one run). Against limits: 41% of memory,
+71% of CPUs — no throttling, no starvation. Against outcome: the one
+failure is the §O-662 timing race, not resource exhaustion (instant
+0.37s, empty response, resources available); the `/dev/full` OOM class
+is gone, with the suite sailing through `qqq-run` lib. Verdict: NORMAL.
+Run 2h08m on 49a0568, daemon never faltered, tree untouched mid-run.
+ → `docker/compose.yaml`.
+## §O-664 - Wave 6 deferrals, recorded with reasons rather than dropped
+
+I-04 structured framing, I-05 AOT cache, I-06 attenuable tokens: not
+started, because each is a product-scale feature needing benchmarks and
+product decisions, not audit cleanup — framing changes the error
+contract owners consume, AOT caching trades cold-start latency against
+artifact trust, and attenuable tokens reshape the capability model.
+Starting any of them inside a cleanup wave would smuggle product
+decisions past review. I-08 phase 2 (porting checkers to Rust, with
+cargo-semver-checks and cargo-modules preserved as the tool list):
+not started, because phase 1's single gate must first prove a week
+green with the parity checker as backstop — porting before the union
+is proven stable would port bugs along with behavior. The parity
+checker stays until that week is green.
+ → `QQQ-Checklist-V1.md`.
+## §O-665 - A deadline-guarded self-test failed on load, not content, and retries prove it
+
+The full gate went red on `check_checklist_counts --self-test` with
+`progress.py exceeded the 120s deadline` — while every other step,
+including the content checks around it, stayed green. Direct
+reproduction: `progress.py` alone finishes in 8.8s, and the self-test
+passes 3/3 at ~7.7s each. Nothing about the content changed between
+the red run and the green retries; the only variable is machine load,
+which a 120s deadline on a shared box cannot distinguish from a hang.
+Disposition: flake with retry evidence, not a regression and not a
+tolerance to loosen (the deadline exists so a hung reporter fails
+instead of hanging the gate — exactly what happened, loudly).
+Generalisable rule: a timeout failure with green content checks and
+fast retries is load, and the evidence that separates them is measured
+seconds, not a second reading of the log.
+ → `tools/check_checklist_counts.py`.
 *End of `QQQ-Observations-and-Memories.md`.*

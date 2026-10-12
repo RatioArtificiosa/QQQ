@@ -37805,4 +37805,19 @@ attempts with 60s, the negative test 3 with 30s. Green in 6.29s, with
 before this round. Generalisable rule: a retry count without a budget
 is a hope about timing — divide the remainder and the total is a proof.
  → `crates/qqq-run/tests/worker_pool.rs`.
+## §O-668 - Bridge11 exits 0: the hardening held, and the numbers moved the way warm cache explains
+
+Final tree `eb0b4c0`, 1h53m, GATE GREEN 146/146 with zero failures to
+disposition — including `test ok (51s)` where bridge10 lost the
+worker_pool saturation race. The readiness retry plus the overall
+deadline did their job under the same full-suite load that produced
+the original flake. Resource picture (109 one-minute samples): CPU mean
+21.9%, p50 10.4%, p99 159.6%, max 512.9%; MEM max 2336 MiB = 28.5% of
+8 GiB. The max is lower than bridge10's 854% because the target volume
+persisted — warm cache, honestly noted, not a performance claim. The
+p50 repeats bridge10's 10.4% exactly: checker-phase idle behavior is
+stable across runs, and the F-17 parity against bridge7's 9.3% holds a
+second time. Foreign containers at 0.0% throughout. Verdict: NORMAL,
+and this time there is nothing to disposition.
+ → `docker/compose.yaml`.
 *End of `QQQ-Observations-and-Memories.md`.*

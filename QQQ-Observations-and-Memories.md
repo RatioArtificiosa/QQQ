@@ -37872,4 +37872,24 @@ Generalisable rule: on a fail-stop path, every error arm must either abort
 or continue correctly; "skip and loop" is silent disablement.
  → `crates/qqq-host/src/instance.rs`,
  → `crates/qqq-run/src/guest_handler.rs`.
+
+## §O-672 - One Duration, two tick rates: the sub-millisecond split
+
+`register_engine` mapped a truncated-to-zero period to the 10 ms default
+while `ticks_for_deadline` mapped it to 1 ms via `.max(1)` — a 500 µs
+period ticked at 10 ms and counted at 1 ms, trapping a 55 ms deadline at
+55 ticks instead of 6. Only direct registrants could hit it (the helper
+emits whole milliseconds), and the erring direction was early, but two
+functions answering "what is the period" differently is the disagreement
+shape `F-17` exists to remove. Review caught it; both now go through one
+`tick_period_ms`, pinned by a boundary test (red by arithmetic: 55 vs 6
+under the old math). Three other review minors were rebutted on the
+record: the `§O` heading level matches all 671 predecessors; the
+no-handle-plus-stopped wakeup guard is unreachable by the RUNNING state
+machine (spawn failure returns `Err`, so `Ok` implies published handle);
+and the global pass counter was already refused in §O-671 with the
+exactness proof. Generalisable rule: every public function that reads one
+quantity shares one function for it, or the boundary between them is a
+latent disagreement.
+ → `crates/qqq-host/src/instance.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

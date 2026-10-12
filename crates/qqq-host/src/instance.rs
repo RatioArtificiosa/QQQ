@@ -1540,7 +1540,7 @@ pub fn epoch_tick_interval(deadline_ms: u64) -> Duration {
 /// ```
 #[must_use]
 pub fn ticks_for_deadline(deadline_ms: u64, tick: Duration) -> u64 {
-    let tick_ms = tick.as_millis().max(1);
+    let tick_ms = u128::from(tick_period_ms(tick));
     let deadline = u128::from(deadline_ms);
     // Ceiling division without overflow: `deadline + tick - 1` can wrap for
     // absurd deadlines, while div-then-remainder cannot.
@@ -1565,6 +1565,20 @@ const DEFAULT_TICK_MS: u64 = 10;
 /// pure overhead, and registration unparks the thread immediately, so a
 /// new lineage never waits out the idle period.
 const IDLE_PARK_MS: u64 = 1_000;
+
+/// A ticker period in whole milliseconds (`F-17`).
+///
+/// One definition shared by registration and deadline math: a thread parks
+/// in whole milliseconds, so a sub-millisecond period (which `as_millis`
+/// truncates to 0) reads as the 10 ms default in both places rather than
+/// ticking at 10 ms while counting at 1 ms. Never 0 — every division by a
+/// period below is safe by construction.
+fn tick_period_ms(tick: Duration) -> u64 {
+    match u64::try_from(tick.as_millis()).unwrap_or(u64::MAX) {
+        0 => DEFAULT_TICK_MS,
+        ms => ms,
+    }
+}
 
 /// One engine lineage registered with the process-wide epoch ticker
 /// (`F-17`).
@@ -1731,10 +1745,7 @@ pub fn register_engine(
         }
     }
 
-    let period_ms = match u64::try_from(tick.as_millis()).unwrap_or(u64::MAX) {
-        0 => DEFAULT_TICK_MS,
-        ms => ms,
-    };
+    let period_ms = tick_period_ms(tick);
     let slot = std::sync::Arc::new(EngineSlot {
         engine: engine.clone(),
         period_ms,
@@ -2449,6 +2460,24 @@ mod tests {
         assert_eq!(
             ticks_for_deadline(0, std::time::Duration::from_millis(10)),
             1
+        );
+    }
+
+    /// **F-17: registration and deadline math read one period.**
+    ///
+    /// A sub-millisecond period truncates to 0 ms; before the shared
+    /// helper, registration read that as the 10 ms default while the
+    /// deadline math read it as 1 ms — one Duration, two tick rates, with
+    /// the deadline trapping a factor of 10 early. Both now go through
+    /// `tick_period_ms`, pinned here at the boundary.
+    #[test]
+    fn f17_submillisecond_periods_agree() {
+        let sub_ms = std::time::Duration::from_micros(500);
+        assert_eq!(tick_period_ms(sub_ms), 10);
+        assert_eq!(
+            ticks_for_deadline(55, sub_ms),
+            ticks_for_deadline(55, std::time::Duration::from_millis(10)),
+            "a sub-ms period must count exactly like the 10 ms default it ticks at"
         );
     }
 

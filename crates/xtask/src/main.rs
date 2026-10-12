@@ -19,13 +19,15 @@
 //! Cargo steps serialise on the target directory themselves; `xtask` runs
 //! them sequentially and accepts that. The cheap checks run in parallel in
 //! a `thread::scope` — every bare, `--check`, `--matrix`, `--list` and
-//! `--report` form, which only read. Everything that can write goes
-//! sequentially in listed order: every `--self-test` (temporary fixtures,
-//! fault injections, builds), every cargo invocation, the orders-api
-//! workspace, the release probe, and the two ported shell checks. A
-//! parallelised fault-injection self-test could interleave with another
-//! check's restore and flake; the sequential lane keeps today's exact
-//! behaviour for exactly those steps.
+//! `--report` form, which only read, except the two checkers whose live
+//! paths shell `cargo xtask list` (which compiles into that same target
+//! dir and races there). Everything that can write goes sequentially in
+//! listed order: every `--self-test` (temporary fixtures, fault
+//! injections, builds), every cargo invocation, the orders-api workspace,
+//! the release probe, and the two ported shell checks. A parallelised
+//! fault-injection self-test could interleave with another check's restore
+//! and flake; the sequential lane keeps today's exact behaviour for
+//! exactly those steps.
 //!
 //! # What is deliberately NOT here (phase 2)
 //!
@@ -323,12 +325,21 @@ const PY_STEPS: &[Step] = &[
         &["tools/check_coderabbit_config.py"],
     ),
     Step::py(
-        Lane::Par,
+        // Sequential, not parallel: the live path shells `cargo xtask list`,
+        // which compiles the xtask binary into the shared target dir. Two
+        // such checkers in the parallel wave race -- one deletes
+        // `target/debug/xtask` mid-rebuild while the other is about to exec
+        // it -- and CI failed `check_gate_parity` on macOS with exactly
+        // that `could not execute process (never executed)`. The sequential
+        // lane runs steps one at a time, so no two cargo processes share
+        // the target dir.
+        Lane::Seq,
         "check_conformance",
         &["tools/check_conformance.py"],
     ),
     Step::py(
-        Lane::Par,
+        // Same cargo-shelling live path as the bare form above.
+        Lane::Seq,
         "check_conformance",
         &["tools/check_conformance.py", "--matrix"],
     ),
@@ -358,7 +369,10 @@ const PY_STEPS: &[Step] = &[
         &["tools/check_error_standard.py"],
     ),
     Step::py(
-        Lane::Par,
+        // Sequential, not parallel: same cargo-shelling live path as
+        // `check_conformance` above (`cargo xtask list` compiles into the
+        // shared target dir). See that step's comment for the macOS race.
+        Lane::Seq,
         "check_gate_parity",
         &["tools/check_gate_parity.py"],
     ),
@@ -2065,6 +2079,33 @@ mod tests {
                     s.lane,
                     Lane::Seq,
                     "{} needs a built binary outside the sequential lane",
+                    s.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_shelling_checkers_run_sequentially() {
+        // Checkers that shell `cargo xtask list` on the live path compile
+        // the xtask binary into the shared target dir as a side effect. Two
+        // of them in the parallel wave race: one deletes
+        // `target/debug/xtask` mid-rebuild while the other is about to exec
+        // it, and CI failed `check_gate_parity` on macOS with `could not
+        // execute process ... (never executed)`. The `--self-test` forms
+        // inject coverage and never shell cargo, so only the live forms
+        // need the sequential lane, where steps run one at a time.
+        const SHELLS_CARGO: &[&str] = &["tools/check_conformance.py", "tools/check_gate_parity.py"];
+        for s in all_steps() {
+            if let StepKind::Py { args } = s.kind
+                && let Some(script) = args.first()
+                && SHELLS_CARGO.contains(script)
+                && !args.contains(&"--self-test")
+            {
+                assert_eq!(
+                    s.lane,
+                    Lane::Seq,
+                    "{} shells cargo outside the sequential lane",
                     s.name
                 );
             }

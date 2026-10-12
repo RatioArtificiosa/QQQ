@@ -37665,4 +37665,23 @@ reconstruction, not a restore — every fix that landed in the abandoned
 history has to be re-applied deliberately, and a platform-gated test
 that fails only on CI will not tell you until it has already failed.
  → `crates/qqq-host/src/audit_sink.rs`.
+## §O-660 - The gate raced itself: two checkers, one target dir, one deleted binary
+
+CI failed `check_gate_parity` on macOS with `could not execute process
+`target/debug/xtask list` (never executed)` — and the cause was the
+gate, not the checker. Both `check_conformance.py` and
+`check_gate_parity.py` shell `cargo xtask list` on the live path, which
+compiles the xtask binary into the shared target dir as a side effect;
+both rode the parallel wave, so one deleted the binary mid-rebuild
+while the other was about to exec it. The step table's lane rule even
+documented the shape ("every cargo invocation goes sequentially") while
+two indirect invocations hid inside python steps the rule could not see.
+Red proof first (a lane-invariant test failing on the table as
+committed, plus the CI log), then all three live forms move sequential
+where steps run one at a time, pinned by that test; the `--self-test`
+forms inject coverage and never shell cargo, so they stay parallel.
+Generalisable rule: a lane rule that names direct invocations misses
+the ones hiding inside scripts — audit what the steps *run*, not just
+what the table *spells*.
+ → `crates/xtask/src/main.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

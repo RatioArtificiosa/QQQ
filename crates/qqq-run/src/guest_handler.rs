@@ -1728,8 +1728,7 @@ mod tests {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|s| s.success());
             if !ok {
                 let _ = std::fs::remove_dir_all(&dir);
                 println!("skipping {tag}: tmpfs mount unavailable (no root)");

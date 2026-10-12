@@ -37629,4 +37629,25 @@ re-applied piece by piece rather than wholesale. Generalisable rule:
 amend while a commit is unpushed; once it is pushed, the next fix is a
 new commit, and the cost is recovering the delta, not rewriting history.
  → `crates/qqq-host/src/audit_sink.rs`.
+## §O-658 - A review called the peek dead code; the test proved it load-bearing
+
+The next review round asked (twice, in near-identical words) to delete
+the `fill_buf` peek, arguing a budget hit already implies an over-long
+line because `raw.len()` would exceed the limit. The reasoning was
+checkable, so it was checked — and it is wrong. `upto` is *clamped* to
+the budget, so a file holding exactly `limit` bytes stops at
+`upto == limit`, which is under the budget; the loop exits on an empty
+buffer and reaches the torn-tail rule. A budget *hit* therefore means the
+reader still had more to give, and the peek distinguishes a live
+endless source (refuse) from a source that ended exactly at the bound
+(a crash mid-write, torn tail). Removing it made
+`a_line_of_exactly_the_bound_is_the_boundary` fail with
+`Ok(... dropped_partial_line: true)` where a refusal was asserted — the
+test caught the review error in one run. The peek stays, with the
+arithmetic written down at the branch so the next reviewer can check it
+rather than re-derive it. Generalisable rule: a review finding about
+dead code is a hypothesis — delete it and let the test decide; and
+record the derivation beside the code, because a rebuttal that lives
+only in the commit message will be re-litigated.
+ → `crates/qqq-host/src/audit_sink.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

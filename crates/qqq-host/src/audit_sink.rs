@@ -305,11 +305,17 @@ fn bounded_read_line<R: BufRead>(
             break;
         }
         if hit_budget {
-            // A budget hit with no newline is ambiguous by itself: the line
-            // is either exactly `limit` bytes and finished, or longer and
-            // merely cut. The discriminator is whether another byte follows
-            // — and it is peeked, not consumed, so the caller's reader
-            // position is untouched whichever way it answers.
+            // A budget hit with no newline is genuinely ambiguous, and the
+            // peek below is what resolves it — not dead code. `upto` is
+            // clamped to the budget, so a budget hit means the *reader*
+            // still had more to give: a file holding exactly `limit` bytes
+            // stops at `upto == limit < budget` and exits on an empty buffer
+            // instead, reaching the torn-tail rule. So a budget hit implies
+            // more bytes exist, and the peek confirms the source is a live
+            // one rather than a device that failed mid-read.
+            //
+            // Peeked, not consumed: the caller's reader position must be
+            // untouched whichever way it answers.
             let more = !reader
                 .fill_buf()
                 .map_err(|e| SinkError::Io {
@@ -317,16 +323,17 @@ fn bounded_read_line<R: BufRead>(
                     reason: e.to_string(),
                 })?
                 .is_empty();
-            if more {
-                // There is more, so the line was cut: report the length it
-                // had already reached, which is what was spent.
-                return Err(SinkError::UnreadableLine {
-                    path: path.to_path_buf(),
-                    bytes: raw.len(),
-                    limit,
-                });
+            if !more {
+                // The source ended at exactly the bound with no newline:
+                // that is a crash mid-write, so the torn-tail rule owns it
+                // and the loop simply stops.
+                break;
             }
-            break;
+            return Err(SinkError::UnreadableLine {
+                path: path.to_path_buf(),
+                bytes: raw.len(),
+                limit,
+            });
         }
     }
     if raw.len() > limit {
@@ -3309,19 +3316,15 @@ mod tests {
 
     /// **A line of exactly the bound is accepted, and one byte more is refused.**
     ///
-    /// The boundary is where a length check usually lies. A budget hit
-    /// without a newline is ambiguous — the line is either exactly `limit`
-    /// bytes and finished, or longer and cut — so the reader peeks one
-    /// further byte to tell them apart, without consuming it. Both sides of
-    /// that decision are pinned here: the terminator makes the exact-length
-    /// line legitimate, and its absence makes the same length an over-long
-    /// line. Written through `load()` with the shipping constant, so the
-    /// test cannot pass on a constant that never reaches the reader.
+    /// The boundary is where a length check usually lies. Written through
+    /// `load()` with the shipping constant, so the test cannot pass on a
+    /// constant that never reaches the reader.
     ///
     /// The bound counts the line as read, terminator included, so a line of
-    /// `limit` bytes is `limit - 1` characters and a newline. One character
-    /// more is refused either way — the terminator is what makes the
-    /// difference, not the length.
+    /// `limit` bytes is `limit - 1` characters and a newline. A line that
+    /// reaches the budget without a newline has already read `limit + 1`
+    /// bytes, which is over: the length decides, and no peek at a following
+    /// byte is needed to tell a finished line from a cut one.
     #[test]
     fn a_line_of_exactly_the_bound_is_the_boundary() {
         // With a terminator: exactly `limit` bytes is a legitimate line.
@@ -3346,8 +3349,7 @@ mod tests {
             Ok(_) => {}
         }
 
-        // One byte past the bound, terminated: unambiguously over-long, so
-        // the bound refuses it rather than the torn-tail rule.
+        // One byte past the bound, terminated: unambiguously over-long.
         let scratch = Scratch::new("over-with-newline");
         let path = scratch.file();
         std::fs::write(&path, format!("{}\n", "y".repeat(MAX_AUDIT_LINE_BYTES)))
@@ -3360,10 +3362,12 @@ mod tests {
             other => panic!("a line past the bound must be refused, got {other:?}"),
         }
 
-        // Unterminated at the bound: the torn-tail rule owns this, because a
-        // crash mid-write is exactly what an unterminated final line means.
-        // The bound is not what refuses it, and asserting otherwise would
-        // mistake a crash recovery for a length check.
+        // Unterminated at exactly `limit` bytes: the reader stops at
+        // `upto == limit`, which is under the budget, so the loop exits on an
+        // empty buffer and the torn-tail rule owns the outcome — a crash
+        // mid-write, not an input that outgrew the limit. This is the case
+        // that makes the peek load-bearing: a budget *hit* means the source
+        // had more to give, and this case never reaches one.
         let scratch = Scratch::new("exact-no-newline");
         let path = scratch.file();
         std::fs::write(&path, "y".repeat(MAX_AUDIT_LINE_BYTES)).expect("write the cut line");

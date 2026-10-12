@@ -37595,4 +37595,38 @@ point. Generalisable rule: a fix reviewed only by its own new tests
 passes by construction; ask what the fixture cannot exhibit, and what
 the boundary it introduced cannot reach.
  → `crates/qqq-host/src/audit_sink.rs`, `crates/qqq-run/src/guest_handler.rs`.
+## §O-656 - A budget hit without a newline was ambiguous, and my first boundary test was wrong
+
+The third review round of the bounded read found a real edge: a budget
+hit with no newline was ambiguous, because the line is either exactly
+`limit` bytes and finished or longer and merely cut, and the reader
+could not tell which. The reader now peeks one further byte — without
+consuming it, so the caller's position is untouched either way — and
+refuses only when there is more. My first test for this was itself wrong
+twice over: it wrote `limit` characters *plus* a newline (the bound
+counts the terminator, so that is one byte over), and then asserted that
+an unterminated line at the bound is a bound refusal, when the torn-tail
+rule correctly owns that case — a crash mid-write is what an
+unterminated final line means. The test now pins three distinct
+outcomes: exactly-at-bound terminated is accepted, one byte past
+terminated is refused by the bound, and unterminated is dropped as a
+torn tail. Generalisable rule: a boundary test needs the case on each
+side *and* the rule that owns the adjacent behaviour — otherwise it
+asserts a length check where a crash-recovery rule lives.
+ → `crates/qqq-host/src/audit_sink.rs`.
+## §O-657 - I amended a pushed commit and had to unwind it rather than force-push
+
+The boundary fix was developed as an amendment to `997d560`, which was
+already on origin, so the local `main` had diverged and `git push`
+refused. A force-push would have rewritten shared history to make my
+own workflow tidy, which is exactly the kind of unilateral change the
+workflow forbids. `git reset --hard origin/main` returned local to the
+pushed history, the orphaned commit's exact delta was recovered with
+`git show`/`git diff` against it, and the work landed as a new commit on
+top. A cherry-pick was tried first and conflicted, because the pushed
+commit already carried most of the same content — the delta had to be
+re-applied piece by piece rather than wholesale. Generalisable rule:
+amend while a commit is unpushed; once it is pushed, the next fix is a
+new commit, and the cost is recovering the delta, not rewriting history.
+ → `crates/qqq-host/src/audit_sink.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

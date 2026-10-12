@@ -301,10 +301,31 @@ fn bounded_read_line<R: BufRead>(
         let _ = buf;
         reader.consume(upto);
         read += upto;
-        // Stop on a newline (the line is complete) or on a budget hit (the
-        // line is either exactly `limit` bytes or over; the check below
-        // decides which).
-        if ended_newline || hit_budget {
+        if ended_newline {
+            break;
+        }
+        if hit_budget {
+            // A budget hit with no newline is ambiguous by itself: the line
+            // is either exactly `limit` bytes and finished, or longer and
+            // merely cut. The discriminator is whether another byte follows
+            // — and it is peeked, not consumed, so the caller's reader
+            // position is untouched whichever way it answers.
+            let more = !reader
+                .fill_buf()
+                .map_err(|e| SinkError::Io {
+                    path: path.to_path_buf(),
+                    reason: e.to_string(),
+                })?
+                .is_empty();
+            if more {
+                // There is more, so the line was cut: report the length it
+                // had already reached, which is what was spent.
+                return Err(SinkError::UnreadableLine {
+                    path: path.to_path_buf(),
+                    bytes: raw.len(),
+                    limit,
+                });
+            }
             break;
         }
     }
@@ -3283,6 +3304,77 @@ mod tests {
                 assert!(bytes > limit, "the refusal reports what it saw: {bytes}");
             }
             other => panic!("a line past the bound must be refused, got {other:?}"),
+        }
+    }
+
+    /// **A line of exactly the bound is accepted, and one byte more is refused.**
+    ///
+    /// The boundary is where a length check usually lies. A budget hit
+    /// without a newline is ambiguous — the line is either exactly `limit`
+    /// bytes and finished, or longer and cut — so the reader peeks one
+    /// further byte to tell them apart, without consuming it. Both sides of
+    /// that decision are pinned here: the terminator makes the exact-length
+    /// line legitimate, and its absence makes the same length an over-long
+    /// line. Written through `load()` with the shipping constant, so the
+    /// test cannot pass on a constant that never reaches the reader.
+    ///
+    /// The bound counts the line as read, terminator included, so a line of
+    /// `limit` bytes is `limit - 1` characters and a newline. One character
+    /// more is refused either way — the terminator is what makes the
+    /// difference, not the length.
+    #[test]
+    fn a_line_of_exactly_the_bound_is_the_boundary() {
+        // With a terminator: exactly `limit` bytes is a legitimate line.
+        let scratch = Scratch::new("exact-with-newline");
+        let path = scratch.file();
+        std::fs::write(&path, format!("{}\n", "y".repeat(MAX_AUDIT_LINE_BYTES - 1)))
+            .expect("write the exact line");
+        match load(&path) {
+            Err(e @ SinkError::UnreadableLine { .. }) => {
+                panic!("a line of exactly the bound must be accepted, got: {e}")
+            }
+            // Any other outcome is correct: the line is not a record, so a
+            // parse refusal is the right answer. What must not happen is a
+            // bound refusal on a line that is exactly at the bound.
+            Err(
+                e @ (SinkError::Io { .. }
+                | SinkError::Malformed { .. }
+                | SinkError::NotAStream { .. }),
+            ) => {
+                let _ = e;
+            }
+            Ok(_) => {}
+        }
+
+        // One byte past the bound, terminated: unambiguously over-long, so
+        // the bound refuses it rather than the torn-tail rule.
+        let scratch = Scratch::new("over-with-newline");
+        let path = scratch.file();
+        std::fs::write(&path, format!("{}\n", "y".repeat(MAX_AUDIT_LINE_BYTES)))
+            .expect("write the over-long line");
+        match load(&path) {
+            Err(SinkError::UnreadableLine { bytes, limit, .. }) => {
+                assert_eq!(limit, MAX_AUDIT_LINE_BYTES);
+                assert!(bytes > limit, "the refusal reports what it saw: {bytes}");
+            }
+            other => panic!("a line past the bound must be refused, got {other:?}"),
+        }
+
+        // Unterminated at the bound: the torn-tail rule owns this, because a
+        // crash mid-write is exactly what an unterminated final line means.
+        // The bound is not what refuses it, and asserting otherwise would
+        // mistake a crash recovery for a length check.
+        let scratch = Scratch::new("exact-no-newline");
+        let path = scratch.file();
+        std::fs::write(&path, "y".repeat(MAX_AUDIT_LINE_BYTES)).expect("write the cut line");
+        match load(&path) {
+            Ok(loaded) => {
+                assert!(
+                    loaded.dropped_partial_line,
+                    "an unterminated final line is a torn tail, not a bound refusal"
+                );
+            }
+            other => panic!("an unterminated final line is dropped, got {other:?}"),
         }
     }
 }

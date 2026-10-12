@@ -201,10 +201,19 @@ fn start_once(sandbox: &Sandbox, workers: u32) -> Option<Server> {
 /// assertion reports what it saw. Measured: the first version used `expect`, which turned a lost
 /// port race into a panic whose message named `TcpStream::connect` instead of the capacity.
 fn request(port: u16, path: &str) -> String {
+    request_timeout(port, path, Duration::from_secs(10))
+}
+
+/// Send one request with a bounded read, and return the raw response.
+///
+/// The timeout covers the read only; a refused connection still returns
+/// immediately. Callers that retry under an overall budget pass a smaller
+/// timeout so one hanging attempt cannot spend the whole budget.
+fn request_timeout(port: u16, path: &str, timeout: Duration) -> String {
     let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) else {
         return "<no connection>".to_owned();
     };
-    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = s.set_read_timeout(Some(timeout));
     if s.write_all(
         format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
     )
@@ -454,10 +463,27 @@ fn capacity_in(line: &str) -> Option<u32> {
 /// refusal is refusal on the first answer, and on some Windows hosts a
 /// refused loopback connect alone costs ~2s, so twenty of them would turn
 /// the negative test into a 40s wait for no additional proof (measured).
-fn request_ready(port: u16, path: &str, attempts: u32) -> String {
+///
+/// `budget` bounds the total wait, strictly: each attempt may spend at
+/// most the remaining budget divided by the attempts still unused, so the
+/// sum can never exceed the budget no matter how the attempts divide it.
+/// A per-attempt timeout alone cannot do this — twenty attempts at ten
+/// seconds each is two hundred seconds of hanging on a silent server,
+/// which is what the hold-forever test below pins. The division shrinks
+/// late attempts on a slow machine, which is the correct direction: the
+/// budget is a promise to the caller, not a suggestion.
+fn request_ready(port: u16, path: &str, attempts: u32, budget: Duration) -> String {
+    let deadline = Instant::now() + budget;
     let mut last = String::new();
-    for _ in 0..attempts {
-        let got = request(port, path);
+    for left in (1..=attempts.max(1)).rev() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // `checked_div` cannot fail here: `left` counts down from at least
+        // 1, so the divisor is never zero.
+        let share = remaining.checked_div(left).unwrap_or(remaining);
+        let got = request_timeout(port, path, share);
         if got.starts_with("HTTP/1.1") {
             return got;
         }
@@ -488,7 +514,7 @@ fn request_ready_reports_a_dead_server_loudly() {
         .port();
     // Listener dropped here: the port is free and nothing answers it.
     let t = Instant::now();
-    let got = request_ready(port, "/healthz", 3);
+    let got = request_ready(port, "/healthz", 3, Duration::from_secs(30));
     assert_eq!(
         got, "<no connection>",
         "a dead server must be reported, not retried into a pass"
@@ -497,6 +523,41 @@ fn request_ready_reports_a_dead_server_loudly() {
         t.elapsed() < Duration::from_secs(30),
         "the retry budget must bound the wait, took {:?}",
         t.elapsed()
+    );
+}
+
+/// A server that accepts and never answers still returns within budget.
+///
+/// Without an overall deadline, each attempt's read timeout extends the
+/// total: three attempts at the default ten seconds is thirty seconds of
+/// hanging on a silent server. The stub below holds every connection it
+/// accepts, so the only thing that can end the call quickly is the
+/// budget — the test fails while the helper ignores it.
+#[test]
+fn request_ready_returns_within_budget_when_the_server_holds_connections() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral port");
+    let port = listener.local_addr().expect("port number").port();
+    std::thread::spawn(move || {
+        // Held, never answered: each attempt must time out fast enough
+        // that the budget, not the attempt count, decides. All accepted
+        // connections stay open so no attempt can observe a refusal.
+        let mut held = Vec::new();
+        for incoming in listener.incoming().take(8).flatten() {
+            held.push(incoming);
+        }
+        std::thread::sleep(Duration::from_secs(60));
+        drop(held);
+    });
+    let t = Instant::now();
+    let got = request_ready(port, "/healthz", 3, Duration::from_secs(6));
+    assert!(
+        t.elapsed() < Duration::from_secs(15),
+        "a holding server must not extend the wait past budget, took {:?}",
+        t.elapsed()
+    );
+    assert!(
+        got.is_empty(),
+        "a holding server answers nothing; got: {got}"
     );
 }
 
@@ -514,7 +575,7 @@ fn a_saturated_single_slot_pool_refuses_and_a_wider_one_serves() {
     // With one worker the route still serves, which is the baseline the refusal is measured
     // against: a server that refused *everything* would satisfy a saturation test alone.
     let narrow = start(&sandbox, 1);
-    let served = request_ready(narrow.port, "/healthz", 20);
+    let served = request_ready(narrow.port, "/healthz", 20, Duration::from_secs(60));
     assert!(
         served.starts_with("HTTP/1.1 200"),
         "one worker must still serve a single request; got: {}",
@@ -525,7 +586,7 @@ fn a_saturated_single_slot_pool_refuses_and_a_wider_one_serves() {
     // Four workers, the same request: if this failed, the fixture rather than the capacity
     // would be the cause, and the narrow case above would prove nothing.
     let wide = start(&sandbox, 4);
-    let also_served = request_ready(wide.port, "/healthz", 20);
+    let also_served = request_ready(wide.port, "/healthz", 20, Duration::from_secs(60));
     assert!(
         also_served.starts_with("HTTP/1.1 200"),
         "the same route must serve with four workers; got: {}",

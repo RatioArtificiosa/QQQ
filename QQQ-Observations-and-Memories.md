@@ -37790,4 +37790,19 @@ and the measured numbers are in the comments: 3/3 in 6.28s on Windows,
 seconds is measuring the machine, not the code — and the probe that
 proves it is twenty lines, not a theory.
  → `crates/qqq-run/tests/worker_pool.rs`.
+## §O-667 - Review asked for one overall deadline, and the red run took thirty seconds to agree
+
+`request_ready` retried a fixed count with a fixed per-attempt timeout,
+so a holding server extended the total by attempts × timeout — the
+reviewer asked for one overall deadline instead, with a test on a
+server that accepts and never responds. Red proof first: the new test
+took 30.19s against the unbudgeted helper (three ten-second timeouts),
+failing its 15s bound. The helper now divides the remaining budget by
+the attempts still unused, so the sum telescopes to at most the budget
+no matter how the attempts divide it; the saturation calls pass 20
+attempts with 60s, the negative test 3 with 30s. Green in 6.29s, with
+4/4 worker_pool tests passing on Windows and 3/3 shown in-container
+before this round. Generalisable rule: a retry count without a budget
+is a hope about timing — divide the remainder and the total is a proof.
+ → `crates/qqq-run/tests/worker_pool.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

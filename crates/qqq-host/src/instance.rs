@@ -1548,6 +1548,325 @@ pub fn ticks_for_deadline(deadline_ms: u64, tick: Duration) -> u64 {
     u64::try_from(ticks.max(1)).unwrap_or(u64::MAX)
 }
 
+/// The default tick period (`F-17`): a zero period registers at 10 ms
+/// rather than refusing, because a lineage with no stated deadline still
+/// needs its epoch advanced.
+///
+/// Periods above a second tick at one-second granularity: the thread never
+/// parks longer than [`IDLE_PARK_MS`], so an absurd period advances its
+/// engine early rather than stalling the whole process. The helper never
+/// produces those (`epoch_tick_interval` caps at 100 ms); this is the
+/// backstop for direct registrants.
+const DEFAULT_TICK_MS: u64 = 10;
+
+/// How long the process ticker parks when no lineage is registered.
+///
+/// One second, not the 10 ms default: with nothing to tick, wake-ups are
+/// pure overhead, and registration unparks the thread immediately, so a
+/// new lineage never waits out the idle period.
+const IDLE_PARK_MS: u64 = 1_000;
+
+/// One engine lineage registered with the process-wide epoch ticker
+/// (`F-17`).
+///
+/// The ticker thread holds this weakly and prunes dead entries every tick,
+/// so dropping the last `Arc` stops the lineage being ticked without any
+/// explicit unregister: the registration lives exactly as long as its
+/// owner. `ticks` counts epochs emitted for this entry. It is always
+/// present rather than `cfg(test)`-gated: qqq-run's acceptance tests read
+/// it across crates (where `cfg(test)` would be invisible), and one
+/// uncontended atomic add per emission is unmeasurable beside
+/// `increment_epoch` itself.
+///
+/// ```
+/// use qqq_host::instance::register_engine;
+///
+/// let engine = wasmtime::Engine::default();
+/// let slot = register_engine(&engine, std::time::Duration::from_millis(1))
+///     .expect("the ticker thread starts");
+/// // The entry accrues ticks while its owner lives: poll rather than
+/// // sleep-and-count, so scheduling delay can only slow the observation,
+/// // never fake it.
+/// let started = std::time::Instant::now();
+/// while slot.ticks() == 0 {
+///     assert!(
+///         started.elapsed() < std::time::Duration::from_secs(5),
+///         "the ticker stalled"
+///     );
+///     std::thread::sleep(std::time::Duration::from_millis(1));
+/// }
+/// ```
+pub struct EngineSlot {
+    engine: wasmtime::Engine,
+    period_ms: u64,
+    acc_ms: std::sync::atomic::AtomicU64,
+    ticks: std::sync::atomic::AtomicU64,
+    /// When this lineage registered, for idle-credit clamping below.
+    ///
+    /// The loop measures one global elapsed per pass; when the registry
+    /// idles empty `last` goes stale by up to the idle park, and a slot
+    /// born after that must not inherit it. Set before the entry is
+    /// published so no pass can observe the slot without its birth.
+    born: Instant,
+}
+
+impl EngineSlot {
+    /// Epochs emitted for this entry since registration — the idle-rate
+    /// acceptance test reads this.
+    ///
+    /// ```
+    /// use qqq_host::instance::register_engine;
+    ///
+    /// let engine = wasmtime::Engine::default();
+    /// let slot = register_engine(&engine, std::time::Duration::from_millis(1))
+    ///     .expect("the ticker thread starts");
+    /// let first = slot.ticks();
+    /// let started = std::time::Instant::now();
+    /// while slot.ticks() <= first {
+    ///     assert!(
+    ///         started.elapsed() < std::time::Duration::from_secs(5),
+    ///         "the ticker stalled"
+    ///     );
+    ///     std::thread::sleep(std::time::Duration::from_millis(1));
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+struct TickerRegistry {
+    entries: std::sync::Mutex<Vec<std::sync::Weak<EngineSlot>>>,
+    unpark: std::sync::Mutex<Option<std::thread::Thread>>,
+}
+
+impl TickerRegistry {
+    const fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(Vec::new()),
+            unpark: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+static PROCESS_TICKER: TickerRegistry = TickerRegistry::new();
+static PROCESS_TICKER_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Register an engine lineage with the process-wide epoch ticker and keep
+/// it ticked until the returned handle is dropped (`F-17`).
+///
+/// One thread serves every lineage: it parks on the shortest registered
+/// period and, each tick, advances each live engine by the wall-clock
+/// elapsed at that engine's own rate, pruning entries whose owners are
+/// gone. Per-lineage threads multiplied wake-ups by engine count (the old
+/// 1 ms sleeper cost ~1,000 wakeups/s per engine); the shared thread costs
+/// one park per tick no matter how many lineages exist.
+///
+/// # Errors
+///
+/// Only when the ticker thread itself cannot start — the caller turns this
+/// into its own error, the same contract the per-lineage ticker had.
+/// Registry-lock poison recovers via `PoisonError::into_inner` instead of
+/// erroring: nothing held under those locks can panic, and a skipped
+/// registration or pass would silently untick a lineage.
+///
+/// ```
+/// use qqq_host::instance::register_engine;
+///
+/// let engine = wasmtime::Engine::default();
+/// let slot = register_engine(&engine, std::time::Duration::from_millis(1))
+///     .expect("the ticker thread starts");
+/// // The lineage ticks while the handle lives: the ticker holds engines
+/// // weakly and prunes dead entries every pass, so dropping the last
+/// // `Arc` unregisters with no explicit call.
+/// let started = std::time::Instant::now();
+/// while slot.ticks() == 0 {
+///     assert!(
+///         started.elapsed() < std::time::Duration::from_secs(5),
+///         "the ticker stalled"
+///     );
+///     std::thread::sleep(std::time::Duration::from_millis(1));
+/// }
+/// drop(slot);
+/// ```
+pub fn register_engine(
+    engine: &wasmtime::Engine,
+    tick: Duration,
+) -> std::io::Result<std::sync::Arc<EngineSlot>> {
+    // Exactly-once start, race-free: only the swap winner spawns. A spawn
+    // failure releases the flag and reports, so the next registration
+    // retries instead of certifying a ticker that never started. The unpark
+    // lock is held across spawn-and-publish: a racing registration blocks
+    // on that same lock in the wake path below, so it can never observe a
+    // started-but-handleless ticker and miss its wakeup (the miss would
+    // stall a shorter period by up to one old period — self-healing at the
+    // next pass, but a deadline slip all the same).
+    if !PROCESS_TICKER_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Poison recovers, like every other registry lock here: skipping on
+        // poison would leave the ticker handleless and every later lineage
+        // unticked with no error — the silent-deadline shape `F-01` exists
+        // to forbid. Nothing held under these locks can panic, so the
+        // recovered guard is safe to use.
+        let mut unpark = PROCESS_TICKER
+            .unpark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spawned = std::thread::Builder::new()
+            .name("qqq-epochs".into())
+            .spawn(|| ticker_loop(&PROCESS_TICKER));
+        match spawned {
+            Ok(thread) => {
+                *unpark = Some(thread.thread().clone());
+                // The `JoinHandle` drops here, detaching the thread:
+                // it runs for the life of the process, which is what
+                // "process-wide" means. Threads do not block process
+                // exit.
+            }
+            Err(e) => {
+                PROCESS_TICKER_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+    }
+
+    let period_ms = match u64::try_from(tick.as_millis()).unwrap_or(u64::MAX) {
+        0 => DEFAULT_TICK_MS,
+        ms => ms,
+    };
+    let slot = std::sync::Arc::new(EngineSlot {
+        engine: engine.clone(),
+        period_ms,
+        acc_ms: std::sync::atomic::AtomicU64::new(0),
+        ticks: std::sync::atomic::AtomicU64::new(0),
+        born: Instant::now(),
+    });
+    // Poison recovers, never skips: a skipped push would leave this
+    // lineage unticked with no error — the silent-deadline shape `F-01`
+    // exists to forbid. Nothing held under this lock can panic, so the
+    // recovered guard is safe to use.
+    PROCESS_TICKER
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(std::sync::Arc::downgrade(&slot));
+    // Wake the thread to recompute its period now: without this a new
+    // shorter-period lineage waits out up to one old period, and deadlines
+    // would slip by that staleness.
+    let unpark = PROCESS_TICKER
+        .unpark
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(thread) = unpark.as_ref() {
+        thread.unpark();
+    }
+    Ok(slot)
+}
+
+/// The process ticker loop: park, measure, advance every live lineage at
+/// its own rate, prune the dead (`F-17`).
+///
+/// Elapsed time is measured, not assumed: a park that returns early
+/// (spurious wakeup) or late (loaded scheduler, notably Windows timer
+/// granularity) advances epochs by what actually passed. That preserves
+/// both the catch-up the sleep loop had — missed quanta still advance the
+/// epoch, so a delayed thread cannot let a guest run past its budget — and
+/// the idle rate the acceptance test pins.
+fn ticker_loop(registry: &'static TickerRegistry) {
+    // Fail-stop first (`F-01`): a dead ticker silently disables
+    // wall-clock deadlines, leaving only fuel to bound CPU. A panic here
+    // aborts the process rather than parking the safety mechanism.
+    let _fail_stop = crate::guard::AbortOnPanic::new("qqq-epochs");
+    let mut last = std::time::Instant::now();
+    loop {
+        // Recomputed from the live set every pass: registrations shorten it
+        // (via unpark) and pruning lengthens it back. Capped so an absurd
+        // period parks at most a second (see `DEFAULT_TICK_MS`). Poison
+        // recovers, never skips: a skipped pass would stall every deadline
+        // by a whole period with no error.
+        let mut period_ms = IDLE_PARK_MS;
+        let entries = registry
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for weak in entries.iter() {
+            if let Some(slot) = weak.upgrade() {
+                let slot_period = slot.period_ms.min(IDLE_PARK_MS);
+                if slot_period < period_ms {
+                    period_ms = slot_period;
+                }
+            }
+        }
+        drop(entries);
+        std::thread::park_timeout(Duration::from_millis(period_ms));
+        let now = std::time::Instant::now();
+        registry
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|weak| {
+                weak.upgrade().is_some_and(|slot| {
+                    // No credit for time before this slot registered: the
+                    // global `last` may predate it by a whole idle park.
+                    // For old slots `last` dominates and this is the global
+                    // elapsed unchanged; for new ones only their own
+                    // lifetime accrues.
+                    let own_ms = u64::try_from(
+                        now.saturating_duration_since(last.max(slot.born))
+                            .as_millis(),
+                    )
+                    .unwrap_or(u64::MAX);
+                    let total = slot
+                        .acc_ms
+                        .fetch_add(own_ms, std::sync::atomic::Ordering::Relaxed)
+                        .saturating_add(own_ms);
+                    let n = total / slot.period_ms;
+                    for _ in 0..n {
+                        slot.engine.increment_epoch();
+                    }
+                    slot.acc_ms
+                        .store(total % slot.period_ms, std::sync::atomic::Ordering::Relaxed);
+                    slot.ticks
+                        .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    true
+                })
+            });
+        last = now;
+    }
+}
+
+/// Live entries currently registered — test introspection for the prune
+/// test below. `#[cfg(test)]` because production has no use for it; the
+/// in-crate tests that need it see it.
+///
+/// Counts entries whose owners are still alive. A dropped lineage leaves
+/// this count at once (`Weak::upgrade` fails at drop) even though its
+/// entry stays in the registry until the ticker's next pass prunes it —
+/// `ticker_holds` below is the pruning signal, this count is only the
+/// live-owner census, which is why the tests poll rather than asserting
+/// immediately.
+#[cfg(test)]
+fn ticker_entry_count() -> usize {
+    PROCESS_TICKER.entries.lock().map_or(0, |entries| {
+        entries
+            .iter()
+            .filter(|weak| weak.upgrade().is_some())
+            .count()
+    })
+}
+
+/// Whether one specific registration is still present in the registry —
+/// test introspection for the prune test below. Identity by `Weak::ptr_eq`,
+/// not by counting live entries: a count cannot say *which* lineage stayed.
+#[cfg(test)]
+fn ticker_holds(weak: &std::sync::Weak<EngineSlot>) -> bool {
+    PROCESS_TICKER
+        .entries
+        .lock()
+        .is_ok_and(|entries| entries.iter().any(|e| std::sync::Weak::ptr_eq(e, weak)))
+}
+
 /// Deterministic-mode clock configuration.
 ///
 /// In deterministic mode the wall clock is **virtual**: it returns a fixed
@@ -2148,6 +2467,165 @@ mod tests {
                 tick_ms <= deadline.max(1),
                 "tick {tick:?} exceeds deadline {deadline}ms"
             );
+        }
+    }
+
+    /// Serializes the registry-touching tests in this module: the process
+    /// ticker is global to the test binary, so two of these tests running
+    /// concurrently would count each other's registrations.
+    static TICKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// **F-17 follow-up: dead lineages prune out of the process-wide ticker.**
+    ///
+    /// The registry holds engines weakly so a dropped app stops being
+    /// ticked: a retained entry would increment the epoch of a dead engine
+    /// forever — a leak shaped exactly like the per-lineage threads this
+    /// replaces. Register two engines, drop one, and the live-entry count
+    /// must fall back within ten seconds; a registry that never prunes
+    /// fails here rather than leaking quietly.
+    /// Pre-fix this fails to compile: there is no registry, only
+    /// per-lineage ticker threads with nothing to count.
+    #[test]
+    fn process_ticker_prunes_dead_lineages() {
+        let _held = TICKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = crate::config::EngineConfig::default();
+        let mk =
+            || wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
+        let a = register_engine(&mk(), Duration::from_millis(1)).expect("register");
+        let base = ticker_entry_count();
+        assert!(
+            base >= 1,
+            "the registered engine must be visible, saw {base}"
+        );
+        let b = register_engine(&mk(), Duration::from_millis(1)).expect("register");
+        assert_eq!(
+            ticker_entry_count(),
+            base + 1,
+            "the second registration must be visible"
+        );
+        // Identity, not just cardinality: hold `b`'s own `Weak` and require
+        // *that entry* to leave, so a count that falls for the wrong reason
+        // (another lineage pruning) cannot pass.
+        let weak_b = std::sync::Arc::downgrade(&b);
+        assert!(
+            ticker_holds(&weak_b),
+            "the second registration must be present as itself"
+        );
+        drop(b);
+        let started = std::time::Instant::now();
+        while ticker_entry_count() > base || ticker_holds(&weak_b) {
+            assert!(
+                started.elapsed() <= Duration::from_secs(10),
+                "a dropped lineage was still registered after 10 s"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(a);
+    }
+
+    /// **F-17: a new registration gets no credit for pre-registration time.**
+    ///
+    /// The ticker measures one global elapsed per pass. When the registry
+    /// idles empty the thread parks up to a second while `last` goes stale;
+    /// crediting that whole elapsed to a just-registered slot would deliver
+    /// a burst of catch-up ticks the lineage never lived through — on a
+    /// 10 ms slot after 300 idle ms, ~30 instant ticks, enough to fail the
+    /// idle-rate bound on its own. Each slot therefore accrues only from
+    /// the later of the last pass and its own registration.
+    ///
+    /// Repro: idle the ticker 300 ms with nothing registered, register a
+    /// 10 ms slot, let it settle 100 ms, and read its ticks. Red shape:
+    /// ~40 ticks (300 idle ms credited at once, plus the settled ones);
+    /// green: at most ~10 + slack (only really-elapsed time accrues).
+    /// The 300 ms sleep is deterministic against the 1 s idle park: passes
+    /// land 1 s apart, so none lands inside the sleep and `last` is exactly
+    /// 300 ms stale at registration. The immediate read after registering
+    /// proves nothing (no pass has run yet) — the settle is the observation.
+    #[test]
+    fn new_registration_gets_no_credit_for_idle_time() {
+        let _held = TICKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = crate::config::EngineConfig::default();
+        let mk =
+            || wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
+        // Start the ticker if this is the first registry test in, then leave
+        // it with nothing to do: `last` must go stale for the repro.
+        // Identity wait, not a census wait: the keeper's own `Weak` must
+        // leave the registry, so a count that falls for the wrong reason
+        // cannot satisfy us.
+        let keeper = register_engine(&mk(), Duration::from_millis(1)).expect("register");
+        let weak_keeper = std::sync::Arc::downgrade(&keeper);
+        drop(keeper);
+        let started = std::time::Instant::now();
+        while ticker_holds(&weak_keeper) {
+            assert!(
+                started.elapsed() <= Duration::from_secs(10),
+                "the keeper registration never pruned"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let lived_from = std::time::Instant::now();
+        let probe = register_engine(&mk(), Duration::from_millis(10)).expect("register");
+        std::thread::sleep(Duration::from_millis(100));
+        let settled = probe.ticks();
+        // Derived from the slot's own measured lifetime, not a fixed
+        // number: accrual can never exceed lifetime/period (every credited
+        // millisecond is really elapsed), so this bound holds on any
+        // scheduler no matter how far the settle sleep stretches — while
+        // the ~30 inherited idle ticks fail it by far.
+        let lived_ms = lived_from.elapsed().as_millis();
+        let allowed = lived_ms / 10 + 5;
+        assert!(
+            u128::from(settled) <= allowed,
+            "a 10 ms slot alive {lived_ms} ms must not inherit 300 idle ms, saw {settled} ticks"
+        );
+    }
+
+    /// **F-17: concurrent registrations all land on one ticker.**
+    ///
+    /// Green-only by construction: the startup race this guards (a loser
+    /// observing a handleless ticker) spans microseconds and self-heals at
+    /// the next pass, so no deterministic red exists. What this proves is
+    /// the structural property — eight threads registering at once get
+    /// eight live entries on exactly one thread, and every entry ticks.
+    #[test]
+    fn concurrent_registrations_share_one_ticker() {
+        let _held = TICKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = crate::config::EngineConfig::default();
+        let cfg = std::sync::Arc::new(cfg);
+        let base = ticker_entry_count();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cfg = std::sync::Arc::clone(&cfg);
+                std::thread::spawn(move || {
+                    let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config"))
+                        .expect("engine");
+                    register_engine(&engine, Duration::from_millis(1)).expect("register")
+                })
+            })
+            .collect();
+        let slots: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("registration thread lives"))
+            .collect();
+        assert_eq!(
+            ticker_entry_count(),
+            base + 8,
+            "every concurrent registration must be visible"
+        );
+        let started = std::time::Instant::now();
+        while slots.iter().any(|s| s.ticks() == 0) {
+            assert!(
+                started.elapsed() <= Duration::from_secs(10),
+                "every registered lineage must tick"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 

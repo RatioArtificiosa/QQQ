@@ -166,8 +166,9 @@ pub use host_wasi::{
     describe_missing_env as describe_missing_wasi_env, register as register_wasi,
 };
 pub use instance::{
-    DeterministicClock, ExecutionMode, ExecutionOutcome, Instance, InstanceOptions,
-    PreparedComponent, digest_of, epoch_tick_interval, ticks_for_deadline, uses_virtual_clock,
+    DeterministicClock, EngineSlot, ExecutionMode, ExecutionOutcome, Instance, InstanceOptions,
+    PreparedComponent, digest_of, epoch_tick_interval, register_engine, ticks_for_deadline,
+    uses_virtual_clock,
 };
 pub use linker::{
     BoundInterfaces, BuiltLinker, StoreData, TrappingLimiter, build_linker, describe_gap,

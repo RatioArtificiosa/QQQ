@@ -41,11 +41,17 @@
 
 - **run**: the epoch ticker parks on the deadline-scaled period instead of
   sleeping 1 ms — one lineage wakes ~10/s at the default 100 ms tick
-  rather than 1,000/s forever. Tick counts are ceiling-rounded with a
-  minimum of 1, shutdown unparks instead of sleeping out the period, and
-  the catch-up and Windows-granularity handling survive unchanged.
-  Per-lineage by design: production serve runs one lineage, and a shared
-  global would let concurrent tests pollute the idle-rate bound. (`F-17`)
+  rather than 1,000/s forever. One process-wide thread serves every
+  lineage (replacing per-lineage threads): engines register weakly and
+  prune out every pass, each entry accrues ticks at its own rate from
+  measured elapsed with no credit for pre-registration idle time, lock
+  poison recovers instead of silently unticking, and shutdown needs no
+  join because dropping the last handle unregisters. Tick counts are
+  ceiling-rounded with a minimum of 1, and the catch-up and
+  Windows-granularity handling survive unchanged. Measured: an idle 10 ms
+  engine draws 100 ticks in 1.03–1.04 s (three runs), the trap test lands
+  inside deadline + 2 ticks + tolerance, and three new doctests hold the
+  api-examples ratchet at its allowance. (`F-17`)
 
 - **cap**: serialized `GrantSet` and `Resolution` blobs no longer
   deserialize back into authority — data cannot construct it. The manifest

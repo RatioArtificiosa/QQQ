@@ -76,7 +76,10 @@ use crate::guest_bridge;
 /// *concurrency*, and reuse is the optimisation a later tier adds.
 pub struct GuestApp {
     engine: wasmtime::Engine,
-    ticker: Arc<EpochTicker>,
+    /// The process-wide ticker registration for this engine lineage
+    /// (`F-17`): dropping the last `Arc` unregisters the lineage, and
+    /// replacements share it so one lineage never runs two clocks.
+    ticker: Arc<qqq_host::instance::EngineSlot>,
     prepared: PreparedComponent,
     handle: HandlerHandle,
     grants: GrantSet,
@@ -285,17 +288,18 @@ impl GuestApp {
         grants: GrantSet,
         limits: LimitSet,
         authority: String,
-        context: (u32, Option<Arc<EpochTicker>>),
+        context: (u32, Option<Arc<qqq_host::instance::EngineSlot>>),
     ) -> Result<Self> {
         let (workers, ticker) = context;
         // The tick follows the deadline through the helper (`F-17`): a 10 s
         // budget ticks every 100 ms (~10 wakeups/s), not every 1 ms. Same
-        // tick feeds the thread period below and the epoch-tick count in
-        // `timed_options`, so the two cannot disagree about what a tick is.
+        // tick feeds the registration period below and the epoch-tick count
+        // in `timed_options`, so the two cannot disagree about what a tick is.
         let tick = qqq_host::instance::epoch_tick_interval(limits.epoch_deadline_ms);
         let ticker = match ticker {
             Some(ticker) => ticker,
-            None => Arc::new(EpochTicker::start(engine.clone(), tick)?),
+            None => qqq_host::instance::register_engine(&engine, tick)
+                .map_err(|e| Error::new(ErrorCode::InternalInvariantViolated, e.to_string()))?,
         };
 
         if authority.is_empty() {
@@ -1544,106 +1548,23 @@ fn timed_options(
     }
 }
 
-/// One timer per engine lineage, retained until all generations drain. Fuel
-/// remains a second bound; an epoch cannot interrupt a blocking host import.
-///
-/// The thread parks on the tick period (`F-17`) instead of sleeping 1 ms:
-/// one lineage wakes ~10/s at the default 100 ms tick rather than 1,000/s
-/// forever. Per-lineage rather than process-wide: production serve runs one
-/// lineage (replacements share the ticker), and a global registry would let
-/// concurrent tests pollute each other's wake-up counts — the acceptance
-/// test needs a hermetic ticker.
-///
-/// Shutdown parks in reverse: `Drop` sets the flag and unparks, so a parked
-/// thread joins immediately instead of sleeping out its period.
-struct EpochTicker {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    unpark: Option<std::thread::Thread>,
-    /// Wake-ups served, for the idle-rate test — `F-17`, test-only.
-    ///
-    /// Counted per loop pass (not per epoch emitted: catch-up emits several
-    /// epochs per wake-up, and the bound under test is wake-ups).
-    /// `cfg(test)`-gated so production carries no instrumentation for the
-    /// test suite: the struct both builds must agree on is unchanged, only
-    /// this counter comes and goes.
-    #[cfg(test)]
-    wakeups: Arc<std::sync::atomic::AtomicU64>,
-}
-impl EpochTicker {
-    fn start(engine: wasmtime::Engine, tick: std::time::Duration) -> Result<Self> {
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        #[cfg(test)]
-        let wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        #[cfg(test)]
-        let counted = Arc::clone(&wakeups);
-        let driver = engine;
-        // The child's `Thread` handle, sent back before the loop starts: the
-        // parent cannot name the child's handle any other way, and `Drop`
-        // needs it to unpark a parked ticker.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("qqq-epochs".into())
-            .spawn(move || {
-                let _ = tx.send(std::thread::current());
-                // Fail-stop first (`F-01`): a dead ticker silently disables
-                // wall-clock deadlines, leaving only fuel to bound CPU. A
-                // panic here aborts the process rather than parking the
-                // safety mechanism. Request threads must NOT use this guard —
-                // their panics are contained into traps by `guard`.
-                let _fail_stop = qqq_host::guard::AbortOnPanic::new("qqq-epochs");
-                let started = std::time::Instant::now();
-                let mut emitted = 0;
-                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    #[cfg(test)]
-                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    std::thread::park_timeout(tick);
-                    // Account for scheduler/timer granularity (notably Windows):
-                    // one park is not necessarily one tick of elapsed time.
-                    // Catch-up preserved from the sleep loop: missed quanta
-                    // still advance the epoch, so a delayed thread cannot let
-                    // a guest run past its budget.
-                    let elapsed =
-                        u64::try_from(started.elapsed().as_millis() / tick.as_millis().max(1))
-                            .unwrap_or(u64::MAX);
-                    for _ in emitted..elapsed {
-                        driver.increment_epoch();
-                    }
-                    emitted = elapsed;
-                }
-            })
-            .map_err(|e| Error::new(ErrorCode::InternalInvariantViolated, e.to_string()))?;
-        let unpark = rx.recv().ok();
-        Ok(Self {
-            stop,
-            thread: Some(thread),
-            unpark,
-            #[cfg(test)]
-            wakeups,
-        })
-    }
-
-    /// Wake-ups served since start — the idle-rate acceptance test reads this.
-    #[cfg(test)]
-    fn wakeups(&self) -> u64 {
-        self.wakeups.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-impl Drop for EpochTicker {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Unpark before joining: without this a parked ticker sleeps out its
-        // whole period on every shutdown, and a 100 ms tick would add 100 ms
-        // to every app teardown and test.
-        if let Some(unpark) = &self.unpark {
-            unpark.unpark();
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
+// Epoch ticking for an engine lineage (`F-17`): one process-wide ticker
+// thread, owned by `qqq-host`. Each `GuestApp` registers its engine
+// lineage there and holds the returned slot until all its generations
+// drain. Fuel remains a second bound; an epoch cannot interrupt a
+// blocking host import.
+//
+// The shared thread parks on the shortest registered period instead of
+// sleeping 1 ms: one lineage wakes ~10/s at the default 100 ms tick
+// rather than 1,000/s forever, and N lineages still cost one park per
+// tick. Each entry accrues ticks at its own rate from measured
+// wall-clock elapsed (catch-up preserved, including Windows timer
+// granularity), and dead entries prune out every pass — dropping the
+// last `Arc` unregisters the lineage with no explicit call.
+//
+// The acceptance tests read per-entry tick counts rather than a global
+// wake-up counter, so concurrent registrations cannot pollute each
+// other's bounds.
 
 // Test indexing (`F-18`): assertions index vectors built inline above.
 // One module-level reason, not per-site noise; shipping code above
@@ -1810,26 +1731,44 @@ mod tests {
         GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
     }
 
-    /// **F-17: an idle ticker wakes at most ~100 times per second.**
+    /// **F-17: one idle engine draws at most 100 ticks per second from the
+    /// process-wide ticker.**
     ///
     /// The old ticker slept 1 ms unconditionally — about 1,000 wakeups/s per
-    /// engine for its whole lifetime, idle or not. The reworked ticker parks
-    /// on its period (10 ms here, so at most ~102 wakeups in a second).
-    /// Pre-fix this fails to compile: the ticker takes no period and
-    /// exposes no wake-up count.
+    /// engine for its whole lifetime, idle or not. The process-wide ticker
+    /// parks on its period and each entry accrues ticks at its own rate, so
+    /// an idle 10 ms engine sees ~100 ticks/s no matter what else is
+    /// registered.
+    ///
+    /// The assertion polls the entry's tick count to 100 and requires at
+    /// least a full second to have passed: a ticker running hot would
+    /// deliver 100 ticks sooner, so reaching 100 "too early" is exactly the
+    /// failure. Polling (rather than sleeping a fixed second and counting)
+    /// makes the bound exact — sleep overshoot and scheduling delay can
+    /// only add elapsed time, never take it away, and a stalled ticker
+    /// fails loudly at the 30 s guard instead of hanging the suite.
+    /// Pre-fix this fails to compile: registration is per-lineage threads
+    /// with no shared ticker to count against.
     #[test]
     fn f17_idle_ticker_wakes_at_most_100_per_second() {
         let cfg = qqq_host::config::EngineConfig::default();
         let engine =
             wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
-        let ticker =
-            EpochTicker::start(engine, std::time::Duration::from_millis(10)).expect("ticker");
-        let before = ticker.wakeups();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let woke = ticker.wakeups() - before;
+        let slot =
+            qqq_host::instance::register_engine(&engine, std::time::Duration::from_millis(10))
+                .expect("register");
+        let started = std::time::Instant::now();
+        while slot.ticks() < 100 {
+            assert!(
+                started.elapsed() <= std::time::Duration::from_secs(30),
+                "the ticker stalled before delivering 100 ticks"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
-            woke <= 1000 / 10 + 2,
-            "idle wake-ups must stay near 100/s, got {woke}"
+            started.elapsed() >= std::time::Duration::from_secs(1),
+            "100 ticks in {:?}, faster than the 100/s bound",
+            started.elapsed()
         );
     }
 
@@ -1847,7 +1786,10 @@ mod tests {
         let engine =
             wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("config")).expect("engine");
         let tick = std::time::Duration::from_millis(10);
-        let _ticker = EpochTicker::start(engine.clone(), tick).expect("ticker");
+        // The slot must stay alive for the whole call: dropping it
+        // unregisters the engine, and an unregistered engine is never
+        // interrupted. Binding it here keeps the lineage ticking.
+        let _slot = qqq_host::instance::register_engine(&engine, tick).expect("register");
         let module = wasmtime::Module::new(&engine, SPIN).expect("compiles");
         let mut store = wasmtime::Store::new(&engine, ());
         store.set_epoch_deadline(qqq_host::instance::ticks_for_deadline(200, tick));

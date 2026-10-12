@@ -37820,4 +37820,56 @@ stable across runs, and the F-17 parity against bridge7's 9.3% holds a
 second time. Foreign containers at 0.0% throughout. Verdict: NORMAL,
 and this time there is nothing to disposition.
  → `docker/compose.yaml`.
+
+## §O-669 - A global elapsed credited to a newborn slot: the idle-credit burst
+
+The process-wide ticker measured one elapsed per pass and credited it to
+every live entry. When the registry idled empty the thread parked up to a
+second while `last` went stale; a slot registered after that inherited the
+whole idle window on its first pass — 300 idle ms became ~30 instant ticks
+on a 10 ms slot (measured: 38 ticks after 100 ms alive, bound 15). On a
+quiet machine that burst alone fails the ≤100/s idle bound. The mistake was
+crediting *pass* time to a slot that did not live through the pass.
+Review caught it; the red test idles the ticker 300 ms (deterministic: no
+pass can land inside against the 1 s idle park), registers, settles
+100 ms, and bounds ticks by the slot's own measured lifetime/period + 5 —
+a bound accrual arithmetic satisfies on any scheduler, so it cannot flake
+on load. The fix stores `born: Instant` per slot and accrues
+`now - max(last, born)`. Generalisable rule: a shared clock must stamp
+each member's membership, or join time inherits history.
+ → `crates/qqq-host/src/instance.rs`.
+
+## §O-670 - A census cannot say which lineage left: prune tests need identity
+
+The prune test counted live entries before and after dropping one
+registration. A count that falls for the wrong reason (another lineage
+pruning) passes, and the keeper-idle wait used the same census. Review
+caught both; the fix holds each dropped lineage's own `Weak` and polls
+`Weak::ptr_eq` via a `ticker_holds` helper, keeping the count asserts as
+the visibility half. The same pass corrected the `ticker_entry_count`
+doc, which claimed a dropped lineage "stays counted until pruned" — the
+helper filters dead `Weak`s, so the count drops at drop and only the
+registry entry awaits pruning. Generalisable rule: when the defect is "X
+leaks", the test must name X, not count the room.
+ → `crates/qqq-host/src/instance.rs`.
+
+## §O-671 - Poison-skip on a safety ticker is a silent stall: recover, never skip
+
+Every registry lock used `if let Ok` — on poison the ticker thread would
+skip the pass (no ticks, no prune, loop continues parking) and a
+registration would push nothing, both with no error: guests running past
+wall-clock deadlines on fuel alone, the exact `F-01` shape. Review caught
+it; all four production sites now recover via `PoisonError::into_inner`
+(nothing held under those locks can panic, so the guard is safe), and the
+startup path holds the unpark lock across spawn-and-publish so a racing
+registration cannot observe a handleless ticker and miss its wakeup. One
+review suggestion was rebutted with a proof and kept out: replacing the
+per-entry tick bound with a global pass counter would reintroduce the
+cross-test pollution the design removed, and the elapsed lower bound is
+exact by construction (credited ms never exceed really-elapsed ms, so 100
+ticks at 10 ms needs a full second — truncation only undercounts).
+Generalisable rule: on a fail-stop path, every error arm must either abort
+or continue correctly; "skip and loop" is silent disablement.
+ → `crates/qqq-host/src/instance.rs`,
+ → `crates/qqq-run/src/guest_handler.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

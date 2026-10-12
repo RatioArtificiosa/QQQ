@@ -3251,21 +3251,16 @@ mod tests {
         }
     }
 
-    /// **A source that never emits a newline is refused, not read forever.**
+    /// **On Linux, `/dev/full` itself is refused rather than read forever.**
     ///
-    /// The F-09 fail-closed and fail-open tests attach `/dev/full`, which
-    /// returns zero bytes on every read with no newline anywhere. `load()`
-    /// used `BufRead::lines()`, which grows its buffer until a newline
-    /// arrives, so the buffer grew until the container's OOM killer ended
-    /// the process — the whole lib test binary died at its tail with no
-    /// test failing first. Reproduced in the Linux bridge at exactly
-    /// 16.00/16.00 GiB.
-    ///
-    /// This drives `load()` against the real device, so it is Unix-gated:
-    /// the three-OS gate still exercises the bound through
-    /// `a_line_past_the_bound_is_refused`, and the device is the one input
-    /// that has no portable stand-in.
-    #[cfg(unix)]
+    /// The device-specific regression for the bridge failure. Linux-only
+    /// because macOS opens it but fails the first read with `ENOSPC`, so
+    /// there `load()` sees EOF and correctly reports an empty stream — the
+    /// endless-bytes behaviour is Linux's. Asserting the Linux reading on
+    /// macOS failed CI, which is how this became gated rather than removed:
+    /// the bound is pinned portably above, and the device case is pinned
+    /// where it actually holds.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_source_without_a_newline_is_refused_not_read_forever() {
         use std::time::Duration;

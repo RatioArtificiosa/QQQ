@@ -37650,4 +37650,19 @@ dead code is a hypothesis — delete it and let the test decide; and
 record the derivation beside the code, because a rebuttal that lives
 only in the commit message will be re-litigated.
  → `crates/qqq-host/src/audit_sink.rs`.
+## §O-659 - Unwinding the amended commit silently reverted a platform fix, and CI caught it twice
+
+When the force-push was refused I reset to origin and rebuilt the
+boundary commit from the orphaned commit's delta. That delta predated
+the `cfg(target_os = "linux")` gate (§O-655), so the rebuilt tree
+carried the device test under `cfg(unix)` again — and the exact macOS
+failure came back on the next push. It came back a *second* time because
+the first fix was applied to the tree and then lost the same way. The
+marker check that found it is now the discipline: after any history
+rewind, compare the markers of the affected file against what origin
+has before trusting the tree. Generalisable rule: an unwind is a
+reconstruction, not a restore — every fix that landed in the abandoned
+history has to be re-applied deliberately, and a platform-gated test
+that fails only on CI will not tell you until it has already failed.
+ → `crates/qqq-host/src/audit_sink.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

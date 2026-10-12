@@ -37771,4 +37771,23 @@ Generalisable rule: a timeout failure with green content checks and
 fast retries is load, and the evidence that separates them is measured
 seconds, not a second reading of the log.
  → `tools/check_checklist_counts.py`.
+## §O-666 - The saturation test now retries the request, and the negative test caught two of my own mistakes
+
+Bridge10's worker_pool failure was a startup race (bound socket, not a
+ready serve loop), so the saturation test retries the request itself —
+any HTTP response ends the retry, keeping the status assertion as the
+judge. The negative test proving the retry cannot mask a dead server
+caught two mistakes before it ever ran green. First it drew its port
+from the shared reservation pool and spent 47s in contention with
+sibling servers; an ephemeral port keeps it out of that pool entirely.
+Then it still took 41s, and a 20-line probe proved why: a refused
+localhost connect costs ~2s on this Windows host (firewall/Defender
+loopback inspection or Docker's network stack — instant on Linux), so
+twenty attempts was a 40s wait for no additional proof. The helper now
+takes an attempt count (20 for a starting server, 3 for a dead one),
+and the measured numbers are in the comments: 3/3 in 6.28s on Windows,
+3/3 in 0.47s in-container. Generalisable rule: a test that takes forty
+seconds is measuring the machine, not the code — and the probe that
+proves it is twenty lines, not a theory.
+ → `crates/qqq-run/tests/worker_pool.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -436,6 +436,70 @@ fn capacity_in(line: &str) -> Option<u32> {
     token.parse().ok()
 }
 
+/// Send one request, retrying while the server is still coming up.
+///
+/// `start` waits for the socket to *bind*, but a bound socket is not a
+/// ready serve loop: under load the first connection can be accepted and
+/// closed with zero bytes before the loop is running. That is exactly what
+/// the Linux bridge saw — an empty response in 0.37s, then 5/5 clean
+/// retries on the identical tree and container. Retrying the request
+/// itself, rather than sleeping once and hoping, closes that race without
+/// changing what the test asserts: any HTTP response (whatever its status)
+/// ends the retry, so the status assertion below still judges; a server
+/// that is actually down answers every attempt with refusal, and the last
+/// answer is what the assertion reports.
+///
+/// `attempts` differs by caller: the saturation case allows 20 (a starting
+/// server needs time), while the dead-server case below needs only 3 —
+/// refusal is refusal on the first answer, and on some Windows hosts a
+/// refused loopback connect alone costs ~2s, so twenty of them would turn
+/// the negative test into a 40s wait for no additional proof (measured).
+fn request_ready(port: u16, path: &str, attempts: u32) -> String {
+    let mut last = String::new();
+    for _ in 0..attempts {
+        let got = request(port, path);
+        if got.starts_with("HTTP/1.1") {
+            return got;
+        }
+        last = got;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    last
+}
+
+/// A dead server stays dead through the retry budget: `request_ready` must
+/// report refusal rather than masking it. Without this, the retry above
+/// could turn a server that never comes up into a passing test — the
+/// shape that would make the hardening a fixture that cannot fail.
+///
+/// The port is ephemeral (bound on `:0`, read back, listener dropped),
+/// not drawn from the shared reservation pool: the first version of this
+/// test used a reservation and spent 47s in contention with sibling
+/// servers under parallel load. An ephemeral port keeps the test out of
+/// that pool entirely, and whatever happens afterwards is loud — a
+/// grabbed port either refuses (the assertion holds) or serves something
+/// that is not `<no connection>` (the assertion fires).
+#[test]
+fn request_ready_reports_a_dead_server_loudly() {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("ephemeral port")
+        .local_addr()
+        .expect("port number")
+        .port();
+    // Listener dropped here: the port is free and nothing answers it.
+    let t = Instant::now();
+    let got = request_ready(port, "/healthz", 3);
+    assert_eq!(
+        got, "<no connection>",
+        "a dead server must be reported, not retried into a pass"
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(30),
+        "the retry budget must bound the wait, took {:?}",
+        t.elapsed()
+    );
+}
+
 #[test]
 fn a_saturated_single_slot_pool_refuses_and_a_wider_one_serves() {
     let Some(bytes) = reference_component() else {
@@ -450,7 +514,7 @@ fn a_saturated_single_slot_pool_refuses_and_a_wider_one_serves() {
     // With one worker the route still serves, which is the baseline the refusal is measured
     // against: a server that refused *everything* would satisfy a saturation test alone.
     let narrow = start(&sandbox, 1);
-    let served = request(narrow.port, "/healthz");
+    let served = request_ready(narrow.port, "/healthz", 20);
     assert!(
         served.starts_with("HTTP/1.1 200"),
         "one worker must still serve a single request; got: {}",
@@ -461,7 +525,7 @@ fn a_saturated_single_slot_pool_refuses_and_a_wider_one_serves() {
     // Four workers, the same request: if this failed, the fixture rather than the capacity
     // would be the cause, and the narrow case above would prove nothing.
     let wide = start(&sandbox, 4);
-    let also_served = request(wide.port, "/healthz");
+    let also_served = request_ready(wide.port, "/healthz", 20);
     assert!(
         also_served.starts_with("HTTP/1.1 200"),
         "the same route must serve with four workers; got: {}",

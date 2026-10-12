@@ -37684,4 +37684,20 @@ Generalisable rule: a lane rule that names direct invocations misses
 the ones hiding inside scripts — audit what the steps *run*, not just
 what the table *spells*.
  → `crates/xtask/src/main.rs`.
+## §O-661 - F-18 benchmark, re-measured: the host is noisier than the effect
+
+The overflow-checks cost check had numbers in the handoff (191.3 vs
+196.1 ms) with no surviving evidence, so it was re-measured honestly:
+temporary release example, 200k `parse_head` calls, identical checksum
+(13200000) both ways, per-package checks on vs all three off. ON:
+191.8, 165.2 ms. OFF: 154.1, 264.3 ms. The within-condition spread
+(~110 ms) swamps any between-condition delta — the effect even flips
+sign between runs — so no cost is distinguishable from host noise on
+this box, and none is claimed. The checks stay on regardless: they are
+a security requirement on three crates, the per-package scope is
+already minimal, and the decision never hinged on the delta being
+small. The example was deleted after measuring; the numbers live here.
+Generalisable rule: a benchmark whose spread exceeds its delta measures
+the host, not the change — report the spread, keep the requirement.
+ → `Cargo.toml`.
 *End of `QQQ-Observations-and-Memories.md`.*

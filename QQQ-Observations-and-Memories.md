@@ -37998,4 +37998,52 @@ ratchet at 2112/2115. Socket I/O builds on `Vetted` next — there is no
 other constructor for a diallable address.
  → `crates/qqq-host/src/egress.rs`,
  → `crates/qqq-cap/src/egress.rs`.
+
+## §O-678 - The connector dials only vetted addresses, and TLS verifies the vetted name
+
+`request` ties vet-open-exchange-audit with the audit callback running
+exactly once on every path — refusals produce zero-byte rows, never no
+row. The `Transport` seam keeps production (`SystemTransport`: TCP with
+connect timeout, TLS against OS roots with SNI plus verification of the
+vetted host) apart from the duplex-scripted fake every exchange test
+drives: happy path with byte counts, hop-by-hop stripping, over-cap
+bodies as errors (never cuts), chunked decode with trailers dropped,
+redirect refusal with no hop chain, HEAD reading nothing, request-side
+caps refusing before the first byte, success/refusal/timeout audit
+rows. TLS is proven in both directions against an in-process rcgen PKI:
+the vetted name verifies, any other name fails — loopback there is test
+plumbing, never the connector. `system_roots` fails loudly on an empty
+store rather than failing every handshake later. Redirects stay refused
+(no grant field exists for a hop chain; the later goal re-vets every
+hop through `vet`). Cleartext has no path in `SystemTransport` by
+design — a second stream type plus a branch is the shape that smuggles
+an unencrypted path in later; `PlainTransport` belongs to the follow-up
+that grants it. Red proof by fault injection (strip removed → strip
+test fails), restored green: 24 unit + 22 doctests, ratchet 2113/2115.
+`send` still refuses; wiring comes later, never here.
+ → `crates/qqq-host/src/egress.rs`.
+
+## §O-679 - Nine review findings on the connector I/O: eight fixed, one refused with proof
+
+First round, five fixed: audit rows carry measured partial bytes on
+failure and timeout (shared saturating counters, never zeros); one
+deadline covers vetting and exchange (hanging resolver fails Timeout
+with a row); request headers validate as RFC 9110 tokens with
+connector-owned `host`/`content-length` refused and `proxy-connection`
+stripped (plus CR/LF and duplicate-Host tests); chunk sizes add checked
+(overflow maps to BodyTooLarge); cleartext refuses before dialling
+(proven by an accepting listener that must see nothing). The sixth was
+refused: `QQQ-STUB(CON-009)` marks *unbound* interfaces while §S-006
+already records `qqq:http` as bound — stamping a bound-but-refusing
+`send` would corrupt the convention.
+Second round, three fixed: response heads reject whitespace before the
+colon while values admit empty/HTAB; interim 1xx are consumed with the
+cap spanning all heads via a drained-bytes counter (the cumulative test
+delivers heads in split reads and fails 3/3 with the counter removed);
+204/304 read no body regardless of headers; IPv6 brackets strip before
+SNI with a vetted-literal test. The `consumed` mutation check is the
+shape done right: a test must fail with the mechanism removed, not
+merely pass with it present. 35 unit + 23 doctests green.
+ → `crates/qqq-host/src/egress.rs`,
+ → `crates/qqq-host/src/host_http.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

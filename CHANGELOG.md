@@ -14,13 +14,18 @@
   overrides. No TLS/h2 wiring in this change — migration is a follow-up.
 
 - **host**: the egress connector vets URLs before any socket opens
-  (`I-01`, tables and vetting half): `is_forbidden_ip` screens the
-  canonical-mapped address against the v4/v6 forbidden tables (loopback,
-  private, link-local, metadata, CG-NAT, 6to4, Teredo, NAT64 and the rest,
-  one test row per table row); `vet` parses strictly, checks the tenant
-  grant, resolves once through an injectable resolver, and refuses on ANY
-  forbidden answer — never filter-and-continue. Literals never touch DNS.
-  Socket I/O builds on the vetted address next; `send` stays refused.
+  (`I-01`): `is_forbidden_ip` screens the canonical-mapped address
+  against the v4/v6 forbidden tables (loopback, private, link-local,
+  metadata, CG-NAT, 6to4, Teredo, NAT64 and the rest, one test row per
+  table row); `vet` parses strictly, checks the tenant grant, resolves
+  once through an injectable resolver, and refuses on ANY forbidden
+  answer — never filter-and-continue. Literals never touch DNS. The
+  connector dials only vetted addresses (TCP with timeouts, TLS against
+  OS roots with SNI plus verification of the vetted name), speaks one
+  capped HTTP/1.1 round trip (chunked decoded, trailers dropped,
+  over-cap bodies refused as errors, redirects refused with no hop
+  chain), and emits one audit row per call with byte counts, never the
+  body. `send` stays refused; wiring comes later.
 
 - **serve**: the HTTP/1.1 head parser is now fuzzed differentially against
   `httparse` (`I-07`): a nightly target parses the same bytes with both

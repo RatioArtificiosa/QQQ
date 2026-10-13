@@ -65,6 +65,15 @@ wasmtime = { workspace = true }
 # of smuggled. Version 2.5.8, MIT/Apache-2.0 — inside deny.toml's allowlist,
 # verified before proposing rather than after adding.
 url = "2"
+# TLS for the egress connector (`I-01`): same pins the server side already
+# resolves (rustls 0.23, tokio-rustls 0.26.5), so no duplicate TLS stack
+# enters the build. `rustls-native-certs` loads the OS root store
+# (Apache-2.0/MIT/ISC); `rustls-pki-types` carries server names
+# (MIT/Apache-2.0) — both inside deny.toml, verified by `cargo deny check`.
+tokio-rustls = "0.26.5"
+rustls = { workspace = true }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
 # Static component inspection (initial memory sums, load-time shape).
 # Same version Wasmtime resolves, so no duplicate crate enters the build.
 wasmparser = { workspace = true }
@@ -115,7 +124,9 @@ wasmtime-wasi = { workspace = true }
 #
 # Tokio was already a workspace dependency and already in `Cargo.lock` through the
 # dev-dependency below, so this promotes an existing pin rather than adding a crate.
-tokio = { workspace = true, features = ["io-util", "rt", "sync"] }
+# `net` dials and `time` bounds for the egress connector (`I-01`); features
+# only, same crate.
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "net", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -124,6 +135,10 @@ getrandom = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# I-01 TLS verification tests mint a CA and a leaf in-process: the SNI and
+# chain checks only mean something against a real (if self-made) PKI.
+# Test-only; production verifies against the OS roots above.
+rcgen = { version = "0.14.10", features = ["pem"] }
 # F-01 policy test reads the workspace manifest as TOML; pinned at the
 # workspace so the test parses with the same version the repo resolves.
 toml = { workspace = true }

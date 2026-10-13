@@ -38140,4 +38140,19 @@ was a bug). 45 http1 unit + 3 corpus green; the nightly schedule
 re-proves the differential itself.
  → `crates/qqq-serve/src/http1.rs`,
  → `crates/qqq-serve/tests/fuzz_corpus.rs`.
+
+## §O-685 - Bridge15 exits 0 on the final tree: 146 steps, stats NORMAL, variance explained
+
+Final tree `87d3c38` (with the crash fix), 2h08m, GATE GREEN 146/146
+with zero failures — nothing to disposition. Resource picture (124
+one-minute samples): CPU mean 24.8%, p50 10.8%, max 368.4%; MEM max
+2602 MiB = 31.8% of 8 GiB. The p50 repeats within a point for the
+fourth run (10.0–10.9): steady checker-phase CPU is flat across the
+wave. The mean is back near bridge11/13 levels (21.6–21.9) after
+bridge14's 53.6 — which resolves §O-681's open attribution question:
+the hot mean was run-to-run scheduling variance in parallel-heavy
+phases, not a trend from this wave's new crates. Max spikes remain
+cargo parallelism; mem headroom 68%; foreign containers at ~0%.
+Verdict: NORMAL.
+ → `docker/compose.yaml`.
 *End of `QQQ-Observations-and-Memories.md`.*

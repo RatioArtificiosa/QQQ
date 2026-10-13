@@ -1260,9 +1260,13 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// A configuration from a certificate source, with the documented policy.
     ///
-    /// `NONE` client auth and the full [`ALPN_ALL`] list — the state a
-    /// deployment reaches once `SRV-002` lands. To serve HTTP/1.1 only today,
-    /// overwrite [`Self::alpn`].
+    /// `NONE` client auth and HTTP/1.1-only ALPN — the state a deployment is
+    /// in while `SRV-002` is unimplemented: RFC 9113 §3.2 gives `h2` its
+    /// meaning as "HTTP/2 over TLS", so advertising it without an h2
+    /// endpoint would negotiate clients into a protocol nothing serves.
+    /// To offer more once the h2 loop exists, overwrite [`Self::alpn`] with
+    /// [`Self::with_alpn`] (the full [`ALPN_ALL`] list is the set a
+    /// deployment reaches then).
     ///
     /// # Why this is not `Default`
     ///
@@ -1275,7 +1279,7 @@ impl TlsConfig {
             certificate,
             versions: PROTOCOL_VERSIONS,
             cipher_suites: CIPHER_SUITES,
-            alpn: ALPN_ALL.iter().map(|p| (*p).to_vec()).collect(),
+            alpn: vec![ALPN_HTTP11.to_vec()],
             client_auth: ClientAuth::None,
         }
     }
@@ -1886,6 +1890,30 @@ mod tests {
         assert_eq!(ALPN_ALL.first().copied(), Some(ALPN_H2));
         assert_eq!(ALPN_H2, b"h2");
         assert_eq!(ALPN_HTTP11, b"http/1.1");
+    }
+
+    /// **F-16: the default config does not advertise `h2` without the h2 loop.**
+    ///
+    /// There is no h2 dispatch loop in the server (`SRV-002` unimplemented),
+    /// so a default that offers `h2` first negotiates clients into a
+    /// protocol nothing serves. The default offers HTTP/1.1 only;
+    /// [`ALPN_ALL`] keeps documenting the future set, and
+    /// [`TlsConfig::with_alpn`] stays the explicit opt-in a deployment
+    /// reaches once the loop exists.
+    /// Pre-fix this fails: `new` defaults to the full `ALPN_ALL` list.
+    #[test]
+    fn f16_default_alpn_does_not_advertise_h2_without_the_h2_loop() {
+        let c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
+        assert!(
+            !c.alpn.iter().any(|p| p == ALPN_H2),
+            "the default must not offer h2, offers {:?}",
+            c.alpn
+        );
+        assert_eq!(
+            c.alpn,
+            vec![ALPN_HTTP11.to_vec()],
+            "the default offers exactly http/1.1"
+        );
     }
 
     // -- the SEC-017 refusals ---------------------------------------------

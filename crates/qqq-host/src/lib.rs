@@ -90,6 +90,7 @@ pub mod call;
 /// the numbers feed admission and instantiation, not the public API.
 pub(crate) mod component_shape;
 pub mod config;
+pub mod egress;
 pub mod guard;
 /// Sanitising sinks for guest stdout and stderr.
 ///

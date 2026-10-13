@@ -215,6 +215,38 @@ impl TenantEgress {
         self.allow.iter().find(|p| p.matches(host, port))
     }
 
+    /// Whether cleartext `http://` URLs are permitted for this tenant.
+    ///
+    /// Read by the egress connector (`I-01`) when it vets a URL's scheme: a
+    /// separate getter rather than a public field so the deny-by-default
+    /// posture stays spelled out at the single construction site above.
+    ///
+    /// ```
+    /// use qqq_cap::egress::TenantEgress;
+    ///
+    /// assert!(!TenantEgress::deny_all().allows_cleartext());
+    /// ```
+    #[must_use]
+    pub fn allows_cleartext(&self) -> bool {
+        self.allow_cleartext
+    }
+
+    /// Whether literal IP addresses are acceptable destinations.
+    ///
+    /// Read by the egress connector (`I-01`): a literal that passes here is
+    /// still screened address-by-address against the forbidden table, so
+    /// this opt-in never reaches loopback, private, or metadata addresses.
+    ///
+    /// ```
+    /// use qqq_cap::egress::TenantEgress;
+    ///
+    /// assert!(!TenantEgress::deny_all().allows_ip_literals());
+    /// ```
+    #[must_use]
+    pub fn allows_ip_literals(&self) -> bool {
+        self.allow_ip_literals
+    }
+
     /// Whether any host is permitted at all.
     ///
     /// Used to distinguish "this tenant has no egress policy" from "this tenant has

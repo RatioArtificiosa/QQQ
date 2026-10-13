@@ -4,6 +4,24 @@
 
 ### Security
 
+- **serve**: TLS defaults to HTTP/1.1-only ALPN (`F-16`, Option A decided
+  2026-10-12): with no h2 dispatch loop in the server, offering `h2`
+  first negotiated clients into an unserved protocol (RFC 9113 §3.2 gives
+  `h2` that meaning). `TlsConfig::new` now offers exactly `http/1.1`;
+  `ALPN_ALL` still documents the future set and `with_alpn` stays the
+  explicit opt-in once the h2 loop exists under its own gate. A red-first
+  test pins the default; all 21 TLS integration tests use explicit
+  overrides. No TLS/h2 wiring in this change — migration is a follow-up.
+
+- **host**: the egress connector vets URLs before any socket opens
+  (`I-01`, tables and vetting half): `is_forbidden_ip` screens the
+  canonical-mapped address against the v4/v6 forbidden tables (loopback,
+  private, link-local, metadata, CG-NAT, 6to4, Teredo, NAT64 and the rest,
+  one test row per table row); `vet` parses strictly, checks the tenant
+  grant, resolves once through an injectable resolver, and refuses on ANY
+  forbidden answer — never filter-and-continue. Literals never touch DNS.
+  Socket I/O builds on the vetted address next; `send` stays refused.
+
 - **serve**: the HTTP/1.1 head parser is now fuzzed differentially against
   `httparse` (`I-07`): a nightly target parses the same bytes with both
   and aborts on any field disagreement when both accept, or on any input

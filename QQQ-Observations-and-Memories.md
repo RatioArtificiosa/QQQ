@@ -37924,4 +37924,78 @@ and bridge13 re-ran from scratch on the untouched tree rather than
 salvaging the partial. Generalisable rule: an instrument that cannot
 prove itself in the first minute proves nothing in the 120th.
  → `docker/compose.yaml`.
+
+## §O-675 - F-16 decision (2026-10-12): Option A, owner-gated and recorded
+
+The owner chose Option A: thin transport abstraction over Hyper 1.x +
+hyper-util (HTTP/1.1 and HTTP/2) with tokio-rustls, QQQ policy staying
+in QQQ. Measured inputs attached: h2/ 11,771 lines across 8 files plus
+tls.rs 2,471 lines (~14.2k, grown from the audit's ~14k); 6 unbounded
+`outbound.push_back` sites in `h2/conn.rs`; hyper/h2/tokio-rustls/rustls
+licences (MIT / Apache-2.0 / ISC) all inside deny.toml (tokio and
+tokio-rustls already workspace deps; hyper/h2 not yet added — nothing
+proposed before the licence check); policy inventory that must survive
+either way: route.rs, limits.rs, guest_output budgets, F-02 response
+validation, cors.rs origin checks, access_log.rs, auth.rs, body caps.
+Seven owner non-negotiables recorded verbatim in the goal transcript:
+policy in QQQ, no direct `h2` dep, tls.rs policy adapts and survives,
+incremental migration with in-house as test-only oracle, per-control
+resource-abuse mapping, evidence before deletion, pinned deps with
+tree inspection. HARD RULE restated: no TLS/h2 wiring in this goal —
+migration is a follow-up under its own release-readiness gate, and any
+wiring here fails the goal. ALPN default + I-01 connector ship
+regardless (no-regrets prerequisites).
+ → `crates/qqq-serve/src/tls.rs`,
+ → `crates/qqq-serve/src/h2/conn.rs`.
+
+## §O-676 - ALPN now defaults to http/1.1; the flood bound needs the new transport
+
+`TlsConfig::new` defaulted ALPN to h2-first with no h2 loop to serve it
+— negotiating clients into an unserved protocol. Red-first test
+(`f16_default_alpn_does_not_advertise_h2_without_the_h2_loop`) failed,
+then the default became exactly `[http/1.1]`; `ALPN_ALL` still documents
+the future set and `with_alpn` stays the explicit opt-in. All 21 TLS
+integration tests use explicit overrides, so none depended on the old
+default (40 unit + 21 integration green).
+Flood-budget disposition, measured not assumed: a temporary probe drove
+100k PINGs through `Connection::recv` without draining — 1,700,000
+queued bytes, red as the finding predicts (`red-flood.log`); 100k empty
+SETTINGS stayed bounded (green — no unbounded growth on that path).
+The outbound bound requires the new transport (Option A maps it to
+hyper/h2 settings; Option B implements the cap), so no bound was faked
+onto the unwired code and the probe was deleted, not committed.
+Follow-up wiring-goal acceptance, verbatim: `f16_ping_flood_is_cut_off`
+(100k PINGs undrained → GOAWAY(ENHANCE_YOUR_CALM) + close, peak queued
+≤ 1 MiB), `f16_settings_flood_is_cut_off` (same for SETTINGS),
+`f16_rapid_reset_cannot_exceed_stream_budget` (10k HEADERS+RST_STREAM →
+GOAWAY well before 10k, reset-surviving accounting), plus `h2spec` in CI
+per the Option B list as the conformance backstop. Transport-independent
+bounds (header-block 1 MiB, 128 CONTINUATIONs) already hold with
+flood-shaped tests green in-tree.
+ → `crates/qqq-serve/src/tls.rs`,
+ → `crates/qqq-serve/src/h2/conn.rs`.
+
+## §O-677 - Literals never touch DNS: the vetting half of the egress connector
+
+`vet` reduces a URL to one diallable address with four structural
+properties, each pinned by a test: strict parse (userinfo, scheme,
+empty host refuse before anything else); grant check against
+`TenantEgress` (two new getters — the policy object stays the single
+authority, so no parallel policy); resolve-once through an injectable
+trait with a call-counting fake (mixed public+private answers refuse
+AND cost exactly one lookup — the rebinding defence); every address
+screened, any forbidden refuses the whole request. Two behaviours
+surprised and both are now structural: numeric shorthand
+(`https://12345/`) never reaches a string test because WHATWG parsing
+already normalised it to `0.0.48.57` — so literals skip DNS entirely
+(passing a literal to a resolver would let search domains expand it)
+and take the forbidden table directly; and a granted link-local stays
+refused, because the opt-in gates the allowlist bypass while the table
+gates routability, and the two gates are independent by design. Red
+proof by fault injection (two table rows removed → table test fails),
+restored green: 11 unit + 9 doctests, and the 12 new fences hold the
+ratchet at 2112/2115. Socket I/O builds on `Vetted` next — there is no
+other constructor for a diallable address.
+ → `crates/qqq-host/src/egress.rs`,
+ → `crates/qqq-cap/src/egress.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

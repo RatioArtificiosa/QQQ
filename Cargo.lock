@@ -1509,6 +1509,7 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "url",
  "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",

@@ -60,6 +60,11 @@ qqq-core = { path = "../qqq-core", version = "0.1.1" }
 qqq-cap = { path = "../qqq-cap", version = "0.1.1" }
 qqq-abi = { path = "../qqq-abi", version = "0.1.1" }
 wasmtime = { workspace = true }
+# Strict URL parsing for the egress connector (`I-01`): WHATWG parsing with
+# IDNA, so numeric-shorthand hosts and homographs arrive normalised instead
+# of smuggled. Version 2.5.8, MIT/Apache-2.0 — inside deny.toml's allowlist,
+# verified before proposing rather than after adding.
+url = "2"
 # Static component inspection (initial memory sums, load-time shape).
 # Same version Wasmtime resolves, so no duplicate crate enters the build.
 wasmparser = { workspace = true }

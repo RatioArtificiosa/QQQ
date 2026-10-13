@@ -37892,4 +37892,35 @@ exactness proof. Generalisable rule: every public function that reads one
 quantity shares one function for it, or the boundary between them is a
 latent disagreement.
  → `crates/qqq-host/src/instance.rs`.
+
+## §O-673 - Bridge13 exits 0 on the F-17 tree: 146 steps, stats NORMAL
+
+Final tree `7eccb66`, 2h04m, GATE GREEN 146/146 with zero failures —
+nothing to disposition, consistent with bridge11's clean run on the
+parent tree (the 5 known environmental failures appear in neither;
+they are gone in this gate shape, not silently skipped — the gate
+fails on any red step). Resource picture (120 one-minute samples):
+CPU mean 21.6%, p50 10.9%, max 293.9%; MEM max 1891 MiB = 23.1% of the
+8 GiB container limit. Against bridge11 (mean 21.9%, p50 10.4%, max
+512.9%, mem 2336 MiB): the means and p50s repeat within a point —
+checker-phase idle behavior is stable, and the F-17 rework introduces
+no idle-CPU regression. The max spikes are cargo build parallelism
+(multi-core above 100% is expected, not a leak); foreign containers at
+~0.0% throughout, so the bridge container is the identified consumer.
+Comfortable headroom everywhere. Verdict: NORMAL.
+ → `docker/compose.yaml`.
+
+## §O-674 - Validate the sampler on its first lines, not after a 2 h run
+
+The bridge12 stats run captured 120 one-minute samples of a docker
+29.8.0 template error: `{{.Time}}` is not a field of the stats context
+in this version, so every line was the parse failure and the run has no
+resource numbers — preserved as interruption evidence only. The mistake
+was launching a 2-hour instrumented run without reading one sample
+first. The fix took 15 seconds (a 3-sample trial with
+`{{.Name}} {{.CPUPerc}} {{.MemUsage}}` plus a PowerShell timestamp),
+and bridge13 re-ran from scratch on the untouched tree rather than
+salvaging the partial. Generalisable rule: an instrument that cannot
+prove itself in the first minute proves nothing in the 120th.
+ → `docker/compose.yaml`.
 *End of `QQQ-Observations-and-Memories.md`.*

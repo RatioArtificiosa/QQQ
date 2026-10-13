@@ -38088,4 +38088,37 @@ a finding. What is firm: idle behavior stable, headroom comfortable,
 foreign containers at ~0%, consumer identified as the bridge
 container, outcome green. Verdict: NORMAL.
  → `docker/compose.yaml`.
+
+## §O-682 - A 0.4-point perf miss on a docs-only commit is noise, confirmed by retry
+
+`09ffbfa` (observations + derived files, zero code bytes) failed
+PERF-020: `hello 456581 > 455051.25 ns (baseline 364041, tolerance
+25%)` — a 0.4 percentage-point miss against a baseline from a
+different runner identity (EPYC 7763 vs the candidate's EPYC 9V45).
+Two facts bound the interpretation: a docs-only diff cannot slow code,
+so a code regression is causally excluded; and the candidate's own
+within-run spread was 332944–465774 (~40%), so the median was
+noise-dominated before any comparison happened — consistent with
+measurement noise, scheduling luck on shared runners being the usual
+source per §O-543. The remedy was reruns, not code: one same-SHA rerun
+greened the job and the run. No benchmark conclusion is drawn from a
+docs-only diff; the vectors (`candidate.json` vs baseline 364041) and
+the spread are preserved in the wave7 evidence for anyone who wants to
+re-derive them.
+ → `tools/run_perf_regression.py`.
+
+## §O-683 - A millisecond-boundary flake in `two_identical_events`, dispositioned not fixed
+
+The gate's single red suite was
+`audit::tests::two_identical_events_render_identically`: two back-toback
+pushes asserted byte-identical JSON, but rendering embeds wall-clock
+`timestamp_unix_ms` and a 1 ms tick landed between them (…944 vs …945).
+Not caused by this wave (`audit.rs` untouched — the diff holds no audit
+file) and not a product defect: retry green twice in isolation plus a
+full host-lib green (614 passed), failing only when the tick lands in
+the microsecond window between pushes. Recorded as a flake with retry
+evidence per the workflow; the durable fix (deterministic clock
+injection for that test) belongs to a later wave, not smuggled into
+this one.
+ → `crates/qqq-host/src/audit.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

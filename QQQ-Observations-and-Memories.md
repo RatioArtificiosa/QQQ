@@ -38067,4 +38067,25 @@ plus 16 host_http tests green, unchanged.
  → `fuzz/src/egress_url.rs`,
  → `fuzz/fuzz_targets/egress_url.rs`,
  → `crates/qqq-host/src/host_http.rs`.
+
+## §O-681 - Bridge14 exits 0 on the Wave 7 tree: 146 steps, stats NORMAL with a noted delta
+
+Final tree `2b2f981`, 2h15m, GATE GREEN 146/146 with zero failures —
+nothing to disposition (the 5 known environmental failures appear in
+neither this nor recent bridges; the gate fails on any red step, so
+absence is evidence, not luck). Resource picture (131 one-minute
+samples): CPU mean 53.6%, p50 10.0%, max 826.4%; MEM max 3205 MiB =
+39.1% of the 8 GiB limit. Against bridge13 (21.6%/10.9%/293.9%/
+1891 MiB): the p50 repeats within a point for the third run — steady
+checker-phase CPU is unchanged by this wave's work — while the mean
+and max run hotter. Attribution, stated with its limit: the
+bridge13 per-phase log expired with the old scratch dir, so the delta
+cannot be pinned to a phase from these numbers alone; the shape (max
+above 100% is cargo build/test parallelism, mem at 39% of limit) plus
+the new native compilation in this tree (url/idna/icu, tokio-rustls,
+native-certs) makes heavier build phases the working hypothesis, not
+a finding. What is firm: idle behavior stable, headroom comfortable,
+foreign containers at ~0%, consumer identified as the bridge
+container, outcome green. Verdict: NORMAL.
+ → `docker/compose.yaml`.
 *End of `QQQ-Observations-and-Memories.md`.*

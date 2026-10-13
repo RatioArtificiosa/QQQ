@@ -38121,4 +38121,23 @@ evidence per the workflow; the durable fix (deterministic clock
 injection for that test) belongs to a later wave, not smuggled into
 this one.
  → `crates/qqq-host/src/audit.rs`.
+
+## §O-684 - The nightly fuzzer earned its keep: U+2001 trimmed into GET
+
+During this goal the scheduled `http1_diff` run crashed on an 84-byte
+input opening with U+2001 (EM QUAD) before `GET`: QQQ accepted with
+method GET while httparse refused (`Mismatch("method")`). Cause:
+`route::Method::parse` uses `str::trim`, which strips *Unicode*
+whitespace, so the prefix vanished into a valid method — a tolerance
+mismatch with the reference that is precisely the smuggling shape the
+differential exists to catch. Fix at the right layer, not the symptom:
+the request line must be ASCII outright as this server's policy (the
+line is method SP target SP version per RFC 9112 §3), which covers the
+method, target, and version positions in one rule. Red-first F-04 table row, green
+after; crash bytes promoted as a reject row per `fuzz.yml` (no
+allowlist entry — allowlists are for intentional differences, and this
+was a bug). 45 http1 unit + 3 corpus green; the nightly schedule
+re-proves the differential itself.
+ → `crates/qqq-serve/src/http1.rs`,
+ → `crates/qqq-serve/tests/fuzz_corpus.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -116,6 +116,9 @@ fn f04_reject_rows_are_refused() {
         b"GET /a\tb HTTP/1.1\r\nHost: x\r\n\r\n",
         // Non-ASCII target.
         "GET /caf\u{e9} HTTP/1.1\r\nHost: x\r\n\r\n".as_bytes(),
+        // Fuzzer crash-1521af0 (nightly http1_diff): U+2001-prefixed method
+        // trimmed into GET by QQQ while httparse refused — exact crash head.
+        b"\xe2\x80\x81GET / HTTP/1.1\r\nN: \r\n\r\n",
         // Whitespace in the name, colonless line, over-long unusable line.
         b"GET / HTTP/1.1\r\nHost : x\r\n\r\n",
         b"GET / HTTP/1.1\r\nX Bad: v\r\n\r\n",

@@ -747,6 +747,19 @@ fn parse_request_line(line: &str) -> std::result::Result<(Method, String, Versio
             detail: "tab in the request line".to_owned(),
         });
     }
+    // ASCII only, for the same reason with a wider blast radius
+    // (fuzzer crash-1521af0): `str::trim` and friends strip *Unicode*
+    // whitespace, so a U+2001-prefixed `GET` trimmed into a valid method
+    // while httparse refused it — a differential the fuzzer caught. The
+    // request line is method SP target SP version (RFC 9112 §3); refusing
+    // non-ASCII there is this server's policy, one rule covering the
+    // method, target, and version positions alike (non-ASCII targets
+    // already refuse row-by-row below).
+    if !line.is_ascii() {
+        return Err(ParseError::BadRequestLine {
+            detail: "non-ASCII byte in the request line".to_owned(),
+        });
+    }
     // `splitn(3, ' ')` rather than `split_whitespace`: a request target must not
     // contain a space (it would be percent-encoded), so splitting on the first
     // two spaces is the correct rule.
@@ -972,6 +985,11 @@ mod tests {
             (
                 "GET /caf\u{e9} HTTP/1.1\r\nHost: x\r\n\r\n",
                 "non-ASCII target",
+                is_bad_request_line,
+            ),
+            (
+                "\u{2001}GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+                "non-ASCII method prefix (fuzzer crash-1521af0: trimmed into GET)",
                 is_bad_request_line,
             ),
         ] {

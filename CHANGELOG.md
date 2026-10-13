@@ -4,6 +4,16 @@
 
 ### Security
 
+- **serve**: the request line must be ASCII outright (`I-07`
+  differential finding): the nightly fuzzer caught U+2001 (EM QUAD)
+  prefixed to `GET` trimming into a valid method via `str::trim`'s
+  Unicode whitespace while httparse refused — a tolerance mismatch with
+  smuggling shape. The server now refuses non-ASCII request lines as its
+  own policy (the request line is method SP target SP version per RFC
+  9112 §3), with a red-first F-04 table row and the crash bytes promoted
+  as a reject row. No allowlist entry: allowlists record intentional
+  differences.
+
 - **serve**: TLS defaults to HTTP/1.1-only ALPN (`F-16`, Option A decided
   2026-10-12): with no h2 dispatch loop in the server, offering `h2`
   first negotiated clients into an unserved protocol (RFC 9113 §3.2 gives

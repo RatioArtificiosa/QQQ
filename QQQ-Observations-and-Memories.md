@@ -38155,4 +38155,22 @@ phases, not a trend from this wave's new crates. Max spikes remain
 cargo parallelism; mem headroom 68%; foreign containers at ~0%.
 Verdict: NORMAL.
  → `docker/compose.yaml`.
+
+## §O-686 - The literal commands close the last gaps: xtask green, fuzz clean, raw bridge green
+
+Three invocations were covered-but-not-literal, so all three ran
+literally on the final tree. `cargo xtask ci`: GATE GREEN, 146 steps,
+exit 0 (`literal-xtask-ci.log`). `http1_diff` 10 minutes, container
+ASan: 14,722,296 executions in 601 s, zero crashes
+(`fuzz-http1diff-600s.log`) — post-fix differential proof on the
+record. Raw `docker compose -f docker/compose.yaml run --rm linux
+checks`: exit 0, GATE GREEN 146 steps in 3.8 h with 217 one-minute
+stats samples (CPU mean 19.1%, p50 8.8%, max 438.2%; MEM max 2022 MiB
+= 24.7% of 8 GiB) — the p50 repeats the family line a fifth time,
+verdict NORMAL, zero failures to disposition. The wrapper-vs-raw
+question is settled by construction: the wrapper executes this exact
+compose invocation, and both paths now have green logs. Wave 7 has no
+pending items left.
+ → `docker/compose.yaml`,
+ → `fuzz/fuzz_targets/http1_diff.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

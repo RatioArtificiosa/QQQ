@@ -37879,7 +37879,8 @@ or continue correctly; "skip and loop" is silent disablement.
 while `ticks_for_deadline` mapped it to 1 ms via `.max(1)` — a 500 µs
 period ticked at 10 ms and counted at 1 ms, trapping a 55 ms deadline at
 55 ticks instead of 6. Only direct registrants could hit it (the helper
-emits whole milliseconds), and the erring direction was early, but two
+emits whole milliseconds), and the erring direction was late — 55 counted
+ticks at a true 10 ms period trap at ~550 ms, not ~60 ms — but two
 functions answering "what is the period" differently is the disagreement
 shape `F-17` exists to remove. Review caught it; both now go through one
 `tick_period_ms`, pinned by a boundary test (red by arithmetic: 55 vs 6

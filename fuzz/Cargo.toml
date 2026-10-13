@@ -79,6 +79,10 @@ qqq-host = { path = "../crates/qqq-host" }
 # with `qqq_serve::http1` and compares against the reference below.
 qqq-serve = { path = "../crates/qqq-serve" }
 libfuzzer-sys = "0.4"
+# Async runtime for the `egress_url` harness (`I-01`): vetting is async
+# over an injectable resolver, so even the fake needs an executor. Same
+# version the workspace resolves; fuzz-only use.
+tokio = { version = "1", features = ["rt"] }
 # The differential reference for `http1_diff` (`I-07`). Fuzz-crate-only by
 # design: the shipped tree must not depend on an outside parser for its own
 # behaviour, and the audit names this crate as the comparison point.
@@ -133,6 +137,12 @@ doc = false
 [[bin]]
 name = "http1_diff"
 path = "fuzz_targets/http1_diff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "egress_url"
+path = "fuzz_targets/egress_url.rs"
 test = false
 doc = false
 

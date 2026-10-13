@@ -25,7 +25,9 @@
   capped HTTP/1.1 round trip (chunked decoded, trailers dropped,
   over-cap bodies refused as errors, redirects refused with no hop
   chain), and emits one audit row per call with byte counts, never the
-  body. `send` stays refused; wiring comes later.
+  body. A libFuzzer target feeds arbitrary URL strings through vetting
+  (2.15M executions, ASan, clean) and is wired into the nightly matrix.
+  `send` stays refused; wiring comes later.
 
 - **serve**: the HTTP/1.1 head parser is now fuzzed differentially against
   `httparse` (`I-07`): a nightly target parses the same bytes with both

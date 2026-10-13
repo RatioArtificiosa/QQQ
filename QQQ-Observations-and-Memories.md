@@ -38046,4 +38046,25 @@ shape done right: a test must fail with the mechanism removed, not
 merely pass with it present. 35 unit + 23 doctests green.
  → `crates/qqq-host/src/egress.rs`,
  → `crates/qqq-host/src/host_http.rs`.
+
+## §O-680 - The fuzzer agrees: 2.15M URLs, no panic, no forbidden dial
+
+The `egress_url` target feeds arbitrary byte strings through `vet`
+with a mixed public+private resolver and asserts the firewall property
+on the value: whatever vets must not be forbidden. Seeds cover grants,
+literals, userinfo, IDN, numeric shorthand, port overflow, and garbage
+(14 files). Local run in the Linux container with ASan (Windows cannot
+execute ASan-instrumented binaries — `STATUS_DLL_NOT_FOUND`, recorded
+not worked around): 2,152,500 executions in 301 s at 7,151 exec/s,
+10,002 new units, peak RSS 539 MB, zero crashes. Wired into the nightly
+matrix with the crash-promotion row pointing at the egress tests.
+Sole-opener proof by grep (`sole-opener-grep.log`): the only
+guest-reachable dial in shipping code is the connector's vetted
+`TcpStream::connect`; the bench loadgen dials its operator target,
+`listener.rs` resolves only its own bind address, and every other hit
+is `#[cfg(test)]` loopback. `send` still refuses: 9 subrequest-limit
+plus 16 host_http tests green, unchanged.
+ → `fuzz/src/egress_url.rs`,
+ → `fuzz/fuzz_targets/egress_url.rs`,
+ → `crates/qqq-host/src/host_http.rs`.
 *End of `QQQ-Observations-and-Memories.md`.*

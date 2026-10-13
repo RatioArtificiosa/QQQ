@@ -51,6 +51,10 @@ use qqq_cap::manifest::Manifest;
 /// functions the fuzz target calls and the tests below pin.
 pub mod diff;
 
+/// The `I-01` URL-string harness over the egress vetting, as pure
+/// functions the fuzz target calls and the tests below pin.
+pub mod egress_url;
+
 /// Documents that exercise the manifest parser's shapes.
 ///
 /// # Why these particular inputs

@@ -79,6 +79,7 @@ jobs:
           - component_load
           - host_interfaces
           - http1_diff
+          - egress_url
     steps:
       - uses: actions/checkout@v5
 
@@ -130,6 +131,12 @@ jobs:
                                     bytes as an accept row with its fields, or a
                                     reject row; a differential mismatch also names
                                     the arm in `fuzz/http1_diff_allowlist.md`)
+                 egress_url      -> crates/qqq-host/src/egress.rs tests (add the
+                                    URL string as a `vet` case: granted hosts
+                                    vet to a public address, everything else
+                                    refuses; a forbidden address that vets is
+                                    the bug, and the string that did it is the
+                                    regression row)
             3. Fix the bug so that entry, and every existing entry, passes.
             4. Commit both together.
 

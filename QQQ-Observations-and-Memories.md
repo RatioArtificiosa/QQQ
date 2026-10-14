@@ -38173,4 +38173,101 @@ compose invocation, and both paths now have green logs. Wave 7 has no
 pending items left.
  → `docker/compose.yaml`,
  → `fuzz/fuzz_targets/http1_diff.rs`.
+
+## §O-687 - The transport seam is three types wide: head, body-stream, responder
+
+The Option A migration starts with the narrowest honest seam:
+`RequestHead` (strings, not enums, so a new protocol's vocabulary
+cannot force the seam wider), `Response`, and a `Transport` trait with
+`name` plus `serves_h2` — the ALPN property made structural, so a
+transport that cannot speak h2 cannot be offered it. Wire-level flood
+knobs live in `HyperLimits` with one derivation function from
+`ConnectionConfig`, so the two transports cannot disagree about a
+limit; QQQ budgets stay in middleware. Every hyper 1.x setting the
+audit named exists in the resolved hyper 1.12.0 (`header_read_timeout`,
+`max_buf_size`, `max_concurrent_streams`, `max_header_list_size`,
+both reset-stream budgets, keep-alive interval) — verified against the
+vendored source, not the docs. Red proofs: settings-map fault
+injection fails the tripwire test; the ping-flood probe re-confirms
+1.7 MB unbounded on the current tree (deleted, not committed — the
+bound belongs to the serve-path commit). `hyper-util` waits for that
+commit too: adding it now would fail `cargo machete` on an unused
+dependency.
+ → `crates/qqq-serve/src/transport.rs`.
+## §O-688 - A settings doc claimed an enforcer that does not exist
+
+The `HyperLimits::max_response_body_bytes` doc said hyper would
+enforce the cap. Hyper 1.12.0 has no response-body setting at all
+(verified against the vendored source, not the docs page), so the
+sentence described a control believed live that was not - the §11
+shape in documentation form. An independent CodeRabbit pass caught
+it; no test could, because the claim lived only in prose. The fix
+names the real enforcer in the doc itself: a QQQ-middleware budget
+with one named home, enforced where response bodies are built in
+the serve-path commit, documenting the 1 MiB the outbound
+discipline already observes until then. The generalisable rule: every
+settings-map line must name its enforcer (hyper builder or QQQ
+middleware); a bound with no enforcer is a believed-live control.
+→ `crates/qqq-serve/src/transport.rs`.
+
+## §O-689 - A Par-lane cookbook timeout is load, not regression
+
+`check_agent_cookbook` failed its Par-lane run with the QQQ-1001
+reproducer exceeding its 120 s subprocess timeout (step: 157 s)
+while `check_agent_bench` (400 s), `check_xrefs` (438 s), and a graf
+rebuild saturated the same box. The same run's `--self-test` lane
+passed the identical checker in 2 s, and an isolated retry on the
+idle machine passed all 5 reproducers in 64.9 s (evidence:
+`cookbook-retry-w8a.log`). No code changed between the three runs,
+so the timeout measures scheduling luck, not the tree. The rule: a
+timeout failure with a same-run self-test pass gets an isolated
+retry before any code conclusion is drawn.
+→ `tools/check_agent_cookbook.py`.
+
+## §O-690 - Two shell traps: a shadowed cmd and a missing VsDevCmd
+
+`cmd` resolved to an fnm multishell `cmd.ps1` shim, which broke
+every `cmd /c` environment load with a misleading clap-style error;
+prepending System32 to PATH restores the real `cmd.exe`. Separately,
+the 2019 BuildTools install ships `vcvars64.bat` but no
+`VsDevCmd.bat`, so the handbook's VsDevCmd load silently produced
+nothing and `link.exe` stayed Git's Unix `link`. The working form is
+a wrapper `.cmd` that `call`s the quoted `vcvars64.bat` and prints
+`set`, parsed back into the shell, verified by `link.exe` resolving
+under `MSVC\...\bin\HostX64\x64`. The rule: never trust the linker
+by habit - assert the resolved `link.exe` path before any cargo run
+that links.
+→ `crates/qqq-serve/src/transport.rs` (no tree file; process only).
+
+## §O-691 - Review caught a panic, a conflation, and a test that could not fail
+
+The pre-commit CodeRabbit pass on the transport seam returned four
+findings; verification against the vendored hyper 1.12.0 source
+confirmed three real defects. First, `apply_http1` set
+`header_read_timeout` with no `Timer`, and hyper documents the
+consequence plainly (`http1.rs`: "Panics if ... configured without
+a `Timer`"; `common/time.rs:84` panics at serve time) — the first
+served connection would have died on a believed-live control, the
+§11 shape with a crash. A red test serving a stalled head through
+the configured builder reproduced hyper's own panic message
+("timeout `header_read_timeout` set, but no timer set") before the
+fix. Second, `keep_alive_interval` equated the H2 PING cadence with
+`ConnectionConfig::idle_timeout`; hyper's own docs ("Sets an
+interval for HTTP2 Ping frames") plus the in-house `Connection::poll`
+idle close prove they are different jobs, so the field is now
+`h2_ping_interval` (config-independent, proven by a two-deployment
+test) beside a carried `idle_timeout` the serve path enforces for
+both protocols. Third, the first version of the timer test passed
+WITHOUT the fix: the panicking server task dropped the socket, the
+client read EOF, green for the wrong reason — the §4
+fixture-that-cannot-fail. Joining the server task and asserting it
+survived turned it honest. The fourth finding (the 1 MiB body-budget
+doc claiming an "already observed" discipline no serving code
+enforces) was the §O-688 disease recurring one edit later, fixed the
+same way: name the enforcer and its commit. The generalisable rule:
+when a new test passes before its fix, the test is the bug — ask
+what else produces its green before celebrating it.
+→ `crates/qqq-serve/src/transport.rs`,
+`crates/qqq-serve/Cargo.toml`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

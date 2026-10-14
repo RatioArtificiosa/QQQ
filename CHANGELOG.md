@@ -4,6 +4,20 @@
 
 ### Security
 
+- **serve**: the Option A serving transport begins with its seam
+  (`F-16`): `RequestHead`/`Response`/`Transport` types plus
+  `HyperLimits` (every audit-named flood knob mapped from
+  `ConnectionConfig`, QQQ budgets staying in middleware) applied to
+  the real hyper 1.x builders. Hyper 1.12.0, MIT — inside deny.toml,
+  no direct `h2` dep. Review-driven corrections in the same seam:
+  the H2 PING cadence is a separate `h2_ping_interval` (PINGs are not
+  an idle bound; `idle_timeout` rides along for the serve path to
+  enforce), every builder gets a `TokioTimer` (hyper panics on a
+  timeout without one), and the response-body budget is documented as
+  serve-path-enforced, not already observed. In-house paths
+  untouched; the serve-path commit lands the flood acceptance tests
+  green next.
+
 - **serve**: the request line must be ASCII outright (`I-07`
   differential finding): the nightly fuzzer caught U+2001 (EM QUAD)
   prefixed to `GET` trimming into a valid method via `str::trim`'s

@@ -116,6 +116,7 @@ pub mod sse;
 /// Streaming responses: writing a body in pieces, after the head.
 pub mod stream;
 pub mod tls;
+pub mod transport;
 /// The WebSocket opening handshake, per RFC 6455 §4.
 pub mod ws;
 /// A live WebSocket connection: the loop between the handshake and the guest.

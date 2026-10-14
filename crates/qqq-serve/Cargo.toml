@@ -79,10 +79,27 @@ base64.workspace = true
 # enables it for every crate in the workspace — which is why the reason is
 # recorded here rather than left as a bare feature name.
 tokio = { workspace = true, features = ["sync"] }
+# Hyper 1.x for the Option A serving transport (`F-16`, Wave 8): the server
+# side speaks HTTP/1.1 and HTTP/2 through hyper's connection drivers while
+# QQQ policy stays in QQQ as middleware. Version 1.12.0, MIT — inside
+# deny.toml's allowlist, verified before proposing rather than after adding.
+# No separate direct `h2` dependency per the owner's non-negotiables: Hyper
+# owns framing, HPACK, stream state, and flow control.
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+# Timer + IO adapters for the hyper serving path (`F-16`): the `apply_*`
+# functions set a `TokioTimer` on each builder, and the tests serve real
+# connections through `TokioIo`. Used by non-test code, so this is a main
+# dependency, not a dev one.
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", features = ["pem"] }
 tokio-rustls = "0.26.5"
+# Response bodies for the test service in `transport::tests`: the crate
+# under test never builds a body itself (responses come from QQQ policy),
+# so these stay dev-only.
+http-body-util = "0.1"
+bytes = "1"
 # **Dev only, deliberately.** `access_log` hand-writes its JSON encoder so the
 # crate has no serialization dependency on a path that runs per request, and so the
 # control-character escaping is explicit rather than inherited. The tests parse the

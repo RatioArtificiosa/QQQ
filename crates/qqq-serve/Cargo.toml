@@ -91,15 +91,19 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 # connections through `TokioIo`. Used by non-test code, so this is a main
 # dependency, not a dev one.
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Response bodies for the hyper serve path (`F-16`): the service answers
+# with in-memory `Full` bodies, and `Bytes` is the buffer they share with
+# the body reader. Both used by non-test code.
+http-body-util = "0.1"
+bytes = "1"
+# Polling hyper's body stream inside the `AsyncRead` adapter (`F-16`):
+# `BodyStream` speaks `futures_core::Stream`, and the adapter is the only
+# place that polls it.
+futures-core = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", features = ["pem"] }
 tokio-rustls = "0.26.5"
-# Response bodies for the test service in `transport::tests`: the crate
-# under test never builds a body itself (responses come from QQQ policy),
-# so these stay dev-only.
-http-body-util = "0.1"
-bytes = "1"
 # **Dev only, deliberately.** `access_log` hand-writes its JSON encoder so the
 # crate has no serialization dependency on a path that runs per request, and so the
 # control-character escaping is explicit rather than inherited. The tests parse the

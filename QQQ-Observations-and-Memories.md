@@ -38270,4 +38270,58 @@ what else produces its green before celebrating it.
 → `crates/qqq-serve/src/transport.rs`,
 `crates/qqq-serve/Cargo.toml`, `CHANGELOG.md`.
 
+## §O-692 - The refusal-status taxonomy is unit-pinned but unwired
+
+`ParseError::status()` maps each parse failure to its honest status
+(431 for over-large heads, 413 for over-large bodies, 505 for bad
+versions) and `http1.rs` unit tests pin every row — but
+`parse_error_response` hardcodes `Failure::BadRequest`, so the wire
+carries `400` for all of them on both transports. The mapping is a
+control believed live that is not: no caller serves it. Found while
+the differential suite expected `413` for a declared over-cap body
+and both paths answered `400`. The hyper path inherits the shape
+through the shared constructor (parity first); the follow-up wires
+the taxonomy into the constructor on both paths at once, with its
+own red-first commit and existing-test audit, never one side first.
+→ `crates/qqq-serve/src/response.rs`,
+`crates/qqq-serve/src/http1.rs`, `crates/qqq-serve/tests/hyper_serve.rs`.
+
+## §O-693 - Hyper normalises before the service, so the map refuses only what survives
+
+Three differential rows forced the same lesson. Hyper strips
+`Content-Length` beside `Transfer-Encoding` (a conflicting-framing
+request arrives TE-only, fails chunked decoding, and answers the
+shared `GuestFault` `500` where the oracle answers `400`);
+hyper answers doubled `Content-Length`, spaced header names, and
+obs-fold natively with a bare bodiless `400`; hyper writes its own
+canonical reason phrases (`413 Payload Too Large` where the
+in-house writer says `Content Too Large`). None of these is
+routable around: the information is gone before the service runs.
+The remedy is not more mapping but explicit delta-pinning —
+status-or-close agreement asserted per row with the difference
+named — plus one genuine map addition the evidence forced (refuse
+any URI with a scheme, since hyper normalises absolute-form to
+origin-form). The rule: a transport adapter cannot refuse what its
+transport normalised away; name the deltas, pin them, converge them
+at the deletion gate.
+→ `crates/qqq-serve/src/serve_hyper.rs`,
+`crates/qqq-serve/tests/hyper_serve.rs`.
+
+## §O-694 - A decoded body fed to a decoder fails closed, then gets fixed
+
+The first `collect_body` fed hyper's `Incoming` — already
+chunk-decoded by hyper — into the shared `BodyReader`, which decodes
+chunk framing itself. Every valid chunked body failed: "hello" is not
+a chunk size. The differential chunked test caught it (hyper `500`
+where the oracle answered `200`). The fix keeps the sharing where it
+matters: `Content-Length` bodies still go through the reader
+(identical streaming counts and refusals), while chunked bodies are
+counted frame-by-frame against the same `config_max_request_bytes`
+cap — hyper guarantees the framing, QQQ guarantees the bound. The
+rule: sharing a reader means sharing its input contract, not just
+its type; a transport that decodes must be met with counting, not a
+second decode.
+→ `crates/qqq-serve/src/serve_hyper.rs`,
+`crates/qqq-serve/tests/hyper_serve.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

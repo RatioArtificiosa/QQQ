@@ -174,6 +174,79 @@ impl Response {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound validation (F-02, serve side)
+// ---------------------------------------------------------------------------
+
+/// A response the wire boundary refused.
+///
+/// Carries only the reason: the offending response itself never travels,
+/// so a splitting status or header cannot reach the wire inside an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundRefusal {
+    /// Why, with any offending value debug-escaped so the detail itself
+    /// can travel in a 500 body without becoming a second injection.
+    pub detail: String,
+}
+
+impl OutboundRefusal {
+    /// The safe replacement: 500 with a fixed body carrying only the
+    /// escaped detail. Valid by construction — a refusal that cannot be
+    /// sent is a second defect wearing the first one's clothes.
+    #[must_use]
+    pub fn replacement(&self) -> Response {
+        Response::text(500, format!("response failed validation: {}", self.detail))
+    }
+}
+
+/// Validate a response for the wire.
+///
+/// Mirrors the guest-boundary rules in `qqq_run::guest_handler::to_served`
+/// (status range, name token, value controls, body cap) at the point of
+/// emission, so a bad response built anywhere in the host becomes a 500
+/// rather than a split stream. Returns the first violation.
+///
+/// # Errors
+///
+/// Returns the first violation found: a status with no wire meaning, a
+/// header name that is not a token, a value carrying a control byte, or
+/// a body past the cap.
+///
+/// The header *count* is deliberately not capped here: headers on a serve
+/// `Response` are handler-built (host side), not attacker-controlled wire
+/// input, and neither hyper nor the in-house writer bounds the count on
+/// emission. The body cap is the enforced bound; see
+/// [`crate::transport::HyperLimits::max_response_body_bytes`].
+pub fn validate_outbound(response: &Response, body_cap_bytes: u64) -> Result<(), OutboundRefusal> {
+    if !(100..=599).contains(&response.status) {
+        return Err(OutboundRefusal {
+            detail: format!(
+                "status {} has no meaning on the wire (100-599 only)",
+                response.status
+            ),
+        });
+    }
+    for (name, value) in &response.headers {
+        if !crate::http1::is_valid_header_name(name) {
+            return Err(OutboundRefusal {
+                detail: format!("header name {name:?} is not a valid token"),
+            });
+        }
+        if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+            return Err(OutboundRefusal {
+                detail: format!("header {name:?} value carries a control byte"),
+            });
+        }
+    }
+    let body_len = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+    if body_len > body_cap_bytes {
+        return Err(OutboundRefusal {
+            detail: format!("body {body_len} bytes exceeds the {body_cap_bytes}-byte cap"),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
 
@@ -824,6 +897,62 @@ mod tests {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    // -- outbound validation (F-02, serve side) ----------------------------
+
+    #[test]
+    fn outbound_accepts_a_plain_response_at_the_cap() {
+        let mut r = Response::text(200, "hello");
+        r.body = vec![0xA5; 1024];
+        super::validate_outbound(&r, 1024).expect("plain response at exactly the cap");
+    }
+
+    #[test]
+    fn outbound_refuses_statuses_with_no_wire_meaning() {
+        for status in [99u16, 600, 999] {
+            let r = Response::status(status);
+            let refusal =
+                super::validate_outbound(&r, 1 << 20).expect_err("bad status must refuse");
+            assert!(
+                refusal.detail.contains(&status.to_string()),
+                "detail names the status: {}",
+                refusal.detail
+            );
+            // The replacement is itself valid: a refusal that cannot be
+            // sent is a second defect wearing the first one's clothes.
+            super::validate_outbound(&refusal.replacement(), 1 << 20).expect("replacement valid");
+        }
+    }
+
+    #[test]
+    fn outbound_refuses_a_splitting_header_name() {
+        let mut r = Response::text(200, "hi");
+        r.headers
+            .push(("X-Bad\r\nInjected: x".to_owned(), "1".to_owned()));
+        super::validate_outbound(&r, 1 << 20).expect_err("CRLF in a name must refuse");
+    }
+
+    #[test]
+    fn outbound_refuses_control_bytes_in_a_value() {
+        for value in ["a\rb", "a\nb", "a\x00b", "a\x7fb"] {
+            let mut r = Response::text(200, "hi");
+            r.set_header("X-V", value);
+            super::validate_outbound(&r, 1 << 20)
+                .expect_err(format!("control byte in {value:?} must refuse").as_str());
+        }
+    }
+
+    #[test]
+    fn outbound_refuses_an_oversize_body() {
+        let mut r = Response::text(200, "hi");
+        r.body = vec![0xA5; (1 << 20) + 1];
+        let refusal =
+            super::validate_outbound(&r, 1 << 20).expect_err("body past the cap must refuse");
+        assert!(
+            refusal.detail.contains("1048577"),
+            "detail carries the length"
+        );
     }
 
     // -- status line and framing -------------------------------------------

@@ -18,6 +18,22 @@
   untouched; the serve-path commit lands the flood acceptance tests
   green next.
 
+- **serve**: the Option A hyper path serves flat routes (`F-16`):
+  `serve_hyper_h1` drives hyper's HTTP/1.1 connection with the same
+  pipeline as the in-house path — same gates in the same order
+  (loopback `Host`, process budget, tenant limits, auth), bodies
+  through the shared `BodyReader` (chunked counted directly, since
+  hyper delivers it decoded), dispatch through `dispatch_off_thread`,
+  render validated by the new `validate_outbound` F-02 gate against
+  `max_response_body_bytes`, plus QQQ-side idle, drain, and
+  per-connection-ceiling enforcement hyper cannot express. A 22-test
+  differential suite pins agreement with the in-house oracle row by
+  row, including the documented deltas: hyper strips
+  `Content-Length` beside `Transfer-Encoding`, answers some parse
+  failures natively, and writes canonical reason phrases. WebSocket
+  and streaming routes answer loud `501` until the parity commit.
+  In-house paths untouched; no deletion.
+
 - **serve**: the request line must be ASCII outright (`I-07`
   differential finding): the nightly fuzzer caught U+2001 (EM QUAD)
   prefixed to `GET` trimming into a valid method via `str::trim`'s

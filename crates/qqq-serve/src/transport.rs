@@ -199,6 +199,30 @@ pub struct HyperLimits {
     /// assert_eq!(HyperLimits::default().http1_max_buf_bytes, 64 << 10);
     /// ```
     pub http1_max_buf_bytes: usize,
+    /// Most headers on one HTTP/1.1 request.
+    ///
+    /// Hyper's own default happens to agree; the map sets it anyway,
+    /// because a default is not a contract and hyper says so itself.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().http1_max_headers, 100);
+    /// ```
+    pub http1_max_headers: usize,
+    /// Longest single HTTP/1.1 header line.
+    ///
+    /// Hyper leaves this unset by default (only the buffer governs), so
+    /// without the map a 9 KiB line sails through a bound QQQ enforces
+    /// at 8 KiB — the gap `hyper_header_size_cap_refuses_through_the_builder`
+    /// pins.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().http1_max_header_size, 8 << 10);
+    /// ```
+    pub http1_max_header_size: usize,
     /// Largest decoded HTTP/2 header list.
     ///
     /// ```
@@ -282,6 +306,31 @@ pub struct HyperLimits {
     /// assert_eq!(HyperLimits::default().idle_timeout, Duration::from_secs(75));
     /// ```
     pub idle_timeout: Duration,
+    /// Most requests served on one connection before it closes.
+    ///
+    /// Hyper has no per-connection request ceiling, so the serve path
+    /// counts and closes QQQ-side — mirroring `Connection`'s
+    /// `RequestLimit`, including the warning: the last response carries
+    /// `Connection: close`, and the next request is refused by closing.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().max_requests_per_connection, 1_000);
+    /// ```
+    pub max_requests_per_connection: u32,
+    /// How long a drain may take before in-flight requests are cut off.
+    ///
+    /// QQQ-side like the idle bound: the serve path bounds graceful
+    /// shutdown with this, mirroring `ConnectionConfig::drain_timeout`.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    /// use std::time::Duration;
+    ///
+    /// assert_eq!(HyperLimits::default().drain_timeout, Duration::from_secs(30));
+    /// ```
+    pub drain_timeout: Duration,
 }
 
 impl Default for HyperLimits {
@@ -293,6 +342,11 @@ impl Default for HyperLimits {
             // Mirrors the in-house `MAX_HEAD_BYTES`: switching transports
             // must not widen what the parser accepted.
             http1_max_buf_bytes: 64 << 10,
+            // Mirrors `MAX_HEADERS` / `MAX_HEADER_BYTES` for the same
+            // reason: hyper's header count default agrees today but is
+            // not a contract, and its per-line size is unset by default.
+            http1_max_headers: crate::http1::MAX_HEADERS,
+            http1_max_header_size: crate::http1::MAX_HEADER_BYTES,
             // Mirrors the in-house `MAX_HEADER_BLOCK_BYTES`.
             h2_max_header_list_bytes: 1 << 20,
             // RFC 9113 §6.5.2 recommends no smaller than 100.
@@ -309,6 +363,11 @@ impl Default for HyperLimits {
             h2_ping_interval: Duration::from_secs(75),
             // Mirrors `ConnectionConfig::idle_timeout`.
             idle_timeout: Duration::from_secs(75),
+            // Mirrors `ConnectionConfig::max_requests`: 1000 amortises a
+            // handshake across a session while keeping a leak visible.
+            max_requests_per_connection: 1_000,
+            // Mirrors `ConnectionConfig::drain_timeout`.
+            drain_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -327,12 +386,16 @@ impl Default for HyperLimits {
 /// let limits = hyper_limits_for(&ConnectionConfig::default());
 /// assert_eq!(limits.header_read_timeout, ConnectionConfig::default().header_timeout);
 /// assert_eq!(limits.idle_timeout, ConnectionConfig::default().idle_timeout);
+/// assert_eq!(limits.max_requests_per_connection, ConnectionConfig::default().max_requests);
+/// assert_eq!(limits.drain_timeout, ConnectionConfig::default().drain_timeout);
 /// ```
 #[must_use]
 pub fn hyper_limits_for(config: &crate::conn::ConnectionConfig) -> HyperLimits {
     HyperLimits {
         header_read_timeout: config.header_timeout,
         idle_timeout: config.idle_timeout,
+        max_requests_per_connection: config.max_requests,
+        drain_timeout: config.drain_timeout,
         ..HyperLimits::default()
     }
 }
@@ -351,6 +414,8 @@ pub fn apply_http1(builder: &mut hyper::server::conn::http1::Builder, limits: &H
     builder.timer(hyper_util::rt::TokioTimer::new());
     builder.header_read_timeout(Some(limits.header_read_timeout));
     builder.max_buf_size(limits.http1_max_buf_bytes);
+    builder.max_headers(limits.http1_max_headers);
+    builder.max_header_size(limits.http1_max_header_size);
     builder.keep_alive(true);
 }
 
@@ -387,6 +452,16 @@ mod tests {
         let limits = hyper_limits_for(&config);
         assert_eq!(limits.header_read_timeout, Duration::from_secs(3));
         assert_eq!(limits.idle_timeout, Duration::from_secs(30));
+        // Connection budgets ride the same map: a ceiling the map forgot
+        // would leave one transport unbounded.
+        assert_eq!(
+            limits.max_requests_per_connection,
+            crate::conn::ConnectionConfig::default().max_requests
+        );
+        assert_eq!(
+            limits.drain_timeout,
+            crate::conn::ConnectionConfig::default().drain_timeout
+        );
         // The PING cadence is not config: the map must not derive it from
         // the idle bound (see `h2_ping_cadence_is_not_the_idle_bound`).
         assert_eq!(
@@ -396,6 +471,8 @@ mod tests {
         // Byte caps are transport-independent constants, not config: the
         // map must not invent per-deployment values for them.
         assert_eq!(limits.http1_max_buf_bytes, 64 << 10);
+        assert_eq!(limits.http1_max_headers, crate::http1::MAX_HEADERS);
+        assert_eq!(limits.http1_max_header_size, crate::http1::MAX_HEADER_BYTES);
         assert_eq!(limits.h2_max_header_list_bytes, 1 << 20);
         assert_eq!(limits.max_concurrent_streams, 100);
     }
@@ -520,6 +597,70 @@ mod tests {
         // socket. The task must have survived — pre-fix this join reaps
         // hyper's missing-timer panic, which is the red this test exists
         // to catch.
+        match outcome {
+            Ok(StalledEnd::Clean | StalledEnd::Reset) => {}
+            Err(error) => panic!("server left a stalled head open past the deadline: {error:?}"),
+        }
+        match server.await {
+            Ok(()) => {}
+            Err(error) => panic!("server task did not survive: {error}"),
+        }
+    }
+
+    /// The single-header cap must fire through the configured builder:
+    /// QQQ refuses a header line past `MAX_HEADER_BYTES` (8 KiB) with 431,
+    /// but hyper's `max_header_size` defaults to unset (only the 64 KiB
+    /// buffer governs). Without the map, a 9 KiB header sails through a
+    /// believed-live bound — the §11 shape at the settings layer.
+    #[tokio::test]
+    async fn hyper_header_size_cap_refuses_through_the_builder() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let limits = HyperLimits::default();
+        let listener = ok(
+            tokio::net::TcpListener::bind("127.0.0.1:0").await,
+            "bind loopback",
+        );
+        let addr = ok(listener.local_addr(), "listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = ok(listener.accept().await, "accept");
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            apply_http1(&mut builder, &limits);
+            let service = hyper::service::service_fn(
+                |_request: hyper::Request<hyper::body::Incoming>| async {
+                    Ok::<_, hyper::Error>(hyper::Response::new(http_body_util::Full::new(
+                        bytes::Bytes::new(),
+                    )))
+                },
+            );
+            let _ = builder
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .await;
+        });
+        let mut client = ok(tokio::net::TcpStream::connect(addr).await, "connect");
+        let big = "x".repeat(9 * 1024);
+        let head = format!("GET / HTTP/1.1\r\nHost: x\r\nX-Big: {big}\r\n\r\n");
+        ok(
+            client.write_all(head.as_bytes()).await,
+            "send over-long header",
+        );
+        // A 9 KiB header line is past the 8 KiB QQQ cap: the server must
+        // kill the connection rather than route the request.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut buf = [0u8; 64];
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) => return StalledEnd::Clean,
+                    Ok(_) => {}
+                    Err(_error) => return StalledEnd::Reset,
+                }
+            }
+        })
+        .await;
+        match outcome {
+            Ok(StalledEnd::Clean | StalledEnd::Reset) => {}
+            Err(error) => panic!("server accepted a 9 KiB header line: {error:?}"),
+        }
         match server.await {
             Ok(()) => {}
             Err(error) => panic!("server task did not survive: {error}"),

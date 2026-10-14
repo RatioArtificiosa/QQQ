@@ -420,7 +420,7 @@ pub enum Served {
 ///
 /// Because every call site is inside a function with a line budget, and the conversion is four tokens
 /// of ceremony that say nothing about the stage being measured.
-fn micros_since(start: std::time::Instant) -> u64 {
+pub(crate) fn micros_since(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
@@ -455,7 +455,7 @@ fn micros_since(start: std::time::Instant) -> u64 {
 /// `failed` is now `false` on that path, because **there is no host failure there**: an unroutable
 /// path is a 404 and a wrong method a 405 -- both produced by the host, neither a failure -- and a
 /// guest answering 500 has, from the host's point of view, answered normally.
-fn emit_span(
+pub(crate) fn emit_span(
     ctx: &ConnectionContext<'_>,
     tenant: &str,
     step: u8,
@@ -1135,7 +1135,7 @@ pub fn access_record(
 ///
 /// The failure is silent by necessity — there is nowhere left to report it that would
 /// not be the same broken sink. What is *not* silent is the panic this removes.
-fn emit_record(logger: &Logger, record: Record) {
+pub(crate) fn emit_record(logger: &Logger, record: Record) {
     use std::io::Write as _;
 
     if let Some(line) = logger.emit(record) {
@@ -1269,7 +1269,7 @@ fn begin_drain_if_signalled(conn: &mut Connection, shutdown: &Shutdown) -> Optio
 /// has a name a test can state, and a fifth caller cannot quietly pass `false` because
 /// the expression looked obvious.
 #[must_use]
-fn is_head(head: &RequestHead) -> bool {
+pub(crate) fn is_head(head: &RequestHead) -> bool {
     head.method == crate::route::Method::Head
 }
 
@@ -1525,7 +1525,7 @@ fn route_match_of(m: &crate::route::Match) -> RouteMatch {
 /// A `Response` is produced synchronously and the body is not consumed, so borrowing it
 /// avoids a copy on every request. The lifetime is the caller's stack frame, which is
 /// exactly the handler's duration.
-async fn dispatch_off_thread(
+pub(crate) async fn dispatch_off_thread(
     table: &RouteTable,
     dispatch: &Dispatch,
     head: &RequestHead,
@@ -1597,7 +1597,7 @@ fn dispatch_flat(
 /// the *application* refusing, which is a different fact — so the refusal is expressed
 /// by the **absence** of `Access-Control-Allow-Origin`, which is what the browser
 /// checks.
-fn apply_cors(
+pub(crate) fn apply_cors(
     mut response: Response,
     head: &RequestHead,
     cors: Option<&crate::cors::Cors>,
@@ -2736,7 +2736,7 @@ async fn refuse_limits(
 /// `started` is taken **after** the head is parsed, so the histogram measures the server's
 /// own service time. Folding in the time spent waiting for a slow client would make the
 /// metric measure the network and call it the handler.
-fn record_metrics(
+pub(crate) fn record_metrics(
     metrics: &crate::metrics::HttpMetrics,
     tenant_labels: &crate::metrics::TenantLabels,
     head: &RequestHead,
@@ -3105,7 +3105,7 @@ async fn drain_body(
 /// is the streaming enforcement for what actually arrives. It reads the shared
 /// constant rather than holding a second number, because two limits is how the
 /// ground between them becomes a smuggle window.
-fn config_max_request_bytes() -> u64 {
+pub(crate) fn config_max_request_bytes() -> u64 {
     http1::MAX_REQUEST_BYTES
 }
 
@@ -3115,7 +3115,7 @@ fn config_max_request_bytes() -> u64 {
 /// handler that wants the query reads it from `RequestHead::target`. Splitting
 /// here rather than in the router keeps the router's contract — "match a path" —
 /// honest, since a route pattern never contains a query.
-fn split_target(target: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
     match target.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (target, None),

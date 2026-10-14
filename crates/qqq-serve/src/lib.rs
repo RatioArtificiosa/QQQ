@@ -111,6 +111,7 @@ pub mod limits;
 pub mod metrics;
 pub mod response;
 pub mod route;
+pub mod serve_hyper;
 pub mod server;
 pub mod sse;
 /// Streaming responses: writing a body in pieces, after the head.

@@ -608,10 +608,19 @@ async fn flood_handshake(addr: SocketAddr) -> TcpStream {
 #[tokio::test]
 async fn f16_ping_flood_answered_without_collapse() {
     let routes = [(Method::Get, "/hello", "h")];
+    // Idle far above the blast: the 75s absolute bound is per-
+    // connection from handshake, and a 100k undrained blast on a
+    // starved runner (backpressured both ways, neither side reading)
+    // can run past it — the bound firing mid-blast is correct server
+    // behavior (proven by injection: 1s idle kills in ~1.3s), not a
+    // ping collapse. This test measures ping handling, not idle; idle
+    // has its own test.
+    let mut limits = default_limits();
+    limits.idle_timeout = Duration::from_secs(300);
     let hyper = HyperH2::start(
         table_with(&routes),
         Dispatch::flat(hello_handler()),
-        default_limits(),
+        limits,
         Pieces::bare(),
     )
     .await;
@@ -709,11 +718,16 @@ async fn f16_settings_flood_acked_without_collapse() {
     let _ = hyper.finish().await;
 }
 
-/// The budget knob moves the cutoff: with `max_local_error_reset_streams`
-/// raised to 100k, the same waves complete with the connection alive —
-/// the causal proof that the death above is the budget firing, not a
-/// harness artifact. Paired with the cutoff test, the two pin both
-/// directions: budget 200 dies early, budget 100k survives.
+/// The budget knobs move the cutoff: with both reset budgets raised
+/// to 100k, the same waves complete with the connection alive — the
+/// causal proof that the death above is the budgets firing, not a
+/// harness artifact. Both knobs, because EITHER fires under pressure:
+/// `max_local_error_reset_streams` counts the server's refusal RSTs
+/// while `max_pending_accept_reset_streams` counts client RSTs still
+/// queued for accept, and a starved scheduler deepens the queue until
+/// the second fires first (measured on CI: GOAWAY with only the first
+/// raised). Paired with the cutoff test, the two pin both directions:
+/// budgets at 200 die early, at 100k survive.
 #[tokio::test]
 async fn h2_reset_budget_knob_moves_the_cutoff() {
     let routes = [(Method::Get, "/hello", "h")];
@@ -722,9 +736,10 @@ async fn h2_reset_budget_knob_moves_the_cutoff() {
         Response::text(200, "slow")
     });
     let mut limits = default_limits();
-    // Causal test: if the wave-4 death is the local-reset budget (200),
-    // raising it must move or remove the death.
+    // Causal test: if the wave death is the reset budgets (200),
+    // raising both must move or remove the death.
     limits.max_local_error_reset_streams = 100_000;
+    limits.max_pending_reset_streams = 100_000;
     let hyper = HyperH2::start(
         table_with(&routes),
         Dispatch::flat(slow),
@@ -830,6 +845,12 @@ async fn h2_sequential_resets_absorbed() {
     let routes = [(Method::Get, "/hello", "h")];
     let mut limits = default_limits();
     limits.max_requests_per_connection = 100_000;
+    // Raised with the ceiling for the same reason: a tight open+RST
+    // loop outruns the accept queue even on a fast machine (proven by
+    // fault injection: a budget of 5 GOAWAYs the flood in 0.01s), and
+    // a starved scheduler widens the gap. The test measures reset
+    // absorption, not accept-queue depth.
+    limits.max_pending_reset_streams = 100_000;
     let hyper = HyperH2::start(
         table_with(&routes),
         Dispatch::flat(hello_handler()),
@@ -898,7 +919,10 @@ async fn h2_sequential_resets_absorbed() {
 /// Concurrent opens against a blocked service: past 100 concurrent
 /// the server refuses with `RST_STREAM`, refusals count toward the
 /// 200 `max_local_error_reset_streams` budget, and the connection
-/// dies well before 10k streams. The cutoff arrives as a TCP close,
+/// dies well before 10k streams. Only that budget can fire here: this
+/// test sends no client RSTs, and the pending-accept budget counts
+/// peer-sent resets on unaccepted streams (h2 `recv_reset`), so it
+/// stays at zero by construction. The cutoff arrives as a TCP close,
 /// not the `GOAWAY` the budget names: hyper aborts instead of
 /// flushing it (a `GOAWAY`, if one ever appears, must still be
 /// `ENHANCE_YOUR_CALM`).
@@ -909,7 +933,7 @@ async fn h2_sequential_resets_absorbed() {
 /// (pinned by `h2_sequential_resets_absorbed`). Pressure — and hence
 /// refusals — requires unfinished streams to pile up, which is what
 /// the blocked service guarantees. The knob-contrast test below
-/// proves the budget is the cause.
+/// proves the reset budgets are the cause.
 #[tokio::test]
 async fn f16_rapid_reset_cannot_exceed_stream_budget() {
     let routes = [(Method::Get, "/hello", "h")];

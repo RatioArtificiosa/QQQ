@@ -38560,4 +38560,56 @@ before anything else trusts that file — and treat two consecutive
 cleans as the verification, since one clean preceded this revert.
 → `crates/qqq-serve/tests/hyper_h2.rs`.
 
+## §O-705 - CI killed three flood tests with the controls working correctly
+
+Run 38594913374 failed all three Rust jobs inside the in-CI gate
+(`GATE RED: test`) on this commit's new h2 tests: the 100k-PING
+blast died mid-write on macOS/Windows, and the knob + sequential
+tests died on Ubuntu — while every production assertion held. Read
+per-OS, the three deaths are three scheduler interactions, each
+proven by fault injection before fixing. (1) The PING blast raced
+the 75s ABSOLUTE idle bound: undrained both ways, neither side
+reads, and on a starved runner the blast runs past the bound that
+exists to reclaim exactly such connections (injection: 1s idle
+kills in ~1.3s, `red-ci-idle-w8b.log`). Fix: idle 300s for that
+test — it measures ping handling, and idle has its own test.
+(2) The knob test raised only `max_local_error_reset_streams`, but
+client RSTs queued for accept count toward
+`max_pending_accept_reset_streams` (200), which a starved scheduler
+trips first (injection: budget 5 GOAWAYs a sequential flood in
+0.01s, `red-ci-pending-w8b.log`). Fix: the knob raises BOTH, and
+the cutoff test's doc now names the pair — either may fire first
+depending on scheduling. (3) The sequential test's 100-pair bursts
+fit the accept queue locally but not under load: same fix, pending
+budget raised beside the ceiling, with the reason stated. The
+`guard::...aborts_during_unwind` lines in the same logs are the
+child's EXPECTED panic on inherited stderr, not failures. Residuals,
+stated: the 30s `finish()` drain waits serialize CI threads and
+deepen starvation (harness tax, not production); if the ping blast
+ever outruns 300s, the next step is interleaved draining, not a
+smaller blast — §O-676's 100k stands. The generalisable rule: a
+flood test must isolate its thesis from every scheduler-sensitive
+knob, because CI runners are the most starved schedulers the code
+will ever meet.
+→ `crates/qqq-serve/tests/hyper_h2.rs`.
+
+## §O-706 - The reviewer vetoed my pair-attribution; the h2 source agreed with them
+
+The CI-fix review caught an overclaim I introduced while fixing:
+my softened cutoff-test doc said EITHER reset budget could fire in
+the main rapid-open test depending on scheduling. The test sends 400
+`HEADERS` and zero client RSTs — and h2's `recv_reset`
+(`proto/streams/recv.rs`) increments the pending-accept count only
+for peer-sent resets on unaccepted streams, so that budget stays at
+zero by construction there; only the local-error budget can fire.
+Verified in the vendored h2 0.4.20 source, not by re-reading my own
+comment. The doc is corrected (pair explanation kept where client
+RSTs actually fly: the knob and sequential tests). The mistake's
+shape is worth naming: a fix that explains a failure can over-
+generalize the mechanism to neighboring tests — and the neighboring
+test's wire bytes (no RST frames sent) already contained the
+refutation. Read the frames the test sends before attributing its
+death.
+→ `crates/qqq-serve/tests/hyper_h2.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

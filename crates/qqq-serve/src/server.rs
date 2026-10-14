@@ -463,10 +463,41 @@ pub(crate) fn emit_span(
     micros: u64,
     failed: bool,
 ) {
-    let Some(sampler) = ctx.sampler else {
+    emit_span_sampled(
+        ctx.logger,
+        ctx.sampler,
+        ctx.id.trace,
+        tenant,
+        step,
+        span,
+        micros,
+        failed,
+    );
+}
+
+/// Emit one span from sampled values rather than a borrowed context.
+///
+/// The body of [`emit_span`], factored so transports that own their
+/// context (rather than borrowing the accept loop's) record identical
+/// spans: same sampler, same trace source, same rendering.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one value per span fact; bundling would hide them"
+)]
+pub(crate) fn emit_span_sampled(
+    logger: &Logger,
+    sampler: Option<crate::span::Sampler>,
+    trace: u64,
+    tenant: &str,
+    step: u8,
+    span: u64,
+    micros: u64,
+    failed: bool,
+) {
+    let Some(sampler) = sampler else {
         return;
     };
-    let trace = TraceId::from_counter(ctx.id.trace);
+    let trace = TraceId::from_counter(trace);
     if !sampler.decide_with_outcome(&trace, failed).is_record() {
         return;
     }
@@ -477,7 +508,7 @@ pub(crate) fn emit_span(
         return;
     };
     emit_record(
-        ctx.logger,
+        logger,
         Record::new(
             Level::Info,
             trace,

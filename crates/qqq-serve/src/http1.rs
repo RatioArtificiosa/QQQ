@@ -372,6 +372,12 @@ pub enum Version {
     Http10,
     /// HTTP/1.1
     Http11,
+    /// HTTP/2.
+    ///
+    /// Never produced by the HTTP/1.1 parser: it names the version of
+    /// requests the hyper HTTP/2 path serves, so dispatch, logging, and
+    /// keep-alive see a faithful version rather than a mapped 1.1.
+    Http2,
 }
 
 impl Version {
@@ -381,6 +387,7 @@ impl Version {
         match self {
             Self::Http10 => "HTTP/1.0",
             Self::Http11 => "HTTP/1.1",
+            Self::Http2 => "HTTP/2",
         }
     }
 }
@@ -432,8 +439,10 @@ impl RequestHead {
             Some(v) if v.eq_ignore_ascii_case("close") => false,
             Some(v) if v.eq_ignore_ascii_case("keep-alive") => true,
             // Explicit `Connection: something-else` is a hop-by-hop header list;
-            // the default applies.
-            _ => self.version == Version::Http11,
+            // the default applies. Newer protocols default to persistent:
+            // spelling every persistent version keeps a future one from
+            // silently inheriting close.
+            _ => matches!(self.version, Version::Http11 | Version::Http2),
         }
     }
 

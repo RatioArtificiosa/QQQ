@@ -184,6 +184,14 @@ pub trait Transport: Send + Sync {
 pub struct HyperLimits {
     /// Slow-head timeout (slow-loris bound).
     ///
+    /// Enforced on HTTP/1 through the builder. HTTP/2 has no such knob
+    /// (verified against h2 0.4.20: no header-read timeout exists), so
+    /// on h2 this field is carried but not enforced — a trickled
+    /// header block is bounded only by the absolute idle bound today.
+    /// That gap has a home: the accept-path hardening phase bounds the
+    /// h2 header phase QQQ-side. Until then the field documents intent,
+    /// not coverage, on h2.
+    ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
     /// use std::time::Duration;
@@ -258,11 +266,11 @@ pub struct HyperLimits {
     /// Largest response body the server will assemble.
     ///
     /// A QQQ-middleware budget, not a hyper setting — hyper has no
-    /// response-body cap. No serving code enforces it yet: the serve-path
-    /// commit wires it where response bodies are built or streamed.
-    /// Adjacent caps (the WebSocket message 1 MiB, tenant body caps) are
-    /// not this bound; until the serve path lands, this field names the
-    /// number both sides must read so neither invents its own.
+    /// response-body cap. The serve path enforces it in
+    /// `render_validated` through `validate_outbound`, on both
+    /// protocols: a handler response past the budget becomes a 500,
+    /// never a split stream. Adjacent caps (the WebSocket message
+    /// 1 MiB, tenant body caps) are not this bound.
     ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
@@ -290,6 +298,20 @@ pub struct HyperLimits {
     /// assert_eq!(HyperLimits::default().h2_ping_interval, Duration::from_secs(75));
     /// ```
     pub h2_ping_interval: Duration,
+    /// How long an unacknowledged HTTP/2 PING may go unanswered before
+    /// the connection closes.
+    ///
+    /// Hyper's default, set explicitly because a default is not a
+    /// contract: a dead peer that accepts PINGs without answering must
+    /// still be reclaimed, on either transport only this one serves h2.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    /// use std::time::Duration;
+    ///
+    /// assert_eq!(HyperLimits::default().h2_ping_ack_timeout, Duration::from_secs(20));
+    /// ```
+    pub h2_ping_ack_timeout: Duration,
     /// Idle-connection bound, QQQ-enforced for both protocols.
     ///
     /// Carried here so the two transports cannot disagree about what the
@@ -306,12 +328,21 @@ pub struct HyperLimits {
     /// assert_eq!(HyperLimits::default().idle_timeout, Duration::from_secs(75));
     /// ```
     pub idle_timeout: Duration,
-    /// Most requests served on one connection before it closes.
+    /// Most requests served on one connection before it stops serving.
     ///
     /// Hyper has no per-connection request ceiling, so the serve path
-    /// counts and closes QQQ-side — mirroring `Connection`'s
-    /// `RequestLimit`, including the warning: the last response carries
-    /// `Connection: close`, and the next request is refused by closing.
+    /// counts QQQ-side — mirroring `Connection`'s `RequestLimit`,
+    /// including the warning. What "stops" means differs by protocol:
+    /// HTTP/1 answers the warned response with `Connection: close` and
+    /// refuses the next request by closing; HTTP/2 cannot close
+    /// per-response (connection headers are forbidden), so it answers
+    /// a persisting `503` while the connection holds its slot to the
+    /// idle bound — a client that wants service opens a new
+    /// connection. The 503s are access-logged per request; `Served`
+    /// stays lifecycle on h2 (idle, drain, or client-close), never
+    /// `RequestLimit`, so the ceiling has no connection-level signal
+    /// there — attributing budget-cutoff deaths distinctly is
+    /// accept-path-hardening work, scheduled, not this seam.
     ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
@@ -361,6 +392,8 @@ impl Default for HyperLimits {
             max_response_body_bytes: 1 << 20,
             // PING cadence, not an idle bound: never derived from config.
             h2_ping_interval: Duration::from_secs(75),
+            // Hyper's own ping-ack default, pinned explicitly.
+            h2_ping_ack_timeout: Duration::from_secs(20),
             // Mirrors `ConnectionConfig::idle_timeout`.
             idle_timeout: Duration::from_secs(75),
             // Mirrors `ConnectionConfig::max_requests`: 1000 amortises a
@@ -433,6 +466,7 @@ pub fn apply_http2<E>(builder: &mut hyper::server::conn::http2::Builder<E>, limi
     builder.max_pending_accept_reset_streams(limits.max_pending_reset_streams);
     builder.max_local_error_reset_streams(limits.max_local_error_reset_streams);
     builder.keep_alive_interval(Some(limits.h2_ping_interval));
+    builder.keep_alive_timeout(limits.h2_ping_ack_timeout);
 }
 
 #[cfg(test)]

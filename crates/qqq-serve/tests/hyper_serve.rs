@@ -163,6 +163,7 @@ impl Hyper {
             .expect("bind loopback");
         let addr = listener.local_addr().expect("listener address");
         let shutdown = pieces.shutdown.clone();
+        let table = Arc::new(table);
         let driver = tokio::spawn(async move {
             let mut last = Served::ClientClosed;
             loop {
@@ -187,7 +188,14 @@ impl Hyper {
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
                         };
-                        last = serve_hyper_h1(stream, &table, &dispatch, &limits, &ctx).await;
+                        last = serve_hyper_h1(
+                            stream,
+                            Arc::clone(&table),
+                            dispatch.clone(),
+                            limits,
+                            &ctx,
+                        )
+                        .await;
                     }
                     () = pieces.shutdown.wait() => break,
                 }

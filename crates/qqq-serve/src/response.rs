@@ -365,7 +365,9 @@ pub fn write_response_head(resp: &Response, version: Version, keep_alive: bool) 
     match (keep_alive, version) {
         (false, _) => out.push_str("Connection: close\r\n"),
         (true, Version::Http10) => out.push_str("Connection: keep-alive\r\n"),
-        (true, Version::Http11) => {}
+        // HTTP/2 is persistent like 1.1 (this writer never serves h2 —
+        // hyper frames it — but the version must still map honestly).
+        (true, Version::Http11 | Version::Http2) => {}
     }
     out.push_str("\r\n");
 
@@ -449,7 +451,7 @@ pub fn write_stream_head(resp: &Response, version: Version, keep_alive: bool) ->
     }
 
     match version {
-        Version::Http11 => {
+        Version::Http11 | Version::Http2 => {
             // A 204/304 has no body by definition, so framing it as chunked would
             // promise chunks that must never arrive — see `forbids_body`.
             if forbids_body(resp.status) {

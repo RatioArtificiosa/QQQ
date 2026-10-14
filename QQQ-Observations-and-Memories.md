@@ -38389,4 +38389,175 @@ than passing — the only remaining `Dead` is a server that received
 the head and ended it.
 → `crates/qqq-serve/tests/hyper_serve.rs`.
 
+## §O-698 - The hyper ceiling counts attempted answers, including dead streams
+
+The `h2_sequential_resets_absorbed` draft failed red in exactly the
+informative way: 10k sequential `HEADERS`+`RST` pairs against the
+default ceiling of 1k ended with the final `GET` answered 503, and
+the run logged exactly 1000 `GET /hello 500` access records — one per
+stream until the ceiling tripped. Two facts fell out of the count.
+First, a reset stream's 500 is parity, not a bug: the body read fails
+on the reset, `collect_streamed` returns `None`, and the same
+`error_response(RequestBodyTooLarge)` the in-house `reject_body`
+writes (500 via the `classify` catch-all) is computed, logged, and
+dropped into the dead socket. Second, the hyper `served` counter
+increments at `answer()` entry while the in-house `Connection` counts
+only wire-written responses (`on_response_sent` runs only when the
+write succeeds) — a delta forced by the h2 survival requirement: a
+dead stream must not kill its siblings, so the socket no longer dies
+with the request and the ceiling carries the bound instead. Not
+counting would let a reset flood do unbounded work on one
+connection. The test was fixed by raising its ceiling to 100k (it
+measures absorption, not the ceiling), and the counting is pinned as
+specified behavior by `h2_reset_streams_count_toward_the_ceiling`
+(ceiling 3, five resets, next `GET` 503 naming the ceiling) with a
+fault-injection red: `fetch_add` replaced by `load` turns the pin
+200, restoring it turns green. The generalisable rule: when a
+differential oracle and the new path must differ by protocol
+necessity, pin the difference as a specified contract with its own
+red proof rather than bending the implementation toward an
+unobservable hook.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_h2.rs`.
+
+## §O-699 - The PING/SETTINGS flood cutoff does not transfer to hyper; the tests say so
+
+`§O-676` asks `GOAWAY(ENHANCE_YOUR_CALM)` + close for PING and
+SETTINGS floods. Measured against hyper 1.12 over h2 0.4.20: both
+are auto-acked at the codec level, and the h2 0.4.20 server builder
+offers reset-stream and buffer knobs but nothing that counts PINGs
+(verified by reading the registry source, not the docs). A QQQ-side
+rate control would need frame boundaries hyper never exposes — a
+byte-sniffing wrapper is bypassable by lying length fields, so it
+would be a control shaped like one. The cutoff is therefore
+inexpressible on this stack, and the two flood tests are named for
+what they actually pin (`f16_ping_flood_answered_without_collapse`,
+`f16_settings_flood_acked_without_collapse`): 100k PINGs / 10k
+SETTINGS answered with no collapse and a live server after. The
+first draft named them `..._is_cut_off` while asserting no cutoff —
+a green suite reading as a cutoff that does not exist — caught on
+re-read before review and renamed with a section-level gap record
+stating the missing knob, the verification, and the mitigations
+that do transfer (17-byte symmetry, single-slot pong state, QQQ
+idle/drain bounds). Nothing is deleted on this evidence: the
+in-house stack keeps its cutoffs until a cutoff exists on the new
+one, per the wave's hard rule. The generalisable rule: a test name
+is a claim the suite makes every green run — when the behavior
+becomes a documented gap, the name changes first, not last.
+→ `crates/qqq-serve/tests/hyper_h2.rs`, `CHANGELOG.md`.
+
+## §O-700 - Copilot's three P2s: one parity rebuttal, one scheduled gap, one doc fix
+
+The first Copilot pass over the h2 diff found three P2s, each
+dispositioned differently. (1) Undeclared h2 bodies bypass tenant
+caps: REBUTTED with parity evidence — the in-house
+`refuse_before_reading` checks `check_body` on the declared length
+only (`server.rs`), and its streaming count enforces the process cap,
+byte-identical to the hyper path's `refuse_tenant_limits` +
+`collect_streamed`. A shared residual, not a migration regression;
+strengthening both is a policy change with its own red-first cycle,
+recorded as a follow-up, not smuggled into the transport commit.
+(2) `header_read_timeout` unenforced on h2: CONFIRMED with red proof
+— a header block trickled past a 200ms bound survived the full 3s
+probe (`red-trickle-h2-w8b.log`), because h2 0.4.20 has no such knob
+and a naive inactivity wrapper would kill legitimate long-lived
+multiplexed connections (real clients do not ping unprompted, and
+only frame-aware idleness is correct). The field doc now says
+carried-but-unenforced on h2 with the home named (accept-path
+hardening phase), and the trickle test lands green there — the red
+log is the test's advance proof, not a shipped failure. (3) Ceiling
+doc claiming close on h2: FIXED — the `HyperLimits` doc now states
+the per-protocol split (h1 closes, h2 persists 503, pinned by
+`h2_ceiling_persists_503`), and the 503 body says "reached" instead
+of "served" since reset attempts count. The generalisable rule: a
+review finding is a hypothesis with a severity label, and the
+disposition proves or bounds it — parity cite, red log, or diff —
+never a shrug.
+→ `crates/qqq-serve/src/transport.rs`, `crates/qqq-serve/src/serve_hyper.rs`.
+
+## §O-701 - Second opinion: a false comment, a stale doc, and two scheduled signals
+
+The Meta-proxy second pass over the same h2 diff found what the
+first did not. (1) FALSE COMMENT, fixed: `map_head_h2` claimed a
+`te: trailers` announcement "is refused on both protocols alike" —
+`framing_of` never examines `te`, and the in-house parser ignores it
+too, so it passes through as an ordinary header on both (trailers
+have no flat-path contract either way). The comment now says that.
+(2) STALE DOC, fixed: `max_response_body_bytes` still said "no
+serving code enforces it yet" — `validate_outbound` enforces it in
+`render_validated` since the h1 commit. Now stated. (3) `Served`
+never reports the h2 ceiling (`RequestLimit`) and budget-cutoff
+deaths surface as `ClientClosed` with no distinct metric: ACCEPTED
+as designed-for-now with the home named — per-request 503s are
+access-logged and metered, so nothing vanishes, but attributing the
+connection-level death distinctly (flood vs. churn) is accept-path
+hardening work, and the ceiling doc says so outright, including the
+softened reconnect wording ("holds its slot to the idle bound; a
+client that wants service opens a new connection"). The tenant-cap
+streaming residual from round one is confirmed reachable
+(100 streams × 2 MiB transient) and stays scheduled, not smuggled.
+The generalisable rule: the second reviewer earns its run when the
+first reviewed behavior and the second reads words — comments and
+docs are claims too, and stale ones are the §11 shape in prose.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/transport.rs`.
+
+## §O-702 - Four rustls advisories arrived mid-wave; triage, not panic
+
+`cargo deny` went red between two green gate runs on the same tree:
+`RUSTSEC-2026-0346`–`0349` against rustls 0.23.45, all fixed in
+0.23.46. The drift was the advisory database, not the code — the
+first response was triage, not a bump-and-hope. Grepped the tree:
+no `ClientSessionStore` impl (0346 unreachable), no `EchMode`
+(0347 unreachable), no `brotli` feature (0348 unreachable); 0349's
+key-share prediction plausibly touches the egress client through
+default resumption, so it is the one that justifies the upgrade and
+the other three ride along. `cargo update -p rustls` moved the lock
+to 0.23.46, `deny check` is green across advisories/bans/licenses/
+sources, and qqq-host's full suite (614 + integration files) plus
+the serve suites stayed green — a patch bump with measured proof,
+not a version prayer. No Advisories issue was open (`gh issue list`
+empty), so no 24h-stop applied. The generalisable rule: a red gate
+on an untouched tree means the world moved — read the delta before
+touching the code.
+→ `Cargo.lock`, `CHANGELOG.md`.
+
+## §O-703 - Third review pass: two wire/log divergences with red proofs, both fixed
+
+The final Copilot pass found two P2s, both real, both reproduced
+red before fixing. (1) Past-ceiling 503s travelled the wire but
+were never access-logged or metered — the ceiling arm returned
+before `render_recorded`, while the field doc claimed per-request
+logging. Fixed by mapping the head for logging inside the Refuse
+arm (order preserved: ceiling still checks first; unmappable heads
+stay silent like parse errors), proven by
+`h2_ceiling_refusal_is_logged_and_metered` (metric 0→1, red first).
+(2) `render_recorded` logged the pre-validation response, so an
+over-cap handler 200 wired a 500 while the log and the status
+metric said 200. Fixed by resolving `effective_response` (borrowed
+when the handler's stands, owned 500 on refusal or `1xx`) BEFORE
+recording — one resolution shared by the recording and silent
+paths, so both map the bytes the record describes — proven by
+`h2_over_cap_handler_body_wires_500_and_meters_500` (wire 500
+throughout; metric Success→ServerError, red first). The round also
+corrected the stale idle-timeout doc the pass flagged. Full suites
+after the refactor: 18/18 h2, 22/22 h1, 740 lib. The generalisable
+rule: any response constructed after the record is a lie in the log
+— validation, substitution, and fallback must all resolve before
+the first byte of observability is emitted.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_h2.rs`.
+
+## §O-704 - A fixed import un-fixed itself: verify fmt after every file write
+
+The ship gate went red on `fmt` for an import order (`{HyperLimits,
+hyper_limits_for}`) that `cargo fmt --all` had already fixed to
+verified-clean TWICE — and the revert arrived with an unrelated
+single-span edit to the same file in between. Reads cannot do that;
+a read-modify-write with a stale snapshot can. No data was lost
+(all tests present under final names, verified by grep), but the
+mechanism is silent: the edit succeeds, theSpan is correct, and a
+distant line regresses. The generalisable rule, now procedure: after
+every write to a source file, re-run `cargo fmt --all -- --check`
+before anything else trusts that file — and treat two consecutive
+cleans as the verification, since one clean preceded this revert.
+→ `crates/qqq-serve/tests/hyper_h2.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

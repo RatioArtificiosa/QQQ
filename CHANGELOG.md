@@ -4,6 +4,18 @@
 
 ### Security
 
+- **deps**: rustls 0.23.45 → 0.23.46 (`RUSTSEC-2026-0346`–`0349`):
+  derived `Debug` on client session values leaked key material,
+  ECH rejection mis-ordered buffered application data, Brotli cert
+  decompression pre-allocated 1 GiB pre-authentication, and an
+  unauthenticated ServerHello could pin later connections to
+  classical key exchange. Triaged against this tree: no custom
+  `ClientSessionStore`, no `EchMode::Enable`, no `brotli` feature —
+  so the first three are not reachable in QQQ configuration, while
+  the key-share-prediction downgrade plausibly touches the egress
+  client (default resumption) and is closed by the upgrade either
+  way. No Advisories issue open; `cargo deny check` green.
+
 - **serve**: the Option A serving transport begins with its seam
   (`F-16`): `RequestHead`/`Response`/`Transport` types plus
   `HyperLimits` (every audit-named flood knob mapped from
@@ -33,6 +45,32 @@
   failures natively, and writes canonical reason phrases. WebSocket
   and streaming routes answer loud `501` until the parity commit.
   In-house paths untouched; no deletion.
+
+- **serve**: the Option A hyper path serves HTTP/2 (`F-16`):
+  `serve_hyper_h2` drives hyper's H2 connection through the same
+  pipeline - `:authority` synthesised as the first `host` header
+  (disagreeing `host` refused as `DuplicateHost`), undeclared bodies
+  streamed to the shared cap, every QQQ control mapped
+  (`max_concurrent_streams`, `max_header_list_size`, both reset
+  budgets, PING cadence plus a new explicit `h2_ping_ack_timeout`,
+  body ceiling) or enforced QQQ-side (idle, drain, per-connection
+  ceiling). A 16-test raw-socket suite pins it: concurrent opens
+  against a blocked service are cut off by the reset budget with the
+  connection reclaimed (plus a knob-contrast proof the budget is the
+  cause), sequential resets are absorbed, and multiplexing, the
+  421/TE refusals, and keep-alive/idle/drain/ceiling parity all hold.
+  Measured gap, recorded in-test rather than relaxed silently: 100k
+  PINGs and 10k SETTINGS are answered/acked without collapse but NOT
+  cut off - hyper 1.12 over h2 0.4.20 auto-acks both at the codec
+  level with no rate knob (verified in the h2 source), so the
+  `§O-676` `GOAWAY(ENHANCE_YOUR_CALM)` cutoff is inexpressible on
+  this stack; the tests are named for what they pin and the flood
+  stays symmetric (17 bytes each way), single-slot, idle-bounded.
+  Specified difference from the in-house path, pinned with red proof: the
+  ceiling counts attempted answers including reset streams (a dead
+  stream must not kill its h2 siblings, so the ceiling carries the
+  bound the in-house socket-close carried). In-house paths
+  untouched; no deletion.
 
 - **serve**: the request line must be ASCII outright (`I-07`
   differential finding): the nightly fuzzer caught U+2001 (EM QUAD)

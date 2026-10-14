@@ -38324,4 +38324,69 @@ second decode.
 → `crates/qqq-serve/src/serve_hyper.rs`,
 `crates/qqq-serve/tests/hyper_serve.rs`.
 
+## §O-695 - Windows RSTs refusal+close under CI load; the suite now asserts refusal-or-dead plus handler-zero
+
+`hyper_body_cap_matches` failed once on the Windows CI runner
+(`ConnectionAborted` reading the declared-cap refusal, in-house
+side) and passed everywhere else, including 15/15 locally loaded
+rounds (16 threads, CPU burners). Same signature as §O-505/§O-598:
+refusal plus close is a kernel race on Windows, and the close can
+win before the client reads anything. No local repro, so no product
+cause to fix — and the product needs none: both paths already refuse
+and reclaim. The hardening follows the §O-505 convention instead of
+fighting the platform: over-cap cases now accept the intact refusal
+(`400` declared, `500` streaming, plus close) or a dead connection,
+and both assert a handler-never-ran flag, which is the invariant
+that matters (no truncated body served). A vacuity probe (forbidding
+the dead branch) passed 5/5 locally, proving the strict assertions
+still execute — the tolerance is for the race, not a cover for it.
+→ `crates/qqq-serve/tests/hyper_serve.rs`.
+
+## §O-696 - External review moves from CodeRabbit CLI to GitHub Copilot CLI
+
+CodeRabbit's review-creation endpoint refuses this machine's account
+on every variable tried (six identical `Failed to start review`
+failures across two waves, backend reachable, auth fine) — measured
+in the maintainer handoff, which retires `cr review` outright and
+names `copilot -p "/review …" --allow-all-tools` as the replacement,
+with the Meta local proxy and Command Code as ordered fallbacks and
+a traps list (exit-1-no-findings means a dead window, untracked
+files are invisible, BYOK vars win over the plan). The wave's
+per-commit independent-review rule survives unchanged; only the
+vendor changes. Operational notes for this repo: run reviews with a
+clean environment (never export `.env` provider vars for a routine
+review), always pass `--allow-all-tools` non-interactively, and
+record reviewed-files evidence from the run output the way the
+handbook required `reviewedFiles`. The handbook's §7 still names
+CodeRabbit — updating it is the maintainer's call, recorded here so
+a post-compaction agent does not rediscover the outage the hard way.
+→ `crates/qqq-serve/tests/hyper_serve.rs` (first Copilot-reviewed diff).
+
+## §O-697 - Four Copilot passes turned the race-tolerant test honest
+
+The replacement reviewer earned its place on the first diff. Pass 1
+found the holes that mattered: `Dead` covered hangs and unreachable
+servers, and an early close could pass without exercising the cap.
+Pass 2 (after the fix) found the accounting flaw — wire bytes are
+not body bytes — and that `Answered(500)` alone does not prove the
+cap fired, since every collect failure maps to the same 500. Pass 3
+(after that fix) found the stalled-flush collapse and, correctly,
+called the `write_all`-is-atomic comment wrong. Each finding was
+fixed, not rebutted: hangs/unreachables panic, `Dead` and
+`Answered` both require strictly-past-cap chunk *data* bytes (the
+cap fires only past it, so the gate cannot false-fail), stalls
+propagate at every write site including the flush. Residuals are
+written down, not waved away: pushed-data is client-side evidence
+(buffers sit between), and an early close for no reason would still
+pass — accepted because no code path closes early without refusing,
+and the flag plus the `Answered` status triangulate the rest. Total
+review spend ~4.5 credits across four passes. The generalisable
+rule: a tolerance branch needs its own proof of exercise, or it is
+a pass shaped like a test. A final confirmation pass closed two more:
+garbled server heads now panic instead of folding into `Dead`, and
+the write/hang/flush failures in the refusal helper panic rather
+than passing — the only remaining `Dead` is a server that received
+the head and ended it.
+→ `crates/qqq-serve/tests/hyper_serve.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

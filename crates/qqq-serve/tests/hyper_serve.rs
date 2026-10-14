@@ -27,6 +27,7 @@
 
 use std::net::{SocketAddr, TcpListener as StdListener};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -215,9 +216,273 @@ struct Wire {
     closed: bool,
 }
 
+/// A refusal the client may never see: on Windows the kernel may RST a
+/// refused-and-closed connection before the response arrives (§O-505,
+/// §O-598). Either outcome proves refusal; what must never happen is
+/// the handler running on a truncated body, which the flag handlers
+/// below pin.
+///
+/// `Dead` means exactly one thing: the server received at least the
+/// head and then ended the connection (EOF or reset mid-read).
+/// Connect, write, flush, and timeout failures panic instead: the
+/// harnesses prove liveness, the request is ~100 bytes, and a hung
+/// server enforces nothing — folding any of those into `Dead` would
+/// mask a missing cap or a broken harness.
+enum Refusal {
+    /// The intact refusal response, with whether the connection closed.
+    Answered(Wire),
+    /// The server ended the connection instead of answering.
+    Dead,
+}
+
+/// Send a complete head, then read whatever the server did: the refusal
+/// response, or a dead connection. Never panics on the socket — a reset
+/// during the read is the outcome, not a harness failure.
+async fn refuse_exchange(addr: SocketAddr, request: &[u8]) -> Refusal {
+    // Connect failures panic: both harnesses prove liveness first, so
+    // an unreachable server is a broken harness, not a refusal.
+    let Ok(mut stream) = TcpStream::connect(addr).await else {
+        panic!("test server unreachable");
+    };
+    // Write failures panic too: the request is ~100 bytes to a live
+    // localhost server, so a failed write is a broken harness, not a
+    // server that refused — only what the server received and ended
+    // may pass as `Dead`.
+    stream.write_all(request).await.expect("write head");
+    stream.flush().await.expect("flush head");
+    // Generous deadline, and a timeout panics rather than passing: a
+    // server that neither answers nor closes enforces nothing, and
+    // folding its silence into `Dead` would mask a missing cap.
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(10), read_response_opt(&mut stream)).await;
+    match outcome {
+        Ok(Some((status, headers, body))) => {
+            let closed = close_observed(&mut stream).await;
+            Refusal::Answered(Wire {
+                status,
+                headers,
+                body,
+                closed,
+            })
+        }
+        Ok(None) => Refusal::Dead,
+        Err(error) => panic!("server hung instead of refusing: {error:?}"),
+    }
+}
+
+/// Read a refusal outcome off a live stream: the intact response, or
+/// `Dead` when the server already killed the connection. A hung server
+/// panics, for the reason `Refusal` documents.
+async fn read_outcome(stream: &mut TcpStream) -> Refusal {
+    let outcome = tokio::time::timeout(Duration::from_secs(10), read_response_opt(stream)).await;
+    match outcome {
+        Ok(Some((status, headers, body))) => {
+            let closed = close_observed(stream).await;
+            Refusal::Answered(Wire {
+                status,
+                headers,
+                body,
+                closed,
+            })
+        }
+        Ok(None) => Refusal::Dead,
+        Err(error) => panic!("server hung instead of refusing: {error:?}"),
+    }
+}
+
+/// `read_response` without panics on the socket: `None` when the
+/// connection died before a complete head, or the body fell short of
+/// `Content-Length`. A head the server did send but that does not
+/// parse is a server bug, not a refusal — those panic rather than
+/// folding into `None`, so garbage can never pass as `Dead`.
+async fn read_response_opt(
+    stream: &mut TcpStream,
+) -> Option<(String, Vec<(String, String)>, Vec<u8>)> {
+    let mut head = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        if stream.read_exact(&mut byte).await.is_err() {
+            return None;
+        }
+        head.push(byte[0]);
+        assert!(
+            head.len() <= 128 * 1024,
+            "server sent an oversized response head"
+        );
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let mut lines = text.split("\r\n");
+    let status = lines.next().unwrap_or("").to_owned();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            panic!("server sent a malformed header line: {line:?}");
+        };
+        headers.push((k.trim().to_lowercase(), v.trim().to_owned()));
+    }
+    let len: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; len];
+    if len > 0 && stream.read_exact(&mut body).await.is_err() {
+        return None;
+    }
+    Some((status, headers, body))
+}
+
+/// Best-effort flood sender: head, then `count` copies of `piece`,
+/// then the terminating chunk. The server may reset mid-upload, which
+/// ends the send rather than failing the test — the refusal is observed
+/// on the read side.
+/// How a flood send ended: the whole flood went out, the server ended
+/// it early (reset or close mid-upload — the refusal arriving as
+/// connection death), or a write stalled past its deadline (the server
+/// neither reads nor closes, which is a hang, not a refusal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloodSend {
+    Done,
+    ClosedEarly,
+    Stalled,
+}
+
+/// A flood send with how much body data the stack accepted: `Dead`
+/// (and `Answered`) are only meaningful past the cap — a close before
+/// the server could have consumed an over-cap body never exercised the
+/// bound. Only chunk *data* counts, not wire bytes: head and chunk
+/// framing ride along but the cap counts bodies. Only fully written
+/// pieces credit their data length, so `data_written` is a lower bound
+/// on what was pushed (a failed piece may have moved partial bytes).
+/// Residual, stated plainly: pushed past-cap data proves the server
+/// *received* past-cap bytes only up to socket buffers — a server that
+/// closed early for no reason with full buffers would still pass.
+/// No code path closes early without refusing first, and the flag plus
+/// the `Answered` status triangulate the rest; the alternative — no
+/// tolerance for the Windows RST race — fails the suite on the
+/// platform instead of testing it.
+struct FloodOutcome {
+    send: FloodSend,
+    data_written: u64,
+}
+
+/// Best-effort flood sender with write deadlines: head, then `count`
+/// copies of `piece`, then the terminating chunk. Stalls propagate as
+/// `Stalled` at every site — including the flush — so a hung peer can
+/// never be mistaken for a refusal. Only chunk data counts toward
+/// `data_written` (see `FloodOutcome`); head, framing, and terminator
+/// ride along uncounted.
+async fn send_flood(
+    stream: &mut TcpStream,
+    head: &[u8],
+    piece: &[u8],
+    piece_data: u64,
+    count: usize,
+) -> FloodOutcome {
+    let mut data_written: u64 = 0;
+    match timed_write(stream, head).await {
+        Ok(_) => {}
+        Err(WriteFail::Closed) => {
+            return FloodOutcome {
+                send: FloodSend::ClosedEarly,
+                data_written,
+            };
+        }
+        Err(WriteFail::Stalled) => {
+            return FloodOutcome {
+                send: FloodSend::Stalled,
+                data_written,
+            };
+        }
+    }
+    for _ in 0..count {
+        match timed_write(stream, piece).await {
+            Ok(_) => data_written += piece_data,
+            Err(WriteFail::Closed) => {
+                return FloodOutcome {
+                    send: FloodSend::ClosedEarly,
+                    data_written,
+                };
+            }
+            Err(WriteFail::Stalled) => {
+                return FloodOutcome {
+                    send: FloodSend::Stalled,
+                    data_written,
+                };
+            }
+        }
+    }
+    match timed_write(stream, b"0\r\n\r\n").await {
+        Ok(_) => {}
+        Err(WriteFail::Closed) => {
+            return FloodOutcome {
+                send: FloodSend::ClosedEarly,
+                data_written,
+            };
+        }
+        Err(WriteFail::Stalled) => {
+            return FloodOutcome {
+                send: FloodSend::Stalled,
+                data_written,
+            };
+        }
+    }
+    match timed_flush(stream).await {
+        Ok(()) => {}
+        Err(WriteFail::Closed) => {
+            return FloodOutcome {
+                send: FloodSend::ClosedEarly,
+                data_written,
+            };
+        }
+        Err(WriteFail::Stalled) => {
+            return FloodOutcome {
+                send: FloodSend::Stalled,
+                data_written,
+            };
+        }
+    }
+    FloodOutcome {
+        send: FloodSend::Done,
+        data_written,
+    }
+}
+
+/// Why a bounded write failed: the peer ended it, or nothing moved.
+enum WriteFail {
+    Closed,
+    Stalled,
+}
+
+/// One write with a deadline, reporting how much the stack accepted. A
+/// stalled write is a hung peer, and hanging is louder than passing: it
+/// panics at the call site.
+async fn timed_write(stream: &mut TcpStream, bytes: &[u8]) -> Result<u64, WriteFail> {
+    match tokio::time::timeout(Duration::from_secs(10), stream.write_all(bytes)).await {
+        Ok(Ok(())) => Ok(bytes.len() as u64),
+        Ok(Err(_)) => Err(WriteFail::Closed),
+        Err(_) => Err(WriteFail::Stalled),
+    }
+}
+
+/// One flush with a deadline: a peer that takes the bytes and never
+/// flushes them through is hung, not refusing.
+async fn timed_flush(stream: &mut TcpStream) -> Result<(), WriteFail> {
+    match tokio::time::timeout(Duration::from_secs(10), stream.flush()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(WriteFail::Closed),
+        Err(_) => Err(WriteFail::Stalled),
+    }
+}
+
 /// Send raw bytes, read one response, then report whether the connection
-/// died. `extra` runs after the response (a second request for
-/// keep-alive, nothing for close checks).
+/// died.
 async fn exchange(addr: SocketAddr, request: &[u8], wait_close: bool) -> Wire {
     exchange_as(addr, request, false, wait_close).await
 }
@@ -826,16 +1091,26 @@ fn echo_handler() -> Handler {
     })
 }
 
-/// An over-cap body — declared or streaming — is `413` and closes, both paths.
+/// An over-cap body — declared or streaming — never reaches a handler,
+/// on either path. The refusal itself may arrive intact or the kernel
+/// may RST first (§O-505, §O-598: refusal plus close is a race on
+/// Windows); both outcomes prove refusal, and the handler flag proves
+/// no truncated body was served.
 #[tokio::test]
 async fn hyper_body_cap_matches() {
     let routes = [(Method::Post, "/echo", "echo")];
-    // Declared over the 2 MiB parser cap.
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let handler: Handler = Arc::new(move |_head, _m: &RouteMatch| {
+        flag.store(true, Ordering::SeqCst);
+        Response::text(200, "must not run")
+    });
+    // Declared over the 2 MiB parser cap: head only, nothing to upload.
     let big_len = 3 * 1024 * 1024;
-    let inhouse = Inhouse::start_with(table_with(&routes), echo_handler(), |_| {}).await;
+    let inhouse = Inhouse::start_with(table_with(&routes), Arc::clone(&handler), |_| {}).await;
     let hyper = Hyper::start(
         table_with(&routes),
-        Dispatch::flat(echo_handler()),
+        Dispatch::flat(handler),
         default_limits(),
         Pieces::bare(),
     )
@@ -843,41 +1118,79 @@ async fn hyper_body_cap_matches() {
     let head = format!(
         "POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {big_len}\r\n\r\n"
     );
-    let a = exchange(inhouse.addr, head.as_bytes(), true).await;
-    let b = exchange(hyper.addr, head.as_bytes(), true).await;
     // Both answer `400`, not `413`: the shared parse-error constructor
     // hardcodes `Failure::BadRequest`, so the `ParseError::status()`
     // taxonomy (431/413/505) never reaches the wire on either path. The
     // mapping is unit-pinned in `http1.rs` but unwired — a believed-live
     // control recorded for the follow-up that wires it on both paths at
     // once, never one side first.
-    assert_eq!(a.status, "HTTP/1.1 400 Bad Request");
-    assert_eq!(code_of(&b.status), code_of(&a.status));
-    assert_eq!(b.body, a.body);
-    assert!(a.closed && b.closed, "over-cap bodies close");
-
-    // Streaming over the cap: chunked, never declared. Both paths fail
-    // the shared reader and answer the shared `GuestFault` constructor,
-    // which is `500` — a declared over-cap is `400` instead, because the
-    // shared parse-error constructor hardcodes `BadRequest` (see above).
-    let mut chunked =
-        b"POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
-            .to_vec();
-    let piece = format!("{:x}\r\n", 64 * 1024);
-    for _ in 0..40 {
-        chunked.extend_from_slice(piece.as_bytes());
-        chunked.extend_from_slice(&vec![0xA5; 64 * 1024]);
-        chunked.extend_from_slice(b"\r\n");
+    for (side, addr) in [("in-house", inhouse.addr), ("hyper", hyper.addr)] {
+        match refuse_exchange(addr, head.as_bytes()).await {
+            Refusal::Answered(wire) => {
+                assert_eq!(
+                    wire.status, "HTTP/1.1 400 Bad Request",
+                    "{side} declared cap"
+                );
+                assert!(wire.closed, "{side} reclaims the connection");
+            }
+            // The kernel RST before the refusal arrived: refusal all the
+            // same, per the convention above.
+            Refusal::Dead => {}
+        }
     }
-    chunked.extend_from_slice(b"0\r\n\r\n");
-    let a = exchange(inhouse.addr, &chunked, true).await;
-    let b = exchange(hyper.addr, &chunked, true).await;
-    assert_eq!(
-        a.status, "HTTP/1.1 500 Internal Server Error",
-        "in-house streaming over-cap is GuestFault"
+
+    // Streaming over the cap: chunked, never declared. An intact refusal
+    // is the shared `GuestFault` `500`; a dead connection is the same
+    // refusal lost to the race. Either way the handler must not have run.
+    let flood_head =
+        b"POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let mut piece = format!("{:x}\r\n", 64 * 1024).into_bytes();
+    piece.extend_from_slice(&vec![0xA5; 64 * 1024]);
+    piece.extend_from_slice(b"\r\n");
+    for (side, addr) in [("in-house", inhouse.addr), ("hyper", hyper.addr)] {
+        let Ok(mut stream) = TcpStream::connect(addr).await else {
+            panic!("{side} test server unreachable");
+        };
+        // Past-cap data is the proof either way: the server can only
+        // have refused for the cap after its count crossed it, and a
+        // locally pushed past-cap body is the client's evidence of
+        // that. The gate is strict (`>`): exactly at the cap the server
+        // must still accept.
+        let cap = qqq_serve::http1::MAX_REQUEST_BYTES;
+        let outcome = send_flood(&mut stream, flood_head, &piece, 64 * 1024, 40).await;
+        match outcome.send {
+            FloodSend::Done | FloodSend::ClosedEarly => {}
+            FloodSend::Stalled => panic!("{side} hung mid-upload instead of refusing"),
+        }
+        match read_outcome(&mut stream).await {
+            Refusal::Answered(wire) => {
+                assert_eq!(
+                    wire.status, "HTTP/1.1 500 Internal Server Error",
+                    "{side} streaming over-cap is GuestFault"
+                );
+                assert!(wire.closed, "{side} reclaims the connection");
+                assert!(
+                    outcome.data_written > cap,
+                    "{side} answered 500 with only {written} body bytes on the wire",
+                    written = outcome.data_written
+                );
+            }
+            // Dead is only meaningful past the cap: a close before the
+            // server could have consumed an over-cap body never
+            // exercised the bound (see `FloodOutcome`).
+            Refusal::Dead => {
+                assert!(
+                    outcome.data_written > cap,
+                    "{side} closed after {written} body bytes, before the cap could fire",
+                    written = outcome.data_written
+                );
+            }
+        }
+    }
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "no truncated body reached a handler on either path"
     );
-    assert_eq!(b.status, a.status, "hyper streaming cap agrees");
-    assert!(a.closed && b.closed, "streaming over-cap closes");
 }
 
 // ---------------------------------------------------------------------------

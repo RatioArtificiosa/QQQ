@@ -38961,4 +38961,32 @@ test of the scheduler, not the code — inject the clock and the
 flake becomes impossible by construction.
 → `crates/qqq-host/src/audit.rs`, `CHANGELOG.md`.
 
+## §O-720 - I-02 checkpoint core: pure crypto now, key custody later
+
+The first I-home lands as the primitive everything else builds
+on, deliberately not the product: `checkpoint_message` (exact
+byte layout from the audit spec), `sign_checkpoint`,
+`verify_checkpoint`, and the `CHECKPOINT_DOMAIN` separator live
+in a new `audit_checkpoint` module with doctests on every public
+item (the api-examples ratchet counts them) plus round-trip,
+per-field-tamper, wrong-key, and determinism tests. Keygen,
+storage, sink scheduling, `verify`, and anchoring stay scheduled
+— fusing key custody into the signing primitive would make
+verification need more than a public key, which is the property
+the whole item exists for. Red-first with a twist: the tests ran
+red through a `todo!` surface (3/3 failing through the real call
+path, log kept), not just a missing name. Process trap caught
+mid-round: after restoring the implementation, the test binary
+went stale — the restore landed inside the build artifacts'
+timestamp window, so cargo called the target fresh and re-ran
+the red binary. An explicit mtime bump plus rebuild fixed it;
+the rule is to never trust a rebuild in the same timestamp
+window as a file restore. Measured: 638 host lib + 171 doctests
+green, fmt and clippy `-D warnings` clean, ed25519-dalek 2.2.0
+already in the lock (promoted pin, no new crate). The
+generalisable rule: for crypto code, a failing test that runs is
+worth more than one that does not compile — it proves the test
+reaches the code under test.
+→ `crates/qqq-host/src/audit_checkpoint.rs`, `crates/qqq-host/src/lib.rs`, `crates/qqq-host/Cargo.toml`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

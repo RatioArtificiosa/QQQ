@@ -4,6 +4,17 @@
 
 ### Security
 
+- **audit**: signed checkpoint primitives (`I-02` core):
+  `audit_checkpoint::{checkpoint_message, sign_checkpoint,
+  verify_checkpoint}` over ed25519-dalek 2.x (existing workspace
+  pin, promoted to `qqq-host`), with the domain-separated layout
+  `qqq-audit-checkpoint-v1\0 || seq || head || ts`. Key
+  management, sink scheduling, `qqq audit verify`, and anchoring
+  are the scheduled product wiring — this commit is the pure
+  crypto both halves build on. Pins: round-trip plus per-field
+  tamper, wrong-key refusal, signing determinism, and doctests on
+  every public item.
+
 - **host**: redirect hop chains plus cleartext transports (`I-01`,
   Phase 3): `PlainTransport` serves cleartext-vetted destinations
   only (TLS-vetted addresses refuse before dialling, mirroring

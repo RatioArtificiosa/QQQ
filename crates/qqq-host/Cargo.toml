@@ -130,6 +130,11 @@ tokio = { workspace = true, features = ["io-util", "rt", "sync", "net", "time"] 
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# Checkpoint signatures for evidence-grade audit logs (`I-02`): the
+# workspace already pins ed25519-dalek 2.x (used by `qqq-pkg` and
+# `qqq-run`), so this promotes the existing pin rather than adding a
+# crate — MIT-licensed, inside deny.toml, verified by `cargo deny check`.
+ed25519-dalek = { workspace = true }
 blake3 = "1"
 getrandom = "0.4"
 

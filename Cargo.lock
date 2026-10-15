@@ -1627,6 +1627,7 @@ name = "qqq-host"
 version = "0.1.1"
 dependencies = [
  "blake3",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "qqq-abi",
  "qqq-cap",

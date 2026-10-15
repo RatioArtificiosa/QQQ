@@ -38850,4 +38850,89 @@ diff misses the unwired caller — always ask what builds the
 inputs, not just what consumes them.
 → `crates/qqq-host/src/instance.rs`, `crates/qqq-run/src/run.rs`, `crates/qqq-host/src/host_http.rs`, `crates/qqq-host/src/linker.rs`, `crates/qqq-cap/src/egress.rs`.
 
+## §O-716 - Redirect chains: red tests can contradict each other, and a grant the wiring ignores is a believed-live control
+
+Two findings in the Phase 3 redirect work. (1) The red-first
+tests disagreed with each other, not just with the code:
+`three_hop_chain_succeeds` (grant 3) expects four opens — three
+follows — while `fourth_hop_refused` and
+`hard_ceiling_holds_past_the_grant` with structurally identical
+chains through the third hop's redirect expected three opens
+(two follows). A hop-by-hop procedure cannot distinguish the
+cases at decision time — the only difference is downstream, in a
+response never fetched — so no implementation could satisfy both;
+measured red proof was 8/10 green with exactly these two
+failing on open counts (4 actual vs 3 expected). Fixed the tests
+to the mandate's semantics (grant N = N follows, N + 1 visits;
+the (N+1)th follow refuses): fourth-follow and ceiling cases now
+assert four opens, four resolutions, five rows. The generalisable
+rule: red tests are hypotheses, and two hypotheses can
+contradict — when they do, the spec decides, and the corrected
+expectation documents the semantics that caused the confusion.
+(2) The grant-into-limits alignment is the §11 shape: manifest
+`redirects` derives `max_redirect_hops`, but `send_via` passed a
+default `Limits` (switch zero), so a declared grant would have
+refused every chain — believed live, actually dead. `send_via`
+now builds the switch from the tenant grant (ceiling still
+applies inside), `send` opens through
+`EgressTransport<SystemTransport, PlainTransport>` so granted
+cleartext works end to end, and two `send_via` tests (granted
+chain lands with 302+200 rows, ungranted chain refuses after the
+first hop) pin the production path, not just the connector.
+`Box<dyn AsyncRead + AsyncWrite>` is unnameable (two non-auto
+traits), so the selector returns an `EgressStream` enum with
+delegated impls — the selection stays visible in the type.
+Measured: 11/11 redirect tests, 23/23 host_http, 631 host lib,
+167 host doctests, 262 cap green; fmt clean; clippy `-D warnings`
+clean after extracting `vet_hop`/`refuse_chain`/`exchange_hop`
+and replacing two `#[expect]`s a diverging `panic!` body never
+trips.
+→ `crates/qqq-host/src/egress.rs`, `crates/qqq-host/src/host_http.rs`, `crates/qqq-cap/src/egress.rs`, `crates/qqq-cap/src/manifest.rs`, `CHANGELOG.md`.
+
+## §O-717 - Review HIGH: a cross-origin redirect delivered the first origin's body to the second
+
+The independent review (Copilot CLI — CodeRabbit's CLI could not
+authenticate here: its login needs a browser on the machine's
+localhost callback, unavailable in this environment; recorded so
+the substitution is explicit, not silent) returned one HIGH:
+`strip_credentials` removed `authorization`,
+`proxy-authorization`, and `cookie` before a cross-origin hop,
+but the cloned request kept its body, so a POST redirected
+across origins delivered the first origin's bytes to the second.
+Both hosts are allowlisted and re-vetted, but the guest
+entrusted the body to one origin — a redirect is not consent to
+deliver it to another. Reproduced with a failing test first
+(`cross_origin_hop_drops_the_body` red pre-fix, log kept), then
+fixed: a cross-origin hop converts POST to GET with an empty
+body (HEAD stays HEAD), ordinary headers still travel, and
+same-origin chains keep method and body so login flows survive.
+Custom headers (`x-api-key` and kin) still travel cross-origin —
+deliberate residual, matching browser behavior and pinned by the
+header test: guests must put secrets in `Authorization`/`Cookie`,
+which strip. The generalisable rule: credential stripping that
+covers headers but not the body is a half-closed hole — audit
+every field that crosses a trust boundary, not just the named
+ones.
+→ `crates/qqq-host/src/egress.rs`.
+
+## §O-718 - The gate catches what unit tests cannot: manifest fields without a regenerated schema
+
+The first full `cargo xtask ci` on the Phase 3 tree went red on
+exactly one root cause across four steps
+(`check_schema_conformance`, `gen_schemas`, its rerun,
+`self_test_schemas`): `HttpCapability` gained `cleartext` and
+`redirects` in Rust, but `schema/qqq-toml.schema.json` still
+described the old shape — every other one of the 146 steps
+green, including clippy, build, and the 251s test run. The
+mistake: the manifest-field diff landed without running the
+generator, and no unit test covers generator outputs (by design —
+the gate owns that). Fixed with `python tools/gen_schemas.py`
+(the two new keys plus their doc-derived descriptions), verified
+with `--check`, then a full gate rerun per the no-edit rule —
+which went GREEN at 146 steps, and again after the §O-717 fix.
+The generalisable rule: a struct change is not done when its
+tests pass; generated artifacts are part of the change, and the
+gate is the only reviewer that reads them.
+→ `schema/qqq-toml.schema.json`, `crates/qqq-cap/src/manifest.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

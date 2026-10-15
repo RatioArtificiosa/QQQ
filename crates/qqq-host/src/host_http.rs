@@ -164,7 +164,7 @@ impl bindings::qqq::http::http::Host for StoreData {
     ///
     /// Grant re-check, then `SEC-009` budget charge, then the
     /// connector over `StoreData::egress`: `vet` → open → `exchange`
-    /// → audit, with exactly one audit row per call in
+    /// → audit, with one audit row per visited hop in
     /// `egress_audit`. The sync/async bridge (scoped thread, fresh
     /// current-thread runtime) assumes no ambient runtime, so the
     /// call works from sync tests, the blocking pool, and async
@@ -225,7 +225,10 @@ impl bindings::qqq::http::http::Host for StoreData {
         // `connection-failed`: the F-01 abort guard kills a panicking
         // host call anyway, and under test unwind a masked panic
         // would turn a host bug into a green-looking refusal.
-        let transport = crate::egress::SystemTransport;
+        let transport = crate::egress::EgressTransport::new(
+            crate::egress::SystemTransport,
+            crate::egress::PlainTransport,
+        );
         let resolver = crate::egress::SystemResolver;
         std::thread::scope(|scope| {
             let handle = scope.spawn(|| {
@@ -302,10 +305,10 @@ impl StoreData {
     /// against fake transports and resolvers over duplex — the sync
     /// `send` adds only the bridge.
     ///
-    /// Exactly one audit row lands in `egress_audit` per call: the
-    /// connector audits every path (refusal, timeout, success,
-    /// failure), and rows are moved here rather than borrowed so no
-    /// borrow of `self` outlives the call.
+    /// One audit row per visited hop lands in `egress_audit` (plus one
+    /// for a terminal chain refusal): the connector audits every path
+    /// (refusal, timeout, success, failure), and rows are moved here
+    /// rather than borrowed so no borrow of `self` outlives the call.
     pub(crate) async fn send_via(
         &mut self,
         req: Request,
@@ -314,11 +317,18 @@ impl StoreData {
     ) -> std::result::Result<Response, HttpError> {
         let egress_req = map_request(req)?;
         let mut rows = Vec::new();
+        // The operational switch follows the tenant grant: a grant the
+        // connector never sees would be a control believed live that
+        // is not. The protocol ceiling still applies inside.
+        let limits = crate::egress::Limits {
+            max_redirects: self.egress.max_redirect_hops(),
+            ..crate::egress::Limits::default()
+        };
         let result = crate::egress::request(
             &self.egress,
             &egress_req,
             resolver,
-            &crate::egress::Limits::default(),
+            &limits,
             transport,
             &mut |row| rows.push(row),
         )
@@ -387,7 +397,12 @@ fn map_response(response: crate::egress::Response) -> Response {
 fn map_failure(failure: &crate::egress::Failure) -> HttpError {
     use crate::egress::{CallError, Failure};
     match failure {
-        Failure::Refused(_) | Failure::Failed(CallError::Redirect) => HttpError::HostNotAllowed,
+        // A downgrade is a policy refusal wearing I/O's clothes: the
+        // grant never authorises `https` to `http`, so the guest sees
+        // the same `host-not-allowed` as every other denied chain.
+        Failure::Refused(_) | Failure::Failed(CallError::Redirect | CallError::Downgrade) => {
+            HttpError::HostNotAllowed
+        }
         Failure::Failed(CallError::RequestTooLarge) => HttpError::RequestTooLarge,
         Failure::Failed(CallError::ResponseHeadTooLarge | CallError::BodyTooLarge { .. }) => {
             HttpError::ResponseTooLarge
@@ -1029,6 +1044,123 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(matches!(
             rows.first().expect("one row recorded").outcome,
+            Outcome::Failed { .. }
+        ));
+    }
+
+    /// A transport answering one same-host redirect: `/start` moves to
+    /// `/end`, everything else lands. Same-host keeps the credential
+    /// question out of this test — cross-origin stripping is pinned
+    /// in the connector's own suite.
+    struct RedirectOnce;
+
+    impl Transport for RedirectOnce {
+        type Stream = tokio::io::DuplexStream;
+
+        // No `.await` in this impl: the duplex pair and the spawn are
+        // synchronous setup; the I/O happens in the spawned task. The
+        // `async` is the trait's contract, not this impl's.
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "duplex setup involves no I/O to await; async satisfies the Transport contract"
+        )]
+        async fn open(
+            &self,
+            _: &Vetted,
+            _: &Limits,
+        ) -> Result<Self::Stream, crate::egress::CallError> {
+            let (client, mut server) = tokio::io::duplex(65536);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut head = Vec::new();
+                loop {
+                    let mut byte = [0u8; 1];
+                    if server.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    if head.len() > 8192 {
+                        return;
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let target = text
+                    .split("\r\n")
+                    .next()
+                    .unwrap_or("")
+                    .split(' ')
+                    .nth(1)
+                    .unwrap_or("/");
+                let reply = if target == "/start" {
+                    "HTTP/1.1 302 Found\r\nlocation: https://api.example.com/end\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_owned()
+                } else {
+                    let body = "landed";
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = server.write_all(reply.as_bytes()).await;
+                let _ = server.flush().await;
+            });
+            Ok(client)
+        }
+    }
+
+    /// The tenant grant reaches the connector's chain: with one
+    /// redirect hop granted, `send_via` follows `/start` to `/end`
+    /// and lands — two `Success` rows, one per visited hop. This is
+    /// the test that would catch a grant the wiring ignored: without
+    /// the limits alignment the operational switch stays zero and
+    /// the chain refuses.
+    #[test]
+    fn send_follows_a_granted_redirect_chain() {
+        let mut data = client_store(8);
+        data.egress = qqq_cap::egress::TenantEgress::allowing_hosts(&["api.example.com"])
+            .expect("fixture policy parses")
+            .allowing_redirects(1);
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let response = block_on(data.send_via(
+            get("https://api.example.com/start"),
+            &RedirectOnce,
+            &resolver,
+        ))
+        .expect("one granted hop follows");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"landed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 2, "visited hop plus followed hop");
+        assert!(matches!(
+            rows.first().expect("first hop row").outcome,
+            Outcome::Success { status: 302 }
+        ));
+        assert!(matches!(
+            rows.get(1).expect("second hop row").outcome,
+            Outcome::Success { status: 200 }
+        ));
+    }
+
+    /// Without the grant the same chain refuses: the first hop's 302
+    /// is recorded, then the chain error — `host-not-allowed` to the
+    /// guest, never a second dial to a destination no grant covers.
+    #[test]
+    fn send_refuses_a_redirect_without_the_grant() {
+        let mut data = allowing_store();
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let result = block_on(data.send_via(
+            get("https://api.example.com/start"),
+            &RedirectOnce,
+            &resolver,
+        ));
+        assert_eq!(outcome(&result), "host-not-allowed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 2, "visited hop plus refusal");
+        assert!(matches!(
+            rows.get(1).expect("refusal row").outcome,
             Outcome::Failed { .. }
         ));
     }

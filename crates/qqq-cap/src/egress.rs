@@ -148,6 +148,15 @@ pub struct TenantEgress {
     /// pattern. Refusing literals is what makes "the allowlist is the policy" true
     /// rather than aspirational.
     allow_ip_literals: bool,
+    /// How many redirect hops the connector may follow for this tenant.
+    ///
+    /// Defaults to `0`, which refuses every redirect — the zero value
+    /// is the safe policy, per the struct docs. Each followed hop is
+    /// re-vetted through the full policy, `https` to `http`
+    /// downgrades always refuse, and the protocol ceiling (3, enforced
+    /// in the connector) applies on top: a grant above the ceiling
+    /// behaves as the ceiling, never above it.
+    max_redirect_hops: u8,
 }
 
 impl TenantEgress {
@@ -158,6 +167,7 @@ impl TenantEgress {
             allow: Vec::new(),
             allow_cleartext: false,
             allow_ip_literals: false,
+            max_redirect_hops: 0,
         }
     }
 
@@ -184,8 +194,12 @@ impl TenantEgress {
             clippy::expect_used,
             reason = "manifest client patterns already validated at parse"
         )]
-        TenantEgress::allowing_hosts(&http.client)
-            .expect("manifest client patterns already validated at parse")
+        let mut policy = TenantEgress::allowing_hosts(&http.client)
+            .expect("manifest client patterns already validated at parse");
+        if http.cleartext {
+            policy = policy.allowing_cleartext();
+        }
+        policy.allowing_redirects(http.redirects)
     }
 
     /// Permit a set of hosts, parsed from manifest-style patterns.
@@ -205,6 +219,7 @@ impl TenantEgress {
             allow,
             allow_cleartext: false,
             allow_ip_literals: false,
+            max_redirect_hops: 0,
         })
     }
 
@@ -232,6 +247,19 @@ impl TenantEgress {
         self
     }
 
+    /// Permit following redirect hops, up to `max_hops`.
+    ///
+    /// Each followed hop is re-vetted through the full policy by the
+    /// connector; `https` to `http` downgrades refuse regardless of
+    /// this grant, and the protocol ceiling (3) applies on top, so a
+    /// larger grant behaves as 3. Zero (the default) refuses every
+    /// redirect at the first `Location`.
+    #[must_use]
+    pub fn allowing_redirects(mut self, max_hops: u8) -> Self {
+        self.max_redirect_hops = max_hops;
+        self
+    }
+
     /// Whether this tenant may reach `host` on `port`.
     ///
     /// Returns the matching pattern so the caller can put it in the `why` chain —
@@ -256,6 +284,24 @@ impl TenantEgress {
     #[must_use]
     pub fn allows_cleartext(&self) -> bool {
         self.allow_cleartext
+    }
+
+    /// How many redirect hops the connector may follow for this tenant.
+    ///
+    /// Read by the egress connector (Phase 3) alongside the operational
+    /// `Limits::max_redirects`: the followed budget is the minimum of
+    /// the two, under the protocol ceiling of 3. A separate getter
+    /// rather than a public field so the zero-is-safe default stays
+    /// spelled out at the single construction site above.
+    ///
+    /// ```
+    /// use qqq_cap::egress::TenantEgress;
+    ///
+    /// assert_eq!(TenantEgress::deny_all().max_redirect_hops(), 0);
+    /// ```
+    #[must_use]
+    pub fn max_redirect_hops(&self) -> u8 {
+        self.max_redirect_hops
     }
 
     /// Whether literal IP addresses are acceptable destinations.

@@ -647,9 +647,10 @@ mod tests {
 ///
 /// Every number bounds a distinct attacker-controlled resource: hangs
 /// (timeouts), header bombs (counts and bytes), and body bombs (bytes).
-/// Redirects are always off in this goal — there is no grant field for a
-/// hop chain yet, so any `3xx` with a `Location` is an error, and the
-/// later goal that adds the grant re-vets every hop through [`vet`].
+/// Redirects are gated twice: the tenant grant
+/// (`TenantEgress::max_redirect_hops`) authorises and this
+/// `max_redirects` operates — [`request`] follows the minimum of the
+/// two under [`REDIRECT_HOP_LIMIT`], re-vetting every hop.
 ///
 /// ```
 /// use qqq_host::egress::Limits;
@@ -724,7 +725,11 @@ pub struct Limits {
     /// assert_eq!(Limits::default().max_body_bytes, 1 << 20);
     /// ```
     pub max_body_bytes: u64,
-    /// Redirect hops followed: always zero here (no grant field exists yet).
+    /// Redirect hops followed: the operational half of the redirect
+    /// budget. [`request`] follows the minimum of this, the tenant
+    /// grant, and [`REDIRECT_HOP_LIMIT`]; [`exchange`] surfaces any
+    /// `3xx` with a `Location` as a response while this is non-zero
+    /// and refuses it as [`CallError::Redirect`] while it is zero.
     ///
     /// ```
     /// use qqq_host::egress::Limits;
@@ -839,8 +844,9 @@ pub enum Outcome {
     },
 }
 
-/// One audit row per call: host, port, outcome, byte counts — never the
-/// body (`I-01`).
+/// One audit row per visited hop (plus one for a terminal chain
+/// refusal): host, port, outcome, byte counts — never the body
+/// (`I-01`, Phase 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRow {
     /// The normalised host that was vetted (SNI value on TLS calls).
@@ -864,8 +870,14 @@ pub enum CallError {
     Timeout,
     /// The TLS handshake failed or the peer was unverifiable.
     Tls,
-    /// A redirect was answered but no hop chain is granted.
+    /// A redirect was answered but no hop chain is granted — or the
+    /// granted chain is exhausted.
     Redirect,
+    /// An `https` hop redirected to `http`: downgrades always refuse,
+    /// under every grant. A separate variant (rather than folding
+    /// into `Redirect`) because the remedy differs — fix the peer,
+    /// not the grant.
+    Downgrade,
     /// The request breached its own caps (too many headers, too many bytes,
     /// a body on GET/HEAD, or a non-ASCII-visible header).
     RequestTooLarge,
@@ -931,9 +943,9 @@ fn system_roots() -> Result<rustls::RootCertStore, CallError> {
 /// Upgrade a connected stream to TLS for the vetted host (`I-01`).
 ///
 /// SNI and verification both use `host` — the vetted, normalised name from
-/// [`Vetted`], never a redirect target (redirects are refused before any
-/// hop, so the original hostname is the only one that reaches here). The
-/// handshake returning `Ok` IS the verification: rustls refuses
+/// [`Vetted`], which [`request`] re-vets on every redirect hop, so each
+/// hop's own hostname is the only one that reaches verification here.
+/// The handshake returning `Ok` IS the verification: rustls refuses
 /// unverifiable chains inside the handshake, so no separate check can be
 /// forgotten.
 ///
@@ -979,10 +991,163 @@ fn sni_name(host: &str) -> &str {
 
 /// The production transport: TCP plus TLS against OS roots (`I-01`).
 ///
-/// SNI is the vetted host and verification runs against it — never against
-/// a redirect target, because redirects are refused before any hop, so the
-/// original hostname is the only one that can reach verification.
+/// SNI is the vetted host and verification runs against it — the hop's
+/// own hostname, which [`request`] re-vets on every redirect before it
+/// can reach verification.
 pub struct SystemTransport;
+
+/// The protocol ceiling on redirect hops: no chain follows more
+/// than three, whatever any grant or limit allows. Three is the
+/// mandate's number — enough for login flows and canonicalization
+/// chains, small enough that a redirect loop is a short walk, not
+/// an unbounded one.
+pub const REDIRECT_HOP_LIMIT: u8 = 3;
+
+/// The production cleartext transport: plain TCP, no TLS (`I-01`,
+/// Phase 3).
+///
+/// Serves ONLY cleartext-vetted destinations. A `tls` destination
+/// reaching this transport is a wiring bug, not a fallback case —
+/// it refuses rather than connecting, because connecting would be
+/// a silent downgrade and refusing loudly is the property the
+/// selection test pins. `SystemTransport` mirrors it from the
+/// other side (cleartext refused before dialling).
+pub struct PlainTransport;
+
+impl Transport for PlainTransport {
+    type Stream = tokio::net::TcpStream;
+
+    async fn open(&self, vetted: &Vetted, limits: &Limits) -> Result<Self::Stream, CallError> {
+        use tokio::io::AsyncWriteExt as _;
+        if vetted.tls {
+            // Wrong transport for a TLS destination: refuse, never
+            // silently downgrade. Reachable only through miswiring —
+            // `EgressTransport` selects by `vetted.tls`.
+            return Err(CallError::Transport);
+        }
+        let mut tcp = tokio::time::timeout(
+            limits.connect_timeout,
+            tokio::net::TcpStream::connect(vetted.addr),
+        )
+        .await
+        .map_err(|_| CallError::Timeout)?
+        .map_err(|_| CallError::Transport)?;
+        // Flushing here surfaces a dead peer before the request,
+        // mirroring the TLS path.
+        tcp.flush().await.map_err(|_| CallError::Transport)?;
+        Ok(tcp)
+    }
+}
+
+/// Route each hop to its transport by scheme (`I-01`, Phase 3).
+///
+/// `request` stays generic over one `Transport`, so this struct is
+/// the seam: TLS destinations open through `secure`, cleartext
+/// through `plain`, chosen per hop from the freshly vetted
+/// destination — never from the original URL, which is how a
+/// redirect could otherwise smuggle a scheme change past the
+/// selection. Each hop opens as [`EgressStream::Secure`] or
+/// [`EgressStream::Plain`]; the bytes cross the enum, not copies of it.
+pub struct EgressTransport<T, P> {
+    /// Opened for `https` (vetted `tls`) destinations.
+    pub secure: T,
+    /// Opened for `http` (cleartext-vetted) destinations.
+    pub plain: P,
+}
+
+impl<T, P> EgressTransport<T, P> {
+    /// Build the selector from its two transports.
+    pub fn new(secure: T, plain: P) -> Self {
+        Self { secure, plain }
+    }
+}
+
+/// The stream [`EgressTransport`] opens: exactly one of its two
+/// transports' streams.
+///
+/// An enum rather than a boxed trait object because two non-auto
+/// traits (`AsyncRead` + `AsyncWrite`) cannot share one `dyn` — and
+/// the enum keeps the selection visible in the type instead of
+/// behind a vtable. Both arms implement the stream traits by
+/// delegation, so [`exchange`] never branches on security posture.
+pub enum EgressStream<S, P> {
+    /// Opened by the secure transport for a TLS-vetted destination.
+    Secure(S),
+    /// Opened by the plain transport for a cleartext-vetted destination.
+    Plain(P),
+}
+
+impl<S, P> tokio::io::AsyncRead for EgressStream<S, P>
+where
+    S: tokio::io::AsyncRead + Unpin,
+    P: tokio::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            EgressStream::Secure(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            EgressStream::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl<S, P> tokio::io::AsyncWrite for EgressStream<S, P>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+    P: tokio::io::AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match &mut *self {
+            EgressStream::Secure(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            EgressStream::Plain(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            EgressStream::Secure(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            EgressStream::Plain(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            EgressStream::Secure(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            EgressStream::Plain(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+impl<T, P> Transport for EgressTransport<T, P>
+where
+    T: Transport + Sync,
+    P: Transport + Sync,
+{
+    type Stream = EgressStream<T::Stream, P::Stream>;
+
+    async fn open(&self, vetted: &Vetted, limits: &Limits) -> Result<Self::Stream, CallError> {
+        if vetted.tls {
+            Ok(EgressStream::Secure(
+                self.secure.open(vetted, limits).await?,
+            ))
+        } else {
+            Ok(EgressStream::Plain(self.plain.open(vetted, limits).await?))
+        }
+    }
+}
 
 /// The production resolver: one OS lookup per vetted host (`I-01`).
 ///
@@ -1011,11 +1176,11 @@ impl Transport for SystemTransport {
         if !vetted.tls {
             // Refused BEFORE dialling: vet permits cleartext when granted,
             // so this branch is reachable — and a refused destination must
-            // never see even a SYN. A plain stream would need a second
-            // stream type and a branch at every exchange — the shape that
-            // smuggles an unencrypted path in later. Cleartext destinations
-            // are served by `PlainTransport` in the follow-up that grants
-            // them, not by a flag here.
+            // never see even a SYN. Cleartext destinations are served by
+            // `PlainTransport` (selected per hop by `EgressTransport`),
+            // not by a flag here: a second stream type and a branch at
+            // every exchange would be the shape that smuggles an
+            // unencrypted path in later.
             return Err(CallError::Transport);
         }
         let tcp = tokio::time::timeout(
@@ -1057,6 +1222,101 @@ pub struct IoCount {
     pub written: u64,
     /// Response bytes read.
     pub read: u64,
+}
+
+/// A redirect target when the response is one: 3xx status plus a
+/// `Location` header value. Shared by [`exchange`] (which refuses
+/// when the operational switch is off) and [`request`] (which
+/// follows when the grant allows), so the two cannot disagree about
+/// what counts as a redirect.
+fn redirect_location(status: u16, headers: &[(String, String)]) -> Option<&str> {
+    if !(300..400).contains(&status) {
+        return None;
+    }
+    headers
+        .iter()
+        .find(|(name, _)| name == "location")
+        .map(|(_, value)| value.as_str())
+}
+
+/// Vet one chain hop under the shared deadline.
+///
+/// Every hop — first or fifth — passes the full policy, so a
+/// redirect cannot smuggle a destination past the allowlist. Both
+/// refusal shapes audit their row here, keeping [`request`]'s loop
+/// to the exchange arms.
+async fn vet_hop(
+    policy: &TenantEgress,
+    url: &str,
+    resolver: &impl Resolver,
+    deadline: tokio::time::Instant,
+    audit: &mut impl FnMut(AuditRow),
+) -> Result<Vetted, Failure> {
+    match tokio::time::timeout_at(deadline, vet(policy, url, resolver)).await {
+        Ok(Ok(vetted)) => Ok(vetted),
+        Ok(Err(reason)) => {
+            audit(AuditRow {
+                host: safe_host(url),
+                port: 0,
+                outcome: Outcome::Refused {
+                    reason: reason.clone(),
+                },
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+            Err(Failure::Refused(reason))
+        }
+        Err(_) => {
+            audit(AuditRow {
+                host: safe_host(url),
+                port: 0,
+                outcome: Outcome::Failed {
+                    reason: CallError::Timeout,
+                },
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+            Err(Failure::Failed(CallError::Timeout))
+        }
+    }
+}
+
+/// Audit a terminal chain refusal against the hop that answered it.
+///
+/// The refused target was never vetted, so the row names the current
+/// hop — every row names a vetted destination, with zero byte counts
+/// because the refusal moved none.
+fn refuse_chain(vetted: &Vetted, reason: CallError, audit: &mut impl FnMut(AuditRow)) -> Failure {
+    audit(AuditRow {
+        host: vetted.host.clone(),
+        port: vetted.addr.port(),
+        outcome: Outcome::Failed {
+            reason: reason.clone(),
+        },
+        request_bytes: 0,
+        response_bytes: 0,
+    });
+    Failure::Failed(reason)
+}
+
+/// Open one hop's stream and exchange the current request over it.
+///
+/// Thin glue keeping [`request`]'s loop readable: open, then
+/// [`exchange`], with transport failures mapped at the seam.
+async fn exchange_hop<T: Transport>(
+    transport: &T,
+    vetted: &Vetted,
+    current: &Request,
+    hop_limits: &Limits,
+    counts: &std::sync::Mutex<IoCount>,
+) -> Result<Response, Failure> {
+    let mut stream = transport
+        .open(vetted, hop_limits)
+        .await
+        .map_err(Failure::Failed)?;
+    exchange(vetted, current, hop_limits, &mut stream, counts)
+        .await
+        .map_err(Failure::Failed)
 }
 
 /// Speak one capped HTTP/1.1 round trip over an open stream (`I-01`).
@@ -1231,10 +1491,7 @@ where
 
     let (status, headers, rest) = read_final_head(stream, limits, counts).await?;
     let mut rest: &[u8] = &rest;
-    if (300..400).contains(&status)
-        && headers.iter().any(|(n, _)| n == "location")
-        && limits.max_redirects == 0
-    {
+    if redirect_location(status, &headers).is_some() && limits.max_redirects == 0 {
         return Err(CallError::Redirect);
     }
     let body = read_body(
@@ -1350,19 +1607,34 @@ fn charge(counts: &std::sync::Mutex<IoCount>, written: usize, read: usize) {
         .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
 }
 
-/// One vetted call, end to end: vet, open, exchange, audit (`I-01`).
+/// One vetted call, end to end: vet, open, exchange, audit (`I-01`,
+/// Phase 3).
 ///
-/// The audit callback runs exactly once per call, on every path —
-/// including vetting refusals, which produce a row with zero byte counts
-/// rather than no row: a refusal that leaves no trace is un-auditable,
-/// and the sink (not this function) decides what to persist. Failed and
-/// timed-out rows carry the bytes that actually moved, read from the
-/// shared counters rather than hard-coded zeros.
+/// The audit callback runs once per visited hop plus once for a
+/// terminal chain refusal, on every path — including vetting
+/// refusals, which produce a row with zero byte counts rather than
+/// no row: a refusal that leaves no trace is un-auditable, and the
+/// sink (not this function) decides what to persist. Failed and
+/// timed-out rows carry the bytes that hop actually moved (deltas
+/// off the shared counters), never cumulative totals and never
+/// hard-coded zeros.
 ///
 /// One deadline bounds everything: it is computed once from
-/// `total_timeout` and covers vetting *and* the exchange, so a hanging
-/// resolver fails the call with [`CallError::Timeout`] instead of
-/// outliving the budget the operator set.
+/// `total_timeout` and covers vetting *and* every hop's exchange, so
+/// a hanging resolver fails the call with [`CallError::Timeout`]
+/// instead of outliving the budget the operator set.
+///
+/// # The redirect chain, and why the budget is a three-way minimum
+///
+/// Each followed hop is re-vetted through [`vet`] — policy, scheme,
+/// forbidden addresses, fresh DNS — so a redirect cannot smuggle a
+/// destination past the allowlist. The followed budget is the minimum
+/// of the tenant grant (`TenantEgress::max_redirect_hops`), the
+/// operational switch (`Limits::max_redirects`), and
+/// [`REDIRECT_HOP_LIMIT`]: the grant authorises, the switch operates,
+/// the ceiling contains, and no one of the three can widen the other
+/// two. `https` to `http` downgrades refuse under every grant, before
+/// the next hop is even resolved.
 ///
 /// # Errors
 ///
@@ -1379,96 +1651,183 @@ pub async fn request<T: Transport>(
 ) -> Result<Response, Failure> {
     let deadline = tokio::time::Instant::now() + limits.total_timeout;
     let counts = std::sync::Mutex::new(IoCount::default());
-    let vetted = match tokio::time::timeout_at(deadline, vet(policy, &request.url, resolver)).await
-    {
-        Ok(Ok(vetted)) => vetted,
-        Ok(Err(reason)) => {
-            audit(AuditRow {
-                host: safe_host(&request.url),
-                port: 0,
-                outcome: Outcome::Refused {
-                    reason: reason.clone(),
-                },
-                request_bytes: 0,
-                response_bytes: 0,
-            });
-            return Err(Failure::Refused(reason));
-        }
-        Err(_) => {
-            audit(AuditRow {
-                host: safe_host(&request.url),
-                port: 0,
-                outcome: Outcome::Failed {
-                    reason: CallError::Timeout,
-                },
-                request_bytes: 0,
-                response_bytes: 0,
-            });
-            return Err(Failure::Failed(CallError::Timeout));
-        }
-    };
-    let outcome = async {
-        let mut stream = transport
-            .open(&vetted, limits)
-            .await
-            .map_err(Failure::Failed)?;
-        exchange(&vetted, request, limits, &mut stream, &counts)
-            .await
-            .map_err(Failure::Failed)
-    };
     let snapshot = || {
         counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     };
-    match tokio::time::timeout_at(deadline, outcome).await {
-        Ok(Ok(response)) => {
-            let moved = snapshot();
-            audit(AuditRow {
-                host: vetted.host.clone(),
-                port: vetted.addr.port(),
-                outcome: Outcome::Success {
-                    status: response.status,
-                },
-                request_bytes: moved.written,
-                response_bytes: moved.read,
-            });
-            Ok(response)
-        }
-        Ok(Err(failure)) => {
-            let moved = snapshot();
-            let reason = match &failure {
-                Failure::Refused(reason) => Outcome::Refused {
-                    reason: reason.clone(),
-                },
-                Failure::Failed(reason) => Outcome::Failed {
-                    reason: reason.clone(),
-                },
-            };
-            audit(AuditRow {
-                host: vetted.host.clone(),
-                port: vetted.addr.port(),
-                outcome: reason,
-                request_bytes: moved.written,
-                response_bytes: moved.read,
-            });
-            Err(failure)
-        }
-        Err(_) => {
-            let moved = snapshot();
-            audit(AuditRow {
-                host: vetted.host.clone(),
-                port: vetted.addr.port(),
-                outcome: Outcome::Failed {
-                    reason: CallError::Timeout,
-                },
-                request_bytes: moved.written,
-                response_bytes: moved.read,
-            });
-            Err(Failure::Failed(CallError::Timeout))
+    // The 3xx that [`exchange`] would refuse must stay visible here:
+    // each visited hop gets its own `Success` row (the 302 happened),
+    // and the chain decision below gets its own refusal row. The
+    // per-hop switch says "surface", the budget below says "follow".
+    let mut hop_limits = *limits;
+    hop_limits.max_redirects = 1;
+    let budget = policy
+        .max_redirect_hops()
+        .min(limits.max_redirects)
+        .min(REDIRECT_HOP_LIMIT);
+    let mut current = request.clone();
+    let mut hops_followed: u8 = 0;
+    loop {
+        let before = snapshot();
+        let vetted = vet_hop(policy, &current.url, resolver, deadline, audit).await?;
+        let outcome = exchange_hop(transport, &vetted, &current, &hop_limits, &counts);
+        // Deltas, not totals: the counters accumulate across hops, and
+        // a row that repeats the running total would charge every
+        // earlier hop's bytes to the latest one.
+        let delta = |moved: &IoCount| {
+            (
+                moved.written.saturating_sub(before.written),
+                moved.read.saturating_sub(before.read),
+            )
+        };
+        match tokio::time::timeout_at(deadline, outcome).await {
+            Ok(Ok(response)) => {
+                let moved = snapshot();
+                let (written, read) = delta(&moved);
+                audit(AuditRow {
+                    host: vetted.host.clone(),
+                    port: vetted.addr.port(),
+                    outcome: Outcome::Success {
+                        status: response.status,
+                    },
+                    request_bytes: written,
+                    response_bytes: read,
+                });
+                let Some(location) = redirect_location(response.status, &response.headers) else {
+                    return Ok(response);
+                };
+                if hops_followed >= budget {
+                    return Err(refuse_chain(&vetted, CallError::Redirect, audit));
+                }
+                let Some(next_url) = join_location(&current.url, location) else {
+                    return Err(refuse_chain(&vetted, CallError::Protocol, audit));
+                };
+                if is_downgrade(&current.url, &next_url) {
+                    return Err(refuse_chain(&vetted, CallError::Downgrade, audit));
+                }
+                if is_cross_origin(&current.url, &next_url) {
+                    strip_credentials(&mut current.headers);
+                    // A cross-origin hop never carries the first
+                    // origin's body: the guest entrusted it to one
+                    // allowed origin, and a redirect — even between
+                    // two allowed origins — is not consent to deliver
+                    // it to another. The follow continues as a GET
+                    // (HEAD stays HEAD); ordinary headers still travel
+                    // so tracing and negotiation survive the hop.
+                    // Same-origin chains keep method and body: login
+                    // flows must not lose their POST.
+                    if current.method == Method::Post {
+                        current.method = Method::Get;
+                        current.body.clear();
+                    }
+                }
+                current.url = next_url;
+                hops_followed = hops_followed.saturating_add(1);
+            }
+            Ok(Err(failure)) => {
+                let moved = snapshot();
+                let (written, read) = delta(&moved);
+                let reason = match &failure {
+                    Failure::Refused(reason) => Outcome::Refused {
+                        reason: reason.clone(),
+                    },
+                    Failure::Failed(reason) => Outcome::Failed {
+                        reason: reason.clone(),
+                    },
+                };
+                audit(AuditRow {
+                    host: vetted.host.clone(),
+                    port: vetted.addr.port(),
+                    outcome: reason,
+                    request_bytes: written,
+                    response_bytes: read,
+                });
+                return Err(failure);
+            }
+            Err(_) => {
+                let moved = snapshot();
+                let (written, read) = delta(&moved);
+                audit(AuditRow {
+                    host: vetted.host.clone(),
+                    port: vetted.addr.port(),
+                    outcome: Outcome::Failed {
+                        reason: CallError::Timeout,
+                    },
+                    request_bytes: written,
+                    response_bytes: read,
+                });
+                return Err(Failure::Failed(CallError::Timeout));
+            }
         }
     }
+}
+
+/// Resolve a `Location` value against the hop that answered it.
+///
+/// Absolute URLs stand alone; origin-relative paths (`/next`) and
+/// bare relative references inherit the answering hop's origin. An
+/// unusable value yields `None` — the peer spoke a malformed
+/// redirect, and [`request`] fails it as [`CallError::Protocol`]
+/// rather than guessing a destination.
+fn join_location(current_url: &str, location: &str) -> Option<String> {
+    url::Url::parse(current_url)
+        .ok()?
+        .join(location)
+        .ok()
+        .map(Into::into)
+}
+
+/// Whether following `next_url` from `current_url` would downgrade an
+/// encrypted hop to cleartext.
+///
+/// Origin-relative locations inherit the current scheme through
+/// [`join_location`], so they can never downgrade; only an absolute
+/// `http:` target from an `https:` hop refuses. Unparseable input
+/// refuses safe (not a downgrade — the join already failed those).
+fn is_downgrade(current_url: &str, next_url: &str) -> bool {
+    let (Some(current), Some(next)) = (
+        url::Url::parse(current_url).ok(),
+        url::Url::parse(next_url).ok(),
+    ) else {
+        return false;
+    };
+    current.scheme() == "https" && next.scheme() == "http"
+}
+
+/// Whether two URLs have different origins (scheme, host, or port).
+///
+/// Unparseable input counts as cross-origin: stripping a credential
+/// that turns out to be same-origin costs nothing, while forwarding
+/// one that turns out cross-origin is the breach.
+fn is_cross_origin(current_url: &str, next_url: &str) -> bool {
+    let (Some(current), Some(next)) = (
+        url::Url::parse(current_url).ok(),
+        url::Url::parse(next_url).ok(),
+    ) else {
+        return true;
+    };
+    current.scheme() != next.scheme()
+        || current.host_str() != next.host_str()
+        || current.port_or_known_default() != next.port_or_known_default()
+}
+
+/// Strip credential headers before a cross-origin hop.
+///
+/// Forward-only: nothing restores a credential once it leaves its
+/// origin, and same-origin hops keep theirs. The set is the
+/// request-side secrets a redirect must never carry elsewhere —
+/// `authorization`, `proxy-authorization`, `cookie` — matched
+/// case-insensitively because header names are. Ordinary headers
+/// (tracing IDs, content negotiation) travel untouched.
+fn strip_credentials(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| {
+        !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "authorization" | "proxy-authorization" | "cookie"
+        )
+    });
 }
 
 fn safe_host(url: &str) -> String {
@@ -2791,5 +3150,674 @@ mod io_tests {
         .await
         .expect("empty and tab values are legal");
         assert_eq!(response.status, 200);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Redirect hop chains + cleartext transports (Phase 3, red-first)
+// ---------------------------------------------------------------------------
+//
+// These fail to compile until the wiring lands (`PlainTransport`,
+// `EgressTransport`, `CallError::Downgrade`,
+// `TenantEgress::allowing_redirects`, manifest `cleartext` /
+// `redirects` fields) — then prove the chain: re-vet every hop,
+// never downgrade, fourth hop refused, per-hop audit rows.
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    /// One canned address for every test host, counting calls in order
+    /// so tests prove each hop was re-vetted (and refused hops never
+    /// reached DNS at all).
+    struct CountingResolver {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingResolver {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("test mutex held").clone()
+        }
+    }
+
+    impl Resolver for CountingResolver {
+        // No I/O to await in a canned answer; the `async` is the
+        // trait's contract, not this impl's.
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "canned answers involve no I/O; async satisfies the Resolver contract"
+        )]
+        async fn resolve(&self, host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            self.calls
+                .lock()
+                .expect("test mutex held")
+                .push(host.to_owned());
+            Ok(vec!["93.184.216.34".parse().expect("fixture parses")])
+        }
+    }
+
+    /// A transport serving per-host scripts over duplex, recording
+    /// opened hosts in order — so tests prove each hop dialled its
+    /// own vetted address, and refused hops dialled nothing.
+    ///
+    /// The alias keeps the log's type below the complexity lint: the
+    /// shape (host plus the raw head bytes the server half saw) is
+    /// the assertion surface, not an abstraction worth a struct.
+    type SeenLog = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+    struct RouteTransport {
+        routes: std::collections::HashMap<String, Vec<u8>>,
+        opens: std::sync::Mutex<Vec<String>>,
+        seen: SeenLog,
+    }
+
+    impl RouteTransport {
+        fn new(routes: &[(&str, Vec<u8>)]) -> Self {
+            Self {
+                routes: routes
+                    .iter()
+                    .map(|(host, script)| ((*host).to_owned(), script.clone()))
+                    .collect(),
+                opens: std::sync::Mutex::new(Vec::new()),
+                seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn opens(&self) -> Vec<String> {
+            self.opens.lock().expect("test mutex held").clone()
+        }
+
+        /// Request bytes the server half saw for one host, concatenated.
+        fn seen_for(&self, host: &str) -> Vec<u8> {
+            self.seen
+                .lock()
+                .expect("test mutex held")
+                .iter()
+                .filter(|(h, _)| h == host)
+                .flat_map(|(_, bytes)| bytes.clone())
+                .collect()
+        }
+    }
+
+    impl Transport for RouteTransport {
+        type Stream = tokio::io::DuplexStream;
+
+        // No `.await` in this impl: setup only, I/O in the task.
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "duplex setup involves no I/O to await; async satisfies the Transport contract"
+        )]
+        async fn open(&self, vetted: &Vetted, _limits: &Limits) -> Result<Self::Stream, CallError> {
+            self.opens
+                .lock()
+                .expect("test mutex held")
+                .push(vetted.host.clone());
+            let script = self.routes.get(&vetted.host).cloned().unwrap_or_else(|| {
+                b"HTTP/1.1 500 No Script\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec()
+            });
+            let seen = std::sync::Arc::clone(&self.seen);
+            let host = vetted.host.clone();
+            let (client, mut server) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut head = Vec::new();
+                loop {
+                    let mut byte = [0u8; 1];
+                    if server.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    if head.len() > 8192 {
+                        return;
+                    }
+                }
+                // Drain a declared body so the exchange never blocks on
+                // a full duplex buffer; content comes from Content-Length.
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let mut content_length = 0usize;
+                for line in text.split("\r\n") {
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length.min(1 << 20)];
+                let mut read = 0usize;
+                while read < body.len() {
+                    // `get_mut` with the loop invariant rather than
+                    // slicing: the cursor only advances by bytes read.
+                    let Some(slot) = body.get_mut(read..) else {
+                        break;
+                    };
+                    match server.read(slot).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => read += n,
+                    }
+                }
+                if let Ok(mut seen) = seen.lock() {
+                    seen.push((host, head));
+                }
+                let _ = server.write_all(&script).await;
+                let _ = server.flush().await;
+            });
+            Ok(client)
+        }
+    }
+
+    fn redirect_to(url: &str) -> Vec<u8> {
+        format!("HTTP/1.1 302 Found\r\nlocation: {url}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .into_bytes()
+    }
+
+    fn ok(body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn policy_allowing(hosts: &[&str]) -> TenantEgress {
+        TenantEgress::allowing_hosts(hosts).expect("fixture policy parses")
+    }
+
+    fn redirect_limits(hops: u8) -> Limits {
+        Limits {
+            max_redirects: hops,
+            ..Limits::default()
+        }
+    }
+
+    fn get(url: &str) -> Request {
+        Request {
+            method: Method::Get,
+            url: url.to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// Cleartext without the opt-in refuses at vetting: no DNS, no
+    /// dial, one refusal row.
+    #[tokio::test]
+    async fn cleartext_refused_without_the_opt_in() {
+        let transport = RouteTransport::new(&[]);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let err = request(
+            &policy_allowing(&["example.com"]),
+            &get("http://example.com/"),
+            &resolver,
+            &Limits::default(),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("cleartext without the grant refuses");
+        assert_eq!(err, Failure::Refused(Refusal::Scheme));
+        assert!(transport.opens().is_empty(), "refused before any dial");
+        assert!(resolver.calls().is_empty(), "refused before any DNS");
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows.first().expect("one refusal row").outcome,
+            Outcome::Refused { .. }
+        ));
+    }
+
+    /// Granted cleartext connects over the plain transport: the TLS
+    /// side panics if touched, proving selection, and the body proves
+    /// the bytes.
+    #[tokio::test]
+    async fn granted_cleartext_connects() {
+        struct PanicTls;
+        impl Transport for PanicTls {
+            type Stream = tokio::io::DuplexStream;
+            // No `.await`: refusal needs none. The `async` is the
+            // trait's contract, not this impl's. (No `#[expect]`:
+            // a body that only panics never trips the unused-async
+            // lint, so expecting it would itself fail.)
+            async fn open(&self, _: &Vetted, _: &Limits) -> Result<Self::Stream, CallError> {
+                panic!("cleartext must never reach the TLS transport");
+            }
+        }
+        let plain = RouteTransport::new(&[("example.com", ok("plain hello"))]);
+        let transport = EgressTransport::new(PanicTls, plain);
+        let policy = policy_allowing(&["example.com"]).allowing_cleartext();
+        let mut rows = Vec::new();
+        let response = request(
+            &policy,
+            &get("http://example.com/"),
+            &CountingResolver::new(),
+            &Limits::default(),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("granted cleartext connects");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"plain hello");
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows.first().expect("one success row").outcome,
+            Outcome::Success { status: 200 }
+        ));
+    }
+
+    /// TLS destinations route to the secure transport: the plain side
+    /// panics if touched, proving selection the other way.
+    #[tokio::test]
+    async fn tls_destinations_route_to_the_secure_transport() {
+        struct PanicPlain;
+        impl Transport for PanicPlain {
+            type Stream = tokio::io::DuplexStream;
+            // No `.await`: refusal needs none (see `PanicTls` above
+            // for why there is no `#[expect]` here).
+            async fn open(&self, _: &Vetted, _: &Limits) -> Result<Self::Stream, CallError> {
+                panic!("TLS must never reach the plain transport");
+            }
+        }
+        let secure = RouteTransport::new(&[("example.com", ok("secure hello"))]);
+        let transport = EgressTransport::new(secure, PanicPlain);
+        let mut rows = Vec::new();
+        let response = request(
+            &policy_allowing(&["example.com"]),
+            &get("https://example.com/"),
+            &CountingResolver::new(),
+            &Limits::default(),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("https routes to the secure transport");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"secure hello");
+        assert_eq!(rows.len(), 1);
+    }
+
+    fn redirect_policy() -> TenantEgress {
+        policy_allowing(&["hop1.test", "hop2.test", "hop3.test", "final.test"])
+            .allowing_redirects(3)
+    }
+
+    /// A redirect without the grant refuses after the first hop: one
+    /// hop dialled and vetted, the second never resolved, two rows
+    /// (the visited hop plus the refusal).
+    #[tokio::test]
+    async fn redirect_refused_without_the_grant() {
+        let transport =
+            RouteTransport::new(&[("hop1.test", redirect_to("https://hop2.test/next"))]);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let err = request(
+            &policy_allowing(&["hop1.test", "hop2.test"]),
+            &get("https://hop1.test/start"),
+            &resolver,
+            &Limits::default(),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("redirect without a grant refuses");
+        assert_eq!(err, Failure::Failed(CallError::Redirect));
+        assert_eq!(transport.opens(), ["hop1.test"]);
+        assert_eq!(resolver.calls(), ["hop1.test"]);
+        assert_eq!(rows.len(), 2, "visited hop plus refusal");
+        assert!(matches!(
+            rows.first().expect("visited hop row").outcome,
+            Outcome::Success { status: 302 }
+        ));
+        assert!(matches!(
+            rows.get(1).expect("refusal row").outcome,
+            Outcome::Failed { .. }
+        ));
+    }
+
+    /// A three-hop chain succeeds with every hop re-vetted: opens and
+    /// resolver calls arrive in hop order, and four rows name the
+    /// four destinations.
+    #[tokio::test]
+    async fn three_hop_chain_succeeds() {
+        let transport = RouteTransport::new(&[
+            ("hop1.test", redirect_to("https://hop2.test/next")),
+            ("hop2.test", redirect_to("https://hop3.test/next")),
+            ("hop3.test", redirect_to("https://final.test/end")),
+            ("final.test", ok("chain done")),
+        ]);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let response = request(
+            &redirect_policy(),
+            &get("https://hop1.test/start"),
+            &resolver,
+            &redirect_limits(3),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("three granted hops succeed");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"chain done");
+        assert_eq!(
+            transport.opens(),
+            ["hop1.test", "hop2.test", "hop3.test", "final.test"]
+        );
+        assert_eq!(
+            resolver.calls(),
+            ["hop1.test", "hop2.test", "hop3.test", "final.test"]
+        );
+        let hosts: Vec<&str> = rows.iter().map(|row| row.host.as_str()).collect();
+        assert_eq!(hosts, ["hop1.test", "hop2.test", "hop3.test", "final.test"]);
+    }
+
+    /// An https-to-http hop refuses as a downgrade before the second
+    /// dial: the new URL is never resolved, let alone opened.
+    #[tokio::test]
+    async fn downgrade_refused() {
+        let transport = RouteTransport::new(&[("hop1.test", redirect_to("http://hop2.test/next"))]);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let err = request(
+            &redirect_policy(),
+            &get("https://hop1.test/start"),
+            &resolver,
+            &redirect_limits(3),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("https-to-http downgrade refuses");
+        assert_eq!(err, Failure::Failed(CallError::Downgrade));
+        assert_eq!(transport.opens(), ["hop1.test"]);
+        assert_eq!(resolver.calls(), ["hop1.test"]);
+        assert_eq!(rows.len(), 2);
+    }
+
+    /// The fourth follow refuses when three are granted: a grant of N
+    /// authorises N followed redirects (N + 1 visits), so the fourth
+    /// redirect — `final.test` back to `hop1.test` — is the chain
+    /// error. Four opens, four resolutions, five rows (four visited
+    /// hops plus the refusal): the refused follow is never resolved,
+    /// let alone opened.
+    #[tokio::test]
+    async fn fourth_hop_refused() {
+        let transport = RouteTransport::new(&[
+            ("hop1.test", redirect_to("https://hop2.test/2")),
+            ("hop2.test", redirect_to("https://hop3.test/3")),
+            ("hop3.test", redirect_to("https://final.test/4")),
+            ("final.test", redirect_to("https://hop1.test/again")),
+        ]);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let err = request(
+            &redirect_policy(),
+            &get("https://hop1.test/start"),
+            &resolver,
+            &redirect_limits(3),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("the fourth follow refuses");
+        assert_eq!(err, Failure::Failed(CallError::Redirect));
+        assert_eq!(
+            transport.opens(),
+            ["hop1.test", "hop2.test", "hop3.test", "final.test"]
+        );
+        assert_eq!(
+            resolver.calls(),
+            ["hop1.test", "hop2.test", "hop3.test", "final.test"]
+        );
+        assert_eq!(rows.len(), 5, "four visited hops plus the refusal");
+        assert!(matches!(
+            rows.get(4).expect("refusal row").outcome,
+            Outcome::Failed { .. }
+        ));
+    }
+
+    /// The hard ceiling holds regardless of the grant: five granted
+    /// hops still stop at three follows — four visits, then the
+    /// fourth redirect refuses even though the grant allows five.
+    #[tokio::test]
+    async fn hard_ceiling_holds_past_the_grant() {
+        let transport = RouteTransport::new(&[
+            ("hop1.test", redirect_to("https://hop2.test/2")),
+            ("hop2.test", redirect_to("https://hop3.test/3")),
+            ("hop3.test", redirect_to("https://final.test/4")),
+            ("final.test", redirect_to("https://hop1.test/5")),
+        ]);
+        let policy = policy_allowing(&["hop1.test", "hop2.test", "hop3.test", "final.test"])
+            .allowing_redirects(5);
+        let resolver = CountingResolver::new();
+        let mut rows = Vec::new();
+        let err = request(
+            &policy,
+            &get("https://hop1.test/start"),
+            &resolver,
+            &redirect_limits(5),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("the protocol ceiling stops at three");
+        assert_eq!(err, Failure::Failed(CallError::Redirect));
+        assert_eq!(transport.opens().len(), 4, "three follows, four visits");
+        assert_eq!(resolver.calls().len(), 4);
+        assert_eq!(rows.len(), 5, "four visited hops plus the refusal");
+    }
+
+    /// Credentials stay at their origin: an `authorization` header
+    /// forwarded to the first hop is stripped before a cross-origin
+    /// second hop, while ordinary headers travel — and stay stripped
+    /// on the third. Stripping moves forward only: nothing restores
+    /// a credential once it leaves its origin.
+    #[tokio::test]
+    async fn sensitive_headers_stripped_cross_origin() {
+        let transport = RouteTransport::new(&[
+            ("a.test", redirect_to("https://b.test/mid")),
+            ("b.test", redirect_to("https://c.test/end")),
+            ("c.test", ok("done")),
+        ]);
+        let policy = policy_allowing(&["a.test", "b.test", "c.test"]).allowing_redirects(3);
+        let post = Request {
+            method: Method::Post,
+            url: "https://a.test/start".to_owned(),
+            headers: vec![
+                ("authorization".to_owned(), "Bearer secret".to_owned()),
+                ("x-keep".to_owned(), "yes".to_owned()),
+            ],
+            body: b"data".to_vec(),
+        };
+        let mut rows = Vec::new();
+        let response = request(
+            &policy,
+            &post,
+            &CountingResolver::new(),
+            &redirect_limits(3),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("chain succeeds");
+        assert_eq!(response.status, 200);
+        for host in ["b.test", "c.test"] {
+            let seen = transport.seen_for(host);
+            let seen = String::from_utf8_lossy(&seen).into_owned();
+            assert!(
+                !seen.to_ascii_lowercase().contains("authorization"),
+                "credential stripped before {host}: {seen:?}"
+            );
+            assert!(
+                seen.contains("x-keep: yes"),
+                "ordinary headers travel to {host}: {seen:?}"
+            );
+        }
+        assert_eq!(rows.len(), 3, "one row per hop");
+    }
+
+    /// A cross-origin hop never carries the first origin's body: a
+    /// POST that meets a cross-origin redirect continues as a GET
+    /// with an empty body, so a secret the guest entrusted to one
+    /// allowed origin is not delivered to another. Ordinary headers
+    /// still travel (pinned above); only the body is dropped.
+    #[tokio::test]
+    async fn cross_origin_hop_drops_the_body() {
+        let transport = RouteTransport::new(&[
+            ("a.test", redirect_to("https://b.test/mid")),
+            ("b.test", ok("landed")),
+        ]);
+        let policy = policy_allowing(&["a.test", "b.test"]).allowing_redirects(1);
+        let post = Request {
+            method: Method::Post,
+            url: "https://a.test/start".to_owned(),
+            headers: vec![("x-keep".to_owned(), "yes".to_owned())],
+            body: b"secret-body".to_vec(),
+        };
+        let mut rows = Vec::new();
+        let response = request(
+            &policy,
+            &post,
+            &CountingResolver::new(),
+            &redirect_limits(1),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("chain succeeds as a bodyless follow");
+        assert_eq!(response.status, 200);
+        let seen = transport.seen_for("b.test");
+        let seen = String::from_utf8_lossy(&seen).into_owned();
+        assert!(
+            seen.starts_with("GET /mid "),
+            "cross-origin follow is a GET: {seen:?}"
+        );
+        assert!(
+            !seen.contains("secret-body"),
+            "first origin's body never reaches the second: {seen:?}"
+        );
+        assert_eq!(rows.len(), 2, "one row per hop");
+    }
+
+    /// A same-origin hop keeps method and body: the follow is the
+    /// same trust domain, so the POST continues as a POST with its
+    /// bytes — login flows must not lose their payload to the chain.
+    /// Both hops' heads carry the method and the full content
+    /// length; the second 302 then exhausts the grant of one and
+    /// refuses, which is also what bounds the self-redirect.
+    #[tokio::test]
+    async fn same_origin_hop_keeps_method_and_body() {
+        let transport = RouteTransport::new(&[("a.test", redirect_to("https://a.test/again"))]);
+        let policy = policy_allowing(&["a.test"]).allowing_redirects(1);
+        let post = Request {
+            method: Method::Post,
+            url: "https://a.test/start".to_owned(),
+            headers: Vec::new(),
+            body: b"secret-body".to_vec(),
+        };
+        let mut rows = Vec::new();
+        let err = request(
+            &policy,
+            &post,
+            &CountingResolver::new(),
+            &redirect_limits(1),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect_err("the second redirect exhausts the grant of one");
+        assert_eq!(err, Failure::Failed(CallError::Redirect));
+        let seen = transport.seen_for("a.test");
+        let seen = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+        assert!(seen.contains("post /start "), "first hop posts: {seen:?}");
+        assert!(
+            seen.contains("post /again "),
+            "same-origin follow stays a post: {seen:?}"
+        );
+        assert_eq!(
+            seen.matches("content-length: 11").count(),
+            2,
+            "both hops carry the full body: {seen:?}"
+        );
+        assert_eq!(rows.len(), 3, "two visited hops plus the refusal");
+    }
+
+    /// A cross-origin HEAD stays a HEAD: there is no body to drop,
+    /// so the follow changes nothing — pinning that the conversion
+    /// touches POST alone.
+    #[tokio::test]
+    async fn cross_origin_head_stays_head() {
+        let transport = RouteTransport::new(&[
+            ("a.test", redirect_to("https://b.test/mid")),
+            ("b.test", ok("landed")),
+        ]);
+        let policy = policy_allowing(&["a.test", "b.test"]).allowing_redirects(1);
+        let head = Request {
+            method: Method::Head,
+            url: "https://a.test/start".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let mut rows = Vec::new();
+        let response = request(
+            &policy,
+            &head,
+            &CountingResolver::new(),
+            &redirect_limits(1),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("chain succeeds");
+        assert_eq!(response.status, 200);
+        let seen = transport.seen_for("b.test");
+        let seen = String::from_utf8_lossy(&seen).into_owned();
+        assert!(
+            seen.starts_with("HEAD /mid "),
+            "cross-origin follow keeps head: {seen:?}"
+        );
+        assert_eq!(rows.len(), 2, "one row per hop");
+    }
+
+    /// The manifest is the grants' single source: cleartext plus one
+    /// redirect hop declared in TOML enforces both through a store
+    /// built from that manifest.
+    #[tokio::test]
+    async fn manifest_derivation_covers_cleartext_and_redirects() {
+        use qqq_cap::manifest::Manifest;
+        let manifest = Manifest::parse(
+            "[package]\nname = \"acme\"\nversion = \"1.0.0\"\n\
+             [capabilities.http]\nclient = [\"example.com\", \"plain.example.com\"]\ncleartext = true\nredirects = 1\n",
+        )
+        .expect("fixture manifest parses");
+        let policy = TenantEgress::from_manifest(&manifest);
+        assert!(policy.allows_cleartext(), "cleartext declared");
+        let transport = RouteTransport::new(&[
+            ("example.com", redirect_to("http://plain.example.com/plain")),
+            ("plain.example.com", ok("plain done")),
+        ]);
+        let mut rows = Vec::new();
+        let response = request(
+            &policy,
+            &get("http://example.com/start"),
+            &CountingResolver::new(),
+            &redirect_limits(1),
+            &transport,
+            &mut |row| rows.push(row),
+        )
+        .await
+        .expect("declared cleartext plus one hop works");
+        assert_eq!(response.status, 200);
+        assert_eq!(rows.len(), 2, "start hop plus followed hop");
     }
 }

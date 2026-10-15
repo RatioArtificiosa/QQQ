@@ -352,12 +352,22 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The `HttpCapability` table.",
       "properties": {
+        "cleartext": {
+          "description": "Whether cleartext `http://` is permitted (maps to the `allow_cleartext` egress grant; default denies).",
+          "type": "boolean"
+        },
         "client": {
           "description": "Outbound hosts the component may reach, as `host:port` patterns.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "redirects": {
+          "description": "How many redirect hops the connector may follow (maps to the redirect-chain grant; default refuses; the protocol ceiling of 3 applies on top).",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
         },
         "server": {
           "description": "Whether the component may receive inbound requests.",

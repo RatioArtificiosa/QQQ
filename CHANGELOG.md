@@ -4,10 +4,33 @@
 
 ### Security
 
+- **host**: redirect hop chains plus cleartext transports (`I-01`,
+  Phase 3): `PlainTransport` serves cleartext-vetted destinations
+  only (TLS-vetted addresses refuse before dialling, mirroring
+  `SystemTransport`'s refusal from the other side),
+  `EgressTransport` selects per hop from the freshly vetted
+  destination, and `request` follows at most the minimum of the
+  tenant grant, the operational switch, and the protocol ceiling of
+  3 — re-vetting every hop through the full policy, refusing
+  `https`→`http` downgrades before the next hop is even resolved,
+  stripping credential headers before cross-origin hops
+  (forward-only), and converting a cross-origin POST to a bodyless
+  GET so one origin's body is never delivered to another
+  (same-origin chains keep method and body). Manifest declares both grants (`cleartext`,
+  `redirects`), and `send_via` aligns the operational switch with
+  the tenant grant so a declared grant is live, not believed-live.
+  Pins: cleartext refused without the opt-in (no DNS, no dial),
+  granted cleartext and TLS routing through the selector,
+  ungranted redirect refused after the first hop, 3-hop re-vetted
+  chain, downgrade refusal, fourth-follow refusal, ceiling over a
+  grant of 5, credential stripping, manifest derivation, and the
+  `send_via` grant/no-grant pair proving the production path.
+
 - **host**: `send` is wired to the egress connector (`I-01`): grant
   re-check, then `SEC-009` budget charge, then vet → open →
-  exchange → audit over the store's egress policy, with exactly one
-  audit row per call. `StoreData` carries the `TenantEgress`
+  exchange → audit over the store's egress policy, with one
+  audit row per visited hop (plus one for a terminal chain
+  refusal). `StoreData` carries the `TenantEgress`
   policy (deny-all unless built from a manifest, which derives it
   from `[capabilities.http] client`) and the row buffer with a
   take-drain; a scoped thread plus fresh runtime bridges sync to

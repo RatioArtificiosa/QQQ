@@ -347,6 +347,15 @@ pub struct HttpCapability {
     /// Outbound hosts the component may reach, as `host:port` patterns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub client: Vec<String>,
+    /// Whether cleartext `http://` is permitted (maps to the
+    /// `allow_cleartext` egress grant; default denies).
+    #[serde(default)]
+    pub cleartext: bool,
+    /// How many redirect hops the connector may follow (maps to the
+    /// redirect-chain grant; default refuses; the protocol ceiling
+    /// of 3 applies on top).
+    #[serde(default)]
+    pub redirects: u8,
 }
 
 /// One `[[capabilities.fs]]` entry.

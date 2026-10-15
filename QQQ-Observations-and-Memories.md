@@ -38755,4 +38755,40 @@ either the upgrade's fault or the flake's turn — three isolated
 greens distinguish them, and the distinction is the disposition.
 → `Cargo.lock`, `crates/qqq-host/src/config.rs`, `CHANGELOG.md`.
 
+## §O-712 - Poll-gated stamps cannot promise slow sends; say what they do
+
+The final review round proved the WatchBody insufficient as
+specified: hyper polls a single-frame body once no matter its
+size (read in the h1 dispatcher — frames poll greedily until the
+~64KB conn buffer fills), and even chunked, polls cluster per
+buffer quantum while the kernel drains silently. A trickle slower
+than quantum-per-bound with a tiny bound reclaims mid-send; the
+Windows CI kill of the 500ms slow-reader test is exactly this
+shape (early EOF, FIN after delivery stalled). The in-house path
+never idle-closes mid-send, and matching that needs a
+send-completion signal hyper withholds (flight-through-send is
+unobservable from the service; IO-write stamping self-sustains
+through keepalive pongs and pong responses). So the contract was
+narrowed to what the mechanism actually provides, in three
+places: the unit test proves per-poll stamping across a whole
+send; the end-to-end test pins slow delivery under sane bounds
+(default 75s, ~3s transfer); the field doc states the residual
+with its inequality. The generalisable rule: a bound enforced
+through another layer's polling inherits that layer's batching —
+measure the batch quantum against the bound before promising.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/transport.rs`, `crates/qqq-serve/tests/hyper_serve.rs`, `CHANGELOG.md`.
+
+## §O-713 - The narrowed contract leaked the old promise in four places
+
+The pre-commit review of the honest-narrowing diff found the
+narrowing incomplete: module, struct, and wrapper docs still said
+a progressing send "however slow" never trips the bound, the test
+comment still claimed ten-times-the-bound timing under a 75s
+bound, and "two orders of magnitude" overstated a 94× margin.
+All four fixed to the measured wording, plus the residual's home
+field. The generalisable rule: when a contract narrows, grep the
+old promise — it lives in docs, comments, and tests long after
+the code stops keeping it.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_serve.rs`, `crates/qqq-serve/src/transport.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

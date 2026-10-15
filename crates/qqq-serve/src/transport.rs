@@ -325,6 +325,14 @@ pub struct HyperLimits {
     /// inverted config the idle poll could close a trickling head
     /// with the wrong reason on HTTP/1.
     ///
+    /// Slow-send residual, stated not hidden: send progress stamps
+    /// arrive per body poll, and hyper front-loads polls up to its
+    /// write quantum — so a trickle slower than quantum-per-bound
+    /// with a tiny bound can still reclaim mid-send, where the
+    /// in-house path never idle-closes mid-send. Defaults are immune
+    /// by roughly two orders of magnitude; matching the in-house rule
+    /// exactly would need a send-completion signal hyper withholds.
+    ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
     /// use std::time::Duration;

@@ -38,9 +38,10 @@
 //!   every answered request stamps an activity clock and holds a
 //!   flight guard while it runs, and the drivers close only when no
 //!   flight is held and nothing arrived within the bound. Response
-//!   sends stamp through the body wrapper, so a progressing send,
-//!   however slow, never trips it. Codec-level traffic (`PING`s) does
-//!   not count.
+//!   sends stamp per body poll; polls cluster per write quantum, so
+//!   a trickle slower than quantum-per-bound under a tiny bound can
+//!   still reclaim mid-send (stated in `HyperLimits::idle_timeout`).
+//!   Codec-level traffic (`PING`s) does not count.
 //! * A request past the per-connection ceiling is answered `503`: on
 //!   HTTP/1 with `Connection: close` (the connection is still
 //!   reclaimed; the status tells the client why), on HTTP/2
@@ -311,8 +312,11 @@ struct State {
 /// the guard's `Drop` releases it, so cancellation (hyper dropping a
 /// reset stream's future before it answers) cannot wedge the count.
 /// The drivers close only when no flight is held AND no activity
-/// happened within the bound — an active connection, however slow,
-/// is never idle.
+/// happened within the bound. Response sends stamp per body poll,
+/// and polls cluster per hyper's write quantum — so the bound holds
+/// for active work at sane ratios and the residual (trickle slower
+/// than quantum-per-bound under a tiny bound) lives in
+/// `HyperLimits::idle_timeout`, not here.
 ///
 /// What this observes is requests reaching the service, not socket
 /// bytes: hyper owns the bytes, so codec-level traffic (`PING`s,
@@ -397,9 +401,10 @@ impl Drop for Flight<'_> {
 /// is held — without this, a stalled send looks idle and the bound
 /// reclaims a connection still doing work (the in-house path never
 /// idle-closes mid-write). The body travels as ≤16KB frames and every
-/// `poll_frame` stamps the watch, so the stamps track the send: a
-/// progressing send, however slow, never trips the bound, while a
-/// fully stalled one (no polls at all) still does.
+/// `poll_frame` stamps the watch, so the stamps track the send while
+/// polls recur; a fully stalled send (no polls at all) still
+/// reclaims, and the quantum-paced corner is stated in
+/// `HyperLimits::idle_timeout` rather than promised away here.
 ///
 /// The chunking is load-bearing, not cosmetic: hyper polls a
 /// single-frame body exactly once no matter its size (the h1 write

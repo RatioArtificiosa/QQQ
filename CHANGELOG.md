@@ -98,16 +98,25 @@
   mid-request. An `IdleWatch` shared by both drivers stamps every
   answered request, guards each flight through cancellation, polls
   for no-flight plus no-recent-activity on subdivided ticks, and
-  stamps response sends through a `Body` wrapper (a stalled send
-  still reclaims; a progressing one never trips). Flood-test
-  hardening in the same unit: the PING test splits into strict
-  1k-answered plus 100k survival-via-fresh-connection (an undrained
-  100k blast outruns every absolute bound on a starved runner), the
-  reset-budget knob raises both budgets, the sequential test raises
-  the pending-accept budget, and the multiplex harness sorts
-  interleaved answers by stream with a deterministic slow/fast
-  proof. Pins: activity survival past the bound on both protocols,
-  send-poll stamping, ceiling and cap metering, budget causality.
+  stamps response sends per 16KB body poll (single-frame bodies
+  poll once no matter the size, so one stamp per response would
+  cover only the send's start). Fully stalled sends still reclaim.
+  Known residual, measured not hidden: hyper front-loads polls up
+  to its write quantum, so a trickle slower than quantum-per-bound
+  under a tiny bound can reclaim mid-send where in-house never
+  would — defaults immune by roughly two orders of magnitude, and matching
+  it exactly needs a send-completion signal hyper withholds.
+- **serve**: flood tests deterministic under CI starvation (`F-16`):
+  the PING test splits into strict 1k-answered plus 100k
+  survival-via-fresh-connection (an undrained 100k blast outruns
+  every absolute bound on a starved runner); the reset-budget knob
+  raises both budgets (either fires under pressure); the
+  sequential test raises the pending-accept budget beside the
+  ceiling; the multiplex harness sorts interleaved answers by
+  stream with a deterministic slow/fast proof. Past-ceiling 503s
+  are recorded and metered, and records describe post-validation
+  wire bytes, so refusals and caps never split the log from the
+  wire.
 
 - **serve**: the request line must be ASCII outright (`I-07`
   differential finding): the nightly fuzzer caught U+2001 (EM QUAD)

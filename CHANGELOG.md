@@ -4,6 +4,20 @@
 
 ### Security
 
+- **host**: `send` is wired to the egress connector (`I-01`): grant
+  re-check, then `SEC-009` budget charge, then vet → open →
+  exchange → audit over the store's egress policy, with exactly one
+  audit row per call. `StoreData` carries the `TenantEgress`
+  policy (deny-all unless built from a manifest, which derives it
+  from `[capabilities.http] client`) and the row buffer with a
+  take-drain; a scoped thread plus fresh runtime bridges sync to
+  async with no ambient assumptions. Refusal taxonomy preserved:
+  ungranted, unwired, and vet-denied stay `host-not-allowed`,
+  budget stays `subrequest-limit-exceeded`, connector failures map
+  by direction. Pins: granted-host round trip with wire-echo
+  mapping proof, vet-refusal row without dialling, failure
+  mapping, untranslatable-method refusal, manifest-derived policy.
+
 - **deps**: wasmtime 48.0.5 → 48.0.6 plus wasmtime-wasi to match
   (`RUSTSEC-2026-0352`–`0356`): four guest-reachable panics in
   async-lifted `call`, `call_async` cancellation, component

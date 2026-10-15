@@ -161,6 +161,33 @@ impl TenantEgress {
         }
     }
 
+    /// Derive the policy from a parsed manifest (`I-01`).
+    ///
+    /// No `[capabilities.http]` section means no declared
+    /// destinations: deny-all, not unrestricted. `expect` with a
+    /// reason rather than `unwrap_or_else(deny_all)`: `Manifest::parse`
+    /// already rejects malformed client patterns, so a failure here
+    /// means the parser's guarantee broke — fail-stop, never silent
+    /// narrowing.
+    ///
+    /// # Panics
+    ///
+    /// When a client pattern fails to parse after `Manifest::parse`
+    /// accepted it, which contradicts the parser's contract and is a
+    /// host bug rather than a guest error.
+    #[must_use]
+    pub fn from_manifest(manifest: &crate::manifest::Manifest) -> Self {
+        let Some(http) = manifest.capabilities.http.as_ref() else {
+            return Self::deny_all();
+        };
+        #[expect(
+            clippy::expect_used,
+            reason = "manifest client patterns already validated at parse"
+        )]
+        TenantEgress::allowing_hosts(&http.client)
+            .expect("manifest client patterns already validated at parse")
+    }
+
     /// Permit a set of hosts, parsed from manifest-style patterns.
     ///
     /// # Errors
@@ -254,6 +281,13 @@ impl TenantEgress {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allow.is_empty()
+    }
+}
+
+impl Default for TenantEgress {
+    /// Deny-all: the safe reading of "no policy supplied".
+    fn default() -> Self {
+        Self::deny_all()
     }
 }
 

@@ -38791,4 +38791,63 @@ old promise — it lives in docs, comments, and tests long after
 the code stops keeping it.
 → `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_serve.rs`, `crates/qqq-serve/src/transport.rs`, `CHANGELOG.md`.
 
+## §O-714 - Send wiring: the policy had no road into the store
+
+The `send` wiring looked like a call-site change until the survey
+showed the policy had no road: `GrantSet` keeps booleans only
+(the client host strings die at resolution), `TenantScope` carries
+identity without policy, and no production code constructed a
+`TenantEgress` anywhere. So the commit adds the road, not just
+the call: a deny-all `egress` field plus row buffer on
+`StoreData`, derivation from `[capabilities.http] client` in
+`from_manifest_with_env` (patterns already validated at parse —
+fail-stop otherwise), a `SystemResolver` beside
+`SystemTransport`, and a scoped-thread bridge so the sync host
+call reaches the async connector under any runtime context. Audit
+rows land in a take-drained buffer (one row per call, budget-
+bounded per lifecycle; debug-assert against cross-lifecycle
+accumulation) with durable routing scheduled alongside the
+audit-sink work — emission proven now, archive later, neither
+silent nor unbounded. Test-side honesty notes: the echo fake
+proves mapping by what comes back (shared slots cannot order
+against an async server task); the no-dial proof is observable
+(a dial would hang or fail wrong, vet refuses fast); method
+refusals emit no rows, exactly like grant and budget refusals.
+Red-first compile failure on the three missing API items, green
+after: 21 host_http including manifest-derived policy. The
+generalisable rule: when the call site is easy and the data is
+missing, the work is the road — wire the authority first, the
+call second.
+→ `crates/qqq-host/src/host_http.rs`, `crates/qqq-host/src/linker.rs`, `crates/qqq-host/src/egress.rs`, `CHANGELOG.md`.
+
+## §O-715 - Review caught the unwired production path, the hanging drop, and silent panics
+
+The send-wiring review found four findings, each dispositioned
+differently. (1) HIGH, fixed: `prepare` built stores without the
+manifest policy, so production `send` would refuse everything —
+`InstanceOptions.egress` now travels into the store, `run.rs`
+sets it from the manifest, and the serve-side threading
+(`GuestApp` holds grants only) is scheduled follow-up with the
+deny-all default keeping it safe meanwhile. (2) HIGH, fixed and
+verified in tokio 1.53.1 source: dropping a per-call runtime
+joins the blocking pool, where a stalled `getaddrinfo`
+(uncancellable `spawn_blocking`) can outlive every connector
+timeout and hang the join — so the bridge calls
+`shutdown_background()` (zero timeout, detaches) and the call
+still fails closed at `total_timeout`, with the bounded leak
+documented. (3) MEDIUM, fixed structurally: panics now resume
+instead of mapping to `connection-failed` (verified the profile
+is unwind with a live F-01 guard — no silent masking in any
+profile), which also corrected a stale `panic = "abort"`
+comment. (4) MEDIUM, fixed by downgrade: the drain doc claimed a
+serve behavior that does not exist yet — now states emission vs.
+retention honestly with the serve integration scheduled.
+Incidental: a `qqq-run` timing test failed once in full-suite
+parallel load and passed isolated plus full-suite on rerun —
+flake with retry evidence, unrelated to the diff (fuel/epoch
+untouched). The generalisable rule: a review that only reads the
+diff misses the unwired caller — always ask what builds the
+inputs, not just what consumes them.
+→ `crates/qqq-host/src/instance.rs`, `crates/qqq-run/src/run.rs`, `crates/qqq-host/src/host_http.rs`, `crates/qqq-host/src/linker.rs`, `crates/qqq-cap/src/egress.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

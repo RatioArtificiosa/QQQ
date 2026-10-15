@@ -67,11 +67,12 @@
 //!    a mis-built linker is a security hole while a mis-placed check is only an
 //!    annoyance. `linker::recheck`'s documentation gives that asymmetry.
 //!
-//! `send` itself is **not implemented in this commit**, and that is stated rather than
-//! hidden. It refuses with `host-not-allowed`, the error the WIT itself documents for
-//! "the destination is outside the manifest's allowlist". That is the correct answer
-//! for every destination while no egress allowlist is wired, and it is the safe
-//! direction: the function cannot accidentally succeed.
+//! `send` itself is **wired** (`I-01`, Phase 2): grant re-check, then
+//! `SEC-009` budget charge, then the connector (`vet` → open →
+//! `exchange` → audit) over the store's egress policy, with one audit
+//! row per call. The loud refusal stays for every path that is not
+//! fully wired: no grant, no budget, an unmappable method, and a
+//! deny-all policy all refuse without a socket opening.
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
@@ -159,21 +160,17 @@ pub const UNGRANTED_AUTHORITY: &str = "<qqq:http.server not granted>";
 /// not in source, and that is stated rather than glossed: a guest cannot reach `send`
 /// at all unless the interface was registered, which already required the grant.
 impl bindings::qqq::http::http::Host for StoreData {
-    /// `send` — the outbound HTTP capability.
+    /// `send` — the outbound HTTP capability, wired end to end.
     ///
-    /// # Why this refuses rather than performing the request
-    ///
-    /// Outbound HTTP needs an **egress allowlist** (`qqq-cap`'s `egress` module holds
-    /// the policy; nothing wires it into a connection yet) and a **subrequest budget**
-    /// (`SEC-009`, whose counter lives on this very type). Shipping a `send` that
-    /// bypassed either would be the most dangerous function in the runtime: an
-    /// unauthenticated request path reaching any host on the internet.
-    ///
-    /// So it refuses with `host-not-allowed`, the error the WIT documents for "the
-    /// destination is outside the manifest's allowlist". The refusal is **not** a silent
-    /// stub: it is the correct answer for every destination while no allowlist is wired,
-    /// and it becomes a real check when one is. What matters for a reader is that it
-    /// cannot accidentally succeed.
+    /// Grant re-check, then `SEC-009` budget charge, then the
+    /// connector over `StoreData::egress`: `vet` → open → `exchange`
+    /// → audit, with exactly one audit row per call in
+    /// `egress_audit`. The sync/async bridge (scoped thread, fresh
+    /// current-thread runtime) assumes no ambient runtime, so the
+    /// call works from sync tests, the blocking pool, and async
+    /// callers alike. Unwired paths stay loud: no grant, no budget,
+    /// an unmappable method, and deny-all policy all refuse without
+    /// a socket opening.
     ///
     /// # The order of the two refusals, and why it matters
     ///
@@ -191,8 +188,6 @@ impl bindings::qqq::http::http::Host for StoreData {
     /// it here without a parser would be exactly the "trusting the authority section"
     /// hazard `qqq-http.wit` warns about.
     fn send(&mut self, req: Request) -> std::result::Result<Response, HttpError> {
-        let _ = req;
-
         // The call-time re-check, before anything reads `req`.
         if !self.grants.grants(Capability::HttpClient) {
             return Err(HttpError::HostNotAllowed);
@@ -206,7 +201,57 @@ impl bindings::qqq::http::http::Host for StoreData {
             return Err(HttpError::SubrequestLimitExceeded);
         }
 
-        Err(HttpError::HostNotAllowed)
+        // The bridge to the async connector. `send` is sync (the `bindgen!`
+        // host trait says so) while `egress::request` is async, and the
+        // guest may be driven from any runtime context — sync tests, the
+        // blocking pool `dispatch_off_thread` uses, or an async caller.
+        // A scoped thread running a fresh current-thread runtime makes
+        // no ambient assumptions: it works under every one, at the cost
+        // of a thread spawn per call (microseconds against network
+        // milliseconds — remeasure before "optimising" this into a
+        // shared pool, which would be ambient state). Timeouts live
+        // inside the future (`Limits`), so a stuck peer cannot hang
+        // the join beyond them.
+        //
+        // The runtime is shut down explicitly with a zero timeout
+        // rather than dropped: dropping it would join the blocking
+        // pool, where a stalled system DNS lookup (`spawn_blocking`
+        // `getaddrinfo`, uncancellable) can outlive every connector
+        // timeout and hang the join with it. `shutdown_background`
+        // detaches instead — the call still fails closed at
+        // `total_timeout`, and the leaked lookup dies with the OS
+        // resolver timeout, bounded by the subrequest budget's rate
+        // limit. Panics resume rather than mapping to
+        // `connection-failed`: the F-01 abort guard kills a panicking
+        // host call anyway, and under test unwind a masked panic
+        // would turn a host bug into a green-looking refusal.
+        let transport = crate::egress::SystemTransport;
+        let resolver = crate::egress::SystemResolver;
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return Err(HttpError::ConnectionFailed);
+                };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(self.send_via(req, &transport, &resolver))
+                }));
+                runtime.shutdown_background();
+                match outcome {
+                    Ok(result) => result,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            });
+            // A scoped-thread panic outside the guarded future is a host
+            // bug, not a network failure: resume it loud rather than
+            // mapping to `connection-failed` like the old fallback did.
+            match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        })
     }
 
     /// `incoming-authority` — the host and port this request arrived on.
@@ -224,7 +269,7 @@ impl bindings::qqq::http::http::Host for StoreData {
     /// that is a **programming error** rather than a condition: a guest calling this
     /// without `http.server` has violated its manifest. It gets [`UNGRANTED_AUTHORITY`],
     /// a sentinel rather than a panic, because a panic inside a host call unwinds through
-    /// Wasmtime's frames and, with `panic = "abort"`, would kill the process — the failure
+    /// Wasmtime's frames toward the F-01 abort guard — the failure
     /// `guard.rs` exists to contain.
     fn incoming_authority(&mut self) -> (String, u16) {
         if !self.grants.grants(Capability::HttpServer) {
@@ -247,6 +292,109 @@ impl bindings::qqq::http::http::Host for StoreData {
             // than inventing 80 or 443.
             None => (authority, 0),
         }
+    }
+}
+
+impl StoreData {
+    /// `send` through vetting: grant and budget are the caller's job
+    /// (checked in `send` before this runs); everything from the URL
+    /// down is the connector's. Async so tests drive it directly
+    /// against fake transports and resolvers over duplex — the sync
+    /// `send` adds only the bridge.
+    ///
+    /// Exactly one audit row lands in `egress_audit` per call: the
+    /// connector audits every path (refusal, timeout, success,
+    /// failure), and rows are moved here rather than borrowed so no
+    /// borrow of `self` outlives the call.
+    pub(crate) async fn send_via(
+        &mut self,
+        req: Request,
+        transport: &impl crate::egress::Transport,
+        resolver: &impl crate::egress::Resolver,
+    ) -> std::result::Result<Response, HttpError> {
+        let egress_req = map_request(req)?;
+        let mut rows = Vec::new();
+        let result = crate::egress::request(
+            &self.egress,
+            &egress_req,
+            resolver,
+            &crate::egress::Limits::default(),
+            transport,
+            &mut |row| rows.push(row),
+        )
+        .await;
+        self.egress_audit.extend(rows);
+        result
+            .map(map_response)
+            .map_err(|failure| map_failure(&failure))
+    }
+}
+
+/// Map the guest's request onto the connector's: method, headers,
+/// body. Anything the connector cannot express is refused here,
+/// before any socket opens — and before any audit row, because
+/// nothing reached the connector to audit.
+fn map_request(req: Request) -> std::result::Result<crate::egress::Request, HttpError> {
+    use crate::egress::Method as EgressMethod;
+    use bindings::qqq::http::http::Method as GuestMethod;
+    let method = match req.method {
+        GuestMethod::Get => EgressMethod::Get,
+        GuestMethod::Head => EgressMethod::Head,
+        GuestMethod::Post => EgressMethod::Post,
+        // The connector speaks three methods; the WIT names nine.
+        // Refusing as `invalid-url` is the least-wrong case in a
+        // taxonomy with no not-implemented: the request as addressed
+        // cannot be performed, and the URL is the address. Loud and
+        // documented beats guessing an equivalent.
+        _ => return Err(HttpError::InvalidUrl),
+    };
+    let mut headers = Vec::with_capacity(req.headers.len());
+    for header in req.headers {
+        let value = String::from_utf8(header.value).map_err(|_| HttpError::RequestTooLarge)?;
+        headers.push((header.name, value));
+    }
+    Ok(crate::egress::Request {
+        method,
+        url: req.url,
+        headers,
+        body: req.body.unwrap_or_default(),
+    })
+}
+
+/// Map the connector's response back onto the guest's types.
+fn map_response(response: crate::egress::Response) -> Response {
+    Response {
+        status: response.status,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|(name, value)| bindings::qqq::http::http::Header {
+                name,
+                value: value.into_bytes(),
+            })
+            .collect(),
+        body: response.body,
+    }
+}
+
+/// Map connector failures onto the guest-visible taxonomy.
+///
+/// Policy refusals stay `host-not-allowed` (a guest that cannot tell
+/// denial from outage retries the denial forever — the WIT's own
+/// warning); everything the network did wrong is
+/// `connection-failed`; cap breaches keep their direction
+/// (request vs. response).
+fn map_failure(failure: &crate::egress::Failure) -> HttpError {
+    use crate::egress::{CallError, Failure};
+    match failure {
+        Failure::Refused(_) | Failure::Failed(CallError::Redirect) => HttpError::HostNotAllowed,
+        Failure::Failed(CallError::RequestTooLarge) => HttpError::RequestTooLarge,
+        Failure::Failed(CallError::ResponseHeadTooLarge | CallError::BodyTooLarge { .. }) => {
+            HttpError::ResponseTooLarge
+        }
+        Failure::Failed(
+            CallError::Timeout | CallError::Tls | CallError::Protocol | CallError::Transport,
+        ) => HttpError::ConnectionFailed,
     }
 }
 
@@ -566,6 +714,323 @@ mod tests {
             "subrequest-limit-exceeded",
             "two refusals must exhaust a budget of two"
         );
+    }
+
+    // -- Phase 2 wiring: `send` through vetting (`send_via`) --------------
+    //
+    // Red-first: `StoreData::egress`, `send_via`, `take_egress_audit`,
+    // and the fake transport/resolver below do not exist until the
+    // wiring lands, so these fail to compile first — then prove the
+    // composition (grant → budget → vet → open → exchange → audit)
+    // rather than its pieces.
+
+    use crate::egress::{Limits, Outcome, Resolver, Transport, Vetted};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// The tenant policy the `CLIENT` manifest implies: `api.example.com`
+    /// on 443, nothing else, no cleartext, no literals.
+    fn allowing_store() -> StoreData {
+        let mut data = client_store(8);
+        data.egress = qqq_cap::egress::TenantEgress::allowing_hosts(&["api.example.com"])
+            .expect("fixture policy parses");
+        data
+    }
+
+    /// A resolver answering one canned address per host, counting calls
+    /// so tests prove resolve-once.
+    #[derive(Default)]
+    struct CannedResolver {
+        hosts: HashMap<String, Vec<std::net::IpAddr>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl CannedResolver {
+        fn answering(host: &str, addr: &str) -> Self {
+            let mut hosts = HashMap::new();
+            hosts.insert(
+                host.to_owned(),
+                vec![addr.parse().expect("fixture addr parses")],
+            );
+            Self {
+                hosts,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Resolver for CannedResolver {
+        // Synchronous body behind the async trait: a fake has no I/O to
+        // await, and manufacturing a timer just to satisfy the lint would
+        // be theater — the `async` is the trait's contract, not this impl's.
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "canned answers involve no I/O; async satisfies the Resolver contract"
+        )]
+        async fn resolve(&self, host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            self.calls
+                .lock()
+                .expect("test mutex held")
+                .push(host.to_owned());
+            Ok(self.hosts.get(host).cloned().unwrap_or_default())
+        }
+    }
+
+    /// A transport serving an echo over duplex: it parses the request
+    /// head the connector wrote and answers with `METHOD TARGET` plus
+    /// the value of the `x-probe` header (or `-`). Mapping (method,
+    /// target, headers) is proven by what comes back — the response
+    /// is observed after the server wrote it, so the echo carries a
+    /// causal edge no shared slot can provide.
+    struct CannedTransport;
+
+    impl Transport for CannedTransport {
+        type Stream = tokio::io::DuplexStream;
+
+        // No `.await` in this impl: the duplex pair and the spawn are
+        // synchronous setup; the I/O happens in the spawned task. The
+        // `async` is the trait's contract, not this impl's.
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "duplex setup involves no I/O to await; async satisfies the Transport contract"
+        )]
+        async fn open(
+            &self,
+            _vetted: &Vetted,
+            _limits: &Limits,
+        ) -> Result<Self::Stream, crate::egress::CallError> {
+            let (client, mut server) = tokio::io::duplex(65536);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut head = Vec::new();
+                loop {
+                    let mut byte = [0u8; 1];
+                    if server.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    if head.len() > 8192 {
+                        return;
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let mut lines = text.split("\r\n");
+                let request_line = lines.next().unwrap_or("");
+                let mut parts = request_line.split(' ');
+                let method = parts.next().unwrap_or("");
+                let target = parts.next().unwrap_or("");
+                let mut probe = "-";
+                let mut content_length = 0usize;
+                for line in lines {
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("x-probe") {
+                            probe = value.trim();
+                        }
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                // The body the connector wrote, so its mapping is proven
+                // by what comes back too — not just head mapping.
+                let mut sent = vec![0u8; content_length.min(65536)];
+                let mut read = 0usize;
+                while read < sent.len() {
+                    // `get_mut` with the loop invariant (`read` only
+                    // advances by bytes just read) rather than slicing:
+                    // an out-of-range here would be a fake bug, not a
+                    // product one, and it must fail loudly either way.
+                    let slot = sent
+                        .get_mut(read..)
+                        .expect("read cursor stays inside the body buffer");
+                    match server.read(slot).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => read += n,
+                    }
+                }
+                let body = format!(
+                    "{method} {target} {probe} {}",
+                    String::from_utf8_lossy(
+                        sent.get(..read)
+                            .expect("read cursor stays inside the body buffer")
+                    )
+                );
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = server.write_all(reply.as_bytes()).await;
+                let _ = server.write_all(body.as_bytes()).await;
+                let _ = server.flush().await;
+            });
+            Ok(client)
+        }
+    }
+
+    /// Drive the async wiring from a sync test: each test owns a tiny
+    /// current-thread runtime, so no ambient runtime is assumed.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds")
+            .block_on(future)
+    }
+
+    /// A granted host travels vet → open → exchange → audit: the
+    /// response comes back mapped, the echo proves the connector
+    /// wrote the guest's method, target, header, and body on the
+    /// wire, and exactly one `Success` audit row names the host,
+    /// port, and byte counts.
+    #[test]
+    fn send_routes_a_granted_host_through_vet_open_exchange_and_audit() {
+        let mut data = allowing_store();
+        let transport = CannedTransport;
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let request = Request {
+            method: Method::Post,
+            url: "https://api.example.com/thing".to_owned(),
+            headers: vec![Header {
+                name: "x-probe".to_owned(),
+                value: b"seven".to_vec(),
+            }],
+            body: Some(b"payload".to_vec()),
+        };
+        let response =
+            block_on(data.send_via(request, &transport, &resolver)).expect("granted host succeeds");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"POST /thing seven payload");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1, "one call emits exactly one row");
+        let row = rows.first().expect("one row recorded");
+        assert_eq!(row.host, "api.example.com");
+        assert_eq!(row.port, 443);
+        assert!(matches!(row.outcome, Outcome::Success { status: 200 }));
+        assert!(row.request_bytes > 0 && row.response_bytes > 0);
+        assert_eq!(
+            resolver.calls.lock().expect("test mutex held").len(),
+            1,
+            "the connector resolves once per call"
+        );
+    }
+
+    /// A method the connector does not speak is refused before any
+    /// socket opens: `egress` moves GET, HEAD, and POST only, so the
+    /// WIT's wider enum meets `invalid-url` with the reason stated.
+    /// No audit row: rows start when the connector runs (vet refusal
+    /// and later), exactly like grant and budget refusals emit none —
+    /// a mapping refusal is a client-shape error, and the budget
+    /// charge is its accounting.
+    #[test]
+    fn send_refuses_methods_the_connector_does_not_speak() {
+        let mut data = allowing_store();
+        let transport = CannedTransport;
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let request = Request {
+            method: Method::Put,
+            url: "https://api.example.com/thing".to_owned(),
+            headers: vec![],
+            body: None,
+        };
+        let result = block_on(data.send_via(request, &transport, &resolver));
+        assert_eq!(outcome(&result), "invalid-url");
+        assert_eq!(
+            data.take_egress_audit().len(),
+            0,
+            "mapping refusals predate the connector, like grant and budget refusals"
+        );
+    }
+
+    /// An unwired store refuses through `send()` itself — grant checked,
+    /// budget charged, vet refusal recorded — without ever dialling.
+    /// No-dial is proven observably, not structurally: a dial would
+    /// reach the real network (hanging to timeout or failing as
+    /// `connection-failed`), while vetting refuses fast as
+    /// `host-not-allowed` before `open` is ever reached — the order
+    /// `egress::request` owns and its own tests pin.
+    #[test]
+    fn send_stores_a_vet_refusal_row_without_dialling() {
+        let mut data = client_store(8);
+        let result = data.send(get("https://api.example.com/thing"));
+        assert_eq!(outcome(&result), "host-not-allowed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1, "the refusal is recorded, not silent");
+        assert!(matches!(
+            rows.first().expect("one row recorded").outcome,
+            Outcome::Refused { .. }
+        ));
+        // Budget charged before the destination was considered: the
+        // order that keeps allowlist probing from being free.
+        let again = data.send(get("https://api.example.com/thing"));
+        assert_eq!(outcome(&again), "host-not-allowed");
+    }
+
+    /// The manifest is the policy's single source: a store built
+    /// from the `CLIENT` manifest enforces its allowlist without
+    /// anyone setting the field by hand. Budget comes from the
+    /// manifest's `[limits]` here too (zero in the fixture, so the
+    /// test sets what the manifest path would carry in production).
+    #[test]
+    fn send_enforces_the_manifest_derived_policy() {
+        let manifest = Manifest::parse(CLIENT).expect("test manifest");
+        let mut data = StoreData::from_manifest_with_env(&manifest, &[]);
+        data.subrequests = crate::quota::SubrequestBudget::new(8);
+        let transport = CannedTransport;
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let allowed =
+            block_on(data.send_via(get("https://api.example.com/thing"), &transport, &resolver));
+        assert_eq!(outcome(&allowed), "ok", "manifest-allowed host succeeds");
+        let denied = block_on(data.send_via(
+            get("https://other.example.com/thing"),
+            &transport,
+            &resolver,
+        ));
+        assert_eq!(outcome(&denied), "host-not-allowed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 2, "both calls emit rows");
+    }
+
+    /// Connector failures map to `connection-failed` with a `Failed`
+    /// audit row: the guest can tell a dead peer from a denied policy.
+    #[test]
+    fn send_maps_connector_failures_to_connection_failed() {
+        struct RefusedTransport;
+        impl Transport for RefusedTransport {
+            type Stream = tokio::io::DuplexStream;
+            // No `.await`: refusing needs no I/O. The `async` is the
+            // trait's contract, not this impl's.
+            #[expect(
+                clippy::unused_async_trait_impl,
+                reason = "refusal involves no I/O; async satisfies the Transport contract"
+            )]
+            async fn open(
+                &self,
+                _: &Vetted,
+                _: &Limits,
+            ) -> Result<Self::Stream, crate::egress::CallError> {
+                Err(crate::egress::CallError::Transport)
+            }
+        }
+        let mut data = allowing_store();
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let result = block_on(data.send_via(
+            get("https://api.example.com/thing"),
+            &RefusedTransport,
+            &resolver,
+        ));
+        assert_eq!(outcome(&result), "connection-failed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows.first().expect("one row recorded").outcome,
+            Outcome::Failed { .. }
+        ));
     }
 
     #[test]

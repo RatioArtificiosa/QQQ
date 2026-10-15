@@ -44,6 +44,7 @@
 use std::fmt;
 
 use qqq_cap::capability::Capability;
+use qqq_cap::egress::TenantEgress;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,32 @@ pub struct StoreData {
     /// `None` that meant "any tenant" would be the failure this field exists to
     /// prevent.
     pub tenant: Option<crate::tenant::TenantScope>,
+
+    /// This instance's egress policy — `I-01`, Phase 2.
+    ///
+    /// Deny-all unless set: an instance built without going through
+    /// the manifest has no declared destinations, and the safe reading
+    /// of "no destinations declared" is that the guest may reach
+    /// none — the same direction the zero subrequest budget reads.
+    /// `from_manifest_with_env` derives it from
+    /// `[capabilities.http] client`; `with_egress` sets it directly,
+    /// which is what tests do.
+    pub egress: TenantEgress,
+
+    /// Egress audit rows this instance emitted, in call order — `I-01`.
+    ///
+    /// Exactly one row per `send` call (success, refusal, or failure —
+    /// the connector audits every path). Drained with
+    /// [`StoreData::take_egress_audit`]: rows are bounded by the
+    /// subrequest budget per lifecycle, and a debug assertion fires
+    /// if a reconfigured store still holds rows from a prior one.
+    /// Durable routing (serve drains per request into the audit
+    /// worker path) is scheduled serve-integration work alongside the
+    /// `GuestApp` manifest threading — today the buffer is the emission
+    /// point the wiring proves, read directly by tests, not the
+    /// archive. That boundary is stated here so no reader mistakes
+    /// emission for retention.
+    pub egress_audit: Vec<crate::egress::AuditRow>,
 
     /// This request's hold on its tenant's shared output budget, if any.
     ///
@@ -299,6 +326,9 @@ impl Default for StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            // Deny-all: no manifest was read, so no destinations exist.
+            egress: TenantEgress::deny_all(),
+            egress_audit: Vec::new(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -376,6 +406,9 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
             tenant: None,
+            // Deny-all: no manifest was read, so no destinations exist.
+            egress: TenantEgress::deny_all(),
+            egress_audit: Vec::new(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -486,6 +519,11 @@ impl StoreData {
             subrequests: crate::quota::SubrequestBudget::new(manifest.limits.max_subrequests),
             handles: crate::quota::HandleQuota::new(manifest.limits.max_open_handles),
             tenant: None,
+            // Derived from the manifest's `[capabilities.http] client` so the
+            // allowlist the developer declared is the policy the connector
+            // enforces — one source, not a parallel list.
+            egress: TenantEgress::from_manifest(manifest),
+            egress_audit: Vec::new(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -525,6 +563,31 @@ impl StoreData {
     #[must_use]
     pub fn tenant_scope(&self) -> Option<&crate::tenant::TenantScope> {
         self.tenant.as_ref()
+    }
+
+    /// Set this instance's egress policy directly — `I-01`, Phase 2.
+    ///
+    /// What tests use: the manifest path (`from_manifest_with_env`)
+    /// derives the same value, so a test that sets the policy under
+    /// examination exercises the identical enforcement the connector
+    /// sees in production.
+    #[must_use]
+    pub fn with_egress(mut self, egress: TenantEgress) -> Self {
+        self.egress = egress;
+        self
+    }
+
+    /// Drain this instance's egress audit rows, in call order — `I-01`.
+    ///
+    /// Tests read directly; the scheduled serve integration drains per
+    /// request into the audit worker path (no serve drain call site
+    /// exists yet — see the `egress_audit` field docs). Draining
+    /// (rather than borrowing) is what bounds the buffer: rows live
+    /// only until someone takes them, and each `send` appends exactly
+    /// one.
+    #[must_use]
+    pub fn take_egress_audit(&mut self) -> Vec<crate::egress::AuditRow> {
+        std::mem::take(&mut self.egress_audit)
     }
 
     /// Install the deterministic ambient state.
@@ -634,6 +697,14 @@ impl StoreData {
         self.subrequests = crate::quota::SubrequestBudget::new(limits.max_subrequests);
         self.handles = crate::quota::HandleQuota::new(limits.max_open_handles);
         self.limits = Some(limits);
+        // A lifecycle boundary, so undrained egress rows fail loudly here
+        // rather than accumulating silently across reuses: rows belong to
+        // the lifecycle that emitted them, and the consumer drains per
+        // lifecycle with `take_egress_audit`.
+        debug_assert!(
+            self.egress_audit.is_empty(),
+            "egress audit rows outlived their lifecycle: drain with take_egress_audit"
+        );
     }
 
     /// Install a limiter that **traps** at `ceiling` bytes per linear memory.

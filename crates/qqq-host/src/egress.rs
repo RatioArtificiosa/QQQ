@@ -984,6 +984,25 @@ fn sni_name(host: &str) -> &str {
 /// original hostname is the only one that can reach verification.
 pub struct SystemTransport;
 
+/// The production resolver: one OS lookup per vetted host (`I-01`).
+///
+/// A unit struct because there is nothing to configure — and because a
+/// resolver with options would be a place to smuggle in a second DNS
+/// path that bypasses the forbidden table. `vet` calls it exactly
+/// once per call and screens every returned address, so rebinding
+/// attackers gain nothing from mixed answers.
+pub struct SystemResolver;
+
+impl Resolver for SystemResolver {
+    async fn resolve(&self, host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+        let mut out = Vec::new();
+        for addr in tokio::net::lookup_host((host, 0)).await? {
+            out.push(addr.ip());
+        }
+        Ok(out)
+    }
+}
+
 impl Transport for SystemTransport {
     type Stream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
 

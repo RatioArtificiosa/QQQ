@@ -378,6 +378,13 @@ pub struct InstanceOptions {
     pub replay_sink: Option<std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>>,
     /// Replay every nondeterministic read from a recorded log — `DET-008`.
     pub replay_source: Option<std::sync::Arc<std::sync::Mutex<crate::replay::ReplayLog>>>,
+    /// This instance's egress policy — `I-01`, Phase 2.
+    ///
+    /// Deny-all unless set: the default is the safe reading of "no
+    /// destinations declared". Runners set it from the manifest
+    /// (`TenantEgress::from_manifest`); `prepare` copies it into the
+    /// store the same way it carries every other option below.
+    pub egress: qqq_cap::egress::TenantEgress,
 }
 
 impl InstanceOptions {
@@ -1264,6 +1271,11 @@ impl ReadyStore {
         // the compiler and not the clock -- and every checker in this repository asks about text, so
         // nothing saw it. See the field's own doc for what this does and does not guarantee.
         data.ambient = crate::ambient::AmbientState::new(opts.deterministic);
+        // The egress policy travels with the store like every other option:
+        // a runner sets `opts.egress` from the manifest and prepare carries
+        // it in, so production instances enforce declared destinations
+        // rather than the deny-all default.
+        data.egress = opts.egress.clone();
         if let Some(log) = &opts.replay_sink {
             data.ambient.set_replay(std::sync::Arc::clone(log));
         }

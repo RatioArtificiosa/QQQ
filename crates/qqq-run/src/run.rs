@@ -923,6 +923,11 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     // is set where a reader sees it beside the others.
     let mut inst_opts = qqq_host::InstanceOptions {
         deterministic: opts.deterministic,
+        // The manifest's allowlist becomes the connector's policy: without
+        // this line every `send` in `qqqai run` would meet the deny-all
+        // default. The serve path (`GuestApp`) carries grants only, so its
+        // manifest-to-policy threading is scheduled serve-integration work.
+        egress: qqq_cap::egress::TenantEgress::from_manifest(&loaded.manifest),
         ..qqq_host::InstanceOptions::default()
     };
     if let Some(log) = &replay_sink {

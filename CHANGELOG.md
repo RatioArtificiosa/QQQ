@@ -4,6 +4,21 @@
 
 ### Security
 
+- **replay**: first-divergent-checkpoint bisect (`I-03` core): a
+  lower-bound search over stored `(call_index, rolling_hash)`
+  checkpoints, comparing hashes under an aligned-grid contract
+  (tuple comparison would break binary-search monotonicity on
+  index-only shifts — a review finding, fixed with red proof),
+  verified against brute force on two thousand shaped inputs
+  plus fixed points (empty, singleton, last-checkpoint,
+  index-shift, unequal lengths). The audit sketch's version
+  carried two defects — `hi = mid + 1` spins forever when the
+  probe lands on `hi - 1`, and returning `lo` after early exit
+  reports a matching index — both caught by the mandated
+  property test before anything trusted the search.
+  Rolling-hash maintenance on the record path and golden-file CI
+  stay scheduled.
+
 - **cap**: attenuable token primitives (`I-06` core): a new
   `token` module with HMAC-SHA-256 `mint`/`attenuate` chain math,
   a closed `Caveat` codec (`exp`, `calls`, everything else fails

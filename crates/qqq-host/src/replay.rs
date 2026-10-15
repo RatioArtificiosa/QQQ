@@ -1285,6 +1285,93 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// I-03: first-divergent-checkpoint bisect
+// ---------------------------------------------------------------------------
+//
+// Rolling trace hashes are cumulative — once two runs diverge, every
+// later hash differs — so the first divergence is binary-searchable
+// over stored `(call_index, hash)` checkpoints. The record path that
+// maintains the rolling hash and the golden-file CI that compares it
+// are scheduled follow-ups; this section is the comparison
+// primitive both build on, verified against brute force before
+// anything trusts it.
+
+/// Find the first checkpoint where two runs diverge (`I-03`).
+///
+/// `a` and `b` are stored `(call_index, rolling_hash)` checkpoint
+/// lists. Returns the index of the first position where the
+/// hashes differ, or `None` when every common hash matches.
+///
+/// # Contract: hashes compare, grids align
+///
+/// Only hashes participate in the search, because only hash
+/// mismatch is monotone in the cumulative construction — once two
+/// runs diverge, every later hash differs, which is what makes
+/// binary search valid. Tuple comparison would break that: an
+/// index-only shift (same hash, moved index) differs and then
+/// matches again, and the search can probe past it. Index grids
+/// are aligned by construction — both runs checkpoint the same
+/// program on the same interval — and comparing runs recorded
+/// under different configurations is refused earlier, at the
+/// replay header (`ReplayHeader::mismatches`), not here. A caller
+/// handing this misaligned grids gets hash comparison, which is
+/// the defined behaviour, not an error.
+///
+/// # The two off-by-ones the audit sketch carried
+///
+/// The sketch narrowed with `hi = mid + 1` on mismatch, which
+/// makes no progress when the probe lands on `hi - 1` — the loop
+/// spins forever (trace it with `n = 2`, divergence at 1) — and
+/// it returned `lo` after exiting on `lo + 1 >= hi` without
+/// checking whether `lo` itself matches (trace divergence at 1
+/// with matching index 0: the search collapses `hi` to 1 while
+/// `lo` never advances, then reports the matching index 0). This
+/// uses the standard lower-bound form — `hi = mid`, run to `lo
+/// == hi`, answer `lo` — and the property test below checks it
+/// against brute force on two thousand shaped inputs, which is
+/// the verification the document orders before trusting any
+/// version of this search.
+///
+/// ```
+/// use qqq_host::replay::first_divergent_checkpoint;
+///
+/// let a = [(0u64, [1u8; 32]), (256, [2u8; 32]), (512, [3u8; 32])];
+/// let mut b = a;
+/// assert_eq!(first_divergent_checkpoint(&a, &b), None);
+/// b[1].1 = [9u8; 32];
+/// assert_eq!(first_divergent_checkpoint(&a, &b), Some(1));
+/// ```
+#[must_use]
+pub fn first_divergent_checkpoint(a: &[(u64, [u8; 32])], b: &[(u64, [u8; 32])]) -> Option<usize> {
+    let common = a.len().min(b.len());
+    // Invariant: every hash below `lo` matches; the first hash
+    // mismatch is at or above `lo` and below `hi`. Both bounds
+    // move every pass (`lo` past `mid`, `hi` down to `mid`), so
+    // this terminates with `lo == hi` at the first mismatch — or
+    // at `common` when the whole prefix matches.
+    let (mut lo, mut hi) = (0usize, common);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        // `#[expect]` with a reason, as in `hex` below: `mid` is
+        // below `hi`, which never exceeds `common`, which never
+        // exceeds either length — the probe is in bounds by the
+        // loop invariant, not by luck. Hashes only: see the
+        // contract above for why tuples would break monotonicity.
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "mid < hi <= common <= both lengths"
+        )]
+        let probe = (a[mid].1, b[mid].1);
+        if probe.0 == probe.1 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo < common).then_some(lo)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1706,5 +1793,131 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), kinds.len(), "kinds must be distinct");
+    }
+
+    // -- I-03 bisect --------------------------------------------------
+    //
+    // The audit document orders this verification before trusting
+    // any binary search here: the bisect must agree with brute
+    // force on every shape of input, and the comparison below also
+    // caught the sketch's non-narrowing `hi = mid + 1` during
+    // development (traced, not shipped).
+
+    /// Brute-force oracle: the first common index where the tuples
+    /// differ, or `None` when the common prefix matches. The
+    /// generator below keeps index grids aligned, so tuple
+    /// difference coincides with hash difference on every case it
+    /// produces — which is exactly the contract the search
+    /// implements; misaligned grids are covered by
+    /// `index_only_shift_with_identical_hashes_is_not_a_divergence`.
+    fn brute_first_divergent(a: &[(u64, [u8; 32])], b: &[(u64, [u8; 32])]) -> Option<usize> {
+        let common = a.len().min(b.len());
+        (0..common).find(|&i| a[i] != b[i])
+    }
+
+    /// Deterministic xorshift64: randomized coverage without a new
+    /// dev-dependency, with a fixed seed so failure output
+    /// reproduces exactly.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0 | 1;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn hash(&mut self) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for chunk in out.chunks_mut(8) {
+                chunk.copy_from_slice(&self.next().to_le_bytes());
+            }
+            out
+        }
+    }
+
+    /// The bisect agrees with brute force on two thousand shaped
+    /// inputs: empty lists, singletons, shared prefixes of every
+    /// length, full matches (equal and unequal lengths), and
+    /// divergence at every position. A search that is wrong — or
+    /// one that does not terminate — fails here, not in CI.
+    #[test]
+    fn bisect_agrees_with_brute_force_on_shaped_inputs() {
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..2000 {
+            let len_a = (rng.next() % 41) as usize;
+            let len_b = (rng.next() % 41) as usize;
+            let mut a = Vec::with_capacity(len_a);
+            for i in 0..len_a {
+                a.push((i as u64 * 256, rng.hash()));
+            }
+            // Shared prefix of a random length, then independent
+            // tails — except every eighth case, which shares the
+            // whole common prefix to exercise the no-divergence
+            // path at unequal lengths.
+            let shared = if rng.next().is_multiple_of(8) {
+                len_a.min(len_b)
+            } else {
+                usize::try_from(rng.next() % (len_a.min(len_b) as u64 + 1))
+                    .expect("lengths fit in usize on every target we ship")
+            };
+            let mut b: Vec<(u64, [u8; 32])> = a.iter().take(shared).copied().collect();
+            while b.len() < len_b {
+                let i = b.len();
+                b.push((i as u64 * 256, rng.hash()));
+            }
+            assert_eq!(
+                first_divergent_checkpoint(&a, &b),
+                brute_first_divergent(&a, &b),
+                "lengths {len_a}/{len_b}, shared prefix {shared}"
+            );
+        }
+    }
+
+    /// Fixed points the property test could only hit by luck: empty
+    /// inputs, singletons, divergence at the last checkpoint, and
+    /// an index shift with identical hashes.
+    #[test]
+    fn bisect_fixed_points() {
+        let empty: Vec<(u64, [u8; 32])> = Vec::new();
+        let one = vec![(0u64, [1u8; 32])];
+        assert_eq!(first_divergent_checkpoint(&empty, &empty), None);
+        assert_eq!(first_divergent_checkpoint(&empty, &one), None);
+        assert_eq!(first_divergent_checkpoint(&one, &empty), None);
+        assert_eq!(first_divergent_checkpoint(&one, &one), None);
+        let mut other = one.clone();
+        other[0].1 = [2u8; 32];
+        assert_eq!(first_divergent_checkpoint(&one, &other), Some(0));
+        // An index shift with identical hashes is not a hash
+        // divergence: see index_only_shift_with_identical_hashes.
+        let mut shifted = one.clone();
+        shifted[0].0 = 256;
+        assert_eq!(first_divergent_checkpoint(&one, &shifted), None);
+        // Matching common prefix at unequal lengths is no divergence.
+        let longer = vec![(0u64, [1u8; 32]), (256, [2u8; 32])];
+        assert_eq!(first_divergent_checkpoint(&one, &longer), None);
+        assert_eq!(first_divergent_checkpoint(&longer, &one), None);
+    }
+
+    /// Review finding (MEDIUM): an index-only shift with identical
+    /// hashes breaks binary search monotonicity — the shifted
+    /// position differs while a later one matches, so a tuple
+    /// comparison can probe past the divergence. Hashes rule the
+    /// comparison (cumulative by contract); index grids are aligned
+    /// by construction, and cross-config comparison is refused at
+    /// the header, not here. The shift sits at position 2 of 4 on
+    /// purpose: the search probes position 2 first, so tuple
+    /// comparison answers `Some(2)` here while hash comparison
+    /// answers `None` — a shift at position 1 would let both
+    /// answer `None` and prove nothing.
+    #[test]
+    fn index_only_shift_with_identical_hashes_is_not_a_divergence() {
+        let h = [5u8; 32];
+        let a = vec![(0u64, h), (256, h), (512, h), (768, h)];
+        let b = vec![(0u64, h), (256, h), (513, h), (768, h)];
+        assert_eq!(first_divergent_checkpoint(&a, &b), None);
     }
 }

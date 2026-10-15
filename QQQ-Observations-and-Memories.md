@@ -39018,4 +39018,90 @@ opens a canonicalization seam, and comparing a derived value
 instead of the recomputed one verifies nothing.
 → `crates/qqq-cap/src/token.rs`, `crates/qqq-cap/src/lib.rs`, `crates/qqq-cap/Cargo.toml`, `CHANGELOG.md`.
 
+## §O-722 - I-03 bisect: the property test earned its mandate twice
+
+The third I-home is the divergence search, and the audit
+document's order — verify against brute force before trusting —
+paid off twice over. First, the sketch's `hi = mid + 1`
+narrowing never progresses when the probe lands on `hi - 1`
+(traced with n = 2, divergence at 1: infinite loop), so the
+shipped version uses the lower-bound form. Second, my own first
+"fix" (same narrowing, early exit, return `lo`) reported a
+matching index 0 for divergence at 1 — the property test caught
+it on lengths 15/17 within milliseconds, and the final form
+runs to `lo == hi` with a `(lo < common).then_some(lo)`
+answer. Both defects are recorded because each looked
+obviously-right on reading; only the oracle distinguished them.
+A fault-injection run (inverted comparison) fails the property
+test immediately (log kept), proving sensitivity, and the
+implementation compares full `(index, hash)` tuples where the
+sketch compared hashes in the loop but tuples in the guard.
+Gate note: the first full gate on this tree went red on
+`check_wit_vendoring` with every self-test case OK and no
+detail line; five standalone runs green plus a full-gate rerun
+green on the untouched tree, so flake with retry evidence (log
+kept), not drift — the vendored copies are byte-identical.
+Review note (MEDIUM, fixed with red proof): the independent
+review showed tuple comparison breaks binary-search
+monotonicity — an index-only shift differs then matches again,
+and the search probed past it (counterexample log kept). Fixed
+by comparing hashes only, with an aligned-grid contract
+(cross-config comparison is refused at the replay header, not
+here); the brute-force oracle keeps comparing tuples because
+the generator holds grids aligned, and a dedicated test pins
+the contract. Clearing the finding caught a second-order hole:
+the first regression test shifted the index at position 1,
+where both implementations answer `None` — a test that passes
+on the bug it names is theater. The reviewer proved it with an
+independent model; the shift moved to position 2 (tuple
+answers `Some(2)`, hash answers `None`), and a tuple-impl run
+fails it exactly so (log kept) before the hash impl goes
+green. The generalisable rule applies twice: reproduce the
+finding, then reproduce the reproduction.
+Measured: 2000-case property plus fixed points green, 33 replay
+tests green, fmt and clippy `-D warnings` clean (one
+`#[expect]` for invariant-bounded indexing, `is_multiple_of`,
+`try_from`, iterator style in the harness). Record-path hashing
+and golden CI stay scheduled. The generalisable rule: a binary
+search is guilty until the property test acquits it — trace the
+invariants on paper, then let the oracle vote two thousand times.
+→ `crates/qqq-host/src/replay.rs`, `CHANGELOG.md`.
+
+## §O-723 - I-homes: cores shipped, product wiring scheduled, nothing homeless
+
+Costing with live inputs. I-02: F-09's v2 chain exists with an
+HMAC option; the missing piece was signatures — core shipped
+(`audit_checkpoint`, ed25519-dalek 2.2.0 already locked).
+Scheduled: keygen/storage, sink scheduling (every N/T),
+`qqq audit verify`, anchoring — a product wave, home: the
+`I-02` follow-up. I-03: `ReplayLog` chains records and
+`AmbientState` records/replays values; the missing piece was
+comparison — core shipped (`first_divergent_checkpoint` plus
+the mandated property proof). Scheduled: rolling-hash
+maintenance on the record path, golden-file determinism CI — a
+product wave, home: the `I-03` follow-up. I-06: authority is a
+resolved `GrantSet` with no delegation shape; no HMAC crate was
+in the tree. Core shipped (`token`: mint/attenuate/verify,
+closed codec, constant-time compare; new pins hmac 0.12 +
+subtle 2, deny-approved). Scheduled: host-side root-key
+custody, caveat-to-policy wiring (allowlist subsets, call
+counters), delegation API — a product wave, home: the `I-06`
+follow-up. I-05: measured — wasmtime 48.0.6, `preload.rs`
+compiles at deploy (in-memory only, per-item timings already
+reported), linkers are built per instantiation (no
+`InstancePre` cache anywhere), no `.cwasm` on disk, and
+`Component::deserialize` is `unsafe` so the wrapper belongs in
+`qqq-sys` behind a verified-bytes check with a SAFETY doc.
+Nothing to carve as a crypto-sized core: the valuable slice is
+benchmarks-first (cold-start p50/p99 reusing the preload
+harness), then keying (config hash + engine version, which
+`config.rs` already reasons about), then the `qqq-sys`
+wrapper, then the cache. Scheduled as a measured performance
+wave, home: the `I-05` follow-up — declined nothing, because
+the benchmarks may show the link-per-request cost is already
+dominated elsewhere. Phase plans live here, in this entry, and
+each follow-up inherits this wave's red-first/gate/review/CI
+discipline — no second-class phases.
+→ `QQQ-Observations-and-Memories.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

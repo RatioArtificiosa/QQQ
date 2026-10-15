@@ -34,13 +34,17 @@
 //!   case-insensitively, so the difference is representation, not
 //!   policy — except for a handler that reflects header names, which
 //!   the differential echo test pins.
-//! * The idle bound wraps the whole connection rather than tracking
-//!   activity: hyper offers no idle callback, so an activity clock
-//!   would need an IO wrapper. A 75 s connection ceiling is the
-//!   conservative approximation; the drain commit refines it.
-//! * A request past the per-connection ceiling is answered `503` and
-//!   closed, where the in-house path closes bare. The connection is
-//!   still reclaimed; the status tells the client why.
+//! * The idle bound accrues between requests, mirroring `Connection`:
+//!   every answered request stamps an activity clock and holds a
+//!   flight guard while it runs, and the drivers close only when no
+//!   flight is held and nothing arrived within the bound. Response
+//!   sends stamp through the body wrapper, so a progressing send,
+//!   however slow, never trips it. Codec-level traffic (`PING`s) does
+//!   not count.
+//! * A request past the per-connection ceiling is answered `503`: on
+//!   HTTP/1 with `Connection: close` (the connection is still
+//!   reclaimed; the status tells the client why), on HTTP/2
+//!   persisting while the client reconnects for service.
 //! * A `1xx` handler response becomes `500`: a flat response is final,
 //!   and `1xx` has no final meaning. Handlers never emit one; the
 //!   branch exists so a future one cannot desynchronise the stream.
@@ -49,7 +53,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_core::Stream as _;
@@ -100,6 +104,7 @@ pub async fn serve_hyper_h1(
         ctx: OwnedCtx::capture(ctx),
         served: Arc::new(AtomicU64::new(0)),
         protocol: Protocol::H1,
+        watch: Arc::new(IdleWatch::new()),
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     crate::transport::apply_http1(&mut builder, &state.limits);
@@ -114,25 +119,39 @@ pub async fn serve_hyper_h1(
     let idle = state.limits.idle_timeout;
     let drain = state.limits.drain_timeout;
     let shutdown = state.ctx.shutdown.clone();
+    // Poll the inactivity bound instead of sleeping it once: an
+    // absolute sleep kills active connections (a slow flood, a
+    // long-lived multiplexed session) exactly like idle ones, which
+    // the in-house `Connection` never does. Ticks subdivide the
+    // bound so a short test bound still fires near it.
+    let check_every = (idle / 10).max(Duration::from_millis(1));
+    let mut ticker = tokio::time::interval(check_every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(connection);
-    tokio::select! {
-        result = &mut connection => {
-            // The connection ended. Per-request outcomes already went to
-            // the access log; this is the connection's. A hyper-side
-            // header timeout is its own outcome; anything else is the
-            // client going away.
-            match result {
-                Ok(()) => Served::ClientClosed,
-                Err(error) if error.is_timeout() => Served::HeaderTimeout,
-                Err(_error) => Served::ClientClosed,
+    loop {
+        tokio::select! {
+            result = &mut connection => {
+                // The connection ended. Per-request outcomes already went to
+                // the access log; this is the connection's. A hyper-side
+                // header timeout is its own outcome; anything else is the
+                // client going away.
+                match result {
+                    Ok(()) => return Served::ClientClosed,
+                    Err(error) if error.is_timeout() => return Served::HeaderTimeout,
+                    Err(_error) => return Served::ClientClosed,
+                }
+            }
+            () = shutdown.wait() => {
+                connection.as_mut().graceful_shutdown();
+                let _ = tokio::time::timeout(drain, &mut connection).await;
+                return Served::Drained;
+            }
+            _ = ticker.tick() => {
+                if state.watch.is_idle(idle) {
+                    return Served::IdleTimeout;
+                }
             }
         }
-        () = shutdown.wait() => {
-            connection.as_mut().graceful_shutdown();
-            let _ = tokio::time::timeout(drain, &mut connection).await;
-            Served::Drained
-        }
-        () = tokio::time::sleep(idle) => Served::IdleTimeout,
     }
 }
 
@@ -159,6 +178,7 @@ pub async fn serve_hyper_h2(
         ctx: OwnedCtx::capture(ctx),
         served: Arc::new(AtomicU64::new(0)),
         protocol: Protocol::H2,
+        watch: Arc::new(IdleWatch::new()),
     });
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     crate::transport::apply_http2(&mut builder, &state.limits);
@@ -173,22 +193,33 @@ pub async fn serve_hyper_h2(
     let idle = state.limits.idle_timeout;
     let drain = state.limits.drain_timeout;
     let shutdown = state.ctx.shutdown.clone();
+    // Same inactivity poll as the HTTP/1 driver: the bound accrues
+    // between requests, never on an active connection.
+    let check_every = (idle / 10).max(Duration::from_millis(1));
+    let mut ticker = tokio::time::interval(check_every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(connection);
-    tokio::select! {
-        result = &mut connection => {
-            // h2 has no per-request read timeouts, so every connection
-            // error is the connection's outcome, not a request's.
-            match result {
-                Ok(()) => Served::ClientClosed,
-                Err(_error) => Served::ClientClosed,
+    loop {
+        tokio::select! {
+            result = &mut connection => {
+                // h2 has no per-request read timeouts, so every connection
+                // error is the connection's outcome, not a request's.
+                match result {
+                    Ok(()) => return Served::ClientClosed,
+                    Err(_error) => return Served::ClientClosed,
+                }
+            }
+            () = shutdown.wait() => {
+                connection.as_mut().graceful_shutdown();
+                let _ = tokio::time::timeout(drain, &mut connection).await;
+                return Served::Drained;
+            }
+            _ = ticker.tick() => {
+                if state.watch.is_idle(idle) {
+                    return Served::IdleTimeout;
+                }
             }
         }
-        () = shutdown.wait() => {
-            connection.as_mut().graceful_shutdown();
-            let _ = tokio::time::timeout(drain, &mut connection).await;
-            Served::Drained
-        }
-        () = tokio::time::sleep(idle) => Served::IdleTimeout,
     }
 }
 
@@ -269,6 +300,202 @@ struct State {
     ctx: OwnedCtx,
     served: Arc<AtomicU64>,
     protocol: Protocol,
+    watch: Arc<IdleWatch>,
+}
+
+/// Service-observable activity for the idle bound, mirroring
+/// `Connection`'s idle rule: idleness accrues between requests, never
+/// mid-request, and never from connect.
+///
+/// Every `answer()` entry stamps activity and holds a flight guard;
+/// the guard's `Drop` releases it, so cancellation (hyper dropping a
+/// reset stream's future before it answers) cannot wedge the count.
+/// The drivers close only when no flight is held AND no activity
+/// happened within the bound — an active connection, however slow,
+/// is never idle.
+///
+/// What this observes is requests reaching the service, not socket
+/// bytes: hyper owns the bytes, so codec-level traffic (`PING`s,
+/// `WINDOW_UPDATE`s) does not reset the bound, exactly as `Connection`
+/// ignores non-request traffic for idleness. The head-arrival window
+/// is covered by `header_read_timeout` on HTTP/1; on HTTP/2 it rides
+/// with the scheduled header-phase hardening (the field doc says so).
+struct IdleWatch {
+    in_flight: AtomicU64,
+    last_activity: std::sync::Mutex<Instant>,
+}
+
+impl IdleWatch {
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicU64::new(0),
+            last_activity: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Stamp activity and hold a flight: released by `Drop` on every
+    /// exit, including cancellation. The stamp lands under the same
+    /// mutex the idle decision takes, so a decision either sees this
+    /// request (count or stamp) or precedes it entirely — never half.
+    fn hold(&self) -> Flight<'_> {
+        let mut slot = self
+            .last_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Instant::now();
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        Flight { watch: self }
+    }
+
+    /// Stamp activity without holding a flight: response-send polls.
+    fn touch(&self) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+
+    /// Idle only when nothing is flying and nothing arrived recently.
+    /// The mutex is taken BEFORE reading the count, linearizing with
+    /// `hold`: a concurrent hold either completes first (count seen,
+    /// not idle) or lands after (stamp seen next tick) — a decision
+    /// never observes a half-started request as an idle connection.
+    fn is_idle(&self, bound: Duration) -> bool {
+        let slot = self
+            .last_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.in_flight.load(Ordering::SeqCst) == 0 && slot.elapsed() >= bound
+    }
+}
+
+/// A held request flight: `Drop` releases it, so every `answer()`
+/// exit — response, refusal, or hyper cancelling a reset stream —
+/// unholds exactly once.
+struct Flight<'a> {
+    watch: &'a IdleWatch,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        // Stamp completion: without it, a slow handler's answer leaves
+        // idleness measured from request arrival, so a short bound
+        // could close the connection before an empty (HEAD, 204, 304)
+        // response is even sent. Stamp BEFORE releasing the count: the
+        // reverse order lets an idle tick observe zero flights with an
+        // expired stamp and close a connection mid-drop.
+        // (Red-proven: disabling the stamp fails
+        // `flight_drop_stamps_activity`; see `red-drop-stamp-w8b.log`.)
+        self.watch.touch();
+        self.watch.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Response body that stamps service activity on every send poll.
+///
+/// Hyper sends the response after `answer()` returns, when no flight
+/// is held — without this, a stalled send looks idle and the bound
+/// reclaims a connection still doing work (the in-house path never
+/// idle-closes mid-write). The body travels as ≤16KB frames and every
+/// `poll_frame` stamps the watch, so the stamps track the send: a
+/// progressing send, however slow, never trips the bound, while a
+/// fully stalled one (no polls at all) still does.
+///
+/// The chunking is load-bearing, not cosmetic: hyper polls a
+/// single-frame body exactly once no matter its size (the h1 write
+/// buffer then drains silently), so one stamp per response would
+/// cover only the send's start. 16KB aligns with the h2 DATA frame
+/// ceiling — no fragmentation waste — and sits well under h1's
+/// 64KB buffer quantum, so polls recur as the socket drains.
+/// `size_hint` stays exact and `is_end_stream` mirrors `Full`, so
+/// framing decisions see the same body hyper would.
+struct WatchBody {
+    data: Bytes,
+    pos: usize,
+    watch: Arc<IdleWatch>,
+}
+
+/// Largest single frame the watch body yields: the h2 DATA ceiling.
+const WATCH_FRAME_BYTES: usize = 16 * 1024;
+
+impl WatchBody {
+    fn new(body: Bytes, watch: &Arc<IdleWatch>) -> Self {
+        Self {
+            data: body,
+            pos: 0,
+            watch: Arc::clone(watch),
+        }
+    }
+}
+
+impl http_body::Body for WatchBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.pos >= this.data.len() {
+            return Poll::Ready(None);
+        }
+        this.watch.touch();
+        let end = (this.pos + WATCH_FRAME_BYTES).min(this.data.len());
+        let chunk = this.data.slice(this.pos..end);
+        this.pos = end;
+        Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact((self.data.len() - self.pos) as u64)
+    }
+}
+
+/// The per-connection ceiling refusal, rendered and recorded.
+///
+/// Extracted so `answer` stays a pipeline: the rule is count first
+/// (every attempt, including reset streams), refuse past the ceiling
+/// with a `503` the client can read, and record it whenever the head
+/// maps — an answer without a record is a refusal the operator cannot
+/// see fire. Heads that do not map stay silent, mirroring
+/// `reject_parse_error`.
+fn refuse_ceiling(
+    state: &State,
+    request: &hyper::Request<Incoming>,
+    served: u64,
+    started: Instant,
+) -> Option<hyper::Response<WatchBody>> {
+    if ceiling_for(served, state.limits.max_requests_per_connection) != Ceiling::Refuse {
+        return None;
+    }
+    let response = Response::text(503, "this connection reached its request ceiling");
+    let mapped = match state.protocol {
+        Protocol::H1 => map_head(request),
+        Protocol::H2 => map_head_h2(request),
+    };
+    Some(match mapped {
+        Ok(head) => {
+            let (path, _query) = split_target(&head.target);
+            close_after(render_recorded(
+                state,
+                Some((&head, path)),
+                &response,
+                0,
+                started,
+            ))
+        }
+        Err(_) => close_after(render_validated(
+            &response,
+            false,
+            &state.limits,
+            &state.watch,
+        )),
+    })
 }
 
 /// The pre-reading gates, in `refuse_before_reading` order.
@@ -283,7 +510,7 @@ fn refuse_early(
     path: &str,
     span: u64,
     started: Instant,
-) -> Option<hyper::Response<http_body_util::Full<Bytes>>> {
+) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
     if ctx.loopback_only {
         let host = head.header("host").unwrap_or("");
@@ -333,7 +560,7 @@ fn render_refusal(
     path: &str,
     response: &Response,
     started: Instant,
-) -> hyper::Response<http_body_util::Full<Bytes>> {
+) -> hyper::Response<WatchBody> {
     close_after(render_recorded(
         state,
         Some((head, path)),
@@ -354,7 +581,7 @@ fn refuse_tenant_limits(
     path: &str,
     span: u64,
     started: Instant,
-) -> Option<hyper::Response<http_body_util::Full<Bytes>>> {
+) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
     let tenant_key = ctx.tenant;
     let tenant: &str = &ctx.tenant_label;
@@ -398,7 +625,7 @@ fn refuse_auth_policy(
     path: &str,
     span: u64,
     started: Instant,
-) -> Option<hyper::Response<http_body_util::Full<Bytes>>> {
+) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
     let tenant: &str = &ctx.tenant_label;
     let policy = ctx.auth.as_ref()?;
@@ -438,7 +665,7 @@ fn serve_special(
     head: &RequestHead,
     path: &str,
     started: Instant,
-) -> Option<hyper::Response<http_body_util::Full<Bytes>>> {
+) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
     if let Some(metrics_path) = ctx.metrics_path.as_deref()
         && path == metrics_path
@@ -555,7 +782,7 @@ enum Protocol {
 async fn answer_h2(
     request: hyper::Request<Incoming>,
     state: Arc<State>,
-) -> Result<hyper::Response<http_body_util::Full<Bytes>>, hyper::Error> {
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
     let mut response = answer(request, &state).await?;
     response.headers_mut().remove(hyper::header::CONNECTION);
     Ok(response)
@@ -571,7 +798,12 @@ async fn answer_h2(
 async fn answer(
     request: hyper::Request<Incoming>,
     state: &State,
-) -> Result<hyper::Response<http_body_util::Full<Bytes>>, hyper::Error> {
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    // Service-level activity first: this request is work the
+    // connection did, so the idle bound restarts here. The guard's
+    // `Drop` unholds on every exit — response, refusal, or hyper
+    // cancelling a reset stream mid-answer.
+    let _flight = state.watch.hold();
     let ctx = &state.ctx;
     let tenant: &str = &ctx.tenant_label;
     let request_started = Instant::now();
@@ -579,36 +811,10 @@ async fn answer(
     // The per-connection ceiling first, mirroring `Connection`'s
     // `RequestLimit`: the in-house path checks before reading, so a
     // request past the ceiling is never served. Here it is answered
-    // `503` rather than closed bare, so the client learns why — the
-    // connection is still reclaimed either way, and there is no head
-    // to log, mirroring the in-house silence.
+    // `503` rather than closed bare, so the client learns why.
     let served = state.served.fetch_add(1, Ordering::SeqCst);
-    let ceiling = ceiling_for(served, state.limits.max_requests_per_connection);
-    if ceiling == Ceiling::Refuse {
-        let response = Response::text(503, "this connection reached its request ceiling");
-        // Recorded when the head maps: the in-house path checks before
-        // reading, so a request past the ceiling is never served — but
-        // HERE the 503 travels the wire, and an answer without a record
-        // is a refusal the operator cannot see fire (and a metric that
-        // never counts the bound working). Heads that do not map stay
-        // silent, mirroring `reject_parse_error`.
-        let mapped = match state.protocol {
-            Protocol::H1 => map_head(&request),
-            Protocol::H2 => map_head_h2(&request),
-        };
-        return Ok(match mapped {
-            Ok(head) => {
-                let (path, _query) = split_target(&head.target);
-                close_after(render_recorded(
-                    state,
-                    Some((&head, path)),
-                    &response,
-                    0,
-                    request_started,
-                ))
-            }
-            Err(_) => close_after(render_validated(&response, false, &state.limits)),
-        });
+    if let Some(refusal) = refuse_ceiling(state, &request, served, request_started) {
+        return Ok(refusal);
     }
 
     // --- The head, mapped to the in-house taxonomy ----------------------
@@ -628,6 +834,7 @@ async fn answer(
                 &response,
                 false,
                 &state.limits,
+                &state.watch,
             )));
         }
     };
@@ -704,7 +911,9 @@ async fn answer(
     // headers are forbidden), so the warned response serves plainly and
     // the over-ceiling answer stays a persisting `503` — a GOAWAY-based
     // warning is drain-commit work, and the budget holds either way.
-    if ceiling == Ceiling::Warn && state.protocol == Protocol::H1 {
+    if ceiling_for(served, state.limits.max_requests_per_connection) == Ceiling::Warn
+        && state.protocol == Protocol::H1
+    {
         return Ok(close_after(rendered));
     }
     Ok(rendered)
@@ -719,7 +928,7 @@ fn render_recorded(
     response: &Response,
     body_bytes: u64,
     started: Instant,
-) -> hyper::Response<http_body_util::Full<Bytes>> {
+) -> hyper::Response<WatchBody> {
     let ctx = &state.ctx;
     let tenant: &str = &ctx.tenant_label;
     // Resolved BEFORE recording: the record must describe the wire
@@ -745,9 +954,9 @@ fn render_recorded(
                 body_bytes,
             );
         }
-        render_inner(&effective, is_head(head))
+        render_inner(&effective, is_head(head), &state.watch)
     } else {
-        render_inner(&effective, false)
+        render_inner(&effective, false, &state.watch)
     }
 }
 
@@ -756,9 +965,7 @@ fn render_recorded(
 /// The in-house path closes the socket for every one of these cases
 /// (unread body, untrustworthy framing, one-shot routes); hyper closes
 /// on the header instead.
-fn close_after(
-    mut response: hyper::Response<http_body_util::Full<Bytes>>,
-) -> hyper::Response<http_body_util::Full<Bytes>> {
+fn close_after(mut response: hyper::Response<WatchBody>) -> hyper::Response<WatchBody> {
     response.headers_mut().insert(
         hyper::header::CONNECTION,
         hyper::header::HeaderValue::from_static("close"),
@@ -777,9 +984,10 @@ fn render_validated(
     response: &Response,
     head_request: bool,
     limits: &HyperLimits,
-) -> hyper::Response<http_body_util::Full<Bytes>> {
+    watch: &Arc<IdleWatch>,
+) -> hyper::Response<WatchBody> {
     let effective = effective_response(response, limits);
-    render_inner(&effective, head_request)
+    render_inner(&effective, head_request, watch)
 }
 
 /// Resolve the response the wire gets: the handler's, unless the F-02
@@ -809,7 +1017,8 @@ fn effective_response<'a>(
 fn render_inner(
     response: &Response,
     head_request: bool,
-) -> hyper::Response<http_body_util::Full<Bytes>> {
+    watch: &Arc<IdleWatch>,
+) -> hyper::Response<WatchBody> {
     let status = hyper::StatusCode::from_u16(response.status)
         .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = hyper::Response::builder().status(status);
@@ -830,12 +1039,14 @@ fn render_inner(
             return render_inner(
                 &Response::text(500, "response failed validation: bad header"),
                 head_request,
+                watch,
             );
         };
         let Ok(header_value) = value.parse::<hyper::header::HeaderValue>() else {
             return render_inner(
                 &Response::text(500, "response failed validation: bad header"),
                 head_request,
+                watch,
             );
         };
         builder = builder.header(header_name, header_value);
@@ -851,12 +1062,12 @@ fn render_inner(
     // response does not claim the representation is empty.
     builder = builder.header(hyper::header::CONTENT_LENGTH, real_len.to_string());
     builder
-        .body(http_body_util::Full::new(body))
+        .body(WatchBody::new(body, watch))
         .unwrap_or_else(|_| {
             hyper::Response::builder()
                 .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                .body(http_body_util::Full::new(Bytes::new()))
-                .unwrap_or_else(|_| hyper::Response::new(http_body_util::Full::new(Bytes::new())))
+                .body(WatchBody::new(Bytes::new(), watch))
+                .unwrap_or_else(|_| hyper::Response::new(WatchBody::new(Bytes::new(), watch)))
         })
 }
 
@@ -1250,6 +1461,83 @@ mod tests {
             builder = builder.header(*name, *value);
         }
         builder.body(()).unwrap_or_else(|_| hyper::Request::new(()))
+    }
+
+    /// Every send poll stamps activity — and polls recur across the
+    /// whole send, not just its start: backdate the watch past the
+    /// bound before EACH poll of a 40KB body (16K + 16K + 8K + end)
+    /// and every poll revives it. A single-frame wrapper would stamp
+    /// once and go silent for the rest of a slow send; the chunking
+    /// exists so the stamps track send progress to the last byte.
+    /// Red before `WatchBody` exists (it names the type and its
+    /// constructor); red at runtime if any poll stops stamping.
+    #[tokio::test]
+    async fn watch_body_stamps_on_poll() {
+        use http_body::Body as _;
+
+        fn backdate(watch: &IdleWatch) {
+            let mut slot = watch.last_activity.lock().expect("test mutex held");
+            *slot = Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("backdate within clock range");
+        }
+
+        let watch = Arc::new(IdleWatch::new());
+        let bound = Duration::from_secs(60);
+        let mut body = WatchBody::new(Bytes::from(vec![b'z'; 40 * 1024]), &watch);
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut pinned = std::pin::Pin::new(&mut body);
+        let mut bytes = 0usize;
+        for (n, want) in [16 * 1024, 16 * 1024, 8 * 1024].into_iter().enumerate() {
+            backdate(&watch);
+            assert!(watch.is_idle(bound), "poll {n}: backdated watch reads idle");
+            match pinned.as_mut().poll_frame(&mut cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let data = frame.into_data().expect("data frame");
+                    assert_eq!(data.len(), want, "poll {n}: frame carries its chunk");
+                    assert!(data.iter().all(|&b| b == b'z'), "poll {n}: bytes unchanged");
+                    bytes += data.len();
+                }
+                other => panic!("poll {n}: DATA frame expected, got {other:?}"),
+            }
+            assert!(
+                !watch.is_idle(bound),
+                "poll {n}: a send poll stamps activity like a request"
+            );
+        }
+        assert_eq!(bytes, 40 * 1024);
+        backdate(&watch);
+        match pinned.as_mut().poll_frame(&mut cx) {
+            Poll::Ready(None) => {}
+            other => panic!("end of body expected, got {other:?}"),
+        }
+        assert!(
+            watch.is_idle(bound),
+            "the terminal poll carries no bytes, so it stamps nothing"
+        );
+    }
+
+    /// Dropping a flight stamps completion: backdate past the bound
+    /// while held (invisible — the flight blocks idleness), drop, and
+    /// the watch is alive. Without the drop stamp, a slow handler's
+    /// answer would leave idleness measured from request arrival.
+    #[test]
+    fn flight_drop_stamps_activity() {
+        let watch = Arc::new(IdleWatch::new());
+        let bound = Duration::from_secs(60);
+        let flight = watch.hold();
+        {
+            let mut slot = watch.last_activity.lock().expect("test mutex held");
+            *slot = Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("backdate within clock range");
+        }
+        drop(flight);
+        assert!(
+            !watch.is_idle(bound),
+            "completion stamps like arrival and polling"
+        );
     }
 
     /// The smuggling rows refuse with the in-house taxonomy, not a guess.

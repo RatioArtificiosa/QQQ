@@ -521,10 +521,7 @@ async fn exchange_as(
     }
 }
 
-async fn read_response(
-    stream: &mut TcpStream,
-    head_request: bool,
-) -> (String, Vec<(String, String)>, Vec<u8>) {
+async fn read_response_head(stream: &mut TcpStream) -> (String, Vec<(String, String)>) {
     let mut head = Vec::new();
     loop {
         let mut byte = [0u8; 1];
@@ -545,6 +542,14 @@ async fn read_response(
         let (k, v) = line.split_once(':').expect("header colon");
         headers.push((k.trim().to_lowercase(), v.trim().to_owned()));
     }
+    (status, headers)
+}
+
+async fn read_response(
+    stream: &mut TcpStream,
+    head_request: bool,
+) -> (String, Vec<(String, String)>, Vec<u8>) {
+    let (status, headers) = read_response_head(stream).await;
     let len: usize = if head_request {
         0
     } else {
@@ -1281,6 +1286,87 @@ async fn hyper_keep_alive_serves_three() {
         assert_eq!(status, "HTTP/1.1 200 OK");
         assert_eq!(body, b"hello from h");
     }
+}
+
+/// Activity resets the idle bound on HTTP/1 too: six keep-alive
+/// `GET`s 150ms apart on a 300ms bound all answer 200. (Wiring pin
+/// for the h1 driver arm — the red-first proof lives on the h2 side,
+/// where the shared `answer()` instrumentation is identical.)
+#[tokio::test]
+async fn hyper_activity_resets_the_idle_bound() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let mut limits = default_limits();
+    limits.idle_timeout = Duration::from_millis(300);
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        limits,
+        Pieces::bare(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(hyper.addr).await.expect("connect");
+    for n in 0..6 {
+        stream
+            .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write");
+        let (status, _, body) = read_response(&mut stream, false).await;
+        assert_eq!(
+            status, "HTTP/1.1 200 OK",
+            "request {n} on an active connection"
+        );
+        assert_eq!(body, b"hello from h");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// A slow reader still receives the whole body: the idle bound
+/// accrues between requests, never mid-send. (End-to-end regression
+/// net: on roomy loopback buffers the whole body completes
+/// server-side before the first client read, so the mechanism proof
+/// lives in the `watch_body_stamps_on_poll` unit test, which needs
+/// no kernel cooperation to exhibit a stalled send.)
+#[tokio::test]
+async fn hyper_slow_reader_gets_full_body() {
+    let routes = [(Method::Get, "/big", "big")];
+    let big: Handler =
+        Arc::new(|_head, _m: &RouteMatch| Response::text(200, "y".repeat(256 * 1024)));
+    let mut limits = default_limits();
+    limits.idle_timeout = Duration::from_millis(500);
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(big),
+        limits,
+        Pieces::bare(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(hyper.addr).await.expect("connect");
+    stream
+        .write_all(b"GET /big HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("write");
+    // Head first, then trickle the body: 4KB per 50ms while the
+    // transfer spans seconds — ten times the bound.
+    let (status, headers) = read_response_head(&mut stream).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let len: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("content-length");
+    assert_eq!(len, 256 * 1024);
+    let mut body = vec![0u8; len];
+    let mut got = 0usize;
+    while got < len {
+        let end = (got + 4096).min(len);
+        stream
+            .read_exact(&mut body[got..end])
+            .await
+            .expect("body trickle reads to the end, never truncated");
+        got = end;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(body.iter().all(|&b| b == b'y'));
 }
 
 /// An idle hyper connection dies on the idle bound, reported as such.

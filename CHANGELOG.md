@@ -4,6 +4,25 @@
 
 ### Security
 
+- **deps**: wasmtime 48.0.5 → 48.0.6 plus wasmtime-wasi to match
+  (`RUSTSEC-2026-0352`–`0356`): four guest-reachable panics in
+  async-lifted `call`, `call_async` cancellation, component
+  stream/future type confusion, and guest-realloc call-to-host,
+  plus a macOS/FreeBSD WASI filesystem sandbox escape. Triaged per
+  SEC-014/R-04: QQQ calls `call_async` from `instance.rs` and
+  drives component streams, so the four panic entries are
+  plausibly guest-triggerable (panics, not escapes — availability,
+  contained by the F-01 abort guard either way); the filesystem
+  escape is unreachable here by construction (WASI p2 only, no
+  preopens, preview-1 filesystem ABI not compiled in — asserted by
+  `registering_against_a_real_linker_succeeds_and_links_no_filesystem_or_sockets`).
+  No Advisories issue open. `ENGINE_VERSION` moved with the lock
+  (both anti-drift tests green), hostile suite 6/6 and fuzz corpus
+  5/5 green on the new engine, full host suite 613/614 with the
+  single failure re-proven 3/3 green in isolation — the known
+  §O-683 millisecond-boundary flake, not a taxonomy shift, and it
+  stays scheduled as Phase-5 work.
+
 - **deps**: rustls 0.23.45 → 0.23.46 (`RUSTSEC-2026-0346`–`0349`):
   derived `Debug` on client session values leaked key material,
   ECH rejection mis-ordered buffered application data, Brotli cert
@@ -71,6 +90,24 @@
   stream must not kill its h2 siblings, so the ceiling carries the
   bound the in-house socket-close carried). In-house paths
   untouched; no deletion.
+
+- **serve**: the hyper drivers track idle as inactivity, not wall
+  time (`F-16`): the first version slept the bound once from
+  connect, killing active connections exactly like idle ones — the
+  in-house `Connection` accrues idle only between requests, never
+  mid-request. An `IdleWatch` shared by both drivers stamps every
+  answered request, guards each flight through cancellation, polls
+  for no-flight plus no-recent-activity on subdivided ticks, and
+  stamps response sends through a `Body` wrapper (a stalled send
+  still reclaims; a progressing one never trips). Flood-test
+  hardening in the same unit: the PING test splits into strict
+  1k-answered plus 100k survival-via-fresh-connection (an undrained
+  100k blast outruns every absolute bound on a starved runner), the
+  reset-budget knob raises both budgets, the sequential test raises
+  the pending-accept budget, and the multiplex harness sorts
+  interleaved answers by stream with a deterministic slow/fast
+  proof. Pins: activity survival past the bound on both protocols,
+  send-poll stamping, ceiling and cap metering, budget causality.
 
 - **serve**: the request line must be ASCII outright (`I-07`
   differential finding): the nightly fuzzer caught U+2001 (EM QUAD)

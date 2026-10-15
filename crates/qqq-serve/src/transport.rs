@@ -314,12 +314,16 @@ pub struct HyperLimits {
     pub h2_ping_ack_timeout: Duration,
     /// Idle-connection bound, QQQ-enforced for both protocols.
     ///
-    /// Carried here so the two transports cannot disagree about what the
-    /// bound is — but hyper does not enforce it. The serve path wraps
-    /// each connection in this deadline (the in-house path closes from
-    /// `Connection::poll` with `CloseReason::IdleTimeout`); until the
-    /// serve-path commit lands, this field documents the bound the map
-    /// must carry, enforced on the in-house side only.
+    /// Inactivity between requests, mirroring `Connection`: the serve
+    /// path stamps every answered request and the drivers close only
+    /// when no request is flying and none arrived within the bound —
+    /// an active connection never trips it, however slow. Hyper does
+    /// not enforce it; the drivers poll it. Codec-level traffic
+    /// (PINGs) does not count, exactly as `Connection` ignores
+    /// non-request traffic for idleness. Must exceed
+    /// `header_read_timeout` (asserted in the mapping test): under an
+    /// inverted config the idle poll could close a trickling head
+    /// with the wrong reason on HTTP/1.
     ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
@@ -424,6 +428,17 @@ impl Default for HyperLimits {
 /// ```
 #[must_use]
 pub fn hyper_limits_for(config: &crate::conn::ConnectionConfig) -> HyperLimits {
+    // Slow-loris order, enforced where authors will trip it: a head
+    // must time out before idleness could misattribute it. Debug-only
+    // because the map cannot refuse a config (it returns bounds, not
+    // a verdict) — but an inverted deployment deserves a loud test
+    // failure rather than a quietly misattributed timeout in prod.
+    debug_assert!(
+        config.header_timeout < config.idle_timeout,
+        "header {:?} must be under idle {:?}, or slow heads misattribute",
+        config.header_timeout,
+        config.idle_timeout
+    );
     HyperLimits {
         header_read_timeout: config.header_timeout,
         idle_timeout: config.idle_timeout,
@@ -486,6 +501,18 @@ mod tests {
         let limits = hyper_limits_for(&config);
         assert_eq!(limits.header_read_timeout, Duration::from_secs(3));
         assert_eq!(limits.idle_timeout, Duration::from_secs(30));
+        // The slow-loris order the in-house path assumes: a head must
+        // time out before idleness could ever misattribute it. An
+        // inverted config (idle under header) would let the idle poll
+        // close a trickling head with the wrong reason on HTTP/1;
+        // mapping a config that inverts the relationship is almost
+        // certainly a mistake, and this trips before it ships.
+        assert!(
+            limits.header_read_timeout < limits.idle_timeout,
+            "header {:?} must be under idle {:?}",
+            limits.header_read_timeout,
+            limits.idle_timeout
+        );
         // Connection budgets ride the same map: a ceiling the map forgot
         // would leave one transport unbounded.
         assert_eq!(

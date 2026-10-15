@@ -95,6 +95,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 # with in-memory `Full` bodies, and `Bytes` is the buffer they share with
 # the body reader. Both used by non-test code.
 http-body-util = "0.1"
+# The `Body` trait for the send-stamping wrapper (`F-16`, Wave 8): the
+# idle bound must observe response sends, not just answered requests,
+# so responses travel in a `Body` impl that stamps the watch on every
+# poll. Version 1.1.0, MIT — same license family as hyper, already in
+# the lockfile through hyper, declared directly because the impl
+# names it. Used by non-test code.
+http-body = "1"
 bytes = "1"
 # Polling hyper's body stream inside the `AsyncRead` adapter (`F-16`):
 # `BodyStream` speaks `futures_core::Stream`, and the adapter is the only

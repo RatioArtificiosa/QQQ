@@ -38612,4 +38612,147 @@ refutation. Read the frames the test sends before attributing its
 death.
 → `crates/qqq-serve/tests/hyper_h2.rs`.
 
+## §O-707 - The hyper idle bound was absolute; in-house idle is inactivity
+
+The Windows CI death ending in `test result ... finished in
+300.08s` reframes §O-705's triage: raising the idle bound to 300s
+only moved the cliff, because the cliff itself is the bug. The
+hyper drivers slept the bound once from connect; the in-house
+`Connection` accrues idle only between requests (`idle_since` set
+on response, cleared on request arrival, never while in flight).
+An absolute bound kills active connections — slow floods,
+long-lived multiplexed sessions — exactly like idle ones, which no
+in-house path does. Fixed with an `IdleWatch` both drivers share:
+every `answer()` entry stamps activity and holds a flight guard
+whose `Drop` releases on response, refusal, or hyper cancelling a
+reset stream; the drivers poll for no-flight plus no-recent-
+activity on a subdivided tick instead of sleeping once. Codec-level
+traffic still does not count, exactly as `Connection` ignores
+non-request traffic. Red proof (`red-idle-absolute-w8b.log`): six
+150ms-spaced `GET`s on a 300ms bound died at 0.32s on the absolute
+driver; green after, on both protocols (the h1 twin pins its
+driver arm; the shared `answer()` hook is one instrumentation
+point). The same round fixed two more CI findings: the multiplex
+harness asserted arrival order and died on macos when the server
+answered out of order — now a pending-response store keyed by
+stream with HPACK decoded in arrival order, plus a deterministic
+slow/fast reorder test (and a self-caught rewrite bug: remove-
+then-check dropped unfinished entries, status 0 — the suite caught
+it before review); and the ping test is restructured into strict
+1k-answered plus 100k survival-via-fresh-connection, with the death
+branch proven green by a forced kill (no theater: only server
+survival is pinned in phase 2). Full suites: 20/20 h2, 23/23 h1,
+740 lib. The generalisable rule: a timeout that fires on elapsed
+time since connect is a lifetime cap wearing an idle bound's name
+— check what resets it before trusting it.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/transport.rs`, `crates/qqq-serve/tests/hyper_h2.rs`, `crates/qqq-serve/tests/hyper_serve.rs`.
+
+## §O-708 - Fourth review round: the watch stopped at answer-return
+
+The idle-rework review found one P1 and three P2s, all fixed with
+red proofs. (1) P1: the flight guard covered `answer()` but not the
+response send — hyper sends after the future returns, so a stalled
+send looked idle while the in-house path never idle-closes
+mid-write. Fixed with `WatchBody`, a `Body` impl that stamps the
+watch on every send poll: progressing sends never trip the bound,
+fully stalled ones still do (reclaim beats the in-house hang, and
+the doc says so). Red-first unit test `watch_body_stamps_on_poll`
+(backdated watch idle, one poll, alive again); an end-to-end
+trickle test CANNOT exhibit the kill locally because kernel
+buffers absorb sub-cap bodies server-side — that near-miss is
+recorded in the test's own doc rather than hidden. (2) P2: the
+idle decision read the count before the mutex, racing a
+just-starting request. Fixed by taking the mutex first in both
+`hold` and `is_idle`, linearizing the decision with the transition.
+(3) P2: the phase-2 flood's write loop had no deadline — a fully
+backpressured blast blocks forever instead of failing, so each
+write now carries 5s before the loop breaks to the survival `GET`.
+(4) P3 plus two doc fixes: the module doc still described the
+absolute bound, and the idle field now states the
+header-under-idle ordering its mapping test asserts. Incidental
+catches while implementing: `Waker::noop()` returns `&'static
+Waker` (the borrow is needless — clippy knew before I did), the
+`unsafe` RawWaker recipe is unusable under this crate's forbid
+(replaced, no exception requested), and extracting `refuse_ceiling`
+was required when the flight line pushed `answer()` past the
+length lint. Full suites: 741 lib, 24 h1, 20 h2. The generalisable
+rule: activity tracking must cover the whole unit of work the
+bound governs — answer, send, and anything between — or the bound
+has a blind window exactly where slow clients live.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/transport.rs`, `crates/qqq-serve/Cargo.toml`, `crates/qqq-serve/tests/hyper_serve.rs`, `crates/qqq-serve/tests/hyper_h2.rs`.
+
+## §O-709 - One stamp per response is no stamping at all; chunk the body
+
+The review of the review fix found the hole in it: hyper polls a
+single-frame body exactly once no matter its size (verified in the
+h1 dispatcher: frames are polled greedily until the ~64KB conn
+buffer fills, and a 1MiB `Full` is consumed by the first poll),
+so the first `WatchBody` stamped once and went silent for the rest
+of a slow send — the P1 it was built for, unclosed. Fixed by
+traveling as ≤16KB frames (h2's DATA ceiling, well under h1's
+buffer quantum): polls now recur as the socket drains, and the
+unit test proves it by backdating past the bound before EACH of
+three polls across a 40KB body, plus a terminal poll that stamps
+nothing. Also closed in the round: a `Mutex`-ordered idle
+decision (no half-started request reads as idle), a 5s bound on
+each phase-2 flood write (a fully backpressured blast blocks
+forever rather than failing), and a `debug_assert!` on the
+header-under-idle ordering where inverted configs would
+misattribute (doc-only beyond that: the outcome is still a close).
+Incidental: `Waker::noop()` returns `&'static Waker`, and 40KB
+stack arrays trip the large-array lint (heap `vec!` instead). The
+generalisable rule: a wrapper that observes once per unit proves
+nothing about a process — count the polls the consumer actually
+performs, in its source, before claiming coverage.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/transport.rs`.
+
+## §O-710 - A fault injection that changes nothing proves nothing
+
+The drop-stamp red proof failed twice before it succeeded, both
+times instructively. First attempt: the injection inserted
+commented-out lines ABOVE the real `touch()` call instead of
+disabling it — the test passed, and the passing run was recorded
+as evidence of nothing. Found only by reading the injected hunk
+instead of trusting the green run. Second attempt: same class of
+mistake avoided by grepping the disabled symbol out of the
+compiled file before running. True red (`red-drop-stamp-w8b.log`):
+comment the real line, fresh compile observed in output, test
+fails on `completion stamps like arrival and polling`; restore,
+green. Companion lesson from the same night: `cargo clean -p`
+on a shared target dir wiped 51GB and cost a four-hour rebuild —
+never clean what every future build needs; the red proof that
+waited on it was a one-line unit test. The generalisable rule:
+a red proof has three parts — the disabled control ABSENT from
+the compiled artifact, a fresh compile observed, and the failure
+on the assert that names the control. Any fewer is theater.
+→ `crates/qqq-serve/src/serve_hyper.rs`.
+
+## §O-711 - Five wasmtime advisories arrive as one bump, and the flake says hello
+
+`cargo deny` went red a second time on an untouched tree:
+`RUSTSEC-2026-0352`–`0356` against wasmtime 48.0.5, fixed in
+48.0.6. Triage per SEC-014/R-04 steps 1–2: four entries are
+guest-triggerable panics (async-lifted `call`, `call_async`
+cancellation, stream/future type confusion, realloc
+call-to-host), and QQQ genuinely drives `call_async`
+(`instance.rs`) and component streams — so for those four,
+reachability is assumed, not excluded. The fifth
+(`RUSTSEC-2026-0352`, a macOS/FreeBSD WASI filesystem sandbox
+escape) is unreachable here by construction — WASI p2 only, no
+preopens, preview-1 filesystem ABI not compiled in, asserted by
+test — a correction review caught after the first triage draft
+claimed all five reachable; the bump patches it regardless.
+`cargo update -p wasmtime -p wasmtime-wasi` moved the lock; `ENGINE_VERSION`
+moved with it (both anti-drift tests green); hostile 6/6 and
+fuzz corpus 5/5 green on the new engine. The full host suite
+went 613/614 with `two_identical_events_render_identically`
+failing once — then 3/3 green in isolation, which is the
+signature of the known §O-683 millisecond flake under load, not
+an engine taxonomy shift; it remains scheduled Phase-5 work with
+its red proof still owed. No Advisories issue open. The
+generalisable rule: a failure during an unrelated upgrade is
+either the upgrade's fault or the flake's turn — three isolated
+greens distinguish them, and the distinction is the disposition.
+→ `Cargo.lock`, `crates/qqq-host/src/config.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -1159,6 +1159,11 @@ pub struct AuditStream {
     /// unkeyed v2 rows (timestamps, plain hash); v1 rows verify without
     /// any key either way.
     key: Option<ChainKey>,
+    /// An injected clock for determinism tests (§O-683). `None` reads
+    /// wall time, which is what every production stream does — the
+    /// field exists so a test can pin time rather than race it, and
+    /// only test code ever sets it.
+    fixed_clock_ms: Option<u64>,
 }
 
 /// Milliseconds since the Unix epoch, saturating on clock error.
@@ -1174,6 +1179,26 @@ fn now_unix_ms() -> u64 {
 }
 
 impl AuditStream {
+    /// The clock this stream stamps rows with: the injected fixed
+    /// instant in tests that pin time, wall time everywhere else.
+    /// One decision point, so production and test rows cannot
+    /// disagree about what "now" means.
+    fn clock_ms(&self) -> u64 {
+        self.fixed_clock_ms.unwrap_or_else(now_unix_ms)
+    }
+
+    /// Pin this stream's clock to a fixed instant, for determinism
+    /// tests (§O-683).
+    ///
+    /// Test-only on purpose: production evidence must carry wall
+    /// time, and a second public constructor for "a stream with a
+    /// fake clock" would be a quiet invitation to ship timeless
+    /// evidence. The name says what it is and who it is for.
+    #[cfg(test)]
+    fn set_fixed_clock_for_test(&mut self, ms: u64) {
+        self.fixed_clock_ms = Some(ms);
+    }
+
     /// A stream holding at most `capacity` records.
     ///
     /// # Errors
@@ -1201,6 +1226,7 @@ impl AuditStream {
             base: genesis_digest(),
             next: 1,
             key: None,
+            fixed_clock_ms: None,
         })
     }
 
@@ -1332,6 +1358,7 @@ impl AuditStream {
             base: genesis_digest(),
             next,
             key: None,
+            fixed_clock_ms: None,
         };
         if let Err((sequence, reason)) = stream.verify_chain() {
             return Err(format!(
@@ -1393,6 +1420,7 @@ impl AuditStream {
             base,
             next,
             key,
+            fixed_clock_ms: None,
         };
         if let Err((sequence, reason)) = stream.verify_chain() {
             return Err(format!(
@@ -1428,7 +1456,7 @@ impl AuditStream {
         }
         let sequence = self.next;
         self.next += 1;
-        let timestamp_unix_ms = now_unix_ms();
+        let timestamp_unix_ms = self.clock_ms();
         let chain = AuditRecord::compute_chain_v2(
             &AuditFields {
                 sequence,
@@ -2515,14 +2543,41 @@ mod tests {
 
     /// Two records of the same event must render identically, or a digest
     /// comparison between hosts means nothing.
+    ///
+    /// Both streams run on an injected fixed clock (§O-683): the
+    /// production clock reads wall time, and a millisecond boundary
+    /// ticking between the two pushes used to flake this assertion.
+    /// Pinning the clock makes the determinism under test exact
+    /// rather than probabilistic.
     #[test]
     fn two_identical_events_render_identically() {
         let mut a = stream(4);
         let mut b = stream(4);
+        a.set_fixed_clock_for_test(1_700_000_000_000);
+        b.set_fixed_clock_for_test(1_700_000_000_000);
         push(&mut a, Outcome::Granted);
         push(&mut b, Outcome::Granted);
         assert_eq!(a.records()[0].to_json(), b.records()[0].to_json());
         assert_eq!(a.head(), b.head());
+    }
+
+    /// The injected clock drives the stamp: forcing a tick between
+    /// pushes must change the render. Without this, the fixed clock
+    /// could be stored-but-unread — a seam that proves nothing — and
+    /// this test would pass vacuously.
+    #[test]
+    fn a_forced_tick_between_pushes_changes_the_render() {
+        let mut s = stream(4);
+        s.set_fixed_clock_for_test(1_700_000_000_000);
+        push(&mut s, Outcome::Granted);
+        let first = s.records()[0].to_json();
+        s.set_fixed_clock_for_test(1_700_000_000_001);
+        push(&mut s, Outcome::Granted);
+        assert_ne!(
+            first,
+            s.records()[1].to_json(),
+            "a forced millisecond tick must move the timestamp"
+        );
     }
 
     #[test]

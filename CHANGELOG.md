@@ -294,6 +294,15 @@
 
 ### Changed
 
+- **audit**: the millisecond-boundary flake in
+  `two_identical_events_render_identically` gets its durable fix
+  (§O-683): `AuditStream` carries an injectable clock, wall time by
+  default, pinned by `set_fixed_clock_for_test` in tests. The test
+  pins both streams to the same instant, and a companion test
+  proves a forced tick moves the render — so the seam is read, not
+  stored-but-ignored. Production rows still carry wall time;
+  nothing else changes. (`I-02` prep, `DET`)
+
 - Developer gate unified (`I-08` phase 1): `cargo xtask ci` runs the union
   of the CI Rust job and the bridge checks — format, lints, build, test,
   ignored suites, every checker with its liveness proof, the release probe

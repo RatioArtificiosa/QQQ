@@ -38935,4 +38935,30 @@ tests pass; generated artifacts are part of the change, and the
 gate is the only reviewer that reads them.
 → `schema/qqq-toml.schema.json`, `crates/qqq-cap/src/manifest.rs`.
 
+## §O-719 - Audit clock determinism: pin time instead of racing it
+
+The §O-683 millisecond-boundary flake (`two_identical_events_
+render_identically` failing when wall time ticked between two
+pushes) gets the durable fix the mandate orders, not another
+retry-and-record cycle. Red-first: the test rewritten against
+`set_fixed_clock_for_test` plus a companion tick test failed to
+compile (E0599, no such method — log kept). The fix is one
+`Option<u64>` on `AuditStream`, `None` in all three constructors
+(the third literal, in the keyed resume variant, was caught by
+the compiler, not by inspection — the exhaustive constructor is
+the backstop), a single `clock_ms()` decision point so prod and
+test rows cannot disagree about "now", and a `#[cfg(test)]`
+setter so production evidence always carries wall time. The
+companion test (`a_forced_tick_between_pushes_changes_the_
+render`) proves the seam is read: a stored-but-ignored clock
+would pass the determinism test vacuously. Measured: audit suite
+44 lib + 45 doctests green, clippy `-D warnings` clean, and the
+flake test 20/20 green in a loop. Survey reorder noted: Phase 5
+lands before Phase 4 because the flake pollutes every later
+run's signal, and the fix is dependency-free. The generalisable
+rule: a time-dependent test that passes "almost always" is a
+test of the scheduler, not the code — inject the clock and the
+flake becomes impossible by construction.
+→ `crates/qqq-host/src/audit.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

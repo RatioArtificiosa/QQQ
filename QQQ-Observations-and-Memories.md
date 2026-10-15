@@ -38989,4 +38989,33 @@ worth more than one that does not compile — it proves the test
 reaches the code under test.
 → `crates/qqq-host/src/audit_checkpoint.rs`, `crates/qqq-host/src/lib.rs`, `crates/qqq-host/Cargo.toml`, `CHANGELOG.md`.
 
+## §O-721 - I-06 token core: narrowing by construction, refusal by default
+
+The second I-home is the delegation primitive: `mint` roots a
+capability id in the host's key, `attenuate` folds each caveat
+into the signature, `verify_chain` replays the chain and
+compares in constant time via `subtle::ct_eq` — and there is no
+other constructor, so authority can only narrow. Two catches
+during the work, both fixed before green. (1) The first
+`verify_chain` draft compared `HMAC(current, b"")` against the
+presented signature — the wrong value entirely, a comparison
+that proves nothing about the chain. Constant-time equality of
+the recomputed terminal signature is the check; the detour is
+recorded because "constant-time" without "of the right value"
+is theater. (2) The doctest for `parse_caveat` asserted
+`b"exp:garbage!!"` parses to `None` — but 8 payload bytes is a
+valid encoding, so the expectation contradicted the format; the
+doctest now uses a short payload, and the unit suite covers
+trailing-byte and empty-input refusal. Red-first through
+`todo!` surfaces (4/4 failing on the real path, log kept).
+Measured: 266 cap lib + 13 doctests green, fmt and clippy `-D
+warnings` clean after `# Panics` sections, a top-level `use`
+for the items-after-statements lint, and `from_ref` for the
+clone-to-slice lint. New pins `hmac` 0.12 + `subtle` 2 (deny
+approves in the gate). The generalisable rule: verify the exact
+bytes the signature commits to — re-encoding before verifying
+opens a canonicalization seam, and comparing a derived value
+instead of the recomputed one verifies nothing.
+→ `crates/qqq-cap/src/token.rs`, `crates/qqq-cap/src/lib.rs`, `crates/qqq-cap/Cargo.toml`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

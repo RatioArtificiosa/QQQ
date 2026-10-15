@@ -52,6 +52,7 @@ pub mod normalize;
 pub mod policy;
 pub mod resolve;
 pub mod server;
+pub mod token;
 
 pub use capability::{
     Capability, CapabilityKind, CapabilitySelector, Namespace, UnknownCapability,

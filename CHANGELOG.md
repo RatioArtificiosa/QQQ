@@ -4,6 +4,19 @@
 
 ### Security
 
+- **cap**: attenuable token primitives (`I-06` core): a new
+  `token` module with HMAC-SHA-256 `mint`/`attenuate` chain math,
+  a closed `Caveat` codec (`exp`, `calls`, everything else fails
+  closed at parse), pure evaluation against caller-supplied time
+  and usage, and constant-time chain verification via `subtle`.
+  New workspace pins `hmac` 0.12 and `subtle` 2 (both inside
+  deny.toml). Host wiring of caveats to live policy (allowlist
+  subsets, call counters) stays scheduled: a constructor anywhere
+  but `mint`/`attenuate` would be a second mint, and there is
+  none. Pins: drop/reorder breaks the chain, attenuation never
+  widens, expiry and unknown-kind refusal, doctests on every
+  public item.
+
 - **audit**: signed checkpoint primitives (`I-02` core):
   `audit_checkpoint::{checkpoint_message, sign_checkpoint,
   verify_checkpoint}` over ed25519-dalek 2.x (existing workspace

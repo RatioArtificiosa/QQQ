@@ -297,6 +297,13 @@ async fn abort_stream_tasks(state: &State) {
 /// `serve_ws_route` maps it, so the two transports report one
 /// taxonomy; a panicked loop keeps the base outcome rather than
 /// upgrading a task failure into a protocol verdict.
+///
+/// A loop outcome refines only an ambiguous base: server verdicts
+/// (`Drained`, the timeouts) describe how the server ended the
+/// connection, and a cleanly closed frame loop must not overwrite
+/// them — shutdown still drained, even though the frames finished
+/// first. Only `ClientClosed` (vanished peer or plain connection
+/// end) is sharpened into what the loop actually saw.
 async fn drain_ws_tasks(state: &State, base: Served) -> Served {
     let handles: Vec<_> = std::mem::take(
         &mut state
@@ -305,6 +312,14 @@ async fn drain_ws_tasks(state: &State, base: Served) -> Served {
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     if handles.is_empty() {
+        return base;
+    }
+    // A server verdict stands: the loop outcome sharpens only the
+    // ambiguous close, never a drain or a timeout the server owns.
+    if base != Served::ClientClosed {
+        for handle in handles {
+            let _ = handle.await;
+        }
         return base;
     }
     let mut served = base;
@@ -354,6 +369,12 @@ where
     });
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     crate::transport::apply_http2(&mut builder, &state.limits);
+    // Capability, not a limit: advertising `SETTINGS_ENABLE_CONNECT_PROTOCOL`
+    // lets clients attempt RFC 8441 bootstrapping, while per-request policy
+    // (route, protocol, origin, key) still decides each stream. Withheld, no
+    // client may even try — which is why the advertisement has its own
+    // test rather than riding along unobserved.
+    builder.enable_connect_protocol();
     let service = service_fn({
         let state = Arc::clone(&state);
         move |request: hyper::Request<Incoming>| {
@@ -918,8 +939,7 @@ fn refuse_auth_policy(
 /// Returns the response — rendered and recorded — when the request is
 /// not an ordinary flat one. Upgrades, streaming routes, and the
 /// metrics path never reach the 501 below: their arms run first in
-/// `answer`, and what remains here is metrics, preflight, and the
-/// h2-upgrade gap.
+/// `answer`, and what remains here is metrics and preflight.
 fn serve_special(
     state: &State,
     head: &RequestHead,
@@ -974,21 +994,9 @@ fn serve_special(
             started,
         )));
     }
-    // The last 501: h2 upgrade requests need extended-CONNECT, a
-    // mechanism this path does not implement yet. Streaming over
-    // both protocols and h1 upgrades are served by their arms in
-    // `answer`, which run before this function.
-    if state.protocol == Protocol::H2
-        && let Some(matched) = state.table.match_route(head.method, path)
-        && state.dispatch.websocket_for(&matched.handler).is_some()
-    {
-        let mut response = Response::text(
-            501,
-            "this route needs an h2 extended-CONNECT upgrade, which the hyper path does not serve yet",
-        );
-        response.set_header("X-QQQ-Error", "hyper-transport-gap");
-        return Some(render_refusal(state, head, path, &response, started));
-    }
+    // What remains here is metrics and preflight: upgrades and
+    // streams take their arms in `answer`, which run before this
+    // function.
     None
 }
 
@@ -1077,6 +1085,25 @@ fn upgrade_route(
     path: &str,
 ) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
     if state.protocol != Protocol::H1 {
+        return None;
+    }
+    let matched = state.table.match_route(head.method, path)?;
+    state.dispatch.websocket_for(&matched.handler).cloned()
+}
+
+/// The extended-CONNECT route, if this request targets one on HTTP/2.
+///
+/// Same shape as [`upgrade_route`] for the other protocol: method,
+/// route table, handler registry. `None` falls through to ordinary
+/// routing — an explicit 404/405 — so a `CONNECT` at a route with
+/// no WebSocket handler is routed, never hijacked, exactly as a
+/// `GET` without upgrade headers is on the h1 arm.
+fn connect_route(
+    state: &State,
+    head: &RequestHead,
+    path: &str,
+) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
+    if state.protocol != Protocol::H2 || head.method != crate::route::Method::Connect {
         return None;
     }
     let matched = state.table.match_route(head.method, path)?;
@@ -1189,6 +1216,24 @@ async fn serve_upgrade(
         limits: state.ctx.ws.limits,
         buffer: Arc::clone(&state.ctx.ws_buffer),
     };
+    spawn_ws_loop(state, upgrade, ws_handler, head, ws_ctx);
+    Ok(response)
+}
+
+/// Run the frame loop for an accepted upgrade on a spawned task.
+///
+/// Shared by the h1 `101` arm and the h2 extended-CONNECT arm: both
+/// hand hyper an upgrade future, both need the loop awaited at
+/// connection end (see `drain_ws_tasks`), the record and `on_close`
+/// fired inside the task, and the same vanished-peer mapping for a
+/// handshake the peer abandoned before the handoff completed.
+fn spawn_ws_loop(
+    state: &State,
+    upgrade: hyper::upgrade::OnUpgrade,
+    ws_handler: Arc<dyn crate::ws_conn::WebSocketHandler>,
+    head: RequestHead,
+    ws_ctx: crate::ws_conn::WsContext,
+) {
     let handle = tokio::spawn(async move {
         let outcome = match upgrade.await {
             Ok(upgraded) => {
@@ -1209,6 +1254,126 @@ async fn serve_upgrade(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(handle);
+}
+
+/// Serve a WebSocket over HTTP/2 extended-CONNECT (RFC 8441):
+/// validate, answer `200`, run the frame loop over the stream.
+///
+/// Refusal order mirrors `serve_upgrade` — body, mechanism,
+/// origin, handshake — minus the h1-only checks: there is no
+/// chunked framing on h2 (a declared body is refused instead),
+/// and no `Upgrade`/`Connection` headers (both are forbidden on
+/// h2; `:protocol` carries the mechanism). Every refusal is
+/// recorded like every other hyper answer. On success the `200`
+/// carries only `Sec-WebSocket-Accept`: `Upgrade`/`Connection`
+/// would fail the stream, and the subprotocol policy matches h1
+/// (none selected).
+async fn serve_h2_connect(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: RequestHead,
+    ws_handler: Arc<dyn crate::ws_conn::WebSocketHandler>,
+    span: u64,
+    started: Instant,
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    // A declared body on a CONNECT is not a handshake: refuse
+    // before the frame loop owns the stream. Unknown-length DATA
+    // is the client's first frames arriving early — hyper routes
+    // them to the upgraded stream, so there is nothing to drain.
+    if head.content_length.is_some_and(|n| n > 0) {
+        return Ok(refuse_special_body(state, request, &head, started).await);
+    }
+    // The mechanism gate: only websocket bootstrapping is served.
+    // A recognized mechanism this server does not implement is
+    // 501, never a silent 400 — and a missing `:protocol` is
+    // proxying, not bootstrapping, which is a 400.
+    let protocol = request
+        .extensions()
+        .get::<hyper::ext::Protocol>()
+        .map(|protocol| protocol.as_str().to_owned());
+    match protocol.as_deref() {
+        Some("websocket") => {}
+        Some(other) => {
+            return Ok(upgrade_refusal(
+                state,
+                &head,
+                501,
+                &format!("extended-CONNECT protocol `{other}` is not implemented"),
+                &[],
+                started,
+            ));
+        }
+        None => {
+            return Ok(upgrade_refusal(
+                state,
+                &head,
+                400,
+                "CONNECT without `:protocol` is proxying, not a WebSocket handshake",
+                &[],
+                started,
+            ));
+        }
+    }
+    // Origin before the handshake: past the `200` the stream
+    // speaks frames, and a refusal must not arrive framed.
+    if !crate::ws::upgrade_origin_allowed(
+        &state.ctx.ws.origins,
+        head.header("origin"),
+        head.header("host").unwrap_or(""),
+    ) {
+        return Ok(upgrade_refusal(state, &head, 403, "", &[], started));
+    }
+    let handshake = match crate::ws::Handshake::parse_extended_connect(|name| {
+        head.header(name).map(str::to_owned)
+    }) {
+        Ok(handshake) => handshake,
+        // 426 names the retry version; anything else is a 400.
+        // Same split as the h1 arm, minus the mechanism checks
+        // that cannot fire here by construction.
+        Err(error) => {
+            let status = match error {
+                crate::ws::HandshakeError::UnsupportedVersion { .. } => 426u16,
+                _ => 400u16,
+            };
+            let mut extra = Vec::new();
+            if status == 426 {
+                extra.push(("Sec-WebSocket-Version", crate::ws::VERSION.to_owned()));
+            }
+            return Ok(upgrade_refusal(
+                state,
+                &head,
+                status,
+                &error.to_string(),
+                &extra,
+                started,
+            ));
+        }
+    };
+    let upgrade = hyper::upgrade::on(request);
+    let response = hyper::Response::builder()
+        .status(hyper::StatusCode::OK)
+        .header("sec-websocket-accept", handshake.accept())
+        .body(WatchBody::new(Bytes::new(), &state.watch))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(WatchBody::new(Bytes::new(), &state.watch))
+                .unwrap_or_else(|_| {
+                    hyper::Response::new(WatchBody::new(Bytes::new(), &state.watch))
+                })
+        });
+    let ws_ctx = crate::ws_conn::WsContext {
+        peer: state.ctx.peer,
+        tenant: state.ctx.tenant_label.clone(),
+        logger: state.ctx.logger.clone(),
+        trace: state.ctx.trace,
+        span,
+        shutdown: state.ctx.shutdown.clone(),
+        idle_timeout: state.ctx.idle_timeout,
+        limits: state.ctx.ws.limits,
+        buffer: Arc::clone(&state.ctx.ws_buffer),
+    };
+    spawn_ws_loop(state, upgrade, ws_handler, head, ws_ctx);
     Ok(response)
 }
 
@@ -1500,10 +1665,14 @@ async fn answer(
     // --- Metrics path, preflight, upgrades: off the flat path ------------
     //
     // WebSocket upgrades on HTTP/1 take the upgrade arm, which owns
-    // the raw request for the handshake handoff; streaming routes
-    // take the streaming arm, which owns it for the channel handoff;
-    // everything else falls through to `serve_special` (metrics,
-    // preflight, h2 upgrades).
+    // the raw request for the handshake handoff; extended-CONNECT on
+    // HTTP/2 takes the connect arm, which owns it for the stream
+    // handoff; streaming routes take the streaming arm, which owns
+    // it for the channel handoff; everything else falls through to
+    // `serve_special` (metrics, preflight).
+    if let Some(ws_handler) = connect_route(state, &head, path) {
+        return serve_h2_connect(state, request, head, ws_handler, span, request_started).await;
+    }
     if let Some(ws_handler) = upgrade_route(state, &head, path) {
         return serve_upgrade(state, request, head, ws_handler, span, request_started).await;
     }

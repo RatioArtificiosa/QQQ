@@ -39307,4 +39307,38 @@ shared predicate is a policy question, not a migration
 regression — answer it with a differential pin, not a fix.
 → `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_streaming.rs`, `CHANGELOG.md`.
 
+## §O-731 - Extended-CONNECT: the stack had the mechanism, the verdict had a bug
+
+The h2 WebSocket unit replaced the last `501` with RFC 8441,
+and the findings split three ways. First, capability proof by
+reading, not searching: hyper 1.12 supports extended-CONNECT
+server-side through a public builder flag, an `ext::Protocol`
+request extension, and the same `OnUpgrade` handoff the h1 arm
+uses — all verified in the vendored source, which also showed
+the h2 stream is bidirectional through the existing
+`HyperUpgraded` bridge unchanged. Second, the handshake split:
+`Handshake::parse` demands `GET` plus `Upgrade`/`Connection`,
+both wrong on h2, so `parse_extended_connect` runs only the
+shared tail (version, key, subprotocols) through one extracted
+`assemble` function — the existing 27 handshake tests guard
+the extraction, 5 new ones pin the entry point. Third, a real
+verdict bug the echo test caught: `drain_ws_tasks` overwrote
+`Drained` with `HandlerClosed` whenever the frame loop closed
+cleanly before shutdown landed — the connection's own outcome
+lost to a per-request one. The loop now refines only the
+ambiguous `ClientClosed`; server verdicts stand. Two wire
+facts pinned along the way: a `CONNECT` without `:protocol`
+dies reset at hyper's framing layer (the service never sees
+it — explicit, but not ours), and a `CONNECT` at a flat route
+answers 405 (method mismatch named, not 404). Red proof: 8/8
+failing pre-implementation (7 timeouts on the dead mechanism
+plus the setting assertion, logs kept). Measured:
+hyper_h2ws 8 green, ws lib 32 green, hyper_ws 4, hyper_serve
+25, hyper_h2 21, hyper_tls 3, hyper_streaming 7 green; graf
+generation 83. The generalisable rule: when a verdict can be
+written by two layers, the connection's verdict outranks the
+request's — refining downward is reporting, overwriting
+upward is loss.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/ws.rs`, `crates/qqq-serve/tests/hyper_h2ws.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

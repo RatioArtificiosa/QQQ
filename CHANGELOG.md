@@ -4,6 +4,28 @@
 
 ### Security
 
+- **serve**: WebSocket over HTTP/2 extended-CONNECT (`F-16`
+  parity): the last `501` is now a mechanism — the h2 builder
+  advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL` (with its own
+  test on the setting bytes), and `CONNECT` with
+  `:protocol: websocket` at a WebSocket route answers `200`
+  with only `Sec-WebSocket-Accept` (connection headers are
+  forbidden on h2) while the shared frame loop runs on a
+  spawned task over the upgraded stream. Refusal order mirrors
+  the h1 arm minus the h1-only checks: declared body 400,
+  foreign `:protocol` 501, foreign origin 403, bad version 426
+  naming 13, bad key 400 — all recorded. The handshake tail
+  (version, key, subprotocols) is shared with the `101` path
+  through one `assemble` function so the mechanisms cannot
+  disagree. A `CONNECT` without `:protocol` dies reset at
+  hyper's framing layer (pinned on the wire, never framed);
+  a `CONNECT` at a route with no handler falls through to an
+  explicit 405. Drained/timeout connection verdicts now
+  survive a cleanly closed frame loop instead of being
+  overwritten by it. Pins: 8 extended-CONNECT tests (echo
+  round trip with accept check and close echo over DATA,
+  all six refusals, flat-route fall-through).
+
 - **serve**: streaming hardening from review (`F-16` parity):
   the channel writer is bounded (16 pieces, `send().await`),
   restoring the socket path's stall shape — a fast handler

@@ -166,6 +166,37 @@ impl Handshake {
             _ => return Err(HandshakeError::ConnectionNotUpgraded),
         }
 
+        Self::assemble(header)
+    }
+
+    /// Parse and validate an RFC 8441 (extended-CONNECT) handshake.
+    ///
+    /// The caller guarantees the mechanism: `CONNECT` with
+    /// `:protocol: websocket`. What remains is the part of the
+    /// contract the bootstrapping keeps — version 13 and a valid
+    /// key — without the `Upgrade`/`Connection` dance, which is
+    /// connection-specific and forbidden on HTTP/2. Same tail as
+    /// [`Self::parse`], so the two mechanisms cannot disagree
+    /// about what a key or a version is.
+    ///
+    /// # Errors
+    ///
+    /// Any [`HandshakeError`] except the mechanism ones (`NotGet`,
+    /// `NotAnUpgrade`, `ConnectionNotUpgraded`), which cannot fire
+    /// here by construction.
+    pub fn parse_extended_connect<F>(header: F) -> Result<Self, HandshakeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Self::assemble(header)
+    }
+
+    /// The version, key, subprotocol, and extension checks both
+    /// mechanisms share, after their mechanism-specific gates.
+    fn assemble<F>(header: F) -> Result<Self, HandshakeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let version = header("sec-websocket-version");
         match version.as_deref() {
             Some(v) if v.trim() == VERSION => {}
@@ -1111,6 +1142,72 @@ mod tests {
         let hs = Handshake::parse("GET", headers(&valid())).expect("valid");
         assert!(hs.protocols().is_empty());
         assert_eq!(hs.select_protocol(&["chat"]), None);
+    }
+
+    // -- extended CONNECT (RFC 8441) ------------------------------------
+
+    /// The RFC 8441 headers without the RFC 6455 connection dance:
+    /// no `Upgrade`, no `Connection` — both are forbidden on h2 —
+    /// with the same version and key contract.
+    fn extended() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("Sec-WebSocket-Version", "13"),
+            ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+        ]
+    }
+
+    /// An extended-CONNECT handshake parses without upgrade headers.
+    #[test]
+    fn an_extended_connect_handshake_parses() {
+        let hs = Handshake::parse_extended_connect(headers(&extended())).expect("must accept");
+        assert_eq!(hs.key(), "dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!(hs.accept(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    /// Version is still 13 over extended CONNECT, and a wrong one
+    /// still names the retry version.
+    #[test]
+    fn an_extended_connect_wrong_version_is_refused() {
+        let mut h = extended();
+        for pair in &mut h {
+            if pair.0 == "Sec-WebSocket-Version" {
+                pair.1 = "8";
+            }
+        }
+        let err = Handshake::parse_extended_connect(headers(&h)).expect_err("must refuse");
+        assert!(
+            matches!(err, HandshakeError::UnsupportedVersion { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("13"), "{err}");
+    }
+
+    /// A missing key is refused, like on the 101 path.
+    #[test]
+    fn an_extended_connect_missing_key_is_refused() {
+        let h = vec![("Sec-WebSocket-Version", "13")];
+        let err = Handshake::parse_extended_connect(headers(&h)).expect_err("must refuse");
+        assert!(matches!(err, HandshakeError::BadKey { .. }), "{err:?}");
+    }
+
+    /// A short key is refused, like on the 101 path.
+    #[test]
+    fn an_extended_connect_short_key_is_refused() {
+        let h = vec![
+            ("Sec-WebSocket-Version", "13"),
+            ("Sec-WebSocket-Key", "c2hvcnQ="),
+        ];
+        let err = Handshake::parse_extended_connect(headers(&h)).expect_err("must refuse");
+        assert!(matches!(err, HandshakeError::BadKey { .. }), "{err:?}");
+    }
+
+    /// Subprotocol offers ride along on extended CONNECT too.
+    #[test]
+    fn an_extended_connect_offer_selects_a_protocol() {
+        let mut h = extended();
+        h.push(("Sec-WebSocket-Protocol", "chat"));
+        let hs = Handshake::parse_extended_connect(headers(&h)).expect("valid");
+        assert_eq!(hs.select_protocol(&["chat"]).as_deref(), Some("chat"));
     }
 
     /// Extensions are retained verbatim and not interpreted.

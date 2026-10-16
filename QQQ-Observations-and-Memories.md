@@ -39440,4 +39440,38 @@ gone — every comment that explained the code's absence is
 now explaining a present that does not exist.
 → `crates/qqq-serve/src/tls.rs`, `crates/qqq-serve/src/transport.rs`, `CHANGELOG.md`.
 
+## §O-736 - Bridge16: the final tree is green on Linux, hot and inside limits
+
+`tools/qqqdev.ps1 test` (full Linux gate set) on final tree
+`96b29a4` (clean): exit 0, "All Linux gates passed", 86
+suites green / 0 bad in 586 s. Wave suites confirmed by name
+in the log: h2ws echo, streaming first-event, h1 WS echo, mTLS
+peer identity, both drain proofs, in-house streaming
+no-body-read, serve_policy routes, discovery tests. The 5
+known environmental failures are FIXED-and-green, not
+absent: the suites that contained them (serve_policy,
+worker_pool, artifact discovery) all ran — the serve-isolation
+and child-target-dir fixes of prior waves hold on this tree.
+Zero failures: nothing to disposition as regression, flake,
+or environmental.
+
+Resources (10 one-minute samples, `docker-stats16.log`, idle
+postgres rows filtered): CPU mean 429.2%, p50 ~449%, max
+873.1%; MEM max 3.557 GiB = 44.5% of the 8 GiB limit.
+Against bridge15 (24.8%/10.8%/368.4%/2.54 GiB, 124 samples)
+and bridge13 (21.6%/10.9%/293.9%/1852 MiB): hotter in every
+CPU number, and the reason is phase mix, stated with the
+samples — six of ten samples sit at ~800% (cargo build/test
+parallelism across the box's cores; the log shows continuous
+compilation then tests, no stall), then 53 → 0.1 → 3.2 as
+the run ends. Priors' p50 ~10% reflects hours of low-CPU
+checker phases this 10-minute build-and-test run never
+entered. Consumer: cargo/rustc/test binaries (memory climbs
+with compilation to 3.5 GiB, then holds). Inside limits
+throughout (44.5% of memory; CPU unconstrained), no outcome
+correlation (exit 0). Judgement NORMAL for a short full-build
+run, with the comparability caveat recorded — not silently
+averaged against 2-hour checker-dominated runs.
+→ `docker/compose.yaml`, `tools/qqqdev.ps1` (unchanged).
+
 *End of `QQQ-Observations-and-Memories.md`.*

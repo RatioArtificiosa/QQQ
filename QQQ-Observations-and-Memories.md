@@ -39459,7 +39459,7 @@ Resources (10 one-minute samples, `docker-stats16.log`, idle
 postgres rows filtered): CPU mean 429.2%, p50 ~449%, max
 873.1%; MEM max 3.557 GiB = 44.5% of the 8 GiB limit.
 Against bridge15 (24.8%/10.8%/368.4%/2.54 GiB, 124 samples)
-and bridge13 (21.6%/10.9%/293.9%/1852 MiB): hotter in every
+and bridge13 (21.6%/10.9%/293.9%/1891 MiB): hotter in every
 CPU number, and the reason is phase mix, stated with the
 samples — six of ten samples sit at ~800% (cargo build/test
 parallelism across the box's cores; the log shows continuous

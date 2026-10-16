@@ -4,6 +4,13 @@
 
 ### Security
 
+- **host**: clock-guard discrimination (`I-02` audit): the
+  forced-tick anti-vacuity test asserted render-level
+  inequality, which passes with a dead clock because sequence
+  always differs. Both clock tests now assert the timestamp
+  field against the pinned instant — red on a dead clock,
+  green live, 20/20 loop.
+
 - **serve**: post-deletion doc truth (`F-16` parity): the TLS
   ALPN docs tied the HTTP/1.1-only default to the h2 loop's
   absence — the loop has landed on the hyper path, so the

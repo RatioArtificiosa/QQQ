@@ -2559,24 +2559,39 @@ mod tests {
         push(&mut b, Outcome::Granted);
         assert_eq!(a.records()[0].to_json(), b.records()[0].to_json());
         assert_eq!(a.head(), b.head());
+        // The render carries the pinned instant, not a dead zero or
+        // wall time: equality alone passes on a constant clock, so
+        // the value itself is asserted here.
+        assert_eq!(a.records()[0].timestamp_unix_ms, 1_700_000_000_000);
     }
 
     /// The injected clock drives the stamp: forcing a tick between
     /// pushes must change the render. Without this, the fixed clock
     /// could be stored-but-unread — a seam that proves nothing — and
     /// this test would pass vacuously.
+    ///
+    /// The assertions read the timestamp *field*, not the whole
+    /// render: two pushes always differ in sequence and chain, so a
+    /// render-level `assert_ne!` passes with a dead clock and proves
+    /// nothing about time. Field-level equality fails on a dead
+    /// clock (both read 0), on wall time (neither reads the pinned
+    /// instant), and passes only when the injection is live.
     #[test]
     fn a_forced_tick_between_pushes_changes_the_render() {
         let mut s = stream(4);
         s.set_fixed_clock_for_test(1_700_000_000_000);
         push(&mut s, Outcome::Granted);
-        let first = s.records()[0].to_json();
         s.set_fixed_clock_for_test(1_700_000_000_001);
         push(&mut s, Outcome::Granted);
-        assert_ne!(
-            first,
-            s.records()[1].to_json(),
-            "a forced millisecond tick must move the timestamp"
+        assert_eq!(
+            s.records()[0].timestamp_unix_ms,
+            1_700_000_000_000,
+            "the first row carries the pinned instant"
+        );
+        assert_eq!(
+            s.records()[1].timestamp_unix_ms,
+            1_700_000_000_001,
+            "the forced tick moves the stamp"
         );
     }
 

@@ -39474,4 +39474,27 @@ run, with the comparability caveat recorded — not silently
 averaged against 2-hour checker-dominated runs.
 → `docker/compose.yaml`, `tools/qqqdev.ps1` (unchanged).
 
+## §O-737 - The anti-vacuity guard was vacuous: sequence always differs
+
+Verifying the audit-clock phase on the final tree found a
+real §11-shaped defect in its own proof. The
+`a_forced_tick_between_pushes_changes_the_render` test exists
+to prove the injected clock is read, not stored-but-unread —
+but it asserted render-level `assert_ne!` across two pushes,
+and two pushes always differ in sequence and chain. A
+constant-clock injection (the exact dead seam the test claims
+to exclude) still passes it: green, proven in `v-clock-red.log`.
+The main `two_identical_events` test had the same hole in
+weaker form (equality passes on any constant clock). Fix: both
+tests now assert the timestamp *field* against the pinned
+instant — failing on a dead clock (reads 0), on wall time
+(reads neither instant), passing only when the injection is
+live. Red proof for the fix: the dead-clock injection fails
+both strengthened tests (`left: 0, right: 1700000000000`);
+restored green plus 20/20 determinism loop. The generalisable
+rule: a discriminating test must hold everything constant
+except the discriminated variable — sequence was the
+confound here, and any multi-field render carries one.
+→ `crates/qqq-host/src/audit.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

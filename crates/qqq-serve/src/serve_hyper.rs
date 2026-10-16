@@ -83,6 +83,89 @@ use crate::server::{
 use crate::span::Sampler;
 use crate::transport::HyperLimits;
 use crate::ws::loopback_host_allowed;
+use tokio_rustls::TlsAcceptor;
+
+/// What serving one TLS connection produced: the transport outcome
+/// plus what the handshake established.
+///
+/// The three travel together because they describe one connection:
+/// splitting them across return values would let a caller serve on
+/// one handshake's bytes while reporting another's identity.
+#[derive(Debug)]
+pub struct TlsServed {
+    /// How the connection ended, same taxonomy as the plaintext drivers.
+    pub served: Served,
+    /// Version, cipher suite, and ALPN the handshake negotiated.
+    pub negotiated: crate::tls::Negotiated,
+    /// Who the peer proved to be, when client authentication was
+    /// required and a certificate verified. `None` is not anonymous —
+    /// it is the absence of authentication, distinct from any identity.
+    pub peer: Option<crate::tls::PeerIdentity>,
+}
+
+/// Serve one TCP connection through TLS, then hyper.
+///
+/// Handshake with the given `rustls::ServerConfig` (built by
+/// [`crate::tls::TlsConfig::build`], so the cipher policy, versions,
+/// and client-auth mode are the documented ones, not adhoc), then
+/// route by negotiated ALPN: `h2` to the HTTP/2 driver, anything
+/// else to HTTP/1.1 — the same default
+/// [`crate::tls::Negotiated::http_version`] makes, so the routing
+/// cannot disagree with the reported version. The encrypted stream
+/// flows through the generic drivers; this function is the only
+/// place that knows a socket was involved at all.
+///
+/// # Errors
+///
+/// Handshake failures surface as I/O errors: a client that cannot
+/// complete the handshake gets no response, and the accept loop
+/// logs the error rather than serving plaintext by accident — a
+/// fallback to cleartext on handshake failure would be a silent
+/// downgrade, which is worse than a refused connection.
+///
+/// ```
+/// use qqq_serve::tls::Negotiated;
+///
+/// // The routing rule this function implements: `h2` means the
+/// // HTTP/2 driver, anything else the HTTP/1.1 driver.
+/// let negotiated = Negotiated {
+///     version: "TLSv1.3".to_owned(),
+///     cipher_suite: "TLS13_AES_256_GCM_SHA384".to_owned(),
+///     alpn: Some("h2".to_owned()),
+/// };
+/// assert_eq!(negotiated.http_version(), "HTTP/2");
+/// assert_eq!(
+///     Negotiated {
+///         alpn: None,
+///         ..negotiated.clone()
+///     }
+///     .http_version(),
+///     "HTTP/1.1"
+/// );
+/// ```
+pub async fn serve_hyper_tls(
+    stream: tokio::net::TcpStream,
+    tls: Arc<rustls::ServerConfig>,
+    table: Arc<RouteTable>,
+    dispatch: Dispatch,
+    limits: HyperLimits,
+    ctx: &ConnectionContext<'_>,
+) -> std::io::Result<TlsServed> {
+    let acceptor = TlsAcceptor::from(tls);
+    let stream = acceptor.accept(stream).await?;
+    let (_, connection) = stream.get_ref();
+    let negotiated = crate::tls::Negotiated::of(connection);
+    let peer = crate::tls::PeerIdentity::from_verified(connection.peer_certificates());
+    let served = match negotiated.http_version() {
+        "HTTP/2" => serve_hyper_h2(stream, table, dispatch, limits, ctx).await,
+        _ => serve_hyper_h1(stream, table, dispatch, limits, ctx).await,
+    };
+    Ok(TlsServed {
+        served,
+        negotiated,
+        peer,
+    })
+}
 
 /// Serve one connection through hyper's HTTP/1.1 driver.
 ///

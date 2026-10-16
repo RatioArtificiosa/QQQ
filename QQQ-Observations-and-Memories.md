@@ -39158,4 +39158,55 @@ that needs a tool must not run before the step that provides
 it, no matter what the image happens to preprint today.
 → `.github/workflows/ci.yml`, `CHANGELOG.md`.
 
+## §O-726 - TLS accept: the policy was ready, only the doorway was missing
+
+`TlsConfig::build`, the ALPN constants with their preference
+order, `Negotiated::http_version`, and `PeerIdentity` all
+existed and were handshake-tested — but no production path
+called them, so `serve()` was plaintext-only and the seam
+commit had nothing to terminate. The unit is one function,
+`serve_hyper_tls`: handshake, route by ALPN, serve, report
+`(served, negotiated, peer)` together. Red-first E0433/E0425
+(log kept). Two test bugs caught before green, both honest
+mistakes: the frame helper overwrote the first stream byte
+with the flags byte (fixed to push flags in order), and the
+client builder needed the provider wrapped in `Arc` with the
+server's suite policy (mirroring `tests/tls.rs`, not the
+defaults). `tokio-rustls` promotes to main dependencies;
+mTLS identity rides the outcome because `ConnectionContext`
+has no peer-identity slot yet — wiring it into request
+attribution is the scheduled follow-up, stated in the code,
+not silently dropped. Measured: 3 TLS round-trip tests green
+3/3 runs, doctest green, fmt and clippy `-D warnings` clean.
+The generalisable rule: when the policy layer is complete
+and tested but unwired, the unit is the doorway, not another
+policy — one function, three round trips.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_tls.rs`, `crates/qqq-serve/Cargo.toml`, `CHANGELOG.md`.
+
+## §O-727 - CI proof: the install-order fix greens windows, PERF was luck
+
+Proof for §O-725 arrived on run 38853292429 (the `6728149`
+push): windows green — the first green windows gate since the
+pool broke — with the tool installed by the moved step rather
+than preprint. Full map 13 success + DCO skipped. PERF-020
+missed once (`hello` 460535 ns vs 455051.25 threshold, ~1.2%
+over on a 25%-tolerance band over baseline 364041) then went
+green twice consecutively on the same SHA, which is the
+§O-543 scheduling-luck signature, not a vector shift; no
+artifact comparison needed when the same binary passes twice
+after one marginal miss. Dispositions for the superseded SHAs,
+which never got their own green runs because `cancel-in-progress`
+kills a run when the next push lands: clock `583d9b2`
+(environmental windows failure ×2, then cancelled),
+I-02 `23d687f` (cancelled), I-06 `5e93df8` (cancelled),
+I-03 `e89483f` (environmental windows ×6 across attempts, with
+ubuntu/macos green on the final attempts), seam `0e6b708`
+(environmental windows ×2). All are covered by the descendant
+green on `6728149`, whose tree contains every one of their
+changes; each kept its local gate green, review, and 32/32.
+The generalisable rule: a cancelled run is not a verdict —
+record what each SHA proved locally and which descendant run
+covers it, or the map fills with gaps that look like regressions.
+→ CI runs 38853292429, 38845440481, 38810169964, 38793994812.
+
 *End of `QQQ-Observations-and-Memories.md`.*

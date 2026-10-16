@@ -4,6 +4,20 @@
 
 ### Security
 
+- **serve**: TLS termination in front of the hyper drivers
+  (`F-16` parity): new `serve_hyper_tls` handshakes with the
+  `rustls::ServerConfig` that `TlsConfig::build` produces (so
+  the cipher policy, versions, and client-auth mode stay the
+  documented ones), then routes by negotiated ALPN — `h2` to
+  the HTTP/2 driver, anything else to HTTP/1.1, the same
+  default `Negotiated::http_version` makes — and reports the
+  outcome, negotiation, and mTLS peer identity together in
+  `TlsServed`, so no caller can serve on one handshake while
+  reporting another's identity. `tokio-rustls` moves from
+  dev-dependencies to dependencies. Pins: ALPN-`h2` and
+  ALPN-`http/1.1` round trips over real loopback TLS, and mTLS
+  identity naming the certificate subject.
+
 - **serve**: the hyper path serves any stream (`F-16` parity):
   `serve_hyper_h1`/`serve_hyper_h2` take `impl AsyncRead +
   AsyncWrite + Unpin + Send + 'static` instead of `TcpStream` —

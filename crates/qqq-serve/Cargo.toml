@@ -103,6 +103,13 @@ http-body-util = "0.1"
 # names it. Used by non-test code.
 http-body = "1"
 bytes = "1"
+# TLS termination for the hyper accept path (`F-16` parity, Wave 8):
+# `serve_hyper_tls` handshakes with `TlsAcceptor` and routes by
+# negotiated ALPN. Promoted from dev-dependencies (where the
+# handshake-level tests used it) because production code now
+# names it. Version 0.26.5, MIT/Apache-2.0 — inside deny.toml,
+# verified by `cargo deny check`.
+tokio-rustls = "0.26.5"
 # Polling hyper's body stream inside the `AsyncRead` adapter (`F-16`):
 # `BodyStream` speaks `futures_core::Stream`, and the adapter is the only
 # place that polls it.
@@ -110,7 +117,6 @@ futures-core = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", features = ["pem"] }
-tokio-rustls = "0.26.5"
 # **Dev only, deliberately.** `access_log` hand-writes its JSON encoder so the
 # crate has no serialization dependency on a path that runs per request, and so the
 # control-character escaping is explicit rather than inherited. The tests parse the

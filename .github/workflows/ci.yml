@@ -1029,17 +1029,20 @@ jobs:
       # liveness proofs, probes), in parallel where independent, with summary
       # aggregation. The matrix, toolchain, cache and job timeout stay here:
       # this step is the *what*, the job around it is the *where and how long*.
+      - name: Install wasm-tools
+        # BEFORE the gate, not after: the gate itself runs guest-build
+        # tests (lang001/lang003/conformance/lang005/audit_load) and the
+        # check_wit validation, all of which shell out to a `wasm-tools`
+        # binary (`qqq-run`'s build plan names the program). Relying on
+        # the runner image to preprint it failed seven consecutive
+        # windows runs with `wasm-tools not found on PATH` — the job
+        # provides the tools, the gate only runs them (same split as
+        # cargo-deny/cargo-machete above). Same pinned action the WIT
+        # job uses, rather than `cargo install`: it FAILS when the tool
+        # cannot be obtained instead of letting anything skip silently.
+        uses: taiki-e/install-action@wasm-tools
       - name: gate (cargo xtask ci)
         run: cargo xtask ci
-
-      - name: Install wasm-tools
-        # The live check below exercises `qqqai dev` and `build --aot` on an
-        # isolated guest, and the guest build shells out to a `wasm-tools`
-        # binary (`qqq-run`'s build plan names the program). The target above
-        # is not enough on a fresh runner. Same pinned action the WIT job
-        # uses, rather than `cargo install`: it FAILS when the tool cannot be
-        # obtained instead of letting the check below skip silently.
-        uses: taiki-e/install-action@wasm-tools
 
       # Kept OUTSIDE the gate on purpose: builds an isolated guest and needs
       # the guest target plus wasm-tools, which this job provides and the

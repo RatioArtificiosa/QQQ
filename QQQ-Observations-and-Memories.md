@@ -39130,4 +39130,32 @@ each follow-up inherits this wave's red-first/gate/review/CI
 discipline — no second-class phases.
 → `QQQ-Observations-and-Memories.md`.
 
+## §O-725 - CI: the gate needs its tools provided, not preprint
+
+Seven consecutive windows runs failed identically —
+`wasm-tools not found on PATH` at toolchain-probe time, then
+the QQQ-1003 fallout in lang001/lang003/conformance/lang005/
+audit_load plus check_wit refusing to skip validation (logs
+kept per run) — while ubuntu and macos stayed green on the
+same SHAs and the local gate stayed green throughout, so tree
+signal was never in question. The cause was ordering, not
+absence: the workflow installs `wasm-tools` via
+`taiki-e/install-action`, but the step sat *below* the gate
+that needs the binary, relying on the runner image to preprint
+it. When the image stopped, every run burned ~40 minutes to
+report an infra absence as test failures. The fix moves the
+install above the gate in the `rust` job, matching the file's
+own stated split ("the job provides the tools, the gate only
+runs them"); a runner that cannot obtain the tool now fails
+loudly at install time. Rejected: tolerating the absence
+(skip-if-missing) — the file already refuses that shape twice,
+and a skipped guest-build suite is a control believed live
+that is not. Proof for this fix is the next green windows run
+on the pushed SHA, not a local run — CI config cannot be
+gate-proven locally beyond YAML validity and step-order
+inspection, both done. The generalisable rule: a gate step
+that needs a tool must not run before the step that provides
+it, no matter what the image happens to preprint today.
+→ `.github/workflows/ci.yml`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

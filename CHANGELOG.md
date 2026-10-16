@@ -341,6 +341,17 @@
 
 ### Changed
 
+- **ci**: install `wasm-tools` before the gate, not after it. The
+  gate runs guest-build tests and WIT validation that shell out
+  to the binary, but the install step sat below the gate — so
+  seven consecutive windows runs failed with `wasm-tools not
+  found on PATH` the moment the runner image stopped preprinting
+  it, each burning a full gate run to report an infra absence as
+  test failures. The file's own convention ("the job provides
+  the tools, the gate only runs them") now holds for this tool
+  too; a runner that cannot obtain it still fails loudly at the
+  install step instead of mid-gate. (`§O-725`)
+
 - **audit**: the millisecond-boundary flake in
   `two_identical_events_render_identically` gets its durable fix
   (§O-683): `AuditStream` carries an injectable clock, wall time by

@@ -1506,3 +1506,155 @@ async fn h2_metrics_path_matches() {
     );
     let _ = hyper.finish().await;
 }
+
+// ---------------------------------------------------------------------------
+// Transport seam: any stream, not just TCP
+// ---------------------------------------------------------------------------
+
+/// Read one frame off any stream: the duplex twin of `read_frame`,
+/// which is pinned to `TcpStream`. Same bound, same panic shape —
+/// a dead connection is `None`, an over-large frame is a harness
+/// bug, never a silent pass.
+async fn read_duplex_frame(stream: &mut tokio::io::DuplexStream) -> Option<(u8, u8, u32, Vec<u8>)> {
+    use tokio::io::AsyncReadExt as _;
+    let mut head = [0u8; 9];
+    stream.read_exact(&mut head).await.ok()?;
+    let len = ((head[0] as usize) << 16) | ((head[1] as usize) << 8) | head[2] as usize;
+    assert!(len <= 1024 * 1024, "server sent an over-large frame");
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        stream.read_exact(&mut payload).await.ok()?;
+    }
+    let sid = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) & 0x7fff_ffff;
+    Some((head[3], head[4], sid, payload))
+}
+
+/// The hyper h2 path serves any byte stream: preface, SETTINGS,
+/// one `GET` stream, and the 200 + body round-trip, all over an
+/// in-memory duplex. Same seam as the h1 test — a server-side
+/// `TlsStream` must flow where this duplex flows. Fails to compile
+/// until `serve_hyper_h2` stops demanding a `TcpStream`.
+///
+/// Scope honesty: this proves the seam (non-TCP bytes served) and
+/// eventual closure after shutdown — not drain *quality*. A
+/// timeout-cut drain returns the same `Drained` as a graceful one
+/// with one completed stream, so graceful-vs-forced belongs to the
+/// drain proofs, not to this test.
+#[tokio::test]
+async fn hyper_h2_serves_a_non_tcp_stream() {
+    let table = Arc::new(table_with(&[(Method::Get, "/hello", "h")]));
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = ConnectionContext {
+        id: &id,
+        shutdown: &pieces.shutdown,
+        logger: &pieces.logger,
+        cors: pieces.cors.as_ref(),
+        metrics_path: pieces.metrics_path.as_deref(),
+        sampler: None,
+        auth: pieces.auth.as_ref(),
+        idle_timeout: pieces.idle,
+        metrics: pieces.metrics.as_ref(),
+        limits: pieces.limits.as_ref(),
+        global_requests: pieces.global_requests.as_ref(),
+        ws: &pieces.ws,
+        loopback_only: pieces.loopback_only,
+        ws_buffer: &pieces.ws_buffer,
+        tenant_labels: &pieces.tenant_labels,
+    };
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    // Cloned before the context borrows `pieces`: the client arm
+    // signals shutdown after reading its response, which ends the
+    // multiplexed connection deterministically as `Drained`.
+    let shutdown = pieces.shutdown.clone();
+    // A short drain bound: the default 30 s would outlast the
+    // close-watch below, and the verdict under test is *that* the
+    // shutdown drains, not how long production allows it.
+    let limits = HyperLimits {
+        drain_timeout: Duration::from_millis(100),
+        ..default_limits()
+    };
+    let serve = serve_hyper_h2(
+        server_io,
+        Arc::clone(&table),
+        Dispatch::flat(hello_handler()),
+        limits,
+        &ctx,
+    );
+    let client = async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut io = client_io;
+        let mut hello = PREFACE.to_vec();
+        hello.extend_from_slice(&settings(&[]));
+        io.write_all(&hello).await.expect("preface writes");
+        // Settle the handshake: server SETTINGS, then ack.
+        loop {
+            let Some((ftype, flags, _, _)) = read_duplex_frame(&mut io).await else {
+                panic!("server died during handshake");
+            };
+            if ftype == SETTINGS && (flags & ACK) == 0 {
+                break;
+            }
+        }
+        io.write_all(&settings_ack()).await.expect("ack writes");
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        let block = encoder.encode(&[
+            HeaderField::new(":method", "GET"),
+            HeaderField::new(":path", "/hello"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":authority", "localhost"),
+        ]);
+        io.write_all(&frame(HEADERS, END_HEADERS | END_STREAM, 1, &block))
+            .await
+            .expect("headers write");
+        let mut status = 0u16;
+        let mut body = Vec::new();
+        loop {
+            let Some((ftype, flags, stream, payload)) = read_duplex_frame(&mut io).await else {
+                panic!("server died mid-response");
+            };
+            if stream == 0 {
+                continue;
+            }
+            if ftype == HEADERS {
+                for field in decoder.decode(&payload).expect("decode") {
+                    if field.name == ":status" {
+                        status = field.value.parse().expect("numeric status");
+                    }
+                }
+            } else if ftype == DATA {
+                body.extend_from_slice(&payload);
+                if (flags & END_STREAM) != 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(status, 200, "flat route answers over duplex h2");
+        assert_eq!(body, b"hello from h");
+        shutdown.signal();
+        // Stay open until the server drains and closes: dropping
+        // here would race EOF against the shutdown signal and the
+        // outcome would be `ClientClosed` instead of `Drained`.
+        // A server that never closes enforces nothing — time out
+        // loudly rather than hanging the suite.
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut byte = [0u8; 1];
+            while io.read_exact(&mut byte).await.is_ok() {}
+        })
+        .await;
+        closed.expect("server drains and closes after shutdown");
+    };
+    // Deadlines on the client arm: a server that stalls
+    // before responding must fail loudly, never hang the
+    // suite (the close-watch inside already times out; this
+    // covers the handshake and the response).
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("server answers over duplex");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "shutdown drains the connection");
+}

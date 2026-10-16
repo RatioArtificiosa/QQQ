@@ -4,6 +4,14 @@
 
 ### Security
 
+- **serve**: the hyper path serves any stream (`F-16` parity):
+  `serve_hyper_h1`/`serve_hyper_h2` take `impl AsyncRead +
+  AsyncWrite + Unpin + Send + 'static` instead of `TcpStream` —
+  the drivers only ever polled through `TokioIo`, so a
+  server-side `TlsStream` now flows where a socket or test
+  duplex flows. Pins: flat-route round trips over duplex on both
+  protocols, including an h2 shutdown-drains verdict.
+
 - **replay**: first-divergent-checkpoint bisect (`I-03` core): a
   lower-bound search over stored `(call_index, rolling_hash)`
   checkpoints, comparing hashes under an aligned-grid contract

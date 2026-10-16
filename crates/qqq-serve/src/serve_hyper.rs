@@ -64,8 +64,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use qqq_host::tenant::TenantKey;
 use qqq_io::listener::Shutdown;
-use tokio::io::{AsyncRead, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::access_log::Logger;
 use crate::auth::AuthPolicy;
@@ -85,19 +84,28 @@ use crate::span::Sampler;
 use crate::transport::HyperLimits;
 use crate::ws::loopback_host_allowed;
 
-/// Serve one TCP connection through hyper's HTTP/1.1 driver.
+/// Serve one connection through hyper's HTTP/1.1 driver.
+///
+/// Any byte stream, not just a socket: the driver only polls the
+/// stream through `TokioIo`, so a server-side `TlsStream` flows
+/// exactly where a `TcpStream` or test duplex flows. `Send` is for
+/// the callers that serve each connection on its own task; `Unpin`
+/// is what lets the driver poll without pinning ceremony.
 ///
 /// The accept loop calls this exactly where it calls the in-house
 /// `serve_connection`: after ledger admission, with the same context.
 /// Ledger release, metrics, and the accept bound stay the caller's job,
 /// because they describe the accept, not the transport.
-pub async fn serve_hyper_h1(
-    stream: TcpStream,
+pub async fn serve_hyper_h1<S>(
+    stream: S,
     table: Arc<RouteTable>,
     dispatch: Dispatch,
     limits: HyperLimits,
     ctx: &ConnectionContext<'_>,
-) -> Served {
+) -> Served
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let state = Arc::new(State {
         table,
         dispatch,
@@ -156,22 +164,28 @@ pub async fn serve_hyper_h1(
     }
 }
 
-/// Serve one TCP connection through hyper's HTTP/2 driver, prior
+/// Serve one connection through hyper's HTTP/2 driver, prior
 /// knowledge (no upgrade dance): the tests speak raw h2, and TLS/ALPN
 /// selection lands with the TLS commit.
+///
+/// Any byte stream, like [`serve_hyper_h1`]: same bounds for the
+/// same reasons.
 ///
 /// Same pipeline as [`serve_hyper_h1`] through the shared `answer`,
 /// with two transport differences: per-request `Connection: close`
 /// headers are stripped (connection headers are forbidden on h2 —
 /// hyper would fail the stream), and the driver is otherwise
 /// identical (idle bound, drain bound, graceful shutdown).
-pub async fn serve_hyper_h2(
-    stream: TcpStream,
+pub async fn serve_hyper_h2<S>(
+    stream: S,
     table: Arc<RouteTable>,
     dispatch: Dispatch,
     limits: HyperLimits,
     ctx: &ConnectionContext<'_>,
-) -> Served {
+) -> Served
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let state = Arc::new(State {
         table,
         dispatch,

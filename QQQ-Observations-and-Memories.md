@@ -39067,6 +39067,32 @@ search is guilty until the property test acquits it — trace the
 invariants on paper, then let the oracle vote two thousand times.
 → `crates/qqq-host/src/replay.rs`, `CHANGELOG.md`.
 
+## §O-724 - Hyper seam: TcpStream appeared twice, both in signatures
+
+The next parity slice removes a fake constraint:
+`serve_hyper_h1`/`h2` demanded `TcpStream` while using nothing
+TCP about it — the only `TcpStream` mentions in the module were
+the two parameters. Red-first E0308 (log kept), then a generic
+bound (`AsyncRead + AsyncWrite + Unpin + Send + 'static`, each
+justified in the docs), then duplex round-trip tests on both
+protocols. Two test-harness lessons. (1) The h2 test first
+asserted `Drained` after dropping the client half — but the
+drop races EOF against the shutdown signal and EOF wins, so
+the outcome was `ClientClosed`. The test now stays open until
+the server drains and closes, with a 10 s loud timeout instead
+of a hang. (2) The default 30 s drain bound outlasts any sane
+close-watch, so the test carries its own 100 ms bound — the
+verdict under test is *that* shutdown drains, not how long
+production allows. Measured: h1 suite 25 green, h2 suite 21
+green (5/5 stability on the new test), fmt and clippy `-D
+warnings` clean. This is the seam the TLS-accept commit
+terminates into. Review returned two LOWs, both closed: the
+drain-quality boundary is now stated in the h2 test docs
+(seam + eventual closure here, graceful-vs-forced in the drain
+proofs), and both client arms carry 60 s loud deadlines so a
+stalled server fails instead of hanging the suite.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_serve.rs`, `crates/qqq-serve/tests/hyper_h2.rs`, `CHANGELOG.md`.
+
 ## §O-723 - I-homes: cores shipped, product wiring scheduled, nothing homeless
 
 Costing with live inputs. I-02: F-09's v2 chain exists with an

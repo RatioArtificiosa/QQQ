@@ -1472,3 +1472,98 @@ async fn hyper_max_requests_closes_with_warning() {
     );
     let _ = hyper.finish().await;
 }
+
+// ---------------------------------------------------------------------------
+// Transport seam: any stream, not just TCP
+// ---------------------------------------------------------------------------
+
+/// The hyper path serves any byte stream, not just a socket: a flat
+/// route round-trips over an in-memory duplex with no listener, no
+/// port, and no TCP at all. This is the seam the TLS commit
+/// terminates into — a server-side `TlsStream` must flow where this
+/// duplex flows. Fails to compile until `serve_hyper_h1` stops
+/// demanding a `TcpStream`.
+#[tokio::test]
+async fn hyper_h1_serves_a_non_tcp_stream() {
+    let table = Arc::new(table_with(&[(Method::Get, "/hello", "h")]));
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = ConnectionContext {
+        id: &id,
+        shutdown: &pieces.shutdown,
+        logger: &pieces.logger,
+        cors: pieces.cors.as_ref(),
+        metrics_path: pieces.metrics_path.as_deref(),
+        sampler: None,
+        auth: pieces.auth.as_ref(),
+        idle_timeout: pieces.idle,
+        metrics: pieces.metrics.as_ref(),
+        limits: pieces.limits.as_ref(),
+        global_requests: pieces.global_requests.as_ref(),
+        ws: &pieces.ws,
+        loopback_only: pieces.loopback_only,
+        ws_buffer: &pieces.ws_buffer,
+        tenant_labels: &pieces.tenant_labels,
+    };
+    let (mut client, server_io) = tokio::io::duplex(65536);
+    let serving = serve_hyper_h1(
+        server_io,
+        Arc::clone(&table),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        &ctx,
+    );
+    let exchange = async move {
+        client
+            .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request writes to duplex");
+        client.flush().await.expect("flush");
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            assert!(
+                client.read_exact(&mut byte).await.is_ok(),
+                "server closed before answering"
+            );
+            head.push(byte[0]);
+            assert!(head.len() <= 64 * 1024, "response head bounded");
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&head).into_owned();
+        let mut lines = text.split("\r\n");
+        let status = lines.next().unwrap_or("").to_owned();
+        let mut length = 0usize;
+        for line in lines {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        let mut body = vec![0u8; length];
+        client.read_exact(&mut body).await.expect("body arrives");
+        (status, body)
+    };
+    let (served, (status, body)) = tokio::join!(serving, async {
+        // Deadline on the client arm: a server that stalls
+        // before responding must fail loudly, never hang the
+        // suite.
+        tokio::time::timeout(Duration::from_secs(60), exchange)
+            .await
+            .expect("server answers over duplex")
+    });
+    assert_eq!(status, "HTTP/1.1 200 OK", "flat route answers over duplex");
+    assert_eq!(body, b"hello from h");
+    assert_eq!(
+        served,
+        Served::ClientClosed,
+        "close-request ends the connection"
+    );
+}

@@ -39497,4 +39497,37 @@ except the discriminated variable — sequence was the
 confound here, and any multi-field render carries one.
 → `crates/qqq-host/src/audit.rs`, `CHANGELOG.md`.
 
+## §O-738 - Bridge17: re-run on the true final tree after a daemon outage
+
+Bridge16 ran on `96b29a4`, but two code commits followed
+(the clock-guard fix and its rename), so the bridge was not
+on the final tree — caught by review, re-run here on
+`51e7484` (clean) as bridge17. The re-run itself hit the
+outage rule: Docker Desktop was down after the power cut and
+`qqqdev` refused in 2.8 s without touching anything; the
+partial logs are preserved as interruption evidence
+(`bridge17-interrupted.log`), the daemon was restarted,
+health was verified before relaunch, and the run went from
+scratch on the untouched tree.
+
+Verdict: exit 0, "All Linux gates passed", 86 suites green /
+0 bad in 262 s. All ten verification-phase tests confirmed
+by name in the log (h2ws echo, streaming first-event, h1 WS
+echo, mTLS identity, both strengthened clock tests,
+downgrade, budget-exhaustion, bisect property, token
+expiry). The 5 known environmentals stay fixed-and-green —
+zero failures, nothing silently absent.
+
+Resources (5 one-minute samples, `docker-stats17.log`): CPU
+mean 101.5%, max 330.2%; MEM max 2.21 GiB = 27.6% of 8 GiB.
+Cooler than bridge16 (warm volume, shorter run); the two
+spikes are cargo compile/test phases, memory held by test
+binaries, inside limits throughout, no outcome correlation.
+Judgement NORMAL. The launch-path proof (real boot on
+:18080, two curl hits, sane body twice) and the flood-cutoff
+rebuttal (hyper 1.12 exposes no ping/settings rate knob —
+18-method builder API enumerated from source; deleted codec
+never served) are logged alongside.
+→ `docker/compose.yaml`, `tools/qqqdev.ps1` (unchanged).
+
 *End of `QQQ-Observations-and-Memories.md`.*

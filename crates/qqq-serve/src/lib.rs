@@ -16,8 +16,8 @@
 //! | Header-bomb and framing limits | **implemented** (`SRV-020`) |
 //! | HTTP/1.1 responses, keep-alive, timeouts, connection limits | **implemented** (`SRV-001`) |
 //! | Accept loop, per-tenant ledger, graceful drain | **implemented** (`SRV-001`, `SRV-011`, `SRV-012`) |
-//! | HTTP/2 protocol: frames, HPACK, streams, flow control, multiplexing | **implemented** (`SRV-002`) |
-//! | HTTP/2 on a listener (TLS/ALPN negotiation of `h2`) | **not implemented** |
+//! | HTTP/2 serving: framing, HPACK, streams, flow control, multiplexing | **implemented** (`SRV-002`, hyper path; h2spec 145/145 + 146 strict green) |
+//! | HTTP/2 on a listener (TLS/ALPN negotiation of `h2`) | **implemented** (`SRV-007` accept path, ALPN `h2`) |
 //! | Streaming bodies, backpressure | **implemented** (`SRV-004`) |
 //! | `max_request_bytes` enforced during streaming | **implemented** (`SRV-005`) |
 //! | TLS, mTLS | **implemented** (`SRV-007`, `SRV-008`) |

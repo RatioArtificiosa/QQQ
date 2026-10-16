@@ -3157,6 +3157,15 @@ Items are grouped below by **phase**, because dependency order matters more than
     check.
   → Not covered: TLS/ALPN negotiation of `h2` on a listener — `crate::server` is
     HTTP/1.1 only. That is the remaining join and is stated in `h2/mod.rs`.
+  → 2026-10-16 (Wave 8, `§O-732`): the serving path moved to hyper, which now
+    owns all h2 framing/HPACK/streams/flow control — h2spec 145/145 plus 146/146
+    strict green against the hyper driver, §O-676 flood budgets green over hyper.
+    The in-house codec (`conn`, `frame`, `flow`, `stream`, `settings`) is deleted
+    (zero references outside its own tests); `h2::hpack` stays as the
+    raw-h2 speaker for the hyper conformance tests with `h2::error` as its wire-code
+    companion; `tls.rs` stays as live transport-independent policy; in-house
+    `http1` stays as the differential oracle. The "seven layers" evidence above is
+    history, not current structure.
 - [x] **SRV-003** Implement the compile-time route table as a radix trie.
   → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **SRV-004** Implement streaming bodies end to end with backpressure propagation.

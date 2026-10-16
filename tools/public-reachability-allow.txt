@@ -36,12 +36,8 @@ crates/qqq-host/src/invoke.rs  method_index  unreviewed  resolves a method name 
 crates/qqq-host/src/pool.rs  note_latency  unreviewed  records an instantiation's latency
 crates/qqq-run/src/verify.rs  digest_hex  unreviewed  renders a digest as lowercase hex
 crates/qqq-serve/src/auth.rs  is_public  published-api  a predicate on `RouteAuth`; the policy is consulted via `decide`
-crates/qqq-serve/src/h2/conn.rs  flow_mut  unreviewed  mutable access to flow control
-crates/qqq-serve/src/h2/conn.rs  streams_mut  unreviewed  mutable access to the stream registry
-crates/qqq-serve/src/h2/flow.rs  recv_mut  unreviewed  mutable access to the receive direction
 crates/qqq-serve/src/h2/hpack.rs  is_pseudo  unreviewed  whether a header name is a pseudo-header
 crates/qqq-serve/src/h2/hpack.rs  set_max_header_list_size  unreviewed  sets the header-list budget
-crates/qqq-serve/src/h2/stream.rs  RESERVED_BIT  unreviewed  the reserved bit of a stream id
 crates/qqq-serve/src/response.rs  is_server_fault  unreviewed  whether a status is the server's fault
 crates/qqq-serve/src/tls.rs  requests_client_certificate  published-api  a predicate on `TlsConfig`; `client_auth` is consulted directly
 crates/qqq-serve/src/ws_conn.rs  send_text  published-api  a thin wrapper over `send`, which the `Echo` handler uses

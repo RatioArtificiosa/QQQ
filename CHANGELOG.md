@@ -4,6 +4,19 @@
 
 ### Security
 
+- **serve**: delete the dead in-house h2 codec (`F-16` parity):
+  `h2/{conn,frame,flow,stream,settings}` served nothing —
+  `server.rs` has no h2 path, the §O-676 flood budgets run over
+  hyper, and zero references existed outside the codec's own
+  tests — and is deleted on parity evidence (h2spec 145/145
+  plus 146/146 strict green against the hyper driver, full
+  gate green). What stays, and why: `h2::hpack` (raw-h2
+  speaker for the hyper conformance tests) with `h2::error`
+  (the shared wire-code vocabulary it maps onto), `tls.rs`
+  (live cipher/ALPN/mTLS/peer-identity policy the hyper path
+  itself uses), in-house `http1` (differential oracle).
+  History preserved in git; the module doc names the commit.
+
 - **serve**: CONNECT review hardening (`F-16` parity): task
   handles prune on push at both sites through one helper
   (sequential upgrades on a long h2 connection no longer

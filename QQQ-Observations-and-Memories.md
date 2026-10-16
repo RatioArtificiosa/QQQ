@@ -39371,4 +39371,55 @@ code, run the test before agreeing — the wire had a worse
 number, and the worse number decided the fix.
 → `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_h2ws.rs`, `CHANGELOG.md`.
 
+## §O-732 - Deletion decision: the codec goes, the policy and the speaker stay
+
+The in-house h2 deletion the wave gated on parity evidence is
+decided three ways, and the evidence for each is different.
+DELETE `h2/{conn,frame,flow,stream,settings}`: the
+serving tree never wired it (`server.rs` has no h2 path), the
+§O-676 flood budgets moved to the hyper driver and are green
+there, a workspace-wide reference search finds zero users
+outside the codec's own tests, and the conformance backstop
+landed today — h2spec 145/145 plus 146/146 strict, green
+against the shipped hyper driver (logs kept; the first run's
+49 timeouts were a serial-probe artifact, the concurrent
+re-run is the evidence). The compiler corrected the file
+list: `h2::hpack` maps its failures onto `h2::error`'s wire
+codes, so `error.rs` stays as its companion — deletion by
+reference search includes following the remaining references.
+KEEP `tls.rs`: cipher policy,
+versions, ALPN, mTLS verification, and peer identity are
+transport-independent policy the hyper path itself builds on
+(`serve_hyper_tls` via `TlsConfig::build`) — deleting it
+would drop live policy, not dead code, which the wave rule
+names as failure. KEEP `h2::hpack`: four hyper conformance
+suites speak raw h2 through it; without the speaker there is
+no backstop. KEEP in-house `http1`: the differential oracle
+the gates still run against. Checklist `SRV-002` keeps its
+history with a dated transition note appended, never
+rewritten; `lib.rs` scope rows now name hyper. Measured: ref
+search 0 external users; h2spec 145 + 146 green; gate verdict
+pending in this commit's log. The generalisable rule: delete
+by reference search, keep by live use — and when the same
+module holds both, split the decision file by file.
+→ `crates/qqq-serve/src/h2/`, `crates/qqq-serve/src/lib.rs`, `QQQ-Checklist-V1.md`, `CHANGELOG.md`.
+
+## §O-734 - Scheduled futures: HTTP/3, MCP2, transport research (later wave)
+
+At the operator's direction 2026-10-16: HTTP/3 (QUIC), MCP2
+transport work, version-tracking of other transport protocols,
+and intense planning of all three are SCHEDULED for a later
+session — explicitly after the current checklist's building
+and auditing complete, not during Wave 8. Trigger: Wave 8
+acceptance (bridge + report) closes first; the survey for the
+later wave starts from this entry. No proposal section, no
+checklist rows, no dependencies exist yet, and none are
+invented here — an unscheduled intention would rot into an
+unowned gap, which is the defect class this file keeps
+recording. Inputs the later survey inherits: hyper owns h1/h2
+framing (this wave), `tls.rs` policy is transport-independent
+(so QUIC/TLS 1.3 reuse starts there), h2spec is the proven
+conformance-backstop pattern to repeat.
+→ (this entry; no code).
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -1,104 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP/2: the frame layer, HPACK, stream state, flow control and multiplexing.
+//! HTTP/2: HPACK only — the framing, streams, flow control and
+//! multiplexing moved to hyper (`F-16` Option A, Wave 8).
 //!
-//! Implements Checklist `SRV-002` — *"Implement HTTP/2 including multiplexing and
-//! flow control"* — and Proposal §6.4, which lists HTTP/2 (complete) in V1's
-//! scope.
+//! What was here: a complete in-house HTTP/2 protocol implementation
+//! (`frame`, `hpack`, `flow`, `stream`, `conn`, plus `error` and
+//! `settings`), built for Checklist `SRV-002` and never wired to a
+//! listener — `crate::server` serves HTTP/1.1 only, and the hyper
+//! path owns all h2 framing since the migration. Deleted 2026-10-16
+//! (`§O-732`) on parity evidence: h2spec 145/145 plus 146/146
+//! strict green against the hyper driver, the §O-676 flood budgets
+//! green over hyper, and zero references outside this module's own
+//! tests. What stays, and why:
 //!
-//! # Why this is built rather than depended on
+//! - [`hpack`] stays: the hyper conformance tests speak raw h2 and
+//!   need an independent HPACK codec (`hyper_h2`, `hyper_tls`,
+//!   `hyper_streaming`, `hyper_h2ws`). It is test harness, not
+//!   transport — Hyper owns framing, HPACK tables, streams, and
+//!   flow control on the serve path, and no separate direct h2
+//!   dependency exists by the owner's non-negotiable.
+//! - [`error`] stays with it: the RFC wire codes are shared
+//!   vocabulary `hpack` maps its failures onto, not serving code.
+//!   Self-contained by design (see its module doc on why the codes
+//!   do not belong in `qqq-core`).
+//! - `crate::tls` stays untouched: cipher policy, versions, ALPN,
+//!   mTLS verification, and peer identity are transport-independent
+//!   policy the hyper path itself uses (`serve_hyper_tls` builds
+//!   on `TlsConfig::build`). Deleting it would drop policy, not
+//!   dead code.
+//! - In-house `http1` stays untouched: it is the differential
+//!   oracle the migration gates still run against.
 //!
-//! The `h2` crate exists and is good. It is deliberately not used here.
-//!
-//! Proposal §6.4 is a list of *commitments* about this server — backpressure
-//! that propagates from the socket through the host to the guest's stream
-//! (§6.4, "Body handling"), per-tenant connection limits (already built, in
-//! `crate::conn`), and a route table compiled at load. Each of those is a place
-//! where the protocol layer's flow-control and framing decisions are visible to
-//! the layer above. A third-party HTTP/2 implementation exposes its own
-//! vocabulary for those decisions, and the mapping between its vocabulary and
-//! this project's is exactly where the guarantees get lost.
-//!
-//! That is not an argument against dependencies in general. It is the specific
-//! argument that a transport protocol's *state* is not separable from the server
-//! semantics built on it, and this crate's written standard is that every claim
-//! is verified in source (see the Observations file's `§O-047` for how a claim
-//! stated but not verified was treated).
-//!
-//! # The layers, bottom to top
-//!
-//! ```text
-//!   bytes ──► frame      the 9-byte header and every frame type
-//!               │
-//!               ├──► hpack    header blocks: integer, Huffman, dynamic table
-//!               │
-//!               ├──► flow     connection and stream windows
-//!               │
-//!               └──► stream   per-stream state, and which frames are legal
-//!                               │
-//!                               ▼
-//!                          conn        preface, dispatch, multiplexing
-//! ```
-//!
-//! Each layer is independently testable, which is the property that makes the
-//! whole verifiable: [`hpack`] has no idea a connection exists, [`flow`] has no
-//! idea what a header is, and [`stream`] is a state machine with no I/O at all.
-//! `SRV-001`'s accept loop was joined only after every piece existed separately,
-//! and the defect that joining it found (`§O-047a`) was in the *handoff* — so the
-//! seams here are named and tested rather than assumed.
-//!
-//! # What is implemented, and what is not
-//!
-//! | Area | State |
-//! |---|---|
-//! | Frame layer: header, SETTINGS, HEADERS, DATA, `WINDOW_UPDATE`, `RST_STREAM`, PING, GOAWAY, PRIORITY, CONTINUATION | **implemented** |
-//! | HPACK: static table, dynamic table with eviction, integer, Huffman | **implemented** |
-//! | Header validation: pseudo-header ordering, connection-specific headers | **implemented** |
-//! | Stream states and frame legality | **implemented** |
-//! | Flow control: both windows, `WINDOW_UPDATE`, `SETTINGS_INITIAL_WINDOW_SIZE` | **implemented** |
-//! | Multiplexing, stream-id monotonicity, `MAX_CONCURRENT_STREAMS` | **implemented** |
-//! | Preface and the initial SETTINGS exchange | **implemented** |
-//! | Server push (`PUSH_PROMISE` sending) | **not implemented** — received frames are refused |
-//! | Priority scheduling (RFC 9113 §5.3) | **parsed and ignored**, as §5.3.1 directs |
-//! | TLS/ALPN negotiation, the socket accept loop for h2 | **not implemented** — `SRV-007`, and `crate::server` is HTTP/1.1 only |
-//! | `CONTINUATION`-reassembly across reads | **implemented** in [`conn`], bounded by a limit |
-//!
-//! The last two rows are the honest gaps. This module is a complete HTTP/2
-//! *protocol* implementation driven over a byte buffer; it is not yet wired to a
-//! listener, and `crate::lib.rs` still reports `SRV-002` as not implemented
-//! until that join is made. Naming the gap is the point — a protocol layer that
-//! claimed to be a server would be worse than one that says where it stops.
-//!
-//! # Error model
-//!
-//! [`error::ErrorCode`] is the RFC's sixteen (fourteen defined) wire codes, local
-//! to this module. It is deliberately **not** added to `qqq_core::ErrorCode`: an
-//! HTTP/2 protocol error is a statement about the peer's bytes with a numeric
-//! value that goes on the wire, not a `QQQ-XXXX` condition with a remediation.
-//! The reasoning is in [`error`]'s module documentation, including why wiring
-//! them into `qqq-core` would need a code outside this module rather than a
-//! guess inside it.
+//! If a future transport needs a second h2 codec, that is a new
+//! decision with new evidence — not a revert. The deleted code is
+//! in git history (`§O-732` names the commit).
 
-pub mod conn;
 pub mod error;
-pub mod flow;
-pub mod frame;
 pub mod hpack;
-pub mod settings;
-pub mod stream;
-
-pub use conn::{Connection, Event, MAX_CONTINUATIONS, MAX_HEADER_BLOCK_BYTES, State};
-pub use error::{ConnectionError, ErrorCode, StreamError};
-pub use flow::{FlowControl, FlowError};
-pub use frame::{
-    CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN, Flags, Frame, FrameError,
-    FrameHeader, FrameType, MAX_FRAME_PAYLOAD, PrioritySpec, SettingId, parse_frame, to_bytes,
-    write_frame,
-};
-pub use hpack::{
-    DEFAULT_HEADER_TABLE_SIZE, Decoder, Encoder, HeaderField, HpackError, MAX_HEADER_LIST_SIZE,
-};
-pub use settings::{
-    DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_CONCURRENT_STREAMS, Settings, SettingsError,
-};
-pub use stream::{FrameKind, Stream, StreamId, StreamState};

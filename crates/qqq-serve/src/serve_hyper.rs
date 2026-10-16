@@ -77,8 +77,9 @@ use crate::metrics::{HttpMetrics, TenantLabels};
 use crate::response::{self, Response, validate_outbound};
 use crate::route::{Method, RouteTable};
 use crate::server::{
-    ConnectionContext, Dispatch, Served, apply_cors, config_max_request_bytes, dispatch_off_thread,
-    emit_record, emit_span_sampled, is_head, micros_since, record_metrics, split_target,
+    ConnectionContext, Dispatch, RouteMatch, Served, apply_cors, config_max_request_bytes,
+    dispatch_off_thread, emit_record, emit_span_sampled, is_head, micros_since, record_metrics,
+    split_target,
 };
 use crate::span::Sampler;
 use crate::transport::HyperLimits;
@@ -586,9 +587,21 @@ impl Drop for Flight<'_> {
 /// `size_hint` stays exact and `is_end_stream` mirrors `Full`, so
 /// framing decisions see the same body hyper would.
 struct WatchBody {
-    data: Bytes,
-    pos: usize,
+    inner: WatchBodyInner,
     watch: Arc<IdleWatch>,
+}
+
+/// What a hyper response body carries.
+enum WatchBodyInner {
+    /// One complete body, sent in ≤16KB frames.
+    Full { data: Bytes, pos: usize },
+    /// A streaming body: frames arrive from the handler as it
+    /// writes them, and the body ends when the sender is dropped.
+    /// The stamps still track the send — a stalled stream (no
+    /// polls at all) reclaims like a stalled send.
+    Stream {
+        rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+    },
 }
 
 /// Largest single frame the watch body yields: the h2 DATA ceiling.
@@ -597,8 +610,15 @@ const WATCH_FRAME_BYTES: usize = 16 * 1024;
 impl WatchBody {
     fn new(body: Bytes, watch: &Arc<IdleWatch>) -> Self {
         Self {
-            data: body,
-            pos: 0,
+            inner: WatchBodyInner::Full { data: body, pos: 0 },
+            watch: Arc::clone(watch),
+        }
+    }
+
+    /// A streaming body fed by a handler through `StreamWriter::channel`.
+    fn streaming(rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>, watch: &Arc<IdleWatch>) -> Self {
+        Self {
+            inner: WatchBodyInner::Stream { rx },
             watch: Arc::clone(watch),
         }
     }
@@ -610,25 +630,48 @@ impl http_body::Body for WatchBody {
 
     fn poll_frame(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
-        if this.pos >= this.data.len() {
-            return Poll::Ready(None);
+        match &mut this.inner {
+            WatchBodyInner::Full { data, pos } => {
+                if *pos >= data.len() {
+                    return Poll::Ready(None);
+                }
+                this.watch.touch();
+                let end = (*pos + WATCH_FRAME_BYTES).min(data.len());
+                let chunk = data.slice(*pos..end);
+                *pos = end;
+                Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+            }
+            WatchBodyInner::Stream { rx } => match rx.poll_recv(cx) {
+                Poll::Ready(Some(chunk)) => {
+                    this.watch.touch();
+                    Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
         }
-        this.watch.touch();
-        let end = (this.pos + WATCH_FRAME_BYTES).min(this.data.len());
-        let chunk = this.data.slice(this.pos..end);
-        this.pos = end;
-        Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
     }
 
     fn is_end_stream(&self) -> bool {
-        self.pos >= self.data.len()
+        match &self.inner {
+            WatchBodyInner::Full { data, pos } => *pos >= data.len(),
+            // Unknown until the sender drops: saying `true` early
+            // would let hyper end the body while the handler still
+            // holds it.
+            WatchBodyInner::Stream { .. } => false,
+        }
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        http_body::SizeHint::with_exact((self.data.len() - self.pos) as u64)
+        match &self.inner {
+            WatchBodyInner::Full { data, pos } => {
+                http_body::SizeHint::with_exact((data.len() - pos) as u64)
+            }
+            WatchBodyInner::Stream { .. } => http_body::SizeHint::default(),
+        }
     }
 }
 
@@ -830,13 +873,13 @@ fn refuse_auth_policy(
     None
 }
 
-/// Metrics path, preflight, and the streaming gap.
+/// Metrics path and preflight.
 ///
 /// Returns the response — rendered and recorded — when the request is
-/// not an ordinary flat one. Order mirrors `serve_special_route`:
-/// server-owned metrics path first, preflight before routing, then
-/// the loud 501 for streaming routes (and h2 upgrade requests,
-/// whose extended-CONNECT mechanism is a separate unit).
+/// not an ordinary flat one. Upgrades, streaming routes, and the
+/// metrics path never reach the 501 below: their arms run first in
+/// `answer`, and what remains here is metrics, preflight, and the
+/// h2-upgrade gap.
 fn serve_special(
     state: &State,
     head: &RequestHead,
@@ -891,14 +934,17 @@ fn serve_special(
             started,
         )));
     }
-    if let Some(matched) = state.table.match_route(head.method, path)
-        && (state.dispatch.streaming_for(&matched.handler).is_some()
-            || (state.protocol == Protocol::H2
-                && state.dispatch.websocket_for(&matched.handler).is_some()))
+    // The last 501: h2 upgrade requests need extended-CONNECT, a
+    // mechanism this path does not implement yet. Streaming over
+    // both protocols and h1 upgrades are served by their arms in
+    // `answer`, which run before this function.
+    if state.protocol == Protocol::H2
+        && let Some(matched) = state.table.match_route(head.method, path)
+        && state.dispatch.websocket_for(&matched.handler).is_some()
     {
         let mut response = Response::text(
             501,
-            "this route needs the streaming loop or an h2 extended-CONNECT upgrade, which the hyper path does not serve yet",
+            "this route needs an h2 extended-CONNECT upgrade, which the hyper path does not serve yet",
         );
         response.set_header("X-QQQ-Error", "hyper-transport-gap");
         return Some(render_refusal(state, head, path, &response, started));
@@ -1015,24 +1061,32 @@ fn upgrade_route(
 /// ledger slot lasts as long as the frames do. The loop's record
 /// and `on_close` fire inside the task, which is why the audit
 /// trail does not depend on the driver outliving the connection.
-fn serve_upgrade(
+async fn serve_upgrade(
     state: &State,
     request: hyper::Request<Incoming>,
     head: RequestHead,
     ws_handler: Arc<dyn crate::ws_conn::WebSocketHandler>,
     span: u64,
     started: Instant,
-) -> hyper::Response<WatchBody> {
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    // A chunked body on an upgrade route is refused before the
+    // handshake, like in-house: committing to frames with bytes
+    // in flight bypasses the body cap. The drain is async, which
+    // is what makes this function async while nothing else in it
+    // awaits.
+    if crate::server::special_route_has_body(&head) {
+        return Ok(refuse_special_body(state, request, &head, started).await);
+    }
     // Not an upgrade at all: answered as ordinary HTTP, never hijacked.
     if !crate::ws_conn::is_upgrade_request(&head) {
-        return upgrade_refusal(
+        return Ok(upgrade_refusal(
             state,
             &head,
             400,
             &crate::ws::HandshakeError::NotAnUpgrade.to_string(),
             &[],
             started,
-        );
+        ));
     }
     // Origin before the handshake: past the `101` the connection
     // speaks frames, and a refusal must not arrive framed.
@@ -1041,7 +1095,7 @@ fn serve_upgrade(
         head.header("origin"),
         head.header("host").unwrap_or(""),
     ) {
-        return upgrade_refusal(state, &head, 403, "", &[], started);
+        return Ok(upgrade_refusal(state, &head, 403, "", &[], started));
     }
     let handshake = match crate::ws::Handshake::parse(head.method.as_str(), |name| {
         head.header(name).map(str::to_owned)
@@ -1059,7 +1113,14 @@ fn serve_upgrade(
             if status == 426 {
                 extra.push(("Sec-WebSocket-Version", crate::ws::VERSION.to_owned()));
             }
-            return upgrade_refusal(state, &head, status, &error.to_string(), &extra, started);
+            return Ok(upgrade_refusal(
+                state,
+                &head,
+                status,
+                &error.to_string(),
+                &extra,
+                started,
+            ));
         }
     };
     let upgrade = hyper::upgrade::on(request);
@@ -1108,7 +1169,7 @@ fn serve_upgrade(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(handle);
-    response
+    Ok(response)
 }
 
 /// Render an upgrade refusal: recorded like every hyper answer,
@@ -1127,6 +1188,141 @@ fn upgrade_refusal(
         response.set_header(name, value.as_str());
     }
     close_after(render_refusal(state, head, path, &response, started))
+}
+
+/// Drain a refused chunked body, bounded like in-house.
+///
+/// Same bound, same deadline, same silence on failure as
+/// `drain_for_refusal`: closing with an unread body resets the
+/// connection and discards the refusal, so the drain is courtesy,
+/// and a courtesy that can hang is not one.
+async fn drain_hyper_body(body: hyper::body::Incoming) {
+    let mut remaining = crate::server::REFUSAL_DRAIN_BYTES;
+    let mut body = body;
+    let deadline = tokio::time::sleep(crate::server::REFUSAL_DRAIN_TIMEOUT);
+    tokio::pin!(deadline);
+    loop {
+        if remaining == 0 {
+            break;
+        }
+        tokio::select! {
+            () = &mut deadline => break,
+            frame = body.frame() => {
+                match frame {
+                    None | Some(Err(_)) => break,
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data() {
+                            remaining = remaining.saturating_sub(data.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Refuse a chunked body on a special route, mirroring
+/// `reject_special_route_body`: drained first, then the same 400
+/// message, recorded and closed. Shared by the upgrade and
+/// streaming arms, which is exactly the sharing in-house gets
+/// from checking before dispatch.
+async fn refuse_special_body(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: &RequestHead,
+    started: Instant,
+) -> hyper::Response<WatchBody> {
+    drain_hyper_body(request.into_body()).await;
+    let (path, _query) = split_target(&head.target);
+    let response = response::from_error(&response::parse_error_response(
+        crate::server::SPECIAL_ROUTE_BODY_MESSAGE,
+    ));
+    close_after(render_recorded(
+        state,
+        Some((head, path)),
+        &response,
+        0,
+        started,
+    ))
+}
+
+/// Serve a streaming route: head now, body as the handler writes it.
+///
+/// The handler runs on a spawned task against a channel writer;
+/// the response carries the receiving end, so the first event
+/// leaves while the handler is still parked — a buffered path
+/// would deadlock the gated test, not merely fail it. The head
+/// mirrors `write_stream_head` minus framing (status, no
+/// content-length/connection/transfer-encoding — hyper frames
+/// DATA itself), and h1 closes after the body like in-house
+/// shuts the socket down. The record fires in the task with the
+/// outcome and the bytes written, so per-request audit does not
+/// depend on the driver outliving the stream.
+#[allow(clippy::too_many_arguments)]
+async fn serve_streaming_hyper(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: RequestHead,
+    matched: RouteMatch,
+    stream_handler: crate::stream::StreamingHandler,
+    span: u64,
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    use crate::stream::{StreamError, StreamOutcome};
+    if crate::server::special_route_has_body(&head) {
+        return Ok(refuse_special_body(state, request, &head, Instant::now()).await);
+    }
+    let (mut writer, rx) = crate::stream::StreamWriter::channel();
+    let builder = hyper::Response::builder().status(hyper::StatusCode::OK);
+    // No content headers: hyper owns framing, and a declared
+    // length would disagree with a body whose end only the
+    // handler's return provides.
+    let response = builder
+        .body(WatchBody::streaming(rx, &state.watch))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(WatchBody::new(Bytes::new(), &state.watch))
+                .unwrap_or_else(|_| {
+                    hyper::Response::new(WatchBody::new(Bytes::new(), &state.watch))
+                })
+        });
+    let response = match state.protocol {
+        Protocol::H1 => close_after(response),
+        Protocol::H2 => response,
+    };
+    let tenant = state.ctx.tenant_label.clone();
+    let peer = state.ctx.peer;
+    let trace = state.ctx.trace;
+    let logger = state.ctx.logger.clone();
+    let (path, _query) = split_target(&head.target);
+    let path = path.to_owned();
+    tokio::spawn(async move {
+        let handler_result = stream_handler(&head, &matched, &mut writer).await;
+        let outcome = match handler_result {
+            Ok(()) => match writer.finish().await {
+                Ok(()) => StreamOutcome::Completed,
+                Err(_) => StreamOutcome::HandlerFailed,
+            },
+            Err(StreamError::Transport(_)) => StreamOutcome::ClientClosed,
+            Err(StreamError::Handler(_)) => StreamOutcome::HandlerFailed,
+        };
+        let written = writer.written();
+        crate::stream::emit_stream_record(
+            &logger,
+            &crate::stream::StreamRecord {
+                head: &head,
+                path: &path,
+                status: 200,
+                outcome,
+                written,
+                tenant: &tenant,
+                peer,
+                trace,
+                span,
+            },
+        );
+    });
+    Ok(response)
 }
 
 /// The per-connection ceiling decision for one request start.
@@ -1253,18 +1449,24 @@ async fn answer(
     // --- Metrics path, preflight, upgrades: off the flat path ------------
     //
     // WebSocket upgrades on HTTP/1 take the upgrade arm, which owns
-    // the raw request for the handshake handoff; everything else
-    // falls through to `serve_special` (metrics, preflight,
-    // streaming routes, h2 upgrades).
+    // the raw request for the handshake handoff; streaming routes
+    // take the streaming arm, which owns it for the channel handoff;
+    // everything else falls through to `serve_special` (metrics,
+    // preflight, h2 upgrades).
     if let Some(ws_handler) = upgrade_route(state, &head, path) {
-        return Ok(serve_upgrade(
-            state,
-            request,
-            head,
-            ws_handler,
-            span,
-            request_started,
-        ));
+        return serve_upgrade(state, request, head, ws_handler, span, request_started).await;
+    }
+    if let Some(matched) = state.table.match_route(head.method, path)
+        && let Some(stream_handler) = state.dispatch.streaming_for(&matched.handler)
+    {
+        // Same position as in-house (after the gates, before the
+        // flat path): a streaming route commits the connection to
+        // a body without a length, so it must not reach the
+        // buffered body reader, which would wait for an end that
+        // only the handler's return provides.
+        let stream_handler = stream_handler.clone();
+        let matched = crate::server::route_match_of(&matched);
+        return serve_streaming_hyper(state, request, head, matched, stream_handler, span).await;
     }
     if let Some(special) = serve_special(state, &head, path, request_started) {
         return Ok(special);

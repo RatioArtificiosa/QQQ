@@ -102,13 +102,35 @@ impl StreamOutcome {
 /// close` forced on HTTP/1.0 — would be the handler's problem to remember. Wrapping the
 /// socket means those rules are applied once, here, and a handler that writes nothing at
 /// all still produces a valid empty stream.
+///
+/// # Channel mode, for the hyper path
+///
+/// The same writer serves hyper streaming responses with the sink
+/// swapped: pieces go to an `mpsc` channel hyper polls as a
+/// response body instead of to a socket. Framing is the transport's
+/// job there (hyper frames DATA itself), so channel pieces travel
+/// unframed and `finish` closes by dropping the sender. The
+/// handler-facing API is identical — one handler serves both
+/// transports, and the `StreamingHandler` type never changes.
 pub struct StreamWriter<'a> {
-    stream: &'a mut TcpStream,
-    version: Version,
+    sink: Sink<'a>,
     /// Whether the body has been terminated, so `finish` is idempotent.
     finished: bool,
     /// How many bytes of body were written, for the access log.
     written: u64,
+}
+
+/// Where a streaming body goes.
+enum Sink<'a> {
+    /// An in-house socket: head bytes, version framing, terminator.
+    Socket {
+        stream: &'a mut TcpStream,
+        version: Version,
+    },
+    /// A hyper response body: unframed pieces, closed by dropping.
+    /// `None` once `finish` took it, so a second `finish` is a
+    /// no-op rather than a second close.
+    Channel(Option<tokio::sync::mpsc::UnboundedSender<bytes::Bytes>>),
 }
 
 impl<'a> StreamWriter<'a> {
@@ -138,11 +160,48 @@ impl<'a> StreamWriter<'a> {
         // looks to the client exactly like a server that has not answered.
         stream.flush().await?;
         Ok(Self {
-            stream,
-            version,
+            sink: Sink::Socket { stream, version },
             finished: false,
             written: 0,
         })
+    }
+
+    /// A writer feeding a hyper response body, with its receiving end.
+    ///
+    /// No head is written: hyper owns the response head (the service
+    /// returns it before the handler runs), so there is nothing to
+    /// commit and no commit error. Pieces travel unframed — hyper
+    /// frames DATA itself — and the body ends when `finish` drops
+    /// the sender or when the writer itself is dropped.
+    ///
+    /// ```
+    /// use qqq_serve::stream::StreamWriter;
+    ///
+    /// let rt = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap();
+    /// rt.block_on(async {
+    ///     let (mut writer, mut rx) = StreamWriter::channel();
+    ///     writer.write_now(b"data: x\n\n").await.unwrap();
+    ///     assert_eq!(writer.written(), 9);
+    ///     writer.finish().await.unwrap();
+    ///     let piece = rx.recv().await.expect("the piece arrives before the close");
+    ///     assert_eq!(&piece[..], b"data: x\n\n");
+    ///     assert!(rx.recv().await.is_none(), "finish closed the body");
+    /// });
+    /// ```
+    #[must_use]
+    pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                sink: Sink::Channel(Some(tx)),
+                finished: false,
+                written: 0,
+            },
+            rx,
+        )
     }
 
     /// Write one piece of the body.
@@ -159,30 +218,50 @@ impl<'a> StreamWriter<'a> {
         if piece.is_empty() {
             return Ok(());
         }
-        // **Framing is version-dependent**, and getting this wrong puts the chunk length
-        // on the wire as body data. HTTP/1.1 frames each piece with a hex length so the
-        // client can delimit it; HTTP/1.0 has no chunked encoding, so the piece is
-        // written raw and the body is delimited by the connection close that follows
-        // `finish`.
-        //
-        // A first version of this function called `write_chunk` unconditionally, gating
-        // only the *terminator* on the version. A test caught it: an HTTP/1.0 client
-        // received `13\r\nraw-body-for-http10\r\n` — the length prefix as content.
-        // **Framing is version-dependent**, and getting this wrong puts the chunk length
-        // on the wire as body data. HTTP/1.1 frames each piece with a hex length so the
-        // client can delimit it; HTTP/1.0 has no chunked encoding, so the piece is
-        // written raw and the body is delimited by the connection close that follows
-        // `finish`.
-        //
-        // A first version of this function called `write_chunk` unconditionally, gating
-        // only the *terminator* on the version. A test caught it: an HTTP/1.0 client
-        // received `13\r\nraw-body-for-http10\r\n` -- the length prefix as content.
-        let framed = if self.version == Version::Http11 {
-            response::write_chunk(piece)
-        } else {
-            piece.to_vec()
-        };
-        self.stream.write_all(&framed).await?;
+        match &mut self.sink {
+            Sink::Socket { stream, version } => {
+                // **Framing is version-dependent**, and getting this wrong puts the chunk length
+                // on the wire as body data. HTTP/1.1 frames each piece with a hex length so the
+                // client can delimit it; HTTP/1.0 has no chunked encoding, so the piece is
+                // written raw and the body is delimited by the connection close that follows
+                // `finish`.
+                //
+                // A first version of this function called `write_chunk` unconditionally, gating
+                // only the *terminator* on the version. A test caught it: an HTTP/1.0 client
+                // received `13\r\nraw-body-for-http10\r\n` — the length prefix as content.
+                // **Framing is version-dependent**, and getting this wrong puts the chunk length
+                // on the wire as body data. HTTP/1.1 frames each piece with a hex length so the
+                // client can delimit it; HTTP/1.0 has no chunked encoding, so the piece is
+                // written raw and the body is delimited by the connection close that follows
+                // `finish`.
+                //
+                // A first version of this function called `write_chunk` unconditionally, gating
+                // only the *terminator* on the version. A test caught it: an HTTP/1.0 client
+                // received `13\r\nraw-body-for-http10\r\n` -- the length prefix as content.
+                let framed = if *version == Version::Http11 {
+                    response::write_chunk(piece)
+                } else {
+                    piece.to_vec()
+                };
+                stream.write_all(&framed).await?;
+            }
+            Sink::Channel(tx) => {
+                // Unframed: hyper frames DATA itself, so a chunk
+                // length here would arrive as body data — the same
+                // bug the socket path guards above, in the other
+                // direction. A dropped receiver means hyper is gone,
+                // which is the channel form of a dead socket.
+                let Some(tx) = tx.as_ref() else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "the response body is gone",
+                    ));
+                };
+                tx.send(bytes::Bytes::copy_from_slice(piece)).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the response body is gone")
+                })?;
+            }
+        }
         self.written += piece.len() as u64;
         Ok(())
     }
@@ -203,7 +282,14 @@ impl<'a> StreamWriter<'a> {
     /// As [`Self::write`].
     pub async fn write_now(&mut self, piece: &[u8]) -> std::io::Result<()> {
         self.write(piece).await?;
-        self.stream.flush().await
+        // A channel send already handed the bytes to hyper's poll,
+        // so there is nothing further to flush — and flushing a
+        // closed channel must not error, which a socket flush
+        // would after `finish`.
+        match &mut self.sink {
+            Sink::Socket { stream, .. } => stream.flush().await,
+            Sink::Channel(_) => Ok(()),
+        }
     }
 
     /// Terminate the body.
@@ -216,6 +302,25 @@ impl<'a> StreamWriter<'a> {
     ///
     /// Idempotent: calling it twice writes one terminator.
     ///
+    /// On a channel writer the terminator is the sender being
+    /// dropped, so the receiver observes the end of the body
+    /// exactly once no matter how many times `finish` runs:
+    ///
+    /// ```
+    /// use qqq_serve::stream::StreamWriter;
+    ///
+    /// let rt = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap();
+    /// rt.block_on(async {
+    ///     let (mut writer, mut rx) = StreamWriter::channel();
+    ///     writer.finish().await.unwrap();
+    ///     writer.finish().await.unwrap();
+    ///     assert!(rx.recv().await.is_none(), "one close, not two");
+    /// });
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the terminator could not be written. The body is already
@@ -226,10 +331,21 @@ impl<'a> StreamWriter<'a> {
             return Ok(());
         }
         self.finished = true;
-        if self.version == Version::Http11 {
-            self.stream.write_all(&response::write_last_chunk()).await?;
+        match &mut self.sink {
+            Sink::Socket { stream, version } => {
+                if *version == Version::Http11 {
+                    stream.write_all(&response::write_last_chunk()).await?;
+                }
+                stream.flush().await
+            }
+            // Closing by dropping: the receiver sees the end of the
+            // body exactly once, and a second `finish` is a no-op
+            // through the flag above rather than a second close.
+            Sink::Channel(tx) => {
+                tx.take();
+                Ok(())
+            }
         }
-        self.stream.flush().await
     }
 
     /// How many bytes of body were written, excluding framing.

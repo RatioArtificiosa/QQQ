@@ -1357,7 +1357,7 @@ async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
 /// it has no declared upper bound, and allowing a special route to commit to
 /// its protocol before consuming it would bypass `BodyReader`'s absolute cap.
 #[must_use]
-fn special_route_has_body(head: &RequestHead) -> bool {
+pub(crate) fn special_route_has_body(head: &RequestHead) -> bool {
     head.chunked
 }
 
@@ -1365,15 +1365,20 @@ fn special_route_has_body(head: &RequestHead) -> bool {
 /// protocol transition runs. These routes have no HTTP request-body contract,
 /// and the unconsumed chunked body would bypass the absolute body cap.
 ///
+/// The message special routes refuse chunked bodies with, shared with
+/// the hyper path so both transports name the same rule. `pub(crate)`
+/// because the refusal text is operator-facing contract, not an
+/// implementation detail either transport may paraphrase.
+pub(crate) const SPECIAL_ROUTE_BODY_MESSAGE: &str =
+    "special routes do not accept an HTTP request body; send the body to an ordinary route";
+
 /// The drain comes first: closing with the refused body unread makes the stack
 /// send RST instead of FIN, and the RST discards the typed refusal before the
 /// client reads it — a refused request the client never sees is not explicit.
 async fn reject_special_route_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
     drain_for_refusal(stream).await;
     let bytes = response::write_response(
-        &response::from_error(&response::parse_error_response(
-            "special routes do not accept an HTTP request body; send the body to an ordinary route",
-        )),
+        &response::from_error(&response::parse_error_response(SPECIAL_ROUTE_BODY_MESSAGE)),
         head.version,
         false,
         is_head(head),
@@ -1503,6 +1508,9 @@ async fn reject_parse_error(
 
 /// Convert a router match into the `RouteMatch` a handler receives.
 ///
+/// [`pub(crate)`](crate) for the hyper streaming arm, which routes
+/// the same way before handing the request to its channel writer.
+///
 /// # Why this is a function rather than two inline conversions
 ///
 /// The same conversion appeared in the flat path and the streaming path, which is two
@@ -1514,7 +1522,7 @@ async fn reject_parse_error(
 /// `params` is copied rather than borrowed because `RouteMatch` is owned: a handler may
 /// hold it for the length of an `await`, and a borrow into the router would tie the
 /// handler's lifetime to the table.
-fn route_match_of(m: &crate::route::Match) -> RouteMatch {
+pub(crate) fn route_match_of(m: &crate::route::Match) -> RouteMatch {
     RouteMatch {
         handler: m.handler.clone(),
         pattern: m.pattern.clone(),
@@ -3213,14 +3221,19 @@ async fn close_immediately(mut stream: TcpStream, status: u16) -> std::io::Resul
 ///
 /// Large enough for a request head, small enough that a peer streaming a body gains
 /// nothing: the point of refusing before reading is that the refused side pays.
-const REFUSAL_DRAIN_BYTES: usize = 8192;
+///
+/// `pub(crate)` for the hyper special-route refusals, which drain
+/// hyper bodies under the same bound rather than inventing their own.
+pub(crate) const REFUSAL_DRAIN_BYTES: usize = 8192;
 
 /// How long the drain waits for the client's request to arrive.
 ///
 /// A client that connects and says nothing must not hold the task open. Long enough for a
 /// request already in flight on a local or LAN connection, short enough that an idle
 /// attacker's connections free their tasks quickly.
-const REFUSAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+///
+/// `pub(crate)` with [`REFUSAL_DRAIN_BYTES`]: one bound, both transports.
+pub(crate) const REFUSAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Read and discard the client's pending bytes so the close is orderly.
 ///

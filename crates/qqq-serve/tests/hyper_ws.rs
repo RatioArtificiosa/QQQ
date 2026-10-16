@@ -339,3 +339,32 @@ async fn hyper_ws_cross_origin_upgrade_is_refused() {
     assert!(!head.contains("101"), "no upgrade on refusal");
     let _ = server.finish().await;
 }
+
+/// An upgrade carrying a chunked body is refused before the 101:
+/// answering it would put the connection into frame mode with
+/// request bytes still in flight. Mirrors the in-house refusal.
+#[tokio::test]
+async fn hyper_ws_chunked_upgrade_is_refused_before_101() {
+    let server = HyperWs::start(Pieces::bare()).await;
+    let mut client = TcpStream::connect(server.addr).await.expect("connect");
+    client
+        .write_all(
+            b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        )
+        .await
+        .expect("write");
+    client.flush().await.expect("flush");
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 400"),
+        "a chunked upgrade must be refused, not upgraded:\n{head}"
+    );
+    assert!(
+        !head.contains("101"),
+        "the handshake must never complete on a refused upgrade:\n{head}"
+    );
+    let _ = server.finish().await;
+}

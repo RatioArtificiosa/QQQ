@@ -39234,4 +39234,39 @@ record what each SHA proved locally and which descendant run
 covers it, or the map fills with gaps that look like regressions.
 → CI runs 38853292429, 38845440481, 38810169964, 38793994812.
 
+## §O-729 - Streaming over hyper: the tests were wrong twice, the code once
+
+The streaming unit's four red tests went green against three
+code fixes and two test fixes, and telling which was which is
+the whole entry. Code fixes, all compiler-caught: flipping
+`serve_upgrade` back to async-`Result` left three bare
+`upgrade_refusal` returns (400/403/426 plus the success tail
+— four `Ok` wraps, found one round apart because the compiler
+stops at the function); `use http_body::Body` was dead because
+`http_body_util::BodyExt::frame` already provides the only
+method used, so the direct trait import shadowed nothing and
+served nothing; `_ = &mut deadline` and `&state` tripped
+`ignored_unit_patterns` and `needless_borrow` on new code.
+Test fixes, both behavioral: the SSE test expected
+`data: hello` while the codec emits `data:hello` — both parse
+identically per the spec's strip-one-space rule, but a byte
+round trip must match the codec, which is ground truth, so
+the expectation moved; the h2 test dropped its duplex right
+after `shutdown.signal()` and got `ClientClosed`, the exact
+EOF-vs-signal race the duplex h2 test already pins — the
+stay-open close-watch plus 100 ms drain bound transferred
+verbatim. `too_many_lines` (120/100) on the h2 test extracted
+the handshake and the GET-and-collect loop into named helpers,
+which is also what makes the next h2 test cheap. Red proof:
+streaming 2/4 failing on `501` pre-implementation (log kept),
+SSE expectation and h2 race failing post-implementation for
+test reasons with the server output correct in both logs.
+Measured: hyper_streaming 4 green, hyper_ws 4 green,
+hyper_serve 25 green, hyper_h2 21 green, hyper_tls 3 green;
+graf generation 81: 18622 nodes, 32787 edges. The
+generalisable rule: when a green server output fails a test,
+read the bytes before touching the server — twice this unit
+the wire was right and the expectation was not.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/src/server.rs`, `crates/qqq-serve/tests/hyper_streaming.rs`, `crates/qqq-serve/tests/hyper_ws.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -4,6 +4,26 @@
 
 ### Security
 
+- **serve**: streaming and SSE over the hyper path (`F-16`
+  parity): the `501` arm for h1/h2 streaming routes is now a
+  channel writer — the handler runs on a spawned task against
+  `StreamWriter::channel` while the response carries the
+  receiving end as `WatchBody::Stream`, so the first event
+  leaves while the handler is still parked (a buffered path
+  would deadlock the gated test, not merely fail it). The
+  head mirrors `write_stream_head` minus framing (hyper owns
+  DATA framing; no content-length/connection/
+  transfer-encoding), h1 closes after the body like in-house
+  shuts the socket down, and the record fires in the task with
+  the outcome and bytes written. Chunked bodies on streaming
+  and upgrade routes are refused before dispatch through one
+  shared drain-then-400 (`drain_hyper_body` bounded like
+  `drain_for_refusal`), since committing to frames or events
+  with bytes in flight bypasses the body cap. Pins:
+  first-event-before-return over h1 and h2 DATA, SSE codec
+  byte round trip, chunked-body refusals with zero handler
+  invocations, h2 shutdown-drains verdict.
+
 - **serve**: WebSocket upgrades over the hyper path (`F-16`
   parity): the `501` arm for h1 upgrade routes is now a real
   handshake — same refusal order as `serve_ws_route`

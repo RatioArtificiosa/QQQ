@@ -4,6 +4,24 @@
 
 ### Security
 
+- **serve**: WebSocket upgrades over the hyper path (`F-16`
+  parity): the `501` arm for h1 upgrade routes is now a real
+  handshake — same refusal order as `serve_ws_route`
+  (non-upgrade 400, origin 403, handshake 400/426), recorded
+  and closed the same way — then a `101` with the RFC 6455
+  accept headers while the frame loop runs on a spawned task
+  over a `HyperUpgraded` bridge (hyper 1.x speaks its own
+  `rt::Read`/`Write`, so polls delegate across a cursor
+  boundary). The loop, codecs, `WsSender`, and audit record
+  are shared with the in-house path: `ws_conn` is generic over
+  the stream and `WsContext` is owned, so one loop serves both
+  transports and the driver awaits it at connection end
+  (ledger slot lasts as long as frames do, `Served` maps the
+  same way). h2 upgrades keep the loud 501 — extended-CONNECT
+  is a separate unit. Pins: echo round trip with accept-value
+  check and close echo, non-upgrade refusal, foreign-origin
+  refusal.
+
 - **serve**: TLS termination in front of the hyper drivers
   (`F-16` parity): new `serve_hyper_tls` handshakes with the
   `rustls::ServerConfig` that `TlsConfig::build` produces (so

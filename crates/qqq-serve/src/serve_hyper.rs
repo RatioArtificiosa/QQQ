@@ -197,6 +197,7 @@ where
         served: Arc::new(AtomicU64::new(0)),
         protocol: Protocol::H1,
         watch: Arc::new(IdleWatch::new()),
+        ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     crate::transport::apply_http1(&mut builder, &state.limits);
@@ -207,7 +208,16 @@ where
             async move { answer(request, &state).await }
         }
     });
-    let connection = builder.serve_connection(TokioIo::new(stream), service);
+    let connection = builder
+        .serve_connection(TokioIo::new(stream), service)
+        // Upgrades are opt-in on HTTP/1: without this, a `101`
+        // completes the connection and the upgrade future resolves
+        // to an error that looks exactly like a vanished peer.
+        // With it, the handshake hands the IO to whoever called
+        // `upgrade::on`. HTTP/2 has no upgrade dance here
+        // (extended-CONNECT is a separate unit), so its driver
+        // stays on the plain connection.
+        .with_upgrades();
     let idle = state.limits.idle_timeout;
     let drain = state.limits.drain_timeout;
     let shutdown = state.ctx.shutdown.clone();
@@ -220,31 +230,68 @@ where
     let mut ticker = tokio::time::interval(check_every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(connection);
-    loop {
+    // Every exit drains upgraded WebSocket loops first: the h1
+    // connection future completes at the `101` handoff, so the
+    // driver returning here would release the ledger slot while
+    // frames still flow. The loops observe shutdown and idle
+    // themselves, so the drain cannot hang past them — and a
+    // task that panicked yields its `JoinError` to the base
+    // outcome rather than inventing one.
+    let base = loop {
         tokio::select! {
             result = &mut connection => {
                 // The connection ended. Per-request outcomes already went to
                 // the access log; this is the connection's. A hyper-side
                 // header timeout is its own outcome; anything else is the
                 // client going away.
-                match result {
-                    Ok(()) => return Served::ClientClosed,
-                    Err(error) if error.is_timeout() => return Served::HeaderTimeout,
-                    Err(_error) => return Served::ClientClosed,
-                }
+                break match result {
+                    Ok(()) => Served::ClientClosed,
+                    Err(error) if error.is_timeout() => Served::HeaderTimeout,
+                    Err(_error) => Served::ClientClosed,
+                };
             }
             () = shutdown.wait() => {
                 connection.as_mut().graceful_shutdown();
                 let _ = tokio::time::timeout(drain, &mut connection).await;
-                return Served::Drained;
+                break Served::Drained;
             }
             _ = ticker.tick() => {
                 if state.watch.is_idle(idle) {
-                    return Served::IdleTimeout;
+                    break Served::IdleTimeout;
                 }
             }
         }
+    };
+    drain_ws_tasks(&state, base).await
+}
+
+/// Await upgraded WebSocket loops and fold the outcome in.
+///
+/// No upgrades — the common case — costs one lock and one empty
+/// check. With upgrades, the last loop's outcome maps exactly as
+/// `serve_ws_route` maps it, so the two transports report one
+/// taxonomy; a panicked loop keeps the base outcome rather than
+/// upgrading a task failure into a protocol verdict.
+async fn drain_ws_tasks(state: &State, base: Served) -> Served {
+    let handles: Vec<_> = std::mem::take(
+        &mut state
+            .ws_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if handles.is_empty() {
+        return base;
     }
+    let mut served = base;
+    for handle in handles {
+        if let Ok(outcome) = handle.await {
+            served = match outcome {
+                crate::ws_conn::WsOutcome::ProtocolError => Served::ClientClosed,
+                _ => Served::HandlerClosed,
+            };
+        }
+    }
+    served
 }
 
 /// Serve one connection through hyper's HTTP/2 driver, prior
@@ -277,6 +324,7 @@ where
         served: Arc::new(AtomicU64::new(0)),
         protocol: Protocol::H2,
         watch: Arc::new(IdleWatch::new()),
+        ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     crate::transport::apply_http2(&mut builder, &state.limits);
@@ -363,6 +411,19 @@ pub(crate) struct OwnedCtx {
     pub loopback_only: bool,
     /// The bounded tenant labels for metrics.
     pub tenant_labels: Arc<TenantLabels>,
+    /// The peer's socket address, for upgraded-connection records.
+    ///
+    /// Flat responses never name it (the access record carries the
+    /// tenant, not the socket), but a WebSocket outlives its
+    /// handshake and its record is written when it ends — by which
+    /// time nothing else remembers who it was.
+    pub peer: std::net::SocketAddr,
+    /// The WebSocket policy: origins, limits, buffer caps.
+    pub ws: crate::ws::WsConfig,
+    /// The process-wide WebSocket buffer budget.
+    pub ws_buffer: Arc<tokio::sync::Semaphore>,
+    /// How long a connection may idle; upgraded connections inherit it.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl OwnedCtx {
@@ -384,6 +445,10 @@ impl OwnedCtx {
             ws_extra_hosts: ctx.ws.extra_hosts.clone(),
             loopback_only: ctx.loopback_only,
             tenant_labels: Arc::clone(ctx.tenant_labels),
+            peer: ctx.id.peer,
+            ws: ctx.ws.clone(),
+            ws_buffer: Arc::clone(ctx.ws_buffer),
+            idle_timeout: ctx.idle_timeout,
         }
     }
 }
@@ -399,6 +464,15 @@ struct State {
     served: Arc<AtomicU64>,
     protocol: Protocol,
     watch: Arc<IdleWatch>,
+    /// WebSocket loops upgraded on this connection, owned by the
+    /// driver past the `101`: the h1 connection future completes
+    /// at the handshake handoff, so without this the ledger slot
+    /// would release while frames still flow — the slot must last
+    /// as long as the connection does, exactly as in-house, where
+    /// `serve_connection` owns the loop. Drained when the driver
+    /// returns, mapping the loop outcome to `Served` the way
+    /// `serve_ws_route` does.
+    ws_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<crate::ws_conn::WsOutcome>>>>,
 }
 
 /// Service-observable activity for the idle bound, mirroring
@@ -756,12 +830,13 @@ fn refuse_auth_policy(
     None
 }
 
-/// Metrics path, preflight, and the upgrade/stream gap.
+/// Metrics path, preflight, and the streaming gap.
 ///
 /// Returns the response — rendered and recorded — when the request is
 /// not an ordinary flat one. Order mirrors `serve_special_route`:
-/// server-owned metrics path first, preflight before routing, then the
-/// loud 501 for routes whose loop lives elsewhere.
+/// server-owned metrics path first, preflight before routing, then
+/// the loud 501 for streaming routes (and h2 upgrade requests,
+/// whose extended-CONNECT mechanism is a separate unit).
 fn serve_special(
     state: &State,
     head: &RequestHead,
@@ -817,17 +892,241 @@ fn serve_special(
         )));
     }
     if let Some(matched) = state.table.match_route(head.method, path)
-        && (state.dispatch.websocket_for(&matched.handler).is_some()
-            || state.dispatch.streaming_for(&matched.handler).is_some())
+        && (state.dispatch.streaming_for(&matched.handler).is_some()
+            || (state.protocol == Protocol::H2
+                && state.dispatch.websocket_for(&matched.handler).is_some()))
     {
         let mut response = Response::text(
             501,
-            "this route needs the WebSocket or streaming loop, which the hyper path does not serve yet",
+            "this route needs the streaming loop or an h2 extended-CONNECT upgrade, which the hyper path does not serve yet",
         );
         response.set_header("X-QQQ-Error", "hyper-transport-gap");
         return Some(render_refusal(state, head, path, &response, started));
     }
     None
+}
+
+/// A hyper upgrade as a tokio stream: the bridge the frame loop needs.
+///
+/// hyper 1.x speaks its own `rt::Read`/`Write` on `Upgraded`
+/// (cursor-based reads, not tokio's `ReadBuf`), so the loop —
+/// written against tokio traits — cannot poll it directly. This
+/// delegates each poll across the boundary: writes, flushes, and
+/// shutdowns map one-to-one, and reads stage through a stack
+/// buffer the cursor fills before the bytes advance the tokio
+/// buffer. Pinned-boxed inside, so `Unpin` holds whatever the
+/// inner type does.
+struct HyperUpgraded(std::pin::Pin<Box<hyper::upgrade::Upgraded>>);
+
+impl HyperUpgraded {
+    fn new(upgraded: hyper::upgrade::Upgraded) -> Self {
+        Self(Box::pin(upgraded))
+    }
+}
+
+impl tokio::io::AsyncRead for HyperUpgraded {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // Scoped so the hyper buffer's borrow of `buf` ends
+        // before `advance`: `filled` counts from the fresh
+        // `ReadBuf`, so its length is exactly what this poll
+        // staged — never bytes a previous poll advanced past.
+        let staged = {
+            let inner = buf.initialize_unfilled();
+            let mut read_buf = hyper::rt::ReadBuf::new(inner);
+            let cursor = read_buf.unfilled();
+            match <hyper::upgrade::Upgraded as hyper::rt::Read>::poll_read(
+                self.0.as_mut(),
+                cx,
+                cursor,
+            ) {
+                std::task::Poll::Ready(Ok(())) => read_buf.filled().len(),
+                std::task::Poll::Ready(Err(error)) => {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        };
+        buf.advance(staged);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncWrite for HyperUpgraded {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        <hyper::upgrade::Upgraded as hyper::rt::Write>::poll_write(self.0.as_mut(), cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        <hyper::upgrade::Upgraded as hyper::rt::Write>::poll_flush(self.0.as_mut(), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        <hyper::upgrade::Upgraded as hyper::rt::Write>::poll_shutdown(self.0.as_mut(), cx)
+    }
+}
+
+/// The upgrade route, if this request targets one on HTTP/1.
+///
+/// Split out so `answer` stays under its line budget: the match
+/// (route table plus handler registry) is the only part of the
+/// upgrade decision that belongs to routing rather than to the
+/// handshake that follows it.
+fn upgrade_route(
+    state: &State,
+    head: &RequestHead,
+    path: &str,
+) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
+    if state.protocol != Protocol::H1 {
+        return None;
+    }
+    let matched = state.table.match_route(head.method, path)?;
+    state.dispatch.websocket_for(&matched.handler).cloned()
+}
+
+/// Serve a WebSocket upgrade on HTTP/1: validate, answer `101`, run
+/// the frame loop on the upgraded connection.
+///
+/// Refusal order mirrors `serve_ws_route` exactly — not-an-upgrade,
+/// origin, handshake — because a client that cannot tell which
+/// check failed it cannot fix its request, and because the two
+/// transports answering differently would be a fork. Every refusal
+/// is recorded through `render_refusal` like every other hyper
+/// answer (an invisible refusal is one the operator cannot see)
+/// and closes, like in-house: an upgrade that will not happen
+/// must not linger as keep-alive.
+///
+/// On success the `101` goes back through hyper while the frame
+/// loop runs on a spawned task over the upgraded IO; the driver
+/// awaits it at connection end (see `drain_ws_tasks`), so the
+/// ledger slot lasts as long as the frames do. The loop's record
+/// and `on_close` fire inside the task, which is why the audit
+/// trail does not depend on the driver outliving the connection.
+fn serve_upgrade(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: RequestHead,
+    ws_handler: Arc<dyn crate::ws_conn::WebSocketHandler>,
+    span: u64,
+    started: Instant,
+) -> hyper::Response<WatchBody> {
+    // Not an upgrade at all: answered as ordinary HTTP, never hijacked.
+    if !crate::ws_conn::is_upgrade_request(&head) {
+        return upgrade_refusal(
+            state,
+            &head,
+            400,
+            &crate::ws::HandshakeError::NotAnUpgrade.to_string(),
+            &[],
+            started,
+        );
+    }
+    // Origin before the handshake: past the `101` the connection
+    // speaks frames, and a refusal must not arrive framed.
+    if !crate::ws::upgrade_origin_allowed(
+        &state.ctx.ws.origins,
+        head.header("origin"),
+        head.header("host").unwrap_or(""),
+    ) {
+        return upgrade_refusal(state, &head, 403, "", &[], started);
+    }
+    let handshake = match crate::ws::Handshake::parse(head.method.as_str(), |name| {
+        head.header(name).map(str::to_owned)
+    }) {
+        Ok(handshake) => handshake,
+        // 426 names the retry version; anything else is a 400.
+        // Same split as `ws::write_refusal`, minus the status
+        // line hyper owns.
+        Err(error) => {
+            let status = match error {
+                crate::ws::HandshakeError::UnsupportedVersion { .. } => 426u16,
+                _ => 400u16,
+            };
+            let mut extra = Vec::new();
+            if status == 426 {
+                extra.push(("Sec-WebSocket-Version", crate::ws::VERSION.to_owned()));
+            }
+            return upgrade_refusal(state, &head, status, &error.to_string(), &extra, started);
+        }
+    };
+    let upgrade = hyper::upgrade::on(request);
+    let mut builder = hyper::Response::builder().status(hyper::StatusCode::SWITCHING_PROTOCOLS);
+    for (name, value) in crate::ws::accept_headers(&handshake, None) {
+        builder = builder.header(name, value);
+    }
+    let response = builder
+        .body(WatchBody::new(Bytes::new(), &state.watch))
+        .unwrap_or_else(|_| {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(WatchBody::new(Bytes::new(), &state.watch))
+                .unwrap_or_else(|_| {
+                    hyper::Response::new(WatchBody::new(Bytes::new(), &state.watch))
+                })
+        });
+    let ws_ctx = crate::ws_conn::WsContext {
+        peer: state.ctx.peer,
+        tenant: state.ctx.tenant_label.clone(),
+        logger: state.ctx.logger.clone(),
+        trace: state.ctx.trace,
+        span,
+        shutdown: state.ctx.shutdown.clone(),
+        idle_timeout: state.ctx.idle_timeout,
+        limits: state.ctx.ws.limits,
+        buffer: Arc::clone(&state.ctx.ws_buffer),
+    };
+    let handle = tokio::spawn(async move {
+        let outcome = match upgrade.await {
+            Ok(upgraded) => {
+                let mut stream = HyperUpgraded::new(upgraded);
+                crate::ws_conn::run_frames(&mut stream, ws_handler.as_ref(), Vec::new(), &ws_ctx)
+                    .await
+            }
+            // The handshake succeeded but the peer vanished
+            // before the upgrade completed: gone, not broken.
+            Err(_) => crate::ws_conn::WsOutcome::ClientGone,
+        };
+        crate::ws_conn::emit_ws_record(&ws_ctx, &head, outcome);
+        ws_handler.on_close(outcome);
+        outcome
+    });
+    state
+        .ws_tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(handle);
+    response
+}
+
+/// Render an upgrade refusal: recorded like every hyper answer,
+/// closed like every in-house upgrade refusal.
+fn upgrade_refusal(
+    state: &State,
+    head: &RequestHead,
+    status: u16,
+    body: &str,
+    extra: &[(&str, String)],
+    started: Instant,
+) -> hyper::Response<WatchBody> {
+    let (path, _query) = split_target(&head.target);
+    let mut response = Response::text(status, body.to_owned());
+    for (name, value) in extra {
+        response.set_header(name, value.as_str());
+    }
+    close_after(render_refusal(state, head, path, &response, started))
 }
 
 /// The per-connection ceiling decision for one request start.
@@ -952,6 +1251,21 @@ async fn answer(
     }
 
     // --- Metrics path, preflight, upgrades: off the flat path ------------
+    //
+    // WebSocket upgrades on HTTP/1 take the upgrade arm, which owns
+    // the raw request for the handshake handoff; everything else
+    // falls through to `serve_special` (metrics, preflight,
+    // streaming routes, h2 upgrades).
+    if let Some(ws_handler) = upgrade_route(state, &head, path) {
+        return Ok(serve_upgrade(
+            state,
+            request,
+            head,
+            ws_handler,
+            span,
+            request_started,
+        ));
+    }
     if let Some(special) = serve_special(state, &head, path, request_started) {
         return Ok(special);
     }

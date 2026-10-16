@@ -39183,6 +39183,31 @@ and tested but unwired, the unit is the doorway, not another
 policy — one function, three round trips.
 → `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_tls.rs`, `crates/qqq-serve/Cargo.toml`, `CHANGELOG.md`.
 
+## §O-728 - WS over hyper: three boundaries, each found by reading
+
+The upgrade unit crossed three API boundaries, each discovered
+by reading rather than guessing. (1) A generic trait method
+kills `dyn` compatibility (E0038): the fix keeps the trait
+shape exactly — `WsSender` holds `&mut dyn AsyncWrite` — so
+existing handlers are untouched and one handler serves both
+transports. (2) hyper 1.x `Upgraded` speaks hyper `rt::Read`/
+`Write`, not tokio's: the `HyperUpgraded` bridge delegates
+each poll, staging reads through `ReadBuf::new` +
+`unfilled()` and advancing only the staged count. (3) Upgrades
+are opt-in per connection: without `.with_upgrades()` the
+`101` completes the connection and the upgrade future errors
+like a vanished peer — found by tracing hyper's dispatch
+(`pending.manual()`) after the echo test died in 0.00 s with
+no task output. Red-first behavioral red (2/3 failing on
+`501`, log kept); the dyn-compatibility break was caught by
+the compiler, not the tests. Measured: hyper_ws 3 green,
+in-house websocket 19 green, lib 742 green, h1/h2/TLS suites
+green. The generalisable rule: when a framework offers an
+upgrade API, check whether the *connection* also needs to opt
+in — the handshake half working while the handoff half is
+disabled fails exactly like a dead peer.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/ws_conn.rs`, `crates/qqq-serve/src/server.rs`, `crates/qqq-serve/tests/hyper_ws.rs`, `CHANGELOG.md`.
+
 ## §O-727 - CI proof: the install-order fix greens windows, PERF was luck
 
 Proof for §O-725 arrived on run 38853292429 (the `6728149`

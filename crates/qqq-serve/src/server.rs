@@ -1442,14 +1442,14 @@ async fn serve_ws_route(
 
     let ws_ctx = crate::ws_conn::WsContext {
         peer: ctx.id.peer,
-        tenant,
-        logger: ctx.logger,
+        tenant: tenant.to_owned(),
+        logger: ctx.logger.clone(),
         trace: ctx.id.trace,
         span,
         // An upgraded connection must still observe both. See `WsContext` for what
         // happens when it does not: a graceful restart hangs on one idle client, because a
         // WebSocket read blocks forever and nothing else can end it.
-        shutdown: ctx.shutdown,
+        shutdown: ctx.shutdown.clone(),
         idle_timeout: ctx.idle_timeout,
         limits: ctx.ws.limits,
         buffer: std::sync::Arc::clone(ctx.ws_buffer),

@@ -44,7 +44,6 @@
 use std::net::SocketAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::http1::{RequestHead, Version};
@@ -151,7 +150,7 @@ impl WebSocketHandler for Echo {
 /// resulting bytes are individually well-formed. The borrow makes it impossible rather
 /// than documented.
 pub struct WsSender<'a> {
-    stream: &'a mut TcpStream,
+    stream: &'a mut (dyn tokio::io::AsyncWrite + Unpin + Send + 'a),
 }
 
 impl WsSender<'_> {
@@ -191,13 +190,19 @@ impl WsSender<'_> {
 /// The same grouping the streaming path uses: identity, logger and the request head all
 /// belong to the connection, and threading them separately pushed every function past
 /// clippy's argument limit.
-pub struct WsContext<'a> {
+///
+/// Owned throughout — tenant, logger, and shutdown are values, not
+/// borrows — so one context serves a socket on the in-house path
+/// and a spawned task on the hyper path, where nothing borrowed
+/// can cross the spawn boundary. Cloning is cheap by construction
+/// (`String` once per connection, `Arc`s and copies otherwise).
+pub struct WsContext {
     /// The peer's address, for the log.
     pub peer: SocketAddr,
     /// The tenant the peer belongs to.
-    pub tenant: &'a str,
+    pub tenant: String,
     /// Where records go.
-    pub logger: &'a Logger,
+    pub logger: Logger,
     /// The process-wide trace id.
     pub trace: u64,
     /// The per-connection span.
@@ -208,7 +213,7 @@ pub struct WsContext<'a> {
     /// keep the process alive past `Shutdown::signal()` -- and since a WebSocket has no
     /// natural end, a single idle client would make a graceful restart **hang forever**,
     /// which in production is a deploy that never completes.
-    pub shutdown: &'a Shutdown,
+    pub shutdown: Shutdown,
     /// How long the connection may be idle before the server closes it.
     ///
     /// `None` means no idle limit, which is what a WebSocket expecting heartbeats wants:
@@ -230,14 +235,17 @@ pub struct WsContext<'a> {
 /// Returns the outcome rather than an error: every way a WebSocket ends is a normal
 /// result, and a caller distinguishing "the client closed" from "the peer broke the
 /// protocol" needs the value rather than a bool.
-pub async fn serve_websocket(
-    stream: &mut TcpStream,
+pub async fn serve_websocket<S>(
+    stream: &mut S,
     head: &RequestHead,
     handler: &dyn WebSocketHandler,
     protocol: Option<&str>,
     prefix: Vec<u8>,
-    ctx: &WsContext<'_>,
-) -> WsOutcome {
+    ctx: &WsContext,
+) -> WsOutcome
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     // --- The handshake ---------------------------------------------------
     let handshake = match Handshake::parse(head.method.as_str(), |name| {
         head.header(name).map(str::to_owned)
@@ -339,12 +347,19 @@ fn u64_to_usize(n: u64) -> usize {
 }
 
 /// The read/assemble/dispatch loop.
-async fn run_frames(
-    stream: &mut TcpStream,
+///
+/// `pub(crate)` for the hyper upgrade path, which runs it over an
+/// upgraded connection: same loop, same caps, same records as the
+/// in-house socket path.
+pub(crate) async fn run_frames<S>(
+    stream: &mut S,
     handler: &dyn WebSocketHandler,
     prefix: Vec<u8>,
-    ctx: &WsContext<'_>,
-) -> WsOutcome {
+    ctx: &WsContext,
+) -> WsOutcome
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let mut assembler = Assembler::with_limit(ctx.limits.max_message_bytes);
     // Seeded with the leftover bytes rather than empty: see `serve_websocket`.
     let mut buf: Vec<u8> = prefix;
@@ -485,7 +500,10 @@ const REFUSAL_DRAIN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Draining first — half-close, read-and-discard until the peer's FIN, close,
 /// the byte cap, or this timeout — means the final close finds an empty
 /// buffer and goes out as FIN, which no stack reorders ahead of the data.
-async fn refuse_with(stream: &mut TcpStream, code: u16, reason: &str) {
+async fn refuse_with<S>(stream: &mut S, code: u16, reason: &str)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let mut sender = WsSender { stream };
     sender.send_frame(&Frame::close(code, reason)).await;
     // Half-close: the write side is done, but the read side must stay open to
@@ -517,7 +535,10 @@ async fn refuse_with(stream: &mut TcpStream, code: u16, reason: &str) {
 /// A close is the last thing written on a connection that is already ending, so a failure
 /// to send it is not actionable -- the peer is gone or the socket is closed, and both mean
 /// the same thing to the caller.
-async fn close_with(stream: &mut TcpStream, code: u16, reason: &str) {
+async fn close_with<S>(stream: &mut S, code: u16, reason: &str)
+where
+    S: tokio::io::AsyncWrite + Unpin + Send,
+{
     let mut sender = WsSender { stream };
     sender.send_frame(&Frame::close(code, reason)).await;
 }
@@ -528,13 +549,16 @@ async fn close_with(stream: &mut TcpStream, code: u16, reason: &str) {
 /// data frames arrived pre-charged by the caller, and this settles the
 /// account — released when the message completes or is refused, so permits
 /// track buffered bytes rather than leaking per frame.
-async fn dispatch_frame(
-    stream: &mut TcpStream,
+async fn dispatch_frame<S>(
+    stream: &mut S,
     handler: &dyn WebSocketHandler,
     assembler: &mut Assembler,
     frame: Frame,
     budget: &mut BufferBudget,
-) -> Option<WsOutcome> {
+) -> Option<WsOutcome>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     if frame.opcode == Opcode::Ping {
         // §5.5.3: a pong carries **the same payload** as the ping. An empty pong is a
         // legal frame and useless: a peer using pings as a liveness probe with a nonce
@@ -596,13 +620,16 @@ async fn dispatch_frame(
 }
 
 /// Write one access record for a WebSocket connection.
-fn emit_ws_record(ctx: &WsContext<'_>, head: &RequestHead, outcome: WsOutcome) {
+///
+/// `pub(crate)` for the hyper upgrade path, which records from its
+/// spawned loop task rather than from the driver.
+pub(crate) fn emit_ws_record(ctx: &WsContext, head: &RequestHead, outcome: WsOutcome) {
     let rec = Record::new(
         outcome.level(),
         TraceId::from_counter(ctx.trace),
         TraceId::span(&format!("{:016x}", ctx.span))
             .unwrap_or_else(|_| TraceId::from_counter(ctx.span)),
-        ctx.tenant,
+        ctx.tenant.as_str(),
         "qqq-serve",
         crate::server::MANIFEST_REV_UNKNOWN,
         format!(

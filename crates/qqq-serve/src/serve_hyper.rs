@@ -1093,17 +1093,19 @@ fn upgrade_route(
 
 /// The extended-CONNECT route, if this request targets one on HTTP/2.
 ///
-/// Same shape as [`upgrade_route`] for the other protocol: method,
-/// route table, handler registry. `None` falls through to ordinary
-/// routing — an explicit 404/405 — so a `CONNECT` at a route with
-/// no WebSocket handler is routed, never hijacked, exactly as a
-/// `GET` without upgrade headers is on the h1 arm.
+/// Same shape as [`upgrade_route`] for the other protocol: route
+/// table plus handler registry, without a method gate — any method
+/// at a WebSocket route takes this arm, and non-CONNECT methods
+/// are refused inside it, exactly as the h1 arm refuses
+/// non-upgrades. Gating on `CONNECT` here instead would let a
+/// `GET` fall through to the flat handler and answer `200` on a
+/// route whose h1 twin answers `400`: a fork wearing a 200.
 fn connect_route(
     state: &State,
     head: &RequestHead,
     path: &str,
 ) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
-    if state.protocol != Protocol::H2 || head.method != crate::route::Method::Connect {
+    if state.protocol != Protocol::H2 {
         return None;
     }
     let matched = state.table.match_route(head.method, path)?;
@@ -1220,6 +1222,15 @@ async fn serve_upgrade(
     Ok(response)
 }
 
+/// Drop finished task handles so a long multiplexed connection
+/// does not collect them: a slot per live task is the ledger's
+/// shape, not a log of every task that ever ran. Both upgrade
+/// loops and streaming handlers prune on push through this one
+/// function, so the second push site cannot forget it.
+fn prune_finished<T>(handles: &mut Vec<tokio::task::JoinHandle<T>>) {
+    handles.retain(|handle| !handle.is_finished());
+}
+
 /// Run the frame loop for an accepted upgrade on a spawned task.
 ///
 /// Shared by the h1 `101` arm and the h2 extended-CONNECT arm: both
@@ -1249,11 +1260,12 @@ fn spawn_ws_loop(
         ws_handler.on_close(outcome);
         outcome
     });
-    state
+    let mut tasks = state
         .ws_tasks
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(handle);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    prune_finished(&mut tasks);
+    tasks.push(handle);
 }
 
 /// Serve a WebSocket over HTTP/2 extended-CONNECT (RFC 8441):
@@ -1276,6 +1288,20 @@ async fn serve_h2_connect(
     span: u64,
     started: Instant,
 ) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    // Only CONNECT bootstraps: any other method at a WebSocket
+    // route is an ordinary request that must never be framed —
+    // the h2 form of the h1 not-an-upgrade 400, answered before
+    // anything else is read.
+    if head.method != crate::route::Method::Connect {
+        return Ok(upgrade_refusal(
+            state,
+            &head,
+            400,
+            &crate::ws::HandshakeError::NotAnUpgrade.to_string(),
+            &[],
+            started,
+        ));
+    }
     // A declared body on a CONNECT is not a handshake: refuse
     // before the frame loop owns the stream. Unknown-length DATA
     // is the client's first frames arriving early — hyper routes
@@ -1535,7 +1561,7 @@ async fn serve_streaming_hyper(
         .stream_tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    tasks.retain(|handle| !handle.is_finished());
+    prune_finished(&mut tasks);
     tasks.push(task);
     drop(tasks);
     Ok(response)
@@ -2288,6 +2314,24 @@ impl AsyncRead for IncomingReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finished handles leave the vec; a parked one stays tracked.
+    /// The red proof is structural: without the retain, three
+    /// pushes leave three entries, two of them dead.
+    #[tokio::test]
+    async fn prune_finished_drops_only_finished_handles() {
+        let mut handles = vec![
+            tokio::spawn(async {}),
+            tokio::spawn(std::future::pending::<()>()),
+            tokio::spawn(async {}),
+        ];
+        tokio::task::yield_now().await;
+        prune_finished(&mut handles);
+        assert_eq!(handles.len(), 1, "only the parked task is still tracked");
+        for handle in handles {
+            handle.abort();
+        }
+    }
 
     fn head<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError> {
         map_head(request)

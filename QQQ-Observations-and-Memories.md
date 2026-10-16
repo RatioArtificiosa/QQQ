@@ -39341,4 +39341,34 @@ request's — refining downward is reporting, overwriting
 upward is loss.
 → `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/ws.rs`, `crates/qqq-serve/tests/hyper_h2ws.rs`, `CHANGELOG.md`.
 
+## §O-733 - The review's MED was a 200, not a 404: widening the CONNECT arm
+
+Clearing the four CONNECT-review findings changed one of them
+upward. (1) Prune: `spawn_ws_loop` now prunes through the same
+`prune_finished` helper the streaming push uses, with a unit
+test (two finished plus one parked → one tracked) — the second
+push site cannot forget it again. (2) Escalated: the reported
+"GET falls to flat 404" was wrong on the number and right on
+the shape — the red test answered **200** `flat ws`, because
+the flat handler is the fallback for any routed name. Method-
+gating the arm would have kept the fork for every non-CONNECT
+method, so `connect_route` matches any method at a WebSocket
+route and the arm refuses non-CONNECT inside it — the h1 arm's
+exact shape, and the red now fails 200-becomes-400 as it
+should. (3) Rebutted with a pin: `Transfer-Encoding` on h2 is
+connection-specific, so hyper resets the stream before the
+service sees it — the new test watches the wire die `RST`,
+which is why the arm checks only declared lengths. (4)
+Rebutted with a pin: a protocol violation followed by shutdown
+still reports `Drained`, and that is not masking — the error
+lives in the access record the loop emitted before dying (the
+log line carries `websocket: protocol_error`), while `Served`
+names how the connection ended. The new test violates §5.1 on
+purpose, then asserts the drain. Measured: hyper_h2ws 11
+green, serve lib 749 green, neighbors green; graf generation
+83. The generalisable rule: when a reviewer names a status
+code, run the test before agreeing — the wire had a worse
+number, and the worse number decided the fix.
+→ `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_h2ws.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

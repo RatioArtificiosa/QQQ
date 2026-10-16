@@ -318,6 +318,7 @@ async fn ws_read_frame(io: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
 fn ws_routes() -> (Arc<RouteTable>, Dispatch) {
     let table = Arc::new(table_with(&[
         (Method::Connect, "/ws", "ws"),
+        (Method::Get, "/ws", "ws"),
         (Method::Get, "/flat", "flat"),
     ]));
     let dispatch = Dispatch::flat(flat_handler()).with_websocket("ws", Arc::new(Echo));
@@ -667,4 +668,163 @@ async fn h2ws_connect_to_a_flat_route_is_not_hijacked() {
     };
     let (served, ()) = tokio::join!(serve, client);
     assert_eq!(served, Served::Drained, "shutdown drains the connection");
+}
+
+/// A `GET` at a WebSocket route over h2 is an ordinary request,
+/// never framed: the h2 form of the h1 not-an-upgrade 400, so the
+/// two protocols cannot disagree about what a missing handshake
+/// is worth.
+#[tokio::test]
+async fn h2ws_get_to_a_ws_route_is_not_upgraded() {
+    use qqq_serve::h2::hpack::HeaderField;
+    let (table, dispatch) = ws_routes();
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let serve = serve_hyper_h2(server_io, table, dispatch, drain_limits(), &ctx);
+    let shutdown = pieces.shutdown.clone();
+    let client = async move {
+        let mut io = client_io;
+        let (mut encoder, mut decoder, _) = h2_shake_hands(&mut io).await;
+        let block = encoder.encode(&[
+            HeaderField::new(":method", "GET"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":path", "/ws"),
+            HeaderField::new(":authority", "localhost"),
+        ]);
+        io.write_all(&h2_frame(0x1, 0x4 | 0x1, 1, &block))
+            .await
+            .expect("headers write");
+        let (status, _) = h2_read_response_head(&mut io, &mut decoder).await;
+        assert_eq!(
+            status, 400,
+            "a missing handshake is a 400 on both protocols"
+        );
+        shutdown.signal();
+        h2_close_watch(&mut io).await;
+    };
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("refusal completes");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "shutdown drains the connection");
+}
+
+/// `Transfer-Encoding` on h2 is a connection-specific header, so
+/// hyper resets the stream before the service ever sees it — the
+/// same framing-layer explicitness as the missing-`:protocol`
+/// case, and the reason the arm checks only declared lengths.
+#[tokio::test]
+async fn h2ws_chunked_te_dies_at_the_framing_layer() {
+    use qqq_serve::h2::hpack::HeaderField;
+    let (table, dispatch) = ws_routes();
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let serve = serve_hyper_h2(server_io, table, dispatch, drain_limits(), &ctx);
+    let shutdown = pieces.shutdown.clone();
+    let client = async move {
+        let mut io = client_io;
+        let (mut encoder, _, _) = h2_shake_hands(&mut io).await;
+        let block = encoder.encode(&[
+            HeaderField::new(":method", "CONNECT"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":path", "/ws"),
+            HeaderField::new(":authority", "localhost"),
+            HeaderField::new(":protocol", "websocket"),
+            HeaderField::new("sec-websocket-version", "13"),
+            HeaderField::new("sec-websocket-key", KEY),
+            HeaderField::new("transfer-encoding", "chunked"),
+        ]);
+        io.write_all(&h2_frame(0x1, 0x4, 1, &block))
+            .await
+            .expect("headers write");
+        let mut reset = false;
+        let deadline = tokio::time::sleep(Duration::from_secs(3));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                () = &mut deadline => break,
+                frame = h2_read_frame(&mut io) => {
+                    let Some((ftype, _, sid, _)) = frame else { break };
+                    if sid == 1 && ftype == 0x3 {
+                        reset = true;
+                        break;
+                    }
+                    assert!(
+                        !(sid == 1 && ftype == 0x1),
+                        "a TE: chunked CONNECT must not be answered"
+                    );
+                }
+            }
+        }
+        assert!(
+            reset,
+            "connection-specific framing dies reset, never answered"
+        );
+        shutdown.signal();
+        h2_close_watch(&mut io).await;
+    };
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("reset completes");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "shutdown drains the connection");
+}
+
+/// A protocol violation followed by shutdown still drains: the
+/// connection verdict outranks the request's, and the error lives
+/// in the access record the loop already emitted — `Drained`
+/// never meant "nothing went wrong".
+#[tokio::test]
+async fn h2ws_protocol_error_keeps_drain() {
+    let (table, dispatch) = ws_routes();
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let serve = serve_hyper_h2(server_io, table, dispatch, drain_limits(), &ctx);
+    let shutdown = pieces.shutdown.clone();
+    let client = async move {
+        let mut io = client_io;
+        let (mut encoder, mut decoder, _) = h2_shake_hands(&mut io).await;
+        h2_connect(
+            &mut io,
+            &mut encoder,
+            Some("websocket"),
+            &[("sec-websocket-version", "13"), ("sec-websocket-key", KEY)],
+        )
+        .await;
+        let (status, _) = h2_read_response_head(&mut io, &mut decoder).await;
+        assert_eq!(status, 200, "the handshake completes first");
+        // An unmasked client frame violates §5.1: the loop ends in
+        // a protocol error on its own, before shutdown arrives.
+        io.write_all(&h2_frame(
+            0x0,
+            0,
+            1,
+            &[0x81u8, 0x05u8, b'h', b'e', b'l', b'l', b'o'],
+        ))
+        .await
+        .expect("violation writes");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown.signal();
+        h2_close_watch(&mut io).await;
+    };
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("violation completes");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "drain outranks the loop's error");
 }

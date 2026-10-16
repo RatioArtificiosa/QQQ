@@ -4,6 +4,18 @@
 
 ### Security
 
+- **serve**: CONNECT review hardening (`F-16` parity): task
+  handles prune on push at both sites through one helper
+  (sequential upgrades on a long h2 connection no longer
+  collect dead slots); any method at a WebSocket route takes
+  the CONNECT arm, and non-CONNECT methods answer the h1-like
+  400 — without it an h2 `GET` fell through to the flat
+  handler and answered `200` where h1 answers `400`, a fork
+  the new test caught red. Pins: prune unit, `GET`-to-WS
+  400, TE-chunked reset at the framing layer, Drained
+  surviving a protocol error (the error lives in the access
+  record the loop already emitted).
+
 - **serve**: WebSocket over HTTP/2 extended-CONNECT (`F-16`
   parity): the last `501` is now a mechanism — the h2 builder
   advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL` (with its own

@@ -2577,7 +2577,7 @@ mod tests {
     /// clock (both read 0), on wall time (neither reads the pinned
     /// instant), and passes only when the injection is live.
     #[test]
-    fn a_forced_tick_between_pushes_changes_the_render() {
+    fn a_forced_tick_between_pushes_moves_the_stamp() {
         let mut s = stream(4);
         s.set_fixed_clock_for_test(1_700_000_000_000);
         push(&mut s, Outcome::Granted);

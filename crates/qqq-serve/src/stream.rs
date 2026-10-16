@@ -130,8 +130,20 @@ enum Sink<'a> {
     /// A hyper response body: unframed pieces, closed by dropping.
     /// `None` once `finish` took it, so a second `finish` is a
     /// no-op rather than a second close.
-    Channel(Option<tokio::sync::mpsc::UnboundedSender<bytes::Bytes>>),
+    Channel(Option<tokio::sync::mpsc::Sender<bytes::Bytes>>),
 }
+
+/// How many pieces a channel writer buffers before its handler stalls.
+///
+/// The channel decouples handler production from hyper's polls; without
+/// a bound a fast handler with a slow consumer buffers without limit,
+/// which the socket path cannot do (a full socket stalls the write
+/// itself). Sixteen absorbs a burst of events without stalling the
+/// common single-event write, while bounding memory to sixteen
+/// in-flight pieces. Per-piece size stays the handler's contract,
+/// exactly as on the socket path, where one arbitrarily large
+/// `write_all` is equally possible.
+const STREAM_CHANNEL_PIECES: usize = 16;
 
 impl<'a> StreamWriter<'a> {
     /// Write the response head and flush it.
@@ -174,6 +186,13 @@ impl<'a> StreamWriter<'a> {
     /// frames DATA itself — and the body ends when `finish` drops
     /// the sender or when the writer itself is dropped.
     ///
+    /// The queue is bounded ([`STREAM_CHANNEL_PIECES`]): a write past
+    /// a full queue waits for hyper to take a piece, which is the
+    /// channel form of a full socket stalling `write_all`. An
+    /// unbounded queue would let a fast handler pile pieces behind a
+    /// slow consumer without limit — memory the socket path cannot
+    /// spend, since it has nowhere to put it.
+    ///
     /// ```
     /// use qqq_serve::stream::StreamWriter;
     ///
@@ -192,8 +211,8 @@ impl<'a> StreamWriter<'a> {
     /// });
     /// ```
     #[must_use]
-    pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    pub fn channel() -> (Self, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_PIECES);
         (
             Self {
                 sink: Sink::Channel(Some(tx)),
@@ -249,7 +268,10 @@ impl<'a> StreamWriter<'a> {
                 // Unframed: hyper frames DATA itself, so a chunk
                 // length here would arrive as body data — the same
                 // bug the socket path guards above, in the other
-                // direction. A dropped receiver means hyper is gone,
+                // direction. Awaiting capacity is the backpressure
+                // a full socket provides: with a slow consumer the
+                // handler stalls here instead of queueing without
+                // bound. A dropped receiver means hyper is gone,
                 // which is the channel form of a dead socket.
                 let Some(tx) = tx.as_ref() else {
                     return Err(std::io::Error::new(
@@ -257,9 +279,14 @@ impl<'a> StreamWriter<'a> {
                         "the response body is gone",
                     ));
                 };
-                tx.send(bytes::Bytes::copy_from_slice(piece)).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the response body is gone")
-                })?;
+                tx.send(bytes::Bytes::copy_from_slice(piece))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "the response body is gone",
+                        )
+                    })?;
             }
         }
         self.written += piece.len() as u64;
@@ -493,6 +520,31 @@ pub fn emit_stream_record(logger: &Logger, rec: &StreamRecord<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A producer that outruns its consumer stalls instead of
+    /// buffering without bound: the socket path stalls in the
+    /// write itself when the peer is slow, and the channel must
+    /// stall the same way rather than queue forever.
+    #[tokio::test]
+    async fn channel_backpressures_a_producer_that_outruns_hyper() {
+        let (mut writer, mut rx) = StreamWriter::channel();
+        for _ in 0..STREAM_CHANNEL_PIECES {
+            writer
+                .write_now(b"x")
+                .await
+                .expect("capacity takes the burst");
+        }
+        let stalled = writer.write_now(b"x");
+        tokio::pin!(stalled);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut stalled)
+                .await
+                .is_err(),
+            "the write past a full queue must wait for hyper, not queue"
+        );
+        rx.recv().await.expect("a queued piece");
+        stalled.await.expect("the stall ends when hyper drains");
+    }
 
     /// The two normal endings are `Info`, and only a truncated body is `Error`.
     ///

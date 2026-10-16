@@ -20,7 +20,7 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -454,22 +454,12 @@ async fn h2_get_events(
     (status, body)
 }
 
-/// Events stream over HTTP/2 DATA frames: the same handler bytes,
-/// the same first-event-before-return proof, framed by hyper.
-#[tokio::test]
-async fn hyper_h2_streaming_delivers_events_as_data() {
-    use qqq_serve::serve_hyper::serve_hyper_h2;
-
-    let table = Arc::new(table_with(&[(Method::Get, "/events", "stream")]));
-    let (tx, rx) = oneshot::channel();
-    let invocations = Arc::new(AtomicUsize::new(0));
-    let dispatch = Dispatch::flat(flat_handler())
-        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
-    let pieces = Pieces::bare();
-    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
-    let id = ConnectionId::new(peer, 1);
-    let ctx = ConnectionContext {
-        id: &id,
+/// One h2 connection context over borrowed pieces: the three
+/// duplex tests build the same struct, and the third copy is
+/// what tripped the line budget — one home for the boilerplate.
+fn h2_conn_ctx<'a>(pieces: &'a Pieces, id: &'a ConnectionId) -> ConnectionContext<'a> {
+    ConnectionContext {
+        id,
         shutdown: &pieces.shutdown,
         logger: &pieces.logger,
         cors: pieces.cors.as_ref(),
@@ -484,7 +474,24 @@ async fn hyper_h2_streaming_delivers_events_as_data() {
         loopback_only: pieces.loopback_only,
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
-    };
+    }
+}
+
+/// Events stream over HTTP/2 DATA frames: the same handler bytes,
+/// the same first-event-before-return proof, framed by hyper.
+#[tokio::test]
+async fn hyper_h2_streaming_delivers_events_as_data() {
+    use qqq_serve::serve_hyper::serve_hyper_h2;
+
+    let table = Arc::new(table_with(&[(Method::Get, "/events", "stream")]));
+    let (tx, rx) = oneshot::channel();
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", gated_handler(rx, Arc::clone(&invocations)));
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
     let limits = HyperLimits {
         // A short drain bound: the default would outlast the
         // close-watch below, and the verdict under test is *that*
@@ -512,6 +519,248 @@ async fn hyper_h2_streaming_delivers_events_as_data() {
         // outcome would be `ClientClosed` instead of `Drained`
         // (same race the duplex h2 test pins). A server that never
         // closes enforces nothing — time out loudly.
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut byte = [0u8; 1];
+            while io.read_exact(&mut byte).await.is_ok() {}
+        })
+        .await;
+        closed.expect("server drains and closes after shutdown");
+    };
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("stream completes");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "shutdown drains the stream");
+}
+
+/// A parked streaming handler ends with its connection: server
+/// shutdown aborts the detached task instead of leaking it.
+/// In-house abandons the connection task the same way at the
+/// drain deadline (the accept loop's `JoinSet`), so the abort is
+/// parity, not policy — and its silence (no record) matches the
+/// abandon, which never reaches the emit either.
+#[tokio::test]
+async fn hyper_h2_parked_streaming_handler_dies_with_the_connection() {
+    use qqq_serve::h2::hpack::HeaderField;
+    use qqq_serve::serve_hyper::serve_hyper_h2;
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let handler: qqq_serve::stream::StreamingHandler = Arc::new({
+        let dropped = Arc::clone(&dropped);
+        move |_head: &RequestHead,
+              _m: &RouteMatch,
+              _w: &mut StreamWriter<'_>|
+              -> Pin<
+            Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>,
+        > {
+            let dropped = Arc::clone(&dropped);
+            Box::pin(async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(dropped);
+                std::future::pending::<Result<(), StreamError>>().await
+            })
+        }
+    });
+    let table = Arc::new(table_with(&[(Method::Get, "/events", "stream")]));
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", handler);
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
+    let limits = HyperLimits {
+        drain_timeout: Duration::from_millis(100),
+        ..default_limits()
+    };
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let serve = serve_hyper_h2(server_io, Arc::clone(&table), dispatch, limits, &ctx);
+    let shutdown = pieces.shutdown.clone();
+    let client = async move {
+        let mut io = client_io;
+        let (mut encoder, _) = h2_shake_hands(&mut io).await;
+        let block = encoder.encode(&[
+            HeaderField::new(":method", "GET"),
+            HeaderField::new(":path", "/events"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":authority", "localhost"),
+        ]);
+        io.write_all(&h2_frame(0x1, 0x4 | 0x1, 1, &block))
+            .await
+            .expect("headers write");
+        // No response read: the handler parks before writing
+        // anything, which is the leak shape — shutdown must end
+        // it anyway.
+        shutdown.signal();
+        // Stay open so the shutdown verdict is deterministic
+        // (EOF would race it into `ClientClosed`).
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut byte = [0u8; 1];
+            while io.read_exact(&mut byte).await.is_ok() {}
+        })
+        .await;
+        closed.expect("server drains and closes after shutdown");
+    };
+    let client = async {
+        tokio::time::timeout(Duration::from_secs(60), client)
+            .await
+            .expect("shutdown completes");
+    };
+    let (served, ()) = tokio::join!(serve, client);
+    assert_eq!(served, Served::Drained, "shutdown drains the connection");
+    let mut fired = false;
+    for _ in 0..500 {
+        if dropped.load(Ordering::SeqCst) {
+            fired = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        fired,
+        "the parked handler task must die with its connection, not leak"
+    );
+}
+
+/// One event plus an invocation count: the declared-length and
+/// DATA-without-length pins below need a handler that proves it
+/// ran and that its bytes crossed.
+fn counting_handler(invocations: Arc<AtomicUsize>) -> qqq_serve::stream::StreamingHandler {
+    Arc::new(
+        move |_head: &RequestHead,
+              _m: &RouteMatch,
+              w: &mut StreamWriter<'_>|
+              -> Pin<
+            Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>,
+        > {
+            let invocations = Arc::clone(&invocations);
+            Box::pin(async move {
+                invocations.fetch_add(1, Ordering::SeqCst);
+                w.write_now(b"data: hi\n\n")
+                    .await
+                    .map_err(|e| StreamError::Transport(e.to_string()))?;
+                Ok(())
+            })
+        },
+    )
+}
+
+/// A declared-length body reaches a streaming handler on hyper,
+/// exactly as in-house: `special_route_has_body` names only
+/// unbounded (chunked) bodies, because a declared length is
+/// already capped by the parser before dispatch. The in-house
+/// half of this differential is
+/// `streaming_route::a_streaming_route_does_not_read_the_request_body`.
+#[tokio::test]
+async fn hyper_streaming_declared_length_body_reaches_the_handler() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", counting_handler(Arc::clone(&invocations)));
+    let server = Hyper::start(dispatch, Pieces::bare()).await;
+    let mut client = TcpStream::connect(server.addr).await.expect("connect");
+    client
+        .write_all(b"POST /events HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+        .await
+        .expect("write");
+    client.flush().await.expect("flush");
+    let got = read_until(&mut client, "data: hi").await;
+    let text = String::from_utf8_lossy(&got).into_owned();
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "a declared-length body is policy, not a refusal:\n{text}"
+    );
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "the handler ran exactly once"
+    );
+    server.finish().await;
+}
+
+/// An HTTP/2 streaming request with DATA but no declared length
+/// takes the same path: the refusal names chunked framing, and
+/// h2 has none — unread DATA is window-bounded, not unbounded.
+/// Pins the flagged case as policy, not bypass.
+#[tokio::test]
+async fn hyper_h2_streaming_data_without_length_reaches_the_handler() {
+    use qqq_serve::h2::hpack::HeaderField;
+    use qqq_serve::serve_hyper::serve_hyper_h2;
+
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let table = Arc::new(table_with(&[(Method::Post, "/events", "stream")]));
+    let dispatch = Dispatch::flat(flat_handler())
+        .with_streaming("stream", counting_handler(Arc::clone(&invocations)));
+    let pieces = Pieces::bare();
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let id = ConnectionId::new(peer, 1);
+    let ctx = h2_conn_ctx(&pieces, &id);
+    let limits = HyperLimits {
+        drain_timeout: Duration::from_millis(100),
+        ..default_limits()
+    };
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let serve = serve_hyper_h2(server_io, Arc::clone(&table), dispatch, limits, &ctx);
+    let shutdown = pieces.shutdown.clone();
+    let client = async move {
+        let mut io = client_io;
+        let (mut encoder, mut decoder) = h2_shake_hands(&mut io).await;
+        let block = encoder.encode(&[
+            HeaderField::new(":method", "POST"),
+            HeaderField::new(":path", "/events"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":authority", "localhost"),
+        ]);
+        io.write_all(&h2_frame(0x1, 0x4, 1, &block))
+            .await
+            .expect("headers write");
+        io.write_all(&h2_frame(0x0, 0x1, 1, b"hello"))
+            .await
+            .expect("data writes");
+        let mut status = 0u16;
+        let mut body = Vec::new();
+        loop {
+            let Some((ftype, flags, sid, payload)) =
+                tokio::time::timeout(Duration::from_secs(10), h2_read_frame(&mut io))
+                    .await
+                    .expect("server speaks")
+            else {
+                panic!("server died mid-stream");
+            };
+            if sid == 0 {
+                continue;
+            }
+            if ftype == 0x1 {
+                for field in decoder.decode(&payload).expect("decode") {
+                    if field.name == ":status" {
+                        status = field.value.parse().expect("numeric status");
+                    }
+                }
+            } else if ftype == 0x0 {
+                body.extend_from_slice(&payload);
+                if (flags & 0x1) != 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            status, 200,
+            "h2 DATA without length is policy, not a refusal"
+        );
+        assert!(
+            String::from_utf8_lossy(&body).contains("data: hi"),
+            "the handler ran and its bytes crossed"
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "the handler ran exactly once"
+        );
+        shutdown.signal();
         let closed = tokio::time::timeout(Duration::from_secs(10), async {
             let mut byte = [0u8; 1];
             while io.read_exact(&mut byte).await.is_ok() {}

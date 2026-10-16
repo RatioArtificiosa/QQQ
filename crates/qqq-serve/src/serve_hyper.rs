@@ -199,6 +199,7 @@ where
         protocol: Protocol::H1,
         watch: Arc::new(IdleWatch::new()),
         ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        stream_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     crate::transport::apply_http1(&mut builder, &state.limits);
@@ -263,11 +264,34 @@ where
             }
         }
     };
+    abort_stream_tasks(&state).await;
     drain_ws_tasks(&state, base).await
 }
 
-/// Await upgraded WebSocket loops and fold the outcome in.
+/// Abandon streaming handlers at connection end.
 ///
+/// The mirror of the accept loop's `JoinSet` abandon at the drain
+/// deadline: in-house ends a parked handler by ending its
+/// connection task, and hyper must end the detached equivalent.
+/// Abort, not await — a parked handler has nothing to wake for —
+/// and no record: the abandon never reaches the emit in-house
+/// either, so a record here would be a behaviour the oracle does
+/// not have. The await after each abort only reaps the teardown,
+/// so a test observing handler drops is deterministic.
+async fn abort_stream_tasks(state: &State) {
+    let handles: Vec<_> = std::mem::take(
+        &mut state
+            .stream_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for handle in handles {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+/// Await upgraded WebSocket loops and fold the outcome in.
 /// No upgrades — the common case — costs one lock and one empty
 /// check. With upgrades, the last loop's outcome maps exactly as
 /// `serve_ws_route` maps it, so the two transports report one
@@ -326,6 +350,7 @@ where
         protocol: Protocol::H2,
         watch: Arc::new(IdleWatch::new()),
         ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        stream_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     crate::transport::apply_http2(&mut builder, &state.limits);
@@ -346,28 +371,32 @@ where
     let mut ticker = tokio::time::interval(check_every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(connection);
-    loop {
+    let base = loop {
         tokio::select! {
             result = &mut connection => {
                 // h2 has no per-request read timeouts, so every connection
                 // error is the connection's outcome, not a request's.
-                match result {
-                    Ok(()) => return Served::ClientClosed,
-                    Err(_error) => return Served::ClientClosed,
-                }
+                break match result {
+                    Ok(()) => Served::ClientClosed,
+                    Err(_error) => Served::ClientClosed,
+                };
             }
             () = shutdown.wait() => {
                 connection.as_mut().graceful_shutdown();
                 let _ = tokio::time::timeout(drain, &mut connection).await;
-                return Served::Drained;
+                break Served::Drained;
             }
             _ = ticker.tick() => {
                 if state.watch.is_idle(idle) {
-                    return Served::IdleTimeout;
+                    break Served::IdleTimeout;
                 }
             }
         }
-    }
+    };
+    // h2 upgrades are refused, so `ws_tasks` is always empty here —
+    // the tail stays shared so the next transport cannot forget it.
+    abort_stream_tasks(&state).await;
+    drain_ws_tasks(&state, base).await
 }
 
 /// Connection context owned by the serving task.
@@ -474,6 +503,17 @@ struct State {
     /// returns, mapping the loop outcome to `Served` the way
     /// `serve_ws_route` does.
     ws_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<crate::ws_conn::WsOutcome>>>>,
+    /// Streaming handlers running on this connection, abandoned
+    /// when the driver returns: the task owns the handler future,
+    /// so dropping the connection without them leaks a parked
+    /// handler the way nothing in-house can (there the handler
+    /// runs inline on the connection task, and the accept loop's
+    /// `JoinSet` abandon is what ends it at the drain deadline).
+    /// Aborted, never awaited: a parked handler has no reason to
+    /// wake, and the connection is over either way. Silence
+    /// matches the abandon — no record fires for a stream the
+    /// server cut, exactly as none fires in-house.
+    stream_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Service-observable activity for the idle bound, mirroring
@@ -600,7 +640,7 @@ enum WatchBodyInner {
     /// The stamps still track the send — a stalled stream (no
     /// polls at all) reclaims like a stalled send.
     Stream {
-        rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+        rx: tokio::sync::mpsc::Receiver<Bytes>,
     },
 }
 
@@ -616,7 +656,7 @@ impl WatchBody {
     }
 
     /// A streaming body fed by a handler through `StreamWriter::channel`.
-    fn streaming(rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>, watch: &Arc<IdleWatch>) -> Self {
+    fn streaming(rx: tokio::sync::mpsc::Receiver<Bytes>, watch: &Arc<IdleWatch>) -> Self {
         Self {
             inner: WatchBodyInner::Stream { rx },
             watch: Arc::clone(watch),
@@ -1296,7 +1336,7 @@ async fn serve_streaming_hyper(
     let logger = state.ctx.logger.clone();
     let (path, _query) = split_target(&head.target);
     let path = path.to_owned();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let handler_result = stream_handler(&head, &matched, &mut writer).await;
         let outcome = match handler_result {
             Ok(()) => match writer.finish().await {
@@ -1322,6 +1362,17 @@ async fn serve_streaming_hyper(
             },
         );
     });
+    // Tracked so the driver abandons it at connection end, and
+    // pruned so a long multiplexed connection does not collect
+    // finished handles: a slot per stream is the ledger's shape,
+    // not a log.
+    let mut tasks = state
+        .stream_tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tasks.retain(|handle| !handle.is_finished());
+    tasks.push(task);
+    drop(tasks);
     Ok(response)
 }
 

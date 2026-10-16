@@ -39269,4 +39269,42 @@ read the bytes before touching the server — twice this unit
 the wire was right and the expectation was not.
 → `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/src/server.rs`, `crates/qqq-serve/tests/hyper_streaming.rs`, `crates/qqq-serve/tests/hyper_ws.rs`, `CHANGELOG.md`.
 
+## §O-730 - The review earned its mandate: one unbounded queue, one leaked task, one rebuttal
+
+The post-commit review of the streaming unit returned three
+findings with test-or-rebuttal demands, and the split is the
+entry: two reproduced red, one rebutted with a pin. (1) HIGH,
+real: `StreamWriter::channel` used an unbounded MPSC queue, so
+a fast handler behind a slow consumer buffered without limit —
+memory the socket path cannot spend, since a full socket stalls
+the write itself. Red proof: the seventeenth write completed
+instantly pre-fix (0.00 s). Fix: a 16-piece bounded channel
+with `send().await`, which restores the stall shape; sixteen
+absorbs an event burst while bounding memory to sixteen
+in-flight pieces, and per-piece size stays the handler's
+contract exactly as on the socket path. (2) HIGH, real: the
+streaming task was detached — a parked handler survived server
+shutdown with no record, while in-house ends it by abandoning
+the connection task at the drain deadline. Red proof: drop
+guard unfired after `Drained` (7.85 s). Fix: per-connection
+task tracking with prune-on-push (a multiplexed connection
+must not collect finished handles) plus abort-and-reap at
+every driver return; silence matches the abandon, which never
+reaches the emit either. (3) MEDIUM, rebutted: h2 DATA without
+a declared length reaches the handler — but so does an h1
+declared-length body on both transports, by the same
+`special_route_has_body` function in the same position. The
+predicate names only unbounded (chunked) bodies deliberately
+(declared lengths are parser-capped; unread h2 DATA is
+window-bounded); a 400 here would contradict
+`a_streaming_route_does_not_read_the_request_body`. Pin: h1
+declared-length and h2 DATA-without-length both answer 200
+with one handler invocation. Measured: hyper_streaming 7
+green, stream lib 42 green, hyper_ws 4, hyper_serve 25,
+hyper_tls 3 green; graf refreshed to generation 82 after the
+last edit. The generalisable rule: a finding that names a
+shared predicate is a policy question, not a migration
+regression — answer it with a differential pin, not a fix.
+→ `crates/qqq-serve/src/stream.rs`, `crates/qqq-serve/src/serve_hyper.rs`, `crates/qqq-serve/tests/hyper_streaming.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

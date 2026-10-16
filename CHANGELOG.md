@@ -4,6 +4,21 @@
 
 ### Security
 
+- **serve**: streaming hardening from review (`F-16` parity):
+  the channel writer is bounded (16 pieces, `send().await`),
+  restoring the socket path's stall shape — a fast handler
+  behind a slow consumer waits instead of queueing without
+  limit — and streaming tasks are tracked per connection with
+  prune-on-push and aborted at every driver return, mirroring
+  the accept loop's `JoinSet` abandon (silence matches the
+  abandon, which never reaches the emit either). A declared
+  h2 DATA length question was rebutted with pins, not fixed:
+  both protocols dispatch declared/window-bounded bodies to
+  the handler through the same shared predicate. Pins:
+  seventeenth-write stalls, parked handler drops on shutdown,
+  h1 declared-length and h2 DATA-without-length both 200 with
+  one invocation.
+
 - **serve**: streaming and SSE over the hyper path (`F-16`
   parity): the `501` arm for h1/h2 streaming routes is now a
   channel writer — the handler runs on a spawned task against

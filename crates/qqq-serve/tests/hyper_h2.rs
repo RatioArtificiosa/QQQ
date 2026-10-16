@@ -1206,9 +1206,9 @@ async fn h2_pings_do_not_extend_the_idle_bound() {
     let stream = flood_handshake(hyper.addr).await;
     // PING every 50 ms — well inside the 300 ms bound, so any
     // activity accounting that counted codec traffic would keep
-    // this connection alive indefinitely. The pongs prove the
-    // traffic flows (read and discarded below); the EOF proves it
-    // does not count toward idleness.
+    // this connection alive indefinitely. Writes flowing without
+    // error plus the server's EOF prove the point: the frames go
+    // out, and still do not count toward idleness.
     let (mut rd, mut wr) = stream.into_split();
     let ping_task = tokio::spawn(async move {
         let mut n = 0u64;

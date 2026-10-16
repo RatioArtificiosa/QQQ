@@ -39530,4 +39530,26 @@ rebuttal (hyper 1.12 exposes no ping/settings rate knob —
 never served) are logged alongside.
 → `docker/compose.yaml`, `tools/qqqdev.ps1` (unchanged).
 
+## §O-739 - The flood cutoff that survived the migration is the idle bound
+
+Answering the deletion skepticism with a test instead of an
+argument: a peer holding an h2 connection open with PING
+frames every 50 ms inside a 300 ms idle bound is still
+closed on the bound with `Served::IdleTimeout` — codec
+traffic never stamps `IdleWatch`, so cheap frames cannot buy
+connection slots. This is the cutoff the renamed
+`answered/acked` tests point at: hyper auto-acks with no rate
+knob (all 18 public builder methods enumerated from source —
+no ping/settings counter exists), and the deleted codec never
+served production traffic (`server.rs` holds zero h2
+references), so no live protection moved or vanished. Red
+proof: neutering the h2 idle arm loses the verdict (the
+connection then dies on hyper's own ping-ack timeout as
+`ClientClosed`, `v-flood-idle-red.log`); restored green in
+0.44 s. Measured: hyper_h2 22 green. The generalisable rule:
+when the mechanism cannot count, bound the lifetime — a
+flood that cannot hold a slot past the deadline is cut off
+without ever being counted.
+→ `crates/qqq-serve/tests/hyper_h2.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

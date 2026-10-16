@@ -1185,6 +1185,62 @@ async fn h2_idle_closes_with_idle_timeout() {
     }
 }
 
+/// PING floods do not extend the idle bound: codec-level traffic
+/// never stamps activity, so a peer holding a connection open with
+/// cheap frames is still reclaimed on the idle deadline. This is
+/// the live cutoff for the flood class the `answered/acked`
+/// renames describe — hyper auto-acks PINGs with no rate knob, so
+/// the bound that ends the connection is idleness, not count.
+#[tokio::test]
+async fn h2_pings_do_not_extend_the_idle_bound() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let mut limits = default_limits();
+    limits.idle_timeout = Duration::from_millis(300);
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        limits,
+        Pieces::bare(),
+    )
+    .await;
+    let stream = flood_handshake(hyper.addr).await;
+    // PING every 50 ms — well inside the 300 ms bound, so any
+    // activity accounting that counted codec traffic would keep
+    // this connection alive indefinitely. The pongs prove the
+    // traffic flows (read and discarded below); the EOF proves it
+    // does not count toward idleness.
+    let (mut rd, mut wr) = stream.into_split();
+    let ping_task = tokio::spawn(async move {
+        let mut n = 0u64;
+        while wr.write_all(&ping(n.to_be_bytes())).await.is_ok() {
+            n += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        n
+    });
+    let closed = loop {
+        let mut buf = [0u8; 64];
+        match tokio::time::timeout(Duration::from_secs(5), rd.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => break true,
+            Ok(Ok(_)) => {}
+            Err(_) => break false,
+        }
+    };
+    let pings = ping_task.await.unwrap_or(0);
+    assert!(
+        pings >= 2,
+        "pings must actually flow for the pin to mean anything, sent {pings}"
+    );
+    assert!(
+        closed,
+        "a ping-flooded idle connection must close, not hang"
+    );
+    match hyper.finish().await {
+        Served::IdleTimeout => {}
+        other => panic!("expected IdleTimeout, got {other:?}"),
+    }
+}
+
 /// Past the ceiling, h2 answers `503` and stays up: no per-response
 /// close signal exists on h2, so the client reconnects for service
 /// while the connection persists to idle.

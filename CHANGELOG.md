@@ -4,6 +4,15 @@
 
 ### Security
 
+- **serve**: ping floods die on the idle bound (`F-16`
+  parity): codec-level traffic never stamps activity, so a
+  peer holding a connection open with cheap PING frames is
+  still reclaimed on the idle deadline — the live cutoff for
+  the flood class hyper answers without collapsing. Pinned by
+  a test that pings inside the bound and still observes the
+  idle close (red-proven by neutering the idle arm: no
+  `IdleTimeout` verdict).
+
 - **host**: clock-guard discrimination (`I-02` audit): the
   forced-tick anti-vacuity test asserted render-level
   inequality, which passes with a dead clock because sequence

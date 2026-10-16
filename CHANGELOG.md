@@ -4,6 +4,13 @@
 
 ### Security
 
+- **serve**: post-deletion doc truth (`F-16` parity): the TLS
+  ALPN docs tied the HTTP/1.1-only default to the h2 loop's
+  absence — the loop has landed on the hyper path, so the
+  default's reason is now least-surprise with `with_alpn` the
+  explicit opt-in (behavior unchanged); the header-list
+  ceiling notes its provenance. No behavior change.
+
 - **serve**: delete the dead in-house h2 codec (`F-16` parity):
   `h2/{conn,frame,flow,stream,settings}` served nothing —
   `server.rs` has no h2 path, the §O-676 flood budgets run over

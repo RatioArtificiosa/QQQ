@@ -246,27 +246,23 @@ pub const CIPHER_SUITES: &[SupportedCipherSuite] = &[
 /// Order is preference, and `h2` is first: a client that offers both gets
 /// HTTP/2, which is the point of negotiating at all.
 ///
-/// # Why `h2` is advertised before HTTP/2 exists here
+/// # Why the default does not advertise `h2`
 ///
-/// `lib.rs` records HTTP/2 as `SRV-002`, not implemented. Advertising `h2`
-/// anyway would be a **lie to the client**: a server that selects `h2` and then
-/// speaks HTTP/1.1 has produced a protocol error the client cannot classify, and
-/// RFC 9113 gives it no recovery.
-///
-/// So the constant exists, the negotiation *mechanism* is implemented and
-/// tested, and the decision about what to advertise is a separate value —
-/// [`ServerConfigExt::with_alpn`] takes it. `lib.rs` advertises HTTP/1.1 only
-/// until `SRV-002` lands, and flips to this full list then. The mechanism is
-/// built now so that flipping it is one constant, not a protocol change.
+/// The default stays HTTP/1.1-only so existing deployments negotiate
+/// nothing new by surprise — and `serve_hyper_tls` routes an
+/// explicitly offered `h2` to the HTTP/2 driver, so the opt-in
+/// reaches a real loop. The mechanism was built before the loop
+/// existed so that wiring it would be one constant, not a protocol
+/// change; that wiring has since landed, and the default's reason
+/// is now conservatism, not absence.
 pub const ALPN_H2: &[u8] = b"h2";
 /// The HTTP/1.1 ALPN protocol identifier.
 pub const ALPN_HTTP11: &[u8] = b"http/1.1";
 
 /// Every ALPN protocol this server knows, in preference order.
 ///
-/// The list [`ServerConfigExt::with_alpn`] is called with once `SRV-002` lands.
-/// Until then it is the documentation of what "ALPN support" means here, and the
-/// test that pins the preference order uses it.
+/// The list [`ServerConfigExt::with_alpn`] is called with to opt in
+/// to `h2`; the preference-order test pins `h2` first.
 pub const ALPN_ALL: &[&[u8]] = &[ALPN_H2, ALPN_HTTP11];
 
 // ---------------------------------------------------------------------------
@@ -1260,13 +1256,13 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// A configuration from a certificate source, with the documented policy.
     ///
-    /// `NONE` client auth and HTTP/1.1-only ALPN — the state a deployment is
-    /// in while `SRV-002` is unimplemented: RFC 9113 §3.2 gives `h2` its
-    /// meaning as "HTTP/2 over TLS", so advertising it without an h2
-    /// endpoint would negotiate clients into a protocol nothing serves.
-    /// To offer more once the h2 loop exists, overwrite [`Self::alpn`] with
-    /// [`Self::with_alpn`] (the full [`ALPN_ALL`] list is the set a
-    /// deployment reaches then).
+    /// `NONE` client auth and HTTP/1.1-only ALPN — the conservative
+    /// default: an explicit [`Self::with_alpn`] is what offers more,
+    /// and `serve_hyper_tls` routes an offered `h2` to the HTTP/2
+    /// driver, so the opt-in reaches a real loop. (An earlier
+    /// revision tied the default to the loop's absence; the loop
+    /// has since landed on the hyper path, and the default's reason
+    /// is now least-surprise, not absence.)
     ///
     /// # Why this is not `Default`
     ///
@@ -1892,17 +1888,16 @@ mod tests {
         assert_eq!(ALPN_HTTP11, b"http/1.1");
     }
 
-    /// **F-16: the default config does not advertise `h2` without the h2 loop.**
+    /// **F-16: the default config stays HTTP/1.1-only; `h2` is an explicit opt-in.**
     ///
-    /// There is no h2 dispatch loop in the server (`SRV-002` unimplemented),
-    /// so a default that offers `h2` first negotiates clients into a
-    /// protocol nothing serves. The default offers HTTP/1.1 only;
-    /// [`ALPN_ALL`] keeps documenting the future set, and
-    /// [`TlsConfig::with_alpn`] stays the explicit opt-in a deployment
-    /// reaches once the loop exists.
+    /// The default offers HTTP/1.1 only so existing deployments
+    /// negotiate nothing new by surprise; [`ALPN_ALL`] documents
+    /// the full set, and [`TlsConfig::with_alpn`] is the explicit
+    /// opt-in — which now reaches a real loop, since
+    /// `serve_hyper_tls` routes ALPN `h2` to the HTTP/2 driver.
     /// Pre-fix this fails: `new` defaults to the full `ALPN_ALL` list.
     #[test]
-    fn f16_default_alpn_does_not_advertise_h2_without_the_h2_loop() {
+    fn f16_default_alpn_stays_http11_h2_is_an_explicit_opt_in() {
         let c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
         assert!(
             !c.alpn.iter().any(|p| p == ALPN_H2),

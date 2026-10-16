@@ -390,7 +390,9 @@ impl Default for HyperLimits {
             // not a contract, and its per-line size is unset by default.
             http1_max_headers: crate::http1::MAX_HEADERS,
             http1_max_header_size: crate::http1::MAX_HEADER_BYTES,
-            // Mirrors the in-house `MAX_HEADER_BLOCK_BYTES`.
+            // The 1 MiB h2 header-list ceiling — formerly mirrored
+            // from the in-house `MAX_HEADER_BLOCK_BYTES` (deleted in
+            // §O-732); the value stands on its own now.
             h2_max_header_list_bytes: 1 << 20,
             // RFC 9113 §6.5.2 recommends no smaller than 100.
             max_concurrent_streams: 100,

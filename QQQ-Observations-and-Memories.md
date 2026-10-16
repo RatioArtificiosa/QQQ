@@ -39422,4 +39422,22 @@ framing (this wave), `tls.rs` policy is transport-independent
 conformance-backstop pattern to repeat.
 → (this entry; no code).
 
+## §O-735 - Deletion's second half: the docs that outlived the code
+
+The deletion review confirmed everything and added one LOW:
+three `tls.rs` comments still tied the HTTP/1.1-only ALPN
+default to the h2 loop's absence — false since the loop
+landed on the hyper path — plus a `transport.rs` comment
+mirroring a deleted constant. Fixed as docs only: the
+default's reason is now least-surprise with `with_alpn` the
+explicit opt-in (behavior deliberately unchanged — flipping
+the default would newly negotiate h2 for existing users, a
+policy change that needs its own red-first unit, not a docs
+fix), the renamed ALPN test pins the same assertion under a
+true name, and the ceiling notes its provenance. The
+generalisable rule: a deletion is not done when the code is
+gone — every comment that explained the code's absence is
+now explaining a present that does not exist.
+→ `crates/qqq-serve/src/tls.rs`, `crates/qqq-serve/src/transport.rs`, `CHANGELOG.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -73,8 +73,16 @@ async fn main() {
     };
     eprintln!("h2spec_serve: listening on 127.0.0.1:{port}");
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            break;
+        let (stream, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            // Transient accept errors (fd pressure storms) must not
+            // kill the harness mid-suite: back off briefly and keep
+            // serving. The job's trap kills the process at the end.
+            Err(error) => {
+                eprintln!("h2spec_serve: accept failed, retrying: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
         // Spawned per connection like the real accept loop: h2spec
         // opens a fresh connection per case and may leave the old

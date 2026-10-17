@@ -1788,8 +1788,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           # Pinned: `h2spec@latest` is a moving target that silently changes
-          # the case list. The pinned version is verified in
-          # `crates/qqq-serve/examples/h2spec_serve.rs`.
+          # the case list. The pinned version below produced the local
+          # evidence (145/145 plus 146/146 strict); keep them in sync.
           go-version: '1.27.1'
 
       # Pinned for the same reason as Go above: the unpinned install is
@@ -1802,7 +1802,7 @@ jobs:
 
       - name: Serve and run the suite plus strict
         run: |
-          set -eu
+          set -euo pipefail
           PORT=18443
           ./target/debug/examples/h2spec_serve "$PORT" > "$RUNNER_TEMP/h2spec-serve.log" 2>&1 &
           SERVER_PID=$!
@@ -1811,6 +1811,15 @@ jobs:
             if (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi
             sleep 1
           done
+          # Fail fast with a message instead of burning the suite on a
+          # dead server: without this, h2spec's 145 connect errors look
+          # like conformance failures rather than a harness that never
+          # started.
+          if ! (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then
+            echo "h2spec_serve never opened 127.0.0.1:$PORT; server log:"
+            cat "$RUNNER_TEMP/h2spec-serve.log"
+            exit 1
+          fi
           export PATH="$PATH:$(go env GOPATH)/bin"
           h2spec -h 127.0.0.1 -p "$PORT" | tee "$RUNNER_TEMP/h2spec.log"
           h2spec -h 127.0.0.1 -p "$PORT" -S | tee -a "$RUNNER_TEMP/h2spec.log"

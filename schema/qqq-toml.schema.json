@@ -100,6 +100,17 @@
           ],
           "description": "`[capabilities.http]` — server and/or client HTTP."
         },
+        "kv": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KvCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.kv]` — named stores."
+        },
         "other": {
           "additionalProperties": true,
           "description": "Namespaces `Capability::all()` knows that have no typed struct yet. Kept so a declaration parses and can be *reported*; the host binds only what it models.…",
@@ -387,6 +398,26 @@
         }
       },
       "title": "qqq-toml#HttpCapability",
+      "type": "object"
+    },
+    "KvCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#KvCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `KvCapability` table.",
+      "properties": {
+        "stores": {
+          "description": "Store names the guest may open.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "write": {
+          "description": "Widen from read-only to `kv.write`. Default denies.",
+          "type": "boolean"
+        }
+      },
+      "title": "qqq-toml#KvCapability",
       "type": "object"
     },
     "Limits": {

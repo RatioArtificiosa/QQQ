@@ -188,9 +188,12 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 pub fn fix_stanza_for(c: Capability) -> String {
     // `sql.execute` needs the widening flag the query stanza leaves
     // commented: one namespace, two grants, so the capability — not
-    // just the namespace — selects the text.
+    // just the namespace — selects the text. Same for `kv.write`.
     if c == Capability::SqlExecute {
         return "add to qqq.toml:\n\n    [[capabilities.sql]]\n    name = \"orders\"\n    driver = \"postgres\"\n    host = \"db.internal:5432\"\n    execute = true  # for sql.execute".to_owned();
+    }
+    if c == Capability::KvWrite {
+        return "add to qqq.toml:\n\n    [capabilities.kv]\n    stores = [\"sessions\"]\n    write = true  # for kv.write".to_owned();
     }
     match c.namespace() {
         "http" => "add to qqq.toml:\n\n    [capabilities.http]\n    server = true          # for http.server\n    client = [\"host:443\"]  # for http.client".to_owned(),
@@ -199,6 +202,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
         "clock" => "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true            # for clock.wall\n    monotonic = true       # for clock.monotonic".to_owned(),
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
+        "kv" => "add to qqq.toml:\n\n    [capabilities.kv]\n    stores = [\"sessions\"]\n    # write = true  # for kv.write; read-only without it".to_owned(),
         "sql" => "add to qqq.toml:\n\n    [[capabilities.sql]]\n    name = \"orders\"\n    driver = \"postgres\"\n    host = \"db.internal:5432\"\n    # secret = \"env:ORDERS_DB_URL\"\n    # execute = true  # for sql.execute; query-only without it".to_owned(),
         // `secret.use` is granted through the nested `crypto.secrets`
         // spelling, not a `[capabilities.secret]` table — the wildcard
@@ -1400,17 +1404,18 @@ mod tests {
 
     #[test]
     fn why_reports_an_unmodelled_denial_with_its_state() {
-        // `kv.read`: `sql` graduated to a stanza in CAP-017, so the
-        // unmodelled-denial path is pinned through `kv` now.
+        // `queue.publish`: `kv` graduated to a stanza in CAP-018 (and
+        // `sql` in CAP-017 before it), so the unmodelled-denial path
+        // is pinned through `queue` now.
         let l = loaded(DENY_ALL);
-        let out = why(&l, "kv.read").expect("must explain");
+        let out = why(&l, "queue.publish").expect("must explain");
         assert!(!out.granted);
         assert!(out.steps.is_empty(), "nothing mentioned it");
         // Assert on the summary *before* moving `fix` out of `out`.
         assert!(out.summary().contains("DENIED"));
         let fix = out.fix.expect("a denial must suggest a fix");
-        // No stanza exists for `kv`: the fix names the state and the
-        // modelling work, never a table the parser would reject.
+        // No stanza exists for `queue`: the fix names the state and
+        // the modelling work, never a table the parser would reject.
         assert!(
             !fix.contains("[capabilities."),
             "must not emit an unparseable stanza: {fix}"
@@ -1419,7 +1424,7 @@ mod tests {
             fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
             "must name the state and its tracking: {fix}"
         );
-        assert!(fix.contains("kv.read"));
+        assert!(fix.contains("queue.publish"));
     }
 
     /// A typo is the most likely reason this command is run, so the error must
@@ -1656,15 +1661,15 @@ mod tests {
     }
 
     /// Namespaces the manifest cannot model must not emit stanzas.
-    /// Five namespaces (`kv`, `queue`, `ai`, `log`, `trace`) have
-    /// no tables in `Capabilities` (`sql` graduated in CAP-017), so
-    /// any `[capabilities.<ns>]` text is a stanza the parser
-    /// rejects — the defect this pins. (`secret` is the seventh
-    /// unmodelled name but the exception: it resolves through the
-    /// nested `crypto.secrets` spelling, pinned below.)
+    /// Four namespaces (`queue`, `ai`, `log`, `trace`) have no
+    /// tables in `Capabilities` (`sql` graduated in CAP-017, `kv`
+    /// in CAP-018), so any `[capabilities.<ns>]` text is a stanza
+    /// the parser rejects — the defect this pins. (`secret` is the
+    /// seventh unmodelled name but the exception: it resolves
+    /// through the nested `crypto.secrets` spelling, pinned below.)
     #[test]
     fn an_unmodelled_namespace_names_its_state_rather_than_guessing() {
-        for ns in ["kv", "queue", "ai", "log", "trace"] {
+        for ns in ["queue", "ai", "log", "trace"] {
             let cap = Capability::all()
                 .iter()
                 .find(|c| c.namespace() == ns)
@@ -1715,6 +1720,28 @@ mod tests {
             !granted.contains(&Capability::SqlExecute),
             "the query stanza must not smuggle execute"
         );
+    }
+
+    /// The property loop picks the first capability per namespace,
+    /// which for `kv` is `KvRead` in sort order — so the write stanza
+    /// gets its own round-trip pin here rather than riding along
+    /// unproven. Write implies read: a writer that cannot read its
+    /// store is incoherent, so both grants are asserted.
+    #[test]
+    fn kv_write_stanza_parses_and_grants_write() {
+        use qqq_cap::manifest::Manifest;
+        let fix = fix_stanza_for(Capability::KvWrite);
+        let body = stanza_body(&fix).expect("kv.write has a stanza");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the write stanza must parse");
+        let granted = manifest.declared_capabilities();
+        assert!(
+            granted.contains(&Capability::KvWrite),
+            "the write stanza grants write"
+        );
+        assert!(granted.contains(&Capability::KvRead), "write implies read");
     }
 
     /// `secret.use` resolves through the nested `crypto.secrets`

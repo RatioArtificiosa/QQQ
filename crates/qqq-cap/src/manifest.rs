@@ -342,6 +342,9 @@ pub struct Capabilities {
     /// `[[capabilities.sql]]` — one entry per database.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql: Vec<SqlCapability>,
+    /// `[capabilities.kv]` — named stores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv: Option<KvCapability>,
     /// Namespaces `Capability::all()` knows that have no typed struct
     /// yet. Kept so a declaration parses and can be *reported*; the
     /// host binds only what it models. Every key is validated
@@ -540,6 +543,20 @@ pub struct SqlCapability {
     /// Widen from query-only to `sql.execute`. Default denies.
     #[serde(default)]
     pub execute: bool,
+}
+
+/// `[capabilities.kv]` — named key-value stores.
+/// Read is the default grant; `write = true` widens explicitly
+/// to `kv.write`, so a read-only consumer never smuggles write.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvCapability {
+    /// Store names the guest may open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stores: Vec<String>,
+    /// Widen from read-only to `kv.write`. Default denies.
+    #[serde(default)]
+    pub write: bool,
 }
 
 /// `[limits]` — enforceable resource bounds.
@@ -1257,6 +1274,7 @@ impl Manifest {
         // nowhere; empty strings are the typo class here, not
         // unknown fields (the struct's own deny already covers those).
         Self::validate_sql(&self.capabilities.sql)?;
+        Self::validate_kv(self.capabilities.kv.as_ref())?;
 
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
@@ -1320,6 +1338,21 @@ impl Manifest {
         Ok(())
     }
 
+    /// A `[capabilities.kv]` table with no stores is refused: an
+    /// empty declaration would grant a read of nothing. Whitespace-only
+    /// names refuse like empty ones, per the sql precedent.
+    fn validate_kv(kv: Option<&KvCapability>) -> Result<(), ManifestError> {
+        if let Some(kv) = kv
+            && (kv.stores.is_empty() || kv.stores.iter().any(|s| s.trim().is_empty()))
+        {
+            return Err(ManifestError::InvalidField {
+                field: "capabilities.kv".to_owned(),
+                reason: "stores must name at least one non-blank store".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// The capabilities this manifest grants, as a concrete set.
     ///
     /// This is step 1's output and step 2's input. Note that it reflects only
@@ -1375,6 +1408,14 @@ impl Manifest {
             push(Capability::SqlQuery);
             if db.execute {
                 push(Capability::SqlExecute);
+            }
+        }
+        if let Some(kv) = &self.capabilities.kv {
+            if !kv.stores.is_empty() {
+                push(Capability::KvRead);
+            }
+            if kv.write {
+                push(Capability::KvWrite);
             }
         }
         if let Some(c) = &self.capabilities.clock {
@@ -2165,28 +2206,29 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
-    /// (`kv` stands in since `sql` graduated to a typed table in
-    /// CAP-017; the shape proved is the catch-all's, not sql's.)
+    /// (`queue` stands in since `sql` graduated to a typed table in
+    /// CAP-017 and `kv` in CAP-018; the shape proved is the
+    /// catch-all's, not theirs.)
     #[test]
     fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.kv]\nstores = [\"sessions\"]\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.queue]\nname = \"orders.events\"\n";
         let m = Manifest::parse(src).expect("a known namespace must declare");
         assert!(
-            m.capabilities.other.contains_key("kv"),
+            m.capabilities.other.contains_key("queue"),
             "the declaration must land in the catch-all"
         );
         // Key presence is not enough: the value must survive intact,
         // or the catch-all is a second silent drop. Only the key set
         // is validated — the shape belongs to the future typed struct.
         assert_eq!(
-            m.capabilities.other["kv"]["stores"][0].as_str(),
-            Some("sessions"),
+            m.capabilities.other["queue"]["name"].as_str(),
+            Some("orders.events"),
             "the declared table body must round-trip through the catch-all"
         );
         assert!(
             !m.declared_capabilities()
                 .iter()
-                .any(|c| c.namespace() == "kv"),
+                .any(|c| c.namespace() == "queue"),
             "declaring is not binding: the host grants nothing unmodelled"
         );
     }
@@ -2209,13 +2251,13 @@ allow_origins = ["https://app.example.com"]
     /// A scalar under `[capabilities]` is not a declaration: the
     /// validator requires tables, so a misplaced value fails loudly
     /// instead of validating as a "known" key with no meaning.
-    /// (`kv` stands in: `sql` is typed now, so its scalar fails
-    /// earlier at serde type-checking — also loudly, also naming
-    /// the table.)
+    /// (`queue` stands in: `sql` is typed now and `kv` followed in
+    /// CAP-018 — both fail earlier at serde type-checking, also
+    /// loudly, also naming the table.)
     #[test]
     fn a_scalar_capability_value_is_refused_not_collected() {
         let src =
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nkv = \"sessions\"\n";
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nqueue = \"events\"\n";
         let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
         let text = err.to_string();
         assert!(
@@ -2308,6 +2350,54 @@ allow_origins = ["https://app.example.com"]
         let text = err.to_string();
         assert!(
             text.contains("capabilities.sql"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// A `kv` declaration grants read but not write: the stores list
+    /// names what is readable, and only an explicit `write = true`
+    /// widens to `kv.write` — the sql execute precedent, applied to
+    /// stores instead of connections.
+    #[test]
+    fn kv_table_parses_and_grants_read_not_write() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.kv]\nstores = [\"sessions\"]\n";
+        let m = Manifest::parse(src).expect("the kv table must parse");
+        let granted = m.declared_capabilities();
+        assert!(
+            granted.contains(&crate::capability::Capability::KvRead),
+            "a kv entry grants read"
+        );
+        assert!(
+            !granted.contains(&crate::capability::Capability::KvWrite),
+            "read alone must not smuggle write"
+        );
+    }
+
+    /// `write = true` is the explicit widening to `kv.write`;
+    /// the default stays read-only.
+    #[test]
+    fn kv_write_flag_grants_write() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.kv]\nstores = [\"sessions\"]\nwrite = true\n";
+        let m = Manifest::parse(src).expect("the kv table must parse");
+        assert!(
+            m.declared_capabilities()
+                .contains(&crate::capability::Capability::KvWrite),
+            "write = true grants write"
+        );
+    }
+
+    /// A `kv` table with no stores is refused: an empty declaration
+    /// would grant a read of nothing.
+    #[test]
+    fn kv_table_requires_nonempty_stores() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.kv]\nstores = []\n";
+        let err = Manifest::parse(src).expect_err("an empty kv table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.kv"),
             "refusal names the table: {text}"
         );
     }

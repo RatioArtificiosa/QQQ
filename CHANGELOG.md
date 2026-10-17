@@ -4,6 +4,11 @@
 
 ### Security
 
+- **cap**: model `[capabilities.kv]` (CAP-018): typed stores
+  with read-by-default and explicit `write = true` widening,
+  blank-store validation, generator stanzas for both grants,
+  refusal range narrowed to CAP-019..022. Red-first.
+
 - **cap**: model `[capabilities.sql]` (CAP-017): typed entries
   with named validation, query by default, explicit
   `execute = true` widening, generator stanzas for both

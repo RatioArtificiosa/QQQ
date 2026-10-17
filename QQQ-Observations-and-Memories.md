@@ -39828,4 +39828,21 @@ the rebuild succeeding with no code change is the proof it
 was environmental.
 → `.github/workflows/ci.yml`.
 
+## §O-750 - CAP-018: kv copies the sql pattern, including its lessons
+
+Second table, deliberately boring: `KvCapability` (stores +
+`write` flag) reuses the CAP-017 shape — read by default,
+explicit widening, empty/blank validation, generator stanzas
+for both grants with a dedicated round-trip pin for the
+second grant (sort order hides it from the loop, same as
+`sql.execute`). The `why` unmodelled-denial test repoints to
+`queue.publish` (`kv` graduated; the test names its current
+stand-in so the next graduation moves it again). Caught
+along the way: my own duplicate match arm (clippy saw it,
+not me — two identical `sql` arms from an anchored insert),
+and a nonexistent `queue.read` in the repoint (the enum has
+`publish`/`subscribe`; the failure named the truth).
+Measured: 3 new tests red-first green; 46/46 commands suite.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

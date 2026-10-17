@@ -29,18 +29,18 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
 | `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
-| `SRV` | HTTP/application server | 21 | Systems engineer |
+| `SRV` | HTTP/application server | 22 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
 | `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
 | `REG` | Q-Block definition, its vocabulary and its five capability levels | 20 | Architect |
 | `DX` | Developer experience, CLI ergonomics, errors | 20 | DX engineer |
 | `CLI` | CLI commands | 24 | DX engineer |
-| `TEST` | Test runner and test infrastructure | 18 | Runtime engineer |
+| `TEST` | Test runner and test infrastructure | 19 | Runtime engineer |
 | `MIG` | Migration tooling | 14 | DX engineer |
 | `AI` | `qqq:ai` inference capability | 10 | Runtime engineer |
 | `LANG` | Language toolchains (5 languages) | 40 | Runtime engineer |
 | `AGENT` | Agent face: MCP, schemas, machine contracts | 25 | Architect |
-| `PERF` | Performance: benchmarks, budgets, optimizations | 27 | Performance engineer |
+| `PERF` | Performance: benchmarks, budgets, optimizations | 28 | Performance engineer |
 | `DET` | Determinism and replay | 16 | Systems engineer |
 | `OBS` | Observability: logs, metrics, traces, audit | 18 | Platform engineer |
 | `DIST` | Distribution and installation | 20 | Platform engineer |
@@ -53,7 +53,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 615 items.**
+**Total: 618 items.**
 
 ### Status legend
 
@@ -3487,6 +3487,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Unblocks: `crates/qqq-run/src/serve.rs` refuses `--tls` with `error[QQQ-7001]`; the refusal is
     deleted — with nothing else moving — once both halves land, and `crates/qqq-serve/tests/tls.rs`
     already proves the library it would call.
+- [x] **SRV-022** Decide the ALPN default policy now that the h2 loop exists: flip the default to advertise `h2` or keep http/1.1-only by least-surprise with `with_alpn` the explicit opt-in. A flip is a behavior change and needs red-first policy tests; a keep needs the recorded reason (the old rationale — no loop — is gone).
+  → Done: KEEP. `serve_hyper_tls` takes a caller-built `ServerConfig`, so the hyper path never reads the shared default — but the in-house accept path does, and in-house is HTTP/1.1-only, so flipping the shared default would advertise `h2` on a path with no h2 loop. Per-path ALPN split is future work, not this decision.
+  → Measured: `tls::tests::f16_default_alpn_stays_http11_h2_is_an_explicit_opt_in` 1/1 green pins the kept default.
+  → §6.4 `qqq-serve` — the HTTP and application server
 - [x] **ABI-001** Author `qqq:http@1.0` with routing, streaming and client.
   → Done: `wit/qqq-http.wit` — 103 lines, 2 interface(s), 3 function(s).
     Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
@@ -4740,6 +4744,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §11.3 Documentation as a product surface
 - [ ] **TEST-018** Implement CI integration examples for GitHub Actions, GitLab CI and others.
   → §11.3 Documentation as a product surface
+- [ ] **TEST-019** Wire h2spec into CI against the hyper h2 driver: download the binary, boot the driver, run the full suite plus strict, gate on pass. Local evidence (145/145 + 146/146 strict) exists but no job enforces it, so framing can regress silently.
+  → §6.4 `qqq-serve` — the HTTP and application server
 
 ### MIG — Migration
 
@@ -4796,6 +4802,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
     today would block every release for a reason that is environmental, which is how
     a gate gets disabled and stays disabled. The prerequisite is the reference
     profile, then the contract.
+- [ ] **PERF-028** Own runner-identity rotation for the PERF baseline: when the fleet identity changes, bootstrap a candidate via the tool's designed path, compare vectors and within-run spread per §O-543, and commit the reviewed entry. PERF-020 failed once on identity mismatch with no benchmark running; the retry went green, but no item tracks the next rotation.
+  → §2.3 NN-3 — Performance and Predictability Over Micro-Benchmarks
 - [x] **PERF-001** Build the benchmark harness with the full published methodology.
   → §9.1 The honest benchmark position
   → Done: **`crates/qqq-bench`** — a new workspace crate, second in the topology order because it has **no workspace dependency at all**. It defines what a *measurement* is and nothing that runs, so it can measure any crate above it; a harness that depended on the server could not be used to time the server's own startup. (Its first manifest declared a `qqq-core` dependency that was never used; `cargo-machete` rejected the unused edge in CI and it was removed — an unused declaration is a false statement about the dependency graph.)
@@ -5754,9 +5762,13 @@ open: the definition is what this landing writes, and the enforcement lands with
   → §4.8.5 The five levels
 - [ ] **REG-008** Add the `qblock-bound-capabilities` resolver and use it in §4.8.5.
   → §4.8.5 The five levels
-- [ ] **REG-009** Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state.
+- [x] **REG-009** Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state.
+  → Done: modelled namespaces emit parsing+granting stanzas; `sql`/`kv`/`queue`/`ai`/`log`/`trace` emit the named refusal with CAP-017..022; `secret.use` resolves through `crypto.secrets`.
+  → Measured: `every_suggested_stanza_parses`, `an_unmodelled_namespace_names_its_state_rather_than_guessing`, `secret_use_resolves_through_crypto_secrets`, `why_reports_an_unmodelled_denial_with_its_state` — 1/1 each, plus 14th-namespace probe (count test fails, stanza test holds via refusal, probe removed).
   → §4.8.8 How to add a capability
-- [ ] **REG-010** Add `deny_unknown_fields` to `Manifest`, with a test and a positive control.
+- [x] **REG-010** Add `deny_unknown_fields` to `Manifest`, with a test and a positive control.
+  → Done: root denies; refusal tests for `[limmits]` and root-level `memroy`; positive controls (full-manifest parse, sql-declaration parse, 18/18 capability tests).
+  → Measured: `a_misspelled_section_is_refused_not_defaulted`, `an_unknown_root_field_is_refused`, `an_unmodelled_namespace_declaration_parses`, `a_misspelled_capability_table_names_the_valid_set` — 1/1 each.
   → §4.8.8 How to add a capability
 - [ ] **REG-011** State the lockfile's real forward-compatibility rule: a new *field* is minor, a new *structure* is a version bump.
   → §5.4 The lockfile — `qqq.lock`
@@ -5788,15 +5800,15 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P0 Foundation | M0 | 79 |
 | P1 Heartbeat | M1 | 58 |
 | P2 Capability engine | M2 | 54 |
-| P3 HTTP | M3 | 37 |
+| P3 HTTP | M3 | 38 |
 | P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 40 |
 | P6 Packages | M6 | 36 |
-| P7 Agent face | M9 | 57 |
-| P8 Perf/determinism/obs | continuous | 61 |
+| P7 Agent face | M9 | 58 |
+| P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **615** |
+| **Total** | | **618** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

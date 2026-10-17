@@ -18,11 +18,9 @@ failure, never an automatic pass.
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import http.client
 import json
 import os
-from pathlib import Path
 import re
 import socket
 import statistics
@@ -30,8 +28,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_WORKLOADS = {
@@ -66,7 +65,9 @@ def read_json(path: Path) -> Any:
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def envelope_data(document: Any, source: str) -> dict[str, Any]:
@@ -105,19 +106,34 @@ def budget_source_items(text: str) -> tuple[set[str], set[str]]:
             f"{len(implemented) + len(unimplemented)} rows; expected 10"
         )
     if implemented & unimplemented:
-        raise PerfError("Budget::ALL classified an item as both implemented and unimplemented")
+        raise PerfError(
+            "Budget::ALL classified an item as both implemented and unimplemented"
+        )
     return implemented, unimplemented
 
 
 def environment_signature(environment: dict[str, Any]) -> str:
-    required = ("cpu_model", "physical_cores", "memory_bytes", "os", "kernel", "toolchains")
+    required = (
+        "cpu_model",
+        "physical_cores",
+        "memory_bytes",
+        "os",
+        "kernel",
+        "toolchains",
+    )
     for key in required:
         value = environment.get(key)
         if value in (None, "", {}, []):
             raise PerfError(f"benchmark environment is missing `{key}`")
     memory_bytes = environment["memory_bytes"]
-    if not isinstance(memory_bytes, int) or isinstance(memory_bytes, bool) or memory_bytes <= 0:
-        raise PerfError("benchmark environment `memory_bytes` must be a positive integer")
+    if (
+        not isinstance(memory_bytes, int)
+        or isinstance(memory_bytes, bool)
+        or memory_bytes <= 0
+    ):
+        raise PerfError(
+            "benchmark environment `memory_bytes` must be a positive integer"
+        )
     comparable = {key: environment[key] for key in required if key != "memory_bytes"}
     return json.dumps(comparable, sort_keys=True)
 
@@ -132,7 +148,9 @@ def environments_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool
     return abs(left["memory_bytes"] - right["memory_bytes"]) <= MEMORY_TOLERANCE_BYTES
 
 
-def normalize_run(document: Any, source: str, implemented_items: set[str]) -> dict[str, Any]:
+def normalize_run(
+    document: Any, source: str, implemented_items: set[str]
+) -> dict[str, Any]:
     data = envelope_data(document, source)
     environment = data.get("environment")
     results = data.get("results")
@@ -171,7 +189,9 @@ def normalize_run(document: Any, source: str, implemented_items: set[str]) -> di
                 f"{source}: `{result['benchmark']}` has a budget without a string item"
             )
         if not budget["item"].strip():
-            raise PerfError(f"{source}: `{result['benchmark']}` has a blank budget item")
+            raise PerfError(
+                f"{source}: `{result['benchmark']}` has a blank budget item"
+            )
         observed_items.add(budget["item"])
     if observed_items != implemented_items:
         raise PerfError(
@@ -188,7 +208,9 @@ def normalize_run(document: Any, source: str, implemented_items: set[str]) -> di
     if not isinstance(does_not_measure, list) or not does_not_measure:
         raise PerfError(f"{source}: does_not_measure must be a non-empty array")
     if not all(isinstance(item, str) and item.strip() for item in does_not_measure):
-        raise PerfError(f"{source}: does_not_measure contains a blank or non-string claim")
+        raise PerfError(
+            f"{source}: does_not_measure contains a blank or non-string claim"
+        )
     harness_source = data.get("harness_source")
     if not isinstance(harness_source, str) or not harness_source.strip():
         raise PerfError(f"{source}: harness_source must be non-empty")
@@ -232,7 +254,8 @@ def aggregate(runs: list[dict[str, Any]], profile: str, commit: str) -> dict[str
         name
         for run in runs
         for name, result in run["results"].items()
-        if isinstance(result.get("budget"), dict) and result["budget"].get("met") is False
+        if isinstance(result.get("budget"), dict)
+        and result["budget"].get("met") is False
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -266,7 +289,9 @@ def compare(
         raise PerfError(
             f"baseline profile `{baseline.get('profile')}` does not match `{candidate['profile']}`"
         )
-    if not environments_compatible(baseline.get("environment", {}), candidate["environment"]):
+    if not environments_compatible(
+        baseline.get("environment", {}), candidate["environment"]
+    ):
         raise PerfError(
             "baseline environment does not match the current runner; refresh it only after "
             "reviewing the runner/profile change"
@@ -338,7 +363,9 @@ def select_baseline(document: Any, candidate: dict[str, Any]) -> dict[str, Any]:
                 baseline.get("environment", {}), candidate["environment"]
             )
         except PerfError as error:
-            raise PerfError(f"baseline entry has an invalid environment: {error}") from error
+            raise PerfError(
+                f"baseline entry has an invalid environment: {error}"
+            ) from error
         if compatible:
             return baseline
 
@@ -351,7 +378,9 @@ def select_baseline(document: Any, candidate: dict[str, Any]) -> dict[str, Any]:
     )
     raise PerfError(
         f"no reviewed baseline matches profile `{candidate['profile']}` and runner identity; "
-        f"available profiles: {', '.join(profiles) or '(none)'}"
+        f"available profiles: {', '.join(profiles) or '(none)'}. "
+        "If the fleet rotated, re-run with --allow-missing-baseline to write a candidate, "
+        "review its vectors against the old baseline per §O-543, and commit it as a baseline entry."
     )
 
 
@@ -374,7 +403,9 @@ def health_status(port: int) -> int | None:
         connection.close()
 
 
-def wait_for_health(child: subprocess.Popen[str], port: int, log: Path, timeout: float) -> None:
+def wait_for_health(
+    child: subprocess.Popen[str], port: int, log: Path, timeout: float
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if health_status(port) == 200:
@@ -384,7 +415,9 @@ def wait_for_health(child: subprocess.Popen[str], port: int, log: Path, timeout:
             raise PerfError(f"qqqai serve exited with {child.returncode}:\n{detail}")
         time.sleep(0.1)
     detail = log.read_text(encoding="utf-8", errors="replace")
-    raise PerfError(f"qqqai serve did not become healthy within {timeout:.0f}s:\n{detail}")
+    raise PerfError(
+        f"qqqai serve did not become healthy within {timeout:.0f}s:\n{detail}"
+    )
 
 
 def run_bench(
@@ -469,7 +502,14 @@ def execute(args: argparse.Namespace) -> int:
     log = runs_dir / "server.log"
     with log.open("w", encoding="utf-8") as stream:
         child = subprocess.Popen(
-            [str(binary), "serve", "--listen", f"127.0.0.1:{port}", "--config", "qqq.toml"],
+            [
+                str(binary),
+                "serve",
+                "--listen",
+                f"127.0.0.1:{port}",
+                "--config",
+                "qqq.toml",
+            ],
             cwd=project,
             stdout=stream,
             stderr=subprocess.STDOUT,
@@ -494,7 +534,9 @@ def execute(args: argparse.Namespace) -> int:
     print(f"PERF-020 profile: {args.profile}")
     print(f"PERF-020 samples: {args.samples} medians written to {candidate_path}")
     print(f"measured budget items: {', '.join(candidate['measured_budget_items'])}")
-    print(f"not measured in the socket harness: {', '.join(candidate['not_measured_budget_items'])}")
+    print(
+        f"not measured in the socket harness: {', '.join(candidate['not_measured_budget_items'])}"
+    )
     if candidate["budget_misses"]:
         print(
             "absolute §9.2 misses are informational on this runner: "
@@ -502,11 +544,15 @@ def execute(args: argparse.Namespace) -> int:
         )
 
     if baseline_mode(baseline_path, args.allow_missing_baseline) == "bootstrap":
-        print("PERF-020 BOOTSTRAP: no baseline exists; comparison intentionally skipped")
+        print(
+            "PERF-020 BOOTSTRAP: no baseline exists; comparison intentionally skipped"
+        )
         return 0
 
     baseline = select_baseline(read_json(baseline_path), candidate)
-    failures = compare(baseline, candidate, args.latency_tolerance, args.throughput_tolerance)
+    failures = compare(
+        baseline, candidate, args.latency_tolerance, args.throughput_tolerance
+    )
     for name, metric in candidate["metrics"].items():
         print(f"{name}: median {metric['median']:.2f} {metric['metric']}")
     if failures:
@@ -540,10 +586,7 @@ def fixture_run(scale: float = 1.0) -> dict[str, Any]:
         if name == "hello":
             result["budget"] = {"item": "PERF-002", "met": True}
             result["p99_nanos"] = 100.0 * scale
-        elif name == "json":
-            result["budget"] = {"item": "PERF-010", "met": True}
-            result["requests_per_second"] = 100.0 * scale
-        elif name == "multi":
+        elif name == "json" or name == "multi":
             result["budget"] = {"item": "PERF-010", "met": True}
             result["requests_per_second"] = 100.0 * scale
         elif name == "tailp99":
@@ -617,11 +660,15 @@ def self_test() -> int:
     small_memory_drift = aggregate(runs, "fixture", "current")
     small_memory_drift["environment"]["memory_bytes"] += 4096
     if compare(baseline, small_memory_drift, 0.25, 0.20):
-        raise AssertionError("a page-sized runner memory fluctuation was treated as a profile change")
+        raise AssertionError(
+            "a page-sized runner memory fluctuation was treated as a profile change"
+        )
     negative_memory_drift = aggregate(runs, "fixture", "current")
     negative_memory_drift["environment"]["memory_bytes"] -= 4096
     if compare(baseline, negative_memory_drift, 0.25, 0.20):
-        raise AssertionError("a negative page-sized runner memory fluctuation was treated as a profile change")
+        raise AssertionError(
+            "a negative page-sized runner memory fluctuation was treated as a profile change"
+        )
     large_memory_drift = aggregate(runs, "fixture", "current")
     large_memory_drift["environment"]["memory_bytes"] += MEMORY_TOLERANCE_BYTES + 1
     expect_error(
@@ -629,10 +676,15 @@ def self_test() -> int:
         lambda: compare(baseline, large_memory_drift, 0.25, 0.20),
     )
     mismatched = aggregate(runs, "other-profile", "current")
-    expect_error("a profile mismatch", lambda: compare(baseline, mismatched, 0.25, 0.20))
+    expect_error(
+        "a profile mismatch", lambda: compare(baseline, mismatched, 0.25, 0.20)
+    )
     malformed = fixture_run()
     malformed["data"]["results"] = malformed["data"]["results"][:-1]
-    expect_error("a missing benchmark row", lambda: normalize_run(malformed, "fixture", real_items))
+    expect_error(
+        "a missing benchmark row",
+        lambda: normalize_run(malformed, "fixture", real_items),
+    )
     malformed_budget = fixture_run()
     malformed_budget["data"]["results"][0]["budget"] = {"met": True}
     expect_error(
@@ -647,7 +699,10 @@ def self_test() -> int:
     )
     with tempfile.TemporaryDirectory(prefix="qqq-perf-self-test-") as temporary:
         missing_baseline = Path(temporary) / "baseline.json"
-        expect_error("a missing baseline without bootstrap", lambda: baseline_mode(missing_baseline, False))
+        expect_error(
+            "a missing baseline without bootstrap",
+            lambda: baseline_mode(missing_baseline, False),
+        )
         if baseline_mode(missing_baseline, True) != "bootstrap":
             raise AssertionError("explicit bootstrap was not accepted")
     collection = {
@@ -662,7 +717,22 @@ def self_test() -> int:
         "an unreviewed runner profile",
         lambda: select_baseline(collection, different_environment),
     )
-    print("PERF REGRESSION SELF-TEST OK — parser, schema, bootstrap inputs and both regression directions")
+    # PERF-028: a rotation failure must teach the recovery at the failure
+    # site. On 2026-10-16 the identity mismatch named available profiles
+    # but not the bootstrap path, so the fix required reading this
+    # source. The message now names the flag, the artifact, and the
+    # review gate — assert all three, or the guidance rots again.
+    try:
+        select_baseline(collection, different_environment)
+        raise AssertionError("an unreviewed runner profile was accepted")
+    except PerfError as error:
+        text = str(error)
+        assert "--allow-missing-baseline" in text, f"names the flag: {text}"
+        assert "candidate" in text, f"names the artifact: {text}"
+        assert "review" in text, f"names the review gate: {text}"
+    print(
+        "PERF REGRESSION SELF-TEST OK — parser, schema, bootstrap inputs and both regression directions"
+    )
     return 0
 
 

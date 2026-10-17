@@ -39762,4 +39762,24 @@ assertion fails on the old parse-only loop. Measured: full
 gate verdict in this commit's log.
 → `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`, `QQQ-Checklist-V1.md` (CAP-024).
 
+## §O-747 - Wave 1: ticks with proof, then the three homeless items homed
+
+REG-009/010 ticked on measured re-runs (5 green unit runs, §O-743/744
+proofs stand). SRV-022 decided KEEP: `serve_hyper_tls` takes a
+caller-built config, but the shared default also serves the h1-only
+in-house path — flipping it would advertise `h2` where no loop
+exists; per-path split is future work. The existing ALPN test pins
+the kept default (1/1). PERF-028's implementable half: the rotation
+failure named profiles but not the recovery, forcing source reads
+at 2 a.m. — the error now names flag, artifact, and review gate,
+pinned by a self-test asserting all three (red pre-fix). The item
+stays open by design: it fires on the next rotation. TEST-019: a
+committed example server plus a CI job (pinned h2spec v2.2.1, exact
+145/146 count asserts, artifact upload); local runs 145/145 and
+146/146 strict green, dead-port run fails loudly (red proof the
+runner discriminates). The generalisable rule: an error message is
+a user interface for the on-call future — if it doesn't name the
+recovery, the recovery doesn't exist at 2 a.m.
+→ `crates/qqq-serve/examples/h2spec_serve.rs`, `.github/workflows/ci.yml`, `tools/run_perf_regression.py`, `QQQ-Checklist-V1.md`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

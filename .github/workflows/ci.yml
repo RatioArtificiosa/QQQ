@@ -1755,3 +1755,82 @@ jobs:
           name: measured-language-probes
           path: target/language-probes/
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # HTTP/2 conformance: h2spec against the hyper driver (TEST-019).
+  #
+  # The local evidence (145/145 plus 146/146 strict) lived only in scratch
+  # logs until this job existed, so framing could regress silently. Ubuntu
+  # only, deliberately: h2 framing is OS-independent, and the three-OS Rust
+  # suites already cover socket behavior per platform — tripling this job
+  # would measure the same frames three times.
+  # ---------------------------------------------------------------------------
+  h2spec:
+    name: HTTP/2 conformance (h2spec)
+    runs-on: ubuntu-latest
+    # 20 min, from a measured ~3 min for build plus two sub-second suite
+    # runs on a warm cache; the bound is headroom for a cold cache, not a
+    # guess. A hang would otherwise burn GitHub's 360-minute default
+    # instead of failing fast (`§O-355`).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          # Pinned: `h2spec@latest` is a moving target that silently changes
+          # the case list. The pinned version is verified in
+          # `crates/qqq-serve/examples/h2spec_serve.rs`.
+          go-version: '1.27.1'
+
+      # Pinned for the same reason as Go above: the unpinned install is
+      # what produced the local evidence, and the pin freezes it.
+      - name: Install h2spec
+        run: go install github.com/summerwind/h2spec/cmd/h2spec@v2.2.1
+
+      - name: Build the conformance server
+        run: cargo build -p qqq-serve --example h2spec_serve
+
+      - name: Serve and run the suite plus strict
+        run: |
+          set -eu
+          PORT=18443
+          ./target/debug/examples/h2spec_serve "$PORT" > "$RUNNER_TEMP/h2spec-serve.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID"' EXIT
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          h2spec -h 127.0.0.1 -p "$PORT" | tee "$RUNNER_TEMP/h2spec.log"
+          h2spec -h 127.0.0.1 -p "$PORT" -S | tee -a "$RUNNER_TEMP/h2spec.log"
+
+      # Anti-vacuity: h2spec exits 0 on an empty run only if it never
+      # started, so assert the exact passing counts the pinning run
+      # produced. A hyper upgrade that changes the case list fails here
+      # loudly, and the new numbers are adopted deliberately — the same
+      # shape as the MSRV crate-count guard above.
+      - name: Prove the suite actually ran green
+        run: |
+          set -eu
+          grep -q "145 tests, 145 passed, 0 failed" "$RUNNER_TEMP/h2spec.log"
+          grep -q "146 tests, 146 passed, 0 failed" "$RUNNER_TEMP/h2spec.log"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h2spec-logs
+          path: |
+            ${{ runner.temp }}/h2spec.log
+            ${{ runner.temp }}/h2spec-serve.log
+          if-no-files-found: error

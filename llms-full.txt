@@ -995,7 +995,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 274 | 3 | 334 | 4 | 0 | 0 | 615 | 44.6% |
+| All checklist items | 277 | 3 | 334 | 4 | 0 | 0 | 618 | 44.8% |
 
 ### By phase
 
@@ -1004,14 +1004,14 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
 | P1 | M1 | 52 | 0 | 6 | 0 | 0 | 0 | 58 | 89.7% |
 | P2 | M2 | 44 | 0 | 8 | 2 | 0 | 0 | 54 | 81.5% |
-| P3 | M3 | 31 | 0 | 6 | 0 | 0 | 0 | 37 | 83.8% |
+| P3 | M3 | 32 | 0 | 6 | 0 | 0 | 0 | 38 | 84.2% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
 | P5 | M5, M8 | 15 | 0 | 23 | 2 | 0 | 0 | 40 | 37.5% |
 | P6 | M6 | 1 | 0 | 35 | 0 | 0 | 0 | 36 | 2.8% |
-| P7 | M9 | 24 | 2 | 31 | 0 | 0 | 0 | 57 | 42.1% |
-| P8 | continuous | 19 | 0 | 42 | 0 | 0 | 0 | 61 | 31.1% |
+| P7 | M9 | 24 | 2 | 32 | 0 | 0 | 0 | 58 | 41.4% |
+| P8 | continuous | 19 | 0 | 43 | 0 | 0 | 0 | 62 | 30.6% |
 | P9 | M10, M11 | 1 | 1 | 73 | 0 | 0 | 0 | 75 | 1.3% |
-| P10 | post-1.0 | 5 | 0 | 49 | 0 | 0 | 0 | 54 | 9.3% |
+| P10 | post-1.0 | 7 | 0 | 47 | 0 | 0 | 0 | 54 | 13.0% |
 
 ### By area
 
@@ -1028,7 +1028,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P2 | CAP | 16 | 0 | 8 | 0 | 0 | 0 | 24 | 66.7% |
 | P2 | SEC | 28 | 0 | 0 | 2 | 0 | 0 | 30 | 93.3% |
 | P3 | ABI | 14 | 0 | 2 | 0 | 0 | 0 | 16 | 87.5% |
-| P3 | SRV | 17 | 0 | 4 | 0 | 0 | 0 | 21 | 81.0% |
+| P3 | SRV | 18 | 0 | 4 | 0 | 0 | 0 | 22 | 81.8% |
 | P4 | CLI | 22 | 0 | 2 | 0 | 0 | 0 | 24 | 91.7% |
 | P4 | DIST | 0 | 0 | 20 | 0 | 0 | 0 | 20 | 0.0% |
 | P4 | DX | 10 | 0 | 10 | 0 | 0 | 0 | 20 | 50.0% |
@@ -1037,10 +1037,10 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P6 | SUP | 0 | 0 | 12 | 0 | 0 | 0 | 12 | 0.0% |
 | P7 | AGENT | 14 | 1 | 10 | 0 | 0 | 0 | 25 | 56.0% |
 | P7 | MIG | 0 | 0 | 14 | 0 | 0 | 0 | 14 | 0.0% |
-| P7 | TEST | 10 | 1 | 7 | 0 | 0 | 0 | 18 | 55.6% |
+| P7 | TEST | 10 | 1 | 8 | 0 | 0 | 0 | 19 | 52.6% |
 | P8 | DET | 2 | 0 | 14 | 0 | 0 | 0 | 16 | 12.5% |
 | P8 | OBS | 11 | 0 | 7 | 0 | 0 | 0 | 18 | 61.1% |
-| P8 | PERF | 6 | 0 | 21 | 0 | 0 | 0 | 27 | 22.2% |
+| P8 | PERF | 6 | 0 | 22 | 0 | 0 | 0 | 28 | 21.4% |
 | P9 | DOD | 0 | 1 | 23 | 0 | 0 | 0 | 24 | 0.0% |
 | P9 | GTM | 0 | 0 | 14 | 0 | 0 | 0 | 14 | 0.0% |
 | P9 | MKT | 0 | 0 | 16 | 0 | 0 | 0 | 16 | 0.0% |
@@ -1049,7 +1049,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P10 | AI | 0 | 0 | 10 | 0 | 0 | 0 | 10 | 0.0% |
 | P10 | FUT | 0 | 0 | 12 | 0 | 0 | 0 | 12 | 0.0% |
 | P10 | OQ | 5 | 0 | 7 | 0 | 0 | 0 | 12 | 41.7% |
-| P10 | REG | 0 | 0 | 20 | 0 | 0 | 0 | 20 | 0.0% |
+| P10 | REG | 2 | 0 | 18 | 0 | 0 | 0 | 20 | 10.0% |
 
 ### Milestone gates
 

@@ -4,6 +4,14 @@
 
 ### Security
 
+- **wave**: Wave-1 closures and homes: REG-009/010 ticked on
+  measured re-runs; SRV-022 keeps the http/1.1-only default
+  (shared with the h1-only in-house path) with the existing
+  test as pin; PERF rotation failures now name the bootstrap
+  path at the failure site; TEST-019 wires h2spec into CI
+  against a committed example server (145/145 + 146 strict
+  locally green).
+
 - **cap**: namespaces derive, stanzas prove, roots refuse:
   `fix_stanza_for` no longer prints stanzas the parser
   rejects for `sql`/`kv`/`queue`/`ai` (or any future

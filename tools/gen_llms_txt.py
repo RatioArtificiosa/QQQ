@@ -50,7 +50,6 @@ import re
 import subprocess
 import sys
 
-
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
 # raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
@@ -81,13 +80,16 @@ def checklist_item_count() -> int | None:
 
     Derived here from the document itself rather than from a copy of the count, because the
     checklist's own arithmetic is already the authority and `check_checklist_counts.py` owns
-    checking it.
+    checking it. The symbol class mirrors that checker's item pattern exactly
+    (`[ x~!-]`): in-progress items are tracked work, and a dropped item with a
+    recorded successor is still a tracked decision — excluding either silently
+    uncounts rows the Total line counts.
     """
     try:
         text = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
     except OSError:
         return None
-    n = len(re.findall(r"^\s*- \[[ x!]\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE))
+    n = len(re.findall(r"^\s*- \[[ x!~-]\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE))
     return n or None
 
 
@@ -95,6 +97,7 @@ def checklist_phrase() -> str:
     """`The 586 tracked items`, or a phrase that makes no claim when the count is unknown."""
     n = checklist_item_count()
     return f"The {n} tracked items" if n else "The tracked items"
+
 
 # ---------------------------------------------------------------------------
 # The curation: what to read, and in what order
@@ -694,7 +697,7 @@ def count_jobs(text: str) -> int | None:
     if head is None:
         return None
     count = 0
-    for line in text[head.end():].split("\n"):
+    for line in text[head.end() :].split("\n"):
         if line and not line[0].isspace():
             break  # the next top-level key ends the block
         if re.match(r"^  [A-Za-z][A-Za-z0-9_-]*:\s*$", line):
@@ -780,7 +783,11 @@ def render_index() -> str:
     out.append("| `tools/` | Checkers and generators, each with a `--self-test`. |")
     out.append("| `docker/` | The Linux verification bridge. |")
     jobs = ci_job_count()
-    gate = f"The gate. {jobs} jobs defined." if jobs else "The gate. (job count unavailable)"
+    gate = (
+        f"The gate. {jobs} jobs defined."
+        if jobs
+        else "The gate. (job count unavailable)"
+    )
     out.append(f"| `.github/workflows/ci.yml` | {gate} |")
     out.append("")
     return "\n".join(out)
@@ -944,7 +951,13 @@ def self_test() -> int:
     restores in a `finally` — `§M-007` records a repair that destroyed what it
     was repairing.
     """
-    global CURATED, EXCLUDED, EXCLUDED_LOCAL, EXCLUDED_SECRETS, EXCLUDED_ALL, FULL_INCLUDES
+    global \
+        CURATED, \
+        EXCLUDED, \
+        EXCLUDED_LOCAL, \
+        EXCLUDED_SECRETS, \
+        EXCLUDED_ALL, \
+        FULL_INCLUDES
 
     failures = 0
 
@@ -966,11 +979,15 @@ def self_test() -> int:
     # comparison it makes. A generated index must not carry a hand-written number.
     expect(
         "a workflow with three jobs counts three",
-        count_jobs("jobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n  c:\n    runs-on: x\n") == 3,
+        count_jobs(
+            "jobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n  c:\n    runs-on: x\n"
+        )
+        == 3,
     )
     expect(
         "nested keys are not counted as jobs",
-        count_jobs("jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n") == 1,
+        count_jobs("jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n")
+        == 1,
     )
     expect(
         "a top-level key after `jobs:` ends the block",
@@ -1005,9 +1022,7 @@ def self_test() -> int:
         # Find the rendered LINE for the fabricated path, rather than splitting
         # the whole document on a substring -- the first version did that and the
         # assertion was wrong about which text it was inspecting.
-        line = next(
-            (l for l in text.splitlines() if "does-not-exist.md" in l), ""
-        )
+        line = next((l for l in text.splitlines() if "does-not-exist.md" in l), "")
         expect(
             "an indexed path that does not exist shows as (missing)",
             line.endswith("(missing)"),
@@ -1069,7 +1084,13 @@ def self_test() -> int:
                 return ""
             return subprocess.run(
                 ["git", "ls-files", "-z"] + paths,
-                cwd=ROOT, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace").stdout.strip("\0 \n")
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            ).stdout.strip("\0 \n")
 
         # --- check A: tracked exclusions must exist -----------------------
         #
@@ -1131,7 +1152,6 @@ def self_test() -> int:
         # exact size and churned on every commit; the second bucketed to 10 KB and
         # churned when `O-116` crossed a boundary. The label must be constant for
         # ANY growth a real edit could produce.
-        import tempfile as _tf
 
         # **The no-boundary property, which is the one that matters.**
         #

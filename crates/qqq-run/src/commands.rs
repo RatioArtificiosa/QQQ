@@ -187,7 +187,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
     match c.namespace() {
         "http" => "add to qqq.toml:\n\n    [capabilities.http]\n    server = true          # for http.server\n    client = [\"host:443\"]  # for http.client".to_owned(),
         "fs" => "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"read-only\"     # or \"append-only\" / \"read-write\"".to_owned(),
-        "crypto" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    random = true          # for crypto.random\n    hash = [\"sha256\"]      # for crypto.hash\n    hmac = [\"sha256\"]      # for crypto.hmac\n    aead = [\"aes-256-gcm\"] # for crypto.aead\n    sign = [\"ed25519\"]     # for crypto.sign\n    secrets = [\"env:NAME\"] # for secret.use".to_owned(),
+        "crypto" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    random = true          # for crypto.random\n    hash = [\"sha256\"]      # for crypto.hash\n    hmac = [\"sha256\"]      # for crypto.hmac\n    aead = [\"aes-256-gcm\"] # for crypto.aead\n    sign = [\"ed25519\"]     # for crypto.sign".to_owned(),
         "clock" => "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true            # for clock.wall\n    monotonic = true       # for clock.monotonic".to_owned(),
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
@@ -197,7 +197,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
         // send the reader to a CAP item for a stanza that exists.
         "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
-            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-017 through CAP-023",
+            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-017 through CAP-022",
             c.name()
         ),
     }
@@ -1672,8 +1672,12 @@ mod tests {
                 "{ns}: a refusal carries no stanza to parse: {fix}"
             );
             assert!(
-                fix.contains("CAP-"),
-                "{ns}: must name the modelling work: {fix}"
+                fix.contains("CAP-017"),
+                "{ns}: must name the modelling range start: {fix}"
+            );
+            assert!(
+                !fix.contains("CAP-023"),
+                "{ns}: secret.use has its own stanza since the crypto arm; the refusal range ends at CAP-022: {fix}"
             );
         }
     }
@@ -1690,12 +1694,37 @@ mod tests {
         let manifest = Manifest::parse(&format!(
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
         ))
+        .expect("the secret stanza must parse");
+        assert_eq!(
+            manifest.declared_capabilities(),
+            vec![Capability::SecretUse],
+            "exactly one grant, no smuggling"
+        );
+    }
+
+    /// The `crypto` stanza grants exactly the crypto family: pasting
+    /// it for a hash denial must not also grant `secret.use` through
+    /// a bundled line. Within the family, each line names its own
+    /// capability (`# for crypto.random`), so the reader picks lines
+    /// rather than pasting blind — but nothing outside the family
+    /// may ride along.
+    #[test]
+    fn crypto_stanza_grants_only_crypto() {
+        use qqq_cap::manifest::Manifest;
+        let fix = fix_stanza_for(Capability::CryptoHash);
+        let body = stanza_body(&fix).expect("crypto.hash has a stanza");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
         .expect("the crypto stanza must parse");
+        let granted = manifest.declared_capabilities();
         assert!(
-            manifest
-                .declared_capabilities()
-                .contains(&Capability::SecretUse),
-            "the stanza must grant secret.use"
+            granted.contains(&Capability::CryptoHash),
+            "the stanza grants its own capability"
+        );
+        assert!(
+            !granted.contains(&Capability::SecretUse),
+            "the stanza must not smuggle secret.use"
         );
     }
 

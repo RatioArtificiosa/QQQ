@@ -2141,8 +2141,23 @@ allow_origins = ["https://app.example.com"]
         let err = Manifest::parse(src).expect_err("an unknown capability table must be refused");
         let text = err.to_string();
         assert!(
-            text.contains("capabilities.htttp") && text.contains("http"),
-            "`htttp` must fail naming the valid namespaces: {text}"
+            text.contains("capabilities.htttp") && text.contains("`http`"),
+            "`htttp` must fail naming the valid namespaces in one shape: {text}"
+        );
+    }
+
+    /// A scalar under `[capabilities]` is not a declaration: the
+    /// validator requires tables, so a misplaced value fails loudly
+    /// instead of validating as a "known" key with no meaning.
+    #[test]
+    fn a_scalar_capability_value_is_refused_not_collected() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nsql = \"orders\"\n";
+        let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("must be a table"),
+            "the scalar branch must fire: {text}"
         );
     }
 

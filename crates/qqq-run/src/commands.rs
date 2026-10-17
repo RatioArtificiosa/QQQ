@@ -181,7 +181,9 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 /// the suggestion cannot drift from the parser's expectations — and for
 /// namespaces the manifest cannot model yet, generating the state instead of
 /// guessing a schema means the suggestion cannot be a stanza the parser
-/// rejects. The modelling work is tracked under CAP-017 through CAP-023.
+/// rejects. The modelling work is tracked under CAP-017 through CAP-022
+/// (`secret` resolves through `crypto.secrets`, and CAP-023 tracks its
+/// dedicated table).
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     match c.namespace() {

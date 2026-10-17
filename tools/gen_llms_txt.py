@@ -81,15 +81,17 @@ def checklist_item_count() -> int | None:
     Derived here from the document itself rather than from a copy of the count, because the
     checklist's own arithmetic is already the authority and `check_checklist_counts.py` owns
     checking it. The symbol class mirrors that checker's item pattern exactly
-    (`[ x~!-]`): in-progress items are tracked work, and a dropped item with a
-    recorded successor is still a tracked decision — excluding either silently
-    uncounts rows the Total line counts.
+    (`[ x~!-]`), including its `^-` anchor: a looser anchor here would count
+    indented rows the checker never sees, and the two would diverge silently
+    on the next nested list. In-progress items are tracked work, and a dropped
+    item with a recorded successor is still a tracked decision — excluding
+    either silently uncounts rows the Total line counts.
     """
     try:
         text = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
     except OSError:
         return None
-    n = len(re.findall(r"^\s*- \[[ x!~-]\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE))
+    n = len(re.findall(r"^- \[[ x!~-]\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE))
     return n or None
 
 

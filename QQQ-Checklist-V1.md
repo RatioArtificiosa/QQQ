@@ -5765,7 +5765,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 - [ ] **REG-008** Add the `qblock-bound-capabilities` resolver and use it in §4.8.5.
   → §4.8.5 The five levels
 - [x] **REG-009** Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state.
-  → Done: modelled namespaces emit parsing+granting stanzas; `sql`/`kv`/`queue`/`ai`/`log`/`trace` emit the named refusal with CAP-017..022; `secret.use` resolves through `crypto.secrets`.
+  → Done: the 6 modelled namespaces plus `secret` (via `crypto.secrets`) emit parsing+granting stanzas; `kv`/`queue`/`ai`/`log`/`trace` emit the named refusal with CAP-018..022 (`sql` graduated to a stanza in CAP-017).
   → Measured: `every_suggested_stanza_parses`, `an_unmodelled_namespace_names_its_state_rather_than_guessing`, `secret_use_resolves_through_crypto_secrets`, `why_reports_an_unmodelled_denial_with_its_state` — 1/1 each, plus 14th-namespace probe (count test fails, stanza test holds via refusal, probe removed).
   → §4.8.8 How to add a capability
 - [x] **REG-010** Add `deny_unknown_fields` to `Manifest`, with a test and a positive control.

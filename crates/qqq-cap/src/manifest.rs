@@ -1303,12 +1303,14 @@ impl Manifest {
 
     /// Every `[[capabilities.sql]]` entry names a real connection.
     /// An undressed declaration would grant a connection to nowhere;
-    /// empty strings are the typo class here (missing fields fail
-    /// earlier, at serde, and unknown fields fail at the struct's
-    /// own deny).
+    /// empty or whitespace-only strings are the typo class here
+    /// (missing fields fail earlier, at serde, and unknown fields
+    /// fail at the struct's own deny) — trimmed per the file-path
+    /// precedent, because spaces grant a connection to nowhere too.
     fn validate_sql(entries: &[SqlCapability]) -> Result<(), ManifestError> {
         for (i, db) in entries.iter().enumerate() {
-            if db.name.is_empty() || db.driver.is_empty() || db.host.is_empty() {
+            if db.name.trim().is_empty() || db.driver.trim().is_empty() || db.host.trim().is_empty()
+            {
                 return Err(ManifestError::InvalidField {
                     field: format!("capabilities.sql[{i}]"),
                     reason: "name, driver, and host are all required".to_owned(),
@@ -2222,6 +2224,27 @@ allow_origins = ["https://app.example.com"]
         );
     }
 
+    /// An array-shaped unmodelled declaration parses into the
+    /// catch-all without granting: `[[capabilities.queue]]` is the
+    /// natural multi-entry shape (the old generator emitted it), so
+    /// refusing arrays while accepting tables would punish the
+    /// shape users reach for first. Grants nothing, like all
+    /// unmodelled content.
+    #[test]
+    fn unmodelled_array_shape_parses_without_granting() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.queue]]\nname = \"orders.events\"\n";
+        let m = Manifest::parse(src).expect("array shape must declare");
+        assert!(
+            m.capabilities.other.contains_key("queue"),
+            "the array lands in the catch-all"
+        );
+        assert!(
+            m.declared_capabilities().is_empty(),
+            "declaring is not binding"
+        );
+    }
+
     /// A `sql` declaration grants query but not execute: the table
     /// carries the connection shape, and only an explicit
     /// `execute = true` widens to `sql.execute`.
@@ -2267,6 +2290,21 @@ allow_origins = ["https://app.example.com"]
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
             [[capabilities.sql]]\nname = \"\"\ndriver = \"postgres\"\nhost = \"\"\n";
         let err = Manifest::parse(src).expect_err("a nameless sql entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.sql"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// Whitespace-only fields refuse like empty ones: spaces grant a
+    /// connection to nowhere too, and the file-path precedent trims
+    /// for exactly this typo class.
+    #[test]
+    fn sql_whitespace_only_fields_are_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.sql]]\nname = \"   \"\ndriver = \"postgres\"\nhost = \"db:5432\"\n";
+        let err = Manifest::parse(src).expect_err("a blank sql entry must be refused");
         let text = err.to_string();
         assert!(
             text.contains("capabilities.sql"),

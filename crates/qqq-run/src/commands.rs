@@ -1693,6 +1693,30 @@ mod tests {
         }
     }
 
+    /// The property loop picks the first capability per namespace,
+    /// which for `sql` is `SqlExecute` in sort order — so the query
+    /// stanza gets its own round-trip pin here rather than riding
+    /// along unproven.
+    #[test]
+    fn sql_query_stanza_parses_and_grants_query() {
+        use qqq_cap::manifest::Manifest;
+        let fix = fix_stanza_for(Capability::SqlQuery);
+        let body = stanza_body(&fix).expect("sql.query has a stanza");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the query stanza must parse");
+        let granted = manifest.declared_capabilities();
+        assert!(
+            granted.contains(&Capability::SqlQuery),
+            "the query stanza grants query"
+        );
+        assert!(
+            !granted.contains(&Capability::SqlExecute),
+            "the query stanza must not smuggle execute"
+        );
+    }
+
     /// `secret.use` resolves through the nested `crypto.secrets`
     /// spelling, not a `[capabilities.secret]` table — the one
     /// unmodelled name with a true stanza. Pins the exception so a

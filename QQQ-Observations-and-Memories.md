@@ -429,7 +429,7 @@ thing out of date.
 
 **Also decided here, because it follows and would otherwise drift:** the **first-party namespace is `qqqai/*`**, permanent on the same grounds as the binary name (`§D-001`) — the two break together.
 
-**Cross-refs:** Proposal §4.8, §0.6, §5.4, §6.5, §11.2; Observations `§D-001`, `§D-008`, `§O-740`; Checklist `REG-001` … `REG-013`.
+**Cross-refs:** Proposal §4.8, §0.6, §5.4, §6.5, §11.2; Observations `§D-001`, `§D-008`, `§O-740`; Checklist `REG-001` … `REG-020`.
 
 ---
 

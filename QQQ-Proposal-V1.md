@@ -203,7 +203,7 @@ Terms used precisely throughout. Where a term is contested in the industry, the 
 | **Attribution** | *The publisher built these bytes from the source they claim.* Requires reproducible builds and independent witnesses; a trust **signal**, never a publish requirement. Distinct from *integrity*, which is unconditional. |
 | **Development Q-Block** | **Not a term this project uses.** A source-only tree is a repository, not a Q-Block. A second publishable kind was considered and rejected, because it would make the safety of an install depend on the publisher's choice. See §4.8.4. |
 
-→ **Checklist:** `DOC-011`, `DOC-012`, `REG-001` … `REG-013`
+→ **Checklist:** `DOC-011`, `DOC-012`, `REG-001`
 
 ---
 
@@ -716,7 +716,7 @@ A **source bundle** is source code plus a build recipe, published **beside** a v
 
 - **Not resolvable.** `resolve` cannot return it, and no verb installs it.
 - **Carries no authority.** `caps = ["none"]`.
-- **Reachable only by deliberate human action** — `qqqai source scope/name@1.4.0 --to ./dir`.
+- **Reachable only by deliberate human action** — `qqqai source scope/name@1.4.0 --to ./dir` (tracked by `REG-014`; not part of §5.2's V1 command set).
 - **Its purpose is audit**: licence review, debug mapping, and independent rebuilds by witnesses.
 
 It is an **attachment**, in the same category as an SBOM or a signature file — not a second kind of package. A source-only tree with no built artifact is a repository, not a Q-Block.
@@ -737,7 +737,7 @@ Every statement about capabilities in this project is about one of five levels, 
 | **Granted** | What does *this instance* hold after overlays? | `GrantSet` |
 | **Observed** | What did it actually call? | the capability audit stream |
 
-The rule exists because the levels differ by design and by a wide margin. Measured at the time of writing, in interfaces: **15 packages are declared**, **6 capability namespaces are bindable**, and **1 interface is bound**. A capability can therefore be declared and not bindable, or bindable and not bound — and writing "QQQ has `qqq:sql`" without naming a level is not imprecise, it is unreadable, because the reader cannot tell whether it means "an interface exists" or "you can use it today".
+The rule exists because the levels differ by design and by a wide margin, and the three counts below are measured in **different units** because the questions are different. At the time of writing: **15 packages and 22 interfaces are declared**, the manifest can express **6 capability namespaces**, and **1 interface is bound**. A capability can therefore be declared and not bindable, or bindable and not bound — and writing "QQQ has `qqq:sql`" without naming a level is not imprecise, it is unreadable, because the reader cannot tell whether it means "an interface exists" or "you can use it today".
 
 → **Checklist:** `REG-006`, `REG-007`, `REG-008`
 
@@ -785,9 +785,9 @@ Eleven steps, in dependency order.
 8. **Flip `implemented` to `true`** in the same commit that lands the binding.
 9. **Add the manifest stanza** and regenerate the schema. **Until this step exists the capability is declared and not bindable, and no command may print a stanza for it.**
 10. **Update the counts** — the namespace count test, and `schema/capability-catalogue.tsv`.
-11. **Record an observation** (`§O-NNN`) and cite it from the item's `→ Done:` line.
+11. **Record an observation** (`§O-nnn`) and cite it from the item's `→ Done:` line.
 
-→ **Checklist:** `REG-009`, `REG-010`
+→ **Checklist:** `REG-009`, `REG-010`, `REG-013`
 
 ### §4.8.9 What is not a Q-Block
 
@@ -1155,7 +1155,7 @@ impl Host {
 
 **Purpose.** The single authority gate. This is the subsystem that justifies the project.
 
-**Model.** A capability is an opaque, typed, unforgeable grant token. There are three kinds:
+**Model.** A capability is a **named kind** of authority; a granted one is represented as an opaque, typed, unforgeable token, and the guest holds an index into its own table rather than the authority itself (§0.6 states the distinction). There are three kinds:
 
 | Kind | Example | Notes |
 |---|---|---|

@@ -104,6 +104,13 @@
           "additionalProperties": true,
           "description": "Namespaces `Capability::all()` knows that have no typed struct yet. Kept so a declaration parses and can be *reported*; the host binds only what it models.…",
           "type": "object"
+        },
+        "sql": {
+          "description": "`[[capabilities.sql]]` — one entry per database.",
+          "items": {
+            "$ref": "#/$defs/SqlCapability"
+          },
+          "type": "array"
         }
       },
       "title": "qqq-toml#Capabilities",
@@ -599,6 +606,47 @@
         }
       },
       "title": "qqq-toml#Server",
+      "type": "object"
+    },
+    "SqlCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#SqlCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `SqlCapability` table.",
+      "properties": {
+        "driver": {
+          "description": "Driver selector, e.g. `postgres`.",
+          "type": "string"
+        },
+        "execute": {
+          "description": "Widen from query-only to `sql.execute`. Default denies.",
+          "type": "boolean"
+        },
+        "host": {
+          "description": "`host:port` the connector dials after vetting.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Logical name, used in diagnostics and audit rows.",
+          "type": "string"
+        },
+        "secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Secret reference for the connection string, e.g. `env:ORDERS_DB_URL`."
+        }
+      },
+      "required": [
+        "driver",
+        "host",
+        "name"
+      ],
+      "title": "qqq-toml#SqlCapability",
       "type": "object"
     },
     "TenantLimit": {

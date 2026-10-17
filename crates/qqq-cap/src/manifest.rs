@@ -339,6 +339,9 @@ pub struct Capabilities {
     /// `[capabilities.dns]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsCapability>,
+    /// `[[capabilities.sql]]` — one entry per database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sql: Vec<SqlCapability>,
     /// Namespaces `Capability::all()` knows that have no typed struct
     /// yet. Kept so a declaration parses and can be *reported*; the
     /// host binds only what it models. Every key is validated
@@ -517,6 +520,26 @@ pub struct DnsCapability {
     /// Names the guest may resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolve: Vec<String>,
+}
+
+/// One `[[capabilities.sql]]` entry: a named database connection.
+/// Query is the default grant; `execute = true` widens explicitly
+/// to `sql.execute`, so a read-only consumer never smuggles write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlCapability {
+    /// Logical name, used in diagnostics and audit rows.
+    pub name: String,
+    /// Driver selector, e.g. `postgres`.
+    pub driver: String,
+    /// `host:port` the connector dials after vetting.
+    pub host: String,
+    /// Secret reference for the connection string, e.g. `env:ORDERS_DB_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Widen from query-only to `sql.execute`. Default denies.
+    #[serde(default)]
+    pub execute: bool,
 }
 
 /// `[limits]` — enforceable resource bounds.
@@ -1229,6 +1252,12 @@ impl Manifest {
             }
         }
 
+        // -- sql entries name a real connection -----------------------
+        // An undressed declaration would grant a connection to
+        // nowhere; empty strings are the typo class here, not
+        // unknown fields (the struct's own deny already covers those).
+        Self::validate_sql(&self.capabilities.sql)?;
+
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
         // without this check a typo'd table would be accepted and then
@@ -1256,15 +1285,36 @@ impl Manifest {
                 });
             }
             if !value.is_table() {
-                return Err(ManifestError::InvalidField {
-                    field: format!("capabilities.{key}"),
-                    reason: "must be a table, not a scalar — a capability declaration \
-                             names fields, it is not a value"
-                        .to_owned(),
-                });
+                let array_of_tables = matches!(value, toml::Value::Array(items)
+                    if items.iter().all(toml::Value::is_table));
+                if !array_of_tables {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.{key}"),
+                        reason: "must be a table, not a scalar — a capability declaration \
+                                 names fields, it is not a value"
+                            .to_owned(),
+                    });
+                }
             }
         }
 
+        Ok(())
+    }
+
+    /// Every `[[capabilities.sql]]` entry names a real connection.
+    /// An undressed declaration would grant a connection to nowhere;
+    /// empty strings are the typo class here (missing fields fail
+    /// earlier, at serde, and unknown fields fail at the struct's
+    /// own deny).
+    fn validate_sql(entries: &[SqlCapability]) -> Result<(), ManifestError> {
+        for (i, db) in entries.iter().enumerate() {
+            if db.name.is_empty() || db.driver.is_empty() || db.host.is_empty() {
+                return Err(ManifestError::InvalidField {
+                    field: format!("capabilities.sql[{i}]"),
+                    reason: "name, driver, and host are all required".to_owned(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1317,6 +1367,12 @@ impl Manifest {
             }
             if !c.secrets.is_empty() {
                 push(Capability::SecretUse);
+            }
+        }
+        for db in &self.capabilities.sql {
+            push(Capability::SqlQuery);
+            if db.execute {
+                push(Capability::SqlExecute);
             }
         }
         if let Some(c) = &self.capabilities.clock {
@@ -2107,26 +2163,28 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
+    /// (`kv` stands in since `sql` graduated to a typed table in
+    /// CAP-017; the shape proved is the catch-all's, not sql's.)
     #[test]
     fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.sql]\nname = \"orders\"\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.kv]\nstores = [\"sessions\"]\n";
         let m = Manifest::parse(src).expect("a known namespace must declare");
         assert!(
-            m.capabilities.other.contains_key("sql"),
+            m.capabilities.other.contains_key("kv"),
             "the declaration must land in the catch-all"
         );
         // Key presence is not enough: the value must survive intact,
         // or the catch-all is a second silent drop. Only the key set
         // is validated — the shape belongs to the future typed struct.
         assert_eq!(
-            m.capabilities.other["sql"]["name"].as_str(),
-            Some("orders"),
+            m.capabilities.other["kv"]["stores"][0].as_str(),
+            Some("sessions"),
             "the declared table body must round-trip through the catch-all"
         );
         assert!(
             !m.declared_capabilities()
                 .iter()
-                .any(|c| c.namespace() == "sql"),
+                .any(|c| c.namespace() == "kv"),
             "declaring is not binding: the host grants nothing unmodelled"
         );
     }
@@ -2149,15 +2207,86 @@ allow_origins = ["https://app.example.com"]
     /// A scalar under `[capabilities]` is not a declaration: the
     /// validator requires tables, so a misplaced value fails loudly
     /// instead of validating as a "known" key with no meaning.
+    /// (`kv` stands in: `sql` is typed now, so its scalar fails
+    /// earlier at serde type-checking — also loudly, also naming
+    /// the table.)
     #[test]
     fn a_scalar_capability_value_is_refused_not_collected() {
         let src =
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nsql = \"orders\"\n";
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nkv = \"sessions\"\n";
         let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
         let text = err.to_string();
         assert!(
             text.contains("must be a table"),
             "the scalar branch must fire: {text}"
+        );
+    }
+
+    /// A `sql` declaration grants query but not execute: the table
+    /// carries the connection shape, and only an explicit
+    /// `execute = true` widens to `sql.execute`.
+    #[test]
+    fn sql_table_parses_and_grants_query_not_execute() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.sql]]\nname = \"orders\"\ndriver = \"postgres\"\n\
+            host = \"db.internal:5432\"\n";
+        let m = Manifest::parse(src).expect("the sql table must parse");
+        let granted = m.declared_capabilities();
+        assert!(
+            granted.contains(&crate::capability::Capability::SqlQuery),
+            "a sql entry grants query"
+        );
+        assert!(
+            !granted.contains(&crate::capability::Capability::SqlExecute),
+            "query alone must not smuggle execute"
+        );
+    }
+
+    /// `execute = true` is the explicit widening to `sql.execute`;
+    /// the default stays query-only.
+    #[test]
+    fn sql_execute_flag_grants_execute() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.sql]]\nname = \"orders\"\ndriver = \"postgres\"\n\
+            host = \"db.internal:5432\"\nexecute = true\n";
+        let m = Manifest::parse(src).expect("the sql table must parse");
+        assert!(
+            m.declared_capabilities()
+                .contains(&crate::capability::Capability::SqlExecute),
+            "execute = true grants execute"
+        );
+    }
+
+    /// A `sql` entry without a name or host is refused: an
+    /// undressed declaration would grant a connection to nowhere.
+    /// Empty strings reach this validator (missing fields fail
+    /// earlier, at serde, with `missing field`) — both layers agree
+    /// that an unnamed entry never parses.
+    #[test]
+    fn sql_table_requires_name_and_host() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.sql]]\nname = \"\"\ndriver = \"postgres\"\nhost = \"\"\n";
+        let err = Manifest::parse(src).expect_err("a nameless sql entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.sql"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// A missing field fails at serde before validation runs: the
+    /// typed struct requires the keys, so absence never reaches the
+    /// empty-string check. Both absence and emptiness refuse; neither
+    /// parses into a grant.
+    #[test]
+    fn sql_table_missing_field_fails_at_parse() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.sql]]\ndriver = \"postgres\"\n";
+        let err = Manifest::parse(src).expect_err("a fieldless sql entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("missing field"),
+            "serde names the missing key: {text}"
         );
     }
 

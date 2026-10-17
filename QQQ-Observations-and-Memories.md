@@ -39782,4 +39782,23 @@ a user interface for the on-call future — if it doesn't name the
 recovery, the recovery doesn't exist at 2 a.m.
 → `crates/qqq-serve/examples/h2spec_serve.rs`, `.github/workflows/ci.yml`, `tools/run_perf_regression.py`, `QQQ-Checklist-V1.md`.
 
+## §O-748 - CAP-017: the first table sets the pattern (query by default, execute by flag)
+
+`[[capabilities.sql]]` models name/driver/host/secret with an
+explicit `execute = true` widening: query is the default
+grant, execute never smuggles. Validation names the table
+index on empty fields; serde catches missing fields first —
+both layers proved by separate tests after the first draft
+conflated them (an array-shaped entry failed `is_table`,
+which widened the check to tables-or-arrays-of-tables before
+the typed struct made it moot). The generator needed a
+capability-level arm, not a namespace arm, because one
+namespace holds two grants with different stanzas — the
+property loop caught it (`sql.execute` ungranted by the
+query stanza). The refusal range shrinks as tables graduate
+(017..022 now); the pin test asserts the start so the range
+cannot rot silently. Measured: 4 new tests red-first green;
+`every_suggested_stanza_parses` covers both sql stanzas.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

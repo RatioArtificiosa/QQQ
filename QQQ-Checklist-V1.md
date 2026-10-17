@@ -2214,7 +2214,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     defect instead.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
   → §7.1 What we are defending, precisely
-- [ ] **CAP-017** Model `[capabilities.sql]` in the manifest: typed struct, validation, grant derivation for `sql.query`/`sql.execute`, and a generator stanza that parses.
+- [x] **CAP-017** Model `[capabilities.sql]` in the manifest: typed struct, validation, grant derivation for `sql.query`/`sql.execute`, and a generator stanza that parses.
+  → Done: `SqlCapability` (name/driver/host/secret/execute) as `[[capabilities.sql]]`; empty-field validation naming the table; query by default, `execute = true` widens; generator emits both stanzas.
+  → Measured: `sql_table_parses_and_grants_query_not_execute`, `sql_execute_flag_grants_execute`, `sql_table_requires_name_and_host`, `sql_table_missing_field_fails_at_parse` — 1/1 each; `every_suggested_stanza_parses` covers both sql stanzas.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
 - [ ] **CAP-018** Model `[capabilities.kv]` in the manifest: typed struct, validation, grant derivation for `kv.read`/`kv.write`, and a generator stanza that parses.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.

@@ -4,6 +4,11 @@
 
 ### Security
 
+- **cap**: model `[capabilities.sql]` (CAP-017): typed entries
+  with named validation, query by default, explicit
+  `execute = true` widening, generator stanzas for both
+  grants, refusal range narrowed to CAP-018..022. Red-first.
+
 - **wave**: Wave-1 closures and homes: REG-009/010 ticked on
   measured re-runs; SRV-022 keeps the http/1.1-only default
   (shared with the h1-only in-house path) with the existing

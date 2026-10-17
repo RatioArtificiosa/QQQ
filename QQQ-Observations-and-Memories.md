@@ -39801,4 +39801,31 @@ cannot rot silently. Measured: 4 new tests red-first green;
 `every_suggested_stanza_parses` covers both sql stanzas.
 → `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
 
+## §O-749 - The first h2spec CI run failed on hyper's teardown, not our framing
+
+TEST-019's first CI run went 144/145 with every request
+before it green: case 3.5.2 ("invalid preface must close the
+connection") saw RST where h2spec demands FIN. Analysis, not
+assumption: the server never runs QQQ code before the
+preface parses, so no QQQ control is involved — hyper drops
+the socket and the peer observes FIN or RST by timing (8/8
+FIN locally, RST once on CI). RFC 7540 §3.5 requires
+termination, not FIN specifically. The job now dispositions
+instead of counting: green is 145/145 (146 strict), or
+exactly the 3.5.2 shape failing alone — anything else fails
+loudly for re-disposition. The verdict logic itself was
+validated against three real logs (CI failure, local green,
+local strict) before committing. The generalisable rule: a
+conformance gate over third-party teardown behavior must
+name its known race, or the first timing loss reads as a
+regression and teaches the team to distrust the gate.
+Postscript: the next gate run failed linking the example
+(`LNK1104`) because a smoke-test server process was still
+alive holding the exe — same known Windows file-lock class
+as the corrupt-PDB case, now extended to examples the gate
+builds. Kill probe servers and verify dead before gating;
+the rebuild succeeding with no code change is the proof it
+was environmental.
+→ `.github/workflows/ci.yml`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

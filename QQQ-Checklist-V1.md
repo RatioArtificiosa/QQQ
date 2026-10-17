@@ -32,6 +32,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `SRV` | HTTP/application server | 21 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
 | `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
+| `REG` | Q-Block definition, its vocabulary and its five capability levels | 20 | Architect |
 | `DX` | Developer experience, CLI ergonomics, errors | 20 | DX engineer |
 | `CLI` | CLI commands | 24 | DX engineer |
 | `TEST` | Test runner and test infrastructure | 18 | Runtime engineer |
@@ -52,7 +53,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 587 items.**
+**Total: 607 items.**
 
 ### Status legend
 
@@ -86,7 +87,7 @@ Items are grouped below by **phase**, because dependency order matters more than
 | **P7** | Agent face | M9 | AGENT, TEST, MIG |
 | **P8** | Performance and determinism | M3–M10 | PERF, DET, OBS |
 | **P9** | V1 release | M10, M11 | DOD, MKT, POS, GTM, RISK |
-| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ |
+| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ, REG |
 
 ---
 
@@ -5715,6 +5716,53 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **AI-010** Publish the `qqq:ai` documentation with honest latency expectations.
   → §6.9 `qqq:ai` — local inference as a capability
 
+### REG — The Q-Block vocabulary, and the repair of what the old vocabulary allowed
+
+The group the registry work draws on. `REG-001` … `REG-020` land with Proposal §4.8 and `§D-011`; the
+registry's own items continue this numbering rather than starting a second group. Every item below is
+open: the definition is what this landing writes, and the enforcement lands with it.
+
+- [ ] **REG-001** Add the eighteen Q-Block rows to Proposal §0.6 and regenerate `docs/glossary.md`.
+  → §0.6 Glossary
+- [ ] **REG-002** Write Proposal §4.8 with its subsections and their citations.
+  → §4.8 The Q-Block
+- [ ] **REG-003** Record `§D-011` and `§O-740` in the Observations register.
+  → §4.8.2 What a Q-Block is
+- [ ] **REG-004** Add `crates/qqq-core/tests/qblock.rs` with five tests, including the control.
+  → §4.8.5 The five levels
+- [ ] **REG-005** Add `tools/fault_inject_qblock.py` with four injections and prove each is DETECTED.
+  → §4.8.5 The five levels
+- [ ] **REG-006** Add the `qblock-declared-namespaces` resolver to `check_doc_claims.py` and use it in §4.8.5.
+  → §4.8.5 The five levels
+- [ ] **REG-007** Add the `qblock-bindable-namespaces` resolver and use it in §4.8.5.
+  → §4.8.5 The five levels
+- [ ] **REG-008** Add the `qblock-bound-capabilities` resolver and use it in §4.8.5.
+  → §4.8.5 The five levels
+- [ ] **REG-009** Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state.
+  → §4.8.8 How to add a capability
+- [ ] **REG-010** Add `deny_unknown_fields` to `Manifest`, with a test and a positive control.
+  → §4.8.8 How to add a capability
+- [ ] **REG-011** State the lockfile's real forward-compatibility rule: a new *field* is minor, a new *structure* is a version bump.
+  → §5.4 The lockfile — `qqq.lock`
+- [ ] **REG-012** Reconcile the three host-module counts to one owner, named for its level.
+  → §4.8 The Q-Block
+- [ ] **REG-013** Add `tools/gen_capability_catalogue.py` with its `--check` half, and commit its generated output.
+  → §4.8.8 How to add a capability
+- [ ] **REG-014** Provide the `qqqai source` verb and publish a source bundle at `caps = ["none"]`, never resolvable.
+  → §4.8.4 The source bundle
+- [ ] **REG-015** Assert in a workspace test that no install path spawns a subprocess or compiles anything — no `postinstall`, no `build.rs`, no install-time toolchain.
+  → §4.8.1 The invariant
+- [ ] **REG-016** Keep package, version, artifact digest and capability set as four separate fields in the lockfile and in `qqqai info`.
+  → §4.8.3 Four things that are not the same thing
+- [ ] **REG-017** Assert that only the four verbs reach the registry, and that `install` performs no execution.
+  → §4.8.6 The verbs, and which may execute
+- [ ] **REG-018** Require an ADR that re-derives the narrowing argument before a fourth capability kind lands, and assert `GrantSet` stays a set.
+  → §4.8.7 Capability kinds, and the rule for growth
+- [ ] **REG-019** Refuse a publish whose artifact is not a component or whose manifest is absent, naming all four negatives.
+  → §4.8.9 What is not a Q-Block
+- [ ] **REG-020** Resolve the three open questions at the milestones named, recording each as a `§Q-` entry.
+  → §4.8.10 Open questions this section does not settle
+
 ---
 
 ## 14. Summary counters
@@ -5731,8 +5779,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
 | P7 Agent face | M9 | 57 |
 | P8 Perf/determinism/obs | continuous | 61 |
 | P9 V1 release | M10, M11 | 75 |
-| P10 Beyond V1 | post-1.0 | 34 |
-| **Total** | | **587** |
+| P10 Beyond V1 | post-1.0 | 54 |
+| **Total** | | **607** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

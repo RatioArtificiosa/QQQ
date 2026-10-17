@@ -45,6 +45,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The byte-faithful writer is imported rather than copied, because two copies of a
+# newline rule is how the two copies drift (`§O-273`) — the same reason
+# `check_glossary.py` imports it. It was called below without being imported, so
+# `--fix` crashed with a `NameError` instead of repairing anything: the repair path
+# this tool's own failure message names, unable to run (`§O-741`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_xrefs import write_text_lf
 
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
@@ -60,10 +67,16 @@ ROOT = Path(__file__).resolve().parent.parent
 CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
 
 ITEM = re.compile(r"^- \[([ x~!-])\] \*\*([A-Z]+)-(\d{3})\*\*", re.MULTILINE)
-AREA_ROW = re.compile(r"^\| `([A-Z]+)` \| ([^|]+?) \| (\d+) \| ([^|]+?) \|$", re.MULTILINE)
+AREA_ROW = re.compile(
+    r"^\| `([A-Z]+)` \| ([^|]+?) \| (\d+) \| ([^|]+?) \|$", re.MULTILINE
+)
 TOTAL_ITEMS = re.compile(r"^\*\*Total: (\d+) items\.\*\*$", re.MULTILINE)
-PHASE_ROW = re.compile(r"^\| \*{0,2}(P\d+) ([^|*]+?)\*{0,2} \| ([^|]+?) \| (\d+) \|$", re.MULTILINE)
-PHASE_MAP_ROW = re.compile(r"^\| \*\*(P\d+)\*\* \| ([^|]+?) \| ([^|]+?) \| ([^|]+?) \|$", re.MULTILINE)
+PHASE_ROW = re.compile(
+    r"^\| \*{0,2}(P\d+) ([^|*]+?)\*{0,2} \| ([^|]+?) \| (\d+) \|$", re.MULTILINE
+)
+PHASE_MAP_ROW = re.compile(
+    r"^\| \*\*(P\d+)\*\* \| ([^|]+?) \| ([^|]+?) \| ([^|]+?) \|$", re.MULTILINE
+)
 PHASE_TOTAL = re.compile(r"^\| \*\*Total\*\* \| \| \*\*(\d+)\*\* \|$", re.MULTILINE)
 
 
@@ -114,7 +127,9 @@ def analyse(text: str) -> list[str]:
         want = declared.get(area)
         got = actual.get(area, 0)
         if want is None:
-            problems.append(f"`{area}` has {got} item(s) but no row in the §1 area table")
+            problems.append(
+                f"`{area}` has {got} item(s) but no row in the §1 area table"
+            )
         elif want != got:
             problems.append(f"§1 says `{area}` has {want}, the document has {got}")
 
@@ -178,16 +193,16 @@ def fix(text: str) -> str:
         return f"| `{area}` | {meaning} | {actual.get(area, 0)} | {owner} |"
 
     text = AREA_ROW.sub(area_row, text)
-    text = TOTAL_ITEMS.sub(
-        lambda m: f"**Total: {sum(actual.values())} items.**", text
-    )
+    text = TOTAL_ITEMS.sub(lambda m: f"**Total: {sum(actual.values())} items.**", text)
 
     mapping = phase_map(text)
 
     def phase_row(m: re.Match[str]) -> str:
         phase, name, milestone, _n = m.groups()
         areas = mapping.get(phase, [])
-        return f"| {phase} {name} | {milestone} | {sum(actual.get(a, 0) for a in areas)} |"
+        return (
+            f"| {phase} {name} | {milestone} | {sum(actual.get(a, 0) for a in areas)} |"
+        )
 
     text = PHASE_ROW.sub(phase_row, text)
     text = PHASE_TOTAL.sub(
@@ -210,7 +225,7 @@ def main() -> int:
         if fixed == text:
             print("nothing to fix: the checklist already agrees with itself")
             return 0
-        write_text_lf(CHECKLIST,fixed, encoding="utf-8")
+        write_text_lf(CHECKLIST, fixed, encoding="utf-8")
         print("rewrote the §1 area table and the §14 phase table from the items")
         problems = analyse(fixed)
         if problems:
@@ -224,7 +239,9 @@ def main() -> int:
     if problems:
         for p in problems:
             print(f"  DRIFT: {p}")
-        print("  Run `python tools/check_checklist_counts.py --fix` to regenerate both tables.")
+        print(
+            "  Run `python tools/check_checklist_counts.py --fix` to regenerate both tables."
+        )
         return 1
 
     actual = counts_by_area(text)
@@ -249,7 +266,9 @@ def parse_progress_total(output: str) -> tuple[int, int] | None:
     Only horizontal whitespace separates the fields: `\s` also matches a
     newline, so a wrapped row would parse counts that were never on one line.
     """
-    m = re.search(r"^TOTAL[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", output, re.MULTILINE)
+    m = re.search(
+        r"^TOTAL[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", output, re.MULTILINE
+    )
     if m is None:
         return None
     done, total, remaining = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -258,9 +277,7 @@ def parse_progress_total(output: str) -> tuple[int, int] | None:
     return (done, total)
 
 
-def compare_counts(
-    done: int, total: int, ticked: int, actual: int
-) -> list[str]:
+def compare_counts(done: int, total: int, ticked: int, actual: int) -> list[str]:
     """The agreement rule, separated so the self-test can break it directly.
 
     A checklist with no recognized items is refused even when both sides say
@@ -363,10 +380,16 @@ def self_test() -> int:
 
     real = CHECKLIST.read_text(encoding="utf-8")
 
-    case("the real checklist is consistent", not analyse(real), "; ".join(analyse(real)))
+    case(
+        "the real checklist is consistent", not analyse(real), "; ".join(analyse(real))
+    )
 
     # 1. A per-area count that disagrees with the items.
-    broken = real.replace("| `CAP` | Capability resolution pipeline | 16 |", "| `CAP` | Capability resolution pipeline | 99 |", 1)
+    broken = real.replace(
+        "| `CAP` | Capability resolution pipeline | 16 |",
+        "| `CAP` | Capability resolution pipeline | 99 |",
+        1,
+    )
     case(
         "a wrong per-area count is caught",
         any("CAP" in p for p in analyse(broken)),
@@ -382,7 +405,13 @@ def self_test() -> int:
     )
 
     # 3. A phase row that disagrees with its areas.
-    broken = re.sub(r"^\| P2 Capability engine \| M2 \| 46 \|$", "| P2 Capability engine | M2 | 7 |", real, count=1, flags=re.MULTILINE)
+    broken = re.sub(
+        r"^\| P2 Capability engine \| M2 \| 46 \|$",
+        "| P2 Capability engine | M2 | 7 |",
+        real,
+        count=1,
+        flags=re.MULTILINE,
+    )
     case(
         "a wrong §14 phase count is caught",
         any("P2" in p for p in analyse(broken)),
@@ -398,7 +427,11 @@ def self_test() -> int:
     )
 
     # 5. An area assigned to no phase — its items would vanish from §14.
-    broken = real.replace("| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ |", "| **P10** | Beyond V1 | post-1.0 | FUT, AI |", 1)
+    broken = real.replace(
+        "| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ |",
+        "| **P10** | Beyond V1 | post-1.0 | FUT, AI |",
+        1,
+    )
     case(
         "an area in no phase is caught",
         any("no phase" in p for p in analyse(broken)),
@@ -435,7 +468,10 @@ def self_test() -> int:
     )
     case(
         "an agreeing progress TOTAL passes",
-        compare_progress(sum(done_by_area(real).values()), sum(counts_by_area(real).values()), []) == [],
+        compare_progress(
+            sum(done_by_area(real).values()), sum(counts_by_area(real).values()), []
+        )
+        == [],
     )
     case(
         "an empty ledger never agrees, even at 0/0",
@@ -445,14 +481,19 @@ def self_test() -> int:
     # 8. The TOTAL parser reads the row progress.py prints, and refuses garbage.
     sample = "TOTAL                                                   268     587        319\n"
     case("the TOTAL row parses", parse_progress_total(sample) == (268, 587))
-    case("a missing TOTAL row is refused", parse_progress_total("no totals here\n") is None)
+    case(
+        "a missing TOTAL row is refused",
+        parse_progress_total("no totals here\n") is None,
+    )
     case(
         "a TOTAL row split across lines is refused",
         parse_progress_total("TOTAL\n268 587 319\n") is None,
     )
     case(
         "a contradictory TOTAL row is refused",
-        parse_progress_total("TOTAL                                                     1       2         999\n")
+        parse_progress_total(
+            "TOTAL                                                     1       2         999\n"
+        )
         is None,
     )
 
@@ -474,7 +515,9 @@ def self_test() -> int:
     #     minutes: a five-second sleeper against a one-second deadline.
     with tempfile.TemporaryDirectory(prefix="progress-hang-") as tmp:
         sleeper = Path(tmp) / "sleepy.py"
-        sleeper.write_text("import time\ntime.sleep(5)\n", encoding="utf-8", newline="\n")
+        sleeper.write_text(
+            "import time\ntime.sleep(5)\n", encoding="utf-8", newline="\n"
+        )
         case(
             "a hung progress script fails on the deadline",
             check_progress(sleeper, timeout=1.0) != 0,

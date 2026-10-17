@@ -52,13 +52,13 @@ WebAssembly Interface Types — the IDL used to declare component interfaces.
 
 ## WASI
 
-WebAssembly System Interface. QQQ targets **WASI 0.3 (Preview 3)**, which introduces native `async`, `stream` and `future` types.
+WebAssembly System Interface. QQQ **targets** **WASI 0.3 (Preview 3)** — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain emits it yet.
 
 [→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
 
 ## Capability
 
-A *grant* of authority. QQQ components hold only the capabilities explicitly named in their manifest. There is no ambient authority.
+A **named kind** of authority, `<namespace>.<operation>` (e.g. `http.client`). QQQ components hold only the capabilities explicitly named in their manifest; there is no ambient authority. Part of the machine contract and never renamed — retired rather than removed, like an error code. Distinct from a *grant*, which is one instance of one. See §6.2.
 
 [→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
 
@@ -125,5 +125,107 @@ Service level objective. Numeric target with a measurement method.
 ## TTFA
 
 Time To First Answer — from `qqqai new` to a running HTTP endpoint, measured as a user-perceived duration (the launch metric).
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Q-Block
+
+The distribution unit: a **built** WebAssembly component plus the manifest that describes it, published to a registry as an immutable, digest-addressed artifact. Its capabilities are **derived by the registry from the component's imports**, never declared by the publisher. No part of a Q-Block executes at install time. Distinct from a *package* (the name), a *version* (the release label) and a *source bundle* (evidence, never installed). See §4.8.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Package
+
+The named thing, `scope/name` — a namespace with a history. A package has versions; a version has artifacts; one artifact is a Q-Block.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Artifact
+
+The bytes for one target of one version, identified by digest rather than by name. A version may have several — one per supported target.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Digest
+
+A content address over artifact bytes, spelled with its algorithm (`sha256:…`). The digest is the identity; the name and version are labels that point at it.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Source bundle
+
+Source code plus a build recipe, published **beside** a version as **evidence** — for audits, licence review, debug mapping and independent rebuilds. Never resolvable, never installable, `caps = ["none"]`. An attachment in the same category as an SBOM or a signature file, not a second kind of package. See §4.8.4.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Grant
+
+The authority a **specific instance** actually holds, after every overlay has narrowed what the manifest declared. A *capability* is a kind; a grant is an instance of one.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Capability kind
+
+One of **Resource**, **Operation** or **Ambient** (§6.2). The narrowing invariant is proved over kinds rather than over names: adding a capability *name* is a minor change, adding a *kind* requires an ADR.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Declared capability
+
+An authority for which an interface exists in `wit/`. Says nothing about whether a publisher may request it or whether a host can serve it.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Bindable capability
+
+An authority a publisher may request in `qqq.toml` — the stanza shape exists and the parser accepts it. A capability can be declared and not bindable.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Bound capability
+
+An authority the host's linker actually registers, so a granted request instantiates instead of failing at bind time. A capability can be bindable and not bound.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Escalation
+
+A version whose **closure** authority set is not a subset of the authority of any version the user has already accepted. Defined over the closure — never over the package's own imports, and never over the immediately preceding version.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Yank
+
+Stop *new* resolutions of a version. Existing lockfiles keep working. Not a security action, and it removes and frees nothing.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Quarantine
+
+A security disposition attached to a **digest**, blocking new installs and flagging existing ones. Distinct from a yank, which is a resolve-time convenience.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Takedown
+
+Withdraw a version from serving. Always **best-effort**: bytes already downloaded cannot be recalled, so a takedown is recorded in the transparency log and clients act on their own copies.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Integrity
+
+*These are the bytes, unchanged.* Guaranteed by content addressing plus a signature, and available for every Q-Block from its first release.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Attribution
+
+*The publisher built these bytes from the source they claim.* Requires reproducible builds and independent witnesses; a trust **signal**, never a publish requirement. Distinct from *integrity*, which is unconditional.
+
+[→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
+
+## Development Q-Block
+
+**Not a term this project uses.** A source-only tree is a repository, not a Q-Block. A second publishable kind was considered and rejected, because it would make the safety of an install depend on the publisher's choice. See §4.8.4.
 
 [→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)

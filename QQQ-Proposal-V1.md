@@ -172,8 +172,8 @@ Terms used precisely throughout. Where a term is contested in the industry, the 
 | **Component** | A binary `.wasm` file in the Component Model format (`version 0x1000d`), with typed imports/exports expressed in WIT. Distinct from a *core module* (`version 0x1`). |
 | **Core module** | A classic Wasm module limited to `i32`/`i64`/`f32`/`f64` at its boundaries. May exist *inside* a component. |
 | **WIT** | WebAssembly Interface Types — the IDL used to declare component interfaces. |
-| **WASI** | WebAssembly System Interface. QQQ targets **WASI 0.3 (Preview 3)**, which introduces native `async`, `stream` and `future` types. |
-| **Capability** | A *grant* of authority. QQQ components hold only the capabilities explicitly named in their manifest. There is no ambient authority. |
+| **WASI** | WebAssembly System Interface. QQQ **targets** **WASI 0.3 (Preview 3)** — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain emits it yet. |
+| **Capability** | A **named kind** of authority, `<namespace>.<operation>` (e.g. `http.client`). QQQ components hold only the capabilities explicitly named in their manifest; there is no ambient authority. Part of the machine contract and never renamed — retired rather than removed, like an error code. Distinct from a *grant*, which is one instance of one. See §6.2. |
 | **Manifest** | `qqq.toml`. Declares a project's identity, capabilities, resource limits, interfaces and dependencies. |
 | **Lockfile** | `qqq.lock`. Resolves the entire dependency graph, with cryptographic digests. |
 | **Fuel** | A deterministic, portable instruction budget consumed by executing Wasm. Used for metering and for provable CPU limits. |
@@ -185,8 +185,25 @@ Terms used precisely throughout. Where a term is contested in the industry, the 
 | **Fabric** | The commercial edition: org-wide policy, fleet attestation, SSO/RBAC, compliance evidence, air-gapped mirrors. **Not required to run QQQ.** |
 | **SLO** | Service level objective. Numeric target with a measurement method. |
 | **TTFA** | Time To First Answer — from `qqqai new` to a running HTTP endpoint, measured as a user-perceived duration (the launch metric). |
+| **Q-Block** | The distribution unit: a **built** WebAssembly component plus the manifest that describes it, published to a registry as an immutable, digest-addressed artifact. Its capabilities are **derived by the registry from the component's imports**, never declared by the publisher. No part of a Q-Block executes at install time. Distinct from a *package* (the name), a *version* (the release label) and a *source bundle* (evidence, never installed). See §4.8. |
+| **Package** | The named thing, `scope/name` — a namespace with a history. A package has versions; a version has artifacts; one artifact is a Q-Block. |
+| **Artifact** | The bytes for one target of one version, identified by digest rather than by name. A version may have several — one per supported target. |
+| **Digest** | A content address over artifact bytes, spelled with its algorithm (`sha256:…`). The digest is the identity; the name and version are labels that point at it. |
+| **Source bundle** | Source code plus a build recipe, published **beside** a version as **evidence** — for audits, licence review, debug mapping and independent rebuilds. Never resolvable, never installable, `caps = ["none"]`. An attachment in the same category as an SBOM or a signature file, not a second kind of package. See §4.8.4. |
+| **Grant** | The authority a **specific instance** actually holds, after every overlay has narrowed what the manifest declared. A *capability* is a kind; a grant is an instance of one. |
+| **Capability kind** | One of **Resource**, **Operation** or **Ambient** (§6.2). The narrowing invariant is proved over kinds rather than over names: adding a capability *name* is a minor change, adding a *kind* requires an ADR. |
+| **Declared capability** | An authority for which an interface exists in `wit/`. Says nothing about whether a publisher may request it or whether a host can serve it. |
+| **Bindable capability** | An authority a publisher may request in `qqq.toml` — the stanza shape exists and the parser accepts it. A capability can be declared and not bindable. |
+| **Bound capability** | An authority the host's linker actually registers, so a granted request instantiates instead of failing at bind time. A capability can be bindable and not bound. |
+| **Escalation** | A version whose **closure** authority set is not a subset of the authority of any version the user has already accepted. Defined over the closure — never over the package's own imports, and never over the immediately preceding version. |
+| **Yank** | Stop *new* resolutions of a version. Existing lockfiles keep working. Not a security action, and it removes and frees nothing. |
+| **Quarantine** | A security disposition attached to a **digest**, blocking new installs and flagging existing ones. Distinct from a yank, which is a resolve-time convenience. |
+| **Takedown** | Withdraw a version from serving. Always **best-effort**: bytes already downloaded cannot be recalled, so a takedown is recorded in the transparency log and clients act on their own copies. |
+| **Integrity** | *These are the bytes, unchanged.* Guaranteed by content addressing plus a signature, and available for every Q-Block from its first release. |
+| **Attribution** | *The publisher built these bytes from the source they claim.* Requires reproducible builds and independent witnesses; a trust **signal**, never a publish requirement. Distinct from *integrity*, which is unconditional. |
+| **Development Q-Block** | **Not a term this project uses.** A source-only tree is a repository, not a Q-Block. A second publishable kind was considered and rejected, because it would make the safety of an install depend on the publisher's choice. See §4.8.4. |
 
-→ **Checklist:** `DOC-011`, `DOC-012`
+→ **Checklist:** `DOC-011`, `DOC-012`, `REG-001` … `REG-013`
 
 ---
 
@@ -644,6 +661,149 @@ Three guest concurrency models exist and QQQ must state a policy for each. The d
 **Why the default is async-single-threaded:** it preserves the strongest isolation guarantee (one memory per task), keeps fuel accounting exact, and matches how request-scoped work actually looks. Density replaces threads.
 
 → **Checklist:** `ARCH-013`, `ARCH-014`, `FUT-004`, `PERF-015`
+
+---
+
+## §4.8 The Q-Block
+
+**What this section is.** The normative definition of QQQ's distribution unit: what a Q-Block *is*, what it is not, what may execute, and how the vocabulary around it grows. Everything in §5.4, §6.5 and §11.2 that resolves, publishes or installs a package depends on this section.
+
+> **Decision `§D-011`** — a Q-Block is a **built artifact plus its manifest**, and source ships beside it as **evidence** rather than as a package kind. The reasoning, the consequences accepted and the rejected alternatives are recorded in that entry; what follows is the normative statement of the model.
+
+→ **Checklist:** `REG-002`, `REG-012`
+
+### §4.8.1 The invariant
+
+> **Nothing on the path from resolution to execution may run outside the capability host.**
+
+The resolver, the installer and the linker are the only code that runs with host authority. A Q-Block's own code first executes as an instantiated component, *after* its grant set is built and its limits are set.
+
+**The test to apply to any future proposal:** *does this run before the capability boundary exists?* A construct that executes publisher-authored code on a consumer's machine before instantiation — an install hook, a build script, a code-generating plugin, a post-download step, a compiler invoked at install time — is refused by this section. The refusal is a property of the model, not a judgement about any particular tool.
+
+→ **Checklist:** `REG-015`
+
+### §4.8.2 What a Q-Block is
+
+A **Q-Block** is a **built** WebAssembly component plus the manifest that describes it, published to a registry as an immutable, digest-addressed artifact.
+
+- **Built, never built by the consumer.** The publisher is the party that runs a toolchain. Installing is downloading bytes and verifying hashes.
+- **Content-addressed.** The digest is the identity; the name and version are labels that point at it.
+- **Capabilities are derived, not declared.** The registry computes them from the component's imports. The publisher's declaration must equal the derived set or the publish is rejected.
+- **No install-time execution.** Nothing in a Q-Block runs on the consumer's machine before instantiation (§4.8.1).
+- **One version, many artifacts** — one per supported target.
+- **Source ships alongside, never as an input** (§4.8.4).
+
+**The closest real analogue is an OCI artifact**: built, content-addressed, signed, distributed by digest, with its security disposition attached separately from its bytes. What OCI lacks and QQQ adds is a **derived capability set** and **dependency semantics**. What QQQ deliberately does not add is npm's install scripts or Cargo's `build.rs`.
+
+→ **Checklist:** `REG-003`
+
+### §4.8.3 Four things that are not the same thing
+
+| Term | What it is | What pins it |
+|---|---|---|
+| **Package** | The named thing — `scope/name` | the name |
+| **Version** | A release label within a package | the label |
+| **Artifact** | The bytes for one target of one version | the digest |
+| **Q-Block** | A version *as installed*: the manifest plus the artifact selected for your target | manifest digest + artifact digest |
+
+A version is not a Q-Block. A digest is not a version. The lockfile pins package + version + artifact digest + capability set, and those are four fields because they are four facts.
+
+→ **Checklist:** `REG-016`
+
+### §4.8.4 The source bundle
+
+A **source bundle** is source code plus a build recipe, published **beside** a version as **evidence**:
+
+- **Not resolvable.** `resolve` cannot return it, and no verb installs it.
+- **Carries no authority.** `caps = ["none"]`.
+- **Reachable only by deliberate human action** — `qqqai source scope/name@1.4.0 --to ./dir`.
+- **Its purpose is audit**: licence review, debug mapping, and independent rebuilds by witnesses.
+
+It is an **attachment**, in the same category as an SBOM or a signature file — not a second kind of package. A source-only tree with no built artifact is a repository, not a Q-Block.
+
+**Why it is not a second publishable kind.** Naming a source-only package a Q-Block would create the expectation that `qqqai add` works on it. Then the safe path becomes one of two, chosen by the publisher, and the registry can no longer make a categorical claim about what installing a Q-Block does. A safety property that holds for some packages is not a property; it is a convention with a documentation page.
+
+→ **Checklist:** `REG-014`
+
+### §4.8.5 The five levels
+
+Every statement about capabilities in this project is about one of five levels, and **a sentence stating a capability fact must name its level**:
+
+| Level | Question it answers | Source of truth |
+|---|---|---|
+| **Declared** | Does an interface exist for this authority? | `wit/*.wit` |
+| **Bindable** | Can a publisher ask for it in `qqq.toml`? | the manifest's `[capabilities]` |
+| **Bound** | Will the host serve it at instantiation? | the registry's `implemented` flag and the linker |
+| **Granted** | What does *this instance* hold after overlays? | `GrantSet` |
+| **Observed** | What did it actually call? | the capability audit stream |
+
+The rule exists because the levels differ by design and by a wide margin. Measured at the time of writing, in interfaces: **15 packages are declared**, **6 capability namespaces are bindable**, and **1 interface is bound**. A capability can therefore be declared and not bindable, or bindable and not bound — and writing "QQQ has `qqq:sql`" without naming a level is not imprecise, it is unreadable, because the reader cannot tell whether it means "an interface exists" or "you can use it today".
+
+→ **Checklist:** `REG-006`, `REG-007`, `REG-008`
+
+### §4.8.6 The verbs, and which may execute
+
+| Verb | Runs | Where |
+|---|---|---|
+| `resolve` | nothing | reads metadata |
+| `install` | nothing | downloads, verifies hash and signature |
+| `run` | the Q-Block | inside the capability host, after grants are built |
+| `build` | a toolchain | **publisher side only** |
+
+A verb that executes publisher-authored code on a consumer's machine, outside these four, is the defect §4.8.1 exists to forbid — and the list is four entries rather than "install does what it needs to" because the fifth verb always sounds reasonable when it is proposed.
+
+→ **Checklist:** `REG-017`
+
+### §4.8.7 Capability kinds, and the rule for growth
+
+Three kinds, per §6.2: **Resource**, **Operation** and **Ambient**.
+
+**The rule.** Adding a capability **name** is a minor change. Adding a capability **kind** requires an ADR that re-derives the narrowing argument.
+
+The reason is structural rather than procedural. `GrantSet` is a set, and `narrow` is intersection or subtraction; that is what makes the narrowing invariant **provable** rather than merely checked. Monotonicity and commutativity are properties of set operations, and they are asserted by 200-iteration property sweeps (`f15_narrowing_is_monotone`, `f15_overlays_commute`). A capability whose authority is not expressible as membership in a set does not extend that proof — it breaks it. Four shapes to watch, named here so the question is asked when the shape appears rather than after a variant has been added:
+
+| Shape | Why a set cannot express it |
+|---|---|
+| **Delegation** | *"may pass this grant to another component, attenuated"* — authority that flows between holders, rather than authority that is held |
+| **Leases** | *"may read this directory until 14:00"* — authority with a time bound |
+| **Pairwise constraints** | *"X and Y together, but not X alone"* — a set has no negative or complementary rules |
+| **Metered authority** | a budget as an axis, rather than a limit attached to a capability |
+
+→ **Checklist:** `REG-018`
+
+### §4.8.8 How to add a capability
+
+Eleven steps, in dependency order.
+
+1. **Decide the name** (`<namespace>.<operation>`, lowercase) **and the kind.** A kind outside the three stops here and becomes an ADR (§4.8.7).
+2. **Add the variant** to `Capability` with a doc comment naming what it grants *and what it does not*, a `kind()` arm, and an `is_covert_channel()` decision.
+3. **Add it to `Capability::all()`** in sorted position. The round-trip and sortedness tests fail until the name parses back.
+4. **Declare it in WIT** at `@1.0.0` — full semver; `@1.0` is a syntax error.
+5. **Embed it** in `qqq-abi`'s `ALL_WIT`, or `check_wit_bindings.py` fails on a `.wit` file that exists on disk and nowhere else.
+6. **Add the registry row** with `implemented: false`, and an `interface_path_for` arm if the package holds more than one interface.
+7. **Add the host module and register it** in `qqq-host`'s linker. *This* is what moves a capability from bindable to bound.
+8. **Flip `implemented` to `true`** in the same commit that lands the binding.
+9. **Add the manifest stanza** and regenerate the schema. **Until this step exists the capability is declared and not bindable, and no command may print a stanza for it.**
+10. **Update the counts** — the namespace count test, and `schema/capability-catalogue.tsv`.
+11. **Record an observation** (`§O-NNN`) and cite it from the item's `→ Done:` line.
+
+→ **Checklist:** `REG-009`, `REG-010`
+
+### §4.8.9 What is not a Q-Block
+
+A git repository. A source-only tree. A container image. A bare `.wasm` with no manifest. A running instance. And **first-party libraries** — Q-TUI, Q-Impact, QT and every other first-party component are ordinary Q-Blocks published under a first-party scope. There is no "official" package kind, and inventing one is how a second contract starts.
+
+→ **Checklist:** `REG-019`
+
+### §4.8.10 Open questions this section does not settle
+
+| Question | Blocked on |
+|---|---|
+| Whether the manifest filename ever changes | Active's schema engine — a **major** change by §5.3's contract, not a candidate for a minor release |
+| Whether `[limits]` splits from the publisher's manifest | an ADR; the overlay model already narrows, so splitting would be a convenience rather than a gap |
+| The first-party scope name if the CLI ever renames | `§D-001` — the binary name and the scope name break together |
+
+→ **Checklist:** `REG-020`
 
 ---
 

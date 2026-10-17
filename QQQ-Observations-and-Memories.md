@@ -407,6 +407,32 @@ thing out of date.
 
 ---
 
+### §D-011 — A Q-Block is a built artifact plus its manifest; source ships as evidence, never as a package kind
+
+**Decision.** The distribution unit is a **built, content-addressed WebAssembly component plus the manifest that describes it**. Its capabilities are **derived by the registry from the component's imports**, not declared by the publisher. A version may also carry a **source bundle** — source plus a build recipe — as *evidence*: for audits, licence review, debug mapping and independent rebuilds. A source bundle is never resolvable, never installable, and carries `caps = ["none"]`. Resolving and installing a Q-Block executes **nothing**; the only code that runs on a consumer's machine is the component, inside the capability host. See Proposal §4.8, §0.6.
+
+**Why.** The alternative — a package that may be source plus a build recipe, which the consumer's machine compiles — is npm's model and Cargo's model, and it re-imports their largest hole: `postinstall` and `build.rs` execute with the installing user's full authority, before any boundary exists. A package that can carry a build script makes its capability manifest documentation, because the thing that already ran was unbounded and the thing the manifest describes has not run yet. Three further consequences decide it:
+
+1. **You cannot audit what you have already executed.** A built artifact can be examined without running it — that is what makes registry-derived capabilities possible at all. Source cannot be examined without a compiler, and a compiler is untrusted code executing.
+2. **Reproducibility is not a default property**, so a source-first model cannot give the lockfile a stable identity. Rust embeds paths, C embeds `__DATE__`, and every TypeScript→wasm path embeds toolchain versions. A digest therefore identifies bytes only if the publisher is the one who built them.
+3. **Accepting all languages is unaffected.** All five toolchains already emit `wasm32-wasip2` components — that is what the language-evidence table measures. What is given up is letting a *consumer's machine* run a stranger's build script, not language reach.
+
+**Consequences accepted.** Publishers build for each target, so a version may carry several artifacts. Toolchain quality per language becomes the project's problem rather than the consumer's (the TinyGo GC-on-64 KiB-vector failure and CPython's startup cost are the two known ones). And a source-free artifact means the debug story needs DWARF→source mapping, which `qqq-debug` already provides.
+
+**Rejected alternatives, recorded so they are not re-proposed.**
+
+| Option | Why not |
+|---|---|
+| **Source plus a build recipe, compiled by the consumer** | Re-imports npm's and Cargo's install-time execution hole, makes the capability manifest documentation, and destroys the lockfile's identity property. |
+| **One package kind with a mode flag** ("development" or "runnable") | A hybrid is not two modes; it is one mode with a hole. Publishing source is easier than standing up a reproducible build, so the unsafe path becomes the default — the same fail-open shape as dependency-confusion defaults. |
+| **A source-only package as a second publishable kind** | A name in a capability-enforcing registry creates the expectation that `qqqai add` works on it, which restores the hybrid. A source-only tree is a repository, and that already exists. |
+
+**Also decided here, because it follows and would otherwise drift:** the **first-party namespace is `qqqai/*`**, permanent on the same grounds as the binary name (`§D-001`) — the two break together.
+
+**Cross-refs:** Proposal §4.8, §0.6, §5.4, §6.5, §11.2; Observations `§D-001`, `§D-008`, `§O-740`; Checklist `REG-001` … `REG-013`.
+
+---
+
 ## 3. OBSERVATIONS
 
 ### §O-001 — The target repository is completely empty
@@ -39551,5 +39577,59 @@ when the mechanism cannot count, bound the lifetime — a
 flood that cannot hold a slot past the deadline is cut off
 without ever being counted.
 → `crates/qqq-serve/tests/hyper_h2.rs`, `CHANGELOG.md`.
+
+## §O-740 - The vocabulary that was missing: five levels, three counts, no words
+
+Three surfaces each rendered the *largest* of three different
+capability counts as though it were the *smallest*, and all
+three were found by reading rather than by a checker: the
+Proposal's own §5.3 manifest example (which the parser
+rejects), `qqqai why`'s fix-stanza generator (which prints
+stanzas the parser rejects, for `sql`/`kv`/`queue`/`ai` — and
+prints them from a function whose own doc comment claims it
+*cannot* drift from the parser's expectations), and the
+README status table (which says "5 host modules bound" while
+`implemented_flags_match_reality` pins one).
+
+The common cause is that `Capability::all()` — 24 capabilities
+across 13 namespaces — is a *vocabulary*, and vocabulary is
+not capability. Measured live at landing: 15 declared WIT
+packages, 6 bindable manifest namespaces, 1 bound interface.
+
+The durable part is not three edits. It is five words —
+declared, bindable, bound, granted, observed — and the rule
+that a sentence about capability must name its level
+(Proposal §4.8.5). A reader who cannot tell whether a claim
+means "an interface exists" or "you can use it today" will
+read it as the second, and that is how three documents came to
+disagree with one test.
+→ `QQQ-Proposal-V1.md` (§0.6, §4.8), `docs/glossary.md`,
+`crates/qqq-abi/src/registry.rs`, `crates/qqq-run/src/commands.rs`,
+`README.md`.
+
+## §O-741 - The `--fix` path could not fix: an unimported writer
+
+`tools/check_checklist_counts.py` diagnoses drift in the
+checklist's own arithmetic and names its repair in the failure
+message: *"Run `python tools/check_checklist_counts.py --fix`
+to regenerate both tables."* That instruction crashed with
+`NameError: name 'write_text_lf' is not defined` — the writer
+was called at the write site and never imported, while every
+sibling tool that writes bytes imports it from `check_xrefs`.
+The one path the tool directed a reader to was the one path
+that could not run. The failure is invisible from the other
+side too: `--check` passes or fails on its own, so nothing
+exercises `--fix` until someone follows the advice.
+
+Found while landing §4.8, which adds a checklist area and so
+needs the tables regenerated. On the way it produced a second
+finding, about method: the register in `E:\QQQ` was 55 lines
+ahead of the working copy this landing had been measured
+against (`§O-738` and `§O-739` had been added since), so the
+planned `§O-738` was **already taken** and became `§O-740`.
+The rule: a number is measured against the live tree, never
+against a snapshot of it — and a snapshot's staleness is
+invisible precisely when it is most dangerous.
+→ `tools/check_checklist_counts.py`.
 
 *End of `QQQ-Observations-and-Memories.md`.*

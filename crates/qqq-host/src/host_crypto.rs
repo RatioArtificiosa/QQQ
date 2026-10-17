@@ -953,9 +953,12 @@ mod tests {
     /// Goes through a real manifest because `GrantSet::from_manifest` is the
     /// only layer that may grant authority — `GrantSet::empty().narrow(...)`
     /// grants nothing, since `narrow` intersects. See Observations §O-020c.
+    /// The body carries its own `[capabilities.crypto]` header; no table
+    /// line is added here, because an extra one would either duplicate
+    /// the header or — before the root denied unknown tables — vanish
+    /// silently while looking load-bearing.
     fn grants_with(crypto_body: &str) -> GrantSet {
-        let src =
-            format!("[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[crypto]\n{crypto_body}");
+        let src = format!("[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n{crypto_body}");
         let manifest = Manifest::parse(&src).expect("test manifest must parse");
         GrantSet::from_manifest(&manifest)
     }

@@ -41,7 +41,8 @@ use crate::capability::Capability;
 /// syntactically valid TOML and semantically coherent; it does **not** yet
 /// prove the capabilities can be satisfied (paths exist, secrets resolve),
 /// which is step 2, NORMALIZE.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// `[package]` — identity.
     pub package: Package,
@@ -310,11 +311,12 @@ impl Build {
 
 /// The capability declaration.
 ///
-/// Every field is optional and every absent field means **denied**. The struct
-/// is deliberately *not* `deny_unknown_fields` at this level, because the
-/// per-capability structs below are — which gives a better error (it names the
-/// capability's own field).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Every field is optional and every absent field means **denied**.
+/// Unknown fields are denied at this level *and* at each
+/// per-capability struct below: the outer denial names the table,
+/// the inner one names the capability's own field, so both layers
+/// agree and neither relies on the other.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     /// `[capabilities.http]` — server and/or client HTTP.
@@ -335,6 +337,17 @@ pub struct Capabilities {
     /// `[capabilities.dns]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsCapability>,
+    /// Namespaces `Capability::all()` knows that have no typed struct
+    /// yet. Kept so a declaration parses and can be *reported*; the
+    /// host binds only what it models. Every key is validated
+    /// against the derived namespace set in [`Manifest::validate`],
+    /// so a typo is still a parse error — flattening without that
+    /// check would trade the `[limmits]` failure mode for a
+    /// `[capabilities.htttp]` one. No `Eq` on this struct for the
+    /// same reason the map exists: `toml::Value` is only
+    /// `PartialEq`, and an `Eq` over floats would be the lie.
+    #[serde(flatten)]
+    pub other: BTreeMap<String, toml::Value>,
 }
 
 /// `[capabilities.http]`.
@@ -1212,6 +1225,33 @@ impl Manifest {
             }
         }
 
+        // -- unmodelled capability namespaces must still be known -------
+        // The `flatten` map lets any `[capabilities.<ns>]` table parse;
+        // without this check a typo'd table would be accepted and then
+        // ignored — the `[limmits]` failure mode one level down. The
+        // valid set derives from `Capability::all()`, so no second
+        // list can drift from it.
+        let known: Vec<String> = crate::capability::Namespace::all()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        // `BTreeMap` iteration is sorted, so the first unknown key is
+        // deterministic — the error names the same table every run.
+        if let Some(unknown) = self
+            .capabilities
+            .other
+            .keys()
+            .find(|key| !known.iter().any(|ns| ns == *key))
+        {
+            return Err(ManifestError::InvalidField {
+                field: format!("capabilities.{unknown}"),
+                reason: format!(
+                    "unknown capability namespace; expected one of: {}",
+                    known.join(", ")
+                ),
+            });
+        }
+
         Ok(())
     }
 
@@ -2013,6 +2053,38 @@ allow_origins = ["https://app.example.com"]
                 "`{stanza}` must name `{needle}`: {err}"
             );
         }
+    }
+
+    /// A misspelled section is refused, not defaulted: `[limmits]`
+    /// with `memory = "1GiB"` must fail naming the unknown table,
+    /// never parse into a project that runs on the 128 MiB default
+    /// while the author believes otherwise. The `[dependencies]`
+    /// and `[server]` fields above exist for exactly this defect
+    /// class; the root table gets the same rule.
+    #[test]
+    fn a_misspelled_section_is_refused_not_defaulted() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[limmits]\nmemory = \"1GiB\"\n";
+        let err = Manifest::parse(src).expect_err("an unknown top-level table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("unknown field") && text.contains("limmits"),
+            "`limmits` must be refused as unknown, not defaulted: {text}"
+        );
+    }
+
+    /// An unknown root field is refused for the same reason: silent
+    /// acceptance at the root is silent misconfiguration everywhere.
+    /// The key sits before any table header so it lands on the root
+    /// itself — inside `[package]` it would test the wrong struct.
+    #[test]
+    fn an_unknown_root_field_is_refused() {
+        let src = "memroy = \"1GiB\"\n[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
+        let err = Manifest::parse(src).expect_err("an unknown root field must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("unknown field") && text.contains("memroy"),
+            "`memroy` must be refused as unknown, not ignored: {text}"
+        );
     }
 
     #[test]

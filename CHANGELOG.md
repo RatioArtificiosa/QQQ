@@ -4,6 +4,17 @@
 
 ### Security
 
+- **cap**: namespaces derive, stanzas prove, roots refuse:
+  `fix_stanza_for` no longer prints stanzas the parser
+  rejects for `sql`/`kv`/`queue`/`ai` (or any future
+  namespace) — unmodelled namespaces name their state plus
+  CAP-017..023 instead of guessing a schema; `Capabilities`
+  gains a validated flatten catch-all so all 13 namespaces
+  declare while the host binds what it models; the `Manifest`
+  root denies unknown fields so `[limmits]` fails loudly.
+  Red-first proofs for all four tests plus a 14th-namespace
+  probe (since removed).
+
 - **serve**: ping floods die on the idle bound (`F-16`
   parity): codec-level traffic never stamps activity, so a
   peer holding a connection open with cheap PING frames is

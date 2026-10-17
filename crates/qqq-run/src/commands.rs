@@ -178,7 +178,10 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 ///
 /// A developer who hits a denial needs the *exact* text, not a link to a
 /// capabilities reference. Generating it from the capability's namespace means
-/// the suggestion cannot drift from the parser's expectations.
+/// the suggestion cannot drift from the parser's expectations — and for
+/// namespaces the manifest cannot model yet, generating the state instead of
+/// guessing a schema means the suggestion cannot be a stanza the parser
+/// rejects. The modelling work is tracked under CAP-017 through CAP-023.
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     match c.namespace() {
@@ -188,11 +191,10 @@ pub fn fix_stanza_for(c: Capability) -> String {
         "clock" => "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true            # for clock.wall\n    monotonic = true       # for clock.monotonic".to_owned(),
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
-        "sql" => "add to qqq.toml:\n\n    [[capabilities.sql]]\n    name = \"orders\"\n    driver = \"postgres\"\n    host = \"db.internal:5432\"\n    secret = \"env:ORDERS_DB_URL\"".to_owned(),
-        "kv" => "add to qqq.toml:\n\n    [capabilities.kv]\n    stores = [\"sessions\"]".to_owned(),
-        "queue" => "add to qqq.toml:\n\n    [[capabilities.queue]]\n    name = \"orders.events\"\n    direction = \"publish\"  # or \"subscribe\"".to_owned(),
-        "ai" => "add to qqq.toml:\n\n    [capabilities.ai]\n    providers = [\"local:ggml\"]\n    models = [\"*:<=4B\"]".to_owned(),
-        other => format!("add a `[[capabilities.{other}]]` stanza to qqq.toml"),
+        _ => format!(
+            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-017 through CAP-023",
+            c.name()
+        ),
     }
 }
 
@@ -1383,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn why_reports_a_denied_capability_with_an_exact_stanza() {
+    fn why_reports_an_unmodelled_denial_with_its_state() {
         let l = loaded(DENY_ALL);
         let out = why(&l, "sql.query").expect("must explain");
         assert!(!out.granted);
@@ -1391,11 +1393,17 @@ mod tests {
         // Assert on the summary *before* moving `fix` out of `out`.
         assert!(out.summary().contains("DENIED"));
         let fix = out.fix.expect("a denial must suggest a fix");
+        // No stanza exists for `sql`: the fix names the state and the
+        // modelling work, never a table the parser would reject.
         assert!(
-            fix.contains("capabilities.sql"),
-            "must name the stanza: {fix}"
+            !fix.contains("[capabilities."),
+            "must not emit an unparseable stanza: {fix}"
         );
-        assert!(fix.contains("qqq.toml"));
+        assert!(
+            fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
+            "must name the state and its tracking: {fix}"
+        );
+        assert!(fix.contains("sql.query"));
     }
 
     /// A typo is the most likely reason this command is run, so the error must
@@ -1458,15 +1466,18 @@ mod tests {
     ///
     /// This is the command's entire purpose: it is run the moment a capability
     /// is refused, and the person needs the text that would change it.
+    /// `crypto.hash` stands in: its stanza is modelled, so the human output
+    /// carries a real one (unmodelled namespaces get the named refusal
+    /// pinned above, never a stanza).
     #[test]
     fn why_prints_the_fix_stanza_in_human_output() {
         let l = loaded(DENY_ALL);
-        let out = why(&l, "sql.query").expect("must explain");
+        let out = why(&l, "crypto.hash").expect("must explain");
         let text = out.summary();
 
         assert!(text.contains("DENIED"), "{text}");
         assert!(
-            text.contains("capabilities.sql"),
+            text.contains("capabilities.crypto"),
             "the stanza must be in the human output, not only in JSON: {text}"
         );
     }
@@ -1575,6 +1586,71 @@ mod tests {
                 fix.contains(c.namespace()),
                 "{c}: the fix must name its namespace `{}`: {fix}",
                 c.namespace()
+            );
+        }
+    }
+
+    /// Extract the TOML stanza from a fix suggestion, if it carries
+    /// one: the prose header goes, indentation goes, the body stays.
+    /// A refusal message has no stanza, so there is nothing to parse.
+    fn stanza_body(fix: &str) -> Option<String> {
+        let mut lines = fix.lines();
+        if !lines.next()?.starts_with("add to qqq.toml:") {
+            return None;
+        }
+        let body: Vec<&str> = lines.map(str::trim_start).collect();
+        let body = body.join("\n");
+        (!body.trim().is_empty()).then_some(body)
+    }
+
+    /// For every namespace, the suggested stanza parses — or the
+    /// suggestion is an explicit, named refusal. A stanza the
+    /// parser rejects is a lie the tool tells the developer to
+    /// paste; this loop makes that shape fail the build for the
+    /// namespace that introduces it, including future ones.
+    #[test]
+    fn every_suggested_stanza_parses() {
+        use qqq_cap::capability::Namespace;
+        use qqq_cap::manifest::Manifest;
+        for ns in Namespace::all() {
+            let cap = Capability::all()
+                .iter()
+                .find(|c| c.namespace() == ns.as_str())
+                .expect("every namespace belongs to a capability");
+            let fix = fix_stanza_for(*cap);
+            let parses = stanza_body(&fix).is_some_and(|body| {
+                Manifest::parse(&format!(
+                    "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+                ))
+                .is_ok()
+            });
+            let refused = fix.contains("no qqq.toml spelling") && fix.contains("CAP-");
+            assert!(
+                parses || refused,
+                "{ns}: the suggestion must parse or name its refusal: {fix}"
+            );
+        }
+    }
+
+    /// Namespaces the manifest cannot model must not emit stanzas.
+    /// `sql`, `kv`, `queue` and `ai` have no tables in
+    /// `Capabilities`, so any `[capabilities.<ns>]` text is a
+    /// stanza the parser rejects — the defect this pins.
+    #[test]
+    fn an_unmodelled_namespace_names_its_state_rather_than_guessing() {
+        for ns in ["sql", "kv", "queue", "ai"] {
+            let cap = Capability::all()
+                .iter()
+                .find(|c| c.namespace() == ns)
+                .expect("namespace exists");
+            let fix = fix_stanza_for(*cap);
+            assert!(
+                !fix.contains("[capabilities."),
+                "{ns}: must not emit a stanza the parser rejects: {fix}"
+            );
+            assert!(
+                fix.contains("CAP-"),
+                "{ns}: must name the modelling work: {fix}"
             );
         }
     }

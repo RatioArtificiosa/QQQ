@@ -385,8 +385,11 @@ def self_test() -> int:
     )
 
     # 1. A per-area count that disagrees with the items.
+    # Pinned row text like case 5 below: a count change (CAP-017..023
+    # moved CAP 16 -> 23) must update this string too, or the replace
+    # misses and the case goes DEAD instead of catching anything.
     broken = real.replace(
-        "| `CAP` | Capability resolution pipeline | 16 |",
+        "| `CAP` | Capability resolution pipeline | 23 |",
         "| `CAP` | Capability resolution pipeline | 99 |",
         1,
     )
@@ -404,9 +407,11 @@ def self_test() -> int:
         "; ".join(analyse(broken)),
     )
 
-    # 3. A phase row that disagrees with its areas.
+    # 3. A phase row that disagrees with its areas. Pinned text like
+    # cases 1 and 5: CAP-017..023 moved P2 46 -> 53, and the string
+    # must track the table.
     broken = re.sub(
-        r"^\| P2 Capability engine \| M2 \| 46 \|$",
+        r"^\| P2 Capability engine \| M2 \| 53 \|$",
         "| P2 Capability engine | M2 | 7 |",
         real,
         count=1,
@@ -427,9 +432,14 @@ def self_test() -> int:
     )
 
     # 5. An area assigned to no phase — its items would vanish from §14.
+    # The P10 row text is pinned here, so a phase-table edit that
+    # changes it (like the Q-Block adding REG) must update this
+    # string too — a replace that matches nothing makes `broken`
+    # identical to `real`, and the case below goes DEAD instead of
+    # catching anything. The DEAD verdict is the tripwire.
     broken = real.replace(
-        "| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ |",
-        "| **P10** | Beyond V1 | post-1.0 | FUT, AI |",
+        "| **P10** | Beyond V1 | post-1.0 | FUT, AI, OQ, REG |",
+        "| **P10** | Beyond V1 | post-1.0 | FUT, AI, REG |",
         1,
     )
     case(

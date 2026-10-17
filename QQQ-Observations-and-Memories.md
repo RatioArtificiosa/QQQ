@@ -39632,4 +39632,78 @@ against a snapshot of it — and a snapshot's staleness is
 invisible precisely when it is most dangerous.
 → `tools/check_checklist_counts.py`.
 
+## §O-742 - A self-test fixture that names a row must track the row
+
+Verifying the other agent's Q-Block landing found its one
+staleness: the checklist-counts self-test hard-codes the P10
+phase-table row to build its "area in no phase" fixture, and
+the Q-Block added `REG` to that row — so the fixture's
+`replace` matched nothing, the broken document equalled the
+real one, and the case went DEAD instead of catching
+anything. The tripwire worked as designed (DEAD, not silent
+green); the string did not track the table. Fix: pin the
+current row text with a comment naming the coupling, so the
+next phase-table edit updates both or sees the DEAD. The
+sweep for siblings (full 146-step gate, which runs every
+checker self-test) found nothing else stale; the Q-Block
+touches no transport claims, so Wave 8's facts stand
+unchanged. The generalisable rule: a fixture that quotes a
+living document is a second copy of that document — date it,
+point at it, or watch it die quietly.
+→ `tools/check_checklist_counts.py`.
+
+## §O-743 - Three lists, one truth: namespaces derive, stanzas prove, roots refuse
+
+The capability-namespaces handoff's two live bugs, fixed per
+its order. (1) `fix_stanza_for` printed stanzas for `sql`,
+`kv`, `queue`, `ai` (and any future namespace via the
+fallback) that `Manifest::parse` rejects — the generator knew
+10 namespaces, the manifest 6, the enum 13. Unmodelled
+namespaces now name their state plus the CAP-017..023 range
+instead of guessing a schema; the 6 modelled stanzas are
+unchanged. (2) The `Manifest` root lacked
+`deny_unknown_fields` — `[limmits] memory = "1GiB"` parsed
+into a project running on the 128 MiB default. The root now
+denies, matching every other struct in the file. Structural
+per §3.2: `Capabilities` gains a `flatten` catch-all so any
+of the 13 namespaces parses as a declaration, with every key
+validated against the derived `Namespace::all()` set in
+`validate()` (typos still fail naming the valid set) — one
+list, no third. `Eq` left both structs: `toml::Value` is only
+`PartialEq`, and an `Eq` over it would be the lie; the only
+cascade was `Manifest` itself. Also fixed alongside: the
+`manifest.rs:314` comment claiming no `deny_unknown_fields`
+beneath the attribute that says otherwise.
+Red proof: 4 new tests failed pre-fix (misspelled section,
+root field, both stanza properties); 14th-namespace probe
+failed the count test while the stanza test held via
+refusal; probe removed, 18/18 capability tests green.
+Measured: qqq-cap + qqq-run suites green; gate verdict in
+this commit's log. The generalisable rule: a suggestion a
+machine prints is a contract with the parser — test the
+round trip, not the text.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-cap/src/capability.rs` (probe only, removed), `crates/qqq-run/src/commands.rs`, `QQQ-Checklist-V1.md` (CAP-017..023), `CHANGELOG.md`.
+
+## §O-744 - A dead table line, not a vacuous test: the deny names the difference
+
+Tightening the `Manifest` root broke three `host_crypto`
+tests, and the first diagnosis was wrong in the interesting
+direction. The helper built `[package] + [crypto] + body`
+where every caller body already carried its own
+`[capabilities.crypto]` header — so the `[crypto]` line was
+dead weight the old lenient root silently dropped, and I
+first read the green tests as vacuous before the duplicate-key
+failure proved them live: with the dead line renamed instead
+of removed, TOML sees two `[capabilities.crypto]` tables.
+The correct fix deletes the line the docstring never
+described (it always said "`[capabilities.crypto]` body").
+Corrected record: the tests were never vacuous — real
+grants, real registration assertions — and what the root
+deny exposed was a dead line that *looked* load-bearing.
+The generalisable rule: when a strictness fix breaks a test,
+read which half was load-bearing before declaring either
+side dead — the failure message (`duplicate key`) names the
+survivor.
+→ `crates/qqq-host/src/host_crypto.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -99,8 +99,16 @@
             }
           ],
           "description": "`[capabilities.http]` — server and/or client HTTP."
+        },
+        "other": {
+          "additionalProperties": true,
+          "description": "Namespaces `Capability::all()` knows that have no typed struct yet. Kept so a declaration parses and can be *reported*; the host binds only what it models.…",
+          "type": "object"
         }
       },
+      "required": [
+        "other"
+      ],
       "title": "qqq-toml#Capabilities",
       "type": "object"
     },

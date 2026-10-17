@@ -25,7 +25,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
 | `HOST` | `qqq-host` execution engine | 24 | Systems engineer |
-| `CAP` | Capability resolution pipeline | 16 | Security engineer |
+| `CAP` | Capability resolution pipeline | 23 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
 | `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
@@ -53,7 +53,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 607 items.**
+**Total: 614 items.**
 
 ### Status legend
 
@@ -2214,6 +2214,20 @@ Items are grouped below by **phase**, because dependency order matters more than
     defect instead.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
   → §7.1 What we are defending, precisely
+- [ ] **CAP-017** Model `[capabilities.sql]` in the manifest: typed struct, validation, grant derivation for `sql.query`/`sql.execute`, and a generator stanza that parses.
+  → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
+- [ ] **CAP-018** Model `[capabilities.kv]` in the manifest: typed struct, validation, grant derivation for `kv.read`/`kv.write`, and a generator stanza that parses.
+  → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
+- [ ] **CAP-019** Model `[capabilities.queue]` in the manifest: typed struct, validation, grant derivation for `queue.publish`/`queue.subscribe`, and a generator stanza that parses.
+  → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
+- [ ] **CAP-020** Model `[capabilities.ai]` in the manifest: typed struct, validation, grant derivation for `ai.infer`, and a generator stanza that parses.
+  → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
+- [ ] **CAP-021** Model `[capabilities.log]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+  → §5.3 Manifest tables — ambient status must be decided, not defaulted into.
+- [ ] **CAP-022** Model `[capabilities.trace]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+  → §5.3 Manifest tables — ambient status must be decided, not defaulted into.
+- [ ] **CAP-023** Model `[capabilities.secret]` in the manifest alongside the nested `crypto.secrets` spelling: typed struct, validation, grant derivation for `secret.use`, and a generator stanza that parses.
+  → §5.3 Manifest tables — two spellings for one capability must resolve to one grant set.
 
 ### SEC — Security engineering
 
@@ -5771,7 +5785,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 |---|---|---|
 | P0 Foundation | M0 | 79 |
 | P1 Heartbeat | M1 | 58 |
-| P2 Capability engine | M2 | 46 |
+| P2 Capability engine | M2 | 53 |
 | P3 HTTP | M3 | 37 |
 | P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 40 |
@@ -5780,7 +5794,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 61 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **607** |
+| **Total** | | **614** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

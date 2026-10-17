@@ -1840,7 +1840,11 @@ jobs:
           set -eu
           python3 - <<'EOF'
           import os, re, sys
-          log = open(os.path.join(os.environ["RUNNER_TEMP"], "h2spec.log")).read()
+          raw = open(os.path.join(os.environ["RUNNER_TEMP"], "h2spec.log")).read()
+          # Strip ANSI color escapes first: h2spec colorizes on a TTY
+          # (never in CI, which pipes), and a colorized `×` or summary
+          # line would otherwise dodge the patterns below silently.
+          log = re.sub(r"\x1b\[[0-9;]*m", "", raw)
           # Distinct failed-case names across both runs (base and
           # strict append to one log): the disposition below accepts
           # exactly one shape — the 3.5.2 teardown race — in either
@@ -1849,19 +1853,28 @@ jobs:
               name.strip()
               for name in re.findall(r"× \d+: (.*)", log)
           )
+          # Exact name, not substring: a future case whose description
+          # merely mentions the preface must not ride this disposition.
+          KNOWN_RACE = "Sends invalid connection preface"
           def check(total):
-              m = re.search(rf"{total} tests, (\d+) passed, \d+ skipped, (\d+) failed", log)
-              assert m, f"no summary line for {total} tests — the suite never ran"
+              # Anchored: an unanchored `145 tests` also matches inside
+              # `1145 tests`, which would accept a log that never ran
+              # this suite.
+              m = re.search(
+                  rf"(?m)^\s*{total} tests, (\d+) passed, \d+ skipped, (\d+) failed",
+                  log,
+              )
+              if not m:
+                  sys.exit(f"no summary line for {total} tests — the suite never ran")
               passed, failed = int(m.group(1)), int(m.group(2))
               if passed == total and failed == 0:
                   return
               if (
                   passed == total - 1
                   and failed == 1
-                  and len(names) == 1
-                  and "invalid connection preface" in next(iter(names))
+                  and names == {KNOWN_RACE}
               ):
-                  print(f"3.5.2 teardown race dispositioned: {next(iter(names))}")
+                  print(f"3.5.2 teardown race dispositioned: {KNOWN_RACE}")
                   return
               sys.exit(f"unexplained h2spec verdict: {passed} passed, {failed} failed: {sorted(names)}")
           check(145)
